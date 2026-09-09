@@ -20,9 +20,10 @@ Hold-for-return is the default and the only reach profile this release records: 
 
 1. **Translate the captain's words into mandate clauses.**
    The words are recorded verbatim; the clauses are your reading of them as explicit fields `bin/fm-afk-contract.sh` records: an action from its fixed verb list, the object in the captain's words, and the stated precondition in the captain's words, plus an optional stop.
-   Read `bin/fm-afk-contract.sh --help` for the field flags, the verb list, and the never-set rather than memorizing them.
-   No static parser reads the object or precondition text, by the captain's mandate: you supply the fields, the script records them verbatim and refuses only a missing field, an unlisted verb, or a never-set concept (credentials, logins, legal or financial acceptance, attended prompts), naming the missing part.
-   Whether a precondition holds is the supervision session's judgment at execution time in a later phase.
+   Read `bin/fm-afk-contract.sh --help` for the field flags, verb list, and coarse best-effort never-set flag rather than memorizing them.
+   No static parser reads the object or precondition text, by the captain's mandate: you supply the fields, the script records them verbatim, checks structural presence and the verb list, and may flag obvious never-set concepts without treating that best-effort scan as authoritative.
+   The flag can miss spellings, including joined compounds such as `oneTimeCode`, and authoritative never-set, forbidden-action, and precondition judgment belongs to the supervision session at execution time in phase 4.
+   Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.
    Write only clauses the words actually support; a wish with no object or no stated precondition is not a clause.
    Plain `/afk` with no words has no clauses.
 2. **Propose and read back.**
@@ -31,7 +32,7 @@ Hold-for-return is the default and the only reach profile this release records: 
    Exit 3 only means a clause was refused; the proposal stands.
 3. **Confirm on the captain's go.**
    Run `bin/fm-afk-launch.sh confirm`; it promotes the proposal into the record and prints the entry announcement.
-   Relay that announcement verbatim in spirit: hold-for-return only, no phone channel, anything that needs the captain waits for their return, N clauses recorded and M refused, and that recorded clauses are held for the return brief and are not executed by this release.
+   Relay that announcement verbatim in spirit: hold-for-return only, no phone channel, anything that needs the captain waits for their return, N clauses recorded and M refused, recorded clauses are held for the return brief and are not executed by this release, and forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text because no recorded clause is authority by itself.
    With no words, run `propose` and `confirm` back to back; the announcement is the same.
    Re-invoking `/afk` while already away with no new words is a refresh and leaves the standing record untouched; new words replace the mandate after the same read-back, preserve the original session entry, and archive the superseded mandate for the return brief.
 4. **Per harness, after the record exists:**
@@ -53,7 +54,7 @@ Hold-for-return is the default and the only reach profile this release records: 
 - The record exists, so the watcher never rechecks an item held for the captain, in either supervision shape; the return brief lists it instead.
   Declared external waits keep their condition-aware, hours-long recheck cadence (`bin/fm-watch.sh`, `bin/fm-classify-lib.sh`).
 - Recorded clauses are not executed by this release.
-  Merge authority, ask-user findings, destructive and security-sensitive actions keep exactly the rules they have when attended (`AGENTS.md` section 7 and `ask-user-authority`); anything that needs the captain holds for their return.
+  Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, no recorded clause is authority by itself, and merge authority plus ask-user findings keep exactly the rules they have when attended (`AGENTS.md` section 7 and `ask-user-authority`); anything that needs the captain holds for their return.
 - The session-start digest reports the posture under its AFK subsection, so a restart re-enters the posture from the record, not from memory.
 
 ## How to exit: the return
@@ -79,6 +80,7 @@ afk changes how the captain is informed and what happens at a captain-owned deci
 "Away" never means "approves more" or "approves less."
 A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy; anything requiring the captain still waits for the captain's explicit word.
 A mandate clause is the captain's explicit instruction given before leaving, recorded with its named object and condition; a clause is never inferred, never applied by analogy, and expires at return.
+Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.
 This release records clauses and does not execute them.
 
 ## The daemon, where it still runs

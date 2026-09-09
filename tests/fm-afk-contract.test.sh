@@ -29,6 +29,7 @@ contract() {  # <home> <args...>
 compile_refusal() {
   local expected=$1 label=$2 home out rc
   shift 2
+  [ "$expected" != 'object - the never-set refuses it' ] || expected='object - coarse best-effort never-set flag matched'
   home=$(make_home "refuse-$RANDOM-$$")
   set +e
   out=$(contract "$home" compile "$@" 2>&1)
@@ -52,9 +53,9 @@ compile_accept() {
   assert_contains "$out" "$expected" "$label: the accepted clause was not read back as given"
 }
 
-# The structural check refuses only a missing field, an unlisted verb, or a
-# never-set concept, and names the missing part every time.
-test_fields_refuse_each_missing_part_by_name() {
+# The structural check names missing fields, and the coarse best-effort
+# never-set flag covers its listed obvious spellings without claiming authority.
+test_fields_and_best_effort_never_set_flag() {
   compile_refusal "action - 'fix' is not a mandate verb" 'unknown verb' --action fix --object 'whatever breaks' --when 'it breaks'
   compile_refusal 'action - the clause names no action' 'empty verb' --action '' --object 'task x PR' --when 'checks green'
   compile_refusal 'object - the clause names no thing to act on' 'no object' --action merge --when 'checks green'
@@ -77,7 +78,7 @@ test_fields_refuse_each_missing_part_by_name() {
   compile_refusal 'object - the never-set refuses it' 'never-set: token prefix' --action answer --object 'task q tokenize prompt' --when 'it appears'
   compile_refusal 'object - the never-set refuses it' 'never-set: in the precondition' --action merge --object 'task x PR' --when 'after the Login/2FA prompt clears'
   compile_refusal 'object - the never-set refuses it' 'never-set: in the stop' --action merge --object 'task x PR' --when 'checks green' --stop 'if a PASSWORD is asked'
-  pass "every malformed clause is refused with its missing part named, and the never-set holds across punctuation and compounds"
+  pass "structural refusals name their part and the best-effort never-set flag covers listed spellings"
 }
 
 # No parser reads the object or precondition: any text the captain gives is
@@ -166,6 +167,7 @@ test_readback_renders_words_verbatim_and_both_lists() {
   assert_contains "$out" '    2. "action=merge object=regardless of checks when=(none)" - refused: missing when' 'refused clause'
   assert_contains "$out" 'every clause expires at return' 'the never-set reminder'
   assert_contains "$out" 'recorded clauses are held for the return brief and are not executed by this release' 'the not-executed notice'
+  assert_contains "$out" 'forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text; no recorded clause is authority by itself' 'the hard authority invariant'
   assert_contains "$out" 'Say go to confirm' 'confirmation prompt'
   # The verbatim words survive the record byte for byte, trailing newline included.
   [ "$(contract "$home" words --proposal; printf x)" = "$(cat "$words"; printf x)" ] || fail "the proposal did not keep the words verbatim"
@@ -210,7 +212,7 @@ test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
   contract "$home" present || fail "present did not see the confirmed record"
   assert_contains "$out" 'Away posture confirmed at ' 'announcement opens with the confirmation time'
   assert_contains "$out" 'hold-for-return only. No phone channel is configured; anything that needs you waits for your return.' 'announcement says hold-for-return only, aloud'
-  assert_contains "$out" '1 mandate clause(s) recorded and 1 refused; recorded clauses are held for the return brief and are not executed by this release.' 'announcement counts clauses and says they are not executed'
+  assert_contains "$out" '1 mandate clause(s) recorded and 1 refused; recorded clauses are held for the return brief and are not executed by this release; forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.' 'announcement counts clauses and states the hard authority invariant'
   assert_contains "$out" 'Expected return: not given. Spend cap: 4 concurrent workers.' 'announcement carries the defaults'
   [ "$(contract "$home" announce)" = "$out" ] || fail "announce did not reproduce the confirmation announcement"
   [ "$(contract "$home" field version)" = 1 ] || fail "record version is not 1"
@@ -332,7 +334,7 @@ test_inputs_are_validated() {
   pass "malformed inputs and foreign record versions are refused rather than guessed"
 }
 
-test_fields_refuse_each_missing_part_by_name
+test_fields_and_best_effort_never_set_flag
 test_fields_record_the_captain_wording_verbatim
 test_clause_fields_round_trip_reversible_whitespace
 test_clause_ids_are_input_ordinals_across_accepted_and_refused

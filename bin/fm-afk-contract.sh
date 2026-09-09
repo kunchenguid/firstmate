@@ -58,19 +58,19 @@
 # precondition holds is the supervision session's judgment at execution time
 # in a later phase. The structural check asserts only that the action, object,
 # and precondition fields are present, and that the action is a listed verb.
-# THE NEVER-SET is a forbidden-concept safety scan, not understanding: a clause
-# whose fields mention credentials, passwords, logins, legal or financial
-# acceptance, payments, invoices, one-time codes, or an attended prompt is
-# refused for every actor because those are physically the captain's. The scan
-# lowercases the fields, turns punctuation into spaces, and matches every stem
-# in the fixed deny-list at consecutive token prefixes, hardening single-token
-# and multi-token concepts against compounds, plurals, and other inflections.
+# THE NEVER-SET SCAN is only a coarse best-effort structural flag, never the
+# authoritative gate: it can miss spellings, with joined compounds such as
+# oneTimeCode a known limitation. Authoritative never-set and forbidden-action
+# enforcement is the supervision session's judgment at execution time in phase 4.
 # A clause missing a required field is refused with that field named, recorded
 # under refused:, read back beside the accepted list, and never executes. Ids
 # are the input ordinals across accepted and refused clauses.
 # THIS RELEASE RECORDS CLAUSES AND DOES NOT EXECUTE THEM: the guarded gates learn
 # to cite a clause in a later phase, and the announcement and return brief both
 # say so, so a recorded clause is never mistaken for a promise.
+# HARD RULE: forbidden, destructive, irreversible, and security-sensitive actions
+# are never pre-authorizable regardless of clause text, and no recorded clause is
+# authority by itself.
 #
 # Usage:
 #   fm-afk-contract.sh compile [--words-file <path> | --words <text>]
@@ -176,10 +176,10 @@ fm_afk_contract_unescape() {  # <escaped-text>
 # --- clause structural check and never-set scan ------------------------------
 
 # fm_afk_contract_never_set_hit <text...>: prints the protected concept the
-# text mentions, or nothing. This is the one forbidden-concept scan: lowercase,
-# punctuation to spaces, then one fixed list whose every stem must prefix the
-# corresponding consecutive input token. It understands nothing about the
-# sentence; it only refuses to record authority over the captain's own things.
+# text mentions, or nothing. This coarse best-effort structural flag lowercases
+# and splits punctuation before checking fixed token stems. It is not authoritative,
+# can miss joined compounds such as oneTimeCode, and does not understand language;
+# phase-4 supervision judgment owns never-set and forbidden-action enforcement.
 fm_afk_contract_never_set_hit() {  # <text...>
   local normalized concept matched i j
   local -a tokens stems concepts=(
@@ -213,7 +213,7 @@ fm_afk_contract_never_set_hit() {  # <text...>
 
 # Check one clause's fields. Sets C_ACTION C_OBJECT C_WHEN C_STOP; on refusal
 # C_MISSING names the missing field and the reason. The fields are never parsed:
-# presence, the listed verb, and the never-set are the whole check.
+# presence, the listed verb, and the coarse best-effort flag are the whole check.
 fm_afk_contract_clause_check() {  # <action> <object> <when> <stop>
   local hit
   C_ACTION=$(fm_afk_contract_action "$1")
@@ -222,7 +222,7 @@ fm_afk_contract_clause_check() {  # <action> <object> <when> <stop>
   C_STOP=$4
   C_MISSING=
   if hit=$(fm_afk_contract_never_set_hit "$C_ACTION" "$C_OBJECT" "$C_WHEN" "$C_STOP"); then
-    C_MISSING="object - the never-set refuses it: credentials, logins, legal or financial acceptance, payments, and attended prompts are the captain's ('$hit')"
+    C_MISSING="object - coarse best-effort never-set flag matched '$hit'; the flag can miss spellings such as joined oneTimeCode and is not authoritative; phase-4 supervision judgment enforces forbidden actions"
     return 1
   fi
   if [ -z "$C_ACTION" ]; then
@@ -448,6 +448,7 @@ $(fm_afk_contract_read_list "$path" refused)
 EOF
   [ "$count" -gt 0 ] || printf '    (none)\n'
   printf '  everything else waits for your return: no red merge without its named check, no discard without a named object and condition, never credentials, legal, financial, or attended prompts, nothing by analogy, and every clause expires at return.\n'
+  printf '  hard rule: forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text; no recorded clause is authority by itself.\n'
   printf '  recorded clauses are held for the return brief and are not executed by this release.\n'
 }
 
@@ -457,9 +458,9 @@ fm_afk_contract_render_announcement() {  # <path>
   refused=$(fm_afk_contract_read_list "$path" refused | grep -c . || true)
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   if [ "$accepted" -eq 0 ] && [ "$refused" -eq 0 ]; then
-    clause_text='No mandate clauses recorded.'
+    clause_text='No mandate clauses recorded. Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.'
   else
-    clause_text="$accepted mandate clause(s) recorded and $refused refused; recorded clauses are held for the return brief and are not executed by this release."
+    clause_text="$accepted mandate clause(s) recorded and $refused refused; recorded clauses are held for the return brief and are not executed by this release; forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself."
   fi
   printf 'Away posture confirmed at %s: hold-for-return only. %s %s Expected return: %s. Spend cap: %s concurrent workers.\n' \
     "$(fm_afk_contract_read_field "$path" confirmed)" \
