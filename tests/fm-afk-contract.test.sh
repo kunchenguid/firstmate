@@ -31,12 +31,12 @@ compile_refusal() {
   shift 2
   home=$(make_home "refuse-$RANDOM-$$")
   set +e
-  out=$(contract "$home" compile "$@" 2>&1)
+  out=$(contract "$home" propose "$@" 2>&1)
   rc=$?
   set -e
   [ "$rc" -eq 3 ] || fail "$label: expected exit 3 for a refused clause, got $rc: $out"
   assert_contains "$out" "refused: missing $expected" "$label: the refusal did not name the missing part"
-  assert_contains "$out" '    (none)' "$label: a refused-only compile should list no accepted clause"
+  assert_contains "$out" '    (none)' "$label: a refused-only proposal should list no accepted clause"
 }
 
 # compile_accept <expected-readback-line> <label> <field flags...>
@@ -45,7 +45,7 @@ compile_accept() {
   shift 2
   home=$(make_home "accept-$RANDOM-$$")
   set +e
-  out=$(contract "$home" compile "$@" 2>&1)
+  out=$(contract "$home" propose "$@" 2>&1)
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "$label: expected exit 0 for an accepted clause, got $rc: $out"
@@ -165,7 +165,7 @@ test_clause_ids_are_input_ordinals_across_accepted_and_refused() {
   local home out rc
   home=$(make_home ordinals)
   set +e
-  out=$(contract "$home" compile \
+  out=$(contract "$home" propose \
     --action merge --object 'task a PR' --when 'checks green' \
     --action merge --object regardless \
     --action prerelease --object 'repo r' --when 'after clause 1' \
@@ -173,13 +173,13 @@ test_clause_ids_are_input_ordinals_across_accepted_and_refused() {
     --action rerun --object 'task t' --when 'after clause 4' 2>&1)
   rc=$?
   set -e
-  [ "$rc" -eq 3 ] || fail "a mixed compile should exit 3 (rc=$rc): $out"
+  [ "$rc" -eq 3 ] || fail "a mixed proposal should exit 3 (rc=$rc): $out"
   assert_contains "$out" '1. merge task a PR when checks green' 'clause 1 accepted'
   assert_contains "$out" '2. "action=merge object=regardless when=(none)" - refused: missing when - the clause states no precondition' 'clause 2 refused for its missing precondition'
   assert_contains "$out" '3. prerelease repo r when after clause 1' 'clause 3 keeps its input ordinal'
   assert_contains "$out" '4. install the prerelease on mini when after clause 3' 'clause 4 keeps its input ordinal'
   assert_contains "$out" '5. rerun task t when after clause 4' 'clause 5 keeps its input ordinal'
-  [ "$(contract "$home" compile --action merge --object 'task a PR' --when 'checks green' --action merge --object regardless --action rerun --object 'task t' --when 'after clause 1' 2>/dev/null | grep -c '^    [0-9]')" -eq 3 ] \
+  [ "$(contract "$home" propose --action merge --object 'task a PR' --when 'checks green' --action merge --object regardless --action rerun --object 'task t' --when 'after clause 1' 2>/dev/null | grep -c '^    [0-9]')" -eq 3 ] \
     || fail "the read-back did not list every clause once"
   pass "clause ids are input ordinals across accepted and refused clauses"
 }
@@ -241,18 +241,17 @@ test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
     --action merge --object everything >/dev/null 2>&1 || true
   [ -f "$home/state/.afk-contract.proposed" ] || fail "propose did not write the proposal"
   proposed_epoch=$(contract "$home" field entered_epoch --proposal)
-  contract "$home" present && fail "a proposal alone must not count as the posture"
+  [ ! -f "$home/state/.afk-contract" ] || fail "a proposal alone must not count as the posture"
   sleep 1
   out=$(contract "$home" confirm 2>&1) || fail "confirm failed: $out"
   record="$home/state/.afk-contract"
   [ -f "$record" ] || fail "confirm did not write the record"
   [ ! -f "$home/state/.afk-contract.proposed" ] || fail "confirm left the proposal behind"
-  contract "$home" present || fail "present did not see the confirmed record"
+  [ -f "$record" ] || fail "the confirmed posture record is absent"
   assert_contains "$out" 'Away posture confirmed at ' 'announcement opens with the confirmation time'
   assert_contains "$out" 'hold-for-return only. No phone channel is configured; anything that needs you waits for your return.' 'announcement says hold-for-return only, aloud'
   assert_contains "$out" '1 mandate clause(s) recorded, 1 refused, and 0 flagged as naming a never-set concept; recorded clauses are held for the return brief and are not executed by this release; forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.' 'announcement counts clauses and states the hard authority invariant'
   assert_contains "$out" 'Expected return: not given. Spend cap: 4 concurrent workers.' 'announcement carries the defaults'
-  [ "$(contract "$home" announce)" = "$out" ] || fail "announce did not reproduce the confirmation announcement"
   [ "$(contract "$home" field version)" = 1 ] || fail "record version is not 1"
   [ "$(contract "$home" field reach_channels)" = none ] || fail "reach channels are not none"
   case "$(contract "$home" field confirmed_epoch)" in ''|*[!0-9]*) fail "confirmed_epoch is not numeric" ;; esac
@@ -371,6 +370,60 @@ test_validation_rejects_incomplete_clause_rows() {
   pass "validation and archive refuse incomplete clause rows by name"
 }
 
+test_validation_rejects_blank_decoded_clause_fields() {
+  local field home record out rc
+  for field in object when; do
+    home=$(make_home "blank-$field-row")
+    contract "$home" propose --action merge --object 'task a PR' --when 'checks green' >/dev/null || fail "$field proposal failed"
+    contract "$home" confirm >/dev/null || fail "$field confirmation failed"
+    record="$home/state/.afk-contract"
+    sed "s/^    $field: e:.*/    $field: e:/" "$record" > "$home/damaged"
+    mv "$home/damaged" "$record"
+    set +e
+    out=$(contract "$home" validate 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "validation accepted a blank decoded $field"
+    assert_contains "$out" "malformed clauses row 1: missing or invalid $field" "validation did not name the blank $field"
+    set +e
+    contract "$home" archive >/dev/null 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "archive accepted a blank decoded $field"
+    [ -f "$record" ] || fail "archive moved the record with a blank $field"
+  done
+  pass "validation and archive refuse blank decoded clause fields"
+}
+
+test_validation_rejects_damaged_words_blocks() {
+  local mode home record out rc
+  for mode in unindented empty; do
+    home=$(make_home "damaged-words-$mode")
+    contract "$home" propose --words 'captain words' >/dev/null || fail "$mode words proposal failed"
+    contract "$home" confirm >/dev/null || fail "$mode words confirmation failed"
+    record="$home/state/.afk-contract"
+    if [ "$mode" = unindented ]; then
+      sed 's/^  captain words$/captain words/' "$record" > "$home/damaged"
+    else
+      grep -v '^  captain words$' "$record" > "$home/damaged"
+    fi
+    mv "$home/damaged" "$record"
+    set +e
+    out=$(contract "$home" validate 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "validation accepted the $mode words block"
+    assert_contains "$out" 'invalid words block:' "validation did not name the damaged words block"
+    set +e
+    contract "$home" archive >/dev/null 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "archive accepted the $mode words block"
+    [ -f "$record" ] || fail "archive moved the record with $mode words"
+  done
+  pass "validation and archive refuse damaged words blocks"
+}
+
 test_archive_moves_the_record_aside_and_is_idempotent() {
   local home epoch path
   home=$(make_home archive)
@@ -380,7 +433,7 @@ test_archive_moves_the_record_aside_and_is_idempotent() {
   path=$(contract "$home" archive) || fail "archive failed"
   [ "$path" = "$home/state/afk-contracts/$epoch.afk-contract" ] || fail "archive path is not keyed by entered_epoch: $path"
   [ -f "$path" ] || fail "archived record missing"
-  contract "$home" present && fail "the record still stands after archive"
+  [ ! -f "$home/state/.afk-contract" ] || fail "the record still stands after archive"
   contract "$home" archive || fail "a second archive with no record must succeed as a no-op"
   [ "$(contract "$home" archived "$epoch")" = "$path" ] || fail "archived lookup did not find the record"
   [ "$(contract "$home" words --path "$path")" = '' ] || fail "reading an archived record by path failed"
@@ -409,13 +462,13 @@ test_inputs_are_validated() {
   assert_contains "$out" '--object must follow the --action that opens its clause' 'a field with no open clause is a usage error'
   [ ! -f "$home/state/.afk-contract.proposed" ] || fail "an invalid proposal was written"
   set +e
-  out=$(contract "$home" announce 2>&1)
+  out=$(contract "$home" validate 2>&1)
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "announce with no record should fail"
+  [ "$rc" -ne 0 ] || fail "validate with no record should fail"
   printf 'version: 9\nentered_epoch: 1\nclauses:\nrefused:\n' > "$home/state/.afk-contract"
   set +e
-  out=$(contract "$home" announce 2>&1)
+  out=$(contract "$home" validate 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "a foreign record version must be refused"
@@ -436,5 +489,7 @@ test_confirming_a_new_proposal_archives_the_standing_record
 test_failed_replacement_keeps_the_standing_record
 test_failed_final_replacement_rolls_back_the_superseded_archive
 test_validation_rejects_incomplete_clause_rows
+test_validation_rejects_blank_decoded_clause_fields
+test_validation_rejects_damaged_words_blocks
 test_archive_moves_the_record_aside_and_is_idempotent
 test_inputs_are_validated

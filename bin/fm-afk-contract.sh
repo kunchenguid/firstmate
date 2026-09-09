@@ -80,25 +80,19 @@
 # authority by itself.
 #
 # Usage:
-#   fm-afk-contract.sh compile [--words-file <path> | --words <text>]
+#   fm-afk-contract.sh propose [--words-file <path> | --words <text>]
 #       [--action <verb> --object <text> --when <text> [--stop <text>]]...
 #       [--expected-return <UTC ISO 8601>] [--spend <n>]
-#     Compile without writing; print the read-back. Exit 0 with every clause
-#     accepted, 3 when at least one clause was refused (the read-back names the
-#     missing part), 2 on a usage error. --words-file keeps the file's bytes
-#     verbatim, trailing newlines included.
-#   fm-afk-contract.sh propose [same options]
-#     Compile, write the proposal, and print the read-back; exits as compile.
-#     A refused clause does not fail the proposal: it is recorded as refused so
-#     the captain can restate it before saying go.
+#     Compile and write the proposal, then print the read-back. Exit 0 with every
+#     clause accepted, 3 when at least one clause was refused (the read-back names
+#     the missing part), and 2 on a usage error. --words-file keeps the file's
+#     bytes verbatim, trailing newlines included. A refused clause remains in the
+#     proposal so the captain can restate it before saying go.
 #   fm-afk-contract.sh confirm
 #     Promote the proposal into the record with the confirmed timestamp and
 #     print the entry announcement. A proposal is required when no confirmed
 #     record exists; an existing record with no proposal is a no-op refresh.
 #     A replacement is staged before the prior record is archived and replaced.
-#   fm-afk-contract.sh discard-proposal
-#   fm-afk-contract.sh present              exit 0 when the record exists
-#   fm-afk-contract.sh announce             print the entry announcement
 #   fm-afk-contract.sh readback [--proposal]
 #   fm-afk-contract.sh field <name> [--proposal]
 #   fm-afk-contract.sh words [--proposal | --path <record>]
@@ -343,13 +337,27 @@ fm_afk_contract_read_field() {  # <path> <name>
 fm_afk_contract_read_words() {  # <path>
   local path=$1
   [ -f "$path" ] || return 1
-  awk '
-    /^words: \|$/ { inwords = 1; keep_final = 1; next }
-    /^words: \|-$/ { inwords = 1; keep_final = 0; next }
-    /^words: -$/ { exit }
+  awk -v record="$path" '
+    function die(reason) {
+      printf "fm-afk-contract: record %s has an invalid words block: %s\n", record, reason > "/dev/stderr"
+      bad = 1
+      exit 2
+    }
+    /^words: \|$/ && !found { found = inwords = 1; keep_final = 1; next }
+    /^words: \|-$/ && !found { found = inwords = 1; keep_final = 0; next }
+    /^words: -$/ && !found { found = scalar = 1; next }
+    !found { next }
+    $0 == "clauses:" {
+      if (inwords && count == 0) die("the block indicator has no stored lines")
+      done = 1
+      exit
+    }
     inwords && /^  / { lines[++count] = substr($0, 3); next }
-    inwords { exit }
+    { die("a stored line lacks its two-space record prefix") }
     END {
+      if (bad) exit 2
+      if (!found) die("the words field is missing")
+      if (!done) die("the clauses section does not follow the words field")
       for (i = 1; i <= count; i++) {
         printf "%s", lines[i]
         if (i < count || keep_final) printf "\n"
@@ -432,6 +440,7 @@ fm_afk_contract_read_list() {  # <path> <section>
 # schema.
 fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
   local path=$1 require_confirmed=$2 version entered entered_epoch expected reach announced spend words_header confirmed
+  local clause_rows clause id object when decoded
   [ -f "$path" ] || return 1
   version=$(fm_afk_contract_read_field "$path" version)
   [ "$version" = "$FM_AFK_CONTRACT_VERSION" ] || {
@@ -452,6 +461,7 @@ fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
   case "$spend" in ''|*[!0-9]*|0) fm_afk_contract_log "record $path has no valid spend cap"; return 1 ;; esac
   words_header=$(sed -n '/^words: /{p;q;}' "$path")
   case "$words_header" in 'words: -'|'words: |'|'words: |-') ;; *) fm_afk_contract_log "record $path has no valid words field"; return 1 ;; esac
+  fm_afk_contract_read_words "$path" >/dev/null || return 1
   if [ "$require_confirmed" -eq 1 ]; then
     confirmed=$(fm_afk_contract_read_field "$path" confirmed)
     fm_afk_contract_validate_iso "$confirmed" || { fm_afk_contract_log "record $path has no valid confirmed time"; return 1; }
@@ -459,9 +469,29 @@ fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
       ''|*[!0-9]*) fm_afk_contract_log "record $path was never confirmed"; return 1 ;;
     esac
   fi
-  if ! fm_afk_contract_read_list "$path" clauses >/dev/null; then
+  if ! clause_rows=$(fm_afk_contract_read_list "$path" clauses); then
     return 1
   fi
+  while IFS= read -r clause; do
+    [ -n "$clause" ] || continue
+    id=$(printf '%s' "$clause" | cut -f1)
+    object=$(printf '%s' "$clause" | cut -f3)
+    when=$(printf '%s' "$clause" | cut -f4)
+    decoded=$(fm_afk_contract_unescape "$object"; printf x)
+    decoded=${decoded%x}
+    if fm_afk_contract_blank "$decoded"; then
+      fm_afk_contract_log "record $path has malformed clauses row $id: missing or invalid object"
+      return 1
+    fi
+    decoded=$(fm_afk_contract_unescape "$when"; printf x)
+    decoded=${decoded%x}
+    if fm_afk_contract_blank "$decoded"; then
+      fm_afk_contract_log "record $path has malformed clauses row $id: missing or invalid when"
+      return 1
+    fi
+  done <<EOF
+$clause_rows
+EOF
   if ! fm_afk_contract_read_list "$path" refused >/dev/null; then
     return 1
   fi
@@ -470,7 +500,7 @@ fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
 # --- rendering --------------------------------------------------------------
 
 fm_afk_contract_render_readback() {  # <path> <title>
-  local path=$1 title=$2 words line count id action object when stop text missing expected spend flag
+  local path=$1 title=$2 words count id action object when stop text missing expected spend flag
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
   printf '%s\n' "$title"
@@ -601,31 +631,20 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, the CLAUSE_* arrays, 
   return 0
 }
 
-fm_afk_contract_cmd_compile() {  # <write-proposal 0|1> <args...>
-  local write=$1 entered entered_epoch proposal rc=0 refused
-  shift
+fm_afk_contract_cmd_propose() {
+  local entered entered_epoch proposal rc=0 refused
   fm_afk_contract_parse_inputs "$@" || return 2
   entered=$(fm_afk_contract_now_iso)
   entered_epoch=$(date +%s)
-  if [ "$write" -eq 1 ]; then
-    proposal=$(fm_afk_contract_proposal_path)
-    fm_afk_contract_render_body "$entered" "$entered_epoch" | fm_afk_contract_write_atomic "$proposal" || {
-      fm_afk_contract_log "failed to write the proposal at $proposal"
-      return 1
-    }
-  else
-    proposal=$(mktemp "${TMPDIR:-/tmp}/fm-afk-contract-compile.XXXXXX") || return 1
-    fm_afk_contract_render_body "$entered" "$entered_epoch" > "$proposal" || { rm -f "$proposal"; return 1; }
-  fi
+  proposal=$(fm_afk_contract_proposal_path)
+  fm_afk_contract_render_body "$entered" "$entered_epoch" | fm_afk_contract_write_atomic "$proposal" || {
+    fm_afk_contract_log "failed to write the proposal at $proposal"
+    return 1
+  }
   refused=$(fm_afk_contract_read_list "$proposal" refused | grep -c . || true)
   [ "$refused" -eq 0 ] || rc=3
-  if [ "$write" -eq 1 ]; then
-    fm_afk_contract_render_readback "$proposal" 'Away posture read-back (proposed, not yet confirmed):'
-    printf 'Say go to confirm; restate any refused clause first if you want it recorded.\n'
-  else
-    fm_afk_contract_render_readback "$proposal" 'Away posture read-back (compiled, not written):'
-    rm -f "$proposal"
-  fi
+  fm_afk_contract_render_readback "$proposal" 'Away posture read-back (proposed, not yet confirmed):'
+  printf 'Say go to confirm; restate any refused clause first if you want it recorded.\n'
   return "$rc"
 }
 
@@ -733,15 +752,8 @@ fm_afk_contract_main() {
   [ -n "$cmd" ] || { fm_afk_contract_usage >&2; return 2; }
   shift
   case "$cmd" in
-    compile) fm_afk_contract_cmd_compile 0 "$@" ;;
-    propose) fm_afk_contract_cmd_compile 1 "$@" ;;
+    propose) fm_afk_contract_cmd_propose "$@" ;;
     confirm) [ "$#" -eq 0 ] || { fm_afk_contract_usage >&2; return 2; }; fm_afk_contract_cmd_confirm ;;
-    discard-proposal) rm -f "$(fm_afk_contract_proposal_path)" ;;
-    present) fm_afk_contract_present ;;
-    announce)
-      path=$(fm_afk_contract_path)
-      fm_afk_contract_validate "$path" 1 || return 1
-      fm_afk_contract_render_announcement "$path" ;;
     readback)
       path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
       [ -f "$path" ] || { fm_afk_contract_log "no record at $path"; return 1; }
