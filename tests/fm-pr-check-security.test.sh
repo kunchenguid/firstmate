@@ -240,6 +240,26 @@ INVALID_URLS=(
   'https://.gitlab.com/g/p/-/merge_requests/1'
   'https://gitlab.com./g/p/-/merge_requests/1'
   'http://gitlab.com/g/p/-/merge_requests/1'
+  'https://gitlab.com/single/merge_requests/1'
+  'https://gitlab.com/g/p/merge_requests/0'
+  'https://gitlab.com/g/p/merge_requests/01'
+  'https://GitLab.com/g/p/merge_requests/1'
+  'https://gitlab.com:443/g/p/merge_requests/1'
+  'https://user@gitlab.com/g/p/merge_requests/1'
+  'https://gitlab.com/g/p/merge_requests/1/'
+  'https://gitlab.com/-/p/merge_requests/1'
+  'https://gitlab.com/g/p.git/merge_requests/1'
+  'https://gitlab.com/g/p.atom/merge_requests/1'
+  'https://gitlab.com/g/p/merge_requests/1?x=1'
+  'https://gitlab.com/g/p/merge_requests/1#note'
+  'https://gitlab.com/g/p/issues/1'
+  'https://gitlab.com//p/merge_requests/1'
+  'https://.gitlab.com/g/p/merge_requests/1'
+  'https://gitlab.com./g/p/merge_requests/1'
+  'http://gitlab.com/g/p/merge_requests/1'
+  'https://gitlab.com/g/p/merge_requests/1 '
+  'https://github.com/o/r/merge_requests/1'
+  'https://github.com/o/r/-/merge_requests/1'
   'https://github.com/o/r/pull/1/'
   ' https://github.com/o/r/pull/1'
   'https://github.com/o/r/pull/1 '
@@ -375,6 +395,9 @@ https://gitlab.com/group/project/-/merge_requests/1|gitlab.com|group/project|1
 https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/sub/deep/project|42
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
+https://gitlab.example/heji/mss-repo/merge_requests/29|gitlab.example|heji/mss-repo|29
+https://gitlab.com/group/sub/deep/project/merge_requests/42|gitlab.com|group/sub/deep/project|42
+https://code.internal/team/tools/ci-runner/merge_requests/123456|code.internal|team/tools/ci-runner|123456
 EOF
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
@@ -1396,6 +1419,84 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+# GitLab introduced the reserved "-" route separator in 12.0, so an instance
+# older than that serves and links <path>/merge_requests/<n> with no separator.
+# The whole chain has to accept that spelling - arming, the stored record, the
+# poll's own reconstruction, and the merge path's project URL - while the
+# identity stays bound to the exact stored URL.
+test_gitlab_legacy_route_merge_watch() {
+  local dir state out rc url project_url
+  dir=$(make_case gitlab-legacy-route)
+  state="$dir/home/state"
+  project_url=https://gitlab.example/heji/mss-repo
+  url="$project_url/merge_requests/29"
+
+  # Arming through the entry point, which is where the legacy spelling used to
+  # be refused as an invalid PR check request.
+  write_task_meta "$dir" task-a
+  out=$(run_check_entry "$dir" task-a "$url" 2>&1) \
+    || fail "arming a legacy-route GitLab merge request was refused"
+  [ "$out" = 'armed: state/task-a.check.sh' ] \
+    || fail "arming a legacy-route merge request did not report the armed poll"
+  grep -qxF "pr=$url" "$state/task-a.meta" \
+    || fail "the legacy-route merge request URL was not recorded verbatim"
+  [ "$(cat "$state/task-a.pr-poll")" = "gitlab
+$url
+gitlab.example
+heji/mss-repo
+29" ] || fail "the legacy-route sidecar bytes were not exact"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "legacy-route poll provenance or metadata binding was invalid"
+
+  # Only an exact merged state wakes firstmate, exactly as on the current route.
+  for out in opened closed '' MERGED merged-but-not; do
+    [ -z "$(FM_TEST_GLAB_STATE="$out" run_poll "$dir")" ] \
+      || fail "legacy-route poll emitted for a non-merged state"
+  done
+  out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
+  [ "$out" = merged ] \
+    || fail "legacy-route poll did not recognise the captain's own manual merge"
+  [ -z "$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")" ] \
+    || fail "legacy-route poll emitted after a glab failure"
+  grep -qF -- "mr view 29 -R $project_url" "$dir/glab.log" \
+    || fail "legacy-route poll did not address glab by project URL and number"
+  ! grep -qF -- "$url" "$dir/glab.log" \
+    || fail "legacy-route poll passed a merge request URL to glab"
+
+  # The identity still determines the stored URL exactly: a swapped host, a
+  # swapped project, a swapped number, and the other route's spelling of the
+  # same identity all fail the reconstruction and stay silent.
+  for out in "gitlab|$url|elsewhere.example|heji/mss-repo|29" \
+    "gitlab|$url|gitlab.example|heji/other-repo|29" \
+    "gitlab|$url|gitlab.example|heji/mss-repo|30" \
+    "gitlab|$project_url/-/merge_requests/29|gitlab.example|heji/mss-repo|30"; do
+    printf '%s\n' "${out//|/$'\n'}" > "$state/task-a.pr-poll"
+    [ -z "$(FM_TEST_GLAB_STATE=merged run_poll "$dir")" ] \
+      || fail "legacy-route poll emitted for a sidecar that does not rebuild its URL"
+  done
+
+  # The merge path reaches the same instance from the legacy URL. This fixture's
+  # glab answers with the poll's field output rather than JSON, so the merge
+  # refuses on a state it could not read instead of merging.
+  write_task_meta "$dir" task-c
+  : > "$dir/glab.log"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  set +e
+  run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "merge wrapper merged a legacy-route merge request it could not read"
+  grep -qF 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
+    || fail "legacy-route merge refused for some reason other than the unreadable state"
+  grep -qF "mr view 29 -R $project_url" "$dir/glab.log" \
+    || fail "legacy-route merge did not read the merge request at its own instance"
+  ! grep -qF ' mr merge ' "$dir/glab.log" \
+    || fail "legacy-route merge merged despite an unreadable state"
+  [ ! -s "$dir/gh-axi.log" ] || fail "a legacy-route GitLab URL reached the GitHub CLI"
+
+  pass "a legacy GitLab route is armed, polled, and addressed without a false wake"
+}
+
 seed_canonical_poll() {
   local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
   state="$dir/home/state"
@@ -2129,6 +2230,7 @@ test_gitlab_merged_poll_retires() {
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_gitlab_legacy_route_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
