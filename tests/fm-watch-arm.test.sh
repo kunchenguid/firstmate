@@ -671,6 +671,52 @@ test_restart_leaves_a_distinct_home_lock_untouched() {
   pass "watch-arm: restart leaves a watcher lock recorded for a distinct home untouched"
 }
 
+# A partially applied install: bin/fm-watch-arm.sh is present at its recorded
+# spelling while bin/fm-watch.sh is momentarily not. The lock still names a live
+# holder recorded under this exact home and script spelling, so restart recovery
+# must not declare it stale, remove it, or publish downtime for it.
+test_restart_leaves_a_lock_untouched_when_the_watcher_script_is_absent() {
+  local dir home state fakebin armout unrelated owner bin entry status
+  dir=$(make_case restart-absent-watcher-script)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  owner="$state/.watch.lock.owner.fixture"
+  bin="$dir/bin"
+  mkdir -p "$home/data" "$owner" "$bin"
+  for entry in "$ROOT"/bin/*; do
+    case "${entry##*/}" in fm-watch.sh) continue ;; esac
+    ln -s "$entry" "$bin/${entry##*/}"
+  done
+  [ -x "$bin/fm-watch-arm.sh" ] || fail "fixture install is missing the arm script"
+  [ ! -e "$bin/fm-watch.sh" ] || fail "fixture install unexpectedly provides fm-watch.sh"
+
+  sleep 300 &
+  unrelated=$!
+  printf '%s\n' "$unrelated" > "$owner/pid"
+  printf '%s\n' "$home" > "$owner/fm-home"
+  printf '%s\n' "$bin/fm-watch.sh" > "$owner/watcher-path"
+  printf '%s\n' 'live-watcher-identity' > "$owner/pid-identity"
+  ln -s "$owner" "$state/.watch.lock"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$bin/fm-watch-arm.sh" --restart > "$armout" 2> "$dir/arm.err" &
+  ARM_PID=$!
+  wait_for_exit "$ARM_PID" 80
+  status=$?
+  [ "$status" -ne 124 ] || fail "restart stayed live with no watcher script to launch"
+  [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$unrelated" ] \
+    || fail "restart cleared a live watcher lock because the recorded script was absent"
+  [ ! -e "$state/.watcher-down" ] \
+    || fail "restart published downtime for a lock it never proved stale"
+  is_live_non_zombie "$unrelated" || fail "restart signaled the live lock holder"
+  kill "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  pass "watch-arm: restart leaves a live lock untouched when the watcher script is absent"
+}
+
 test_markerless_legacy_queue_is_recovered_on_arm() {
   local dir home state fakebin row
   dir=$(make_case markerless-legacy-arm)
@@ -875,6 +921,7 @@ test_recovery_consumption_serializes_queue_publication
 test_restart_preserves_recovery_across_reused_pid_lock
 test_restart_clears_reused_pid_lock_recorded_under_an_equivalent_home
 test_restart_leaves_a_distinct_home_lock_untouched
+test_restart_leaves_a_lock_untouched_when_the_watcher_script_is_absent
 test_markerless_legacy_queue_is_recovered_on_arm
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
