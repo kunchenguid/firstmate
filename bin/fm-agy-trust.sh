@@ -86,16 +86,17 @@ mkdir -p "$STORE_DIR" 2>/dev/null || true
 [ -d "$STORE_DIR" ] || refuse "Antigravity config directory '$STORE_DIR' does not exist and could not be created"
 LOCK="$STORE_DIR/.fm-trust.lock"
 # Stale-proof mutual exclusion for concurrent spawns. The lock directory
-# carries an owner file with "<pid>:<epoch>"; mkdir stays the single atomic
-# arbiter. A contender breaks only a lock whose owner pid is dead, whose
-# timestamp is older than a legitimate hold can ever be (a hold is a single
-# read-modify-rename of one small file), or whose directory is older than any
-# legitimate mkdir-to-owner write with no owner file at all. A SIGKILLed or
-# OOM-killed holder therefore blocks the next writer for at most one grace
-# window rather than permanently. A break verdict is revalidated immediately
-# before removal, so a contender that renewed the lock in between is waited
-# on instead of removed; whatever slips the residual microsecond window still
-# converges, because the following mkdir admits exactly one winner.
+# carries an owner file with "<pid>:<epoch>:<random>"; mkdir stays the single
+# atomic arbiter. A contender breaks only a lock whose owner pid is dead,
+# whose timestamp is older than a legitimate hold can ever be (a hold is a
+# single read-modify-rename of one small file), or whose directory is older
+# than any legitimate mkdir-to-owner write with no owner file at all. Every
+# stale threshold sits below every wait budget, so no waiter can exhaust its
+# retries while a lock it watches is still counting down to breakable. A
+# break verdict is revalidated immediately before removal. And the single
+# mutating rename additionally proves current ownership first: even a holder
+# evicted mid-hold refuses rather than interleaving renames, while release
+# never removes a successor's lock.
 lock_owner() { cat "$LOCK/owner" 2>/dev/null; }
 # Portable directory mtime in epoch seconds. macOS (BSD) stat uses `-f`,
 # Linux (GNU) stat uses `-c`; detect the platform once rather than chaining
@@ -107,16 +108,19 @@ else
   lock_dir_mtime() { stat -c %Y "$LOCK" 2>/dev/null; }
 fi
 lock_stale() {  # <owner-line> -> 0 when the lock may be broken
-  local owner=$1 opid ots now
-  case "$owner" in
-    *:*) opid=${owner%%:*}; ots=${owner##*:} ;;
-    *) return 0 ;;
-  esac
+  local owner=$1 opid ots rest now
+  opid=${owner%%:*}
+  rest=${owner#*:}
+  case "$rest" in *:*) ots=${rest%%:*} ;; *) ots=$rest ;; esac
   case "$opid" in ''|*[!0-9]*) return 0 ;; esac
   case "$ots" in ''|*[!0-9]*) return 0 ;; esac
   if kill -0 "$opid" 2>/dev/null; then
     now=$(date +%s)
-    [ $((now - ots)) -gt 60 ] && return 0
+    # A legitimate hold is a single read-modify-rename of one small file, so
+    # a live pid holding longer than this is wedged rather than working. Kept
+    # below every wait budget so no waiter can exhaust its retries while a
+    # lock it watches is still counting down to breakable.
+    [ $((now - ots)) -gt 20 ] && return 0
     return 1
   fi
   return 0
@@ -145,10 +149,12 @@ lock_wait() {
   [ "$lock_attempt" -lt 300 ] || refuse "timed out waiting for '$LOCK'"
   sleep 0.1
 }
+LOCK_TOKEN=
 lock_attempt=0
 while :; do
   if mkdir "$LOCK" 2>/dev/null; then
-    printf '%s:%s\n' "$$" "$(date +%s)" > "$LOCK/owner" 2>/dev/null || {
+    LOCK_TOKEN="$$:$(date +%s):$RANDOM"
+    printf '%s\n' "$LOCK_TOKEN" > "$LOCK/owner" 2>/dev/null || {
       rmdir "$LOCK" 2>/dev/null || true
       refuse "could not record trust lock ownership in '$LOCK'"
     }
@@ -167,7 +173,15 @@ while :; do
   [ "$lock_attempt" -lt 300 ] || refuse "timed out waiting for '$LOCK'"
   sleep 0.1
 done
-trap 'rm -f "$LOCK/owner" 2>/dev/null; rmdir "$LOCK" 2>/dev/null' EXIT
+# Release only a lock still owned here: a successor's lock is never removed,
+# including on the abort paths below that fire after an eviction.
+lock_release() {
+  [ -n "$LOCK_TOKEN" ] || return 0
+  [ "$(lock_owner)" = "$LOCK_TOKEN" ] || return 0
+  rm -f "$LOCK/owner" 2>/dev/null
+  rmdir "$LOCK" 2>/dev/null || true
+}
+trap 'lock_release' EXIT
 trap 'exit 1' HUP INT TERM
 if [ -e "$STORE" ]; then
   [ -f "$STORE" ] || refuse "'$STORE' is not a regular file"
@@ -205,6 +219,14 @@ while [ "$attempt" -lt 3 ]; do
     rm -f "$tmp"
     [ "$attempt" -ge 3 ] && refuse "'$STORE' was modified while trust was being recorded; refusing to overwrite it"
     continue
+  fi
+  # The lock may have been evicted while this was staged (a wedged hold looks
+  # exactly like a dead one once its timestamp expires). Publishing under a
+  # lost lock would interleave two renames, so ownership is proven again at
+  # the single mutating step and a lost lock refuses rather than publishing.
+  if [ "$(lock_owner)" != "$LOCK_TOKEN" ]; then
+    rm -f "$tmp"
+    refuse "lost the trust lock before publishing for '$WT_REAL'; refusing to interleave renames"
   fi
   if ! mv -f "$tmp" "$STORE" 2>/dev/null; then
     rm -f "$tmp"
