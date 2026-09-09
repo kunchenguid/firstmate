@@ -316,8 +316,9 @@ if [ "$HEALTHY" -eq 1 ]; then
   if [ "$ALARMED" -eq 0 ] && fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     {
       printf 'firstmate watcher auto-arm HELD THIS TURN OPEN - a live watcher with a fresh beacon was verified, but the failure-episode reset for this home could not be recorded, so recovery is not yet provably closed.\n'
-      printf 'The arm is not the cause here: the bookkeeping write refused. Read %s (outcome=failed-suppressed), the markers it clears (%s, %s), and the lock serializing them (%s). If this repeats, the state directory itself is refusing the write.\n' \
-        "$STATE/.claude-autoarm-epoch" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$STATE/.turnend-claude-blocks.lock"
+      printf 'The arm is not the cause here: the bookkeeping write refused. Read %s (outcome=failed-suppressed), the three markers it clears (%s, %s, %s), and the lock serializing them (%s): a busy lock, or any of those three existing as a directory, refuses it. If this repeats, the state directory itself is refusing the write.\n' \
+        "$STATE/.claude-autoarm-epoch" "$STATE/.turnend-claude-blocks" "$FAILURE_NOTICE" "$FAILURE_ALARM" \
+        "$STATE/.turnend-claude-blocks.lock"
     } >&2
   fi
   if autoarm_commit failed-suppressed; then

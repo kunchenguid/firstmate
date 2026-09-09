@@ -201,6 +201,35 @@ printf 'watcher: FAILED - watcher cycle exited 1 without an actionable reason\n'
 exit 1
 SH
       ;;
+    mode-restricted-artifact)
+      # The incident's real chain, driven by the filesystem rather than by a
+      # hardcoded exit: publish an artifact that must be private, chmod it,
+      # read the mode back, and refuse - with plain untyped text naming the
+      # concrete mode - only when the mode did not stick. On a filesystem that
+      # holds 600 this arm closes cleanly instead.
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+artifact="$FM_HOME/state/pr-check.tmp"
+: > "$artifact" 2>/dev/null || {
+  printf 'fm-pr-check-migrate: cannot create %s\n' "$artifact"
+  exit 1
+}
+chmod 600 "$artifact" 2>/dev/null || true
+if [ "$(uname)" = Darwin ]; then
+  mode=$(/usr/bin/stat -f %Lp "$artifact" 2>/dev/null)
+else
+  mode=$(stat -c %a "$artifact" 2>/dev/null)
+fi
+rm -f "$artifact" 2>/dev/null || true
+if [ "$mode" != 600 ]; then
+  printf 'fm-pr-check-migrate: cannot publish %s: mode %s, expected 600\n' "$artifact" "$mode"
+  exit 1
+fi
+printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
+exit 0
+SH
+      ;;
     mute-failure)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1362,7 +1391,7 @@ mode_incapable_root() {
 }
 
 test_mode_incapable_state_dir_never_blocks_silently() {
-  local root dir all
+  local root dir all probe reverted
   if ! root=$(mode_incapable_root); then
     printf 'skip: no filesystem on this host reverts chmod on both files and directories; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
     return 0
@@ -1375,11 +1404,26 @@ test_mode_incapable_state_dir_never_blocks_silently() {
   chmod 700 "$dir/state" 2>/dev/null || true
   [ "$(fm_test_file_mode "$dir/state")" != 700 ] \
     || fail "$root stopped reverting modes between the probe and the fixture"
+  # The arm below refuses on a FILE mode, so measure the same kind of object
+  # here: this is the concrete mode the operator must be shown, not a guess.
+  probe="$dir/state/.mode-probe"
+  : > "$probe" || fail "could not create a mode probe in $dir/state"
+  chmod 600 "$probe" 2>/dev/null || true
+  reverted=$(fm_test_file_mode "$probe")
+  rm -f "$probe"
+  [ "$reverted" != 600 ] \
+    || fail "$root stopped reverting file modes between the probe and the fixture"
   : > "$dir/state/task.meta"
-  write_arm_fixture "$dir" failed
+  # Not a hardcoded failure: this arm publishes a restricted artifact and
+  # refuses only because the filesystem reverted its mode, so the whole chain
+  # from the mount to the operator-visible block runs for real.
+  write_arm_fixture "$dir" mode-restricted-artifact
   assert_every_block_is_loud "$dir" "mode-incapable home"
   all=$LOUD_BLOCK_OUTPUT
-  assert_contains "$all" "watcher: FAILED" "the mode-incapable home dropped what refused"
+  assert_contains "$all" "mode $reverted, expected 600" \
+    "the mode-incapable home dropped the concrete mode the filesystem forced"
+  assert_contains "$all" "$dir/state/pr-check.tmp" \
+    "the mode-incapable home dropped the artifact that could not be published"
   pass "auto-arm: a state directory that cannot hold restricted modes never blocks a turn with empty output"
 }
 
