@@ -6,6 +6,24 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Reviewed Claude and Codex worker launches
+
+On 2026-09-09, Claude Code 2.1.236 and codex-cli 0.153.1 accepted the permission and additional-directory arguments below through their real CLI parsers.
+Each command exited 0 and printed its normal help; no provider turn or worker was started.
+
+```sh
+claude --permission-mode auto --add-dir /tmp --add-dir /private/tmp --help
+claude --permission-mode manual --add-dir /tmp --add-dir /private/tmp --help
+codex --approve-for-me --add-dir /tmp --add-dir /private/tmp --help
+codex --sandbox workspace-write --ask-for-approval on-request -c approvals_reviewer=user --add-dir /tmp --help
+```
+
+`tests/fm-spawn-dispatch-profile.test.sh` exercises generated worker commands, default and explicit harness selection, auto/manual modes, reporting-directory grants, and rejection of invalid permission settings through the real spawn entry point with isolated Git worktrees and fake endpoints.
+`tests/fm-secondmate-harness.test.sh` and `tests/fm-backend-orca.test.sh` cover the other affected launch shapes.
+These are argument and routing checks, not evidence of account eligibility, classifier decisions, hook delivery, or end-to-end supervised operation in Auto mode.
+Before relying on unattended operation, run an authenticated disposable task through the intended primary and worker harness, verify tests and status delivery, then verify that a denied operation is surfaced without falling back to bypass.
+The operator contract is in [configuration](../configuration.md#worker-permission-mode-configcrew-permissions); the executable launch owner is `bin/fm-spawn.sh`.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

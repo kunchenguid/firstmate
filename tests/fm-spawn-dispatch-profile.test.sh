@@ -131,7 +131,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --permission-mode auto --settings '{\"feedbackDrafts\":\"off\"}' --add-dir '$(cd "$HOME_DIR/state" && pwd -P)' --add-dir '$(cd "$HOME_DIR/data/$id" && pwd -P)' -- \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -345,7 +345,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --approve-for-me" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -395,7 +395,7 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "claude --permission-mode auto --settings '{\"feedbackDrafts\":\"off\"}' --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
   pass "claude receives --model and --effort profile flags"
@@ -412,7 +412,7 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --approve-for-me" \
     "codex launch did not thread model and reasoning effort config"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
@@ -428,7 +428,7 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' --approve-for-me" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
@@ -736,7 +736,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --permission-mode auto --settings '{\"feedbackDrafts\":\"off\"}'" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -792,6 +792,62 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_worker_permission_modes() {
+  local harness mode rec id out status launch state_real data_real
+  for harness in claude codex; do
+    for mode in auto manual; do
+      id="perm-$harness-$mode-z1"
+      rec=$(make_spawn_case "$id" codex "$id")
+      read_case_record "$rec"
+      printf '%s\n' "$mode" > "$HOME_DIR/config/crew-permissions"
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness "$harness")
+      status=$?
+      expect_code 0 "$status" "$harness $mode spawn failed: $out"
+      launch=$(cat "$LAUNCH_LOG")
+      assert_not_contains "$launch" 'dangerously' 'worker must not enable bypass'
+      assert_not_contains "$launch" '__PERMISSIONDIRS__' 'directory placeholder leaked'
+      state_real=$(cd "$HOME_DIR/state" && pwd -P)
+      data_real=$(cd "$HOME_DIR/data/$id" && pwd -P)
+      assert_contains "$launch" "--add-dir '$state_real'" 'status/inbox access missing'
+      assert_contains "$launch" "--add-dir '$data_real'" 'brief/report access missing'
+      assert_not_contains "$launch" "--add-dir '$HOME_DIR' " 'whole home must not be granted'
+      case "$harness:$mode" in
+        claude:auto) assert_contains "$launch" '--permission-mode auto' 'Claude Auto missing' ;;
+        claude:manual) assert_contains "$launch" '--permission-mode manual' 'Claude manual missing' ;;
+        codex:auto) assert_contains "$launch" '--approve-for-me' 'Codex review missing' ;;
+        codex:manual)
+          assert_contains "$launch" '--sandbox workspace-write --ask-for-approval on-request -c approvals_reviewer=user' 'Codex manual must override global automatic review'
+          assert_not_contains "$launch" '--approve-for-me' 'manual must not enable auto review'
+          ;;
+      esac
+      assert_meta_profile "$HOME_DIR/state/$id.meta" "$harness" default default
+    done
+  done
+  pass 'Claude and Codex auto/manual modes preserve narrow reporting access and explicit harness overrides'
+}
+
+test_invalid_worker_permissions_refuse() {
+  local harness bad rec id out status count=0
+  for harness in claude codex; do
+    for bad in '' bypass 'auto manual' 'auto; touch /tmp/fm-never-execute'; do
+      count=$((count + 1))
+      id="perm-invalid-$count-z1"
+      rec=$(make_spawn_case "$id" "$harness" "$id")
+      read_case_record "$rec"
+      printf '%s\n' "$bad" > "$HOME_DIR/config/crew-permissions"
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+      status=$?
+      [ "$status" -ne 0 ] || fail 'invalid permission mode was accepted'
+      assert_contains "$out" 'invalid config/crew-permissions' 'missing actionable error'
+      [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'invalid mode published metadata'
+      [ ! -s "$LAUNCH_LOG" ] || fail 'invalid mode launched an agent'
+    done
+  done
+  pass 'invalid permission settings refuse before launching or publishing task metadata'
+}
+
+test_worker_permission_modes
+test_invalid_worker_permissions_refuse
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths

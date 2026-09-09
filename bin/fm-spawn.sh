@@ -164,7 +164,19 @@
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
+#   Claude and Codex launches read config/crew-permissions: absent or auto uses
+#   Claude's --permission-mode auto / Codex's --approve-for-me (workspace-write
+#   with automatic review); manual uses Claude manual / Codex on-request with
+#   human review. Empty, unreadable, or unknown settings refuse the launch.
+#   This applies to ship, scout, and secondmate launches, not an already-running
+#   primary, other harnesses, or the explicit raw-command escape hatch.
+#   There is no fallback to permission or sandbox bypass on failure or denial.
+#   Both modes add only the owning home's state directory and the brief's
+#   directory to the worker's existing worktree access, for status/inbox/report
+#   writes. State is shared across this home's tasks, not per-task isolation.
+#   Git protected paths and network requests still follow the harness's review.
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __PERMISSIONDIRS__ additional quoted state and task-data directory flags
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -1242,7 +1254,28 @@ pi_supports_tui_mode() {
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
-  local harness=$1 kind=${2:-ship}
+  local harness=$1 kind=${2:-ship} permission_mode=auto permission_flags
+  case "$harness" in
+    claude|codex)
+      if [ -e "$CONFIG/crew-permissions" ] || [ -L "$CONFIG/crew-permissions" ]; then
+        if [ ! -f "$CONFIG/crew-permissions" ] || [ ! -r "$CONFIG/crew-permissions" ]; then
+          echo "error: config/crew-permissions must be a readable file containing auto or manual" >&2
+          return 1
+        fi
+        permission_mode=$(cat "$CONFIG/crew-permissions") || return 1
+      fi
+      case "$harness:$permission_mode" in
+        claude:auto) permission_flags='--permission-mode auto' ;;
+        claude:manual) permission_flags='--permission-mode manual' ;;
+        codex:auto) permission_flags='--approve-for-me' ;;
+        codex:manual) permission_flags='--sandbox workspace-write --ask-for-approval on-request -c approvals_reviewer=user' ;;
+        *)
+          echo "error: invalid config/crew-permissions (expected auto or manual); refusing launch" >&2
+          return 1
+          ;;
+      esac
+      ;;
+  esac
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
     # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
@@ -1264,12 +1297,12 @@ launch_template() {
     # alone disables the feature; keep both so a managed override of one still
     # leaves the other in force. Both are per-launch, scoped to this invocation only,
     # and never touch the captain's global ~/.claude/settings.json.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude ' "$permission_flags" ' --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG____PERMISSIONDIRS__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__' "$permission_flags" ' __PERMISSIONDIRS__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__' "$permission_flags" ' __PERMISSIONDIRS__-c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" -- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -3033,6 +3066,12 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+case "$HARNESS" in
+  claude|codex)
+    permission_dirs="--add-dir $(shell_quote "$STATE_REAL") --add-dir $(shell_quote "$(cd "$(dirname "$BRIEF")" && pwd -P)") "
+    LAUNCH=${LAUNCH//__PERMISSIONDIRS__/$permission_dirs}
+    ;;
+esac
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"

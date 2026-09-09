@@ -294,6 +294,26 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
+## Worker permission mode (config/crew-permissions)
+
+Claude and Codex workers use reviewed execution rather than permission bypass by default.
+An optional home-local `config/crew-permissions` selects `auto` (the default) or `manual`; `bin/fm-spawn.sh --help` owns exact launch flags, validation, directory grants, and exclusions.
+The setting is read for each new launch or relaunch, including a secondmate agent launched by this home; it does not change already-running agents or the primary's permission mode.
+This file is not inherited into secondmate homes: their own workers use their home's setting or the same safe default.
+No global agent settings or hooks are installed by selecting a mode.
+Other harness adapters and explicit raw launch commands retain their existing permission behavior.
+
+Auto requests Claude's classifier-backed permission mode and Codex's automatic approval reviewer with workspace-write sandboxing.
+Availability depends on the installed CLI, account, and managed policy; an unsupported or denied request must be reported, never retried with bypass permissions.
+Manual keeps approval prompts available for human review, so an unattended task may wait for intervention.
+Both modes preserve the separate project delivery and merge-approval rules.
+Workers receive additional access to the owning home's shared state directory and their brief/report directory, not the entire home; the shared state layout is not a per-task security boundary.
+Protected Git writes and operations outside the allowed sandbox still require the harness's normal review.
+
+For a Claude primary with mostly Codex workers, launch `claude` in this home, set `config/crew-harness` to `codex`, and keep `config/backend` at `tmux`.
+Select Claude explicitly for an individual review when wanted; a dispatch-profile file is unnecessary for this simple default.
+Choose the primary's own Auto mode through its CLI or interface rather than changing global settings on behalf of unrelated sessions.
+
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
