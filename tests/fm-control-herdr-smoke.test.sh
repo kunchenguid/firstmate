@@ -10,8 +10,8 @@
 # comes from herdr's own agent registry.
 #
 # No real agent is launched. herdr's `pane report-agent` is the same registry
-# the adapter reads, so registering and not registering an agent on a plain
-# shell pane exercises exactly the classification the control plane gates on.
+# the adapter reads. Working occupancy on a plain shell pane still classifies
+# as alive. Idle occupancy on a proven idle shell classifies as already-stopped.
 #
 # Always runs on a private, named, throwaway lab session, never the default
 # one (tests/herdr-test-safety.sh; the 2026-07-02 incident). Skips cleanly
@@ -113,16 +113,32 @@ case "$OUT" in
 esac
 pass "real herdr: interrupt refuses when herdr's own agent registry reports no agent"
 
-# --- a registered agent: classification flips, and the verbs follow ---------
+# --- idle occupancy on a proven idle shell is already-stopped -------------
 
 herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
   --state idle --session "$SESSION" >/dev/null 2>&1 \
-  || fail "could not register a live agent on the task pane"
+  || fail "could not register idle occupancy on the task pane"
 
 STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
-[ "$STATE" = alive ] || fail "herdr should classify a registered agent as alive, got '$STATE'"
+[ "$STATE" = dead ] || fail "idle occupancy on a proven idle shell should classify as dead, got '$STATE'"
 
-OUT=$(run_control hsmoke interrupt) || fail "interrupt against a registered agent should succeed: $OUT"
+OUT=$(run_control hsmoke exit) || fail "exit against proven idle-shell occupancy should be already-stopped: $OUT"
+case "$OUT" in
+  "already-stopped hsmoke"*) : ;;
+  *) fail "idle occupancy on a proven idle shell should report already-stopped, got: $OUT" ;;
+esac
+pass "real herdr: idle occupancy on a proven idle shell is already-stopped"
+
+# --- working occupancy on a shell pane stays live --------------------------
+
+herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
+  --state working --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not register a working agent on the task pane"
+
+STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
+[ "$STATE" = alive ] || fail "herdr should classify working occupancy as alive, got '$STATE'"
+
+OUT=$(run_control hsmoke interrupt) || fail "interrupt against a registered working agent should succeed: $OUT"
 case "$OUT" in
   *"interrupt-delivered hsmoke harness=claude backend=herdr verified=agent-alive cancel=unconfirmed"*) : ;;
   *) fail "interrupt should report the agent-alive proof on herdr, got: $OUT" ;;
@@ -135,7 +151,7 @@ herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
 pass "real herdr: no control verb removed the endpoint or the task's local copy"
 
 # Last, because it deliberately types a harness command into a pane that hosts
-# a plain shell: the registered agent cannot actually be stopped that way, and
+# a plain shell: working occupancy cannot actually be stopped that way, and
 # the control plane must say so rather than report a stop it did not achieve.
 if OUT=$(run_control hsmoke exit 2>&1); then
   fail "exit should fail closed when the agent does not stop: $OUT"
