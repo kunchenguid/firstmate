@@ -86,22 +86,43 @@ test_init_points_an_existing_claude_md_without_renaming_it() {
   pass "fm-project-recipes.sh: init points an existing CLAUDE.md at the catalog without renaming it"
 }
 
-# AutoEvals today: AGENTS.md and CLAUDE.md coexist as distinct real files. The
-# catalog is the product there, so init must succeed and leave both files as
-# they are apart from the one pointer line in AGENTS.md.
+# AutoEvals today: AGENTS.md and CLAUDE.md coexist as distinct real files and
+# CLAUDE.md does not import AGENTS.md. Workers read AGENTS.md and the captain's
+# own sessions load CLAUDE.md, so the catalog has to be reachable from both.
 test_init_succeeds_when_agents_and_claude_are_both_real_files() {
-  local world out claude_before
+  local world out
   world=$(make_project bothreal)
   printf '# Agent memory\n\nWritten by an earlier worker.\n' >"$world/project/AGENTS.md"
-  printf '# Operating context\n\nThe captain'"'"'s own words, not a pointer.\n' >"$world/project/CLAUDE.md"
-  claude_before=$(cat "$world/project/CLAUDE.md")
+  printf '# Operating context\n\nThe captain'"'"'s own words, not a pointer. See AGENTS.md for the rest.\n' >"$world/project/CLAUDE.md"
   out=$(recipes_cmd "$world/home" init "$world/project") || fail "init died on a project holding both AGENTS.md and CLAUDE.md: $out"
   assert_present "$world/project/.agents/recipes.md" "init did not create the catalog"
   assert_grep ".agents/recipes.md" "$world/project/AGENTS.md" "AGENTS.md does not point at the catalog"
   assert_grep "Written by an earlier worker" "$world/project/AGENTS.md" "init lost the existing AGENTS.md content"
+  assert_grep ".agents/recipes.md" "$world/project/CLAUDE.md" \
+    "a CLAUDE.md that does not import AGENTS.md was left without a pointer, so the captain's own sessions cannot reach the catalog"
+  assert_grep "The captain's own words, not a pointer." "$world/project/CLAUDE.md" "init lost the captain's own CLAUDE.md content"
+  out=$(recipes_cmd "$world/home" init "$world/project") || fail "second init failed: $out"
+  [ "$(grep -c '\.agents/recipes\.md' "$world/project/AGENTS.md")" = 1 ] ||
+    fail "init added a second pointer to AGENTS.md"
+  [ "$(grep -c '\.agents/recipes\.md' "$world/project/CLAUDE.md")" = 1 ] ||
+    fail "init added a second pointer to CLAUDE.md"
+  pass "fm-project-recipes.sh: init points both real memory files at the catalog when CLAUDE.md does not import AGENTS.md"
+}
+
+# When CLAUDE.md imports AGENTS.md, everything in AGENTS.md is already loaded
+# by the captain's sessions, so the pointer in AGENTS.md alone reaches them and
+# CLAUDE.md stays untouched.
+test_init_leaves_a_claude_md_that_imports_agents_md_untouched() {
+  local world out claude_before
+  world=$(make_project imports)
+  printf '# Agent memory\n\nWritten by an earlier worker.\n' >"$world/project/AGENTS.md"
+  printf '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->\n@AGENTS.md\n' >"$world/project/CLAUDE.md"
+  claude_before=$(cat "$world/project/CLAUDE.md")
+  out=$(recipes_cmd "$world/home" init "$world/project") || fail "init failed: $out"
+  assert_grep ".agents/recipes.md" "$world/project/AGENTS.md" "AGENTS.md does not point at the catalog"
   [ "$(cat "$world/project/CLAUDE.md")" = "$claude_before" ] ||
-    fail "init touched CLAUDE.md on a project that also keeps AGENTS.md"
-  pass "fm-project-recipes.sh: init succeeds when AGENTS.md and CLAUDE.md are both real files"
+    fail "init touched a CLAUDE.md that already imports AGENTS.md"
+  pass "fm-project-recipes.sh: init leaves a CLAUDE.md that imports AGENTS.md untouched"
 }
 
 test_digest_names_the_catalog_by_absolute_path_on_request() {
@@ -238,6 +259,7 @@ test_check_reports_a_catalog_that_outgrew_its_budget() {
 test_init_creates_the_catalog_and_points_agents_md_at_it
 test_init_points_an_existing_claude_md_without_renaming_it
 test_init_succeeds_when_agents_and_claude_are_both_real_files
+test_init_leaves_a_claude_md_that_imports_agents_md_untouched
 test_digest_names_the_catalog_by_absolute_path_on_request
 test_digest_carries_when_and_ask_but_not_the_rest
 test_digest_is_bounded_and_says_what_it_left_out

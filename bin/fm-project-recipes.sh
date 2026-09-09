@@ -26,12 +26,15 @@
 # `init` is the only subcommand that writes, and it writes only into the
 # directory it is given. It refuses while a git operation is in flight there,
 # because that directory can be a live folder the captain is working in at the
-# same time. It always creates the catalog, then adds one pointer line to the
-# memory file the project already has: AGENTS.md when there is one, otherwise
-# CLAUDE.md. It never renames, converts, or reconciles those files - a project
-# that keeps both as distinct real files is left exactly as it is - and it calls
-# bin/fm-ensure-agents-md.sh only when the project has neither. `digest` and
-# `check` never write anything.
+# same time. It always creates the catalog, then adds one pointer line to every
+# memory file the catalog has to be reachable from: AGENTS.md when there is
+# one, and CLAUDE.md when it is a real file that does not import AGENTS.md
+# through an `@AGENTS.md` line - the captain's own sessions load CLAUDE.md, so
+# a pointer only in an AGENTS.md they never import would serve workers alone.
+# It never renames, converts, or reconciles those files - a project that keeps
+# both as distinct real files is left exactly as it is apart from the pointer -
+# and it calls bin/fm-ensure-agents-md.sh only when the project has neither.
+# `digest` and `check` never write anything.
 #
 # `digest --absolute` names the catalog by its absolute path instead of the
 # project-relative one, for a reader that works somewhere other than
@@ -194,6 +197,22 @@ pointer_line() {
   printf '%s\n' "Agent recipes - what this project can do and how each capability is asked for: [\`$RECIPES_REL\`]($RECIPES_REL). Read it before starting work, and record what you learn there."
 }
 
+add_pointer() {  # <memory file>; appends the pointer once
+  grep -qF "$RECIPES_REL" "$1" && return 0
+  if [ -n "$(tail -c 1 "$1")" ]; then
+    printf '\n' >>"$1"
+  fi
+  {
+    printf '\n'
+    pointer_line
+  } >>"$1"
+  echo "updated: added the recipe-catalog pointer to $1"
+}
+
+imports_agents_md() {  # <CLAUDE.md>; true when it carries an @AGENTS.md import line
+  grep -qE '^@(\./)?AGENTS\.md[[:space:]]*$' "$1"
+}
+
 recipe_blocks() {  # <recipes file> [notes file]
   awk -v brk="$RECIPE_BREAK" -v notes="${2:-}" '
     BEGIN {
@@ -319,28 +338,22 @@ case "$CMD" in
     else
       echo "unchanged: $RECIPES"
     fi
-    # The pointer goes into whichever memory file the project already keeps.
-    # This directory can be the captain's own live folder, so the project's
-    # memory files are never renamed or reconciled here: a CLAUDE.md that holds
-    # his own words gets the pointer in place, and a project that keeps both
-    # files as distinct real files is left exactly as it is.
-    if [ -f "$DIR/AGENTS.md" ]; then
-      MEMORY="$DIR/AGENTS.md"
-    elif [ -f "$DIR/CLAUDE.md" ]; then
-      MEMORY="$DIR/CLAUDE.md"
-    else
+    # The pointer goes into every memory file the catalog must be reachable
+    # from. This directory can be the captain's own live folder, so the
+    # project's memory files are never renamed or reconciled here: a CLAUDE.md
+    # that holds his own words gets the pointer in place, and when it does not
+    # import AGENTS.md both files get it, because workers read AGENTS.md while
+    # his sessions load CLAUDE.md.
+    if [ ! -f "$DIR/AGENTS.md" ] && [ ! -f "$DIR/CLAUDE.md" ]; then
       "$SCRIPT_DIR/fm-ensure-agents-md.sh" "$DIR" >/dev/null || die "could not establish AGENTS.md in $DIR"
-      MEMORY="$DIR/AGENTS.md"
     fi
-    if ! grep -qF "$RECIPES_REL" "$MEMORY"; then
-      if [ -n "$(tail -c 1 "$MEMORY")" ]; then
-        printf '\n' >>"$MEMORY"
+    if [ -f "$DIR/AGENTS.md" ]; then
+      add_pointer "$DIR/AGENTS.md"
+    fi
+    if [ -f "$DIR/CLAUDE.md" ]; then
+      if [ ! -f "$DIR/AGENTS.md" ] || ! imports_agents_md "$DIR/CLAUDE.md"; then
+        add_pointer "$DIR/CLAUDE.md"
       fi
-      {
-        printf '\n'
-        pointer_line
-      } >>"$MEMORY"
-      echo "updated: added the recipe-catalog pointer to $MEMORY"
     fi
     ;;
   digest)

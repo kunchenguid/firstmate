@@ -94,9 +94,9 @@ For a project whose home is a local checkout, this is the main path rather than 
 A project can stop being software and become a toolbox whose only user is an agent - diagnose an assistant bug, audit a conversation corpus, change a prompt, run a realistic test.
 For a project like that the operational recipes are the product, and they usually survive only inside one long conversation.
 
-`bin/fm-project-recipes.sh` gives every project a catalog of those capabilities at `<project home>/.agents/recipes.md`, pointed at from the agent memory file the project already keeps: its `AGENTS.md`, or its `CLAUDE.md` when that is what the project has.
+`bin/fm-project-recipes.sh` gives every project a catalog of those capabilities at `<project home>/.agents/recipes.md`, pointed at from every agent memory file it has to be reachable from: the project's `AGENTS.md`, and its `CLAUDE.md` whenever that is a real file that does not import `AGENTS.md`, because the captain's own sessions load `CLAUDE.md` and workers read `AGENTS.md`.
 It lives with the project on purpose, so it serves the captain's individual sessions exactly as much as a dispatched worker; it is not a firstmate-private channel.
-Creating it never renames or reconciles the project's memory files; a project that keeps both `AGENTS.md` and `CLAUDE.md` as distinct real files is left exactly as it is, apart from the one pointer line.
+Creating it never renames or reconciles the project's memory files; a project that keeps both `AGENTS.md` and `CLAUDE.md` as distinct real files is left exactly as it is, apart from the pointer line each needs.
 
 ```sh
 bin/fm-project-recipes.sh init <project-home>     # the only subcommand that writes
