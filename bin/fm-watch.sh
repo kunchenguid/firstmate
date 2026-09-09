@@ -296,11 +296,12 @@ _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
 
-# afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
-# watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
-# every wake) and let the daemon classify - never absorb here, or the daemon's
-# digest/injection layer would never see the wake.
-afk_present() { [ -e "$STATE/.afk" ]; }
+# afk_present: legacy function name for daemon-owned triage. It is true while
+# away mode or continuous supervision owns this watcher, which must then behave
+# one-shot so the daemon receives every durable wake.
+afk_present() {
+  [ -e "$STATE/.afk" ] || [ -f "$FM_HOME/config/continuous-supervision" ]
+}
 
 # afk_record_present: 0 while the away-posture record exists (the captain is
 # away, in either supervision shape). While it exists an item held for the

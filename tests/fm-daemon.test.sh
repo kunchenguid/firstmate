@@ -1702,6 +1702,34 @@ test_busy_guard_defers_when_supervisor_busy() {
   pass "busy-guard defers injection when supervisor pane is busy"
 }
 
+test_continuous_supervision_retries_busy_then_injects_idle() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase continuous-busy-idle)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  mkdir -p "$dir/config"
+  : > "$dir/config/continuous-supervision"
+  capture="$dir/pane.txt"
+  printf 'esc to interrupt\n' > "$capture"
+  escalate_add "$state" "inbox: unread durable instruction"
+  if FM_HOME="$dir" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
+    fail "continuous supervision injected while the composer was busy"
+  fi
+  [ -s "$state/.subsuper-escalations" ] || fail "busy deferral lost the durable escalation"
+  printf '\342\235\257 \n' > "$capture"
+  FM_HOME="$dir" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 \
+    FM_FAKE_TMUX_SENT="$sent" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "continuous supervision did not retry after the composer became idle"
+  grep -F "unread durable instruction" "$sent" >/dev/null \
+    || fail "idle retry did not inject the durable instruction"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "confirmed delivery retained the escalation"
+  pass "continuous supervision preserves a busy deferral and injects after idle"
+}
+
 test_marker_detection() {
   local marker_hex
   marker_hex=$(printf '%s' "$FM_INJECT_MARK" | od -An -tx1 | tr -d ' \n')
@@ -2830,6 +2858,7 @@ test_signal_escalate_marks_seen_no_catchall_refire
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy
+test_continuous_supervision_retries_busy_then_injects_idle
 test_marker_detection
 test_afk_turn_exemption
 test_should_exit_afk_when_afk_inactive
