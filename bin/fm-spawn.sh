@@ -3197,13 +3197,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     # isolated git worktree - it would pass the same two-consecutive-reads
     # check before the newly resent 'treehouse get' has actually run, since
     # spawn_send_text_line returns as soon as the keys are injected, not once
-    # the shell has interpreted them. Require more consecutive agreeing reads
-    # before re-accepting a candidate that matches the just-rejected slot, so
-    # a couple of stale immediate reads can't be mistaken for the new
-    # 'treehouse get' having already settled back into the same place.
-    SLOT_REJECT_CONFIRM_READS=5
+    # the shell has interpreted them. A candidate matching the just-rejected
+    # slot is never accepted as settled, no matter how many reads agree on
+    # it: the wait keeps polling (still bounded by this loop's own deadline)
+    # until the pane reports a genuinely different isolated path, since only
+    # a different path proves the new 'treehouse get' actually ran.
     candidate=""
-    candidate_reads=0
     last_seen=""
     last_reason="the pane reported no path"
     WT=""
@@ -3212,26 +3211,18 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       [ -z "$p" ] || last_seen="$p"
       if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
         p_real=$(real_path_or_raw "$p")
-        if [ "$p_real" = "$candidate" ]; then
-          candidate_reads=$((candidate_reads + 1))
-        else
-          candidate="$p_real"
-          candidate_reads=1
-        fi
         if [ -n "$rejected_wt_real" ] && [ "$p_real" = "$rejected_wt_real" ]; then
-          required_reads=$SLOT_REJECT_CONFIRM_READS
-          last_reason="it is the same worktree slot rejected on the previous attempt, and has not yet re-agreed enough times to trust it as genuinely settled"
-        else
-          required_reads=2
-          last_reason="it is an isolated worktree, but no second read agreed with it"
-        fi
-        if [ "$candidate_reads" -ge "$required_reads" ]; then
+          candidate=""
+          last_reason="it is the same worktree slot rejected on the previous attempt"
+        elif [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
           break
+        else
+          last_reason="it is an isolated worktree, but no second read agreed with it"
+          candidate="$p_real"
         fi
       else
         candidate=""
-        candidate_reads=0
         [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
       sleep 1
