@@ -279,11 +279,34 @@ Create replaces only a confidently dead or no-agent husk, creates the replacemen
 This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
-A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
+A structurally gone pane becomes `missing`, an agent-less shell becomes `dead`, a registered agent whose pane still runs an agent process becomes `alive`, and an unexpected read becomes `unreadable`.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
 
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
+
+## Stale agent registration
+
+A Herdr agent registration is released by the agent's own integration, so a harness that dies without running that release path leaves the registry reporting a live agent indefinitely.
+The bundled Pi integration has no exit or signal hook, and `herdr agent explain` reports `screen_detection_skip_reason: full_lifecycle_hook_authority` for such a pane, so no screen detection corrects the record once the process is gone.
+The registration also cannot be repaired from outside: on Herdr 0.8.2-preview, `pane release-agent` and `pane report-agent` calls naming an integration's own source id return success and change nothing.
+
+The classifier therefore never trusts the registry alone.
+Before reporting a registered agent as live, the adapter cross-checks the pane's real processes and reads a registration over a provably shell-only foreground as `no-agent`, which the recovery-grade probe reports as `dead` and which is what lets a supported relaunch repair the endpoint at all.
+The proof is deliberately one-directional: two independent sources - herdr's own `pane process-info` foreground list and every operating-system process sharing that foreground process group - must agree across consecutive samples that nothing but a recognized shell is running.
+It never asks whether an agent process is present, because naming harness binaries would be a guess about every current and future harness, and it never consults terminal titles, rendered screen content, or agent labels.
+Every unreadable, unparseable, mis-addressed, or unavailable process read leaves the registry's own verdict standing, so an uncertain read can never become a confirmed agent-free one.
+The same proof also settles an unusable registry answer: a pane whose registration reads neither a live status nor a clean `agent_not_found` is `dead` when the processes prove it agent-free, and stays `unreadable` otherwise.
+
+The strict idle-shell primitive is not reusable for this question.
+It requires the foreground process group to be the pane's own shell, which is false for a worker launched through a wrapper, and it answers "is this shell idle", not "is any agent running".
+
+This `no-agent` verdict is shared with the husk close-and-replace, projection reclaim, and stale-projection cleanup paths, so a pane holding a dead worker's registration now becomes replaceable instead of blocking its own repair.
+Those paths keep their own independent gates: the cleanup path additionally demands the strict idle childless-shell proof, and reclaim additionally demands exact recorded workspace, tab, and pane identity.
+Because a registration is no longer sufficient on its own, a test fixture that stands in for a live agent must hold its pane with a real non-shell process, not just a registry row.
+
+One shape stays indistinguishable from a husk: an agent whose entire foreground process group is bare shells.
+Every supported harness runs a non-shell process (a Pi pane's foreground is `node` with argv0 `pi`), and a shell a harness spawns for a tool call keeps the harness process in the same group, so this shape does not arise in supported dispatch; a purely shell-implemented agent would need its own signal.
 
 ## Push events and polling fallback
 
@@ -334,6 +357,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
 - Mid-session secondmate agent-process liveness is not implemented.
+- An agent whose whole foreground process group is bare shells cannot be told apart from a dead pane.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
 ## Regression entry points

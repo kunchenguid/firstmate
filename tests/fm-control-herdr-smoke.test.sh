@@ -10,8 +10,11 @@
 # comes from herdr's own agent registry.
 #
 # No real agent is launched. herdr's `pane report-agent` is the same registry
-# the adapter reads, so registering and not registering an agent on a plain
-# shell pane exercises exactly the classification the control plane gates on.
+# the adapter reads, and a stand-in `sleep` supplies the process half of the
+# same question, so the three real shapes - nothing registered, a registration
+# whose worker is gone, and a registration over a running process - exercise
+# exactly the classification the control plane gates on, with no model tokens
+# spent.
 #
 # Always runs on a private, named, throwaway lab session, never the default
 # one (tests/herdr-test-safety.sh; the 2026-07-02 incident). Skips cleanly
@@ -113,7 +116,40 @@ case "$OUT" in
 esac
 pass "real herdr: interrupt refuses when herdr's own agent registry reports no agent"
 
+# --- a stale registration: registered, but nothing is running --------------
+# A herdr registration is released by the agent's own integration, so a worker
+# that dies without running that path leaves the registry reporting a live
+# agent forever (docs/herdr-backend.md "Stale agent registration"). The pane
+# below still holds only its shell, so the classifier must read the endpoint as
+# dead - the state the supported repair paths require - rather than reporting
+# the dead worker as alive.
+
+herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
+  --state working --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not register the stale-registration shape on the task pane"
+
+STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
+[ "$STATE" = dead ] \
+  || fail "herdr should classify a registration whose worker is gone as dead, got '$STATE'"
+
+OUT=$(run_control hsmoke exit) \
+  || fail "exit against a stale registration should be idempotent success: $OUT"
+case "$OUT" in
+  "already-stopped hsmoke"*) : ;;
+  *) fail "a stale registration should report already-stopped, got: $OUT" ;;
+esac
+pass "real herdr: a registration whose worker is gone reads dead, so the control plane can repair the endpoint instead of refusing"
+
 # --- a registered agent: classification flips, and the verbs follow ---------
+#
+# A live agent is a registration AND a process: the classifier cross-checks
+# the pane's real foreground processes, so a registration over a bare shell is
+# read as the stale husk it is (tests/herdr-test-safety.sh's fixture helper).
+# Still no agent, model, or token: a `sleep` holds the pane exactly as a real
+# harness process would.
+
+herdr_hold_pane_with_agent_process "$SESSION" "$PANE_ID" \
+  || fail "could not put a real foreground process in the task pane"
 
 herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
   --state idle --session "$SESSION" >/dev/null 2>&1 \
@@ -135,7 +171,8 @@ herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
 pass "real herdr: no control verb removed the endpoint or the task's local copy"
 
 # Last, because it deliberately types a harness command into a pane that hosts
-# a plain shell: the registered agent cannot actually be stopped that way, and
+# a stand-in process, not a harness: the registered agent cannot be stopped
+# that way, and
 # the control plane must say so rather than report a stop it did not achieve.
 if OUT=$(run_control hsmoke exit 2>&1); then
   fail "exit should fail closed when the agent does not stop: $OUT"

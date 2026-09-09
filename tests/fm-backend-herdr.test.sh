@@ -973,6 +973,307 @@ test_create_task_refuses_when_agent_state_ambiguous() {
   pass "fm_backend_herdr_create_task: refuses (fail-safe) rather than guessing when the duplicate's agent state cannot be classified confidently"
 }
 
+# --- stale agent registration: process-level cross-check ----------------------
+#
+# A herdr agent registration is released by the agent's own integration, so an
+# agent that dies without running that release path leaves the registry
+# reporting a live agent_status forever. These tests drive
+# fm_backend_herdr_pane_agent_state with a REAL process group behind the
+# reported foreground, because the verdict is a claim about processes: the
+# canned herdr responses supply what herdr reports, and the operating-system
+# process table supplies the independent second source. Both must agree that
+# the pane's foreground holds nothing but shells before a registered agent is
+# downgraded to no-agent; every other outcome must stay live.
+
+# start_pgroup_leader: start <mode> as its own process-group leader and echo
+# its pid (which is therefore also its process-group id).
+#   lone-shell - one bash blocked on a fifo read, with no child at all.
+#   shell-plus-tool - one bash with a real non-shell child (sleep) in the SAME
+#     process group, which is what a shell wrapper around a live agent looks
+#     like to the process table.
+start_pgroup_leader() {  # <dir> <mode>
+  local dir=$1 mode=$2 launcher pid
+  launcher="$dir/launch-$mode.sh"
+  mkdir -p "$dir"
+  [ -p "$dir/hold" ] || mkfifo "$dir/hold"
+  case "$mode" in
+    lone-shell)
+      cat > "$launcher" <<'SH'
+#!/usr/bin/env bash
+set -m
+bash -c 'read -r _ < "$1"' pane-shell "$1" >/dev/null 2>&1 &
+echo $!
+SH
+      ;;
+    shell-plus-tool)
+      # `; :` keeps bash from exec-optimizing itself away, so the group holds
+      # both the shell and the non-shell child.
+      cat > "$launcher" <<'SH'
+#!/usr/bin/env bash
+set -m
+bash -c 'sleep 300; :' pane-shell >/dev/null 2>&1 &
+echo $!
+SH
+      ;;
+    *) fail "unknown start_pgroup_leader mode $mode" ;;
+  esac
+  chmod +x "$launcher"
+  pid=$("$launcher" "$dir/hold")
+  printf '%s\n' "$pid"
+}
+
+stop_pgroup_leader() {  # <pid>
+  [ -n "${1:-}" ] || return 0
+  kill -- -"$1" 2>/dev/null || true
+  kill "$1" 2>/dev/null || true
+}
+
+# pgroup_members: pids sharing <pgid> in the operating-system process table.
+pgroup_members() {  # <pgid>
+  ps -axo pid=,pgid= | awk -v want="$1" '$2 == want { print $1 }'
+}
+
+# process_info_fixture: one `pane process-info` response for <pane> whose
+# foreground process group is <pgid> and whose foreground process array is the
+# literal <json-array>.
+process_info_fixture() {  # <pane> <pgid> <json-array>
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":%s}}}\n' \
+    "$1" "$2" "$2" "$3"
+}
+
+# run_pane_agent_state: classify <pane> in the canned-response environment.
+# Extra `NAME=value` assignments are applied to the classifier's environment.
+# The body is a bash -c source, so its single-quoted $ expansions are
+# deliberate (SC2016).
+# shellcheck disable=SC2016
+run_pane_agent_state() {  # <fakebin> <log> <responses> <pane> [env-assignment...]
+  local fb=$1 log=$2 resp=$3 pane=$4
+  shift 4
+  env "$@" PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest "$1"' "$ROOT" "$pane"
+}
+
+seed_registered_agent_responses() {  # <responses> <pane> <status>
+  printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$2" > "$1/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"%s"}}}\n' "$3" > "$1/2.out"
+}
+
+new_stale_registration_case() {  # <name> -> echoes "<dir> <log> <responses> <fakebin>"
+  local dir log resp fb
+  dir="$TMP_ROOT/$1"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s %s %s %s\n' "$dir" "$log" "$resp" "$fb"
+}
+
+test_pane_agent_state_stale_registration_over_shell_only_foreground_is_no_agent() {
+  local dir log resp fb leader out members
+  read -r dir log resp fb <<EOF
+$(new_stale_registration_case stale-reg-shell-only)
+EOF
+  leader=$(start_pgroup_leader "$dir/proc" lone-shell)
+  members=$(pgroup_members "$leader")
+  [ "$members" = "$leader" ] \
+    || fail "fixture precondition: expected the lone shell '$leader' to be its whole process group, got '$members'"
+  # The registry still reports a working agent: this is exactly the frozen
+  # registration a Pi process leaves behind when it dies without releasing it.
+  seed_registered_agent_responses "$resp" w1:p2 working
+  # A login shell arrives as "-zsh" from BSD ps; both samples must agree.
+  process_info_fixture w1:p2 "$leader" '[{"pid":'"$leader"',"name":"zsh","argv0":"-zsh"}]' > "$resp/3.out"
+  cp "$resp/3.out" "$resp/4.out"
+  out=$(run_pane_agent_state "$fb" "$log" "$resp" w1:p2)
+  stop_pgroup_leader "$leader"
+  [ "$out" = no-agent ] \
+    || fail "a still-registered agent over a shell-only foreground must classify no-agent, got '$out'"
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info' "the live branch never cross-checked the pane's processes"
+  pass "fm_backend_herdr_pane_agent_state: a registered agent_status over a provably shell-only foreground reads no-agent, not live"
+}
+
+# run_agent_state: the recovery-grade view of the same canned environment.
+# The body is a bash -c source, so its single-quoted $ expansions are
+# deliberate (SC2016).
+# shellcheck disable=SC2016
+run_agent_state() {  # <fakebin> <log> <responses>
+  env PATH="$1:$PATH" FM_HERDR_LOG="$2" FM_HERDR_RESPONSES="$3" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_agent_state herdr fmtest:w1:p2' "$ROOT"
+}
+
+test_agent_state_stale_registration_is_recovery_grade_dead() {
+  local dir log resp fb leader out
+  read -r dir log resp fb <<EOF
+$(new_stale_registration_case stale-reg-recovery)
+EOF
+  leader=$(start_pgroup_leader "$dir/proc" lone-shell)
+  seed_registered_agent_responses "$resp" w1:p2 working
+  process_info_fixture w1:p2 "$leader" '[{"pid":'"$leader"',"name":"bash","argv0":"bash"}]' > "$resp/3.out"
+  cp "$resp/3.out" "$resp/4.out"
+  out=$(run_agent_state "$fb" "$log" "$resp")
+  stop_pgroup_leader "$leader"
+  [ "$out" = dead ] \
+    || fail "fm_backend_agent_state must read a stale registration over a dead worker as dead (relaunch-eligible), got '$out'"
+  pass "fm_backend_agent_state (herdr): a stale registration over a shell-only pane is recovery-grade dead, which is what unblocks relaunch"
+}
+
+test_pane_agent_state_unreadable_registration_over_shell_only_foreground_is_no_agent() {
+  local dir log resp fb leader out agent_out
+  read -r dir log resp fb <<EOF
+$(new_stale_registration_case stale-reg-unreadable-registry)
+EOF
+  leader=$(start_pgroup_leader "$dir/proc" lone-shell)
+  # The second observed shape of the same failure: something rewrote the dead
+  # worker's registration to a status that is not a registered agent state at
+  # all, so the registry read is unusable rather than wrongly live. The pane
+  # still holds nothing but a shell, and the process proof stands on its own
+  # evidence, so recovery must still see a dead endpoint.
+  seed_registered_agent_responses "$resp" w1:p2 unknown
+  process_info_fixture w1:p2 "$leader" '[{"pid":'"$leader"',"name":"zsh","argv0":"-zsh"}]' > "$resp/3.out"
+  cp "$resp/3.out" "$resp/4.out"
+  out=$(run_pane_agent_state "$fb" "$log" "$resp" w1:p2)
+  [ "$out" = no-agent ] \
+    || fail "an unusable registration over a shell-only foreground must classify no-agent, got '$out'"
+  # Replay the same scripted call sequence for the recovery-grade view.
+  : > "$log"
+  rm -f "$resp/.count"
+  agent_out=$(run_agent_state "$fb" "$log" "$resp")
+  stop_pgroup_leader "$leader"
+  [ "$agent_out" = dead ] \
+    || fail "fm_backend_agent_state must read an unusable registration over a dead worker as dead, got '$agent_out'"
+  pass "fm_backend_herdr_pane_agent_state: an unreadable registration over a provably shell-only foreground is no-agent, and reads dead for recovery"
+}
+
+test_pane_agent_state_unreadable_registration_with_agent_process_stays_unknown() {
+  local dir log resp fb leader out
+  read -r dir log resp fb <<EOF
+$(new_stale_registration_case unreadable-registry-agent-present)
+EOF
+  leader=$(start_pgroup_leader "$dir/proc" lone-shell)
+  # Unusable registry answer AND a real agent process: nothing is proven, so
+  # the conservative backstop the husk check depends on must be preserved.
+  seed_registered_agent_responses "$resp" w1:p2 unknown
+  process_info_fixture w1:p2 "$leader" \
+    '[{"pid":'"$leader"',"name":"zsh","argv0":"zsh"},{"pid":99999,"name":"node","argv0":"pi"}]' > "$resp/3.out"
+  cp "$resp/3.out" "$resp/4.out"
+  out=$(run_pane_agent_state "$fb" "$log" "$resp" w1:p2)
+  stop_pgroup_leader "$leader"
+  [ "$out" = unknown ] \
+    || fail "an unusable registry answer with an agent process present must stay unknown, got '$out'"
+  pass "fm_backend_herdr_pane_agent_state: an unusable registry answer is only settled by a positive process proof, never by the absence of one"
+}
+
+test_pane_agent_state_agent_process_in_foreground_stays_live() {
+  local dir log resp fb leader out probes
+  read -r dir log resp fb <<EOF
+$(new_stale_registration_case stale-reg-agent-present)
+EOF
+  leader=$(start_pgroup_leader "$dir/proc" lone-shell)
+  seed_registered_agent_responses "$resp" w1:p2 working
+  # herdr reports a real agent process beside the pane shell: no proof, no
+  # downgrade - this is the healthy worker the classifier must never touch.
+  process_info_fixture w1:p2 "$leader" \
+    '[{"pid":'"$leader"',"name":"zsh","argv0":"zsh"},{"pid":99999,"name":"node","argv0":"pi"}]' > "$resp/3.out"
+  cp "$resp/3.out" "$resp/4.out"
+  out=$(run_pane_agent_state "$fb" "$log" "$resp" w1:p2)
+  stop_pgroup_leader "$leader"
+  [ "$out" = live ] || fail "a pane whose foreground holds an agent process must stay live, got '$out'"
+  probes=$(grep -c $'pane\x1fprocess-info' "$log")
+  [ "$probes" = 1 ] \
+    || fail "a live agent must be settled by the FIRST process sample, got $probes process-info calls"
+  pass "fm_backend_herdr_pane_agent_state: a non-shell foreground process keeps the pane live and costs exactly one extra read"
+}
+
+test_pane_agent_state_process_table_disagreement_stays_live() {
+  local dir log resp fb leader out members
+  read -r dir log resp fb <<EOF
+$(new_stale_registration_case stale-reg-table-divergence)
+EOF
+  # Divergence case: herdr's foreground list says "only a shell", but the
+  # operating-system process table shows a real non-shell process sharing that
+  # foreground process group. Losing either source must not produce a
+  # downgrade, so the herdr-side evidence alone can never carry the verdict.
+  leader=$(start_pgroup_leader "$dir/proc" shell-plus-tool)
+  members=$(pgroup_members "$leader" | wc -l | tr -d ' ')
+  [ "$members" -ge 2 ] \
+    || fail "fixture precondition: expected a non-shell process sharing group '$leader', found $members member(s)"
+  seed_registered_agent_responses "$resp" w1:p2 working
+  process_info_fixture w1:p2 "$leader" '[{"pid":'"$leader"',"name":"bash","argv0":"bash"}]' > "$resp/3.out"
+  cp "$resp/3.out" "$resp/4.out"
+  out=$(run_pane_agent_state "$fb" "$log" "$resp" w1:p2)
+  stop_pgroup_leader "$leader"
+  [ "$out" = live ] \
+    || fail "a non-shell process in the pane's foreground process group must keep the pane live, got '$out'"
+  pass "fm_backend_herdr_pane_agent_state: the operating-system process table can veto herdr's own shell-only foreground report"
+}
+
+test_pane_agent_state_unreadable_process_evidence_stays_live() {
+  local dir log resp fb leader out case_name payload
+  # Every way the process evidence can be missing, malformed, or about another
+  # pane must preserve the registered verdict: an uncertain read may never
+  # become "confirmed agent-free".
+  for case_name in absent empty malformed wrong-pane no-processes bad-pgid; do
+    read -r dir log resp fb <<EOF
+$(new_stale_registration_case "stale-reg-unreadable-$case_name")
+EOF
+    leader=$(start_pgroup_leader "$dir/proc" lone-shell)
+    seed_registered_agent_responses "$resp" w1:p2 working
+    case "$case_name" in
+      absent) : ;;
+      empty) : > "$resp/3.out" ;;
+      malformed) printf 'not json at all\n' > "$resp/3.out" ;;
+      wrong-pane)
+        payload=$(process_info_fixture w9:p9 "$leader" '[{"pid":'"$leader"',"name":"zsh","argv0":"zsh"}]')
+        printf '%s\n' "$payload" > "$resp/3.out"
+        ;;
+      no-processes) process_info_fixture w1:p2 "$leader" '[]' > "$resp/3.out" ;;
+      bad-pgid)
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":null,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' \
+          "$leader" "$leader" > "$resp/3.out"
+        ;;
+    esac
+    [ ! -f "$resp/3.out" ] || cp "$resp/3.out" "$resp/4.out"
+    out=$(run_pane_agent_state "$fb" "$log" "$resp" w1:p2)
+    stop_pgroup_leader "$leader"
+    [ "$out" = live ] \
+      || fail "unreadable process evidence ($case_name) must preserve the registered live verdict, got '$out'"
+  done
+  pass "fm_backend_herdr_pane_agent_state: absent, empty, malformed, mis-addressed, empty-array, and unusable-group process reads all stay live"
+}
+
+test_pane_agent_state_without_a_process_table_stays_live() {
+  local dir log resp fb leader out
+  read -r dir log resp fb <<EOF
+$(new_stale_registration_case stale-reg-no-ps)
+EOF
+  leader=$(start_pgroup_leader "$dir/proc" lone-shell)
+  seed_registered_agent_responses "$resp" w1:p2 working
+  process_info_fixture w1:p2 "$leader" '[{"pid":'"$leader"',"name":"zsh","argv0":"zsh"}]' > "$resp/3.out"
+  cp "$resp/3.out" "$resp/4.out"
+  out=$(run_pane_agent_state "$fb" "$log" "$resp" w1:p2 \
+    FM_HERDR_PS_BIN="$dir/no-such-ps")
+  stop_pgroup_leader "$leader"
+  [ "$out" = live ] \
+    || fail "an unavailable process table must preserve the registered live verdict, got '$out'"
+  pass "fm_backend_herdr_pane_agent_state: an unavailable process table cannot downgrade a registered agent"
+}
+
+test_pane_agent_state_downgrade_needs_consecutive_samples() {
+  local dir log resp fb leader out
+  read -r dir log resp fb <<EOF
+$(new_stale_registration_case stale-reg-flapping)
+EOF
+  leader=$(start_pgroup_leader "$dir/proc" lone-shell)
+  seed_registered_agent_responses "$resp" w1:p2 working
+  # First sample looks agent-free, the confirming sample catches the agent -
+  # the transient snapshot taken while an agent is still starting.
+  process_info_fixture w1:p2 "$leader" '[{"pid":'"$leader"',"name":"zsh","argv0":"zsh"}]' > "$resp/3.out"
+  process_info_fixture w1:p2 "$leader" \
+    '[{"pid":'"$leader"',"name":"zsh","argv0":"zsh"},{"pid":99999,"name":"node","argv0":"pi"}]' > "$resp/4.out"
+  out=$(run_pane_agent_state "$fb" "$log" "$resp" w1:p2)
+  stop_pgroup_leader "$leader"
+  [ "$out" = live ] \
+    || fail "a downgrade must require every confirmation sample to agree, got '$out'"
+  pass "fm_backend_herdr_pane_agent_state: one agent-free snapshot is not enough to downgrade a registered agent"
+}
+
 test_create_task_husk_replacement_creates_before_closing() {
   # Safety-critical ordering: the replacement tab must be created BEFORE the
   # husk tab is closed, never the reverse - closing a workspace's LAST
@@ -4703,6 +5004,15 @@ test_create_task_closes_and_replaces_no_agent_husk
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
+test_pane_agent_state_stale_registration_over_shell_only_foreground_is_no_agent
+test_agent_state_stale_registration_is_recovery_grade_dead
+test_pane_agent_state_unreadable_registration_over_shell_only_foreground_is_no_agent
+test_pane_agent_state_unreadable_registration_with_agent_process_stays_unknown
+test_pane_agent_state_agent_process_in_foreground_stays_live
+test_pane_agent_state_process_table_disagreement_stays_live
+test_pane_agent_state_unreadable_process_evidence_stays_live
+test_pane_agent_state_without_a_process_table_stays_live
+test_pane_agent_state_downgrade_needs_consecutive_samples
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
