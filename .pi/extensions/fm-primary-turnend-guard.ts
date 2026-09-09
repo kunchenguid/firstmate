@@ -437,6 +437,13 @@ async function claimSessionstartMessage(
   if (generation.sessionId && currentSessionId && generation.sessionId !== currentSessionId) {
     return undefined;
   }
+  // Ownership is often acquired after the extension loads (startup takes the
+  // session lock), stranding the loaded marker on a previous or absent owner.
+  // A live, session-matched generation claim is the first point that proves
+  // the acquisition settled, so refresh custody here; markLoaded still
+  // refuses a live foreign owner, and cancelled/delivered generations return
+  // above without republishing.
+  markLoaded();
   generation.delivered = true;
   return sessionstartMessage(generation, result);
 }

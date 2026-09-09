@@ -830,6 +830,205 @@ JS
   pass "Pi provider preflight owns one generation-bound startup prerequisite with deterministic fallback, replacement, cancellation, timeout, and truncation"
 }
 
+test_pi_turnend_marker_custody() {
+  local fixture out status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi turnend marker custody test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-turnend-marker-custody"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" \
+    "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'MARKER_CUSTODY_DIGEST\n'
+SH
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" VWATCH="$ROOT/bin/fm-watch.sh" \
+    node --input-type=module 2>&1 <<'JS'
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const state = `${process.env.FM_HOME}/state`;
+const lockPath = `${state}/.lock`;
+const markerPath = `${state}/.pi-turnend-extension-loaded`;
+const watchExtPath = `${process.env.FM_HOME}/.pi/extensions/fm-primary-pi-watch.ts`;
+const watchMarkerPath = `${state}/.pi-watch-extension-loaded`;
+const watchLockDir = `${state}/.watch.lock`;
+const beatPath = `${state}/.last-watcher-beat`;
+const sha256 = (path) => `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+const version = sha256(process.env.EXT);
+const watchVersion = sha256(watchExtPath);
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+const writeLock = (pid) => writeFileSync(lockPath, `${pid}\n`);
+const writeStaleMarker = (pid) => writeFileSync(markerPath, `sha256:stale\n${pid}\n`);
+const marker = () => readFileSync(markerPath, "utf8").trim().split("\n");
+const assertMarkerCurrent = (label) => {
+  const [markerVersion, markerPid] = marker();
+  assert(markerVersion === version, `${label}: marker build does not match the loaded extension`);
+  assert(markerPid === String(process.pid), `${label}: marker PID does not match the confirmed owner`);
+};
+const assertMarkerStale = (label, pid) => {
+  const [markerVersion, markerPid] = marker();
+  assert(markerVersion === "sha256:stale" && markerPid === String(pid),
+    `${label}: an unconfirmed owner overwrote the marker`);
+};
+const handlers = new Map();
+const sent = [];
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  sendMessage(message) { sent.push(message); },
+};
+const ctx = (sessionId) => ({
+  sessionManager: {
+    getHeader: () => ({ timestamp: new Date().toISOString() }),
+    getSessionId: () => sessionId,
+  },
+});
+const load = async (tag) => {
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?custody=${tag}`);
+  extension.default(pi);
+};
+const sleepers = [];
+const otherOwner = () => {
+  const child = spawn("sleep", ["30"], { stdio: "ignore" });
+  child.unref();
+  sleepers.push(child);
+  return child;
+};
+// Run the REAL continuity verdict (bin/fm-wake-lib.sh) against the marker and
+// lock state the producer left behind. Only the watch marker and the beacon
+// are seeded; the turn-end marker under test is genuine producer output.
+const verdict = async () => {
+  const script = [
+    `. ${JSON.stringify(process.env.WAKE_LIB)}`,
+    `FM_SUPERVISION_MODEL=extension`,
+    `fm_watcher_supervision_verdict ${JSON.stringify(state)} ${JSON.stringify(process.env.VWATCH)} 300 ${JSON.stringify(process.env.FM_HOME)} ${JSON.stringify(process.env.FM_HOME)}`,
+    `printf '%s:%s' "$FM_WATCHER_VERDICT_OK" "$FM_WATCHER_VERDICT_REASON"`,
+  ].join("\n");
+  const child = spawn("bash", ["-c", script], { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert(code === 0, `continuity verdict helper failed: ${stderr}`);
+  return stdout.trim();
+};
+try {
+  // Stable owner: the session already holds the lock when the extension loads.
+  writeLock(process.pid);
+  await load("stable");
+  assertMarkerCurrent("stable owner at load");
+  handlers.get("session_start")({ reason: "startup" }, ctx("stable-session"));
+  await handlers.get("before_agent_start")({ prompt: "stable" }, ctx("stable-session"));
+  assertMarkerCurrent("stable owner after claim");
+
+  // Late acquisition: another live session owns the lock at load, then this
+  // session's startup acquires ownership before the first provider call. The
+  // claim must refresh the marker to the confirmed owner.
+  const late = otherOwner();
+  writeLock(late.pid);
+  writeStaleMarker(late.pid);
+  await load("late");
+  assertMarkerStale("late acquisition at load", late.pid);
+  handlers.get("session_start")({ reason: "startup" }, ctx("late-session"));
+  assertMarkerStale("late acquisition before ownership", late.pid);
+  writeLock(process.pid);
+  await handlers.get("before_agent_start")({ prompt: "late" }, ctx("late-session"));
+  // Composed acceptance first: the REAL continuity verdict must accept the
+  // producer's own marker as a benign handoff (fresh beat, unheld watch lock).
+  writeFileSync(watchMarkerPath, `${watchVersion}\n${process.pid}\n`);
+  writeFileSync(beatPath, "beat\n");
+  const handoff = await verdict();
+  assert(handoff.startsWith("true"),
+    `composed handoff after late acquisition: real continuity verdict ${handoff} rejects producer custody`);
+  assertMarkerCurrent("late acquisition after claim");
+
+  // An unhealthy HELD watcher lock is never a benign handoff, custody or not.
+  mkdirSync(watchLockDir);
+  const holder = otherOwner();
+  writeFileSync(`${watchLockDir}/pid`, `${holder.pid}\n`);
+  const held = await verdict();
+  assert(held.startsWith("false"),
+    `unhealthy held watcher lock must still reject, got ${held}`);
+  rmSync(watchLockDir, { recursive: true, force: true });
+
+  // Liveness negative: align both marker PIDs with the lock so equality
+  // passes and only the dead lock holder can fail the verdict.
+  const realMarker = readFileSync(markerPath, "utf8");
+  const dead = spawn("sleep", ["0.05"], { stdio: "ignore" });
+  await new Promise((resolve) => dead.on("exit", resolve));
+  writeLock(dead.pid);
+  writeFileSync(watchMarkerPath, `${watchVersion}\n${dead.pid}\n`);
+  writeFileSync(markerPath, `${version}\n${dead.pid}\n`);
+  const deadOwner = await verdict();
+  assert(deadOwner.startsWith("false"),
+    `dead aligned owner must fail liveness rather than equality, got ${deadOwner}`);
+  writeLock(process.pid);
+  writeFileSync(watchMarkerPath, `${watchVersion}\n${process.pid}\n`);
+  writeFileSync(markerPath, realMarker);
+
+  // Unrelated live owner: a generation that never acquires ownership must not
+  // republish the marker.
+  const squatter = otherOwner();
+  writeLock(squatter.pid);
+  writeStaleMarker(squatter.pid);
+  await load("squatter");
+  handlers.get("session_start")({ reason: "startup" }, ctx("squatter-session"));
+  await handlers.get("before_agent_start")({ prompt: "squatter" }, ctx("squatter-session"));
+  assertMarkerStale("unrelated live owner after claim", squatter.pid);
+
+  // Stale pending claim: a claim that started while the generation was live
+  // must not republish the marker once the session shuts down and ownership
+  // settles elsewhere before the claim resolves.
+  const cancelled = otherOwner();
+  writeLock(cancelled.pid);
+  writeStaleMarker(cancelled.pid);
+  await load("cancelled");
+  handlers.get("session_start")({ reason: "startup" }, ctx("cancelled-session"));
+  const pendingClaim = handlers.get("before_agent_start")({ prompt: "cancelled" }, ctx("cancelled-session"));
+  const shutdown = handlers.get("session_shutdown")();
+  writeLock(process.pid);
+  await shutdown;
+  const staleMessage = await pendingClaim;
+  assert(staleMessage === undefined,
+    "stale pending claim delivered after cancellation");
+  assertMarkerStale("stale pending claim after ownership", cancelled.pid);
+
+  // Compact caller: the session_compact claim path refreshes custody too.
+  const compacted = otherOwner();
+  writeLock(compacted.pid);
+  writeStaleMarker(compacted.pid);
+  await load("compact");
+  writeLock(process.pid);
+  await handlers.get("session_compact")({}, ctx("compact-session"));
+  assertMarkerCurrent("compact claim after acquisition");
+} finally {
+  for (const child of sleepers) child.kill("SIGKILL");
+}
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi turnend marker custody"
+  [ -z "$out" ] || fail "Pi turnend marker custody printed output: $out"
+  pass "Pi turnend marker follows confirmed ownership and never overwrites a live foreign session"
+}
+
 test_pi_reload_releases_sessionstart_exit_listener() {
   local fixture out status=0
   command -v node >/dev/null 2>&1 || {
@@ -1123,5 +1322,6 @@ test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text
 test_pi_startup_classifies_cli_continuations
 test_pi_sessionstart_generation_prerequisite
+test_pi_turnend_marker_custody
 test_pi_reload_releases_sessionstart_exit_listener
 test_pi_large_sessionstart_digest_is_delivered_loudly
