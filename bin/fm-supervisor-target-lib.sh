@@ -82,11 +82,14 @@ discover_supervisor_backend() {
 # discover_supervisor_harness: resolve the HARNESS that renders the supervisor
 # pane, for the harness-scoped composer proofs the away-mode injector runs
 # against that pane before typing into it. Priority:
-#   1. FM_SUPERVISOR_HARNESS env - captured INSIDE the captain pane by
-#      bin/fm-afk-launch.sh and forwarded beside FM_SUPERVISOR_TARGET and
-#      FM_SUPERVISOR_BACKEND. A daemon started by that launcher is a child of
-#      the terminal server rather than of the captain pane, so its own ancestry
-#      structurally cannot answer which harness renders the pane it reads.
+#   1. FM_SUPERVISOR_HARNESS env - stated by the operator, or forwarded beside
+#      FM_SUPERVISOR_TARGET and FM_SUPERVISOR_BACKEND by bin/fm-afk-launch.sh
+#      when the pane it ran in is the supervised one. A daemon started by that
+#      launcher is a child of the terminal server rather than of the captain
+#      pane, so its own ancestry structurally cannot answer which harness
+#      renders the pane it reads. The launcher forwards nothing rather than a
+#      harness it cannot prove belongs to the target, which lands here as
+#      absent and falls through to the fail-safe self-detection below.
 #   2. bin/fm-harness.sh over this process's own ancestry - correct on the
 #      harness-native launch paths, where the daemon does run inside the
 #      primary's process tree.

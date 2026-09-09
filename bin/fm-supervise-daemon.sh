@@ -1611,8 +1611,10 @@ fm_super_main() {
 
   # --- scope harness-specific composer proofs to the supervisor pane's own
   # harness (discover_supervisor_harness, bin/fm-supervisor-target-lib.sh).
-  # FM_SUPERVISOR_HARNESS, captured in the captain pane and forwarded by
-  # bin/fm-afk-launch.sh with the target and backend, wins; without it the
+  # FM_SUPERVISOR_HARNESS, stated by the operator or forwarded by
+  # bin/fm-afk-launch.sh when the pane it ran in IS the supervised one, wins
+  # (that launcher forwards nothing rather than a value it cannot prove
+  # describes the target pane); without it the
   # daemon falls back to its own ancestry, which IS the supervisor pane's
   # harness on the harness-native launch paths and resolves to unknown
   # otherwise, simply skipping harness-scoped structural checks (fail-safe
