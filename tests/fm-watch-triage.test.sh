@@ -2166,12 +2166,17 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
 }
 
 # A dead worker reaches handle_paused_stale rather than the live fallback above.
-# When one declared wait directly replaces another, the existing
-# throttle belongs to the old declaration and must not suppress the new wait's
-# first inspection merely because its timestamp is still young.
+# When one declared wait directly replaces another, the existing throttle belongs
+# to the OLD declaration and must not make the new wait serve out the remainder of
+# the old window. But the replacement is still a freshly declared wait, so this
+# path absorbs it while it is fresh exactly as it absorbs a first declaration: the
+# status append that declared it already woke firstmate through the signal path,
+# and firing here too would nag twice for one event. The contract pinned here is
+# therefore: absorbed while fresh, then re-surfaced once its OWN age crosses the
+# window, regardless of how recently the previous declaration re-surfaced.
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
   local spec name initial replacement expected dir state fakebin out capture_file
-  local statusf window key sig back pid wakes
+  local statusf window key sig back pid wakes real_grep new_hash ready release once i
   for spec in \
     'paused-replacement|paused: waiting on validation run one|paused: waiting on validation run two|awaiting external' \
     'captain-held-replacement|captain-held [key=route]: awaiting the routing call|captain-held [key=release]: awaiting the release call|awaiting the captain'
@@ -2202,9 +2207,90 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
     wait_for_exit "$pid" 100 || fail "[$name] initial declared wait did not re-surface"
     ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the initial declared wait"
 
+    # Pause the executable watcher after it reads the old declaration but before
+    # it reads the status mtime, then append the replacement concurrently.
+    # Correct ordering can pair the old declaration only with the replacement's
+    # fresh age. Reading the mtime first instead pairs a stale age with the new
+    # declaration signature and incorrectly alarms on the scope mismatch.
+    real_grep=$(command -v grep)
+    new_hash=$(hash_text 'idle after replacement wait')
+    ready="$state/concurrent-status-read-ready"
+    release="$state/concurrent-status-read-release"
+    once="$state/concurrent-status-read-once"
+    cat > "$fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+set -u
+matched=1
+for arg in "$@"; do
+  [ "$arg" = "${FM_CONCURRENT_STATUS_FILE:-}" ] && matched=0
+done
+if [ "$matched" -eq 0 ] \
+  && [ "$(cat "${FM_CONCURRENT_STALE_MARKER:-/dev/null}" 2>/dev/null || true)" = "${FM_CONCURRENT_STALE_VALUE:-}" ] \
+  && [ ! -e "${FM_CONCURRENT_READ_ONCE:-/dev/null}" ]; then
+  snapshot="${FM_CONCURRENT_READ_READY}.snapshot"
+  "${FM_CONCURRENT_REAL_GREP:?}" "$@" > "$snapshot"
+  status=$?
+  : > "$FM_CONCURRENT_READ_ONCE"
+  : > "$FM_CONCURRENT_READ_READY"
+  i=0
+  while [ ! -e "$FM_CONCURRENT_READ_RELEASE" ] && [ "$i" -lt 1000 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$FM_CONCURRENT_READ_RELEASE" ] || exit 124
+  cat "$snapshot"
+  exit "$status"
+fi
+exec "${FM_CONCURRENT_REAL_GREP:?}" "$@"
+SH
+    chmod +x "$fakebin/grep"
+    printf 'idle after replacement wait\n' > "$capture_file"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+      FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_CONCURRENT_REAL_GREP="$real_grep" FM_CONCURRENT_STATUS_FILE="$statusf" \
+      FM_CONCURRENT_STALE_MARKER="$state/.stale-$key" FM_CONCURRENT_STALE_VALUE="$new_hash" \
+      FM_CONCURRENT_READ_READY="$ready" FM_CONCURRENT_READ_RELEASE="$release" \
+      FM_CONCURRENT_READ_ONCE="$once" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    i=0
+    while [ ! -e "$ready" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if [ ! -e "$ready" ]; then
+      : > "$release"
+      reap "$pid"
+      fail "[$name] watcher did not reach the concurrent status-read boundary"
+    fi
     printf '%s\n' "$replacement" >> "$statusf"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
-    printf 'idle after replacement wait\n' > "$capture_file"
+    : > "$release"
+    # A changed pane hash needs three polls to become stable stale: first sight
+    # records the new hash, second sight increments its stability count, and the
+    # third reaches handle_paused_stale. Each wait proves one whole intervening
+    # cycle, so require two to make the fresh-age assertion non-vacuous even when
+    # the helper removes the beacon before the watcher's first poll.
+    if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"; fail "[$name] a freshly declared replacement wait was alarmed instead of absorbed"
+    fi
+    reap "$pid"
+    rm -f "$fakebin/grep"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 0 ] \
+      || fail "[$name] a freshly declared replacement wait produced $wakes stale wakes while still fresh"
+
+    # Age the replacement past its OWN window while the previous declaration's
+    # throttle is still young. Inheriting that throttle would hold the new wait
+    # silent for the remainder of the old window; it must re-surface on its own.
+    back=$(( $(date +%s) - 500 ))
+    if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+    else touch -m -d "@$back" "$statusf"; fi
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
       FM_WATCH_HANDLING_SUCCESSOR=1 \
@@ -2220,7 +2306,7 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
     grep -F "$expected" "$state/.wake-queue" >/dev/null \
       || fail "[$name] replacement declared wait used the wrong recheck reason: $(cat "$state/.wake-queue")"
   done
-  pass "absorbed paused and captain-held replacements each start their own re-surface cadence"
+  pass "absorbed paused and captain-held replacements are absorbed while fresh, then start their own re-surface cadence"
 }
 
 # Run one watcher round against a parked-worker fixture, so a round differs only
