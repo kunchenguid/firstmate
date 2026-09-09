@@ -51,9 +51,11 @@
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes). Past that bound, a declared external
 #                          wait or verified captain-held transfer uses the long
-#                          pause recheck cadence (under afk it is instead handed
-#                          to the daemon as this plain reason, once per
-#                          declaration; busy_turn_bound_check owns that handoff);
+#                          pause recheck cadence; under daemon-backed afk an
+#                          external wait is instead handed to the daemon as this
+#                          plain reason once per declaration, while captain-held
+#                          work stays silent until return
+#                          (busy_turn_bound_check owns that split);
 #                          every other pane goes through the same wedge timer and
 #                          surfaces with the identical "stale: ..." reason,
 #                          escalation count, and demand-deep-inspection marker,
