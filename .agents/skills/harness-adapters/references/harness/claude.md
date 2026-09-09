@@ -22,7 +22,7 @@ A ship or scout spawn therefore pre-registers the worktree before launch, and th
 
 The canonical root matters because Claude Code 2.1.266 (read from its bundle on 2026-09-09) keys a second trust check on it.
 When the project's `.claude/settings.json` or `settings.local.json` carries `permissions.allow` rules or `additionalDirectories`, a gated-grants backstop renders the dialog in its "This folder pre-approves N tool permissions in .claude/settings.json" variant and looks up trust under the canonical git root, the primary checkout a linked worktree's `.git` file points at, rather than the worktree path the plain check accepts.
-For a firstmate worker that root is normally `projects/<name>`, so a worker parked on that variant on 2026-09-09 even though its worktree entry was recorded.
+For a firstmate worker that root is normally `projects/<name>`, the primary checkout the script refuses as a worktree, so registering the worktree alone leaves such a worker parked on that variant.
 The script derives the root from git's own main-working-tree listing rather than from the project argument, so a spawn from a linked spawning home registers the repository's main checkout and not the home; the script's header owns the registration rationale and the owner proof.
 
 Never try to answer the trust dialog with a key.
