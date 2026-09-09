@@ -306,14 +306,16 @@
 # entry lands in that account's own store. A set value is written to the task
 # record as claude_config_dir=<absolute path>, and --relaunch reuses the recorded
 # value for both the trust registration and the launch instead of inheriting
-# firstmate's own environment. Every claude spawn records a resolved account,
-# the default single-store install included, where the resolved value is HOME
-# itself (bin/fm-claude-trust.sh resolves the unset default the same way). So an
-# absent claude_config_dir= never means the default store. It means one of two
-# things: a record written before this field existed, or a task that passed
-# through a non-claude harness, since only a claude* spawn records an account
-# and a relaunch onto another harness drops the line. Both inherit the ambient
-# account, which is where such a task's worker was already running, and both
+# firstmate's own environment. A claude spawn that resolves an account records
+# it, the default single-store install included, where the resolved value is
+# HOME itself (bin/fm-claude-trust.sh resolves the unset default the same way).
+# So an absent claude_config_dir= never means the default store. It means one of
+# three things: a record written before this field existed; a task that passed
+# through a non-claude harness, since only a claude* spawn records an account and
+# a relaunch onto another harness drops the line; or a remote secondmate, whose
+# spawn hands the whole launch to its own host before the account is resolved at
+# all. None of the three leaves an account to reuse, so all three inherit the
+# ambient one - what a relaunch did before this field existed - and all three
 # stay safe because that one inherited value feeds the trust registration and
 # the launch alike. A relative value is refused rather than resolved, from the
 # environment and from the record alike, because the two sides would otherwise
@@ -1718,13 +1720,14 @@ case "$HARNESS" in
           exit 1 ;;
       esac
     fi
-    # An absent record field is a record written before this field existed, not
-    # a task on the default store: every claude spawn records its resolved
-    # account, so the default store arrives as an explicit path. Such a legacy
-    # task's worker was running under firstmate's own account, so inherit the
-    # ambient one, which is exactly what its relaunch did before the field
-    # existed. A fresh spawn takes the ambient account for the same reason its
-    # first dispatch always did.
+    # An absent record field never means a task on the default store: a spawn
+    # that resolves an account records it, so the default store arrives as an
+    # explicit path. Absent means the record predates the field, or the task
+    # passed through a non-claude harness, or it is a remote secondmate whose
+    # spawn never reaches here - the header above enumerates all three. None of
+    # them leaves an account to reuse, so inherit the ambient one, which is
+    # exactly what a relaunch did before the field existed. A fresh spawn takes
+    # the ambient account for the same reason its first dispatch always did.
     if [ -z "$CLAUDE_ACCOUNT_DIR" ]; then
       case ${CLAUDE_CONFIG_DIR:-} in
         ''|/*) ;;
@@ -3721,8 +3724,10 @@ preserve_relaunch_meta() {
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   # claude_config_dir= records which claude account this task's worker was
   # launched against, so --relaunch reuses it instead of inheriting firstmate's
-  # own. Written for every claude task, the default store included, so an absent
-  # line means one thing only: a record written before this field existed.
+  # own. Written for every claude task that resolves an account, the default
+  # store included; an absent line means the record predates the field, the task
+  # passed through a non-claude harness, or it is a remote secondmate (the
+  # header above enumerates all three).
   [ -z "$CLAUDE_ACCOUNT_DIR" ] || echo "claude_config_dir=$CLAUDE_ACCOUNT_DIR"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"

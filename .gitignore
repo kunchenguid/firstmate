@@ -11,5 +11,4 @@ __pycache__/
 *.pyc
 .env
 config/
-.omc/*
-!.omc/skills
+.omc/
