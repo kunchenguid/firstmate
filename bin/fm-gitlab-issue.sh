@@ -21,8 +21,9 @@
 #
 # <issue-url> is https://<host>/<group>[/<subgroup>...]/<project>/-/issues/<iid>.
 # Nested subgroups are ordinary path segments; a trailing "#note_<id>" fragment
-# is ignored. The host must be a plain lowercase DNS name (no port, no userinfo)
-# and the project path is validated by bin/fm-pr-lib.sh's GitLab rules.
+# is ignored. The host must be a plain DNS name (no port, no userinfo) and is
+# lowercased before use; the project path is validated by bin/fm-pr-lib.sh's
+# GitLab rules.
 #
 # Subcommands:
 #   show    Print one JSON object: title, description, state, labels, author
@@ -66,9 +67,9 @@
 #           comparing the URL's host and project path with each clone's
 #           `git remote get-url origin`. An entry without a .git of its own is
 #           skipped rather than resolved to an enclosing repository. Scheme,
-#           userinfo, any port, a trailing
-#           ".git", a trailing "/", and host and path case are normalised
-#           away, so https, ssh://, and scp-like origins all match. Prints
+#           userinfo, any port, a trailing ".git", a trailing "/", and host and
+#           path case are normalised away, so https, ssh://, and scp-like
+#           origins all match. Prints
 #           "<clone-dir>\t<posture>" where <posture> is the exact output of
 #           `bin/fm-project-mode.sh --raw <name>` ("<mode> <yolo>") or the word
 #           "unregistered" when the clone has no data/projects.md line. Exits 3
@@ -79,6 +80,8 @@
 #   FM_HOME              the operational home whose projects/ and data/ are read
 #                        (default: this checkout, via FM_ROOT_OVERRIDE)
 #   FM_PROJECTS_OVERRIDE clone root instead of $FM_HOME/projects
+#   FM_DATA_OVERRIDE     data root instead of $FM_HOME/data, whose projects.md
+#                        decides whether `project` reports a posture
 #   FM_GITLAB_TIMEOUT    seconds allowed per glab call (default 30)
 #
 # Hard limits: this script never closes or reopens an issue, never changes
