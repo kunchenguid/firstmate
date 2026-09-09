@@ -114,7 +114,7 @@ fm_path_age() {
 # given, so a caller with no independent notion of the poll cadence still
 # derives the same default fm-watch.sh itself would use.
 # docs/turnend-guard.md "Guard grace and the poll cadence" is the single owner
-# of the rationale; every FM_GUARD_GRACE default should derive from this.
+# of the rationale and caller-specific grace defaults.
 fm_poll_derived_grace() {
   local poll=${1:-${FM_POLL:-15}} margin=60 derived
   case "$poll" in ''|*[!0-9]*) poll=15 ;; esac
