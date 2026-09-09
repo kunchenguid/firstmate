@@ -385,6 +385,37 @@ test_agy_teardown_preserves_a_borrowed_project_root() {
   pass "Agy teardown leaves a borrowed project customization root standing"
 }
 
+test_agy_teardown_preserves_an_empty_borrowed_root() {
+  # A pre-existing EMPTY customization directory is still project property
+  # (the Greptile finding on PR 1408). Spawn borrows it, and once the installed
+  # hook is gone the root is empty again, which is exactly when an
+  # ownership-blind rmdir would delete it: only a root recorded as created may
+  # be pruned, so this one must survive teardown. Git tracks no empty
+  # directory, so the root is placed in the worktree itself, where spawn's
+  # base refresh leaves untracked directories alone.
+  local id rec out rc
+  id="agy-emptyroot-z11-$$"
+  rec=$(make_spawn_case emptyroot "$id")
+  read_spawn_record "$rec"
+  mkdir "$WT_DIR/.agents"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "Agy spawn should borrow the empty pre-existing root"$'\n'"$out"
+  [ "$(sed -n '2p' "$HOME_DIR/state/$id.agy-turnend-token")" = .agents ] \
+    || fail "spawn did not select the empty pre-existing root"
+  [ "$(sed -n '3p' "$HOME_DIR/state/$id.agy-turnend-token")" = preexisting ] \
+    || fail "spawn recorded the empty pre-existing root as created"
+  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "Agy teardown failed"
+  assert_absent "$WT_DIR/.agents/hooks.json" "Agy hook survived teardown"
+  [ -d "$WT_DIR/.agents" ] \
+    || fail "teardown removed an empty pre-existing customization root"
+  pass "Agy teardown leaves an empty pre-existing customization root standing"
+}
+
 test_agy_teardown_preserves_a_project_authored_hook_file() {
   # A hooks.json the project wrote over the installed one while the task ran
   # carries no firstmate turn-end marker, so teardown must not delete it.
@@ -559,6 +590,7 @@ test_agy_delivery_ignores_a_stale_turnend_marker
 test_agy_omits_unsupported_explicit_effort
 test_agy_teardown_removes_task_hook_and_auth
 test_agy_teardown_preserves_a_borrowed_project_root
+test_agy_teardown_preserves_an_empty_borrowed_root
 test_agy_teardown_preserves_a_project_authored_hook_file
 test_agy_teardown_preserves_a_replaced_hook_retaining_the_token
 test_agy_primary_guard_bounds_continuation
