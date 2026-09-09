@@ -1374,7 +1374,7 @@ test_completion_records_a_named_local_base() {
     "spawn_gen=spawn-close-named" "base_branch=develop"
 
   out=$(run_teardown "$case_dir" "$id") || fail "named-base teardown failed: $out"
-  [ "$(row_state "$case_dir" "$id")" = done ] \
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "named-base teardown left its backlog item open"
   assert_grep 'local develop' "$(backlog_of "$case_dir")" \
     "named-base teardown did not record the actual local landing base"

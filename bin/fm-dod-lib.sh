@@ -230,7 +230,7 @@ EOF
         local_landing=$base_branch
       else
         local_rebase_target='the current default branch'
-        local_advanced_target='`main`'
+        local_advanced_target="\`main\`"
         local_landing=main
       fi
       cat <<EOF

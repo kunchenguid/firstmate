@@ -429,10 +429,10 @@ STUB
       || fail "$mode: named-base promotion should succeed"
     payload="$home/data/$id/ship-instructions.md"
     if [ "$mode" = local-only ]; then
-      assert_grep 'Return to a clean `develop` base' "$payload" \
+      assert_grep "Return to a clean \`develop\` base" "$payload" \
         "local-only promotion did not select the local recorded base"
     else
-      assert_grep 'Return to a clean `origin/develop` base' "$payload" \
+      assert_grep "Return to a clean \`origin/develop\` base" "$payload" \
         "$mode promotion did not select the remote recorded base"
     fi
   done
