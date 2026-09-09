@@ -1103,6 +1103,22 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+Compound worktree identity validation was verified on 2026-09-09 with the following portable regression command:
+
+```sh
+bin/fm-test-run.sh tests/fm-teardown-endpoint-safety.test.sh tests/fm-backend-orca.test.sh
+```
+
+The endpoint suite reported:
+
+```text
+ok - Orca compound IDs require an exact absolute path, valid repo and terminal, and task binding
+```
+
+These fixtures cover absolute paths with spaces, malformed prefixes and separators, mismatched paths, invalid terminals, and mismatched task ownership.
+They exercise the shared metadata validator without a vendor harness signal; other backend parsers and harness-specific lifecycle checks are unchanged.
+Live guarded scout teardown also succeeded with Orca app version 1.4.198 on 2026-09-09 after applying the same fix; this observation does not establish compatibility for other Orca versions.
+
 ## cmux
 
 The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.

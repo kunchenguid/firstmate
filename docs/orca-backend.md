@@ -60,6 +60,7 @@ Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
 Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
+The endpoint validator in `bin/fm-backend.sh` accepts Orca's compound worktree identifiers while retaining task ownership and terminal checks.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
@@ -78,6 +79,7 @@ It never raw-deletes an Orca worktree.
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```

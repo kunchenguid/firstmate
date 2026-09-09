@@ -293,6 +293,47 @@ test_supported_backend_endpoint_records_validate() {
   pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
 }
 
+test_orca_compound_endpoint_identity() {
+  local dir id repo candidate terminal binding
+  dir=$(make_case orca-compound)
+  id=orca-compound
+  repo=c668d50f-c307-49b8-bcf5-21f59776d85c
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  for candidate in "$repo::$dir/worktree" "$repo::$dir/worktree with spaces"; do
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=term_8a1764fd-c65f-4883-bfad-7be2dd4f9661" \
+      "worktree=${candidate#*::}" "project=$dir/project" "backend=orca" "orca_worktree_id=$candidate"
+    fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid compound Orca ID refused"
+    [ "$FM_BACKEND_VALIDATED_TARGET" = term_8a1764fd-c65f-4883-bfad-7be2dd4f9661 ] || fail "compound Orca validation changed terminal"
+  done
+  for candidate in "::$dir/worktree" "bad/repo::$dir/worktree" "$repo::relative" \
+    "$repo:$dir/worktree" "$repo::$dir/other" "$repo::extra::$dir/worktree"; do
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+      "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=$candidate"
+    if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+      fail "invalid compound Orca ID accepted: $candidate"
+    fi
+  done
+  for terminal in 'term/7' 'term::7' $'term\t7'; do
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=$terminal" \
+      "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=$repo::$dir/worktree"
+    if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+      fail "compound Orca ID bypassed terminal atom validation"
+    fi
+  done
+  binding=another-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$binding" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=$repo::$dir/worktree"
+  if fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" 2>/dev/null; then
+    fail "compound Orca ID bypassed exact task binding"
+  fi
+  pass "Orca compound IDs require an exact absolute path, valid repo and terminal, and task binding"
+}
+
 test_tmux_empty_target_refuses_without_invocation() {
   local dir rc
   dir=$(make_case direct-empty)
@@ -830,6 +871,7 @@ test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
+test_orca_compound_endpoint_identity
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
