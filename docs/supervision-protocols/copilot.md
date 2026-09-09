@@ -10,7 +10,7 @@ When this session owns supervision and away mode is not active:
    On attach, the task follows verified identity-matched successors instead of exiting when the first cycle ends.
 6. After a successful start or attach status, end the turn.
    The asynchronous task remains the live wait until it returns an actionable notification or failure.
-7. On the completion notification, drain first, read the task result for the reason line when needed, handle the queued event, and start the next attached asynchronous arm if supervision remains required.
+7. On the completion notification, drain first, read the task result for the reason line when needed, handle the queued event, and start the next attached asynchronous arm if supervision remains required. Title-only `shell_completed` notifications are trusted only when they match the exact observed watcher success text and consume the real arm's recent root/home-bound completion receipt.
 8. Failure or missing cycle only: inspect the failure, then start one replacement asynchronous arm.
 9. Never use shell `&`, detached execution, a truncating pipe, or a bundled command for Firstmate supervision.
    The PreToolUse seatbelt denies those command shapes before execution.
