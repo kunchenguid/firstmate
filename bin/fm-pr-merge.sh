@@ -2,15 +2,23 @@
 # Merge a task's PR or MR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
-# addressed through gh-axi by the derived owner and repository; a GitLab merge
+# addressed by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded.
 #
+# No-mistakes requires a registered evidence_head= bound to this PR URL.
+# Missing evidence or a proposed head mismatch refuses: the original worker
+# must refresh evidence and re-register with bin/fm-pr-check.sh before retrying.
+# GitHub uses gh with --match-head-commit; GitLab uses glab with --sha, binding
+# the actual request against a push between inspection and merge. Caller head
+# overrides and --admin are refused for no-mistakes. A squash merge commit
+# need not equal the evidenced PR head. Other modes retain the gh-axi path on
+# GitHub and live-head verification on GitLab without requiring evidence.
+# Regression: tests/fm-pr-merge.test.sh.
+#
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
-# The gh-axi merge abstraction always performs the merge; the outcome read that
-# follows it never becomes a prerequisite for reaching that abstraction. After
-# gh-axi returns success, GitHub's live state is read back and accepted only
+# After the merge command returns success, GitHub's live state is accepted only
 # when the pull request is merged or in the merge queue. gh's GraphQL API
 # supplies that queue-aware read when gh is on PATH; when gh is absent or its
 # read fails, gh-axi's own view still proves a landed merge, and every outcome
@@ -48,9 +56,7 @@
 # exact current head commit. Every failing condition is reported, not just the
 # first. The verified head is then passed to glab as --sha, so a push that lands
 # between that read and the merge fails the merge instead of landing commits
-# nothing verified. A recorded pr_head that disagrees with the live head is
-# reported rather than trusted, because a rebase moves the head and leaves the
-# recorded value stale. Reading that state needs glab and jq, and either one
+# nothing verified. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
 # Extra args must not include --repo or -R in any form, including a bundled
@@ -177,7 +183,7 @@ reject_head_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --sha|--sha=*)
+      --sha|--sha=*|--match-head-commit|--match-head-commit=*)
         echo "error: extra merge arguments must not override the head commit" >&2
         return 1
         ;;
@@ -210,12 +216,33 @@ if [ "$PROVIDER" = gitlab ]; then
   fi
 fi
 
-# The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
-# because that script re-records pr= and drops a pr_head= it cannot resolve.
-RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ]; then
-  RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+EVIDENCE_HEAD=
+if [ "$PR_MODE" = no-mistakes ]; then
+  EVIDENCE_HEAD=$(sed -n 's/^evidence_head=//p' "$META")
+  if ! fm_pr_head_valid "$EVIDENCE_HEAD" || ! fm_pr_metadata_identity_parse "$META" \
+    || [ "$FM_PR_META_URL" != "$URL" ]; then
+    printf 'error: task %s needs the original worker to refresh final-HEAD evidence and register its full SHA for %s\n' "$ID" "$URL" >&2
+    exit 1
+  fi
+  reject_head_overrides "$@" || exit 1
+  for arg in "$@"; do
+    case "$arg" in
+      --admin|--admin=*)
+        echo "error: extra merge arguments must not bypass merge protections" >&2
+        exit 1 ;;
+    esac
+  done
 fi
+RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+
+verify_evidence_head() {
+  [ "$PR_MODE" = no-mistakes ] || return 0
+  if [ "$EVIDENCE_HEAD" != "$1" ]; then
+    printf 'error: task %s proposed head %s differs from evidenced head %s; ask the original worker to refresh final-HEAD evidence and re-register before retrying\n' "$ID" "$1" "$EVIDENCE_HEAD" >&2
+    return 1
+  fi
+}
 
 # Pre-merge conditions for a GitLab merge request, read from one live view of
 # the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and
@@ -282,8 +309,10 @@ FIELDS
     echo "error: could not read the GitLab merge request head commit before merging" >&2
     return 1
   fi
+  verify_evidence_head "$live_head" || return 1
   # A rebase moves the head and leaves the recorded value behind, so the
   # disagreement is reported and the live head is what gets verified and merged.
+  # For no-mistakes, the evidence equality check above must already have passed.
   if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
     printf 'notice: recorded head %s disagrees with the live head %s; verifying the live head\n' \
       "$RECORDED_HEAD" "$live_head" >&2
@@ -493,7 +522,9 @@ METHODS
 }
 
 record_pr_metadata() {
-  if ! "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
+  local evidence_args=()
+  [ -z "$EVIDENCE_HEAD" ] || evidence_args=("$EVIDENCE_HEAD")
+  if ! "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL" "${evidence_args[@]+"${evidence_args[@]}"}"; then
     return 1
   fi
   grep -qxF "pr=$URL" "$META" || {
@@ -630,6 +661,30 @@ record_pr_metadata || exit 1
 
 case "$PROVIDER" in
   github)
+    merge_command=(gh-axi)
+    if [ "$PR_MODE" = no-mistakes ]; then
+      if ! proposed_head=$(gh pr view "$URL" --json headRefOid -q .headRefOid) || ! fm_pr_head_valid "$proposed_head"; then
+        echo "error: could not read proposed GitHub head; merge refused" >&2
+        exit 1
+      fi
+      verify_evidence_head "$proposed_head" || exit 1
+      merge_command=(gh)
+      normalized_args=()
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --method)
+            [ "$#" -ge 2 ] || exit 2
+            case "$2" in merge|squash|rebase) ;; *) exit 2 ;; esac
+            normalized_args+=("--$2"); shift ;;
+          --method=*)
+            case "${1#--method=}" in merge|squash|rebase) ;; *) exit 2 ;; esac
+            normalized_args+=("--${1#--method=}") ;;
+          *) normalized_args+=("$1") ;;
+        esac
+        shift
+      done
+      set -- "${normalized_args[@]+"${normalized_args[@]}"}" --match-head-commit "$EVIDENCE_HEAD"
+    fi
     merge_output=
     merge_args=()
     if ! caller_has_merge_method "$@"; then
@@ -639,11 +694,14 @@ case "$PROVIDER" in
       FM_PR_GITHUB_AUTO_REQUESTED=true
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
-    if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    if merge_output=$("${merge_command[@]}" pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
     else
       merge_status=$?
+      if [ "$PR_MODE" = no-mistakes ]; then
+        printf 'error: merge refused for task %s; if its head changed, ask the original worker to refresh final-HEAD evidence and re-register\n' "$ID" >&2
+      fi
       [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
       if github_read_outcome; then
         if [ "$FM_PR_GITHUB_MERGED" != true ] && [ "$FM_PR_GITHUB_QUEUED" != true ]; then
@@ -679,7 +737,13 @@ case "$PROVIDER" in
     # skips the interactive confirmation, which no supervised run can answer;
     # the conditions above are what authorize the merge.
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
-      --sha "$FM_PR_MERGE_HEAD" --yes "$@"
+      --sha "$FM_PR_MERGE_HEAD" --yes "$@" || {
+        merge_status=$?
+        if [ "$PR_MODE" = no-mistakes ]; then
+          printf 'error: merge refused for task %s; if its head changed, ask the original worker to refresh final-HEAD evidence and re-register\n' "$ID" >&2
+        fi
+        exit "$merge_status"
+      }
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0

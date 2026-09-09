@@ -19,7 +19,10 @@
 # does the same for the supervision-branch effort pin: Pi's own supported-level
 # list is what the picker offers, Pi's own clamp is what lowers a level a model
 # cannot run, and an explicit thinking level must beat the level a reopened
-# session recorded.
+# session recorded. A final probe pins the delivery-timing contract routine
+# notes rest on: against a held completion stream, a display-only note reaches
+# the transcript at the running turn's own boundary while a nextTurn note is
+# withheld until the captain's next prompt.
 #
 # No provider call leaves the machine. The first branch probe points
 # PI_CODING_AGENT_DIR at an empty directory, so it reads no credentials and
@@ -991,3 +994,154 @@ if [ "$status" -ne 0 ] || [ "$out" != "STREAM_OK" ]; then
   fail "real-SDK streaming-time watcher delivery guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
 pass "real Pi SDK $PI_VERSION queues a streaming-time watcher wake without before_agent_start, keeps the successor chain, and surfaces consumption of both follow-ups"
+
+# Seventh probe: the vendor delivery-timing contract the supervision branch's
+# routine notes rest on. A routine note describes the fleet RIGHT NOW, so the
+# question is not whether Pi eventually shows it but WHEN. Against the real
+# AgentSession, with a completion stream held open so main is genuinely
+# streaming, a display-only note (triggerTurn:false) must reach the transcript
+# at the running turn's own boundary, while a deliverAs:"nextTurn" note must
+# still be withheld there and appear only once the captain sends another
+# prompt. That difference is the whole reason the extension delivers routine
+# notes display-only: a note parked for the next prompt is read as current
+# minutes later, after the merge and cleanup it described have already landed.
+# The provider is the same local fake intercepted in-process, so no request
+# leaves the machine and no credential is read.
+timingdir="$TMP_ROOT/timing-agent-dir"
+mkdir -p "$timingdir" "$TMP_ROOT/timing-sessions"
+cat > "$timingdir/models.json" <<'JSON'
+{
+  "providers": {
+    "fm-live-timing": {
+      "baseUrl": "https://fm-live-timing.invalid/v1",
+      "api": "openai-completions",
+      "apiKey": "fm-live-placeholder",
+      "models": [
+        { "id": "fm-live-timing-model", "name": "fm live timing", "contextWindow": 8192, "maxTokens": 512 }
+      ]
+    }
+  }
+}
+JSON
+FM_LIVE_SESSIONS="$TMP_ROOT/timing-sessions" \
+  PI_CODING_AGENT_DIR="$timingdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/timing-output" 2>&1 <<'EOF'
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const pkg = resolve(process.env.PI_PACKAGE_DIR);
+const { DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, createAgentSession } =
+  await import(pathToFileURL(`${pkg}/dist/index.js`).href);
+
+let completions = 0;
+let releaseStream = () => {};
+let streamHeld = new Promise((release) => {
+  releaseStream = release;
+});
+const chunk = (delta, finish) => `data: ${JSON.stringify({
+  id: "fm-live-timing",
+  object: "chat.completion.chunk",
+  created: 1,
+  model: "fm-live-timing-model",
+  choices: [{ index: 0, delta, finish_reason: finish }],
+  ...(finish ? { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } : {}),
+})}\n\n`;
+globalThis.fetch = async (input) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://fm-live-timing.invalid/")) {
+    throw new Error(`unexpected network request in provider-free guard: ${url}`);
+  }
+  completions += 1;
+  const hold = streamHeld;
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(encoder.encode(chunk({ role: "assistant", content: "OK" }, null)));
+      await hold;
+      controller.enqueue(encoder.encode(chunk({}, "stop")));
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  });
+  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+};
+
+const agentDir = resolve(process.env.PI_CODING_AGENT_DIR);
+const settings = SettingsManager.create(process.cwd(), agentDir);
+const loader = new DefaultResourceLoader({
+  cwd: process.cwd(),
+  agentDir,
+  settingsManager: settings,
+  noSkills: true,
+  noPromptTemplates: true,
+  noThemes: true,
+  noContextFiles: true,
+});
+await loader.reload();
+const runtime = await ModelRuntime.create({
+  authPath: `${agentDir}/auth.json`,
+  modelsPath: `${agentDir}/models.json`,
+});
+const registry = new ModelRegistry(runtime);
+await registry.refresh();
+const model = registry.find("fm-live-timing", "fm-live-timing-model");
+if (!model) throw new Error("the real registry did not resolve the local timing model");
+const sessionManager = SessionManager.create(process.cwd(), resolve(process.env.FM_LIVE_SESSIONS));
+const { session } = await createAgentSession({
+  cwd: process.cwd(),
+  sessionManager,
+  settingsManager: settings,
+  resourceLoader: loader,
+  modelRuntime: runtime,
+  model,
+  noTools: "builtin",
+});
+
+const errors = [];
+const waitFor = async (predicate, label) => {
+  for (let i = 0; i < 600; i += 1) {
+    if (errors.length) throw new Error(`the real session rejected its prompt: ${errors[0]}`);
+    if (predicate()) return;
+    await new Promise((tick) => setTimeout(tick, 50));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+};
+const shown = (type) => sessionManager.getEntries().some((entry) =>
+  entry.type === "custom_message" && entry.customType === type);
+const runPrompt = (text) => {
+  session.prompt(text).catch((error) => errors.push(error instanceof Error ? error.message : String(error)));
+};
+
+// Turn 1 streams against the held completion: both notes are written here,
+// exactly as the branch writes one while main is busy merging.
+runPrompt("Reply with exactly the word OK.");
+await waitFor(() => completions === 1 && session.isStreaming, "main streaming on the held completion");
+await session.sendCustomMessage({ customType: "fm-timing-display", content: "display-only note", display: true }, { triggerTurn: false });
+await session.sendCustomMessage({ customType: "fm-timing-nextturn", content: "next-turn note", display: true }, { deliverAs: "nextTurn" });
+if (shown("fm-timing-display")) throw new Error("a display-only note landed mid-stream instead of at the turn boundary");
+if (shown("fm-timing-nextturn")) throw new Error("a nextTurn note landed mid-stream");
+
+// The run reaches its own boundary. This is the whole contract: the
+// display-only note is in the transcript now, while the nextTurn note is not.
+releaseStream();
+await waitFor(() => shown("fm-timing-display"), "the display-only note to reach the transcript at the run boundary");
+await waitFor(() => !session.isStreaming, "the first run to settle");
+if (shown("fm-timing-nextturn")) {
+  throw new Error("a nextTurn note reached the transcript at the run boundary; the two delivery modes no longer differ");
+}
+
+// Only the captain's next prompt releases the nextTurn note - the delay that
+// made a stale 'waiting for merge' note read as current.
+streamHeld = Promise.resolve();
+runPrompt("Reply with exactly the word OK again.");
+await waitFor(() => shown("fm-timing-nextturn"), "the nextTurn note to be released by the next prompt");
+session.dispose();
+console.log("TIMING_OK");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/timing-output")
+if [ "$status" -ne 0 ] || [ "$out" != "TIMING_OK" ]; then
+  fail "real-SDK routine-note delivery-timing guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+pass "real Pi SDK $PI_VERSION flushes a display-only note at the running turn's boundary and withholds a nextTurn note until the captain's next prompt"

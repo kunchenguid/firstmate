@@ -1487,6 +1487,26 @@ The same guard against the pre-change extension in the same lab measured a 676.9
 Measured through the same real `fm_branch_report` tool and real `bin/` scripts with a 1 ms interval timer, the largest single block of the JavaScript thread fell from 273 ms to 2.0 ms for a routine outcome, from 286 ms to 2.0 ms for a captain outcome, and from 134 ms to 1.9 ms for main's acknowledgement, against a 1.3-2.2 ms idle-loop floor.
 Those absolute figures are specific to this host and Pi version; the guards assert the relationship (delivery must stay in the class of the same machine's own floor) rather than a remembered millisecond number.
 
+### 2026-09-09 routine-note delivery timing
+
+The vendor delivery-timing contract behind routine supervision notes was pinned against the npm `@earendil-works/pi-coding-agent` 0.85.1 package on macOS 26 arm64, Node v24.19.0.
+The probe drives a real `AgentSession` whose only provider is a local fake with its fetch intercepted in-process and its completion stream held open, so main is genuinely streaming while both notes are sent; no credential is read and no request leaves the machine.
+
+```sh
+FM_PI_BRANCH_LIVE_E2E=1 bash tests/fm-pi-branch-live-e2e.test.sh
+bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh
+npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+```
+
+```text
+ok - real Pi SDK 0.85.1 flushes a display-only note at the running turn's boundary and withholds a nextTurn note until the captain's next prompt
+ok - a failed cursor write re-delivers a routine note exactly once more while a captain outcome stays deduplicated
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.1
+```
+
+It proved the difference the routine-note delivery mode rests on: a message sent with `triggerTurn: false` while the session is streaming is absent from the transcript mid-stream, reaches it when that run hits its own boundary, and never steers the running turn, while a message sent with `deliverAs: "nextTurn"` is still absent at that boundary and appears only once a further prompt is sent.
+That is why routine notes are delivered display-only rather than parked for a later prompt; a parked note is presented as current after the merge and cleanup it described have already landed.
+
 ## Native Codex through Pi
 
 Verified on 2026-09-08 with Pi 0.85.1 and the installed `pi-codex-native` 0.2.1 adapter.

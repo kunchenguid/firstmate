@@ -5,7 +5,13 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
-# Usage: fm-pr-check.sh <task-id> <pr-url>
+# For no-mistakes tasks, the third argument is required: copy the full SHA
+# from the worker's evidence-bearing ready report, never from the forge.
+# It records evidence_head= and pr_head= on either forge; registration is an
+# attestation, not verification of the evidence or of the current remote head.
+# Other modes reject that argument and record pr_head= opportunistically on
+# GitHub only. bin/fm-pr-merge.sh owns the landing-time continuity check.
+# Usage: fm-pr-check.sh <task-id> <pr-url> [<evidenced-full-head>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +26,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
-if [ "$#" -ne 2 ]; then
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
   echo "error: invalid PR check request" >&2
   exit 2
 fi
@@ -43,6 +49,18 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   exit 1
 fi
 
+PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+EVIDENCE_HEAD=${3:-}
+if [ "$PR_MODE" = no-mistakes ]; then
+  if ! fm_pr_head_valid "$EVIDENCE_HEAD"; then
+    printf 'error: task %s needs the original worker to refresh final-HEAD evidence and register its full SHA\n' "$ID" >&2
+    exit 1
+  fi
+elif [ -n "$EVIDENCE_HEAD" ]; then
+  echo "error: evidenced HEAD applies only to no-mistakes tasks" >&2
+  exit 2
+fi
+
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.
@@ -62,18 +80,9 @@ fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
-# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
-# and treats a recorded value that disagrees as stale rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
+PR_HEAD=$EVIDENCE_HEAD
+if [ "$PR_MODE" != no-mistakes ] && [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
@@ -107,10 +116,11 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    pr=*|pr_head=*) ;;
+    pr=*|pr_head=*|evidence_head=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
   esac
 done < "$META"
+[ -z "$EVIDENCE_HEAD" ] || printf 'evidence_head=%s\n' "$EVIDENCE_HEAD" >> "$META_TMP" || exit 1
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
 [ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
 chmod 0600 "$META_TMP" || exit 1
@@ -142,6 +152,7 @@ fm_pr_poll_publish_prepared || {
 # written is reported as actionable, and bin/fm-inactive-reconcile.sh still
 # delivers the child's own ready line on the next supervision poll.
 READY_LINE="done [key=child-pr-$ID]: child $ID PR ready: $URL"
+[ -z "$EVIDENCE_HEAD" ] || READY_LINE="$READY_LINE evidence_head=$EVIDENCE_HEAD"
 PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"

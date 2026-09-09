@@ -353,7 +353,7 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 ### Validate
 
-For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
+A no-mistakes ship worker starts validation itself, immediately after its own implementation commit, so firstmate neither waits for a ready-to-validate report nor sends an instruction to begin: `bin/fm-dod-lib.sh` owns that one continuous contract, and a worker that stopped after committing is steered back into it rather than treated as done.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 When the captain adds or changes an ask mid-task, append the captain's words to that brief's `## Captain's intent` and steer the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
@@ -375,12 +375,15 @@ Resume fleet supervision immediately after the decision lands.
 Judge validation by the currently attributed run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed exactly as `bin/fm-crew-state.sh` prints it - only that state line reclassifies an orphaned ci monitor after green checks as held-for-merge done, or a terminal failed record with the daemon unreachable as unknown, never the raw run record.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
-The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
+Read-only verification of the run's own attributed HEAD, with the evidence written outside the repository, is not that duplication: a worker parked at a gate is expected to produce the evidence its gate decision needs, and pausing it to ask permission first is the stall to steer out of.
+The worker reports the PR as soon as CI is green and its final-HEAD evidence is in hand, rather than waiting for merge monitoring to finish.
 
 ### PR ready, landing, and teardown
 
-For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signal - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` once CI is green and the task's own verification and evidence cover the exact final HEAD including every pipeline fix, while `direct-PR` reports `done: PR <url>` after opening the PR.
+A no-mistakes ready line without that final-HEAD evidence is an incomplete report, not a landing decision; ask the same worker to complete it rather than merging on CI colour alone.
+Run `bin/fm-pr-check.sh <id> <PR url> [<evidenced-full-head>]` with the URL and, for no-mistakes, the full SHA copied from that evidence-bearing ready signal; never substitute the latest forge head.
+Registration records the evidenced SHA and arms the merge poll; the shared merge owner refuses missing or changed evidence and binds the forge merge to that SHA, so ask the original worker to refresh evidence and re-register on refusal.
 Tell the captain the PR's full `https://...` URL copied from the worker's ready line or the task's `pr=` metadata, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.

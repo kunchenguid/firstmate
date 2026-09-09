@@ -440,6 +440,23 @@ EOF
   [ "$(nm_ci_checks_state)" = green ]
 }
 
+# Detail for a terminal PASSED run. The run record proves one thing - the
+# pipeline finished its own steps and reached a passing outcome - so that is all
+# this states. It deliberately does NOT say the PR merged or closed: a run whose
+# push/pr/ci steps never ran reaches passed with no PR involved at all, and even
+# a run that did open one records no landing authority here. The merge fact has
+# its own owners (the task's `pr=` metadata and the merge poll's forge record),
+# and a skipped step is equally no evidence in the other direction, so nothing
+# here concludes that a PR is absent either. The run's own PR URL is surfaced
+# verbatim when it carries one, as the pointer to those owners.
+nm_passed_detail() {
+  local pr_url detail
+  detail="run passed (pipeline outcome; merge state not proven here)"
+  pr_url=$(strip_quotes "$(nm_field pr)")
+  [ -n "$pr_url" ] && detail="$detail: $pr_url"
+  printf '%s' "$detail"
+}
+
 # Reclassify a terminal failed run as done (held-for-merge) when
 # nm_failed_run_is_green_held_ci matches, surfacing the run's PR URL so the
 # supervisor reads the concrete review-ready outcome instead of a failure.
@@ -492,10 +509,13 @@ nm_effective_ci_step_status() {
 # Root cause of the PR #252 incident (2026-07): for a repo where merge is left
 # to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
 # stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
-# reports every check green - it only reaches outcome=passed once the PR is
-# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
-# never distinguishes "still waiting on checks" from "checks green, waiting on
-# merge": both read as plain `ci,running,...`. The only place that transition is
+# reports every check green - a run that reaches that phase leaves it for
+# outcome=passed only once the PR is actually merged (or failed/cancelled if
+# closed). That is a fact about a ci-monitoring run, not about outcome=passed in
+# general: a run whose push/pr/ci steps were skipped passes without a PR ever
+# existing, which is why nm_passed_detail states the outcome and never a merge.
+# `axi status`'s steps[] table never distinguishes "still waiting on checks"
+# from "checks green, waiting on merge": both read as plain `ci,running,...`. The only place that transition is
 # recorded is the ci step's own log text, e.g. "all CI checks passed - still
 # monitoring until merged or closed" or "no CI checks reported - still
 # monitoring until merged or closed" (verified against 360+ real run logs under
@@ -638,7 +658,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+        passed)        RUN_STATE="done"; RUN_DETAIL=$(nm_passed_detail) ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else

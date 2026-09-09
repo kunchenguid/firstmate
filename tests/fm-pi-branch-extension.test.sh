@@ -714,10 +714,13 @@ const untouched = cacheHandler({ type: "before_provider_request", payload: { mod
 if (untouched !== undefined) throw new Error("cache-key hook rewrote a provider payload with no prompt_cache_key");
 console.log(`CACHE_KEY=${rewriteA.prompt_cache_key}`);
 
-// 4. Two-stage filter, stage 2: routine while main is idle appends with no
-// turn; routine while main is busy defers to after the captain's next prompt;
-// captain-relevant persists a visible entry with no model turn. Store rows are
-// written before delivery and marked read only after it.
+// 4. Two-stage filter, stage 2: a routine note is display-only delivery whether
+// main is idle or busy - never a steer, and never parked for the captain's next
+// prompt, because Pi flushes a display-only message at the running turn's own
+// boundary while a nextTurn message waits for a prompt that may be minutes of
+// merges and cleanups later. Captain-relevant persists a visible entry with no
+// model turn. Store rows are written before delivery and marked read only after
+// it.
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
 const r1 = await report.execute("call-1", { task: "branch-driver", verdict: "routine", summary: "worker healthy, no action needed", wake: "signal: working" }, undefined, undefined, {});
 if (r1.isError) throw new Error(`routine report failed: ${JSON.stringify(r1)}`);
@@ -728,12 +731,13 @@ await offer.settlement;
 globalThis.__fmOnBranchPrompt = undefined;
 if (sentToMain.length !== 1) throw new Error("routine report did not merge exactly one note");
 if (sentToMain[0].message.customType !== "fm-branch-merge") throw new Error("merge note has the wrong custom type");
-if (sentToMain[0].options.triggerTurn) throw new Error("routine idle merge must not trigger a turn");
-if (sentToMain[0].options.deliverAs) throw new Error("routine idle merge must append immediately");
+if (sentToMain[0].options.deliverAs !== undefined || sentToMain[0].options.triggerTurn !== false) {
+  throw new Error(`routine idle merge must be display-only delivery with no turn: ${JSON.stringify(sentToMain[0].options)}`);
+}
 await fire("agent_start", {});
 await report.execute("call-2", { task: "task-9", verdict: "routine", summary: "still healthy" }, undefined, undefined, {});
-if (sentToMain[1].options.deliverAs !== "nextTurn" || sentToMain[1].options.triggerTurn) {
-  throw new Error(`routine busy merge must defer to nextTurn without a turn: ${JSON.stringify(sentToMain[1].options)}`);
+if (sentToMain[1].options.deliverAs !== undefined || sentToMain[1].options.triggerTurn !== false) {
+  throw new Error(`routine busy merge must stay display-only, never parked for a later prompt: ${JSON.stringify(sentToMain[1].options)}`);
 }
 await fire("agent_end", {});
 await report.execute("call-3", { task: "task-9", verdict: "captain", summary: "PR https://example.com/pr/9 checks green, ready for review" }, undefined, undefined, {});

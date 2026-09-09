@@ -360,6 +360,54 @@ outcome: passed
 EOF
 }
 
+# A run that reached outcome=passed with its push/pr/ci steps skipped: the
+# pipeline finished and passed, and no PR was ever part of it. The detail for
+# this shape used to be identical to run_passed's, claiming a merge that could
+# not have happened.
+run_passed_no_pr() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: passed
+steps[6]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  review,completed,0,0
+  test,completed,0,0
+  push,skipped,0,0
+  pr,skipped,0,0
+  ci,skipped,0,0
+EOF
+}
+
+# A run that opened a PR and passed with its ci step skipped. A skipped step is
+# no evidence in either direction: it neither proves the PR merged nor proves
+# there is no PR.
+run_passed_pr_ci_skipped() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/77"
+  findings: none
+outcome: passed
+steps[7]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  review,completed,0,0
+  test,completed,0,0
+  lint,completed,0,0
+  push,completed,0,0
+  pr,completed,0,0
+  ci,skipped,0,0
+EOF
+}
+
 run_failed() {  # <branch>
   cat <<EOF
 run:
@@ -935,6 +983,39 @@ test_terminal_passed() {
   assert_contains "$out" "state: done" "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
   pass "terminal passed run is authoritative"
+}
+
+# outcome=passed is a VERIFICATION result. The merge fact has its own owners -
+# the task's pr= metadata and the merge poll's forge record - so this line may
+# not conclude a merge from a passing run, and may not conclude the opposite
+# from a skipped step either.
+test_terminal_passed_states_no_merge_fact() {
+  reset_fakes
+  local d out
+  d=$(new_case passed-no-merge-claim)
+  make_repo_on_branch "$d/wt" fm/feat-nomerge
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-nomerge.meta" "window=fm:fm-feat-nomerge" "worktree=$d/wt" "kind=ship"
+
+  # (a) passed with push/pr/ci skipped: no PR was ever opened, so the old
+  # "PR merged/closed" detail asserted an event that never happened.
+  FM_FAKE_AXI_STATUS="$(run_passed_no_pr fm/feat-nomerge)"
+  out=$(run_crew_state "$d" feat-nomerge)
+  assert_contains "$out" "state: done" "a passed run with skipped delivery steps is still done"
+  assert_contains "$out" "run passed" "the passed detail must still report the passing outcome"
+  assert_not_contains "$out" "merged" "a passed run with no PR must not read as merged"
+  assert_not_contains "$out" "closed" "a passed run with no PR must not read as closed"
+  assert_not_contains "$out" "no PR" "a skipped step must not be reported as proof there is no PR"
+
+  # (b) passed with a PR recorded and ci skipped: the URL is surfaced verbatim
+  # as the pointer to the merge owners, and still asserts nothing about merging.
+  FM_FAKE_AXI_STATUS="$(run_passed_pr_ci_skipped fm/feat-nomerge)"
+  out=$(run_crew_state "$d" feat-nomerge)
+  assert_contains "$out" "state: done" "a passed run with a skipped ci step is still done"
+  assert_contains "$out" "https://github.com/o/r/pull/77" "the passed detail must surface the run's own PR URL"
+  assert_not_contains "$out" "merged" "a skipped ci step must not be reported as a merge"
+  assert_not_contains "$out" "closed" "a skipped ci step must not be reported as a close"
+  pass "a passed run reports its verification outcome and never a merge fact"
 }
 
 test_terminal_failed() {
@@ -2255,6 +2336,7 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_terminal_passed_states_no_merge_fact
 test_terminal_failed
 test_terminal_failed_ci_orphan_after_green_reads_done
 test_terminal_failed_ci_orphan_status_only_reads_done

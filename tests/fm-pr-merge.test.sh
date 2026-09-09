@@ -102,7 +102,7 @@ make_case() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   printf '%s\n' \
     'state=MERGED' \
     'merged=true' \
@@ -2082,6 +2082,117 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+test_final_evidence_continuity() {
+  local provider scenario case_dir url head rc
+  local args=()
+  for provider in github gitlab; do
+    for scenario in matching changed missing race refreshed wrong-url; do
+      case_dir=$(make_gitlab_case "evidence-$provider-$scenario")
+      url=$MR_URL
+      [ "$provider" != github ] || url=https://github.com/example/repo/pull/44
+      head=$MR_HEAD
+      mkdir -p "$case_dir/home"
+      printf '%s\n' "$head" > "$case_dir/live-head"
+      fm_write_meta "$case_dir/state/task-x1.meta" "worktree=$case_dir/wt" "kind=ship" "mode=no-mistakes"
+      cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case_dir=$(dirname "$FM_TEST_GH_LOG")
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case "$1 $2" in
+  'pr view') cat "$case_dir/live-head" ;;
+  'pr merge')
+    expected=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --match-head-commit ]; then expected=$2; shift; fi
+      shift
+    done
+    [ ! -e "$case_dir/race" ] || printf '%040d\n' 2 > "$case_dir/live-head"
+    [ "$expected" = "$(cat "$case_dir/live-head")" ] || { echo 'expected head mismatch' >&2; exit 1; }
+    : > "$case_dir/landed"
+    ;;
+  'api graphql') cat "$FM_TEST_GH_OUTCOME" ;;
+  *) exit 1 ;;
+esac
+SH
+      cat > "$case_dir/fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case_dir=$(dirname "$FM_TEST_GLAB_LOG")
+printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
+case "$1 $2" in
+  'mr view')
+    if [ -e "$case_dir/landed" ]; then cat "$case_dir/mr-post.json"; else cat "$case_dir/mr.json"; fi
+    ;;
+  'mr merge')
+    expected=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --sha ]; then expected=$2; shift; fi
+      shift
+    done
+    [ ! -e "$case_dir/race" ] || printf '%040d\n' 2 > "$case_dir/live-head"
+    [ "$expected" = "$(cat "$case_dir/live-head")" ] || { echo 'expected head mismatch' >&2; exit 1; }
+    : > "$case_dir/landed"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+      chmod +x "$case_dir/fakebin/gh" "$case_dir/fakebin/glab"
+      if [ "$scenario" = missing ]; then
+        printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$case_dir/state/task-x1.meta"
+        rc=0
+        FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" PATH="$case_dir/fakebin:$PATH" \
+          "$ROOT/bin/fm-pr-check.sh" task-x1 "$url" > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+        [ "$rc" -ne 0 ] || fail "$provider: missing registration evidence accepted"
+      else
+        FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" PATH="$case_dir/fakebin:$PATH" \
+          "$ROOT/bin/fm-pr-check.sh" task-x1 "$url" "$head" > "$case_dir/out" 2> "$case_dir/err" \
+          || fail "$provider: evidence registration failed"
+        assert_grep "evidence_head=$head" "$case_dir/state/task-x1.meta" "$provider: registration lost evidence"
+      fi
+      case "$scenario" in
+        changed|refreshed)
+          printf '%s\n' "$MR_STALE_HEAD" > "$case_dir/live-head"
+          write_mr_json "$case_dir/mr.json" "head=$MR_STALE_HEAD" "pipeline_sha=$MR_STALE_HEAD"
+          ;;
+        race) : > "$case_dir/race" ;;
+        wrong-url) url=${url%/*}/99 ;;
+      esac
+      args=()
+      if [ "$provider" = github ] && [ "$scenario" = matching ]; then
+        args=(-- --method squash)
+      fi
+      rc=0
+      FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" "${args[@]+"${args[@]}"}" > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+      if [ "$scenario" = matching ]; then
+        expect_code 0 "$rc" "$provider: matching evidence refused"
+        [ -f "$case_dir/landed" ] || fail "$provider: matching evidence did not land"
+      else
+        [ "$rc" -ne 0 ] || fail "$provider/$scenario: unsafe merge accepted"
+        assert_absent "$case_dir/landed" "$provider/$scenario: unverified head landed"
+        if [ "$scenario" = race ]; then
+          assert_grep 'expected head mismatch' "$case_dir/err" "$provider: race did not reach expected-head check"
+        else
+          assert_grep 'original worker' "$case_dir/err" "$provider: no evidence refresh request"
+          assert_no_grep 'pr merge' "$case_dir/gh.log" "$provider: invoked merge before evidence check"
+          assert_no_grep 'mr merge' "$case_dir/glab.log" "$provider: invoked merge before evidence check"
+        fi
+      fi
+      if [ "$scenario" = refreshed ]; then
+        FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" PATH="$case_dir/fakebin:$PATH" \
+          "$ROOT/bin/fm-pr-check.sh" task-x1 "$url" "$MR_STALE_HEAD" > "$case_dir/out" 2> "$case_dir/err" \
+          || fail "$provider: refreshed evidence registration failed"
+        rc=0
+        FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+        expect_code 0 "$rc" "$provider: refreshed evidence could not continue"
+        [ -f "$case_dir/landed" ] || fail "$provider: refreshed evidence did not land"
+      fi
+    done
+  done
+  pass "both forges enforce final evidence continuity and conditional merges"
+}
+
+test_final_evidence_continuity
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance

@@ -57,6 +57,20 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
   esac
+  # shellcheck disable=SC2016 # Single quotes are deliberate: backticks must stay literal.
+  case "$out_a" in
+    *'For a no-mistakes task, register readiness with `bin/fm-pr-check.sh <task> <url> <evidenced-full-head>`'*"copying the full evidenced SHA from the worker's evidence-bearing ready report, never from the latest forge head."*) ;;
+    *) fail "emitted branch prompt lost the no-mistakes evidence registration contract" ;;
+  esac
+  case "$out_a" in
+    *"If that report lacks the full evidenced SHA, ask the original worker to complete it before registering readiness."*) ;;
+    *) fail "emitted branch prompt lost the missing-evidence recovery instruction" ;;
+  esac
+  # shellcheck disable=SC2016 # Single quotes are deliberate: backticks must stay literal.
+  case "$out_a" in
+    *'For a direct-PR task, retain `bin/fm-pr-check.sh <task> <url>`'*) ;;
+    *) fail "emitted branch prompt lost the two-argument direct-PR registration contract" ;;
+  esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 
