@@ -104,6 +104,19 @@ META_LOCK_HELD=1
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
+# This script is the only writer of pr= and pr_head=, so it owns the guarantee
+# that neither value can smuggle a second key into the task record through an
+# embedded line break. fm_pr_url_parse and fm_pr_head_valid already refuse such
+# a value, and this restates the consequence at the point of the write rather
+# than leaving it implicit in two regular expressions: the identity reader
+# (bin/fm-pr-lib.sh) binds itself to these two keys wherever they sit and no
+# longer treats an unexpected trailing line as evidence of tampering.
+case "$URL$PR_HEAD" in
+  *$'\n'*|*$'\r'*)
+    echo "error: invalid PR check request" >&2
+    exit 1
+    ;;
+esac
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
