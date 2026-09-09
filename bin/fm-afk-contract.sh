@@ -362,27 +362,68 @@ fm_afk_contract_read_words() {  # <path>
 fm_afk_contract_read_list() {  # <path> <section>
   local path=$1 section=$2
   [ -f "$path" ] || return 1
-  awk -v want="$section" '
+  awk -v want="$section" -v verbs="$FM_AFK_CONTRACT_VERBS" -v record="$path" '
+    function row_name() { return (id != "" ? id : ordinal + 1) }
+    function die(part) {
+      printf "fm-afk-contract: record %s has malformed %s row %s: missing or invalid %s\n", record, section, row_name(), part > "/dev/stderr"
+      bad = 1
+      exit 2
+    }
+    function valid_action(value,    values, count, i) {
+      count = split(verbs, values, " ")
+      for (i = 1; i <= count; i++) if (value == values[i]) return 1
+      return 0
+    }
     function flush() {
-      if (id == "") return
-      if (want == "clauses") printf "%s\t%s\t%s\t%s\t%s\n", id, action, object, when, stop
-      else if (want == "flags") { if (flag != "" && flag != "-") printf "%s\t%s\n", id, flag }
-      else printf "%s\t%s\t%s\n", id, text, missing
-      id = ""; action = ""; object = ""; when = ""; stop = ""; text = ""; missing = ""; flag = ""
+      if (!active) return
+      if (section == "clauses") {
+        if (state < 1 || id !~ /^[0-9]+$/) die("id")
+        if (state < 2 || !valid_action(action)) die("action")
+        if (state < 3) die("object")
+        if (state < 4) die("when")
+        if (state < 5) die("stop")
+        if (state < 6 || flag == "") die("flag")
+        if (want == "clauses") printf "%s\t%s\t%s\t%s\t%s\n", id, action, object, when, stop
+        else if (flag != "-") printf "%s\t%s\n", id, flag
+      } else {
+        if (state < 1 || id !~ /^[0-9]+$/) die("id")
+        if (state < 2) die("text")
+        if (state < 3 || missing == "") die("missing")
+        printf "%s\t%s\t%s\n", id, text, missing
+      }
+      ordinal++
+      active = 0
+      state = 0
+      id = action = object = when = stop = text = missing = flag = ""
     }
     BEGIN { section = (want == "flags") ? "clauses" : want }
-    $0 == section ":" { insection = 1; next }
-    insection && /^[^ ]/ { flush(); exit }
-    insection && /^  - id: / { flush(); id = substr($0, 9); next }
-    insection && /^    action: / { action = substr($0, 13); next }
-    insection && /^    object: e:/ { object = substr($0, 15); next }
-    insection && /^    when: e:/ { when = substr($0, 13); next }
-    insection && /^    stop: e:/ { stop = substr($0, 13); next }
-    insection && /^    stop: -$/ { stop = "-"; next }
-    insection && /^    flag: / { flag = substr($0, 11); next }
-    insection && /^    text: e:/ { text = substr($0, 13); next }
-    insection && /^    missing: / { missing = substr($0, 14); next }
-    END { flush() }
+    $0 == section ":" && !found { found = insection = 1; next }
+    insection && /^[^ ]/ { flush(); done = 1; exit }
+    !insection { next }
+    /^  - id: / {
+      flush()
+      active = 1
+      id = substr($0, 9)
+      state = 1
+      next
+    }
+    section == "clauses" && state == 1 && /^    action: / { action = substr($0, 13); state = 2; next }
+    section == "clauses" && state == 2 && /^    object: e:/ { object = substr($0, 15); state = 3; next }
+    section == "clauses" && state == 3 && /^    when: e:/ { when = substr($0, 13); state = 4; next }
+    section == "clauses" && state == 4 && /^    stop: e:/ { stop = substr($0, 13); state = 5; next }
+    section == "clauses" && state == 4 && /^    stop: -$/ { stop = "-"; state = 5; next }
+    section == "clauses" && state == 5 && /^    flag: / { flag = substr($0, 11); state = 6; next }
+    section == "refused" && state == 1 && /^    text: e:/ { text = substr($0, 13); state = 2; next }
+    section == "refused" && state == 2 && /^    missing: / { missing = substr($0, 14); state = 3; next }
+    { die(section == "clauses" ? (state == 1 ? "action" : state == 2 ? "object" : state == 3 ? "when" : state == 4 ? "stop" : state == 5 ? "flag" : "row") : (state == 1 ? "text" : state == 2 ? "missing" : "row")) }
+    END {
+      if (bad) exit 2
+      if (!done) flush()
+      if (!found) {
+        printf "fm-afk-contract: record %s lacks its %s section\n", record, section > "/dev/stderr"
+        exit 2
+      }
+    }
   ' "$path"
 }
 
@@ -418,8 +459,10 @@ fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
       ''|*[!0-9]*) fm_afk_contract_log "record $path was never confirmed"; return 1 ;;
     esac
   fi
-  if ! grep -q '^clauses:$' "$path" || ! grep -q '^refused:$' "$path"; then
-    fm_afk_contract_log "record $path lacks its clause sections"
+  if ! fm_afk_contract_read_list "$path" clauses >/dev/null; then
+    return 1
+  fi
+  if ! fm_afk_contract_read_list "$path" refused >/dev/null; then
     return 1
   fi
 }
@@ -647,7 +690,11 @@ fm_afk_contract_cmd_confirm() {
       return 1
     fi
   fi
-  mv "$staged" "$record" || { rm -f "$staged"; return 1; }
+  mv "$staged" "$record" || {
+    rm -f "$staged"
+    [ -z "${archived:-}" ] || rm -f "$archived"
+    return 1
+  }
   if [ -n "${archived:-}" ]; then
     fm_afk_contract_log "replaced the earlier away posture; its record is archived at $archived"
   fi

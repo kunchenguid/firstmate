@@ -320,6 +320,57 @@ test_failed_replacement_keeps_the_standing_record() {
   pass "a failed replacement keeps the standing posture live"
 }
 
+test_failed_final_replacement_rolls_back_the_superseded_archive() {
+  local home before out rc
+  home=$(make_home replace-final-move-failure)
+  contract "$home" propose --words 'original posture' >/dev/null || fail "first propose failed"
+  contract "$home" confirm >/dev/null || fail "first confirm failed"
+  before=$(cat "$home/state/.afk-contract")
+  contract "$home" propose --words 'replacement posture' >/dev/null || fail "replacement propose failed"
+  mkdir -p "$home/fakebin"
+  cat > "$home/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  *.afk-contract.confirming.*:*/.afk-contract) exit 1 ;;
+esac
+exec /bin/mv "$@"
+SH
+  chmod +x "$home/fakebin/mv"
+  set +e
+  out=$(PATH="$home/fakebin:$PATH" contract "$home" confirm 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "replacement succeeded after its final publication failed"
+  [ "$(cat "$home/state/.afk-contract")" = "$before" ] || fail "failed final publication changed the standing posture"
+  [ -f "$home/state/.afk-contract.proposed" ] || fail "failed final publication discarded the pending proposal"
+  [ -z "$(find "$home/state/afk-contracts" -name '*-superseded-*.afk-contract' -print -quit)" ] \
+    || fail "failed final publication left a duplicate superseded mandate"
+  pass "a failed final replacement publication rolls back its superseded archive"
+}
+
+test_validation_rejects_incomplete_clause_rows() {
+  local home record out rc
+  home=$(make_home malformed-clause-row)
+  contract "$home" propose --action merge --object 'task a PR' --when 'checks green' >/dev/null || fail "proposal failed"
+  contract "$home" confirm >/dev/null || fail "confirmation failed"
+  record="$home/state/.afk-contract"
+  grep -v '^    object: ' "$record" > "$home/truncated"
+  mv "$home/truncated" "$record"
+  set +e
+  out=$(contract "$home" validate 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "validation accepted a clause row without its object field"
+  assert_contains "$out" 'malformed clauses row 1: missing or invalid object' "validation did not name the malformed clause row"
+  set +e
+  out=$(contract "$home" archive 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "archive accepted a clause row without its object field"
+  [ -f "$record" ] || fail "archive moved the malformed clause record"
+  pass "validation and archive refuse incomplete clause rows by name"
+}
+
 test_archive_moves_the_record_aside_and_is_idempotent() {
   local home epoch path
   home=$(make_home archive)
@@ -383,5 +434,7 @@ test_propose_confirm_writes_the_record_and_announces_hold_for_return
 test_confirm_requires_readback_and_refresh_is_a_no_op
 test_confirming_a_new_proposal_archives_the_standing_record
 test_failed_replacement_keeps_the_standing_record
+test_failed_final_replacement_rolls_back_the_superseded_archive
+test_validation_rejects_incomplete_clause_rows
 test_archive_moves_the_record_aside_and_is_idempotent
 test_inputs_are_validated

@@ -575,7 +575,7 @@ test_return_brief_without_a_record_reports_the_legacy_flag() {
 
 
 test_unreadable_superseded_archive_keeps_return_gated() {
-  local dir out rc epoch archive
+  local dir out rc epoch archive backup
   dir="$TMP_ROOT/superseded-unreadable"
   install_runner "$dir"
   contract_in "$dir" propose --words 'first mandate' \
@@ -588,6 +588,8 @@ test_unreadable_superseded_archive_keeps_return_gated() {
   archive=""
   for archive in "$dir/home/state/afk-contracts/$epoch-superseded-"*.afk-contract; do break; done
   [ -f "$archive" ] || fail "no superseded archive was written"
+  backup="$dir/superseded.backup"
+  cp "$archive" "$backup"
   printf 'version: 1\n' > "$archive"
   touch "$dir/home/state/.last-watcher-beat"
   : > "$dir/home/state/.fake-drain"
@@ -599,9 +601,51 @@ test_unreadable_superseded_archive_keeps_return_gated() {
   assert_contains "$out" 'superseded away-posture record unreadable' "the gate did not name the unreadable superseded archive"
   [ -e "$dir/home/state/.afk-return-catchup" ] || fail "the gate was not retained"
   rm -f "$archive"
-  out=$(run_return "$dir" check) || fail "check did not clear once the unreadable archive was removed: $out"
+  set +e
+  out=$(run_return "$dir" check)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "deleting the named superseded archive cleared catch-up (rc=$rc): $out"
+  assert_contains "$out" "superseded away-posture record missing: $archive" "check did not retain the exact missing archive"
+  cp "$backup" "$archive"
+  out=$(run_return "$dir" check) || fail "check did not clear once the superseded archive was restored: $out"
   assert_contains "$out" 'catch-up clear' "check did not clear the gate"
-  pass "an unreadable superseded mandate keeps catch-up gated instead of being skipped"
+  pass "an unreadable superseded mandate stays required until its record validates"
+}
+
+test_missing_final_archive_keeps_retained_contract_gated() {
+  local dir out rc epoch archive backup
+  dir="$TMP_ROOT/final-archive-missing"
+  install_runner "$dir"
+  contract_in "$dir" propose --words 'durable mandate' \
+    --action merge --object 'task final PR' --when 'checks green' >/dev/null 2>&1 || fail "could not propose the mandate"
+  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the mandate"
+  epoch=$(contract_in "$dir" field entered_epoch)
+  seed_live_blocker "$dir" tmux repair-final
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "the live blocker did not retain catch-up (rc=$rc): $out"
+  archive="$dir/home/state/afk-contracts/$epoch.afk-contract"
+  [ -f "$archive" ] || fail "return did not archive the final posture record"
+  backup="$dir/final.backup"
+  cp "$archive" "$backup"
+  rm "$archive"
+  printf 'resolved [key=repair-final]: repaired the synthetic blocker\n' >> "$dir/home/state/repair-task.status"
+  set +e
+  out=$(run_return "$dir" check)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "check cleared after the retained final archive disappeared (rc=$rc): $out"
+  assert_contains "$out" "archived away-posture record missing for entered_epoch $epoch; catch-up stays gated" "check did not name the missing final archive"
+  [ -f "$dir/home/state/.afk-return-catchup" ] || fail "the missing final archive did not retain the gate"
+  cp "$backup" "$archive"
+  out=$(run_return "$dir" check) || fail "check did not clear after the final archive was restored: $out"
+  assert_contains "$out" 'catch-up clear' "a valid restored final archive did not clear catch-up"
+  pass "the retained contract epoch requires its final archive on every check"
 }
 
 test_return_gate_orders_catchup_before_bearings
@@ -611,6 +655,7 @@ test_evidence_publication_failure_preserves_wake_for_redrain
 test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
 test_unreadable_superseded_archive_keeps_return_gated
+test_missing_final_archive_keeps_retained_contract_gated
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated
