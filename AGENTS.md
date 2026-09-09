@@ -147,6 +147,8 @@ state/               runtime records and signals; gitignored
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
+.procevent-state-insecure  durable one-shot record that the process-event state root stopped being a private directory, written by bin/fm-procevent.sh when a caller swallows that refusal (its `.XXXXXX` staging siblings are transient, and a `.displaced-*` sibling holds whatever directory it had to move off the path); gitignored, cleared automatically on the first command that finds the root private again, and safe to delete
+.procevent-state-insecure-surfaced  suppressor proving the record above already reached the captain as one wake, written by bin/fm-watch.sh only after delivery; gitignored, cleared with the record, and deleting it re-arms that wake
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 

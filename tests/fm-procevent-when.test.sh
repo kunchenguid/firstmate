@@ -79,6 +79,51 @@ chmod +x "$ACT"
 
 count_lines() { [ -e "$1" ] && grep -c . "$1" || echo 0; }
 
+# Run the real watcher against <home> for at most <tenths> deciseconds, then stop
+# it. An out path of "-" gives the watcher a stdout reader that is already gone,
+# which is how an actionable wake fails to reach firstmate.
+# Queue a process-event wake so a run that must NOT report the insecure state
+# root still ends in an observable wake. procevent_surface_queued sits directly
+# after the insecure check, so seeing its reason proves the cycle got past it.
+queue_procevent_anchor() {  # <home> <key>
+  FM_STATE_OVERRIDE="$1/state" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_wake_append check "procevent:$2" "check: process-event result captured: $2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$2"
+}
+
+run_watcher() {  # <home> <out|-> <tenths>
+  local home=$1 out=$2 tenths=$3 pid='' wrapper i pidfile
+  pidfile="$home/.run-watcher.pid"
+  rm -f -- "$pidfile"
+  if [ "$out" = - ]; then
+    ( FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+        FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" 2>/dev/null &
+      echo $! > "$pidfile"
+      wait ) | true &
+  else
+    ( FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+        FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" 2>/dev/null &
+      echo $! > "$pidfile"
+      wait ) &
+  fi
+  wrapper=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ -z "$pid" ]; do
+    pid=$(cat "$pidfile" 2>/dev/null)
+    [ -n "$pid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "$pid" ] || fail "run_watcher could not observe the watcher pid"
+  i=0
+  while [ "$i" -lt "$tenths" ]; do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; i=$((i + 1)); done
+  kill "$pid" 2>/dev/null || true
+  wait "$wrapper" 2>/dev/null || true
+  rm -f -- "$pidfile"
+}
+
 # --- arm binds the pair and refuses a duplicate ------------------------------
 H="$TMP_ROOT/h-arm"; new_home "$H"
 out=$(when "$H" arm arm-test --interval 0.1 \
@@ -389,5 +434,284 @@ assert_grep 'trust binding' "$RESULT" "the refusal names the action trust bindin
 assert_absent "$ACTION_TAMPER_LOG" "the mutated action was not executed"
 assert_absent "$H/state/when/when-action-tamper.fired" "no fire was claimed for mutated action bytes"
 pass "mutated action bytes are refused before claiming the fire"
+
+# --- a state root that is group-writable is refused ----------------------------------
+H="$TMP_ROOT/h-group-writable"; new_home "$H"
+chmod 775 "$H/state" || fail "could not set group-writable permissions on state directory"
+if when "$H" arm group-writable-test --condition true --action true 2>"$TMP_ROOT/group-writable.err"; then
+  fail "arming against a group-writable state directory must be refused"
+fi
+assert_grep "process-event state root is not a private directory" "$TMP_ROOT/group-writable.err" "the refusal names the private-directory failure"
+assert_absent "$H/state/when/when-group-writable-test.spec" "no spec file was written"
+assert_absent "$H/state/when/when-group-writable-test.trust" "no trust file was written"
+assert_absent "$H/state/procevent/when-group-writable-test.source" "no registry file was written"
+chmod 700 "$H/state"
+pass "a group-writable state root is refused before any files are written"
+
+
+# --- a state root that turns insecure after arming is no longer swallowed silently ---
+H="$TMP_ROOT/h-insecure-after-arm"; new_home "$H"
+when "$H" arm survives-relax --interval 0.1 --stable 1 --condition true --action true >/dev/null \
+  || fail "could not arm against a private state root"
+assert_absent "$H/.procevent-state-insecure" "no insecure marker before the root is relaxed"
+chmod 775 "$H/state" || fail "could not relax the state directory to group-writable"
+pe "$H" reconcile >/dev/null 2>&1
+detected_first=$(awk -F= '$1=="detected"{print $2}' "$H/.procevent-state-insecure" 2>/dev/null)
+[ -n "$detected_first" ] || fail "reconcile against an insecure root left no durable record where the caller swallows the failure"
+assert_grep "state=$H/state" "$H/.procevent-state-insecure" "the durable record names the offending state root"
+printf 'sentinel=first-write\n' >> "$H/.procevent-state-insecure"
+pe "$H" reconcile >/dev/null 2>&1
+assert_grep "sentinel=first-write" "$H/.procevent-state-insecure" \
+  "a repeat failure replaced the durable record instead of keeping the first detection"
+detected_second=$(awk -F= '$1=="detected"{print $2}' "$H/.procevent-state-insecure" 2>/dev/null)
+[ "$detected_first" = "$detected_second" ] || fail "a repeat failure rewrote the first detection timestamp"
+chmod 700 "$H/state" || fail "could not restore private permissions"
+pe "$H" reconcile >/dev/null 2>&1 || fail "reconcile against a restored private root should succeed"
+assert_absent "$H/.procevent-state-insecure" "the durable record was not cleared once the root is private again"
+pass "a state root that turns insecure after arming leaves a durable record instead of vanishing"
+
+# --- the watcher turns the swallowed failure into one delivered wake ----------------
+H="$TMP_ROOT/h-watch-insecure"; new_home "$H"
+when "$H" arm watch-surfaces --interval 0.1 \
+  --condition "$COND" "$TMP_ROOT/never" "$TMP_ROOT/watch-surfaces-count" \
+  --action "$ACT" "$TMP_ROOT/watch-surfaces-act" >/dev/null \
+  || fail "could not arm against a private state root"
+chmod 775 "$H/state" || fail "could not relax the state directory to group-writable"
+run_watcher "$H" - 100
+assert_present "$H/.procevent-state-insecure" "the watcher's own swallowed reconcile left the durable record"
+assert_absent "$H/.procevent-state-insecure-surfaced" \
+  "a wake that never reached firstmate latched the one-shot suppressor anyway"
+
+run_watcher "$H" "$TMP_ROOT/watch-insecure.out" 100
+assert_grep "check: procevent-state-insecure" "$TMP_ROOT/watch-insecure.out" \
+  "the watcher surfaced the state root that stopped being private"
+assert_present "$H/.procevent-state-insecure-surfaced" "the delivered wake latched the one-shot suppressor"
+
+queue_procevent_anchor "$H" anchor-again
+run_watcher "$H" "$TMP_ROOT/watch-insecure-again.out" 100
+assert_grep "process-event result captured" "$TMP_ROOT/watch-insecure-again.out" \
+  "the run that must not re-report never completed a cycle past the insecure check"
+if grep -Fq "check: procevent-state-insecure" "$TMP_ROOT/watch-insecure-again.out"; then
+  fail "the watcher re-reported the same insecure state root on a later cycle"
+fi
+chmod 700 "$H/state" || fail "could not restore private permissions"
+pass "the watcher reports a state root that stopped being private once, only once delivered"
+
+# --- neither marker path can be redirected through a planted symlink ----------------
+# A symlink to a DIRECTORY is the sharp case: `mv file link` renames into the
+# target directory and leaves the link intact, so the marker never lands where
+# its readers look and the suppressor can never commit.
+H="$TMP_ROOT/h-marker-symlink-dir"; new_home "$H"
+mkdir -p "$H/record-target-dir"
+ln -s record-target-dir "$H/.procevent-state-insecure"
+chmod 775 "$H/state" || fail "could not relax the state directory to group-writable"
+pe "$H" reconcile >/dev/null 2>&1
+[ -z "$(ls -A "$H/record-target-dir")" ] || fail "the durable record was written into its symlinked directory"
+[ ! -L "$H/.procevent-state-insecure" ] || fail "the durable record stayed a symlink to a directory"
+assert_grep "state=$H/state" "$H/.procevent-state-insecure" \
+  "the record replacing a symlinked directory names the offending state root"
+
+mkdir -p "$H/surfaced-target-dir"
+ln -s surfaced-target-dir "$H/.procevent-state-insecure-surfaced"
+run_watcher "$H" "$TMP_ROOT/watch-symlink-dir.out" 100
+assert_grep "check: procevent-state-insecure" "$TMP_ROOT/watch-symlink-dir.out" \
+  "a symlinked directory at the suppressor path silenced the wake"
+[ -z "$(ls -A "$H/surfaced-target-dir")" ] || fail "the suppressor was written into its symlinked directory"
+[ ! -L "$H/.procevent-state-insecure-surfaced" ] || fail "the suppressor stayed a symlink to a directory"
+queue_procevent_anchor "$H" anchor-symlink-dir
+run_watcher "$H" "$TMP_ROOT/watch-symlink-dir-again.out" 100
+assert_grep "process-event result captured" "$TMP_ROOT/watch-symlink-dir-again.out" \
+  "the run that must not re-report never completed a cycle past the insecure check"
+if grep -Fq "check: procevent-state-insecure" "$TMP_ROOT/watch-symlink-dir-again.out"; then
+  fail "the suppressor never committed, so the watcher woke again every cycle"
+fi
+chmod 700 "$H/state" || fail "could not restore private permissions"
+pass "a symlinked directory at either marker path is replaced, not written into"
+
+H="$TMP_ROOT/h-marker-symlink"; new_home "$H"
+ln -s marker-target "$H/.procevent-state-insecure"
+chmod 775 "$H/state" || fail "could not relax the state directory to group-writable"
+pe "$H" reconcile >/dev/null 2>&1
+[ ! -e "$H/marker-target" ] || fail "the durable record wrote through its dangling symlink target"
+[ ! -L "$H/.procevent-state-insecure" ] || fail "the durable record stayed a symlink"
+assert_grep "state=$H/state" "$H/.procevent-state-insecure" "the replacing record names the offending state root"
+
+printf 'preserve me too\n' > "$H/surfaced-target"
+ln -s surfaced-target "$H/.procevent-state-insecure-surfaced"
+run_watcher "$H" "$TMP_ROOT/watch-symlink.out" 100
+assert_grep "check: procevent-state-insecure" "$TMP_ROOT/watch-symlink.out" \
+  "a symlink planted at the suppressor path silenced the wake"
+[ "$(cat "$H/surfaced-target")" = 'preserve me too' ] || fail "the suppressor wrote through its symlink target"
+[ ! -L "$H/.procevent-state-insecure-surfaced" ] || fail "the suppressor stayed a symlink"
+chmod 700 "$H/state" || fail "could not restore private permissions"
+pass "a planted symlink cannot redirect or silence either marker"
+
+# --- a plain directory at either marker path cannot silence the mechanism -----------
+H="$TMP_ROOT/h-marker-dir"; new_home "$H"
+mkdir "$H/.procevent-state-insecure"
+chmod 775 "$H/state" || fail "could not relax the state directory to group-writable"
+pe "$H" reconcile >/dev/null 2>&1
+[ ! -d "$H/.procevent-state-insecure" ] || fail "a directory at the record path was read as a valid record"
+assert_grep "state=$H/state" "$H/.procevent-state-insecure" \
+  "the record replacing a directory names the offending state root"
+
+mkdir "$H/.procevent-state-insecure-surfaced"
+run_watcher "$H" "$TMP_ROOT/watch-marker-dir.out" 100
+assert_grep "check: procevent-state-insecure" "$TMP_ROOT/watch-marker-dir.out" \
+  "a directory at the suppressor path silenced the wake"
+[ ! -d "$H/.procevent-state-insecure-surfaced" ] || fail "the suppressor stayed a directory"
+queue_procevent_anchor "$H" anchor-marker-dir
+run_watcher "$H" "$TMP_ROOT/watch-marker-dir-again.out" 100
+assert_grep "process-event result captured" "$TMP_ROOT/watch-marker-dir-again.out" \
+  "the run that must not re-report never completed a cycle past the insecure check"
+if grep -Fq "check: procevent-state-insecure" "$TMP_ROOT/watch-marker-dir-again.out"; then
+  fail "the suppressor never committed, so the watcher woke again every cycle"
+fi
+chmod 700 "$H/state" || fail "could not restore private permissions"
+pe "$H" reconcile >/dev/null 2>&1 || fail "reconcile against a restored private root should succeed"
+assert_absent "$H/.procevent-state-insecure" "the record replacing a directory was never cleared"
+pass "a directory at either marker path is replaced, not treated as a valid marker"
+
+# --- a non-empty directory at either marker path cannot silence the mechanism -------
+# Its contents are not this code's to delete, so the path is freed by moving the
+# directory aside; nothing it held may be lost.
+H="$TMP_ROOT/h-marker-dir-nonempty"; new_home "$H"
+mkdir -p "$H/.procevent-state-insecure/kept"
+printf 'do not lose me\n' > "$H/.procevent-state-insecure/kept/payload"
+chmod 775 "$H/state" || fail "could not relax the state directory to group-writable"
+pe "$H" reconcile >/dev/null 2>&1
+[ ! -d "$H/.procevent-state-insecure" ] \
+  || fail "a non-empty directory at the record path was read as a valid record"
+assert_grep "state=$H/state" "$H/.procevent-state-insecure" \
+  "the record replacing a non-empty directory names the offending state root"
+displaced=$(printf '%s\n' "$H"/.procevent-state-insecure.displaced-* | head -1)
+[ "$(cat "$displaced/kept/payload" 2>/dev/null)" = 'do not lose me' ] \
+  || fail "the displaced directory's contents were destroyed instead of moved aside"
+
+mkdir -p "$H/.procevent-state-insecure-surfaced/kept"
+run_watcher "$H" "$TMP_ROOT/watch-dir-nonempty.out" 100
+assert_grep "check: procevent-state-insecure" "$TMP_ROOT/watch-dir-nonempty.out" \
+  "a non-empty directory at the suppressor path silenced the wake"
+[ ! -d "$H/.procevent-state-insecure-surfaced" ] || fail "the suppressor stayed a directory"
+queue_procevent_anchor "$H" anchor-dir-nonempty
+run_watcher "$H" "$TMP_ROOT/watch-dir-nonempty-again.out" 100
+assert_grep "process-event result captured" "$TMP_ROOT/watch-dir-nonempty-again.out" \
+  "the run that must not re-report never completed a cycle past the insecure check"
+if grep -Fq "check: procevent-state-insecure" "$TMP_ROOT/watch-dir-nonempty-again.out"; then
+  fail "the suppressor never committed, so the watcher woke again every cycle"
+fi
+chmod 700 "$H/state" || fail "could not restore private permissions"
+pe "$H" reconcile >/dev/null 2>&1 || fail "reconcile against a restored private root should succeed"
+assert_absent "$H/.procevent-state-insecure" "the record was never cleared once the root was private"
+pass "a non-empty directory at either marker path is moved aside, not treated as a marker"
+
+# --- a non-empty directory at the record path never invents a wake -----------------
+H="$TMP_ROOT/h-marker-dir-noalarm"; new_home "$H"
+mkdir -p "$H/.procevent-state-insecure/kept"
+pe "$H" reconcile >/dev/null 2>&1 || fail "reconcile against a private root should succeed"
+queue_procevent_anchor "$H" anchor-noalarm
+run_watcher "$H" "$TMP_ROOT/watch-dir-noalarm.out" 100
+assert_grep "process-event result captured" "$TMP_ROOT/watch-dir-noalarm.out" \
+  "the run never completed a cycle past the insecure check"
+if grep -Fq "check: procevent-state-insecure" "$TMP_ROOT/watch-dir-noalarm.out"; then
+  fail "a directory at the record path made the watcher report a private root as insecure"
+fi
+pass "a directory at the record path cannot claim a private state root stopped being private"
+
+# --- a stale success never erases a record a concurrent command just wrote --------
+# The retire path runs after its own successful observation of the root, so a
+# record that appeared or was replaced since that observation describes a root
+# that stopped being private afterwards. Retiring on the record's identity
+# rather than its mere presence is what keeps that newer record standing.
+in_lib() {  # <argv...>
+  FM_HOME="$TMP_ROOT" bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-procevent-lib.sh"
+    fn=$2; shift 2; "$fn" "$@"
+  ' _ "$ROOT" "$@"
+}
+
+H="$TMP_ROOT/h-retire-race"; new_home "$H"
+M="$H/.procevent-state-insecure"
+printf 'fm-procevent-state-insecure-v1\ndetected=1\nstate=%s\n' "$H/state" > "$M"
+printf 'fm-procevent-state-insecure-surfaced-v1\n' > "$M-surfaced"
+seen=$(in_lib fm_procevent_insecure_marker_identity "$M")
+[ "$seen" != absent ] || fail "the snapshot did not identify the record it saw"
+printf 'fm-procevent-state-insecure-v1\ndetected=2\nstate=%s\n' "$H/state" > "$M.newer"
+mv -f "$M.newer" "$M"
+in_lib fm_procevent_insecure_marker_retire "$M" "$seen"
+assert_present "$M" "a record written after the observation was erased by a stale success"
+assert_grep "detected=2" "$M" "the surviving record is the newer detection"
+assert_present "$M-surfaced" "the suppressor was retired against a record the run never saw"
+pass "a stale success leaves a newer insecure-root record standing"
+
+# --- the record a run did see is still retired once the root is private again -----
+seen=$(in_lib fm_procevent_insecure_marker_identity "$M")
+in_lib fm_procevent_insecure_marker_retire "$M" "$seen"
+assert_absent "$M" "the record the run saw before observing a private root was not retired"
+assert_absent "$M-surfaced" "the one-shot suppressor outlived the record it suppressed"
+pass "the record a run saw before a private observation is retired with its suppressor"
+
+# --- a record written while the retire is deciding still stands -------------------
+# The stub stands in for a concurrent failing command that records at exactly the
+# instant the retire inspects the record it claimed; the retire must not erase it.
+H="$TMP_ROOT/h-retire-race-window"; new_home "$H"
+M="$H/.procevent-state-insecure"
+printf 'fm-procevent-state-insecure-v1\ndetected=1\nstate=%s\n' "$H/state" > "$M"
+seen=$(in_lib fm_procevent_insecure_marker_identity "$M")
+FM_HOME="$TMP_ROOT" bash -c '
+  . "$1/bin/fm-pr-lib.sh"
+  . "$1/bin/fm-wake-lib.sh"
+  . "$1/bin/fm-procevent-lib.sh"
+  marker=$2
+  eval "$(declare -f fm_pr_file_identity | sed "1s/^fm_pr_file_identity/fm_pr_file_identity_real/")"
+  fm_pr_file_identity() {
+    local rc out
+    out=$(fm_pr_file_identity_real "$1"); rc=$?
+    if [ ! -e "$marker.raced" ]; then
+      : > "$marker.raced"
+      printf "fm-procevent-state-insecure-v1\ndetected=2\nstate=concurrent\n" > "$marker.newer"
+      mv -f "$marker.newer" "$marker"
+    fi
+    printf "%s\n" "$out"
+    return "$rc"
+  }
+  fm_procevent_insecure_marker_retire "$marker" "$3"
+' _ "$ROOT" "$M" "$seen"
+assert_present "$M" "the record written during the retire's own decision was erased"
+assert_grep "state=concurrent" "$M" "the surviving record is the one written during the decision"
+pass "a record written while a retire decides is not erased by that retire"
+
+# --- a record that appears while a run with no record of its own retires ----------
+# The snapshot was `absent`, so nothing of this run's is at the path; a concurrent
+# failing command lands its record there while the retire is still running. The
+# stub installs it on the retire's first fm_marker_clear, which is the exact
+# instant the previous code unlinked the path.
+H="$TMP_ROOT/h-retire-race-absent"; new_home "$H"
+M="$H/.procevent-state-insecure"
+printf 'fm-procevent-state-insecure-surfaced-v1\n' > "$M-surfaced"
+seen=$(in_lib fm_procevent_insecure_marker_identity "$M")
+[ "$seen" = absent ] || fail "the snapshot claimed a record where none exists"
+FM_HOME="$TMP_ROOT" bash -c '
+  . "$1/bin/fm-pr-lib.sh"
+  . "$1/bin/fm-wake-lib.sh"
+  . "$1/bin/fm-procevent-lib.sh"
+  marker=$2
+  eval "$(declare -f fm_marker_clear | sed "1s/^fm_marker_clear/fm_marker_clear_real/")"
+  fm_marker_clear() {
+    if [ ! -e "$marker.raced" ]; then
+      : > "$marker.raced"
+      printf "fm-procevent-state-insecure-v1\ndetected=2\nstate=concurrent\n" > "$marker.newer"
+      mv -f "$marker.newer" "$marker"
+    fi
+    fm_marker_clear_real "$@"
+  }
+  fm_procevent_insecure_marker_retire "$marker" "$3"
+' _ "$ROOT" "$M" "$seen"
+assert_present "$M" "a record that appeared during a no-record retire was erased"
+assert_grep "state=concurrent" "$M" "the surviving record is the one written during the retire"
+assert_absent "$M-surfaced" "the stale suppressor outlived the record it suppressed"
+pass "a retire that saw no record cannot erase one that appears while it runs"
 
 printf 'all fm-procevent-when tests passed\n'

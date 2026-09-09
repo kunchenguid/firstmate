@@ -271,6 +271,27 @@ fm_pr_private_file_valid() {
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }
 
+# A marker this repo stages with mktemp+rename is settled only when the path
+# holds the regular file that code writes. Nothing else at the path counts.
+fm_marker_settled() {  # <path>
+  local path=$1
+  [ ! -L "$path" ] || return 1
+  [ -f "$path" ]
+}
+
+# Free <path> so a staged rename replaces it instead of writing through a
+# symlink or into a directory. A directory whose contents this code does not own
+# is moved aside rather than deleted, so no shape leaves the path unwritable.
+fm_marker_clear() {  # <path>
+  local path=$1
+  rm -f -- "$path" 2>/dev/null || true
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    rmdir -- "$path" 2>/dev/null \
+      || mv -- "$path" "$path.displaced-$$-$RANDOM" 2>/dev/null || true
+  fi
+  [ ! -e "$path" ] && [ ! -L "$path" ]
+}
+
 fm_pr_regular_destination_or_absent() {
   local path=$1
   [ ! -L "$path" ] || return 1

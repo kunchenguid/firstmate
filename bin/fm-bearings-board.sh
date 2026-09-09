@@ -426,6 +426,9 @@ command_build() {
     "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
     owner=$(await_source_owner "$sid")
     if [ "$owner" != live ]; then
+      if [ -e "$FM_HOME/.procevent-state-insecure" ]; then
+        fail "source $sid is not listening after reconcile: the process-event state root is not a private directory (see $FM_HOME/.procevent-state-insecure)"
+      fi
       fail "source $sid is not listening after reconcile (observed owner: ${owner:-none})"
     fi
     printf 'listening: live\n'

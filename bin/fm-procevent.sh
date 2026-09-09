@@ -47,6 +47,19 @@
 #            start a runner for any registered source that has no live owner.
 #            This is liveness repair only - it never discovers results by
 #            polling the source, because the child blocks on the source itself.
+#            Every command here, reconcile included, first requires the state
+#            root to still be a private directory (see fm_procevent_private_directory_valid
+#            in fm-procevent-lib.sh); a root that has stopped being private dies
+#            before doing anything else. A caller that swallows that exit (the
+#            watcher's own reconcile call does, by design, so an ordinary poll
+#            cycle never wakes on a transient error) would otherwise lose the
+#            failure entirely, so the first such failure is recorded once at
+#            $FM_HOME/.procevent-state-insecure and retired automatically the
+#            next time the root is private again - but only the exact record
+#            this run saw before it observed the root, so a slower success
+#            cannot erase a newer failure a concurrent command just recorded.
+#            bin/fm-watch.sh surfaces that marker as a one-shot wake instead of
+#            leaving it to rot unseen.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -215,8 +228,27 @@ state_root_bind() {  # [create]
   export FM_STATE_OVERRIDE
 }
 
+INSECURE_MARKER="$FM_HOME/.procevent-state-insecure"
+
+insecure_marker_record() {  # <attempted-state>
+  local tmp
+  ! fm_marker_settled "$INSECURE_MARKER" || return 0
+  tmp=$(umask 077; mktemp "$INSECURE_MARKER.XXXXXX" 2>/dev/null) || return 0
+  printf 'fm-procevent-state-insecure-v1\ndetected=%s\nstate=%s\n' "$(date +%s)" "$1" > "$tmp" \
+    2>/dev/null && fm_marker_clear "$INSECURE_MARKER" \
+    && mv -f -- "$tmp" "$INSECURE_MARKER" 2>/dev/null && return 0
+  rm -f -- "$tmp" 2>/dev/null || true
+}
+
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
-  state_root_bind || die "process-event state root is not a private directory"
+  ATTEMPTED_STATE=$STATE
+  INSECURE_SEEN=$(fm_procevent_insecure_marker_identity "$INSECURE_MARKER")
+  if state_root_bind; then
+    fm_procevent_insecure_marker_retire "$INSECURE_MARKER" "$INSECURE_SEEN"
+  else
+    insecure_marker_record "$ATTEMPTED_STATE"
+    die "process-event state root is not a private directory"
+  fi
 fi
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }

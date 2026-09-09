@@ -1176,3 +1176,28 @@ fm_procevent_result_extension_load() {  # <result-path>
   fm_procevent_digest_valid "$FM_PROCEVENT_RESULT_EXTENSION_PACKAGE_DIGEST" || return 2
   fm_procevent_digest_valid "$FM_PROCEVENT_RESULT_EXTENSION_BINDING_DIGEST" || return 2
 }
+
+# Identity of the insecure-state-root record, or the literal "absent". Callers
+# snapshot this BEFORE observing the root so a later retire can tell its own
+# record apart from one another process wrote in the meantime.
+fm_procevent_insecure_marker_identity() {  # <marker>
+  fm_marker_settled "$1" && fm_pr_file_identity "$1" 2>/dev/null || printf 'absent\n'
+}
+
+# Retire the record only when it is still the exact file the caller saw before
+# it observed the root private. The claiming rename is the single decision
+# point, so nothing is inspected and then acted on separately: a record written
+# after the claim lands at the freed path and stands, and a newer record the
+# claim caught is put back untouched.
+fm_procevent_insecure_marker_retire() {  # <marker> <identity-snapshot>
+  local marker=$1 seen=$2 claim=$1.retiring-$$
+  rm -f -- "$claim" 2>/dev/null || true
+  mv -- "$marker" "$claim" 2>/dev/null || { [ "$seen" = absent ] || return 0; }
+  if fm_marker_settled "$claim" && [ "$(fm_pr_file_identity "$claim")" != "$seen" ]; then
+    ln -- "$claim" "$marker" 2>/dev/null || true
+    rm -f -- "$claim" 2>/dev/null || true
+    return 0
+  fi
+  rm -f -- "$claim" 2>/dev/null || true
+  fm_marker_clear "$marker-surfaced" || true
+}

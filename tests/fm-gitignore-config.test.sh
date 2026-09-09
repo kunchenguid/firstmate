@@ -22,6 +22,26 @@ random_leaf() {
   printf '%s-%s' "$1" "$$-$RANDOM-$RANDOM"
 }
 
+# fm-procevent.sh writes its insecure-state-root markers into FM_HOME, which
+# defaults to the firstmate checkout. Untracked there, they make the working tree
+# read as dirty, which is what stops bin/fm-update.sh fast-forwarding.
+test_procevent_insecure_markers_do_not_dirty_porcelain() {
+  local repo status
+  repo=$(mktemp -d "${TMPDIR:-/tmp}/fm-procevent-marker-ignore.XXXXXX")
+  git init -q "$repo"
+  cp "$ROOT/.gitignore" "$repo/.gitignore"
+  git -C "$repo" add .gitignore
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'seed gitignore'
+  printf 'detected\n' > "$repo/.procevent-state-insecure"
+  : > "$repo/.procevent-state-insecure-surfaced"
+  : > "$repo/.procevent-state-insecure.tmpAB12"
+  status=$(git -C "$repo" status --porcelain)
+  rm -rf "$repo"
+  [ -z "$status" ] || fail "process-event insecure markers still dirty porcelain: $status"
+  pass "process-event insecure-state-root markers do not make the checkout dirty"
+}
+
 test_config_dir_ignored_as_category() {
   local direct nested sample
   direct="$(random_leaf config/unlisted-key)"
@@ -87,3 +107,4 @@ test_unrelated_path_stays_visible
 test_scratchpad_prefix_is_ignored
 test_scratchpad_prefix_ignores_no_tracked_path
 test_scratchpad2_does_not_dirty_porcelain
+test_procevent_insecure_markers_do_not_dirty_porcelain

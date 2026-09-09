@@ -749,6 +749,8 @@ The adapter automates only the exact deterministic subset: anything needing judg
 
 This section is the single owner of the runner's operating contract.
 Process-event commands resolve the state root to its physical directory before validating it and deriving paths, so a home reached through a symlinked ancestor behaves like its physical spelling while an unsafe target directory remains refused.
+That validation gates every command, an adapter's `arm` and the watcher's per-cycle `reconcile` included, so a root that has stopped being a private directory refuses before any spec, trust, or registration record is written rather than half-arming a source.
+Callers that deliberately swallow that reconcile's exit would lose the refusal entirely, so the first one is recorded once at `$FM_HOME/.procevent-state-insecure`: the watcher reports it as a single `check: procevent-state-insecure` wake, and the first command that finds the root private again clears the record.
 Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before any announcement or event can reference it.
 By default, results are published as ordinary `check` wakes carrying the source id and committed result sequence through the existing durable wake queue, so the runner adds no second notification control plane.
 The self-announcing adapter exception and its fail-safe ordering are defined below.
