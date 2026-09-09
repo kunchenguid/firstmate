@@ -55,6 +55,16 @@
 #                           that issue and refuses when there is none.
 #   .gitlab-issues-error    the last poll-error line and when it was printed.
 #
+# Every writer of the pending record runs under state/.gitlab-issues.lock, the
+# repo's portable lock from fm-wake-lib.sh (a dead holder is reclaimed, a live one
+# is waited for): `check` appends the pending lines and then writes the seen
+# record while holding it, and `handled` re-reads the pending record under it
+# before rewriting, so an append can never be lost to a concurrent rewrite. A
+# `check` that cannot take the lock before its sweep deadline reports that as a
+# poll error and leaves the seen record alone, so the new pairs are reported by
+# the next poll instead of being marked seen without their details. `handled`
+# waits at most one FM_CHECK_TIMEOUT for the lock, longer than any sweep holds it.
+#
 # The report line is `gitlab-issue <n> new: <path>#<iid>(<label>) ...`, listing
 # the first MAX_LISTED pairs and counting the rest, capped to MAX_LINE characters.
 # A glab or jq failure, a malformed config, or a sweep that ran out of time prints
@@ -83,6 +93,7 @@ CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 SEEN="$STATE/.gitlab-issues-seen"
 PENDING="$STATE/.gitlab-issues-pending"
 ERROR_MARK="$STATE/.gitlab-issues-error"
+PENDING_LOCK="$STATE/.gitlab-issues.lock"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 UNREGISTER_BIN="$SCRIPT_DIR/fm-check-unregister.sh"
 DEFAULT_LABELS='["fm::todo","fm::human-replied"]'
@@ -97,6 +108,8 @@ MAX_LINE=400
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -274,10 +287,31 @@ emit_error() {
 SWEEP_DIR=
 DEADLINE=0
 POLL_REASON=
+LOCK_HELD=0
+
+# pending_lock_take <seconds>: hold state/.gitlab-issues.lock, waiting at most
+# that long for a live holder. FM_LOCK_HELD_PID names a holder that outlasted it.
+pending_lock_take() {
+  fm_lock_acquire_wait_bounded "$PENDING_LOCK" "$1" || return 1
+  LOCK_HELD=1
+}
+
+pending_lock_release() {
+  [ "$LOCK_HELD" -eq 1 ] || return 0
+  LOCK_HELD=0
+  fm_lock_release "$PENDING_LOCK"
+}
 
 sweep_cleanup() {
+  pending_lock_release
   [ -z "$SWEEP_DIR" ] || rm -rf -- "$SWEEP_DIR"
   SWEEP_DIR=
+}
+
+# shellcheck disable=SC2329  # Registered by action_check's signal traps.
+sweep_interrupted() {
+  sweep_cleanup
+  exit "$1"
 }
 
 # fetch_label <label> <out-file>: one bounded, paginated glab call. Sets
@@ -331,31 +365,35 @@ current_pairs() {
   ' "$file"
 }
 
-# pending_records <label> <ndjson> <new-pairs-json-object> <epoch>: the JSON line
-# for each issue whose (issue, label) pair is new.
+# pending_records <label> <ndjson> <new-pairs-json-object> <epoch>: one JSON line
+# per new (issue, label) pair. A paginated answer can list the same issue on two
+# pages when issues shift between page fetches, so the pairs are deduplicated the
+# way the seen merge deduplicates them, and pending agrees with the report count.
 pending_records() {
   local label=$1 file=$2 new=$3 epoch=$4
   [ -s "$file" ] || return 0
-  jq -c --arg want "$label" --argjson new "$new" --argjson epoch "$epoch" '
+  jq -c -s --arg want "$label" --argjson new "$new" --argjson epoch "$epoch" '
     def project_path:
       ((.web_url // "") | capture("^https?://[^/]+/(?<p>.+)/-/issues/[0-9]+/?$")? | .p)
       // (((.references // {}).full // "") | split("#") | .[0] | select(length > 0));
-    (project_path) as $p
-    | select($p != null and $p != "")
-    | "\($p)#\(.iid)" as $key
-    | select($new | has($key + "\t" + $want))
-    | {
-        issue: $key, project: $p, iid: .iid, label: $want,
-        title: .title, state: .state, web_url: .web_url, labels: (.labels // []),
-        author: ((.author // {}).username // null),
-        created_at: .created_at, updated_at: .updated_at,
-        description: (.description // ""), seen_epoch: $epoch
-      }
+    [ .[]
+      | (project_path) as $p
+      | select($p != null and $p != "")
+      | "\($p)#\(.iid)" as $key
+      | select($new | has($key + "\t" + $want))
+      | {
+          issue: $key, project: $p, iid: .iid, label: $want,
+          title: .title, state: .state, web_url: .web_url, labels: (.labels // []),
+          author: ((.author // {}).username // null),
+          created_at: .created_at, updated_at: .updated_at,
+          description: (.description // ""), seen_epoch: $epoch
+        }
+    ] | unique_by([.issue, .label]) | .[]
   ' "$file"
 }
 
 action_check() {
-  local label i now current seen_old seen_new new_pairs new_json count line listed rest
+  local label i now current seen_old seen_new new_pairs new_json count line listed rest remaining
   local -a labels=()
 
   [ -f "$CONFIG" ] || return 0
@@ -374,7 +412,10 @@ action_check() {
     emit_error "could not create a temporary directory"
     return 0
   }
-  trap sweep_cleanup EXIT HUP INT TERM
+  trap sweep_cleanup EXIT
+  trap 'sweep_interrupted 129' HUP
+  trap 'sweep_interrupted 130' INT
+  trap 'sweep_interrupted 143' TERM
   DEADLINE=$(($(real_epoch) + SWEEP_SECS))
 
   while IFS= read -r label; do
@@ -446,11 +487,21 @@ action_check() {
   done
   # The details land before the wake is printed, so firstmate finds them when it
   # reads `pending`; a seen record that cannot be written costs a repeated report.
+  # Both land under the pending lock, and a lock that cannot be taken before the
+  # sweep deadline leaves the seen record alone so the next poll reports the pairs.
+  remaining=$((DEADLINE - $(real_epoch)))
+  [ "$remaining" -ge 1 ] || remaining=1
+  if ! pending_lock_take "$remaining"; then
+    emit_error "could not lock $PENDING within ${remaining}s${FM_LOCK_HELD_PID:+ (held by pid $FM_LOCK_HELD_PID)}"
+    return 0
+  fi
   if ! ( umask 077; cat "$SWEEP_DIR/pending" >> "$PENDING" ); then
+    pending_lock_release
     emit_error "could not write $PENDING"
     return 0
   fi
   private_write "$SEEN" < "$seen_new" || true
+  pending_lock_release
 
   listed=$(awk -F '\t' -v max="$MAX_LISTED" 'NR <= max { printf "%s%s(%s)", (NR > 1 ? " " : ""), $1, $2 }' "$new_pairs")
   rest=$((count - MAX_LISTED))
@@ -468,8 +519,36 @@ action_pending() {
   cat "$PENDING"
 }
 
+HANDLED_REMOVED=0
+
+# handled_rewrite <key>: read the pending record and write it back without that
+# issue's entries. Runs only while the pending lock is held, so the lines read
+# are the lines replaced.
+handled_rewrite() {
+  local key=$1 kept
+  HANDLED_REMOVED=0
+  if [ ! -f "$PENDING" ] || [ -L "$PENDING" ]; then
+    printf 'fm-gitlab-issues: no pending entry for %s\n' "$key" >&2
+    return 1
+  fi
+  kept=$(jq -c --arg k "$key" 'select(.issue != $k)' "$PENDING" 2>/dev/null) || {
+    printf 'fm-gitlab-issues: %s is not readable as JSON lines\n' "$PENDING" >&2
+    return 1
+  }
+  HANDLED_REMOVED=$(jq -c --arg k "$key" 'select(.issue == $k)' "$PENDING" 2>/dev/null | wc -l | tr -d '[:space:]')
+  if [ "$HANDLED_REMOVED" -eq 0 ]; then
+    printf 'fm-gitlab-issues: no pending entry for %s\n' "$key" >&2
+    return 1
+  fi
+  if [ -z "$kept" ]; then
+    rm -f -- "$PENDING" || return 1
+  else
+    printf '%s\n' "$kept" | private_write "$PENDING" || return 1
+  fi
+}
+
 action_handled() {
-  local key=${1-} path iid kept removed
+  local key=${1-} path iid rc
   case "$key" in
     *#*) path=${key%#*}; iid=${key##*#} ;;
     *) die_usage "handled needs <path_with_namespace>#<iid>" ;;
@@ -480,21 +559,15 @@ action_handled() {
     printf 'fm-gitlab-issues: no pending entry for %s\n' "$key" >&2
     return 1
   fi
-  kept=$(jq -c --arg k "$key" 'select(.issue != $k)' "$PENDING" 2>/dev/null) || {
-    printf 'fm-gitlab-issues: %s is not readable as JSON lines\n' "$PENDING" >&2
-    return 1
-  }
-  removed=$(jq -c --arg k "$key" 'select(.issue == $k)' "$PENDING" 2>/dev/null | wc -l | tr -d '[:space:]')
-  if [ "$removed" -eq 0 ]; then
-    printf 'fm-gitlab-issues: no pending entry for %s\n' "$key" >&2
+  if ! pending_lock_take "$CHECK_TIMEOUT"; then
+    printf 'fm-gitlab-issues: could not lock %s within %ss%s\n' "$PENDING" "$CHECK_TIMEOUT" "${FM_LOCK_HELD_PID:+ (held by pid $FM_LOCK_HELD_PID)}" >&2
     return 1
   fi
-  if [ -z "$kept" ]; then
-    rm -f -- "$PENDING" || return 1
-  else
-    printf '%s\n' "$kept" | private_write "$PENDING" || return 1
-  fi
-  printf 'handled: %s (%s pending entr%s removed)\n' "$key" "$removed" "$([ "$removed" -eq 1 ] && printf y || printf ies)"
+  rc=0
+  handled_rewrite "$key" || rc=$?
+  pending_lock_release
+  [ "$rc" -eq 0 ] || return "$rc"
+  printf 'handled: %s (%s pending entr%s removed)\n' "$key" "$HANDLED_REMOVED" "$([ "$HANDLED_REMOVED" -eq 1 ] && printf y || printf ies)"
 }
 
 # --- arm and disarm -----------------------------------------------------------

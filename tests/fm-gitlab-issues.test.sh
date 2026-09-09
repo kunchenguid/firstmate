@@ -324,6 +324,102 @@ test_handled_removes_that_issue_and_refuses_an_unknown_one() {
   pass "handled removes exactly that issue's pending entries and refuses an unknown reference"
 }
 
+# The pending record has two writers: the watcher's check appends, firstmate's
+# handled rewrites by read-then-rename. Without one lock between them a check
+# that lands between handled's read and its rename has its append thrown away
+# while its seen record still says the pair was reported, so the issue is never
+# offered again. The slow jq below holds handled exactly in that window: it lets
+# jq read the record, then waits for the test before handing the lines back.
+test_check_append_survives_a_concurrent_handled_rewrite() {
+  local home out gate handled_out handled_status check_status handled_pid check_pid i
+  home=$(make_home race)
+  write_config "$home" "{\"host\":\"$HOST\",\"group\":\"$GROUP\"}"
+  serve "$home" fm::todo "$(issue acme/tools/backend-app 1 fm::todo)"
+  serve "$home" fm::human-replied
+  out="$home/out.txt"
+  run_check "$home" "$out"
+
+  gate="$home/gate"
+  mkdir -p "$gate" "$home/slowjq"
+  cat > "$home/slowjq/jq" <<'SH'
+#!/usr/bin/env bash
+# Slow jq: on the first read of the pending record, read it for real, then hold
+# the answer until the test says go. Every other call is the real jq.
+if [ ! -e "$SLOW_JQ_GATE/read" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "$SLOW_JQ_PENDING" ]; then
+      "$SLOW_JQ_REAL" "$@" > "$SLOW_JQ_GATE/answer"
+      rc=$?
+      : > "$SLOW_JQ_GATE/read"
+      while [ ! -e "$SLOW_JQ_GATE/go" ]; do sleep 0.05; done
+      cat "$SLOW_JQ_GATE/answer"
+      exit "$rc"
+    fi
+  done
+fi
+exec "$SLOW_JQ_REAL" "$@"
+SH
+  chmod 0755 "$home/slowjq/jq"
+
+  handled_out="$home/handled.txt"
+  env FM_CHECK_TIMEOUT=30 FM_HOME="$home" PATH="$home/slowjq:$home/fakebin:$PATH" \
+    SLOW_JQ_GATE="$gate" SLOW_JQ_PENDING="$home/state/.gitlab-issues-pending" SLOW_JQ_REAL="$(command -v jq)" \
+    "$CHECK" handled "acme/tools/backend-app#1" >"$handled_out" 2>&1 &
+  handled_pid=$!
+  i=0
+  while [ ! -e "$gate/read" ]; do
+    i=$((i + 1))
+    [ "$i" -le 200 ] || fail "handled never read the pending record: $(cat "$handled_out")"
+    sleep 0.05
+  done
+
+  # handled has read the record and is about to rename over it. A new issue
+  # arrives now and the check runs while handled is still in that window.
+  serve "$home" fm::todo "$(issue acme/tools/backend-app 1 fm::todo)" "$(issue acme/tools/backend-app 2 fm::todo)"
+  env FM_CHECK_TIMEOUT=30 FM_HOME="$home" PATH="$home/fakebin:$PATH" \
+    FAKE_GLAB_DIR="$home/gitlab" FAKE_GLAB_LOG="$home/glab.log" \
+    "$CHECK" check >"$out" 2>"$out.err" &
+  check_pid=$!
+  sleep 1
+  : > "$gate/go"
+  handled_status=0
+  wait "$handled_pid" || handled_status=$?
+  check_status=0
+  wait "$check_pid" || check_status=$?
+  expect_code 0 "$handled_status" "handled during a concurrent check exit: $(cat "$handled_out")"
+  expect_code 0 "$check_status" "check during a concurrent handled exit: $(cat "$out.err")"
+
+  assert_contains "$(cat "$out")" "gitlab-issue 1 new: acme/tools/backend-app#2(fm::todo)" "the check did not report the new issue"
+  run_sub "$home" pending | jq -e -s 'any(.[]; .issue == "acme/tools/backend-app#2")' >/dev/null \
+    || fail "the pending record for issue 2 was lost to handled's rewrite: $(run_sub "$home" pending)"
+  run_sub "$home" pending | jq -e -s 'any(.[]; .issue == "acme/tools/backend-app#1") | not' >/dev/null \
+    || fail "handled did not remove issue 1: $(run_sub "$home" pending)"
+  assert_grep 'acme/tools/backend-app#2' "$home/state/.gitlab-issues-seen" "the seen record does not hold the reported pair"
+  assert_absent "$home/state/.gitlab-issues.lock" "the pending lock was left held after both writers finished"
+
+  run_check "$home" "$out"
+  [ ! -s "$out" ] || fail "the pair reported during the race was reported again: $(cat "$out")"
+  pass "a check append during handled's read-then-rewrite is kept, and neither writer loses the other's change"
+}
+
+# A paginated answer can list the same issue twice when issues shift between
+# page fetches; the report counts the pair once and pending must agree.
+test_a_duplicated_issue_in_one_answer_yields_one_pending_record() {
+  local home out pending
+  home=$(make_home dup)
+  write_config "$home" "{\"host\":\"$HOST\",\"group\":\"$GROUP\"}"
+  serve "$home" fm::todo "$(issue acme/tools/backend-app 12 fm::todo)" "$(issue acme/tools/frontend-app 3 fm::todo)" "$(issue acme/tools/backend-app 12 fm::todo)"
+  serve "$home" fm::human-replied
+  out="$home/out.txt"
+  run_check "$home" "$out"
+  assert_contains "$(cat "$out")" "gitlab-issue 2 new:" "the duplicated issue was counted twice"
+  pending=$(run_sub "$home" pending)
+  [ "$(printf '%s\n' "$pending" | wc -l | tr -d ' ')" = 2 ] || fail "pending must hold one line per reported pair, not per returned object: $pending"
+  printf '%s\n' "$pending" | jq -e -s 'map(select(.issue == "acme/tools/backend-app#12")) | length == 1' >/dev/null \
+    || fail "the duplicated issue has more than one pending record: $pending"
+  pass "an issue returned twice in one answer is one report entry and one pending record"
+}
+
 # --- poll errors ---------------------------------------------------------------
 
 test_poll_error_is_reported_once_per_reason_per_hour() {
@@ -476,6 +572,8 @@ test_projects_filter_keeps_only_configured_projects
 test_intake_labels_and_host_come_from_the_config
 test_many_new_pairs_are_bounded_to_one_line
 test_handled_removes_that_issue_and_refuses_an_unknown_one
+test_check_append_survives_a_concurrent_handled_rewrite
+test_a_duplicated_issue_in_one_answer_yields_one_pending_record
 test_poll_error_is_reported_once_per_reason_per_hour
 test_a_hung_glab_is_bounded_and_reported
 test_an_error_body_with_exit_zero_is_not_read_as_no_issues
