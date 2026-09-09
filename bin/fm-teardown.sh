@@ -939,7 +939,7 @@ cleanup_recovery_identity_is_unambiguous() {
 }
 
 classify_cleanup_recovery() {
-  local kind project worktree top origin url_path owner repo rest number api branch dirty remote_head status_script
+  local kind project worktree top origin url_path owner repo rest number api branch dirty remote_head status_script task_head
   kind=$(fm_meta_get "$META" kind)
   [ -n "$kind" ] || kind=ship
   CLEANUP_CLASSIFICATION=NONE
@@ -1063,8 +1063,13 @@ SH
     cleanup_recovery_endpoint_metadata_present && return 0
     CLEANUP_CLASSIFICATION=REFUSED
     CLEANUP_CLASSIFICATION_REASON="missing isolated copy is not merge proof"
-    cleanup_recovery_identity_is_unambiguous kind project worktree pr || {
+    cleanup_recovery_identity_is_unambiguous kind project worktree pr pr_head || {
       CLEANUP_CLASSIFICATION_REASON="ship recovery identity is missing or ambiguous"
+      return 0
+    }
+    task_head=$(fm_meta_get "$META" pr_head)
+    fm_pr_head_valid "$task_head" || {
+      CLEANUP_CLASSIFICATION_REASON="ship recovery record lacks a valid task PR head"
       return 0
     }
     [ "$(cleanup_recovery_meta_count tasktmp)" -eq 0 ] || {
@@ -1116,12 +1121,12 @@ SH
         ;;
     esac
     api=$(cd "$PROJ" && gh-axi api "/repos/$owner/$repo/pulls/$number" --jq \
-      ".merged == true and (.merged_at | type == \"string\") and .html_url == \"$PR_URL\" and .base.repo.full_name == \"$owner/$repo\"" 2>/dev/null) || {
+      ".merged == true and (.merged_at | type == \"string\") and .html_url == \"$PR_URL\" and .base.repo.full_name == \"$owner/$repo\" and .head.sha == \"$task_head\"" 2>/dev/null) || {
       CLEANUP_CLASSIFICATION_REASON="GitHub API could not authenticate or resolve the recorded pull request"
       return 0
     }
     [ "$api" = true ] || {
-      CLEANUP_CLASSIFICATION_REASON="GitHub API did not confirm the identified upstream pull request as merged"
+      CLEANUP_CLASSIFICATION_REASON="GitHub API did not confirm the identified upstream pull request as merged at the recorded task head"
       return 0
     }
     CLEANUP_CLASSIFICATION=PROVABLY-LANDED
