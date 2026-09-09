@@ -10,18 +10,57 @@ TMP_ROOT=$(fm_test_tmproot fm-brief-paused-nonterminal)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-normalize_brief() {
-  tr '\n' ' ' < "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[[:space:]][[:space:]]*/ /g'
+normalize_whitespace() {
+  tr '\n' ' ' < "$1" | sed 's/[[:space:]][[:space:]]*/ /g'
+}
+
+positive_bounded_wait_before_resolved() {
+  local guidance=$1 pattern
+  case "$guidance" in
+    *"in the turn"*|*"inside the turn"*|*"same turn"*|*"in-turn"*) ;;
+    *) return 1 ;;
+  esac
+  case "$guidance" in
+    *"do not sleep"*|*"do not poll"*|*"never sleep"*|*"never poll"*|\
+    *"sleep forever"*|*"poll forever"*|*"wait forever"*|*"wait indefinitely"*) return 1 ;;
+  esac
+  pattern="(sleep[[:space:]]+[0-9]+|poll[[:space:]]+every[[:space:]]+[0-9]+[[:space:]]*(seconds?|minutes?)).*append \`resolved:\`"
+  printf '%s\n' "$guidance" | grep -Eiq "$pattern"
+}
+
+end_turn_claim_is_exact() {
+  local claim=$1 pause_verb=$2 terminal token_count
+  [ -n "$claim" ] || return 1
+  for terminal in needs-decision blocked "done" failed; do
+    case "$claim" in
+      *"\`$terminal:\`"*) ;;
+      *) return 1 ;;
+    esac
+  done
+  token_count=$(printf '%s\n' "$claim" | grep -Eo "\`[a-z-]+:\`" | wc -l | tr -d ' ')
+  [ "$token_count" = 4 ] || return 1
+  case "$claim" in
+    *"\`working:\`"*|*"\`$pause_verb:\`"*|*"\`paused:\`"*) return 1 ;;
+  esac
+  return 0
+}
+
+working_sentence_is_unchanged() {
+  case "$1" in
+    *"A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the turn after it; continue the same stage until a defined \`done:\` gate under Definition of done."*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 assert_paused_guidance() {
-  local kind=$1 brief=$2 verb=$3 text guidance marker tail ending_sentence ending_list token_count
-  text=$(normalize_brief "$brief")
+  local kind=$1 brief=$2 verb=$3 text text_lower guidance marker tail ending_claim
+  text=$(normalize_whitespace "$brief")
+  text_lower=$(printf '%s\n' "$text" | tr '[:upper:]' '[:lower:]')
   marker="use \`$verb: {why}\`"
-  assert_contains "$text" "$marker" \
+  assert_contains "$text_lower" "$marker" \
     "$kind clause 1: pause guidance must name the configured '$verb:' status"
 
-  guidance=${text#*"$marker"}
+  guidance=${text_lower#*"$marker"}
   guidance=${guidance%%" 5. if you hit"*}
   tail=$guidance
   assert_contains "$tail" "nonterminal" \
@@ -30,36 +69,39 @@ assert_paused_guidance() {
   assert_contains "$tail" "do not end the turn" \
     "$kind clause 1: '$verb:' guidance must say not to end the turn"
   tail=${tail#*"do not end the turn"}
-  case "$tail" in
-    *sleep*) tail=${tail#*sleep} ;;
-    *poll*) tail=${tail#*poll} ;;
-    *) fail "$kind clause 1: '$verb:' guidance must require an explicit in-turn sleep or poll" ;;
-  esac
-  assert_contains "$tail" "append \`resolved:\`" \
-    "$kind clause 1: '$verb:' guidance must require appending 'resolved:' after the wait clears"
+  positive_bounded_wait_before_resolved "$tail" \
+    || fail "$kind clause 1: '$verb:' guidance must positively require a finite in-turn sleep or poll before appending 'resolved:'"
 
-  ending_sentence=$(printf '%s\n' "$guidance" | sed 's/[.!?]/\
-/g' | grep -i 'may end a turn' | head -n 1)
-  assert_contains "$ending_sentence" "may end a turn" \
+  ending_claim=$(printf '%s\n' "$guidance" | sed 's/[.!?]/\
+/g' | grep -i 'may end a turn')
+  assert_contains "$ending_claim" "may end a turn" \
     "$kind clause 2: guidance must state which statuses may end a turn"
-  ending_list=${ending_sentence%%"may end a turn"*}
-  for terminal in needs-decision blocked "done" failed; do
-    assert_contains "$ending_list" "\`$terminal:\`" \
-      "$kind clause 2: may-end list must contain '$terminal:'"
-  done
-  token_count=$(printf '%s\n' "$ending_list" | grep -Eo "\`[a-z-]+:\`" | wc -l | tr -d ' ')
-  expect_code 4 "$token_count" \
-    "$kind clause 2: may-end list must contain exactly needs-decision, blocked, done, and failed"
-  assert_not_contains "$ending_list" "\`working:\`" \
-    "$kind clause 2: may-end list must not contain 'working:'"
-  assert_not_contains "$ending_list" "\`$verb:\`" \
-    "$kind clause 2: may-end list must not contain '$verb:'"
-  assert_not_contains "$ending_list" "\`paused:\`" \
-    "$kind clause 2: may-end list must not contain hard-coded 'paused:'"
+  end_turn_claim_is_exact "$ending_claim" "$verb" \
+    || fail "$kind clause 2: complete may-end claim must contain exactly needs-decision, blocked, done, and failed"
 
-  assert_contains "$text" \
-    "a mid-task \`working:\` line (including setup complete) is nonterminal: do not end the turn after it; continue the same stage until a defined \`done:\` gate under definition of done." \
-    "$kind clause 3: existing working-status nonterminal sentence changed"
+  working_sentence_is_unchanged "$text" \
+    || fail "$kind clause 3: existing working-status nonterminal sentence changed in wording or case"
+}
+
+test_assertions_reject_counterexamples() {
+  local positive_wait negative_wait unbounded_wait extra_terminals changed_case
+  positive_wait="stay in the turn and sleep 30; append \`resolved:\`"
+  negative_wait="stay in the turn; do not sleep or poll; append \`resolved:\`"
+  unbounded_wait="stay in the turn; sleep forever and wait indefinitely; append \`resolved:\`"
+  extra_terminals="Only \`needs-decision:\`, \`blocked:\`, \`done:\`, and \`failed:\` may end a turn; \`paused:\` and \`working:\` may end a turn too."
+  changed_case="A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the turn after it; continue the same stage until a defined \`done:\` gate under Definition Of Done."
+
+  positive_bounded_wait_before_resolved "$positive_wait" \
+    || fail "clause 1 positive fixture: finite in-turn sleep before resolved must satisfy the bounded-wait assertion"
+  ! positive_bounded_wait_before_resolved "$negative_wait" \
+    || fail "clause 1 counterexample: negated sleep-or-poll guidance must not satisfy the bounded-wait assertion"
+  ! positive_bounded_wait_before_resolved "$unbounded_wait" \
+    || fail "clause 1 counterexample: unbounded wait guidance must not satisfy the bounded-wait assertion"
+  ! end_turn_claim_is_exact "$extra_terminals" paused \
+    || fail "clause 2 counterexample: a complete claim adding paused and working must fail exact-set comparison"
+  ! working_sentence_is_unchanged "$changed_case" \
+    || fail "clause 3 counterexample: changing Definition of done capitalization must fail the verbatim guard"
+  pass "fm-brief paused contract: counterexamples cannot satisfy the three strengthened assertions"
 }
 
 generate_brief_pair() {
@@ -71,6 +113,8 @@ generate_brief_pair() {
     "$ROOT/bin/fm-brief.sh" "paused-scout-$suffix" firstmate --scout >/dev/null 2>&1 \
     || fail "scout fixture with '$verb:' did not scaffold"
 }
+
+test_assertions_reject_counterexamples
 
 generate_brief_pair paused default
 assert_paused_guidance ship "$BRIEF_HOME/data/paused-ship-default/brief.md" paused
