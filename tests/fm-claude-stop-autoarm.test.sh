@@ -176,6 +176,24 @@ printf 'stale: fixture-win actionable\n'
 exit 0
 SH
       ;;
+    untyped-failure)
+      # The shape a refusal raised further down the stack has: a helper that
+      # cannot create its mode-restricted artifacts writes plain text with none
+      # of the arm's typed prefixes.
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'fm-artifact-writer: refusing to publish: %s/private.tmp is mode 777, expected 600\n' "$FM_HOME/state"
+exit 1
+SH
+      ;;
+    mute-failure)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+exit 1
+SH
+      ;;
     records-grace)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -455,7 +473,12 @@ test_failed_cycles_notify_once_and_keep_retrying() {
   expect_code 2 "$status1" "the first exhausted failure must notify"
   expect_code 2 "$status2" "a consecutive exhausted failure must force another Stop-owned retry"
   [ -n "$out1" ] || fail "the first exhausted failure did not notify"
-  [ -z "$out2" ] || fail "consecutive exhausted failure repeated an operator notice: $out2"
+  [ -n "$out2" ] || fail "a consecutive exhausted failure blocked the turn with empty output"
+  assert_not_contains "$out2" "automatic supervision mechanism is broken" \
+    "consecutive exhausted failure repeated the full operator notice: $out2"
+  assert_contains "$out2" "STILL FAILING" "the suppressed continuation did not name itself"
+  assert_contains "$out2" "watcher: FAILED" "the suppressed continuation did not name what refused"
+  assert_contains "$out2" ".claude-autoarm-epoch" "the suppressed continuation did not name the episode record"
   [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 4 ] || fail "each cycle must retain bounded automatic retries"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "failure episode marker was not recorded"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "second failure must record failed-suppressed"
@@ -484,7 +507,9 @@ test_failure_notice_marker_write_refuses_delivery_and_retries() {
   [ "$(epoch_field "$dir" epoch)" -gt "$gen1" ] || fail "the successor did not supersede the refused terminal entry"
   assert_present "$marker" "the successful successor did not record the failure notice"
   assert_contains "$out2" "automatic supervision mechanism is broken" "the successful successor did not deliver the failure notice"
-  [ -z "$out3" ] || fail "the firing after the successful marker commit repeated the notice: $out3"
+  [ -n "$out3" ] || fail "the firing after the successful marker commit blocked the turn with empty output"
+  assert_not_contains "$out3" "automatic supervision mechanism is broken" \
+    "the firing after the successful marker commit repeated the notice: $out3"
   delivered=$(printf '%s\n%s\n' "$out2" "$out3" | grep -c 'automatic supervision mechanism is broken' || true)
   [ "$delivered" -eq 1 ] || fail "the restored episode delivered $delivered failure notices instead of one"
   pass "auto-arm: marker-write refusal defers delivery until one successor commits the notice"
@@ -566,7 +591,11 @@ test_positive_recovery_budget_contention_preserves_episode() {
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 2 "$status" "a healthy auto-arm must continue when the episode reset lock is busy"
-  [ -z "$out" ] || fail "recovery contention produced an operator notice: $out"
+  [ -n "$out" ] || fail "recovery contention blocked the turn with empty output"
+  assert_contains "$out" "HELD THIS TURN OPEN" "recovery contention did not name why the turn is held"
+  assert_contains "$out" ".claude-autoarm-epoch" "recovery contention did not name the episode record"
+  assert_not_contains "$out" "automatic supervision mechanism is broken" \
+    "recovery contention escalated to the full failure notice: $out"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "recovery contention must not record ordinary clean recovery"
   assert_present "$dir/state/.turnend-claude-blocks" "recovery contention partially cleared the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "recovery contention partially cleared the failure notice"
@@ -1184,6 +1213,150 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+# --- no silent block ----------------------------------------------------------
+#
+# Exit 2 blocks the turn and the collected stderr is the operator's only view of
+# why. A blocking firing that prints nothing leaves the home re-waking forever
+# with no message naming a cause; diagnosing the real incident took reading the
+# epoch ledger by hand. These pin the invariant, not the wording: every exit-2
+# firing carries text, and it names what refused and where the episode state is.
+
+# Drive one home through the first exhausted failure and several consecutive
+# ones, returning the concatenated evidence of every blocking firing.
+assert_every_block_is_loud() {  # <dir> <label>
+  local dir=$1 label=$2 out status i
+  for i in 1 2 3 4 5; do
+    out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+    expect_code 2 "$status" "$label: firing $i must hold the turn open for another retry"
+    [ -n "$out" ] || fail "$label: firing $i blocked the turn with empty output"
+    assert_contains "$out" ".claude-autoarm-epoch" \
+      "$label: firing $i did not name the episode record"
+    printf '%s\n' "$out"
+  done
+}
+
+test_consecutive_failures_never_block_silently() {
+  local dir all notices
+  dir=$(make_primary_dir "$TMP_ROOT/loud-consecutive")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  all=$(assert_every_block_is_loud "$dir" "consecutive failure")
+  notices=$(printf '%s\n' "$all" | grep -c 'automatic supervision mechanism is broken' || true)
+  [ "$notices" -eq 1 ] \
+    || fail "the episode delivered $notices full notices instead of exactly one"
+  pass "auto-arm: every consecutive failure blocks loudly while the full notice stays once per episode"
+}
+
+test_untyped_arm_refusal_is_still_named() {
+  local dir out1 out2 status
+  dir=$(make_primary_dir "$TMP_ROOT/loud-untyped")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" untyped-failure
+  out1=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an untyped arm refusal must still reach the failure notice"
+  assert_contains "$out1" "mode 777, expected 600" \
+    "the full notice dropped a refusal that carried none of the arm's typed prefixes"
+  out2=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the consecutive untyped refusal must keep the retry handoff"
+  assert_contains "$out2" "mode 777, expected 600" \
+    "the suppressed continuation dropped the untyped refusal"
+  pass "auto-arm: a refusal with none of the arm's typed prefixes is still named in every block"
+}
+
+test_arm_without_any_output_still_names_the_block() {
+  local dir out1 out2 status
+  dir=$(make_primary_dir "$TMP_ROOT/loud-mute")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" mute-failure
+  out1=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an arm that says nothing must still reach the failure notice"
+  assert_contains "$out1" "no diagnostic output" "the block did not admit that the arm said nothing"
+  assert_contains "$out1" ".claude-autoarm-epoch" "the block did not name the episode record"
+  out2=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the consecutive mute failure must keep the retry handoff"
+  [ -n "$out2" ] || fail "a mute arm produced an empty blocking firing"
+  pass "auto-arm: an arm with no output of its own still yields a block that names itself"
+}
+
+# The real condition behind the incident: a state directory that silently
+# reverts chmod, so nothing can hold a restricted mode. Reproduced only where
+# the host actually offers such a filesystem, and only after the revert is
+# measured rather than assumed.
+mode_incapable_parent() {
+  local candidate probe
+  for candidate in "${FM_TEST_MODE_INCAPABLE_PARENT:-}" /mnt/*/ /Volumes/*/; do
+    [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ] || continue
+    probe=$(mktemp -d "${candidate%/}/fm-mode-probe.XXXXXX" 2>/dev/null) || continue
+    : > "$probe/f" 2>/dev/null && chmod 600 "$probe/f" 2>/dev/null
+    if [ -f "$probe/f" ] && [ "$(fm_test_file_mode "$probe/f")" != 600 ]; then
+      rm -rf "$probe"
+      printf '%s\n' "${candidate%/}"
+      return 0
+    fi
+    rm -rf "$probe"
+  done
+  return 1
+}
+
+fm_test_file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
+test_mode_incapable_state_dir_never_blocks_silently() {
+  local parent dir all
+  if ! parent=$(mode_incapable_parent); then
+    printf 'skip: no filesystem on this host reverts chmod 600; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
+    return 0
+  fi
+  dir=$(mktemp -d "$parent/fm-autoarm-modeless.XXXXXX") || fail "could not create a home on $parent"
+  make_primary_dir "$dir" >/dev/null
+  [ "$(fm_test_file_mode "$dir/state")" != 700 ] \
+    || { rm -rf "$dir"; fail "$parent stopped reverting modes between the probe and the fixture"; }
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  all=$(assert_every_block_is_loud "$dir" "mode-incapable home") || { rm -rf "$dir"; return 1; }
+  assert_contains "$all" "watcher: FAILED" "the mode-incapable home dropped what refused"
+  rm -rf "$dir"
+  pass "auto-arm: a state directory that cannot hold restricted modes never blocks a turn with empty output"
+}
+
+test_mode_capable_home_keeps_every_silent_path_silent() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/mode-capable-unchanged")
+  chmod 700 "$dir/state" || fail "could not restrict the fixture state directory"
+  [ "$(fm_test_file_mode "$dir/state")" = 700 ] \
+    || fail "this host cannot hold restricted modes, so the control case proves nothing"
+  : > "$dir/state/task.meta"
+
+  # An idle-but-verified home still ends its turn silently at exit 0.
+  write_arm_fixture "$dir" benign-live
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the control watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$dir/state/.watch.lock"
+  expect_code 0 "$status" "a verified healthy cycle must still end the turn"
+  [ -z "$out" ] || fail "a mode-capable home lost its silent healthy close: $out"
+
+  # And an actionable wake still carries exactly the wake banner, nothing more.
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an actionable wake must still translate to a rewake"
+  assert_contains "$out" "firstmate watcher wake" "the actionable rewake banner changed"
+  assert_not_contains "$out" "STILL FAILING" "an actionable wake leaked a failure continuation"
+  assert_not_contains "$out" "HELD THIS TURN OPEN" "an actionable wake leaked a held-open continuation"
+  pass "auto-arm: a home whose state dir can hold restricted modes keeps its silent and actionable paths unchanged"
+}
+
+
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
@@ -1225,3 +1398,8 @@ test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
 test_fm_lock_status_still_works_with_shared_lib
+test_consecutive_failures_never_block_silently
+test_untyped_arm_refusal_is_still_named
+test_arm_without_any_output_still_names_the_block
+test_mode_incapable_state_dir_never_blocks_silently
+test_mode_capable_home_keeps_every_silent_path_silent

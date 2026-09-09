@@ -49,8 +49,15 @@
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
 #     last-resort notice per failure episode; later consecutive failures still
-#     exit 2 to guarantee the next Stop-owned retry without repeating notice,
-#     until the synchronous guard has consumed its attended fail-open.
+#     exit 2 to guarantee the next Stop-owned retry, carrying the shorter
+#     suppressed-continuation line rather than repeating the full notice, until
+#     the synchronous guard has consumed its attended fail-open.
+#   - No silent block: EVERY exit 2 names a cause on stderr. Exit 2 blocks the
+#     turn and the collected stderr is the operator's only view of why, so a
+#     blocking path that prints nothing leaves the home re-waking forever with
+#     no message naming a cause - the exact undiagnosable loop a state
+#     directory that cannot hold restricted modes used to produce. Episode
+#     deduplication applies to the FULL notice, never to the block itself.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome so the synchronous Stop guard
@@ -62,7 +69,7 @@
 # suppresses any later automatic continuation in that unresolved episode.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
-# exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
+# exit 0 is always silent, and exit 2 always carries its reason on stderr.
 # On any uncertainty such as unresolvable ancestry, malformed lock state, or
 # lock contention, it exits 0 and leaves continuity to the synchronous guard and
 # the model.
@@ -196,6 +203,30 @@ autoarm_record() {  # <outcome>
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
 }
 
+# Every exit-2 path is a BLOCKED turn whose only operator-visible text is the
+# stderr the harness collects, so an exit 2 that prints nothing blocks the turn
+# undiagnosably: the home re-wakes forever with no message naming a cause. Each
+# blocking path below therefore names what refused, why the turn is being held,
+# and the epoch ledger to read. Deduplication stays a property of the FULL
+# failure notice, never of the block itself.
+#
+# The arm's typed lines are the primary evidence, but a refusal raised further
+# down the stack (a helper script that cannot create its mode-restricted
+# artifacts, for example) reaches this file as untyped output. Fall back to the
+# arm's last plain lines so such a cause is still named instead of dropped.
+autoarm_refusal_evidence() {
+  local shown=
+  if [ -n "$OUT" ] && [ -s "$OUT" ]; then
+    shown=$(grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8)
+    [ -n "$shown" ] || shown=$(grep -v '^[[:space:]]*$' "$OUT" 2>/dev/null | tail -8)
+  fi
+  if [ -n "$shown" ]; then
+    printf '%s\n' "$shown"
+  else
+    printf 'The arm produced no diagnostic output of its own.\n'
+  fi
+}
+
 # X mode cadence: source the generated config so an X instance polls at its
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).
 # shellcheck source=/dev/null
@@ -273,6 +304,13 @@ if [ "$HEALTHY" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
+  if [ ! -e "$FAILURE_ALARM" ] && fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+    {
+      printf 'firstmate watcher auto-arm HELD THIS TURN OPEN - a live watcher with a fresh beacon was verified, but the failure-episode reset for this home could not be recorded, so recovery is not yet provably closed.\n'
+      autoarm_refusal_evidence
+      printf 'Read %s (outcome=failed-suppressed) and the markers beside it. If this repeats, the state directory itself is refusing the write.\n' "$STATE/.claude-autoarm-epoch"
+    } >&2
+  fi
   if autoarm_commit failed-suppressed; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     [ -e "$FAILURE_ALARM" ] && exit 0
@@ -322,7 +360,8 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
   fi
   {
     printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
-    [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+    autoarm_refusal_evidence
+    printf 'Episode state is recorded in %s.\n' "$STATE/.claude-autoarm-epoch"
     printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n'
   } >&2
   if autoarm_commit failed "$FAILURE_NOTICE"; then
@@ -331,6 +370,13 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
   fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
+fi
+if fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+  {
+    printf 'firstmate watcher auto-arm STILL FAILING - this turn is held open for another Stop-owned retry. The full notice for this failure episode was already delivered, so only the current cause is repeated here.\n'
+    autoarm_refusal_evidence
+    printf 'Episode state is recorded in %s (outcome=failed-suppressed). Investigate the automatic Stop hook and watcher startup; do not launch a manual background arm.\n' "$STATE/.claude-autoarm-epoch"
+  } >&2
 fi
 if autoarm_commit failed-suppressed; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
