@@ -84,8 +84,11 @@ It never raw-deletes an Orca worktree.
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
+
+`tests/fm-teardown-endpoint-safety.test.sh` pins the composite worktree id rule above: the real `<repo id>::<absolute path>` shape validates, every structural defect refuses with its concrete reason, and the shared endpoint-atom rule the other backends use stays unwidened.
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.
