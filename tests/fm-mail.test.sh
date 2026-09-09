@@ -1719,6 +1719,57 @@ PYEOF
   pass "fm-mail: hung logout cannot advance the retry-scan position"
 }
 
+test_poll_list_logs_out_on_imap_error() {
+  # A standing check that fails after IMAP login must still log out so repeated
+  # select/search/fetch errors cannot leak sessions until the server times them
+  # out.
+  local harness out marker rc=0
+  harness="$TMP_ROOT/poll-logout-on-error-harness.py"
+  marker="$TMP_ROOT/poll-logout-on-error.marker"
+  rm -f "$marker"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[2],
+    'FM_MAIL_POLL_MAX_WAKES': '1',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            raise RuntimeError('search failed')
+        return ('NO', None)
+    def logout(self):
+        open(sys.argv[1], 'w', encoding='utf-8').write('logged-out\n')
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[3])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  {
+    printf 'uidvalidity=90009\n'
+  } > "$HOME_DIR/state/.mail-seen"
+
+  out=$(python3 "$harness" "$marker" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll_list must fail when IMAP search raises"
+  assert_contains "$out" "search failed" "the IMAP error is reported on stderr"
+  [ -f "$marker" ] || fail "poll_list must log out after a post-login IMAP error"
+  assert_equals "logged-out" "$(cat "$marker")" "logout ran on the error path"
+  pass "fm-mail: poll_list logs out when IMAP work fails after login"
+}
+
 test_poll_retry_position_not_saved_when_row_emitted() {
   # When a retry row is emitted, cmd_poll_list must not persist the retry-scan
   # position at all: a kill in the position-write window cannot drop a uid
@@ -1945,6 +1996,75 @@ PYEOF
   turn=$(cat "$HOME_DIR/state/.mail-turn" 2>/dev/null || printf '')
   assert_equals "" "$turn" "the alternating turn must not advance when emit is killed"
   pass "fm-mail: cap-one turn is not saved before emit/flush"
+}
+
+test_poll_cap_one_turn_not_saved_when_retry_pos_write_fails() {
+  # At cap=1 on the retry turn, 81 is unfetchable and 82 is recovered, so the
+  # durable retry-scan position must advance. If that write fails closed, the
+  # poll must not spend the retry turn: the next successful poll still emits 82
+  # instead of handing the slot to new mail.
+  local harness out1 out2 turn rc1=0 rc2=0
+  harness="$TMP_ROOT/cap-one-turn-pos-fail-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+    'FM_MAIL_RETRY': sys.argv[2],
+    'FM_MAIL_TURN': sys.argv[3],
+    'FM_MAIL_RETRY_POS': sys.argv[4],
+    'FM_MAIL_POLL_MAX_WAKES': '1',
+})
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'81 82 100'])
+        if cmd == 'fetch':
+            if args[0] == b'81':
+                return ('NO', None)
+            return ('OK', [(b'', b'Subject: good\r\nFrom: a@b.c\r\n\r\n')])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[5])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_poll_list())
+PYEOF
+  {
+    printf 'uidvalidity=90009\n'
+    printf '81\n82\n'
+  } > "$HOME_DIR/state/.mail-seen"
+  printf '81\n82\n' > "$HOME_DIR/state/.mail-retry"
+  printf '1\n' > "$HOME_DIR/state/.mail-turn"
+  rm -f "$HOME_DIR/state/.mail-retry-pos"
+  mkdir -p "$HOME_DIR/state/.mail-retry-pos"
+
+  out1=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-turn" "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc1=$?
+  [ "$rc1" -ne 0 ] || fail "poll_list must fail closed when retry-pos cannot be written"
+  turn=$(cat "$HOME_DIR/state/.mail-turn" 2>/dev/null || printf '')
+  assert_equals "1" "$turn" "a failed retry-pos write must not spend the retry turn"
+
+  rmdir "$HOME_DIR/state/.mail-retry-pos"
+  : > "$HOME_DIR/state/.mail-retry-pos"
+  out2=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+    "$HOME_DIR/state/.mail-turn" "$HOME_DIR/state/.mail-retry-pos" "$ROOT/bin/fm-mail.py" 2>&1) || rc2=$?
+  expect_code 0 "$rc2" "the next poll after a fail-closed position write must succeed"
+  assert_contains "$out2" $'82\t\ta@b.c\tgood\tretry' "the unspent retry turn still surfaces recovered uid 82"
+  assert_not_contains "$out2" $'100\t' "new mail must not take the unspent retry turn"
+  pass "fm-mail: a failed retry-pos write does not spend the cap-one retry turn"
 }
 
 test_poll_skips_unfetchable_uid_but_keeps_progress() {
@@ -2511,9 +2631,11 @@ test_poll_retry_window_of_unseen_never_stalls_cursor
 test_poll_retry_unfetchable_window_advances_with_new_mail
 test_poll_retry_unseen_window_advances_with_new_mail
 test_poll_retry_logout_before_emit_and_position_save
+test_poll_list_logs_out_on_imap_error
 test_poll_retry_position_not_saved_when_row_emitted
 test_poll_retry_small_window_rotates_past_unfetchable_prefix
 test_poll_cap_one_turn_not_saved_before_emit
+test_poll_cap_one_turn_not_saved_when_retry_pos_write_fails
 test_poll_retry_surfaces_under_new_mail_flood
 test_poll_resurfaces_degraded_uid_whose_wake_never_recorded
 test_poll_cap_one_never_suppresses_new_mail

@@ -278,6 +278,7 @@ def cmd_poll_list():
     retry, retry_order = load_retry(os.environ.get('FM_MAIL_RETRY', ''))
     retry_pos_path = os.environ.get('FM_MAIL_RETRY_POS', '')
     retry_pos = load_retry_pos(retry_pos_path, len(retry_order))
+    m = None
     try:
         m = connect_mailbox()
         m.select('INBOX')
@@ -404,15 +405,11 @@ def cmd_poll_list():
             m.logout()
         except Exception:
             pass
+        m = None
         print('uidvalidity\t%s' % uidv)
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
         sys.stdout.flush()
-        # Persist the cap-one alternation turn only after the rows are emitted
-        # and flushed, so a kill between the decision and the emit can never
-        # skip an unspent turn.
-        if next_turn is not None:
-            save_turn(turn_path, next_turn)
         # The retry-scan cursor must keep marching so every retry uid is
         # reachable, but it must never advance past a uid whose wake did not
         # durably publish. Rows are handed to the bash wake layer immediately
@@ -455,6 +452,11 @@ def cmd_poll_list():
         elif len(retry_window) > 0 and len(retry_candidates) == 0:
             save_retry_pos(retry_pos_path, len(retry_order),
                            len(retry_window), retry_pos)
+        # Persist the cap-one alternation turn only after the rows are emitted
+        # and flushed, so a kill between the decision and the emit can never
+        # skip an unspent turn.
+        if next_turn is not None:
+            save_turn(turn_path, next_turn)
         return 0
     except Exception as e:
         # stderr, not stdout: the bash poll's command substitution captures
@@ -462,6 +464,12 @@ def cmd_poll_list():
         # and the poll dies rc=1 with nothing left to report.
         print('fm-mail poll error:', e, file=sys.stderr)
         return 1
+    finally:
+        if m is not None:
+            try:
+                m.logout()
+            except Exception:
+                pass
 
 
 def main():
