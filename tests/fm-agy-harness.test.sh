@@ -170,6 +170,38 @@ test_agy_busy_signature_is_harness_scoped() {
   pass "Agy busy classification is explicit and harness-scoped"
 }
 
+# The raw-launch escape hatch records the command basename, so an agy launched
+# as `agy-nightly ...` is refused by the control plane, arms no turn-end wiring
+# and yields no composer reading. The rendered-footer fallback is then the only
+# evidence the pane is mid-turn, and the watcher acts on exactly one verdict:
+# busy. Anything else falls through to the doorbell.
+test_watcher_leaves_a_raw_launched_agy_pane_alone_mid_turn() (
+  local state="$TMP_ROOT/agy-watch-state"
+  mkdir -p "$state"
+  printf 'window=fake\nharness=agy-nightly\n' > "$state/agy-watch.meta"
+  unset FM_BUSY_REGEX
+  FM_HOME="$TMP_ROOT/agy-watch-home"
+  FM_STATE_OVERRIDE="$state"
+  export FM_HOME FM_STATE_OVERRIDE
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-watch.sh"
+  # shellcheck disable=SC2329 # Runtime override called by the sourced watcher.
+  fm_backend_busy_state() { printf 'unknown'; }
+  window_is_busy fake 'Generating...
+esc to cancel' \
+    || fail "the watcher did not treat a mid-turn raw-launched Agy pane as busy"
+  if window_is_busy fake 'done.
+? for shortcuts                              Gemini 3.6 Flash · low'; then
+    fail "an idle Agy footer made the watcher hold a pane it should ring"
+  fi
+  printf 'window=fake\nharness=claude\n' > "$state/agy-watch.meta"
+  if window_is_busy fake 'Generating...
+esc to cancel'; then
+    fail "Agy's footer classified a recorded Claude task busy"
+  fi
+  pass "the watcher holds a mid-turn raw-launched Agy pane instead of ringing it"
+)
+
 test_plain_backends_share_agy_composer_contract() {
   local state
   state=$(
@@ -946,6 +978,7 @@ test_agy_hook_is_never_armed_without_its_retirement_record() {
 test_separated_composer_is_structural
 test_separated_composer_is_harness_scoped
 test_agy_busy_signature_is_harness_scoped
+test_watcher_leaves_a_raw_launched_agy_pane_alone_mid_turn
 test_plain_backends_share_agy_composer_contract
 test_agy_spawn_delivers_after_trust_and_registers_hook
 test_agy_spawn_does_not_seed_the_container_environment
