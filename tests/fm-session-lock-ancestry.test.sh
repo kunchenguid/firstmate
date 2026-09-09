@@ -340,6 +340,137 @@ test_verified_alive_defers_without_any_sidecar() {
   pass "session-lock: with no identity evidence at all, plain liveness still defers - unchanged pre-fix fallback behavior"
 }
 
+# --- unit layer: ownership token, heartbeat lease, and token-gated release --
+
+test_write_identity_mints_a_fresh_token_per_acquisition() {
+  local dir state pid token1 token2
+  dir="$TMP_ROOT/token-fresh-per-acquisition"
+  state="$dir/state"
+  mkdir -p "$state"
+  "$NAMED_CLAUDE" -c 'sleep 60; :' &
+  pid=$!
+  session_lock_eval "$state" "fm_session_lock_write_identity '$state' '$pid'" \
+    || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fail "could not record identity for the first acquisition"; }
+  token1=$(sed -n '3s/^token=//p' "$state/.lock-identity" 2>/dev/null || true)
+  [ -n "$token1" ] || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fail "first acquisition did not record a token"; }
+  session_lock_eval "$state" "fm_session_lock_write_identity '$state' '$pid'" \
+    || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fail "could not record identity for the second acquisition"; }
+  token2=$(sed -n '3s/^token=//p' "$state/.lock-identity" 2>/dev/null || true)
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  [ -n "$token2" ] || fail "second acquisition did not record a token"
+  [ "$token1" != "$token2" ] || fail "two consecutive acquisitions minted the same token: $token1"
+  pass "session-lock: two consecutive acquisitions of the same pid get different tokens"
+}
+
+test_renew_heartbeat_updates_heartbeat_and_preserves_token() {
+  local dir state pid token1 token2 hb1 hb2
+  dir="$TMP_ROOT/renew-heartbeat"
+  state="$dir/state"
+  mkdir -p "$state"
+  "$NAMED_CLAUDE" -c 'sleep 60; :' &
+  pid=$!
+  session_lock_eval "$state" "fm_session_lock_write_identity '$state' '$pid'" \
+    || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fail "could not record identity for the live pid"; }
+  token1=$(sed -n '3s/^token=//p' "$state/.lock-identity" 2>/dev/null || true)
+  hb1=$(sed -n '4s/^heartbeat_at=//p' "$state/.lock-identity" 2>/dev/null || true)
+  if [ -z "$token1" ] || [ -z "$hb1" ]; then
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    fail "the initial acquisition did not record both token and heartbeat_at"
+  fi
+  sleep 2
+  if ! session_lock_eval "$state" "fm_session_lock_renew_heartbeat '$state' '$pid'"; then
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    fail "heartbeat renewal refused a live, identity-matched, self-recorded owner"
+  fi
+  token2=$(sed -n '3s/^token=//p' "$state/.lock-identity" 2>/dev/null || true)
+  hb2=$(sed -n '4s/^heartbeat_at=//p' "$state/.lock-identity" 2>/dev/null || true)
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  [ "$token2" = "$token1" ] || fail "heartbeat renewal must never mint a new token, got $token1 -> $token2"
+  [ "$hb2" -gt "$hb1" ] || fail "heartbeat renewal did not advance heartbeat_at: $hb1 -> $hb2"
+  pass "session-lock: heartbeat renewal updates heartbeat_at in place while preserving the acquisition token"
+}
+
+test_verified_alive_false_for_expired_heartbeat_live_matching_identity() {
+  local dir state pid
+  dir="$TMP_ROOT/verified-alive-expired-heartbeat"
+  state="$dir/state"
+  mkdir -p "$state"
+  "$NAMED_CLAUDE" -c 'sleep 60; :' &
+  pid=$!
+  session_lock_eval "$state" "fm_session_lock_write_identity '$state' '$pid'" \
+    || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fail "could not record identity for the live pid"; }
+  # owner_pid/identity/token stay genuine and matching; only the lease itself
+  # is backdated far past a deliberately tiny custom grace.
+  sed 's/^heartbeat_at=.*/heartbeat_at=1/' "$state/.lock-identity" > "$state/.lock-identity.tmp" \
+    && mv "$state/.lock-identity.tmp" "$state/.lock-identity"
+  if FM_SESSION_LOCK_LEASE_GRACE=5 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"; . "$2"
+    fm_session_lock_pid_verified_alive "$3" "$4"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$state" "$pid"; then
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    fail "a live, identity-matched owner with an expired lease was still verified alive"
+  fi
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  pass "session-lock: a live, identity-matched owner whose lease has expired is reclaimable"
+}
+
+test_verified_alive_true_for_fresh_heartbeat_within_custom_grace() {
+  local dir state pid
+  dir="$TMP_ROOT/verified-alive-fresh-heartbeat"
+  state="$dir/state"
+  mkdir -p "$state"
+  "$NAMED_CLAUDE" -c 'sleep 60; :' &
+  pid=$!
+  session_lock_eval "$state" "fm_session_lock_write_identity '$state' '$pid'" \
+    || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fail "could not record identity for the live pid"; }
+  sleep 2
+  if ! FM_SESSION_LOCK_LEASE_GRACE=30 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"; . "$2"
+    fm_session_lock_pid_verified_alive "$3" "$4"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$state" "$pid"; then
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    fail "a live, identity-matched owner with a fresh heartbeat well within grace was reclaimed after ordinary idle time"
+  fi
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  pass "session-lock: a live owner with a fresh heartbeat is never reclaimed by the lease-expiry condition even after ordinary idle time"
+}
+
+test_session_lock_release_is_token_gated() {
+  local dir state out
+  dir="$TMP_ROOT/release-token-gated"
+  state="$dir/state"
+  mkdir -p "$state"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"; . "$2"
+    fm_current_pid me || exit 1
+    printf "%s\n" "$me" > "$FM_STATE_OVERRIDE/.lock"
+    fm_session_lock_write_identity "$FM_STATE_OVERRIDE" "$me" || exit 1
+    if fm_session_lock_release "$FM_STATE_OVERRIDE" 999999999; then
+      printf "mismatch_release=succeeded\n"
+    else
+      printf "mismatch_release=refused\n"
+    fi
+    [ -e "$FM_STATE_OVERRIDE/.lock" ] && printf "lock_after_mismatch=present\n" || printf "lock_after_mismatch=missing\n"
+    if fm_session_lock_release "$FM_STATE_OVERRIDE" "$me"; then
+      printf "match_release=succeeded\n"
+    else
+      printf "match_release=refused\n"
+    fi
+    [ -e "$FM_STATE_OVERRIDE/.lock" ] && printf "lock_after_match=present\n" || printf "lock_after_match=missing\n"
+    [ -e "$FM_STATE_OVERRIDE/.lock-identity" ] && printf "sidecar_after_match=present\n" || printf "sidecar_after_match=missing\n"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" 2>&1)
+  assert_contains "$out" "mismatch_release=refused" "fm_session_lock_release must refuse a pid that does not match the caller"
+  assert_contains "$out" "lock_after_mismatch=present" "a refused mismatched release must not remove the lock"
+  assert_contains "$out" "match_release=succeeded" "fm_session_lock_release must succeed when pid and recorded token/identity match the caller"
+  assert_contains "$out" "lock_after_match=missing" "a successful release must remove state/.lock"
+  assert_contains "$out" "sidecar_after_match=missing" "a successful release must remove state/.lock-identity"
+  pass "session-lock: fm_session_lock_release refuses a mismatched pid and releases a genuine self-owned lock"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -485,6 +616,11 @@ test_verified_alive_false_for_dead_pid
 test_verified_alive_false_for_reused_pid_mismatched_identity
 test_verified_alive_ignores_sidecar_recorded_for_a_different_pid
 test_verified_alive_defers_without_any_sidecar
+test_write_identity_mints_a_fresh_token_per_acquisition
+test_renew_heartbeat_updates_heartbeat_and_preserves_token
+test_verified_alive_false_for_expired_heartbeat_live_matching_identity
+test_verified_alive_true_for_fresh_heartbeat_within_custom_grace
+test_session_lock_release_is_token_gated
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

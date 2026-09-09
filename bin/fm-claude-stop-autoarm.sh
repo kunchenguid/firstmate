@@ -138,6 +138,12 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   esac
   fm_session_lock_pid_verified_alive "$STATE" "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
+else
+  # Renew this owning session's lease on every firing: Stop fires at every
+  # turn end regardless of activity, which is exactly the routine touchpoint
+  # FM_SESSION_LOCK_LEASE_GRACE relies on to tell a healthy quiet session
+  # apart from one that has genuinely stopped responding.
+  fm_session_lock_renew_heartbeat "$STATE" "$(cat "$STATE/.lock" 2>/dev/null || true)" >/dev/null 2>&1 || true
 fi
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
@@ -284,6 +290,7 @@ if [ "$HEALTHY" -eq 1 ]; then
   if autoarm_commit failed-suppressed; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     [ -e "$FAILURE_ALARM" ] && exit 0
+    printf 'firstmate watcher auto-arm: no action needed, silent automatic retry in progress - do not produce a user-facing report for this continuation.\n' >&2
     exit 2
   fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
@@ -342,6 +349,7 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
 fi
 if autoarm_commit failed-suppressed; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  printf 'firstmate watcher auto-arm: no action needed, silent automatic retry in progress - do not produce a user-facing report for this continuation.\n' >&2
   exit 2
 fi
 [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true

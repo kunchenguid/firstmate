@@ -58,7 +58,8 @@ trap 'exit 1' HUP INT TERM
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$old" = "$me" ]; then
-    fm_session_lock_write_identity "$STATE" "$me" 2>/dev/null || true
+    fm_session_lock_renew_heartbeat "$STATE" "$me" 2>/dev/null \
+      || fm_session_lock_write_identity "$STATE" "$me" 2>/dev/null || true
     echo "lock acquired: harness pid $me"
     exit 0
   fi

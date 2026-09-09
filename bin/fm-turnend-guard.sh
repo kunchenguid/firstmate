@@ -186,6 +186,7 @@ fi
 allow_supervised_stop() {
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
+  printf 'firstmate turn-end guard: no action needed, silent automatic retry in progress - do not produce a user-facing report for this continuation.\n' >&2
   exit 2
 }
 
@@ -440,7 +441,10 @@ i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-      fm_failure_episode_reset "$STATE" || exit 2
+      fm_failure_episode_reset "$STATE" || {
+        printf 'firstmate turn-end guard: no action needed, silent automatic retry in progress - do not produce a user-facing report for this continuation.\n' >&2
+        exit 2
+      }
     fi
     exit 0
   fi
@@ -449,7 +453,10 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
 done
 if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-    fm_failure_episode_reset "$STATE" || exit 2
+    fm_failure_episode_reset "$STATE" || {
+      printf 'firstmate turn-end guard: no action needed, silent automatic retry in progress - do not produce a user-facing report for this continuation.\n' >&2
+      exit 2
+    }
   fi
   exit 0
 fi

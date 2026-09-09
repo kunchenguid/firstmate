@@ -261,6 +261,10 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   fm_session_lock_pid_verified_alive "$STATE" "$LOCK_PID" && exit 0
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
+else
+  # Renew this owning session's lease at every park, the routine per-turn
+  # touchpoint FM_SESSION_LOCK_LEASE_GRACE relies on (bin/fm-session-lock-lib.sh).
+  fm_session_lock_renew_heartbeat "$STATE" "$(cat "$STATE/.lock" 2>/dev/null || true)" >/dev/null 2>&1 || true
 fi
 
 OWNER_ID=$(cat "$STATE/.lock" 2>/dev/null || true)
