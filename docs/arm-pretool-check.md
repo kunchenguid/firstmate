@@ -160,7 +160,7 @@ Prose may improve without changing adapter behavior.
 | Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
-| Agy | `.toolCall.args.CommandLine` | `.agents/hooks.json` forwards stdin and Agy consumes the stdout `decision=deny` object. |
+| Agy | `.toolCall.args.CommandLine` | `.agents/hooks.json` anchors from `pwd -P`, verifies the hook-loaded firstmate root, and forwards stdin with `--agy`. Agy reads the RETURNED object and treats ANY nonzero exit as a failed hook, so `--agy` prints `{"decision":"deny","reason":"[code] reason"}` on stdout and exits 0. Agy also reads a returned `{}` as a deny with an empty reason, so an allowed command must return NOTHING. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
 | omp | `event.input.command` | `.omp/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true, reason}` only for exit 2; omp surfaces the reason verbatim to the model (verified 18.1.2). |

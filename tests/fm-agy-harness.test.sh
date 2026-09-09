@@ -578,6 +578,152 @@ test_agy_spawn_does_not_seed_the_container_environment() {
   pass "fm-spawn: the launch composer scope never reaches the container it creates"
 }
 
+# --- tracked .agents/hooks.json transport ------------------------------------
+#
+# Agy 1.1.28 reads the PreToolUse decision from the hook's stdout and treats ANY
+# nonzero exit as a failed hook, and it reads a returned `{}` as a deny with an
+# empty reason rather than as an allow (verified live, see
+# docs/verification/agy-harness.md). The tracked registration is therefore
+# executed here through its own command string, exactly as Agy runs it, so a
+# regression in the wrapper cannot reach a primary as a silently denied shell.
+
+agy_hook_command() {  # <jq path expression>
+  jq -r "$1" "$ROOT/.agents/hooks.json"
+}
+
+agy_pretool_payload() {  # <command line>
+  jq -cn --arg command "$1" '{toolCall:{name:"run_command",args:{CommandLine:$command}}}'
+}
+
+# A customization root whose hooks.json registers <script> and whose parent
+# carries the Firstmate shape the wrapper's anchoring check requires.
+agy_fake_hook_root() {  # <dir> <script basename> <event>
+  local dir=$1 script=$2 event=$3
+  mkdir -p "$dir/.agents" "$dir/bin"
+  : > "$dir/AGENTS.md"
+  if [ "$event" = Stop ]; then
+    jq -n --arg c "run $script" \
+      '{"firstmate-primary-turn-end":{"Stop":[{"type":"command","command":$c}]}}' \
+      > "$dir/.agents/hooks.json"
+  else
+    jq -n --arg c "run $script" \
+      '{"firstmate-primary-shell-seatbelts":{"PreToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":$c}]}]}}' \
+      > "$dir/.agents/hooks.json"
+  fi
+}
+
+test_agy_tracked_seatbelts_allow_without_returning_an_object() {
+  local i command out rc payload
+  payload=$(agy_pretool_payload 'printf hello')
+  for i in 0 1; do
+    command=$(agy_hook_command ".\"firstmate-primary-shell-seatbelts\".PreToolUse[0].hooks[$i].command")
+    [ -n "$command" ] || fail "tracked .agents/hooks.json has no PreToolUse hook $i"
+    out=$(printf '%s' "$payload" | (cd "$ROOT/.agents" && bash -c "$command") 2>/dev/null)
+    rc=$?
+    expect_code 0 "$rc" "Agy seatbelt $i must exit 0 when the command is allowed"
+    [ -z "$out" ] \
+      || fail "Agy seatbelt $i returned '$out' on allow; Agy reads any returned object, including {}, as a deny"
+  done
+  pass ".agents/hooks.json: an allowed run_command returns nothing at exit 0"
+}
+
+test_agy_tracked_seatbelt_denies_at_exit_zero() {
+  local dir command out rc err
+  dir="$TMP_ROOT/agy-hook-deny"
+  agy_fake_hook_root "$dir" fm-arm-pretool-check.sh PreToolUse
+  # Stands in for the real seatbelt's deny contract: the decision object on
+  # stdout, the Claude-shaped object on stderr, and exit 2.
+  cat > "$dir/bin/fm-arm-pretool-check.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$(dirname "$0")/argv"
+cat > "$(dirname "$0")/stdin"
+printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"stub"}\n' >&2
+printf '{"decision":"deny","reason":"STUB_DENY"}\n'
+exit 2
+EOF
+  chmod +x "$dir/bin/fm-arm-pretool-check.sh"
+  command=$(agy_hook_command '."firstmate-primary-shell-seatbelts".PreToolUse[0].hooks[0].command')
+  err="$dir/err"
+  out=$(printf '%s' "$(agy_pretool_payload 'bin/fm-watch.sh &')" \
+    | (cd "$dir/.agents" && bash -c "$command") 2>"$err")
+  rc=$?
+  expect_code 0 "$rc" "an Agy deny must exit 0 or Agy reports a failed hook instead of the decision"
+  [ "$(printf '%s' "$out" | jq -s -r 'length')" = 1 ] \
+    || fail "an Agy deny must return exactly one JSON object, got: $out"
+  printf '%s' "$out" | jq -e '.decision == "deny" and .reason == "STUB_DENY"' >/dev/null \
+    || fail "the seatbelt's decision object was not forwarded verbatim: $out"
+  [ ! -s "$err" ] \
+    || fail "the seatbelt's stderr must not reach Agy, which renders it only as a hook failure: $(cat "$err")"
+  assert_contains "$(cat "$dir/bin/argv")" '--agy' "the tracked hook must select the Agy deny rendering"
+  assert_contains "$(cat "$dir/bin/stdin")" 'CommandLine' "the tracked hook must forward the original payload"
+  pass ".agents/hooks.json: a deny is forwarded as one decision object at exit 0 with no stderr"
+}
+
+test_agy_tracked_hooks_anchor_on_the_hook_loaded_root() {
+  local dir command out rc
+  dir="$TMP_ROOT/agy-hook-anchor"
+  agy_fake_hook_root "$dir" fm-arm-pretool-check.sh PreToolUse
+  cat > "$dir/bin/fm-arm-pretool-check.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '{"decision":"deny","reason":"ANCHORED_ROOT"}\n'
+exit 2
+EOF
+  chmod +x "$dir/bin/fm-arm-pretool-check.sh"
+  command=$(agy_hook_command '."firstmate-primary-shell-seatbelts".PreToolUse[0].hooks[0].command')
+
+  out=$(printf '%s' "$(agy_pretool_payload 'anything')" \
+    | (cd "$dir/.agents" && bash -c "$command") 2>/dev/null)
+  printf '%s' "$out" | jq -e '.reason == "ANCHORED_ROOT"' >/dev/null \
+    || fail "the hook must run the checkout that loaded it, not the one it was copied from: $out"
+
+  # A root that does not register this script is not the registration that
+  # fired, so the hook stands down instead of executing that root's code.
+  printf '{"someone-else":{"PreToolUse":[]}}\n' > "$dir/.agents/hooks.json"
+  out=$(printf '%s' "$(agy_pretool_payload 'anything')" \
+    | (cd "$dir/.agents" && bash -c "$command") 2>/dev/null)
+  rc=$?
+  expect_code 0 "$rc" "an unregistered root must allow"
+  [ -z "$out" ] || fail "the hook ran from a root that never registered it: $out"
+
+  # A directory that is not a Firstmate checkout at all.
+  agy_fake_hook_root "$dir" fm-arm-pretool-check.sh PreToolUse
+  rm "$dir/AGENTS.md"
+  out=$(printf '%s' "$(agy_pretool_payload 'anything')" \
+    | (cd "$dir/.agents" && bash -c "$command") 2>/dev/null)
+  [ -z "$out" ] || fail "the hook ran outside a Firstmate checkout: $out"
+  pass ".agents/hooks.json: the seatbelt anchors on the hook-loaded root and stands down elsewhere"
+}
+
+test_agy_tracked_stop_hook_always_returns_one_object() {
+  local dir command out rc payload
+  dir="$TMP_ROOT/agy-hook-stop"
+  agy_fake_hook_root "$dir" fm-turnend-guard-agy.sh Stop
+  cat > "$dir/bin/fm-turnend-guard-agy.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"decision":"continue","reason":"STUB_CONTINUE"}\n'
+EOF
+  chmod +x "$dir/bin/fm-turnend-guard-agy.sh"
+  command=$(agy_hook_command '."firstmate-primary-turn-end".Stop[0].command')
+  [ -n "$command" ] || fail "tracked .agents/hooks.json has no Stop hook"
+  payload='{"executionNum":0,"terminationReason":"NO_TOOL_CALL","fullyIdle":true}'
+
+  out=$(printf '%s' "$payload" | (cd "$dir/.agents" && bash -c "$command") 2>/dev/null)
+  rc=$?
+  expect_code 0 "$rc" "the Agy Stop hook must exit 0"
+  printf '%s' "$out" | jq -e '.decision == "continue"' >/dev/null \
+    || fail "the Stop hook did not forward the guard's continue decision: $out"
+
+  # A guard that cannot run must still return an object, or Agy renders a failed
+  # hook instead of allowing the turn to end.
+  rm "$dir/bin/fm-turnend-guard-agy.sh"
+  out=$(printf '%s' "$payload" | (cd "$dir/.agents" && bash -c "$command") 2>/dev/null)
+  rc=$?
+  expect_code 0 "$rc" "a missing guard must still exit 0"
+  [ "$out" = '{}' ] || fail "a missing guard must return {} so the turn is allowed to end, got: $out"
+  pass ".agents/hooks.json: the Stop hook returns one object and allows the stop when the guard is unavailable"
+}
+
 test_separated_composer_is_structural
 test_separated_composer_is_harness_scoped
 test_agy_busy_signature_is_harness_scoped
@@ -596,3 +742,7 @@ test_agy_teardown_preserves_a_replaced_hook_retaining_the_token
 test_agy_primary_guard_bounds_continuation
 test_agy_detection_uses_marker_and_ancestry
 test_agy_session_lock_identity
+test_agy_tracked_seatbelts_allow_without_returning_an_object
+test_agy_tracked_seatbelt_denies_at_exit_zero
+test_agy_tracked_hooks_anchor_on_the_hook_loaded_root
+test_agy_tracked_stop_hook_always_returns_one_object

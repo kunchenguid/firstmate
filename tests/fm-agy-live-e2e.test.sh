@@ -17,7 +17,7 @@
 # standing while retiring only the task hook it installed.
 #
 # Run explicitly with FM_AGY_LIVE_E2E=1. It spends a small number of real model
-# tokens: four short turns on the cheapest listed Flash tier (override with
+# tokens: five short turns on the cheapest listed Flash tier (override with
 # FM_AGY_LIVE_MODEL). Nothing under ~/.gemini is edited; the only side effect
 # outside the lab is Agy's own trust record for the lab's disposable worktree
 # path. FM_AGY_LIVE_TIMEOUT bounds each wait (seconds, default 240). A passing
@@ -144,8 +144,40 @@ else
 fi
 SH
 chmod +x "$LAB/capture-stop.sh"
-jq -n --arg cmd "bash '$LAB/capture-stop.sh'" \
-  '{"fm-live-payload-capture":{"Stop":[{"type":"command","command":$cmd,"timeout":10}]}}' \
+# The same project root also registers a PreToolUse probe on run_command. Agy
+# reads the decision from the hook's STDOUT and treats any nonzero exit as a
+# failed hook, so the four renderings below are driven for real: silence, a
+# returned {}, a deny object at exit 0, and the same object at exit 2. That is
+# what pins the transport bin/fm-arm-pretool-check.sh --agy and the tracked
+# .agents/hooks.json depend on.
+cat > "$LAB/pretool-probe.sh" <<SH
+#!/usr/bin/env bash
+payload=\$(cat)
+cmd=\$(printf '%s' "\$payload" | "$JQ_BIN" -r '.toolCall.args.CommandLine // empty' 2>/dev/null)
+case "\$cmd" in
+  *fm-agy-seatbelt-rc2*)
+    printf 'deny-object-exit2\n' >> "$LAB/pretool.log"
+    printf '%s\n' '{"decision":"deny","reason":"FIRSTMATE_AGY_PRETOOL_DENY"}'
+    exit 2
+    ;;
+  *fm-agy-seatbelt-deny*)
+    printf 'deny-object-exit0\n' >> "$LAB/pretool.log"
+    printf '%s\n' '{"decision":"deny","reason":"FIRSTMATE_AGY_PRETOOL_DENY"}'
+    ;;
+  *fm-agy-seatbelt-object*)
+    printf 'empty-object-exit0\n' >> "$LAB/pretool.log"
+    printf '%s\n' '{}'
+    ;;
+  *fm-agy-seatbelt-allow*)
+    printf 'silent-exit0\n' >> "$LAB/pretool.log"
+    ;;
+esac
+exit 0
+SH
+chmod +x "$LAB/pretool-probe.sh"
+jq -n --arg stop "bash '$LAB/capture-stop.sh'" --arg pre "bash '$LAB/pretool-probe.sh'" \
+  '{"fm-live-payload-capture":{"Stop":[{"type":"command","command":$stop,"timeout":10}]},
+    "fm-live-pretool-probe":{"PreToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":$pre,"timeout":10}]}]}}' \
   > "$PROJ/.agents/hooks.json"
 printf 'project-owned customization root\n' > "$PROJ/.agent/keep.md"
 printf 'Agy live adapter probe\n' > "$PROJ/README.md"
@@ -324,18 +356,50 @@ wait_marker || fail "agy $VERSION: no Stop hook fired within ${TIMEOUT}s after t
 pane | grep -q 'AGY_STEER_OK' || fail "agy $VERSION: the steered turn did not reply AGY_STEER_OK"
 pass "agy $VERSION: fm-send's doorbell was read, acted on, acknowledged, and closed by the task Stop hook"
 
-# --- 6. Busy footer and interrupt through fm-control -------------------------
+# --- 6. PreToolUse decision transport ---------------------------------------
+# Agy renders a returned `{}` as a deny with an empty reason, so a seatbelt that
+# answers an allowed command with an object silently blocks every shell call in
+# a primary. Only silence allows.
+rm -f "$MARKER"
+FM_HOME="$LAB" "$ROOT/bin/fm-send.sh" "$TASK" \
+  'Use your shell tool four separate times, once per numbered command line below, never combining them into one command line. 1) printf x > .fm-agy-seatbelt-allow  2) printf x > .fm-agy-seatbelt-object  3) printf x > .fm-agy-seatbelt-deny  4) printf x > .fm-agy-seatbelt-rc2 . A policy hook is expected to block some of them and that is the expected result: never retry a blocked one, and never create those files any other way. After all four attempts reply with exactly the single line AGY_SEATBELT_OK.' \
+  >/dev/null 2>&1 || fail "fm-send refused the seatbelt steer"
+wait_marker || fail "agy $VERSION: no Stop hook fired within ${TIMEOUT}s after the seatbelt steer"
+PRETOOL_LOG="$LAB/pretool.log"
+for rendering in silent-exit0 empty-object-exit0 deny-object-exit0 deny-object-exit2; do
+  grep -qx "$rendering" "$PRETOOL_LOG" 2>/dev/null \
+    || fail "agy $VERSION: the PreToolUse hook never received the $rendering probe; the worker did not attempt all four commands"
+done
+[ -f "$WT/.fm-agy-seatbelt-allow" ] \
+  || fail "agy $VERSION: a PreToolUse hook that returned NOTHING at exit 0 did not allow the command; the seatbelt's allow rendering has drifted"
+assert_seatbelt_blocked() {  # <sentinel> <what the hook returned>
+  [ ! -e "$WT/.fm-agy-seatbelt-$1" ] \
+    || fail "agy $VERSION: a PreToolUse hook that returned $2 did not block the command"
+}
+assert_seatbelt_blocked object 'an empty object {} at exit 0'
+assert_seatbelt_blocked deny 'a deny decision object at exit 0'
+assert_seatbelt_blocked rc2 'a deny decision object at exit 2'
+note "PreToolUse renderings driven live: silence allowed, {} blocked, deny object blocked at exit 0 and at exit 2"
+DENY_RENDER=$(pane | grep -i 'denied by pre-tool hook' | tail -1 | sed 's/^[[:space:]]*//')
+if [ -n "$DENY_RENDER" ]; then
+  note "deny surfaced to the model as: $DENY_RENDER"
+else
+  note "deny reason rendering not visible in the collapsed pane; the blocked sentinels are the assertion"
+fi
+pass "agy $VERSION: only a silent PreToolUse hook allows, and a returned object at either exit status blocks"
+
+# --- 7. Busy footer and interrupt through fm-control -------------------------
 rm -f "$MARKER"
 FM_HOME="$LAB" "$ROOT/bin/fm-send.sh" "$TASK" \
   'Run exactly this shell command: sleep 120. Then reply with exactly the single line AGY_SLEEP_DONE.' \
   >/dev/null 2>&1 || fail "fm-send refused the long-turn steer"
 i=0
-while [ "$i" -lt "$TIMEOUT" ] && [ ! -f "$LAB/state/$TASK.inbox/handled/002.msg" ]; do
+while [ "$i" -lt "$TIMEOUT" ] && [ ! -f "$LAB/state/$TASK.inbox/handled/003.msg" ]; do
   sleep 1
   i=$((i + 1))
 done
-[ -f "$LAB/state/$TASK.inbox/handled/002.msg" ] \
-  || fail "agy $VERSION: the worker did not acknowledge the second steering record within ${TIMEOUT}s"
+[ -f "$LAB/state/$TASK.inbox/handled/003.msg" ] \
+  || fail "agy $VERSION: the worker did not acknowledge the third steering record within ${TIMEOUT}s"
 BUSY_STATE=''
 for _ in $(seq 1 30); do
   BUSY_STATE=$(crew_state)
@@ -358,20 +422,39 @@ case "$INT_OUT" in
   *) fail "fm-control interrupt reported something other than delivery: $INT_OUT" ;;
 esac
 note "fm-control: $INT_OUT"
+# Two independent signals answer "did the single Escape cancel the turn?", and
+# either carries a positive verdict, because the `Interrupted` banner is a
+# rendering rather than the outcome. On 1.1.28 Agy may run a steered shell
+# command through its own background task tracker (`N task(s)` in the footer);
+# Escape then returns the agent to idle with no banner at all. The stage is not
+# vacuous either way: the pane was just proved busy above, so the busy footer
+# clearing is a real transition.
 BANNER=0
+BUSY_CLEARED=0
 i=0
 while [ "$i" -lt 60 ]; do
   pane | grep -q 'Interrupted' && BANNER=1
-  [ "$BANNER" -eq 1 ] && [ "$(composer_state)" = empty ] && break
+  case "$(crew_state)" in
+    *'harness busy (agy-regex)'*) ;;
+    *) BUSY_CLEARED=1 ;;
+  esac
+  if { [ "$BANNER" -eq 1 ] || [ "$BUSY_CLEARED" -eq 1 ]; } && [ "$(composer_state)" = empty ]; then
+    break
+  fi
   sleep 1
   i=$((i + 1))
 done
-[ "$BANNER" -eq 1 ] || fail "agy $VERSION: Escape did not render the Interrupted banner within 60s; tail: $(pane_tail 5 | tr '\n' '|')"
+[ "$BANNER" -eq 1 ] || [ "$BUSY_CLEARED" -eq 1 ] \
+  || fail "agy $VERSION: within 60s of a single Escape the pane rendered no Interrupted banner AND fm-crew-state still read the turn busy; tail: $(pane_tail 5 | tr '\n' '|')"
 wait_idle_composer || fail "agy $VERSION: the composer did not return to empty after the interrupt (last verdict: ${LAST_VERDICT:-unreadable})"
-note "interrupt banner: $(pane | grep 'Interrupted' | tail -1 | sed 's/^[[:space:]]*//')"
-pass "agy $VERSION: single Escape interrupted the running turn and returned the composer to idle"
+if [ "$BANNER" -eq 1 ]; then
+  note "interrupt banner: $(pane | grep 'Interrupted' | tail -1 | sed 's/^[[:space:]]*//')"
+else
+  note "no Interrupted banner this run: Agy tracked the steered command as a background task, and Escape returned the agent to idle with the busy footer cleared"
+fi
+pass "agy $VERSION: single Escape ended the busy turn and returned the composer to idle"
 
-# --- 7. Exit through fm-control, then teardown -------------------------------
+# --- 8. Exit through fm-control, then teardown -------------------------------
 EXIT_OUT=$(FM_HOME="$LAB" "$ROOT/bin/fm-control.sh" "$TASK" exit 2>&1) \
   || fail "fm-control exit failed: $EXIT_OUT"
 case "$EXIT_OUT" in
@@ -400,4 +483,4 @@ pass "agy $VERSION: teardown retired only the task hook, pointer, and registry e
 
 [ "$SURVEY_SEEN" -eq 0 ] || note "the post-turn feedback survey appeared once during this run and was skipped"
 PASSED=1
-pass "live Agy adapter guard: agy $VERSION drove spawn, hooks, steer, busy, interrupt, exit, and teardown end to end"
+pass "live Agy adapter guard: agy $VERSION drove spawn, hooks, steer, seatbelt decisions, busy, interrupt, exit, and teardown end to end"

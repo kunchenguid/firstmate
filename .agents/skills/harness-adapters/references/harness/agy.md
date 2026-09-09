@@ -55,10 +55,11 @@ A relaunch retires that same wiring through `../../../bin/fm-control-lib.sh`'s t
 ## Primary integration
 
 The primary Firstmate checkout carries `.agents/hooks.json`.
+Every hook command in that file anchors on `pwd -P`, resolves the checkout from the customization root Agy loaded it from, and runs only when that root's own `hooks.json` still registers it, so a copied or nested checkout can never execute the wrong scripts.
 Its Stop hook calls `../../../bin/fm-turnend-guard-agy.sh`, which invokes the shared primary predicate only for `executionNum: 0`.
 When the predicate blocks, the wrapper returns `{"decision":"continue","reason":"..."}` and Agy re-enters the same live execution loop.
 Every later execution number is allowed, which bounds the adapter to one forced follow-up.
-The same file's `run_command` PreToolUse hook passes `.toolCall.args.CommandLine` to the watcher-arm seatbelt and consumes the same stdout `decision=deny` object as Grok; `../../../docs/arm-pretool-check.md` owns the exact shape.
+The same file's `run_command` PreToolUse hook passes `.toolCall.args.CommandLine` to the watcher-arm and cd seatbelts with `--agy`, which returns the decision object on stdout at exit 0 and returns nothing when the command is allowed; `../../../docs/arm-pretool-check.md` owns the exact shape and why neither a nonzero exit nor a returned `{}` can carry an allow.
 Agy 1.1.28 exposes agent selection but no verified in-session delegation-shaped tool token, so its subagent guard axis remains inspected but unwired under `../../../docs/subagent-guard.md`.
 Agy 1.1.28 has no SessionStart hook event, verified by inspection of its installed lifecycle-hook contract, so the native session-start nudge is not applicable.
 Its primary supervision protocol (`../../../docs/supervision-protocols/agy.md`) uses the same bounded foreground checkpoint shape as Codex, because no verified Agy background task can wake the same persistent TUI turn.

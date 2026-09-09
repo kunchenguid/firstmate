@@ -18,8 +18,8 @@ FM_AGY_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-agy-live-e2e.test.sh
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
-The first command needs a signed-in `agy` plus `tmux`, `jq`, `treehouse`, and `git`, spends four short turns on the cheapest listed Flash tier (`FM_AGY_LIVE_MODEL` overrides it), and finished in about three minutes on 2026-09-09.
-It drives the real `bin/fm-spawn.sh`, `bin/fm-crew-state.sh`, `bin/fm-send.sh`, `bin/fm-control.sh`, and `bin/fm-teardown.sh` against the installed binary, has the worker run `bin/fm-harness.sh` from inside a real Agy tool call, and prints every capture quoted below as `#` notes beside its `ok` lines.
+The first command needs a signed-in `agy` plus `tmux`, `jq`, `treehouse`, and `git`, spends five short turns on the cheapest listed Flash tier (`FM_AGY_LIVE_MODEL` overrides it), and finished in between one and four minutes across the 2026-09-09 runs.
+It drives the real `bin/fm-spawn.sh`, `bin/fm-crew-state.sh`, `bin/fm-send.sh`, `bin/fm-control.sh`, and `bin/fm-teardown.sh` against the installed binary, has the worker run `bin/fm-harness.sh` from inside a real Agy tool call, re-drives the PreToolUse decision renderings recorded below, and prints every capture quoted below as `#` notes beside its `ok` lines.
 The guard is the adapter's only live evidence; the refusals of foreign, mismatched, or malformed Stop payloads and the omission of unsupported effort levels have no live surface and are portable-suite facts (`tests/fm-agy-harness.test.sh`), reported as such rather than as live results.
 The second command spends no tokens and refreshes the liveness row in [`runtime-backends.md`](runtime-backends.md).
 Both fail naming the Agy version rather than skipping when the binary is installed and the guard is requested.
@@ -142,28 +142,47 @@ On 1.1.28 the payload's sole `workspacePaths` entry equalled the recorded task w
 
 ## PreToolUse
 
-The `run_command` PreToolUse probe is 1.1.8 evidence from 2026-07-30 and was not re-driven on 1.1.28.
-A live task-local hook received:
+The decision transport was driven live on 1.1.28 on 2026-09-09, because the tracked primary seatbelts depend on it and the earlier record was 1.1.8 evidence.
+Two turns in a trusted disposable workspace attempted the `run_command` calls below, against a `.agents/hooks.json` probe that answered each command line with a different rendering.
+"Ran" means the sentinel file the command wrote existed afterwards.
 
-```json
-{
-  "toolCall": {
-    "name": "run_command",
-    "args": {
-      "CommandLine": "printf forbidden > '<disposable-sentinel>'"
-    }
-  }
-}
-```
+| Hook stdout | Hook exit | Outcome | Rendered to the model |
+| --- | --- | --- | --- |
+| nothing | 0 | ran | nothing |
+| `{}` | 0 | BLOCKED | `Error: tool call denied by pre-tool hook: ` |
+| `{"decision":"allow"}` | 0 | ran | nothing |
+| `{"decision":"deny","reason":R}` | 0 | BLOCKED | `Error: tool call denied by pre-tool hook: R` |
+| `{"decision":"deny","reason":R}` | 2 | BLOCKED | `Error: JSON hook "..." failed: command failed: exit status 2, stderr: ...` |
 
-The hook returned:
+Two facts follow, and both changed the adapter.
+
+Agy reads the decision from the returned object and treats ANY nonzero exit as a failed hook rather than as a decision, so a deny must exit 0.
+The exit-2 row still stopped the command, but as a hook failure whose reason reached the model only as a raw stderr dump, which is not a seatbelt that was seen working.
+
+Agy reads a returned `{}` as a deny with an empty reason, so an ALLOWED command must return nothing at all.
+The observed rendering for that row was the deny line above with an empty reason, and the sentinel stayed absent.
+A seatbelt that answered every allowed command with `{}` would therefore have blocked every shell call in an Agy primary.
+
+`bin/fm-arm-pretool-check.sh --agy` and `bin/fm-cd-pretool-check.sh --agy` render exactly that contract, and the tracked `.agents/hooks.json` selects it, discards the Claude-shaped stderr object, and exits 0 on every path.
+The exact deny reason is unchanged from the 1.1.8 observation:
 
 ```json
 {"decision":"deny","reason":"FIRSTMATE_AGY_PRETOOL_DENY"}
 ```
 
-Agy rendered `Tool call denied by pre-tool hook: FIRSTMATE_AGY_PRETOOL_DENY` and the sentinel stayed absent.
-The 1.1.28 `hooks.md` still documents `deny` as a hard block with the same stdout object, and the 1.1.28 changelog names hook decisions only for the `ask` reason line, so the tracked primary arm and cd seatbelts keep that shape.
+```text
+Error: tool call denied by pre-tool hook: FIRSTMATE_AGY_PRETOOL_DENY
+```
+
+`tests/fm-agy-live-e2e.test.sh` re-drives every row except the explicit `{"decision":"allow"}` one, which no Firstmate seatbelt emits, and `tests/fm-agy-harness.test.sh` executes the tracked hook commands themselves so an allow that returns an object, a deny that exits nonzero, or a lost `--agy` fails in CI.
+
+## Hook command anchoring
+
+Every command in the tracked `.agents/hooks.json` resolves its checkout from `pwd -P` rather than a relative `../bin/` path, following the `.codex/hooks.json` precedent.
+Agy sets the hook working directory to the customization root holding `hooks.json`, confirmed on 1.1.28 by the Stop probe above, so the parent of that directory is the checkout whose registration fired.
+Each command therefore requires an executable script under that parent's `bin/`, an `AGENTS.md` beside it, and a `hooks.json` in the loaded root that still names the script it is about to run, and it stands down silently otherwise.
+The seatbelt entries stand down by returning nothing, and the Stop entry by returning `{}`, because those are this release's allow renderings for their events.
+`tests/fm-agy-harness.test.sh` runs the tracked command strings from a foreign root, an unregistered root, and a directory that is not a Firstmate checkout.
 
 ## Busy footer, composer, and the feedback survey
 
@@ -210,6 +229,11 @@ Single Escape through `bin/fm-control.sh <id> interrupt` cancelled the running `
 The control plane reported `interrupt-delivered <id> harness=agy backend=tmux verified=agent-alive cancel=unconfirmed`, and the composer returned to `empty`.
 When the tool had already started a shell child, Escape returned the agent to idle but the child continued until completion (1.1.8 observation, consistent with the leaked `sleep` teardown reaped on 1.1.28).
 
+That banner is not reliable on 1.1.28 and must not be the only signal.
+1.1.28 may run the same steered `sleep 120` through its own background task tracker, which the footer reports as `Gemini 3.8 Flash · low · 1 task(s) · /tasks` beside `esc to cancel`.
+Two consecutive runs on 2026-09-09 both took that path and diverged on the rendering: one printed the banner above, the other printed no banner anywhere in the pane while Escape still returned the agent to idle and cleared the busy footer.
+The live guard therefore reads the banner and the busy footer clearing as two independent signals and accepts either, after proving the same pane busy immediately before the interrupt.
+
 `bin/fm-control.sh <id> exit` submitted `/exit`, reported `stopped <id> harness=agy backend=tmux`, and the pane printed:
 
 ```text
@@ -248,18 +272,25 @@ bin/fm-lint.sh
 bin/fm-doc-audience-check.sh
 ```
 
-The live guard's final lines on 2026-09-09, run twice in a row:
+The live guard's final lines on 2026-09-09:
 
 ```text
 ok - agy 1.1.28: teardown retired only the task hook, pointer, and registry entry and left both project roots standing
-ok - live Agy adapter guard: agy 1.1.28 drove spawn, hooks, steer, busy, interrupt, exit, and teardown end to end
+ok - live Agy adapter guard: agy 1.1.28 drove spawn, hooks, steer, seatbelt decisions, busy, interrupt, exit, and teardown end to end
 ```
+
+```text
+FM_TEST_END 2026-09-09T12:23:01Z tests/fm-agy-live-e2e.test.sh exit=0 duration_ms=74187 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=74312
+```
+
+That run took the no-banner interrupt path recorded above, so the two-signal interrupt check is exercised rather than assumed.
 
 The drift guard on the same host classified `agy 1.1.28: title='agy' foreground=[agy ]` alive beside Claude, Codex, and Cursor.
 
 The portable adapter regression completed with:
 
 ```text
-FM_TEST_END 2026-09-09T05:10:59Z tests/fm-agy-harness.test.sh exit=0 duration_ms=30576 gate_skip=false
-FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=30636
+FM_TEST_END 2026-09-09T11:55:46Z tests/fm-agy-harness.test.sh exit=0 duration_ms=30757 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=30847
 ```

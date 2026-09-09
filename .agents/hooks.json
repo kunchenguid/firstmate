@@ -6,12 +6,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "../bin/fm-arm-pretool-check.sh; rc=$?; if [ \"$rc\" -eq 0 ]; then printf '{}\\n'; fi; exit \"$rc\"",
+            "command": "bash -c 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; here=$(pwd -P) || exit 0; root=$(CDPATH= cd -- \"$here/..\" 2>/dev/null && pwd -P) || exit 0; [ -x \"$root/bin/fm-arm-pretool-check.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$here/hooks.json\" ] || exit 0; jq -e \"any(.[]?.PreToolUse[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-arm-pretool-check.sh\\\"))\" \"$here/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-arm-pretool-check.sh\" --agy 2>/dev/null; exit 0'",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "../bin/fm-cd-pretool-check.sh; rc=$?; if [ \"$rc\" -eq 0 ]; then printf '{}\\n'; fi; exit \"$rc\"",
+            "command": "bash -c 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; here=$(pwd -P) || exit 0; root=$(CDPATH= cd -- \"$here/..\" 2>/dev/null && pwd -P) || exit 0; [ -x \"$root/bin/fm-cd-pretool-check.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$here/hooks.json\" ] || exit 0; jq -e \"any(.[]?.PreToolUse[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-cd-pretool-check.sh\\\"))\" \"$here/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-cd-pretool-check.sh\" --agy 2>/dev/null; exit 0'",
             "timeout": 10
           }
         ]
@@ -22,8 +22,8 @@
     "Stop": [
       {
         "type": "command",
-        "command": "../bin/fm-turnend-guard-agy.sh",
-        "timeout": 10
+        "command": "bash -c 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || { printf \"{}\\n\"; exit 0; }; command -v jq >/dev/null 2>&1 || { printf \"{}\\n\"; exit 0; }; here=$(pwd -P) || { printf \"{}\\n\"; exit 0; }; root=$(CDPATH= cd -- \"$here/..\" 2>/dev/null && pwd -P) || { printf \"{}\\n\"; exit 0; }; [ -x \"$root/bin/fm-turnend-guard-agy.sh\" ] || { printf \"{}\\n\"; exit 0; }; [ -f \"$root/AGENTS.md\" ] || { printf \"{}\\n\"; exit 0; }; [ -f \"$here/hooks.json\" ] || { printf \"{}\\n\"; exit 0; }; jq -e \"any(.[]?.Stop[]?.command?; type == \\\"string\\\" and contains(\\\"fm-turnend-guard-agy.sh\\\"))\" \"$here/hooks.json\" >/dev/null 2>&1 || { printf \"{}\\n\"; exit 0; }; out=$(printf \"%s\" \"$payload\" | \"$root/bin/fm-turnend-guard-agy.sh\" 2>/dev/null); [ -n \"$out\" ] || out=\"{}\"; printf \"%s\\n\" \"$out\"; exit 0'",
+        "timeout": 30
       }
     ]
   }

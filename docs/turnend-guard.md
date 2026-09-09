@@ -86,7 +86,8 @@ Every other direct `FM_GUARD_GRACE` reader (`bin/fm-guard.sh`, the strict-watche
   Do NOT widen this guard to `GROK_SESSION_ID`: Grok injects that into every child process, so it can survive into a Claude session that Grok launched and would silently disable Claude's own continuity.
   The same marker guard carries every tracked `.claude/settings.json` entry whose event Grok already covers through its own `.grok/hooks/` registration, which is both `Stop` entries, the `SessionStart` entry, and the two `PreToolUse` Bash entries; `bin/fm-subagent-pretool-check.sh` is the one deliberate unguarded exception because no Grok registration covers the subagent-spawn event, recorded in [`subagent-guard.md`](subagent-guard.md) "Known residual gap".
   `tests/fm-turnend-guard.test.sh` pins that inventory so neither the guarded set nor the exception can change silently.
-- Agy registers a `Stop` hook in `.agents/hooks.json` and delegates its native continuation response to `bin/fm-turnend-guard-agy.sh`.
+- Agy registers a `Stop` hook in `.agents/hooks.json` that anchors from `pwd -P`, verifies the hook-loaded firstmate root, and delegates its native continuation response to `bin/fm-turnend-guard-agy.sh`.
+  Every path through that registration returns one JSON object and exits 0, because Agy renders any nonzero hook exit as a failed hook rather than a decision.
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.

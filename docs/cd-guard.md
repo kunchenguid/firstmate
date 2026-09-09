@@ -117,7 +117,7 @@ The cd-guard never duplicates shell lexing; it adds only the cd-specific decisio
 | Claude | `.claude/settings.json` PreToolUse Bash hook forwarding stdin with `--claude` | Blocks the tool call; stderr deny object, stdout empty. |
 | Codex | `.codex/hooks.json` PreToolUse hook that anchors from `pwd -P`, verifies the hook-loaded firstmate root, and forwards the payload | Blocks on exit 2 and displays stderr. |
 | Grok | `.grok/hooks/fm-primary-cd-check.json` PreToolUse hook anchored on `${GROK_WORKSPACE_ROOT:-}` | Consumes the stdout `decision=deny` object. |
-| Agy | `.agents/hooks.json` `run_command` PreToolUse hook | Consumes the stdout `decision=deny` object. |
+| Agy | `.agents/hooks.json` `run_command` PreToolUse hook that anchors from `pwd -P`, verifies the hook-loaded firstmate root, and forwards stdin with `--agy` | Prints `{"decision":"deny","reason":...}` on stdout and exits 0, because Agy reads the returned object and treats a nonzero exit as a failed hook. An allowed command must return nothing, because Agy reads a returned `{}` as a deny with an empty reason; `docs/arm-pretool-check.md` owns that shape. |
 | OpenCode | `.opencode/plugins/fm-primary-cd-check.js` `tool.execute.before` | Throws, which surfaces as the failed tool result. |
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` `tool_call` handler | Returns `{block: true}`; piggybacks on the already-loaded primary extension so no extra `-e` flag is needed. |
 | omp | `.omp/extensions/fm-primary-turnend-guard.ts` `tool_call` handler | Returns `{block: true, reason}` and omp surfaces the reason to the model; runs before the watcher-arm seatbelt in the same auto-discovered extension, so no `-e` flag is needed. |
