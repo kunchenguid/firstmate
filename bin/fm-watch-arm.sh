@@ -334,11 +334,7 @@ attach_and_wait() {
       continue
     fi
     if close_unobserved_cycle; then
-      if ! copilot_publish_completion_receipt; then
-        cycle_log_append 1 none copilot-receipt-publish-failed none
-        echo "watcher: FAILED - copilot watcher completion receipt could not be written"
-        return 1
-      fi
+      copilot_publish_completion_receipt_nonfatal
       cycle_log_append unknown unknown attached-delivered-wake none
       return 0
     fi
@@ -384,6 +380,12 @@ print_watch_output() {
 copilot_publish_completion_receipt() {
   [ "$(fm_hook_actual_host)" = copilot ] || return 0
   fm_copilot_watch_receipt_publish "$FM_ROOT" "$FM_HOME" "$STATE"
+}
+
+copilot_publish_completion_receipt_nonfatal() {
+  copilot_publish_completion_receipt && return 0
+  echo "watcher: warning: copilot watcher completion receipt could not be written" >&2
+  return 0
 }
 
 handling_successor_generation() {
@@ -510,11 +512,7 @@ owned_child_finished() {
     rm -f "$child_out" 2>/dev/null || true
     child=
     child_out=
-    if ! copilot_publish_completion_receipt; then
-      cycle_log_append 1 none copilot-receipt-publish-failed none
-      echo "watcher: FAILED - copilot watcher completion receipt could not be written"
-      return 1
-    fi
+    copilot_publish_completion_receipt_nonfatal
     cycle_log_append "$rc" "$signal" "$reason_type" none
     return 0
   fi
@@ -537,11 +535,7 @@ owned_child_finished() {
     child=
     child_out=
     if close_unobserved_cycle; then
-      if ! copilot_publish_completion_receipt; then
-        cycle_log_append 1 none copilot-receipt-publish-failed none
-        echo "watcher: FAILED - copilot watcher completion receipt could not be written"
-        return 1
-      fi
+      copilot_publish_completion_receipt_nonfatal
       cycle_log_append "$rc" "$signal" clean-exit-delivered-wake none
       return 0
     fi

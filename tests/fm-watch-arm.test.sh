@@ -856,6 +856,57 @@ test_copilot_success_publishes_single_use_receipt() {
   pass "watch-arm: successful Copilot arms publish single-use completion receipts"
 }
 
+test_copilot_receipt_publication_failure_preserves_wake() {
+  local mode=$1 dir home state fakebin armout armerr status sentinel
+  dir=$(make_case "copilot-receipt-fail-$mode")
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  armerr="$dir/arm.err"
+  mkdir -p "$home/data"
+  make_fake_ps_copilot "$fakebin"
+
+  case "$mode" in
+    blocked)
+      printf 'not a receipt directory\n' > "$state/.copilot-watch-arm" \
+        || fail "could not block the receipt directory path"
+      ;;
+    symlink)
+      sentinel="$dir/sentinel"
+      printf 'must remain intact\n' > "$sentinel"
+      ln -s "$sentinel" "$state/.copilot-watch-arm" || fail "could not plant the receipt-dir symlink"
+      ;;
+    *) fail "unknown receipt publication failure mode: $mode" ;;
+  esac
+
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 \
+    FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' "$WATCH_ARM" > "$armout" 2> "$armerr" &
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "Copilot receipt-failure fixture watcher did not start: $(cat "$armout" 2>/dev/null || true)"
+  printf 'done: receipt failure fixture finished\n' > "$state/receipt-failure.status"
+  wait_for_exit "$ARM_PID" 120
+  status=$?
+  expect_code 0 "$status" "a Copilot watcher wake must survive receipt publication failure"
+  grep -q '^signal:' "$armout" \
+    || fail "receipt publication failure replaced the actionable wake reason: $(cat "$armout")"
+  if [ -s "$armerr" ] && ! grep -q 'warning: copilot watcher completion receipt could not be written' "$armerr"; then
+    fail "receipt publication failure wrote an unexpected diagnostic: $(cat "$armerr")"
+  fi
+  if claim_copilot_watch_receipt "$home" "$home" "$state"; then
+    fail "receipt publication failure created a claimable success-shaped receipt"
+  fi
+  case "$mode" in
+    symlink)
+      [ "$(cat "$sentinel")" = 'must remain intact' ] \
+        || fail "receipt publication followed a symlink target during failure handling"
+      ;;
+  esac
+  pass "watch-arm: Copilot receipt publication $mode failure preserves the wake"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
@@ -871,3 +922,5 @@ test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_copilot_success_publishes_single_use_receipt
+test_copilot_receipt_publication_failure_preserves_wake blocked
+test_copilot_receipt_publication_failure_preserves_wake symlink
