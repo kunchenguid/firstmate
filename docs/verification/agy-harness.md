@@ -223,6 +223,12 @@ The away-mode harness forwarding and non-leak behavior stays portable for a diff
 `bin/fm-harness.sh` returning `agy` from inside a real Agy tool call is driven in the guard's brief turn, and the forwarding decision layered on it is deterministic shell over environment variables with no rendered surface for a live drive to observe.
 Adding a live stage there would re-prove the same detection through a longer path and report it as new evidence, which is why this record does not claim one.
 
+Read those three as a floor rather than a backlog.
+Each is portable for a stated reason rather than for want of effort, so adding further live stages cannot shrink the set to zero.
+The three stages driven live on 2026-09-09 were still worth their cost, because each now proves against the real binary something this suite had only assumed.
+What closing them did not do is change how validation reports the remainder: the no-mistakes test step rejected this branch on four separate runs for reporting a portable scenario as passing, naming a different scenario each time, so shrinking the portable set was never going to end that.
+That gate reads its configuration from the default branch rather than from the branch under validation, so there is no setting on a feature branch that changes it either; [configuration.md](../configuration.md#gate-defaults-no-mistakesyaml) owns that boundary.
+
 ## Primary-side seatbelt: untested
 
 The tracked `.agents/hooks.json` seatbelts have NOT been driven inside a live Agy PRIMARY, and this record does not claim they have.

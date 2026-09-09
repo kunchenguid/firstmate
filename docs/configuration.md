@@ -219,6 +219,9 @@ Storing evidence in the repo publishes each run's test artifacts to the orphan `
 That branch shares no history with code branches, so evidence never enters a pushed feature branch or the default branch; the worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
 The [`firstmate-coding-guidelines` skill](../.agents/skills/firstmate-coding-guidelines/SKILL.md#no-mistakes-test-configuration) owns why `commands.test` stays absent and targeted validation belongs to the evidence path.
 `commands.test` executes code, so no-mistakes honors it only from the default-branch copy of `.no-mistakes.yaml`; a pushed branch cannot change what the gate runs.
+That trust boundary covers the whole file rather than only its executable keys, which is the same reason `disable_project_settings` cannot be switched off by pushing a branch.
+Every run's manifest records a `trusted_config_sha` equal to the default branch's tip at the moment the run started, so the gate reads its settings from `main` and never from the branch under validation.
+The consequence is worth knowing before hunting for a knob: a gate behavior that blocks a feature branch cannot be configured around from that branch, and has to be changed by landing a config commit on `main` first.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
