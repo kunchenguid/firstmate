@@ -52,6 +52,64 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# make_two_slot_spawn_fakebin <dir>: like make_spawn_fakebin, but
+# #{pane_current_path} hands back FM_FAKE_PANE_PATH_1 for the first two reads
+# (enough for fm-spawn's settle loop to accept it) then FM_FAKE_PANE_PATH_2
+# forever after, via FM_FAKE_PANE_COUNTFILE. Batch dispatch re-execs
+# fm-spawn.sh once per id=repo pair; real treehouse never hands a later call
+# the same slot an earlier call's still-running task occupies, so a batch test
+# that spawns two ids against one project needs two genuinely distinct slots
+# or fm-spawn's worktree-pool-slot-collision guard rejects the second as
+# contested - a real production collision, just not the one this case tests.
+make_two_slot_spawn_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(make_spawn_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*)
+    countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
+    n=0
+    [ -f "$countfile" ] && n=$(cat "$countfile")
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$countfile"
+    if [ "$n" -le 2 ]; then
+      printf '%s\n' "${FM_FAKE_PANE_PATH_1:-}"
+    else
+      printf '%s\n' "${FM_FAKE_PANE_PATH_2:-}"
+    fi
+    exit 0
+    ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows)
+    if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
+      printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
+    fi
+    exit 0
+    ;;
+  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-l" ]; then
+          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        fi
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
 make_spawn_case() {
   local name=$1 harness=$2 case_dir home proj wt fakebin launchlog id
   shift 2
@@ -207,6 +265,11 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
     "relative FM_HOME leaked into Pi's default cross-process extension path"
   assert_contains "$launch" "< '$home_real/data/$relative_id/launch-brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
+
+  # This fixture reuses the same fake pane path for the next spawn below; drop
+  # the just-published meta first so fm-spawn's worktree-pool-slot-collision
+  # guard does not read the reused path as a second live task's own worktree.
+  rm -f "$home_real/state/$relative_id.meta"
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
@@ -630,11 +693,16 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
 }
 
 test_batch_preserves_native_ultra() {
-  local rec id1=ultra-batch-a id2=ultra-batch-b out launch
+  local rec id1=ultra-batch-a id2=ultra-batch-b out launch wt2 countfile
   rec=$(make_spawn_case ultra-batch pi "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  wt2="$CASE_DIR/wt-2"
+  git -C "$PROJ_DIR" worktree add --quiet --detach "$wt2" "$(git -C "$PROJ_DIR" rev-parse HEAD)"
+  countfile="$CASE_DIR/pane-call-count"
+  FAKEBIN_DIR=$(make_two_slot_spawn_fakebin "$CASE_DIR/fake2")
+  out=$(FM_FAKE_PANE_PATH_1="$WT_DIR" FM_FAKE_PANE_PATH_2="$wt2" FM_FAKE_PANE_COUNTFILE="$countfile" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model codex-native/gpt-6-astra --effort ultra)
   expect_code 0 "$?" "native Ultra batch failed: $out"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" pi codex-native/gpt-6-astra ultra
@@ -787,14 +855,19 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status wt2 countfile
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  wt2="$CASE_DIR/wt-2"
+  git -C "$PROJ_DIR" worktree add --quiet --detach "$wt2" "$(git -C "$PROJ_DIR" rev-parse HEAD)"
+  countfile="$CASE_DIR/pane-call-count"
+  FAKEBIN_DIR=$(make_two_slot_spawn_fakebin "$CASE_DIR/fake2")
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(FM_FAKE_PANE_PATH_1="$WT_DIR" FM_FAKE_PANE_PATH_2="$wt2" FM_FAKE_PANE_COUNTFILE="$countfile" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
