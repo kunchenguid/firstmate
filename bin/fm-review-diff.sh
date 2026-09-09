@@ -72,6 +72,7 @@ default_branch() {
 
 RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -1 | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ -n "$RECORDED_BASE" ]; then
   COMPARE_BASE=$RECORDED_BASE
 else
@@ -150,7 +151,21 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
+USE_LOCAL_BASE=0
 if [ "$MODE" = local-only ]; then
+  USE_LOCAL_BASE=1
+elif [ "$KIND" = scout ] && [ -n "$RECORDED_BASE" ] \
+  && git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+  REMOTE_BASE_STATUS=0
+  git -C "$PROJ" ls-remote --exit-code --heads origin "refs/heads/$COMPARE_BASE" >/dev/null 2>&1 \
+    || REMOTE_BASE_STATUS=$?
+  case "$REMOTE_BASE_STATUS" in
+    0) ;;
+    2) USE_LOCAL_BASE=1 ;;
+    *) echo "error: could not determine whether origin/$COMPARE_BASE exists for scout review" >&2; exit 1 ;;
+  esac
+fi
+if [ "$USE_LOCAL_BASE" -eq 1 ]; then
   BASE="$COMPARE_BASE"
   BASE_REF="refs/heads/$COMPARE_BASE"
 elif git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then

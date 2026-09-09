@@ -233,6 +233,32 @@ test_local_only_recorded_base_does_not_require_default_or_remote_ref() {
   pass "fm-review-diff uses a local recorded base without resolving the default"
 }
 
+test_scout_recorded_local_base_when_remote_ref_is_absent() {
+  local case_dir out
+  case_dir=$(make_case scout-local-base)
+  git -C "$case_dir/project" branch develop main
+  git -C "$case_dir/wt" checkout -q develop
+  printf 'local-develop\n' > "$case_dir/wt/local-develop.txt"
+  git -C "$case_dir/wt" add local-develop.txt
+  git -C "$case_dir/wt" commit -qm "local develop tip"
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  printf 'scout-crew\n' > "$case_dir/wt/scout-crew.txt"
+  git -C "$case_dir/wt" add scout-crew.txt
+  git -C "$case_dir/wt" commit -qm "scout crew tip"
+  write_task_meta "$case_dir" "kind=scout" "base_branch=develop"
+
+  out=$(run_review_diff "$case_dir" task-x1)
+  assert_contains "$out" 'diff base: develop' \
+    "scout review did not use its local recorded base"
+  assert_not_contains "$out" 'origin/develop' \
+    "scout review selected a missing remote-tracking base"
+  assert_not_contains "$out" 'local-develop' \
+    "scout review included commits already on its local base"
+  assert_contains "$out" '+scout-crew' \
+    "scout review omitted crew changes"
+  pass "fm-review-diff falls back to a local recorded base for scouts"
+}
+
 test_recorded_base_branch_without_default() {
   local case_dir out
   case_dir=$(make_case recorded-base-no-default)
@@ -289,5 +315,6 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_recorded_base_branch_is_compare_base
 test_local_only_recorded_base_does_not_require_default_or_remote_ref
+test_scout_recorded_local_base_when_remote_ref_is_absent
 test_recorded_base_branch_without_default
 test_recorded_crew_branch_ignores_parked_head
