@@ -2,9 +2,19 @@
 # Merge a task's PR or MR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
-# addressed through gh-axi by the derived owner and repository; a GitLab merge
+# addressed by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded.
+#
+# No-mistakes requires a registered evidence_head= bound to this PR URL.
+# Missing evidence or a proposed head mismatch refuses: the original worker
+# must refresh evidence and re-register with bin/fm-pr-check.sh before retrying.
+# GitHub uses gh with --match-head-commit; GitLab uses glab with --sha, binding
+# the actual request against a push between inspection and merge. Caller head
+# overrides and --admin are refused for no-mistakes. A squash merge commit
+# need not equal the evidenced PR head. Other modes retain the gh-axi path on
+# GitHub and live-head verification on GitLab without requiring evidence.
+# Regression: tests/fm-pr-merge.test.sh.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -302,6 +312,7 @@ FIELDS
   verify_evidence_head "$live_head" || return 1
   # A rebase moves the head and leaves the recorded value behind, so the
   # disagreement is reported and the live head is what gets verified and merged.
+  # For no-mistakes, the evidence equality check above must already have passed.
   if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
     printf 'notice: recorded head %s disagrees with the live head %s; verifying the live head\n' \
       "$RECORDED_HEAD" "$live_head" >&2

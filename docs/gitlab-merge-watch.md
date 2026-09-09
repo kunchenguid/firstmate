@@ -241,8 +241,8 @@ That is the intended reading of the requirement rather than an oversight: a succ
 
 Both refusals came after `pr=` was recorded and the merge poll was armed, exactly as a failing `gh-axi pr merge` does on the GitHub side, so a refusal still leaves the audit trail and the watch in place.
 
-A recorded `pr_head=` that no longer matches the live head is reported, and the live head is what gets verified.
-The stale value below was written into the task record by hand, because a GitLab task never records one on its own:
+The following fixture demonstrates stale advisory `pr_head=` handling without a no-mistakes evidence requirement.
+The stale value was written into the task record by hand; the current mode-specific registration and landing contracts are owned by [fm-pr-check.sh](../bin/fm-pr-check.sh) and [fm-pr-merge.sh](../bin/fm-pr-merge.sh):
 
 ```
 $ fm-pr-merge.sh e4 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
@@ -265,11 +265,7 @@ Without it, a push landing in that window would merge commits nothing verified.
 `--yes` is passed for the same reason the watch poll needs no terminal: an unattended run cannot answer a confirmation prompt, and a wedged prompt is worse than a refusal.
 It skips only that prompt; the conditions above are what authorize the merge.
 
-## Why a recorded head is not the authority
+## Recorded-head contracts
 
-`bin/fm-pr-check.sh` records `pr_head=` only for GitHub, where `gh` exposes the head commit as a selectable field.
-It is optional by design, and the other consumers already treat it that way: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
-
-The merge path does not record one either, and deliberately does not depend on one.
-A rebase moves the head and leaves any recorded value stale, so a merge decided from metadata can verify a commit that no longer exists.
-Reading the head live at merge time, reporting a recorded value that disagrees, and binding the merge to what was actually verified is what closes that gap.
+See [fm-pr-check.sh](../bin/fm-pr-check.sh) for mode-specific recorded fields and [fm-pr-merge.sh](../bin/fm-pr-merge.sh) for their landing-time authority.
+The cross-forge final-evidence continuity regression is `tests/fm-pr-merge.test.sh`; the live observations above do not prove that newer guard.

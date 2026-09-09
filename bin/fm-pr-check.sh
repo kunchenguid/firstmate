@@ -5,6 +5,12 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+# For no-mistakes tasks, the third argument is required: copy the full SHA
+# from the worker's evidence-bearing ready report, never from the forge.
+# It records evidence_head= and pr_head= on either forge; registration is an
+# attestation, not verification of the evidence or of the current remote head.
+# Other modes reject that argument and record pr_head= opportunistically on
+# GitHub only. bin/fm-pr-merge.sh owns the landing-time continuity check.
 # Usage: fm-pr-check.sh <task-id> <pr-url> [<evidenced-full-head>]
 set -eu
 
