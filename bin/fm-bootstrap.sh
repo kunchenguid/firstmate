@@ -73,6 +73,11 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          GitLab issue intake is likewise OPTIONAL: when config/gitlab-issues.json
+#          is present in the active home, glab and jq join the required tools.
+#          glab reports as MISSING rather than MISSING_MANUAL because a one-line
+#          install exists (Homebrew/Linuxbrew, or a release package); jq is not
+#          reported twice when the resolved backend already requires it.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -857,6 +862,7 @@ secondmate_handoff_detect() {
 install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
+    glab) echo "brew install glab  # or a release package from https://gitlab.com/gitlab-org/cli/-/releases" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
@@ -1412,6 +1418,17 @@ detect_local_tools() {
   for t in $COMMON_TOOLS; do
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
+  # GitLab issue intake (bin/fm-gitlab-issues.sh) is opt-in per home through
+  # config/gitlab-issues.json, so its glab and jq dependencies join the required
+  # set only when that file is present, the same presence-gated shape as the
+  # Relay dependencies. jq is skipped when the resolved backend already reported
+  # it, so one missing jq is one line.
+  if [ -f "$CONFIG/gitlab-issues.json" ]; then
+    command -v glab >/dev/null 2>&1 || missing_tool_diagnostic glab
+    if ! fm_backend_list_contains "$BACKEND_TOOLS" jq; then
+      command -v jq >/dev/null 2>&1 || missing_tool_diagnostic jq
+    fi
+  fi
   # The treehouse lease-support upgrade check is only relevant when the resolved
   # backend actually requires treehouse (every backend except orca, which owns its
   # own worktrees); an orca home must not be told to upgrade a provider it never uses.
