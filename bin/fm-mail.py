@@ -361,7 +361,8 @@ def cmd_poll_list():
                 continue
             # A raised or empty FETCH is treated as a failure for THIS uid only,
             # so one bad message can never abort the bounded scan: a new uid is
-            # surfaced degraded, a retry uid is rotated, and the scan advances.
+            # surfaced degraded, a retry uid is left for a later scan step, and
+            # the scan advances.
             try:
                 typ, msg = m.uid('fetch', u.encode(), '(BODY.PEEK[HEADER])')
                 if typ != 'OK' or not msg or not msg[0]:
@@ -433,7 +434,7 @@ def cmd_poll_list():
         #     number of unfetchable retry candidates before the first emitted
         #     one, landing the cursor on that uid (never past it).
         #  2. budget > 0 but no retry row emitted -> by the candidates actually
-        #     examined within budget (fetched or rotated), never the full
+        #     examined within budget (fetched or unfetchable), never the full
         #     window (Greptile 'Retry cursor skips candidates'), even when
         #     new-mail rows fill `out`.
         #  3. budget == 0 because the window held only unseen uids (none

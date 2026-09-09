@@ -13,19 +13,21 @@
 #   send <to> <subject> <body | ->
 #                        Send one message. A "-" body reads plain text from
 #                        stdin.
-#   poll                 Surface NEW unseen mail as a `check` wake so firstmate
-#                        answers it concisely. Only UNSEEN mail newer than the
-#                        last poll is surfaced; already-read mail never wakes a
-#                        poll, no message is ever marked read (BODY.PEEK), and
-#                        every surfaced message is keyed by its immutable IMAP
-#                        UID so expunge renumbering never re-wakes or loses
-#                        mail. The cursor also records the mailbox generation
+#   poll                 Surface UNSEEN mail this home has not yet woken as a
+#                        `check` wake so firstmate answers it concisely. IMAP
+#                        \Seen mail never wakes a poll, no message is ever
+#                        marked read (BODY.PEEK), and every surfaced message
+#                        is keyed by its immutable IMAP UID so expunge
+#                        renumbering never re-wakes or loses mail. A uid whose
+#                        header could not be fetched is woken once degraded
+#                        and later re-woken once with recovered metadata. The
+#                        cursor also records the mailbox generation
 #                        (UIDVALIDITY) so a recreated mailbox cannot reuse a
 #                        numeric uid and suppress a new wake, and overlapping
-#                        polls are serialized so the same mail is never
-#                        double-surfaced. poll itself has no scheduler: run it
-#                        manually, from `at`/cron, or via the standing check
-#                        armed by bin/fm-mail-check.sh (docs/configuration.md
+#                        polls are serialized on the mail-seen lock. poll
+#                        itself has no scheduler: run it manually, from
+#                        `at`/cron, or via the standing check armed by
+#                        bin/fm-mail-check.sh (docs/configuration.md
 #                        "Mail plane").
 #   status               Print configuration and the last poll cursor. No
 #                        network, no wake.
@@ -37,9 +39,10 @@
 # (degraded placeholders) and retried on later polls until the real metadata
 # lands; a persistently unfetchable uid is never skipped and never re-wakes.
 #
-# Deployment - credentials and endpoints live ONLY in the gitignored
-# $FM_HOME/.env (same convention as the Relay/FMX token). Add these four
-# required values, plus the optional ports and timeout:
+# Deployment - credentials and endpoints are read from the environment,
+# filling missing keys from the gitignored $FM_HOME/.env (same convention
+# as the Relay/FMX token; env wins). Add these four required values, plus
+# the optional ports and timeout:
 #   FM_MAIL_USER=<imap/smtp account>
 #   FM_MAIL_PASS=<password>
 #   FM_IMAP_HOST=<imap host>
@@ -475,13 +478,13 @@ mail_heal() {
 
 mail_poll() {
   # List unseen mail (uid,date,from,subj,status) plus the mailbox generation
-  # guard, then diff against already-surfaced uids to find NEW messages and
-  # surface one wake each. status is ok, retry, or degraded; an empty status
-  # is treated as ok so a legacy four-field row still wakes. Never marks
-  # anything read. Overlapping polls are serialized on the mail-seen lock;
-  # each poll first heals a run interrupted between its phases (mail_heal), so
-  # an overlapping poll or an interrupted run can never lose a mail. wake_for
-  # owns the remaining kill-window duplicate residual.
+  # guard, then wake each NEW uid and each recovered retry uid. status is
+  # ok, retry, or degraded; an empty status is treated as ok so a legacy
+  # four-field row still wakes. Never marks anything read. Overlapping polls
+  # are serialized on the mail-seen lock; each poll first heals a run
+  # interrupted between its phases (mail_heal), so an overlapping poll or an
+  # interrupted run can never lose a mail. wake_for owns the remaining
+  # kill-window duplicate residual.
   local list generation uid fr subj status woke=0 need_wake line wake_rc=0
   if [ ! -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
     echo "fm-mail: $SCRIPT_DIR/fm-wake-lib.sh missing; cannot poll" >&2
