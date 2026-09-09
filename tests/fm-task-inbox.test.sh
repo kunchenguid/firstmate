@@ -479,12 +479,12 @@ test_ring_ladder_policy() {
   pass "inbox: the re-ring ladder paces by grace, escalates once, and resets on ack"
 }
 
-setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
-  local name=$1 dir
+setup_watch_case() {  # <name> [harness] -> echoes case dir; state in <dir>/state
+  local name=$1 harness=${2:-grok} dir
   dir="$TMP_ROOT/$name"
   mkdir -p "$dir/state"
   make_watch_stubs "$dir" >/dev/null
-  fm_write_meta "$dir/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=grok"
+  fm_write_meta "$dir/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=$harness"
   printf '%s\n' "$dir"
 }
 
@@ -524,6 +524,66 @@ test_watcher_rerings_idle_pane_quietly() {
   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   [ ! -s "$log" ] || fail "the watcher kept ringing after the ack:"$'\n'"$(cat "$log")"
   pass "watcher: an unhandled aged message on an idle pane re-rings without waking firstmate, and the ack silences it"
+}
+
+# An Agy composer is a bare `>` between two long separators with a footer
+# below: the SAME container whether it is empty or holds a half-typed steer.
+# Only a caller that declares the pane's harness can tell those apart
+# (bin/fm-composer-lib.sh), and an undeclared read answers 'unknown', which the
+# ring treats as safe to type into. The doorbell would then be concatenated
+# onto the captain's unsubmitted text and submitted as one garbled message.
+test_watcher_defers_on_a_pending_agy_composer() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case agypending agy)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf '%s\n' \
+    '────────────────────────────────────────────────────────────────' \
+    '> a half typed steer the captain has not sent' \
+    '────────────────────────────────────────────────────────────────' \
+    '? for shortcuts' > "$dir/agy-pending.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/agy-pending.capture" \
+    FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  sleep 4
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ ! -s "$log" ] \
+    || fail "the doorbell was typed onto an Agy composer that visibly holds text:"$'\n'"$(cat "$log")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a composer-protected skip queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: an Agy crewmate holding unsubmitted text is composer-protected from the re-ring"
+}
+
+# The same declaration must not make every pane read pending: an idle Agy
+# composer still rings, so the protection above cannot be a blanket refusal.
+test_watcher_rerings_an_idle_agy_composer() {
+  local dir state out log pid rec i
+  dir=$(setup_watch_case agyidle agy)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  printf '%s\n' \
+    '────────────────────────────────────────────────────────────────' \
+    '>' \
+    '────────────────────────────────────────────────────────────────' \
+    '? for shortcuts' > "$dir/agy-idle.capture"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/agy-idle.capture" \
+    FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'Firstmate instruction waiting' "$log" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  grep -qF "Firstmate instruction waiting: list '$state/t1.inbox'/*.msg" "$log" \
+    || fail "an idle Agy composer never received the re-ring:"$'\n'"$(cat "$log")"
+  pass "watcher: an idle Agy crewmate still receives the re-ring"
 }
 
 test_watcher_waits_on_busy_pane() {
@@ -705,6 +765,8 @@ test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
+test_watcher_defers_on_a_pending_agy_composer
+test_watcher_rerings_an_idle_agy_composer
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder

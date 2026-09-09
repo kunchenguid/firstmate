@@ -823,6 +823,49 @@ test_agy_ready_gate_without_stability_types_into_the_repaint() {
 # is missing. spawn runs under set -eu and spawn_abort_cleanup does not retire
 # harness wiring, so the record must exist before the wiring does. Blocking the
 # record's own path with a directory makes its write the failing step.
+# Wiring is armed by fm-spawn's harness case and retired through
+# fm_control_harness_family, so anything the first table arms and the second
+# cannot resolve is a Stop hook nothing will ever remove, left in a pool
+# worktree that gets reused. The raw-launch escape hatch records a command's
+# basename as the harness, so a versioned binary is the reachable input.
+test_agy_wiring_is_never_armed_for_a_harness_retirement_cannot_resolve() {
+  local id rec out rc root family
+  # shellcheck source=bin/fm-control-lib.sh
+  . "$ROOT/bin/fm-control-lib.sh"
+  family=$(fm_control_harness_family agy) \
+    || fail "retirement cannot resolve the exact agy harness"
+  [ "$family" = agy ] || fail "the exact agy harness resolved to '$family'"
+  if fm_control_harness_family agy-nightly >/dev/null 2>&1; then
+    fail "retirement now resolves a prefixed agy harness; the arm case must match it too"
+  fi
+
+  id="agy-prefix-za-$$"
+  rec=$(make_spawn_case prefixarm "$id")
+  read_spawn_record "$rec"
+  ln -sf "$FAKEBIN_DIR/agy" "$FAKEBIN_DIR/agy-nightly"
+  rc=0
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+    FM_FAKE_POINTER_LOG="$CASE_DIR/pointer.log" \
+    FM_FAKE_AGY_STATE="$CASE_DIR/agy.state" \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" \
+    FM_FAKE_TMUX_ENV_LOG="$CASE_DIR/tmux-env.log" \
+    PATH="$BASE_PATH" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+      "$id" "$PROJ_DIR" --mode no-mistakes --yolo off \
+      --harness 'agy-nightly --dangerously-skip-permissions') || rc=$?
+
+  # Whatever the launch outcome, nothing retirement cannot find may be armed.
+  for root in .agents .agent _agents _agent; do
+    assert_absent "$WT_DIR/$root/hooks.json" \
+      "a prefixed agy harness armed a Stop hook in $root that no retirement path resolves (rc=$rc): $out"
+  done
+  assert_absent "$WT_DIR/.fm-agy-turnend" \
+    "a prefixed agy harness armed a task pointer no retirement path resolves"
+  assert_absent "$HOME_DIR/state/$id.agy-turnend-token" \
+    "a prefixed agy harness wrote a token record its own family lookup cannot find"
+  pass "Agy wiring is armed only for the harness value its retirement paths resolve"
+}
+
 test_agy_hook_is_never_armed_without_its_retirement_record() {
   local id rec out rc root
   id="agy-record-order-z9-$$"
@@ -853,6 +896,7 @@ test_agy_spawn_refuses_when_all_hook_roots_are_owned
 test_agy_delivery_accepts_fast_completed_turn
 test_agy_delivery_ignores_a_stale_turnend_marker
 test_agy_hook_is_never_armed_without_its_retirement_record
+test_agy_wiring_is_never_armed_for_a_harness_retirement_cannot_resolve
 test_agy_omits_unsupported_explicit_effort
 test_agy_teardown_removes_task_hook_and_auth
 test_agy_teardown_preserves_a_borrowed_project_root

@@ -3683,7 +3683,7 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
       ;;
-    agy*)
+    agy)
       # Agy discovers task-local hooks from four supported customization roots.
       # Never merge with or overwrite a project's hooks.json.
       # Select the first unoccupied root and fail closed when every root is
