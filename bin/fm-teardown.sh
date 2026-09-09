@@ -1340,16 +1340,20 @@ pr_is_merged() {
   return 0
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# Is the branch's content already present in the up-to-date recorded landing
+# base (or the default branch when none is recorded)? Fetches first, then 3-way
+# merges that base with HEAD: when HEAD introduces nothing the base does not
+# already contain (e.g. its change landed via squash) the merged tree equals the
+# base's tree. This isolates branch-only changes, so unrelated commits the base
+# gained past the merge-base do not count as "added". Returns non-zero when
+# inconclusive (no base ref, or a merge conflict), so the caller refuses rather
+# than guesses.
 content_in_default() {
   local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
+  name=$(meta_value "$META" base_branch || true)
+  if [ -z "$name" ]; then
+    name=$(default_branch) || return 1
+  fi
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
@@ -1672,7 +1676,12 @@ validate_worktree_teardown_safety() {
     if [ -z "$landing_base" ]; then
       landing_base=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
     fi
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$landing_base" -- 2>/dev/null); then
+    if ! git -C "$WT" show-ref --verify --quiet "refs/heads/$landing_base"; then
+      echo "REFUSED: cannot inspect worktree $WT for commits not on $landing_base: refs/heads/$landing_base is missing." >&2
+      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "refs/heads/$landing_base" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $landing_base"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi

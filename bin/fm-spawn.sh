@@ -11,8 +11,12 @@
 #   the mode up. A ship spawn additionally reads the brief's recorded
 #   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
 #   instructions and the recorded task delivery cannot drift apart; a brief
-#   scaffolded before that line existed warns once and launches on the flag. A
-#   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
+#   scaffolded before that line existed warns once and launches on the flag.
+#   A ship or scout spawn also reads a "Base branch contract: base_branch=<branch>"
+#   line the same way and REFUSES when that line is present and --base-branch
+#   disagrees or is omitted. After spawn, state/<id>.meta base_branch= is the
+#   source of truth. A brief with no such line is unchanged.
+#   A ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, or an incomplete pair of Task subsections.
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
 #   it also carries the current `--intent` contract and the extracted captain
@@ -2309,6 +2313,18 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+# Spawn-time agreement only. Downstream review, promotion, landing, and teardown
+# read state/<id>.meta base_branch=, never this brief line.
+BRIEF_BASE=$(sed -n 's/^Base branch contract: base_branch=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+if [ -n "$BRIEF_BASE" ]; then
+  if [ -z "${BASE_BRANCH:-}" ]; then
+    echo "error: base mismatch for $ID: the brief says base_branch=$BRIEF_BASE but this spawn passed no --base-branch; correct the flag or re-scaffold the brief so the worker's instructions and the pool agree" >&2
+    exit 1
+  elif [ "$BRIEF_BASE" != "$BASE_BRANCH" ]; then
+    echo "error: base mismatch for $ID: the brief says base_branch=$BRIEF_BASE but this spawn passed --base-branch $BASE_BRANCH; correct the flag or re-scaffold the brief so the worker's instructions and the pool agree" >&2
+    exit 1
   fi
 fi
 

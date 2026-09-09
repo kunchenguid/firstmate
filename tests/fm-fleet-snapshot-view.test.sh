@@ -522,6 +522,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] done-bracket-pr - Done Bracket PR - <https://github.com/kunchenguid/firstmate/pull/43> (repo: gamma, merged 2026-07-12) (kind: ship)
 - [x] reported-comma - Reported Scout data/reported-comma/report.md (repo: gamma, reported 2026-07-10) (kind: scout)
 - [x] done-note - Done Note local main (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-named - Done Named local develop (repo: delta, done 2026-07-11) (kind: ship)
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
@@ -621,6 +622,14 @@ EOF
       and .done == "2026-07-11"
       and .completion == {verb:"done",date:"2026-07-11"}
   ' >/dev/null || fail "done closure metadata did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-named")
+    | .repo == "delta"
+      and .title == "Done Named"
+      and .local_note == "local develop"
+      and .done == "2026-07-11"
+      and .completion == {verb:"done",date:"2026-07-11"}
+  ' >/dev/null || fail "named-base local note did not parse"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")
     | .backlog.id == "bold-task"
@@ -636,6 +645,8 @@ EOF
     "view should render bracketed PR artifact outside the title"
   assert_contains "$view" "| done-note | Done Note | delta | ship | - | local main |" \
     "view should render local-only done artifact outside the title"
+  assert_contains "$view" "| done-named | Done Named | delta | ship | - | local develop |" \
+    "view should render a named-base local-only done artifact outside the title"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 

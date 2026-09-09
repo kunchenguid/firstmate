@@ -55,9 +55,11 @@
 # by bin/fm-spawn.sh's header: freshen from that branch, and for no-mistakes
 # pass `axi run --base-branch <branch>` so the PR opens on that integration
 # branch. A direct-PR brief opens with gh-axi pr create --base <branch>. A
-# local-only brief records that same base as the landing target that
-# bin/fm-merge-local.sh reads. A scout brief records the freshen base as the
-# same `Base branch contract:` line spawn reads from Definition of done.
+# local-only brief names that same base as the local landing target in prose.
+# After spawn, state/<id>.meta base_branch= is the source of truth for review,
+# promotion, local landing, and teardown. A ship or scout brief also writes a
+# `Base branch contract:` line that spawn checks against --base-branch before
+# creating an endpoint; nothing downstream reads that line.
 # --secondmate refuses the flag.
 # --branch-name <name> replaces every generated `fm/<task-id>` crew branch
 # (checkout command, push-rule text, local-only done line) with that name.
@@ -503,11 +505,7 @@ case "$MODE" in
     ;;
   local-only)
     SETUP2=""
-    if [ -n "$BASE_BRANCH" ]; then
-      RULE1="1. Never push to any remote and never open a PR. Work only on your \`$CREW_BRANCH\` branch; firstmate handles the merge into local \`$BASE_BRANCH\`."
-    else
-      RULE1="1. Never push to any remote and never open a PR. Work only on your \`$CREW_BRANCH\` branch; firstmate handles the merge into local \`main\`."
-    fi
+    RULE1="1. Never push to any remote and never open a PR. Work only on your \`$CREW_BRANCH\` branch; firstmate handles the merge into local \`${BASE_BRANCH:-main}\`."
     ;;
   *)  # no-mistakes
     SETUP2="

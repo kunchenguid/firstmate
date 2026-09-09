@@ -17,7 +17,8 @@
 # brief contributes only Task lines explicitly marked as captain words to intent.
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
-# alongside the kind= flip. Firstmate resolves both at promotion time, having just
+# alongside the kind= flip. A recorded base_branch= must exist where that mode
+# lands: refs/heads/<base> for local-only, origin for no-mistakes and direct-PR. Firstmate resolves both at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
@@ -159,7 +160,23 @@ fi
 # promoted no-mistakes worker that never received the ask-user escalation rule or
 # the --yes ban is the delivery hole this file used to leave open.
 RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -1 | cut -d= -f2- || true)
+PROMOTE_PROJ=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+[ -n "$PROMOTE_PROJ" ] || PROMOTE_PROJ=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ -n "$RECORDED_BASE" ]; then
+  if [ -z "$PROMOTE_PROJ" ] || ! git -C "$PROMOTE_PROJ" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "error: promotion cannot verify recorded base '$RECORDED_BASE' because the task has no usable project or worktree git directory" >&2
+    exit 1
+  fi
+  if [ "$MODE" = local-only ]; then
+    if ! git -C "$PROMOTE_PROJ" show-ref --verify --quiet "refs/heads/$RECORDED_BASE"; then
+      echo "error: local-only promotion requires recorded base '$RECORDED_BASE' as a local branch (refs/heads/$RECORDED_BASE); a base that exists only on origin cannot be landed locally" >&2
+      exit 1
+    fi
+  elif ! git -C "$PROMOTE_PROJ" show-ref --verify --quiet "refs/remotes/origin/$RECORDED_BASE" \
+    && ! git -C "$PROMOTE_PROJ" ls-remote --exit-code --heads origin "refs/heads/$RECORDED_BASE" >/dev/null 2>&1; then
+    echo "error: $MODE promotion requires recorded base '$RECORDED_BASE' on origin; a local-only base cannot be a pull-request target" >&2
+    exit 1
+  fi
   RETURN_BASE=$RECORDED_BASE
   [ "$MODE" = local-only ] || RETURN_BASE="origin/$RECORDED_BASE"
   RETURN_STEP="3. Return to a clean \`$RETURN_BASE\` base, then create your branch: \`git checkout -b fm/$ID\`."
