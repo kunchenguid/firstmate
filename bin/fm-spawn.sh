@@ -3719,8 +3719,6 @@ EOF
       auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
       umask "$old_umask"
       token=${auth_file##*/}
-      printf '%s\n' "$TURNEND" > "$auth_file"
-      printf 'token=%s\n' "$token" > "$WT/.fm-agy-turnend"
       agy_command=$(printf 'bash %s %s %s %s' \
         "$(shell_quote "$FM_ROOT/bin/fm-agy-turnend-hook.sh")" \
         "$(shell_quote "$AGY_AUTH_DIR")" \
@@ -3729,13 +3727,21 @@ EOF
       agy_command=$(json_escape "$agy_command")
       agy_hook_json=$(printf '{"firstmate-task-turn-end-%s":{"Stop":[{"type":"command","command":"%s","timeout":10}]}}' \
         "$token" "$agy_command")
-      printf '%s\n' "$agy_hook_json" > "$WT/$AGY_HOOK_ROOT/hooks.json"
+      # The retirement record is written BEFORE the wiring it is the only
+      # record of: spawn runs under set -eu and spawn_abort_cleanup does not
+      # retire harness wiring, so a hook armed ahead of its record would
+      # survive into the next occupant of a reused pool worktree. A record
+      # whose wiring never landed is inert, because every retirement path
+      # removes only what it finds and only when it still matches.
       # The fourth token-file line is the provenance record retirement compares
       # against: only a hooks.json still byte-identical to what was installed
       # here is firstmate's to delete (fm-control-lib.sh owns the test).
       printf '%s\n%s\n%s\n%s\n' \
         "$token" "$AGY_HOOK_ROOT" "$AGY_HOOK_ROOT_OWNER" "$agy_hook_json" \
         > "$STATE/$ID.agy-turnend-token"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf 'token=%s\n' "$token" > "$WT/.fm-agy-turnend"
+      printf '%s\n' "$agy_hook_json" > "$WT/$AGY_HOOK_ROOT/hooks.json"
       exclude_path '.fm-agy-turnend'
       exclude_path "$AGY_HOOK_ROOT/hooks.json"
       ;;

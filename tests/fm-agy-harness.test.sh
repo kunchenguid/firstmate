@@ -817,6 +817,32 @@ test_agy_ready_gate_without_stability_types_into_the_repaint() {
   pass "fm-spawn: with stability disabled the gate releases inside the repaint window, so the guard above is real"
 }
 
+# A hook that outlives its retirement record keeps touching state/<id>.turn-ended
+# for the next occupant of a reused pool worktree, because every retirement path
+# in fm-teardown.sh and fm-control-lib.sh keys off that record and no-ops when it
+# is missing. spawn runs under set -eu and spawn_abort_cleanup does not retire
+# harness wiring, so the record must exist before the wiring does. Blocking the
+# record's own path with a directory makes its write the failing step.
+test_agy_hook_is_never_armed_without_its_retirement_record() {
+  local id rec out rc root
+  id="agy-record-order-z9-$$"
+  rec=$(make_spawn_case recordorder "$id")
+  read_spawn_record "$rec"
+  mkdir -p "$HOME_DIR/state/$id.agy-turnend-token"
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "Agy spawn reported success though its retirement record could not be written"
+  for root in .agents .agent _agents _agent; do
+    assert_absent "$WT_DIR/$root/hooks.json" \
+      "an Agy task hook was armed in $root with no retirement record to remove it"
+  done
+  assert_absent "$WT_DIR/.fm-agy-turnend" \
+    "the Agy task pointer survived with no retirement record to remove it"
+  [ -d "$HOME_DIR/state/$id.agy-turnend-token" ] \
+    || fail "the blocked record path was replaced rather than failing the write"
+  pass "an Agy spawn that cannot record its wiring never arms the hook"
+}
+
 test_separated_composer_is_structural
 test_separated_composer_is_harness_scoped
 test_agy_busy_signature_is_harness_scoped
@@ -826,6 +852,7 @@ test_agy_spawn_does_not_seed_the_container_environment
 test_agy_spawn_refuses_when_all_hook_roots_are_owned
 test_agy_delivery_accepts_fast_completed_turn
 test_agy_delivery_ignores_a_stale_turnend_marker
+test_agy_hook_is_never_armed_without_its_retirement_record
 test_agy_omits_unsupported_explicit_effort
 test_agy_teardown_removes_task_hook_and_auth
 test_agy_teardown_preserves_a_borrowed_project_root
