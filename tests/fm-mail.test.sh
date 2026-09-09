@@ -2086,7 +2086,10 @@ EOF
     FM_HOME="$retry_home" PATH="$fakebin:$PATH" \
     FM_MAIL_TEST_FETCH_COUNT="$control" \
     "$MAIL" poll 2>&1) || rc=$?
-  expect_code 0 "$rc" "recovered fetch poll must succeed"
+  if [ "$rc" != 0 ]; then
+    printf 'poll output on failure:\n%s\n' "$out" >&2
+    fail "recovered fetch poll must succeed: expected exit 0, got $rc"
+  fi
   assert_contains "$out" "woke for 41" "recovered fetch wakes with the real metadata"
   assert_contains "$(cat "$retry_home/state/.wake-queue")" "alice@example.com" \
     "recovered wake names the real sender"
