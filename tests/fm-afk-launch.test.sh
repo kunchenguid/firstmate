@@ -1079,6 +1079,55 @@ e2e_tmux() {
   rm -rf "$home_tmp" 2>/dev/null || true
 }
 
+# ---------------------------------------------------------------------------
+# E2E tmux: the supervisor pane's HARNESS reaches the daemon. The daemon lands
+# in its own detached session, a child of the tmux server, so it can only learn
+# which harness renders the captain pane from what this launcher forwards. The
+# harness is detected here from the captain pane's own environment (never set
+# by the test as FM_SUPERVISOR_HARNESS, which the launcher would overwrite
+# anyway), and the recorder entry reports the value the daemon actually
+# receives.
+# ---------------------------------------------------------------------------
+e2e_tmux_forwards_the_supervisor_pane_harness() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (tmux harness-forwarding e2e)"; return 0; }
+  local cap_session home_tmp cap_pane rec recorder record deadline got
+  cap_session="fm-afk-launch-harness-$$"
+  home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-harness.XXXXXX")
+  record="$home_tmp/forwarded-harness"
+  recorder="$home_tmp/recorder.sh"
+  cat > "$recorder" <<SH
+#!/usr/bin/env bash
+printf '%s' "\${FM_SUPERVISOR_HARNESS-UNSET}" > "$record"
+exec sleep 600
+SH
+  chmod +x "$recorder"
+  tmux new-session -d -s "$cap_session" 2>/dev/null || { fail "tmux harness e2e: could not create captain session"; rm -rf "$home_tmp"; return 0; }
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
+  cap_pane=$(tmux display-message -p -t "$cap_session" '#{pane_id}')
+  confirm_posture "$home_tmp" || fail "tmux harness e2e: could not confirm fixture posture"
+
+  env -u CLAUDECODE -u FM_SUPERVISOR_HARNESS ANTIGRAVITY_AGENT=1 \
+    FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
+    FM_SUPERVISOR_TARGET="$cap_pane" FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$recorder" \
+    "$LAUNCH" start >/dev/null 2>&1
+
+  rec=$(cut -f2 "$home_tmp/state/.afk-daemon-terminal" 2>/dev/null || true)
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $rec"
+  deadline=$(( $(date +%s) + 20 ))
+  while [ ! -s "$record" ] && [ "$(date +%s)" -lt "$deadline" ]; do sleep 0.2; done
+  got=$(cat "$record" 2>/dev/null || printf 'NOTHING')
+  if [ "$got" = agy ]; then
+    pass "tmux harness e2e: the daemon receives the captain pane's detected harness"
+  else
+    fail "tmux harness e2e: the daemon received '$got' instead of the captain pane's harness"
+  fi
+
+  FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
+    FM_SUPERVISOR_TARGET="$cap_pane" FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" stop >/dev/null 2>&1
+  tmux kill-session -t "$cap_session" 2>/dev/null || true
+  rm -rf "$home_tmp" 2>/dev/null || true
+}
+
 unit_clear_stale
 unit_propose_confirm_records_the_posture_without_a_daemon
 unit_pi_never_launches_the_daemon
@@ -1118,5 +1167,6 @@ unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts
 e2e_herdr
 e2e_tmux
+e2e_tmux_forwards_the_supervisor_pane_harness
 
 [ "$FAILED" -eq 0 ] || exit 1

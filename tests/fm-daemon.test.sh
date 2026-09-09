@@ -2717,30 +2717,37 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 # FM_SUPERVISOR_HARNESS. Without that declaration an Agy composer classifies
 # `unknown` and every escalation defers forever; with it the real classifier
 # reads the same pane `empty` and the injection is confirmed.
-agy_supervisor_capture() {
+# The idle and busy Agy tails are the same container: only the footer row
+# differs (docs/verification/agy-harness.md captures both live). The composer
+# proof accepts either footer, so on Agy the busy guard is the ONLY thing
+# standing between a mid-turn pane and a typed escalation, and it has to read
+# the supervisor pane's harness to have a signature at all.
+agy_supervisor_capture() {  # <footer>
   printf '%s\n' \
     'Antigravity CLI' \
     '────────────────────────────────────────────────────────────────' \
     '>' \
     '────────────────────────────────────────────────────────────────' \
-    '? for shortcuts                              Gemini 3.6 Flash · low'
+    "$1"
 }
 
-run_agy_supervisor_inject() {  # <case-name> <declared-harness>
+run_agy_supervisor_inject() {  # <case-name> <declared-harness> <footer>
   local dir state capture sent
   dir=$(make_supercase "$1")
   state="$dir/state"; capture="$dir/pane.txt"; sent="$dir/sent.txt"
   afk_enter "$state"
-  agy_supervisor_capture > "$capture"
+  agy_supervisor_capture "$3" > "$capture"
   (
     fm_backend_target_exists() { return 0; }
-    pane_is_busy() { return 1; }
     PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_SENT="$sent" \
       FM_FAKE_TMUX_CURSOR_Y=2 FM_COMPOSER_HARNESS="$2" \
       FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
       inject_msg "away escalation digest" "$state"
   )
 }
+
+AGY_IDLE_FOOTER='? for shortcuts                              Gemini 3.6 Flash · low'
+AGY_BUSY_FOOTER='esc to cancel                                 Gemini 3.6 Flash · low'
 
 test_supervisor_harness_prefers_the_forwarded_pane_value() {
   local out own
@@ -2754,12 +2761,19 @@ test_supervisor_harness_prefers_the_forwarded_pane_value() {
 }
 
 test_away_injection_into_an_agy_supervisor_pane_is_confirmed() {
-  if run_agy_supervisor_inject inject-agy-undeclared ''; then
+  if run_agy_supervisor_inject inject-agy-undeclared '' "$AGY_IDLE_FOOTER"; then
     fail "an undeclared supervisor harness let the injector type into an unproven composer"
   fi
-  run_agy_supervisor_inject inject-agy-declared agy \
-    || fail "an Agy supervisor pane with the forwarded harness still deferred instead of confirming the injection"
-  pass "away-mode injection into an Agy supervisor pane is confirmed once the pane's harness is declared"
+  run_agy_supervisor_inject inject-agy-declared agy "$AGY_IDLE_FOOTER" \
+    || fail "an idle Agy supervisor pane with the forwarded harness still deferred instead of confirming the injection"
+  pass "away-mode injection into an idle Agy supervisor pane is confirmed once the pane's harness is declared"
+}
+
+test_away_injection_defers_on_a_busy_agy_supervisor_pane() {
+  if run_agy_supervisor_inject inject-agy-busy agy "$AGY_BUSY_FOOTER"; then
+    fail "the injector typed into an Agy supervisor pane whose footer says a turn is running"
+  fi
+  pass "away-mode injection defers on a mid-turn Agy supervisor pane the composer proof reads empty"
 }
 
 test_afk_start_refuses_when_flag_cannot_be_written
@@ -2881,6 +2895,7 @@ test_primary_busy_guard_is_harness_scoped
 test_watch_child_does_not_inherit_the_supervisor_composer_harness
 test_supervisor_harness_prefers_the_forwarded_pane_value
 test_away_injection_into_an_agy_supervisor_pane_is_confirmed
+test_away_injection_defers_on_a_busy_agy_supervisor_pane
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers

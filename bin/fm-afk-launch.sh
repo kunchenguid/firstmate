@@ -73,8 +73,11 @@
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
 # placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
-# override the captured captain pane/backend (an isolated lab pane in tests),
-# and FM_SUPERVISOR_HARNESS carries that pane's harness to the daemon.
+# override the captured captain pane/backend (an isolated lab pane in tests).
+# FM_SUPERVISOR_HARNESS is NOT a seam of that kind: it is always recomputed
+# here from the pane this script runs in and forwarded to the daemon, so an
+# ambient value is overwritten rather than honored. It is an override only on
+# the daemon side (bin/fm-supervise-daemon.sh).
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

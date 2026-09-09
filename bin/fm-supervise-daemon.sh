@@ -636,13 +636,22 @@ mark_escalated_seen() {  # <state> <captured-endpoint-file>
 # existing caller/test that passes only <target> is unaffected.
 #
 # This rendered reader applies only to the supervisor pane during away-mode
-# injection. It never classifies a recorded worker task. The detected primary
-# harness selects exactly one signature, so output from another harness cannot
-# make the primary read busy.
+# injection. It never classifies a recorded worker task. Exactly one harness
+# signature is selected, so output from another harness cannot make the pane
+# read busy, and the harness it selects is the SUPERVISOR PANE's own
+# (FM_COMPOSER_HARNESS, resolved once at startup by
+# discover_supervisor_harness) rather than the daemon process's, which on the
+# script-owned away launch is the terminal server's and answers unknown. An
+# unknown harness registers no signature at all, so the busy guard would pass
+# every pane through to the composer proof, and a harness whose composer looks
+# identical busy and idle (agy renders the same container with an
+# `esc to cancel` footer) would then be typed into mid-turn.
 #
-# Resolved lazily and memoized: harness detection walks process ancestry, which
-# is too heavy to pay on every source of this library (the unit tests and the
-# launcher source it purely for its pure functions).
+# fm_daemon_primary_harness remains the fallback for the harness-native launch
+# paths, where the daemon does run inside the primary's process tree. Resolved
+# lazily and memoized: harness detection walks process ancestry, which is too
+# heavy to pay on every source of this library (the unit tests and the launcher
+# source it purely for its pure functions).
 fm_daemon_primary_harness() {
   if [ -z "${FM_DAEMON_PRIMARY_HARNESS:-}" ]; then
     FM_DAEMON_PRIMARY_HARNESS=$("$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null || printf 'unknown')
@@ -653,7 +662,8 @@ fm_daemon_primary_harness() {
 
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
-  harness=$(fm_daemon_primary_harness)
+  harness=${FM_COMPOSER_HARNESS:-}
+  [ -n "$harness" ] || harness=$(fm_daemon_primary_harness)
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$native" in
     busy) return 0 ;;
