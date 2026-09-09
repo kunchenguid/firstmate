@@ -20,6 +20,12 @@
 # (the prs: line and the omitted[] surfaces) what was not requested, so an absence is
 # never ambiguous.
 #
+# Every Underway row carries a rendered `running` elapsed time ("45s", "14m",
+# "1h 14m", "2d 3h") so no reader repeats that arithmetic. It is how long that
+# row's own worker has been running, taken from the canonical snapshot, and reads
+# `unknown` whenever no start is recorded for it, including an active child whose
+# secondmate home reports none.
+#
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
@@ -129,12 +135,14 @@ Default collection performs bounded concurrent remote-ledger reads for registere
 remote homes under one shared snapshot budget and may refresh the parent-side cache.
 --include-prs additionally performs live GitHub discovery and checks.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,doing},
+Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,running,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+in_flight.running is how long that row's own worker has been running ("45s",
+  "14m", "1h 14m", "2d 3h"), or "unknown" when no start is recorded for it.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -334,6 +342,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  # The projection owns the rendered elapsed time so no reader has to do this
+  # arithmetic; "unknown" is the honest answer when no start is recorded.
+  def running_label:
+    if . == null then "unknown"
+    else . as $s
+      | ($s / 86400 | floor) as $d
+      | (($s % 86400) / 3600 | floor) as $h
+      | (($s % 3600) / 60 | floor) as $m
+      | if $d > 0 then "\($d)d \($h)h"
+        elif $h > 0 then "\($h)h \($m)m"
+        elif $m > 0 then "\($m)m"
+        else "\($s)s" end
+    end;
   def fit($n):
     tostring | gsub("\\s+"; " ")
     | if $n <= 0 then ""
@@ -457,6 +478,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | {id, kind,
         state: .current_state.state,
         repo:(.backlog.repo // .project // null),
+        running:(.runtime.running_seconds | running_label),
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
@@ -466,6 +488,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             kind:(.kind // "secondmate"),
             state:(.state // "working"),
             repo:(.repo // null),
+            running:(.running_seconds | running_label),
             doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record
