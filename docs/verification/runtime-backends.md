@@ -1047,6 +1047,24 @@ Observed guarantees: `fm-afk-launch.sh start` refused on the Pi primary and `con
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+## zai primary session identity on Windows
+
+zai is a herdr fork whose engine is the zai-cli node bundle; it publishes no harness-identity marker of its own and consumes the herdr pane environment, so its identity comes from process ancestry alone.
+On Windows the MSYS (Git Bash) ps table cannot see native Windows processes, and MSYS fork children carry a stale Win32 parent pid, so both a Unix ps walk and a pure CIM parent walk die before reaching the engine.
+The hybrid walk in `bin/fm-windows-process-lib.sh` climbs the MSYS `/proc` chain, then hands off to one CIM snapshot anchored at the last MSYS process, whose native parent is a CreateProcess child of the engine.
+MSYS `ln -s` emulated as a copy was also verified: the session-lock claim then verifies through `fm_lock_points_to_owner`'s pid-content fallback and releases through the directory branch of `fm_lock_release`.
+
+Verified live on 2026-09-10 with Windows 11 Home 10.0.26200 x64, Git Bash (MSYS), zai-cli under Herdr on protocol 19, as the running firstmate home's own session.
+
+```sh
+bin/fm-harness.sh        # zai
+bin/fm-lock.sh           # lock acquired: harness pid <zai-cli node pid>
+bin/fm-session-start.sh  # SUPERVISION OPERATING INSTRUCTIONS - primary harness: zai
+bash tests/fm-zai-windows-identity.test.sh
+```
+
+Observed guarantees: the zai-cli node hop is the innermost and only harness match, the herdr wrapper above it never claims the identity, the lock records the native Windows pid of that engine and is idempotently re-acquired by the same session, a stale lock is taken over and a live foreign holder refuses, and a simulated Windows chain drives `bin/fm-harness.sh` and `bin/fm-lock.sh` deterministically in `tests/fm-zai-windows-identity.test.sh` with no real zai required.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

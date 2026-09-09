@@ -83,6 +83,10 @@ fi
 case "$HARNESS" in
   claude|codex|opencode|pi|grok|cursor|omp) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
+  # zai (herdr-fork engine) has no verified wake adapter of its own yet; it
+  # supervises through the generic unknown-harness contract while still being
+  # named as itself in the header.
+  zai) SNIPPET="$DOC_DIR/unknown.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"

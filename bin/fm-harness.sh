@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|zai|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -37,6 +37,11 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# On MSYS-style Windows hosts the ps ancestry walk below cannot cross into the
+# native Windows processes above the shell, so the chain enumeration delegates
+# to this lib there.
+# shellcheck source=bin/fm-windows-process-lib.sh
+. "$SCRIPT_DIR/fm-windows-process-lib.sh"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -118,69 +123,34 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args argv0
+  # On an MSYS-style Windows host the engine above this shell is a native
+  # Windows process MSYS ps cannot see, so the chain arrives as CIM identity
+  # lines from bin/fm-windows-process-lib.sh; the per-hop matching is shared
+  # through fm_detect_hop_harness. Cursor argv0 evidence is a ps lookup and is
+  # unavailable over the Windows chain, so the cursor arm there rides on names.
+  local pid=$$ comm args argv0 harness line
+  if fm_host_is_windows; then
+    while IFS= read -r line; do
+      line=${line%"$(printf '\r')"}
+      [ -n "$line" ] || continue
+      IFS="$(printf '\037')" read -r pid comm args <<<"$line"
+      harness=$(fm_detect_hop_harness "$comm" "$args" '')
+      case "$harness" in
+        ''|unknown) continue ;;
+        *) printf '%s\n' "$harness"; return ;;
+      esac
+    done < <(fm_windows_ancestry_lines)
+    echo unknown
+    return
+  fi
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
     argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
-    if fm_cursor_process_matches "$comm" '' "$argv0"; then
-      echo cursor
-      return
-    fi
-    if fm_gemini_path_is_gemini "$comm"; then
-      echo gemini
-      return
-    fi
-    case "$(basename -- "$comm")" in
-      # gemini precedes claude here for the same precedence reason as the
-      # marker layer above, so a gemini worker under a claude primary is never
-      # read as claude. This arm covers a natively-named gemini binary only.
-      # It does NOT reach the currently installed CLI, which is a node bundle
-      # (~/.local/bin/gemini -> @google/gemini-cli/bundle/gemini.js): modern
-      # Node on Linux reports `comm` as MainThread rather than node (measured
-      # on Node v24.20.0), so neither this arm nor the node interpreter arm
-      # below matches a live gemini process. GEMINI_CLI above is therefore
-      # load-bearing for gemini rather than a fast path, which is why gemini
-      # is not offered as a primary or secondmate harness. Do NOT add
-      # MainThread to the interpreter arm to close this: that would make the
-      # args of EVERY node process searchable and let an unrelated node
-      # command carrying a harness name in its arguments claim an identity.
-      *claude*) echo claude; return ;;
-      *codex*) echo codex; return ;;
-      *opencode*) echo opencode; return ;;
-      *grok*) echo grok; return ;;
-      kimi) echo kimi; return ;;
-      rovo) echo rovo; return ;;
-      # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
-      # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
-      # name carries the version and CHANGES on every auto-update. Match the stable
-      # prefix rather than any exact name. Deliberately anchored, never *muse*, so
-      # unrelated commands (musescore, amuse) cannot be misread as this harness.
-      muse|muse-bin-*) echo muse; return ;;
-      pi-signed) echo pi; return ;;
-      pi) echo pi; return ;;
-      # omp is a Bun-compiled single binary whose process name is exactly `omp`
-      # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
-      # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
-      # comp, and similar unrelated commands are not misread as this harness.
-      # It sits above the node*|python* interpreter fallback deliberately: the
-      # optional claude-bridge extension runs a nested executable literally
-      # named `claude` with its own node child, and that fallback's *claude*
-      # args glob would otherwise claim it if that subtree were ever walked.
-      omp) echo omp; return ;;
-      node*|python*)
-        # Bare interpreter: match the harness name in its script path.
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
-        if fm_gemini_args_are_gemini "$args"; then
-          echo gemini
-          return
-        fi
-        case "$args" in
-          *claude*) echo claude; return ;;
-          *codex*) echo codex; return ;;
-          *opencode*) echo opencode; return ;;
-          *grok*) echo grok; return ;;
-          *" pi "*|*/pi) echo pi; return ;;
-        esac ;;
+    harness=$(fm_detect_hop_harness "$comm" "$args" "$argv0")
+    case "$harness" in
+      ''|unknown) ;;
+      *) printf '%s\n' "$harness"; return ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
@@ -188,6 +158,84 @@ detect_own() {
     fi
   done
   echo unknown
+}
+
+# Print the harness one parent-chain hop identifies, or nothing. The single
+# matcher behind both ancestry walks in detect_own, so the two platforms cannot
+# drift: comm is the process's reported command name, args its full command
+# line, argv0 the cursor-resolved argv[0] (empty on the Windows chain).
+fm_detect_hop_harness() {  # <comm> <args> <argv0>
+  local comm=$1 args=$2 argv0=$3
+  if fm_cursor_process_matches "$comm" '' "$argv0"; then
+    echo cursor
+    return
+  fi
+  if fm_gemini_path_is_gemini "$comm"; then
+    echo gemini
+    return
+  fi
+  case "$(basename -- "$comm")" in
+    # gemini precedes claude here for the same precedence reason as the
+    # marker layer above, so a gemini worker under a claude primary is never
+    # read as claude. This arm covers a natively-named gemini binary only.
+    # It does NOT reach the currently installed CLI, which is a node bundle
+    # (~/.local/bin/gemini -> @google/gemini-cli/bundle/gemini.js): modern
+    # Node on Linux reports `comm` as MainThread rather than node (measured
+    # on Node v24.20.0), so neither this arm nor the node interpreter arm
+    # below matches a live gemini process. GEMINI_CLI above is therefore
+    # load-bearing for gemini rather than a fast path, which is why gemini
+    # is not offered as a primary or secondmate harness. Do NOT add
+    # MainThread to the interpreter arm to close this: that would make the
+    # args of EVERY node process searchable and let an unrelated node
+    # command carrying a harness name in its arguments claim an identity.
+    *claude*) echo claude; return ;;
+    *codex*) echo codex; return ;;
+    *opencode*) echo opencode; return ;;
+    *grok*) echo grok; return ;;
+    kimi) echo kimi; return ;;
+    rovo) echo rovo; return ;;
+    # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
+    # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
+    # name carries the version and CHANGES on every auto-update. Match the stable
+    # prefix rather than any exact name. Deliberately anchored, never *muse*, so
+    # unrelated commands (musescore, amuse) cannot be misread as this harness.
+    muse|muse-bin-*) echo muse; return ;;
+    pi-signed) echo pi; return ;;
+    pi) echo pi; return ;;
+    # omp is a Bun-compiled single binary whose process name is exactly `omp`
+    # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
+    # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
+    # comp, and similar unrelated commands are not misread as this harness.
+    # It sits above the node*|python* interpreter fallback deliberately: the
+    # optional claude-bridge extension runs a nested executable literally
+    # named `claude` with its own node child, and that fallback's *claude*
+    # args glob would otherwise claim it if that subtree were ever walked.
+    omp) echo omp; return ;;
+    # zai is the herdr-fork primary engine. Anchored exact names, never *zai*,
+    # so unrelated commands (mizai, zairah) are not misread as this harness.
+    zai|zai-cli) echo zai; return ;;
+    node*|python*)
+      # Bare interpreter: match the harness name in its script path.
+      if fm_gemini_args_are_gemini "$args"; then
+        echo gemini
+        return
+      fi
+      case "$args" in
+        *claude*) echo claude; return ;;
+        *codex*) echo codex; return ;;
+        *opencode*) echo opencode; return ;;
+        *grok*) echo grok; return ;;
+        *" pi "*|*/pi) echo pi; return ;;
+        # The zai engine is a node bundle: the npm install runs
+        # zai-cli/dist/cli.js and a repo checkout runs .../zai/dist/cli.js,
+        # so match the package name or a /zai/ directory component. Verified
+        # live under zai on Windows: node.exe running zai-cli/dist/cli.js
+        # hosts the session. Never the bare letters zai, matching the
+        # anchored basename arm above.
+        *zai-cli*|*/zai/*) echo zai; return ;;
+      esac ;;
+  esac
+  return 1
 }
 
 # True when an exact `omp` process sits within eight parents of this one. The

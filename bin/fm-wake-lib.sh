@@ -448,8 +448,15 @@ fm_lock_link_owner() {
 
 fm_lock_points_to_owner() {
   local lockdir=$1 ownerdir=$2 actual
-  actual=$(readlink "$lockdir" 2>/dev/null) || return 1
-  [ "$actual" = "$ownerdir" ]
+  actual=$(readlink "$lockdir" 2>/dev/null) || actual=''
+  [ "$actual" = "$ownerdir" ] && return 0
+  # MSYS-style hosts emulate `ln -s` with a copy when no winsymlinks mode is
+  # configured: the claim is then a real directory holding a copy of the
+  # owner's files, and readlink can never resolve it. The creating ln still
+  # refuses an existing target, so the claim stays atomic; ownership is proven
+  # by the copied pid matching this owner dir's own pid.
+  [ -d "$lockdir" ] || return 1
+  cmp -s "$lockdir/pid" "$ownerdir/pid" 2>/dev/null
 }
 
 fm_lock_discard_owner() {
@@ -1095,6 +1102,10 @@ fm_lock_release() {
   [ "$pid" = "$current" ] || return 0
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
+  # Copy-mode claims (MSYS ln -s emulation) leave the owner dir behind here
+  # instead of in the symlink branch above; discard it so repeated lock
+  # cycles do not leak one directory per acquisition.
+  [ -n "${FM_LOCK_OWNER_DIR:-}" ] && fm_lock_discard_owner "$FM_LOCK_OWNER_DIR"
 }
 
 fm_meta_lock_path() {
