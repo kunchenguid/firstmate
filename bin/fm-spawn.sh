@@ -1908,7 +1908,8 @@ effort_flag_for_harness() {
       esac
       ;;
     agy)
-      # Agy 1.1.8 accepts low, medium, and high and rejects xhigh and max.
+      # Agy 1.1.8 through 1.1.28 accept low, medium, and high and reject xhigh
+      # and max; tests/fm-agy-live-e2e.test.sh re-proves the rejection live.
       case "$effort" in
         low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac

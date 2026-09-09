@@ -29,7 +29,7 @@ zsh
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
-Anti-Gravity CLI 1.1.8 was observed under `agy` on 2026-07-30 in a dedicated tmux server.
+Anti-Gravity CLI 1.1.8 was observed under `agy` on 2026-07-30 in a dedicated tmux server, and 1.1.28 again on 2026-09-09 through `FM_AGY_LIVE_E2E=1 tests/fm-agy-live-e2e.test.sh`.
 Its empty and typed separator composers were classified through the shared executable interface, and `esc to cancel` was present only during an active turn.
 
 ### Agent liveness name sources
@@ -115,15 +115,15 @@ The classifier was not at fault: the guard resolved the harness through a generi
 That binary exits immediately, leaving a bare shell in the pane.
 The guard now asks `fm_cursor_resolve_binary` first for `cursor`, which is the same verified owner `bin/fm-spawn.sh` uses, so the probe launches `cursor-agent` and the editor CLI can no longer masquerade as the harness.
 
-### 2026-09-08 Linux drift refresh adding Agy
+### 2026-09-09 Linux drift refresh adding Agy
 
-Running the guard with `FM_HARNESS_LIVENESS_DRIFT=1` on Linux 6.8 x86_64 with tmux 3.4 checked the 4 installed harnesses and classified every one `alive`, including Anti-Gravity CLI, which joined the guard's loop in this run:
+Running the guard with `FM_HARNESS_LIVENESS_DRIFT=1` on Linux 6.8 x86_64 with tmux 3.4 checked the 4 installed harnesses and classified every one `alive`, including Anti-Gravity CLI, which joined the guard's loop on 2026-09-08 at 1.1.27 and was refreshed at 1.1.28 the next day:
 
 ```text
-# claude 2.1.263 (Claude Code): title='claude' foreground=[claude ]
-# codex codex-cli 0.150.1: title='codex' foreground=[codex ]
+# claude 2.1.266 (Claude Code): title='claude' foreground=[claude ]
+# codex codex-cli 0.153.4: title='codex' foreground=[codex ]
 # cursor 2026.07.23-e383d2b: title='cursor-agent' foreground=[MainThread ]
-# agy 1.1.27: title='agy' foreground=[agy ]
+# agy 1.1.28: title='agy' foreground=[agy ]
 # unverified on this machine (not installed): opencode pi pi-signed grok kimi muse
 # checked 4 installed harness(es)
 ```

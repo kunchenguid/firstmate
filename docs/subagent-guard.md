@@ -242,7 +242,7 @@ The bounded follow-up for each is identical to the Codex procedure above.
 On a host with the binary installed, ask the harness to enumerate its tools, then wire the matcher and re-run the live matrix below.
 `bin/fm-subagent-pretool-check.sh` needs no change for any of them: it already accepts Grok's stdin shape and the `--tool` CLI form OpenCode and Pi use, and it already emits the Grok stdout decision object by default.
 
-Agy 1.1.8 exposes a top-level `--agent` selection flag and `agy agent` listing command, but neither the CLI help nor the installed hook contract establishes an in-session delegation-shaped tool name.
+Agy 1.1.28 still exposes a top-level `--agent` selection flag and `agy agent` listing command, but neither the CLI help nor the installed hook contract establishes an in-session delegation-shaped tool name.
 The Agy primary hook therefore does not guess a PreToolUse matcher for delegation.
 
 ## Live validation record, 2026-07-22

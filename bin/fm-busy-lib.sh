@@ -840,7 +840,7 @@ fm_busy_grok_tail_busy() {
 }
 
 # fm_busy_agy_tail_busy: the Agy-only rendered-tail fallback retained from the
-# verified adapter contribution. Agy 1.1.8 has a Stop hook but no verified
+# verified adapter contribution. Agy 1.1.28 still has a Stop hook but no verified
 # semantic turn-start event, so the stable ASCII `esc to cancel` footer remains
 # its narrowly scoped current-state source until a complete lifecycle replaces
 # it. Only the bottom nonblank row is live footer geometry; transcript text and
