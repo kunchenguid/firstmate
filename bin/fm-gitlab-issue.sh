@@ -40,9 +40,15 @@
 #           --prefix overrides): every other prefixed label is removed and the
 #           new one added in a single PUT with add_labels/remove_labels. Labels
 #           outside the prefix are never touched. A label that does not start
-#           with the prefix is refused. Already-set is a no-op. Prints
-#           "<label>\t<removed,labels>" (second field empty when nothing was
-#           removed) and verifies the returned label set.
+#           with the prefix is refused. Under the default "fm::" prefix the
+#           label is validated further, against the closed set of issue states
+#           owned by FM_LABEL_VOCABULARY below (that variable is the single
+#           definition of those names; nothing else lists them); the refusal
+#           names the whole set and happens before any request, so a typo can
+#           never create a label as a side effect. A caller-supplied --prefix
+#           is validated by prefix only, with no vocabulary check. Already-set
+#           is a no-op. Prints "<label>\t<removed,labels>" (second field empty
+#           when nothing was removed) and verifies the returned label set.
 #   comment Create a note from <file> (or stdin with "-"). Prints
 #           "<note-id>\t<issue-url>#note_<note-id>".
 #   comment-update
@@ -330,8 +336,15 @@ cmd_show() {
 
 # --- label ------------------------------------------------------------------
 
+# The default prefix and the closed set of states that live under it. This is
+# the only definition of those names in the repository: the refusal below
+# prints the set verbatim, so a caller (and the test suite) learns the
+# vocabulary from the script rather than from a second copy of the list.
+FM_LABEL_PREFIX='fm::'
+FM_LABEL_VOCABULARY='fm::todo fm::triage fm::plan-review fm::accepted fm::needs-human fm::done fm::human-replied'
+
 cmd_label() {
-  local prefix='fm::' new='' issue state removed body after
+  local prefix="$FM_LABEL_PREFIX" new='' issue state removed body after
   while [ $# -gt 0 ]; do
     case "$1" in
       --prefix) [ $# -ge 2 ] || die 1 "--prefix needs a value"; prefix=$2; shift 2 ;;
@@ -348,6 +361,12 @@ cmd_label() {
   case "$new" in
     "$prefix" | *,* | *[[:cntrl:]]*) die 1 "refusing malformed label '$new'" ;;
   esac
+  if [ "$prefix" = "$FM_LABEL_PREFIX" ]; then
+    case " $FM_LABEL_VOCABULARY " in
+      *" $new "*) ;;
+      *) die 1 "refusing label '$new': not a $FM_LABEL_PREFIX issue state; expected one of: $FM_LABEL_VOCABULARY" ;;
+    esac
+  fi
   require_tools
   issue=$(glab_api GET "$ISSUE_API")
   state=$(printf '%s\n' "$issue" | jq -ec --arg p "$prefix" --arg new "$new" '

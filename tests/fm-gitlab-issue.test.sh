@@ -4,7 +4,9 @@
 # request it receives and answers from fixtures. No case reaches the network.
 #
 # Covered: issue-URL parsing including nested subgroups and the explicit host
-# flag; `label` removing only prefixed labels in one PUT and staying idempotent;
+# flag; `label` removing only prefixed labels in one PUT, staying idempotent,
+# and accepting exactly the closed fm:: vocabulary it advertises while a
+# caller-supplied --prefix stays prefix-only;
 # `checklist` rewriting exactly one line and refusing a missing or ticked one;
 # `show` folding every page of notes and `show --since` dropping system notes,
 # the token user's own notes, and older notes down to the fractional second;
@@ -198,6 +200,32 @@ expect_code 1 "$rc" "the bare prefix is refused"
 err=$("$SCRIPT" label "$URL" 'fm::a,fm::b' 2>&1); rc=$?
 expect_code 1 "$rc" "a comma in the label is refused"
 pass "label refuses anything outside the prefix without a request"
+
+# The refusal below prints the whole closed vocabulary, so the suite learns the
+# seven state names from the script itself instead of keeping a second copy.
+: > "$FM_TEST_GLAB_LOG"
+err=$("$SCRIPT" label "$URL" fm::rejected 2>&1); rc=$?
+expect_code 1 "$rc" "a well-formed fm:: label outside the vocabulary is refused"
+assert_contains "$err" "expected one of:" "the refusal lists the whole fm:: vocabulary"
+[ ! -s "$FM_TEST_GLAB_LOG" ] || fail "fm::rejected still reached glab: $(requests)"
+typo=$("$SCRIPT" label "$URL" fm::rejcted 2>&1); rc=$?
+expect_code 1 "$rc" "a near-miss typo is refused"
+assert_contains "$typo" "fm::rejcted" "the refusal names the label it refused"
+[ "$(count_method PUT)" = 0 ] || fail "a refused label recorded a PUT: $(requests)"
+[ ! -s "$FM_TEST_GLAB_LOG" ] || fail "fm::rejcted still reached glab: $(requests)"
+pass "label refuses an unknown fm:: state, typo included, before any request"
+
+vocab=${err##*expected one of: }
+IFS=' ' read -r -a fm_states <<<"$vocab"
+[ "${#fm_states[@]}" = 7 ] || fail "the fm:: vocabulary must hold exactly seven states: $vocab"
+for state in "${fm_states[@]}"; do
+  new_case "vocab-${state//:/_}"
+  out=$("$SCRIPT" label "$URL" "$state" 2>&1) || fail "the advertised state $state was refused: $out"
+  [ "${out%%$'\t'*}" = "$state" ] || fail "label $state printed: $out"
+  [ "$(jq -r --arg s "$state" '[.labels[] | select(startswith("fm::"))] == [$s]' "$FIX/issue.json")" = true ] \
+    || fail "$state is not the only fm:: label after the swap: $(jq -c .labels "$FIX/issue.json")"
+done
+pass "every state the vocabulary advertises is accepted and becomes the only fm:: label"
 
 new_case label-prefix
 out=$("$SCRIPT" label "$URL" --prefix 'priority::' priority::low 2>&1) || fail "prefixed label failed: $out"
