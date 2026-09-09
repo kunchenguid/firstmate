@@ -28,10 +28,13 @@
 #   show    Print one JSON object: title, description, state, labels, author
 #           ({id, username, name}), web_url, project_path_with_namespace,
 #           project_id, iid, and notes. `notes` holds the non-system notes in
-#           creation order, excluding notes written by the authenticated user
-#           itself (read once per run from the `user` endpoint), each as
+#           creation order from every page of the notes endpoint (glab
+#           --paginate prints one array per page; they are folded into one
+#           list), excluding notes written by the authenticated user itself
+#           (read once per run from the `user` endpoint), each as
 #           {id, author, created_at, body}. With --since only notes created
-#           strictly after that instant are kept; the value is an ISO-8601
+#           strictly after that instant are kept, compared at the precision
+#           given (GitLab emits milliseconds); the value is an ISO-8601
 #           timestamp (Z or numeric offset, optional fraction) or a Unix epoch.
 #   label   Make <label> the only label carrying the prefix (default "fm::",
 #           --prefix overrides): every other prefixed label is removed and the
@@ -55,7 +58,9 @@
 #           rewritten line.
 #   project Map the issue to a local clone under $FM_HOME/projects/*/ by
 #           comparing the URL's host and project path with each clone's
-#           `git remote get-url origin`. Scheme, userinfo, any port, a trailing
+#           `git remote get-url origin`. An entry without a .git of its own is
+#           skipped rather than resolved to an enclosing repository. Scheme,
+#           userinfo, any port, a trailing
 #           ".git", a trailing "/", and host and path case are normalised
 #           away, so https, ssh://, and scp-like origins all match. Prints
 #           "<clone-dir>\t<posture>" where <posture> is the exact output of
@@ -123,7 +128,7 @@ ISSUE_HOST=
 ISSUE_PATH=
 ISSUE_IID=
 parse_issue_url() {  # <url>
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path iid
   local LC_ALL=C
   raw=${raw%%#*}
   # The path class contains "/" and "-", so this match is greedy to the last
@@ -131,13 +136,14 @@ parse_issue_url() {  # <url>
   # fm_pr_gitlab_path_valid refuses the reserved "-" segment.
   pattern='^https://([A-Za-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/issues/([1-9][0-9]*)/?$'
   [[ "$raw" =~ $pattern ]] || return 1
-  host=${BASH_REMATCH[1],,}
   path=${BASH_REMATCH[2]}
+  iid=${BASH_REMATCH[3]}
+  host=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')
   fm_pr_gitlab_host_valid "$host" || return 1
   fm_pr_gitlab_path_valid "$path" || return 1
   ISSUE_HOST=$host
   ISSUE_PATH=$path
-  ISSUE_IID=${BASH_REMATCH[3]}
+  ISSUE_IID=$iid
 }
 
 parse_issue_url "$RAW_URL" || die 1 "not a GitLab issue URL (expected https://<host>/<group>/<project>/-/issues/<iid>): $RAW_URL"
@@ -151,15 +157,16 @@ ISSUE_API="projects/$PROJECT_ENC/issues/$ISSUE_IID"
 
 # glab_api <method> <endpoint> [<body-file>] [extra glab flags...]
 # One bounded request against the issue's host. A body file is sent verbatim
-# with --input, so a note body is never reinterpreted by glab's typed --field
-# parsing. Response JSON is printed on stdout; any failure exits 2 with glab's
-# own diagnostic (which never contains the token).
+# with --input and an explicit JSON Content-Type (glab sets none for --input),
+# so a note body is never reinterpreted by glab's typed --field parsing.
+# Response JSON is printed on stdout; any failure exits 2 with glab's own
+# diagnostic (which never contains the token).
 glab_api() {
   local method=$1 endpoint=$2 body=${3:-}
   shift 2
   [ $# -eq 0 ] || shift
   local -a cmd=(glab api --hostname "$ISSUE_HOST" --method "$method")
-  [ -z "$body" ] || cmd+=(--input "$body")
+  [ -z "$body" ] || cmd+=(--input "$body" --header 'Content-Type: application/json')
   cmd+=("$@" "$endpoint")
   local out rc=0
   out=$(bounded "${cmd[@]}") || rc=$?
@@ -285,20 +292,22 @@ cmd_show() {
   issue=$(glab_api GET "$ISSUE_API")
   me=$(glab_api GET user)
   notes=$(glab_api GET "$ISSUE_API/notes?sort=asc&order_by=created_at" '' --paginate)
-  # A paginated glab response is one JSON array; a single page is the same
-  # shape, so both fold through the same filter.
+  # glab --paginate prints one JSON array per page back to back, so after
+  # slurping, everything from the third document on is a page of notes; a
+  # single page is the one-element case of the same fold.
   printf '%s\n%s\n%s\n' "$issue" "$me" "$notes" | jq -es --argjson since "$since_json" --arg path "$ISSUE_PATH" '
     def to_epoch:
       if type == "number" then .
-      else (capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})[T ](?<t>[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})?$")
+      else (capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})[T ](?<t>[0-9]{2}:[0-9]{2}:[0-9]{2})(?<f>\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})?$")
             // error("not an ISO-8601 timestamp: " + .)) as $p
         | (($p.d + "T" + $p.t + "Z") | fromdateiso8601)
+          + (($p.f // "0") | tonumber)
           - (if ($p.z // "Z") == "Z" then 0
              else (($p.z[1:3] | tonumber) * 3600 + ($p.z[-2:] | tonumber) * 60)
                   * (if $p.z[0:1] == "-" then -1 else 1 end)
              end)
       end;
-    .[0] as $issue | .[1] as $me | (.[2] // []) as $notes
+    .[0] as $issue | .[1] as $me | (.[2:] | add // []) as $notes
     | ($since | if . == null then null else to_epoch end) as $cut
     | {
         title: $issue.title,
@@ -494,17 +503,18 @@ origin_identity() {
   path=${path%/}
   path=${path%.git}
   [ -n "$host" ] && [ -n "$path" ] || return 1
-  printf '%s/%s\n' "${host,,}" "${path,,}"
+  printf '%s/%s\n' "$host" "$path" | tr '[:upper:]' '[:lower:]'
 }
 
 cmd_project() {
   [ $# -eq 0 ] || die 1 "project: unexpected argument '$1'"
   [ -d "$PROJECTS" ] || die 3 "no clone matches $ISSUE_HOST/$ISSUE_PATH: no projects directory at $PROJECTS"
-  local want="${ISSUE_HOST,,}/${ISSUE_PATH,,}" clone origin identity name posture
+  local want clone origin identity name posture
   local -a matches=()
+  want=$(printf '%s/%s' "$ISSUE_HOST" "$ISSUE_PATH" | tr '[:upper:]' '[:lower:]')
   for clone in "$PROJECTS"/*/; do
     clone=${clone%/}
-    [ -d "$clone" ] || continue
+    [ -d "$clone" ] && [ -e "$clone/.git" ] || continue
     origin=$(git -C "$clone" remote get-url origin 2>/dev/null) || continue
     identity=$(origin_identity "$origin") || continue
     [ "$identity" = "$want" ] || continue

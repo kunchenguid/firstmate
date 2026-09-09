@@ -6,10 +6,13 @@
 # Covered: issue-URL parsing including nested subgroups and the explicit host
 # flag; `label` removing only prefixed labels in one PUT and staying idempotent;
 # `checklist` rewriting exactly one line and refusing a missing or ticked one;
-# `show --since` dropping system notes, the token user's own notes, and older
-# notes; `comment` and `comment-update` sending the body verbatim; `project`
-# matching https, scp-like, and ssh:// origins with and without .git and
-# exiting 3 when no clone matches; and glab failure or timeout exiting 2.
+# `show` folding every page of notes and `show --since` dropping system notes,
+# the token user's own notes, and older notes down to the fractional second;
+# `comment` and `comment-update` sending the body verbatim; every body-carrying
+# request declaring a JSON Content-Type; `project` matching https, scp-like,
+# and ssh:// origins with and without .git, skipping a plain directory inside a
+# repository, and exiting 3 when no clone matches; and glab failure or timeout
+# exiting 2.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -22,34 +25,41 @@ command -v jq >/dev/null 2>&1 || fail "these tests need the real jq on PATH"
 export PATH="$FAKEBIN:$PATH"
 
 # The fake glab answers from $FM_TEST_GLAB_FIX and appends one line per request
-# to $FM_TEST_GLAB_LOG: "<method>\t<hostname>\t<paginate>\t<endpoint>\t<body>".
+# to $FM_TEST_GLAB_LOG:
+# "<method>\t<hostname>\t<paginate>\t<endpoint>\t<headers;joined>\t<body>".
 # A PUT on the issue applies add_labels/remove_labels to issue.json so a second
 # call sees the new label set; a POST or PUT on a note stores the body so the
-# suite can check exactly what would have reached GitLab.
+# suite can check exactly what would have reached GitLab. A paginated notes GET
+# prints notes.json and then, like real glab, a second array from
+# notes-page2.json when that fixture exists.
 cat > "$FAKEBIN/glab" <<'SH'
 #!/usr/bin/env bash
 set -u
 [ "${1:-}" = api ] || { echo "fake glab: only 'api' is supported" >&2; exit 1; }
 shift
-method=GET hostname='<unset>' paginate=no endpoint= body=
+method=GET hostname='<unset>' paginate=no endpoint= body= headers=
 while [ $# -gt 0 ]; do
   case "$1" in
     --hostname) hostname=$2; shift 2 ;;
-    --method) method=$2; shift 2 ;;
+    --method | -X) method=$2; shift 2 ;;
     --input) if [ "$2" = - ]; then body=$(cat); else body=$(cat "$2"); fi; shift 2 ;;
+    --header | -H) headers="${headers:+$headers;}$2"; shift 2 ;;
     --paginate) paginate=yes; shift ;;
     -*) echo "fake glab: unexpected flag $1" >&2; exit 1 ;;
     *) endpoint=$1; shift ;;
   esac
 done
 body_c=$(printf '%s' "$body" | jq -c . 2>/dev/null || printf '%s' "$body")
-printf '%s\t%s\t%s\t%s\t%s\n' "$method" "$hostname" "$paginate" "$endpoint" "$body_c" >> "$FM_TEST_GLAB_LOG"
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$method" "$hostname" "$paginate" "$endpoint" "$headers" "$body_c" >> "$FM_TEST_GLAB_LOG"
 fix=$FM_TEST_GLAB_FIX
 [ ! -e "$fix/fail" ] || { echo "fake glab: 401 Unauthorized" >&2; exit 1; }
 [ ! -e "$fix/hang" ] || sleep 30
 case "$method $endpoint" in
   "GET user") cat "$fix/user.json" ;;
-  "GET projects/"*"/issues/"*"/notes?"*) cat "$fix/notes.json" ;;
+  "GET projects/"*"/issues/"*"/notes?"*)
+    cat "$fix/notes.json"
+    [ "$paginate" = no ] || [ ! -e "$fix/notes-page2.json" ] || cat "$fix/notes-page2.json"
+    ;;
   "GET projects/"*"/issues/"*"/notes/"*) cat "$fix/note-${endpoint##*/}.json" ;;
   "GET projects/"*"/issues/"*) cat "$fix/issue.json" ;;
   "PUT projects/"*"/issues/"*"/notes/"*)
@@ -103,6 +113,14 @@ JSON
 
 requests() { cat "$FM_TEST_GLAB_LOG"; }
 count_method() { grep -c "^$1"$'\t' "$FM_TEST_GLAB_LOG" || true; }
+# assert_json_body <method>: at least one <method> request is on record and
+# every one of them declared its body as JSON in the headers column.
+assert_json_body() {
+  awk -F'\t' -v m="$1" '
+    $1 == m { n++; if ($5 !~ /(^|;)Content-Type: application\/json(;|$)/) bad++ }
+    END { exit !(n && !bad) }' "$FM_TEST_GLAB_LOG" \
+    || fail "every $1 request must carry Content-Type: application/json: $(requests)"
+}
 
 # --- URL parsing --------------------------------------------------------------
 
@@ -161,7 +179,8 @@ put_body=${put##*$'\t'}
   || fail "the PUT carries only label fields: $put_body"
 [ "$(jq -c .labels "$FIX/issue.json")" = '["bug","fm::accepted","priority::high"]' ] \
   || fail "labels after PUT: $(jq -c .labels "$FIX/issue.json")"
-pass "label removes only the prefixed labels and adds the new one in a single PUT"
+assert_json_body PUT
+pass "label removes only the prefixed labels and adds the new one in a single PUT, declared as JSON"
 
 : > "$FM_TEST_GLAB_LOG"
 out=$("$SCRIPT" label "$URL" fm::accepted 2>&1) || fail "idempotent label failed: $out"
@@ -199,6 +218,7 @@ expected='"Plan:\n\n- [ ] 1/ add the test\n- [x] 2/ fix the loop → !12\n- [x] 
 [ "$new_body" = "$expected" ] || fail "checklist rewrote more than one line or changed a byte:"$'\n'"$new_body"
 [ "$(count_method PUT)" = 1 ] || fail "checklist must PUT the note once: $(requests)"
 assert_contains "$(grep $'^PUT\t' "$FM_TEST_GLAB_LOG")" $'\t'"$ENC"$'/notes/300\t' "the PUT addresses the note"
+assert_json_body PUT
 pass "checklist ticks exactly the addressed line and appends the suffix"
 
 : > "$FM_TEST_GLAB_LOG"
@@ -235,7 +255,9 @@ cat > "$FIX/notes.json" <<'JSON'
   {"id": 4, "system": false, "created_at": "2026-09-08T10:05:00.000Z",
    "author": {"id": 6, "username": "bob", "name": "Bob"}, "body": "answer: option B"},
   {"id": 5, "system": false, "created_at": "2026-09-08T10:05:00.000Z",
-   "author": {"id": 6, "username": "bob", "name": "Bob"}, "body": "same second as --since"}
+   "author": {"id": 6, "username": "bob", "name": "Bob"}, "body": "same second as --since"},
+  {"id": 6, "system": false, "created_at": "2026-09-08T10:05:00.900Z",
+   "author": {"id": 6, "username": "bob", "name": "Bob"}, "body": "same second, 900ms later"}
 ]
 JSON
 out=$("$SCRIPT" show "$URL" 2>&1) || fail "show failed: $out"
@@ -245,24 +267,54 @@ out=$("$SCRIPT" show "$URL" 2>&1) || fail "show failed: $out"
 [ "$(printf '%s' "$out" | jq -r .project_path_with_namespace)" = grp/sub/deep/proj ] || fail "show project path"
 [ "$(printf '%s' "$out" | jq -r .author.username)" = alice ] || fail "show author"
 [ "$(printf '%s' "$out" | jq -c .labels)" = '["fm::todo","bug","fm::triage","priority::high"]' ] || fail "show labels"
-[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[2,4,5]' ] \
+[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[2,4,5,6]' ] \
   || fail "notes without --since must drop only system and own notes: $(printf '%s' "$out" | jq -c .notes)"
 [ "$(printf '%s' "$out" | jq -c '.notes[0] | keys')" = '["author","body","created_at","id"]' ] || fail "note shape"
 [ "$(count_method GET)" = 3 ] || fail "show must read issue, user, and notes exactly once each: $(requests)"
 pass "show assembles the issue and keeps only human notes not written by the token user"
 
 out=$("$SCRIPT" show "$URL" --since 2026-09-08T10:05:00Z 2>&1) || fail "show --since failed: $out"
-[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[]' ] || fail "--since is strictly after: $out"
+[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[6]' ] || fail "--since is strictly after: $out"
 out=$("$SCRIPT" show "$URL" --since 2026-09-08T10:04:59Z 2>&1) || fail "show --since failed: $out"
-[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[4,5]' ] || fail "--since Z filter: $out"
+[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[4,5,6]' ] || fail "--since Z filter: $out"
 out=$("$SCRIPT" show "$URL" --since '2026-09-08T16:35:00+07:00' 2>&1) || fail "show --since offset failed: $out"
-[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[4,5]' ] || fail "--since with a +07:00 offset: $out"
+[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[4,5,6]' ] || fail "--since with a +07:00 offset: $out"
+out=$("$SCRIPT" show "$URL" --since 2026-09-08T10:05:00.500Z 2>&1) || fail "show --since fraction failed: $out"
+[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[6]' ] \
+  || fail "--since with a fraction must keep the later same-second note only: $out"
+out=$("$SCRIPT" show "$URL" --since 2026-09-08T10:05:00.900Z 2>&1) || fail "show --since fraction failed: $out"
+[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[]' ] \
+  || fail "--since equal to a note's fractional created_at is not strictly after: $out"
 epoch=$(( $(date -u -d '2026-09-08T09:59:59Z' +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' '2026-09-08T09:59:59Z' +%s) ))
 out=$("$SCRIPT" show "$URL" --since "$epoch" 2>&1) || fail "show --since epoch failed: $out"
-[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[4,5]' ] || fail "--since epoch: $out"
+[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[4,5,6]' ] || fail "--since epoch: $out"
 err=$("$SCRIPT" show "$URL" --since yesterday 2>&1); rc=$?
 expect_code 1 "$rc" "an unparseable --since is refused"
-pass "show --since filters by instant in ISO-8601 with Z or offset, or by epoch"
+pass "show --since filters by instant in ISO-8601 with Z or offset, or by epoch, down to the fraction"
+
+new_case show-pages
+cat > "$FIX/notes.json" <<'JSON'
+[
+  {"id": 101, "system": false, "created_at": "2026-09-08T09:00:00.000Z",
+   "author": {"id": 5, "username": "alice", "name": "Alice"}, "body": "first page"},
+  {"id": 102, "system": true, "created_at": "2026-09-08T09:01:00.000Z",
+   "author": {"id": 5, "username": "alice", "name": "Alice"}, "body": "changed label"}
+]
+JSON
+cat > "$FIX/notes-page2.json" <<'JSON'
+[
+  {"id": 201, "system": false, "created_at": "2026-09-08T09:02:00.000Z",
+   "author": {"id": 77, "username": "fm-bot", "name": "Firstmate Bot"}, "body": "own note on page two"},
+  {"id": 202, "system": false, "created_at": "2026-09-08T09:03:00.000Z",
+   "author": {"id": 6, "username": "bob", "name": "Bob"}, "body": "human reply on page two"}
+]
+JSON
+out=$("$SCRIPT" show "$URL" 2>&1) || fail "show over two pages failed: $out"
+[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[101,202]' ] \
+  || fail "notes from every page must be folded and filtered alike: $(printf '%s' "$out" | jq -c .notes)"
+out=$("$SCRIPT" show "$URL" --since 2026-09-08T09:00:30Z 2>&1) || fail "show --since over two pages failed: $out"
+[ "$(printf '%s' "$out" | jq -c '[.notes[].id]')" = '[202]' ] || fail "--since applies to the second page: $out"
+pass "show folds every page of a paginated notes response"
 
 # --- comment / comment-update -------------------------------------------------
 
@@ -277,7 +329,8 @@ out=$(printf '{"looks":"like json"}\n' | "$SCRIPT" comment "$URL" --body-file - 
 [ "$(cat "$FIX/posted-note.body")" = '{"looks":"like json"}' ] || fail "stdin body was reinterpreted"
 err=$("$SCRIPT" comment "$URL" --body-file /dev/null 2>&1); rc=$?
 expect_code 1 "$rc" "an empty body is refused"
-pass "comment posts the body verbatim from a file or stdin"
+assert_json_body POST
+pass "comment posts the body verbatim from a file or stdin, declared as JSON"
 
 printf '%s' '{"id": 501, "system": false, "body": "old"}' > "$FIX/note-501.json"
 : > "$FM_TEST_GLAB_LOG"
@@ -286,6 +339,7 @@ out=$("$SCRIPT" comment-update "$URL" 501 --body-file "$FIX/body2.md" 2>&1) || f
 [ "$out" = $'501\t'"$URL"'#note_501' ] || fail "comment-update output: $out"
 [ "$(jq -r .body "$FIX/note-501.json")" = 'updated plan' ] || fail "note body not replaced"
 [ "$(count_method PUT)" = 1 ] && [ "$(count_method POST)" = 0 ] || fail "comment-update must PUT once: $(requests)"
+assert_json_body PUT
 err=$("$SCRIPT" comment-update "$URL" abc --body-file "$FIX/body2.md" 2>&1); rc=$?
 expect_code 1 "$rc" "a non-numeric note id is refused"
 pass "comment-update replaces one note body in place"
@@ -297,8 +351,10 @@ for log in "$TMP_ROOT"/*/requests.log; do
     || fail "a mutating request left the issue and its notes: $log"
   ! grep -E $'^PUT\t[^\t]*\t[^\t]*\t'"$ENC"$'\t' "$log" | grep -E 'state_event|assignee|milestone|"labels"' >/dev/null \
     || fail "an issue PUT carried a field other than add_labels/remove_labels: $log"
+  ! grep -E $'^(PUT|POST)\t' "$log" | grep -Ev $'^[^\t]*\t[^\t]*\t[^\t]*\t[^\t]*\t([^\t]*;)?Content-Type: application/json(;[^\t]*)?\t' >/dev/null \
+    || fail "a body-carrying request went out without a JSON Content-Type: $log"
 done
-pass "every mutating request stays on the issue's labels and notes"
+pass "every mutating request stays on the issue's labels and notes and declares its JSON body"
 
 # --- glab failure and timeout --------------------------------------------------
 
@@ -363,5 +419,14 @@ err=$(FM_HOME="$HOME_DIR" "$SCRIPT" project 'https://gitlab.example.test/grp/sub
 expect_code 1 "$rc" "two matching clones are refused"
 assert_contains "$err" "2 clones match" "the ambiguity is named"
 pass "project refuses to guess between two clones of one project"
+
+NESTED_HOME="$TMP_ROOT/nested-home"
+fm_git_init_commit "$NESTED_HOME"
+git -C "$NESTED_HOME" remote add origin 'https://gitlab.example.test/grp/sub/mate-home.git'
+mkdir -p "$NESTED_HOME/projects/plain-dir" "$NESTED_HOME/data"
+err=$(FM_HOME="$NESTED_HOME" "$SCRIPT" project 'https://gitlab.example.test/grp/sub/mate-home/-/issues/8' 2>&1); rc=$?
+expect_code 3 "$rc" "a plain directory under projects/ must not resolve to the enclosing repository's origin"
+assert_contains "$err" "no clone under $NESTED_HOME/projects" "the miss is reported as no clone"
+pass "project skips a projects/ entry that is not a repository of its own"
 
 echo "all fm-gitlab-issue tests passed"
