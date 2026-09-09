@@ -36,12 +36,18 @@ The normal isolation and unlanded-work refusal rules still apply.
 backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
-orca_worktree_id=<orca worktree id>
+orca_worktree_id=<repo id>::<absolute Orca worktree path>
 worktree=<absolute Orca worktree path>
 ```
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+
+Unlike every other backend's opaque endpoint atom, an Orca worktree id is composite: the repository id, then a literal `::`, then the worktree's absolute path.
+Both halves come from the same `orca worktree create --json` response that supplies `worktree=`, so the id's path half is the recorded worktree path.
+Cleanup validation splits the value on its first `::` and refuses the record unless both halves are non-empty, the repository id half is a plain endpoint atom, and the path half is absolute, free of control characters, and exactly the task's own recorded `worktree=`.
+That last check is a cross-record consistency check rather than a character rule: a record whose id names a different directory than the task's own worktree refuses instead of releasing the wrong worktree.
+A value that cannot be parsed or does not agree with the record preserves task state and names the concrete reason.
 
 ## Current lifecycle and safety
 
@@ -59,7 +65,7 @@ Grok alone retains its isolated rendered-tail fallback.
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
-Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
+Beyond the record-level identity check above, cleanup also asks Orca to resolve the recorded worktree id and verifies the path Orca reports matches the recorded worktree path.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
@@ -78,8 +84,11 @@ It never raw-deletes an Orca worktree.
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
-[`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.
+`tests/fm-teardown-endpoint-safety.test.sh` pins the composite worktree id rule above: the real `<repo id>::<absolute path>` shape validates, every structural defect refuses with its concrete reason, and the shared endpoint-atom rule the other backends use stays unwidened.
+
+[`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness smoke and the dated response-shape observations.
