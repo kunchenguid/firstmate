@@ -15,6 +15,12 @@ Let the control plane verify postconditions.
 Inspect after spawn within the tool's readiness window.
 Select only its documented trust choice from the active Firstmate home, binding `FM_HOME` unless already correct, then inspect again under the router-owned completion postcondition.
 No observed dialog proves only that launch.
+One cleared gate does not prove the last one: a tool may present several in sequence, and the tool reference owns how many.
+
+The postcondition is the agent visibly processing its instructions, never a status word.
+A backend that reports an agent idle is reporting that it is not producing output, which a worker parked at a launch gate satisfies exactly as well as one that has finished a turn.
+An endpoint liveness check answers only whether the pane exists.
+Treating either as proof of a healthy start is how a worker that never read its brief gets reported as ready.
 
 Each supported harness handles its folder-trust gate differently, and the tool reference owns the detail.
 Claude gates a fresh worktree and cannot be answered by key, so the spawn pre-registers the path in Claude's own store.

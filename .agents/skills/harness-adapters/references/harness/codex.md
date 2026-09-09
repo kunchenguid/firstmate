@@ -15,9 +15,31 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
 | Model discovery | Open the current interactive session's `/model` picker. |
 
-A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
-Accept it with Enter and verify the instructions begin processing.
+Because busy state is unknown, `../../../bin/fm-crew-state.sh` reports a Codex worker as `unknown` and names the adapter, for example `harness state unavailable (unknown codex-unverified)`.
+That is the recorded contract rather than a fault to investigate, and it is not evidence the worker is wedged.
+Supervision still surfaces a wedged Codex worker, because the watcher's stale path reads pane output churn rather than harness semantic state.
+What is lost is the distinction: Firstmate cannot separate a Codex worker that is thinking from one that is stuck, so it cannot absorb a benign stale for a provably-working Codex agent and cannot attribute a validation run's step state for one.
+Expect periodic stale escalations on a healthy Codex worker and reconcile them by inspection.
+
+## Launch gates
+
+Gate sequence, selection defaults, and option text verified on 2026-09-09 with codex-cli 0.153.4.
+
+A first run for a repository root can present two gates in sequence, and the launch is not underway until both are cleared.
+Clearing only the first leaves the agent parked with its launch brief unread.
+
+The first is the directory trust dialog: "Do you trust the contents of this directory?"
+Its selection starts on the accepting choice, so Enter accepts it.
 The decision persists for the repository, so later worktrees of the same project skip it.
+
+The second appears when that root's `.codex/hooks.json` is new or changed: "Hooks need review", offering `1. Review hooks`, `2. Trust all and continue`, and `3. Continue without trusting (hooks won't run)`.
+Its selection starts on `1. Review hooks`, so Enter alone opens the review rather than accepting, and accepting requires moving the selection first.
+Firstmate's own key plane carries no selection movement - `../../../bin/fm-control-lib.sh` accepts only Enter, Escape, C-c, and C-u - so it cannot answer this gate; move the selection through the backend's own key facility, or hand the gate to the operator.
+
+Read the hooks before choosing rather than trusting blind.
+For a Firstmate-launched worker or secondmate these are Firstmate's own tracked hooks - session start, the Bash pre-tool checks, and the turn-end guard - each anchored to a Firstmate-shaped root and written to exit 0 when anything is missing.
+Codex's own option text declares that declining leaves hooks unrun, and the turn-end guard is one of the hooks that gate registers, so `3. Continue without trusting` launches a worker whose turn-end backstop is not installed.
+That consequence follows from the option's declared behavior and the registered hook set; it has not been separately exercised, and nothing in the pane announces it after the choice is made.
 
 ## Skill popup
 
