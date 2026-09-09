@@ -2253,7 +2253,7 @@ for path in sorted((root / "archive").glob("*/manifest.json")):
         continue
     sample = path.parent
     for kind, name in (("packets", "packet.md"), ("ground-truth", "ground-truth.md")):
-        source = f"{kind}/{record['sample']['packet']}.md"
+        source = f"{kind}/{record['identity']['packet']}.md"
         target = root / source
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():

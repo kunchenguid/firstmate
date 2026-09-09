@@ -202,7 +202,7 @@ os.execv(sys.argv[2], sys.argv[2:])
         sample.mkdir(parents=True)
         (self.root / "benchmark.json").write_text(json.dumps({"tracks": {"A": {"packets": [{"id": "A1"}]}}}))
         hashes = {}
-        record = {"sample": {"track": "A", "packet": "A1"}, "files": {},
+        record = {"sample": "sample", "identity": {"track": "A", "packet": "A1"}, "files": {},
                   "groups": {"packet_and_ground_truth": ["packet.md", "ground-truth.md"]}}
         for kind, name in (("packets", "packet.md"), ("ground-truth", "ground-truth.md")):
             content = (kind + " original").encode()
@@ -289,12 +289,20 @@ os.execv(sys.argv[2], sys.argv[2:])
                   "tree_binding": {key: "a" * 40 for key in
                                    ("original_sha", "original_tree", "neutral_sha", "neutral_tree", "base_tree", "patch_hash")}}
         identity = ("A", "entrant", "candidate", "A1")
+        (self.root / "benchmark.json").write_text(json.dumps({"tracks": {"A": {"packets": [{"id": "A1"}]}}}))
+        hashes = {kind + "/A1.md": hashlib.sha256((sample / name).read_bytes()).hexdigest()
+                  for kind, name in (("packets", "packet.md"), ("ground-truth", "ground-truth.md"))}
+        (self.root / "freeze.json").write_text(json.dumps({"schema": gate.FREEZE_SCHEMA, "hashes": hashes}))
         with mock.patch.object(gate, "check_result_plan_binding"), \
              mock.patch.object(gate, "planned_sample_identities", return_value={identity}), \
-             mock.patch.object(gate, "validate_archived_packet"), \
              mock.patch.object(gate, "validate_archived_projection"), \
              mock.patch.object(gate, "load_archived_measurements", return_value={"deterministic": 4}):
-            for intervals, expected in ((dict.fromkeys(gate.REQUIRED_TIMING_INTERVALS, 10), True), ({}, False)):
+            valid_intervals = dict.fromkeys(gate.REQUIRED_TIMING_INTERVALS, 10)
+            for intervals, replacement, expected in ((valid_intervals, None, True), ({}, None, False),
+                                                      (valid_intervals, "packet.md", False),
+                                                      (valid_intervals, "ground-truth.md", False)):
+                for name in ("packet.md", "ground-truth.md"):
+                    (sample / name).write_text("substituted" if name == replacement else "{}\n")
                 (sample / "timing.json").write_text(json.dumps({"failure": failure, "intervals": intervals}))
                 record["files"] = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                                    for path in sample.iterdir() if path.name != "manifest.json"}
@@ -305,7 +313,8 @@ os.execv(sys.argv[2], sys.argv[2:])
                     passed, _ = gate.check_archive(self.root, {}, report)
                 self.assertEqual(passed, expected, output.getvalue())
                 if not expected:
-                    self.assertIn("scored attempt lacks valid timing intervals", output.getvalue())
+                    self.assertIn("archived packet material differs from its frozen source" if replacement
+                                  else "scored attempt lacks valid timing intervals", output.getvalue())
 
     def test_container_images_require_explicit_digests(self):
         confine = str(ROOT / "bin/fm-bench-confine.sh")

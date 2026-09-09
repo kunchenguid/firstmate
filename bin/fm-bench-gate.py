@@ -2840,7 +2840,7 @@ def check_result_plan_binding(root: Path, plan: dict[str, Any], report: Report) 
 
 def validate_archived_packet(sample: Path, record: dict[str, Any]) -> None:
     root = sample.parent.parent
-    identity = as_object(record.get("sample"))
+    identity = as_object(record.get("identity"))
     packet = identity.get("packet")
     plan = load_json(root / "benchmark.json")
     track = as_object(as_object(plan.get("tracks")).get(identity.get("track")))
