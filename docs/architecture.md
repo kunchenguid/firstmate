@@ -152,6 +152,7 @@ The daemon injects only into an affirmatively `empty` composer, so every other o
 The current operator boundary is in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
+That retry re-enters the same busy guard, so `inject_msg` also bounds a busy verdict that disagrees with a provably-empty composer: past `FM_BUSY_GUARD_ESCAPE_SECS` of that disagreement - counted only from attempts that actually observed the pane, never from wall-clock time the daemon spent not looking - it delivers instead of deferring again, which is what turns a stuck busy guard into a bounded delay instead of a silent one for the rest of the away session.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
 `fm-send.sh` delivers every remote text steer and ordinary local text steer as a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
 The doorbell line is a shell no-op and is never typed into an endpoint classified as dead or missing; that record surfaces once for recovery instead of walking the re-ring ladder (`bin/fm-task-inbox-lib.sh` header).

@@ -55,7 +55,12 @@
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
-#     alert if submit still cannot be confirmed.
+#     alert if submit still cannot be confirmed. That retry re-enters the same
+#     busy guard, so inject_msg also carries its own bounded escape: once the
+#     busy guard has disagreed with a confirmed-empty composer for
+#     FM_BUSY_GUARD_ESCAPE_SECS straight, it delivers instead of deferring
+#     again, bounding any guard false-positive to that window instead of the
+#     whole away session.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -102,7 +107,11 @@
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
 #                                   (default 300)
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
-#                                   the watcher is mid-cycle (default 15)
+#                                   the watcher is mid-cycle (default 15); also
+#                                   the per-observation credit cap for the
+#                                   FM_BUSY_GUARD_ESCAPE_SECS window below,
+#                                   since it is the cadence at which a buffered
+#                                   escalation is actually retried
 #          FM_BUSY_REGEX            optional rendered busy-signature override
 #                                   for delivery guards and Grok's fallback
 #          FM_COMPOSER_IDLE_RE      optional shared classifier override; see
@@ -111,6 +120,14 @@
 #                                   undelivered before one normal flush attempt;
 #                                   if that cannot confirm a submit, a wedge
 #                                   alarm fires (default 300; 0 disables)
+#          FM_BUSY_GUARD_ESCAPE_SECS max seconds the busy guard may keep
+#                                   deferring while the composer reads
+#                                   provably empty before inject_msg stops
+#                                   trusting the busy verdict and delivers
+#                                   anyway (default 300; 0 disables the escape,
+#                                   so a busy verdict always defers as before;
+#                                   clamped to BUSY_GUARD_ESCAPE_SECS_MAX;
+#                                   resolved once at daemon start)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
 #                                   (off|auto|osascript|herdr|command:<cmd>). An
@@ -204,6 +221,37 @@ HOUSEKEEPING_TICK_DEFAULT=15
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
+# How long the busy guard may disagree with a provably-empty composer before
+# inject_msg stops trusting it and delivers anyway (2026-08-26 investigation:
+# the daemon's own in-pane launch method can make an idle claude pane read
+# permanently busy, and the max-defer retry above re-enters this same guard,
+# so a false positive here was previously unbounded). Set to 0 to disable the
+# escape and always defer on a busy verdict, matching the old behavior.
+BUSY_GUARD_ESCAPE_SECS_DEFAULT=300
+# Upper clamp on FM_BUSY_GUARD_ESCAPE_SECS: large enough to never bind a
+# legitimate configuration (the default is five minutes), small enough that
+# resolve_busy_guard_escape_secs's forced-decimal parse stays comfortably
+# inside bash's integer arithmetic instead of risking an overflow on an
+# absurd operator-supplied value.
+BUSY_GUARD_ESCAPE_SECS_MAX=86400
+# Largest gap between two consecutive busy-plus-empty observations that still
+# counts in full toward the escape window. The streak marker records OBSERVED
+# disagreement, and inject_msg only runs when the daemon reaches a delivery
+# attempt: the main loop can skip many ticks (pane gone, crash backoff, a
+# restart between flushes) without observing the pane at all, and that
+# unobserved wall-clock must not accrue toward the escape. Each observation
+# therefore contributes at most one poll interval - the housekeeping cadence at
+# which a buffered escalation is actually retried - so the escape still needs a
+# genuinely continuous run of observations no matter how long the gaps between
+# them were. Seeded with the default cadence and resolved once at daemon start
+# by resolve_busy_empty_streak_step_max from the EFFECTIVE FM_HOUSEKEEPING_TICK:
+# pinning it to the default would credit at most 15s per retry on a slower
+# cadence, stretching a 300s escape to 20 minutes of away-mode silence on a 60s
+# tick and defeating the bound this whole mechanism exists to provide.
+BUSY_EMPTY_STREAK_STEP_MAX=$HOUSEKEEPING_TICK_DEFAULT
+# Resolved once at daemon start by resolve_busy_guard_escape_secs (below);
+# empty until then, in which case inject_msg falls back to the default.
+BUSY_GUARD_ESCAPE_SECS_RESOLVED=
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
@@ -632,16 +680,26 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
+# Sets the global PANE_BUSY_LAST_SOURCE as a side effect on a busy verdict, so
+# a caller logging a deferral can say which branch decided (native agent-state
+# vs the rendered-pane regex fallback) instead of one indistinguishable line
+# for both - the 2026-08-26 investigation had to read a private herdr ruleset
+# and reproduce a footer live just to answer that question from the log alone.
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
   harness=$(fm_daemon_primary_harness)
+  PANE_BUSY_LAST_SOURCE=
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$native" in
-    busy) return 0 ;;
+    busy) PANE_BUSY_LAST_SOURCE="native agent-state (agent_status=busy)"; return 0 ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
+    | fm_busy_lines_match "$harness"; then
+    PANE_BUSY_LAST_SOURCE="rendered-pane busy-regex fallback"
+    return 0
+  fi
+  return 1
 }
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats
@@ -1186,6 +1244,84 @@ window_for_task() {  # <task-key> [state]
   return 1
 }
 
+# _resolve_secs_override <raw> <max>: shared, overflow-safe validation for this
+# daemon's integer-seconds overrides. On success prints <raw> as a
+# leading-zero-free decimal string and returns 0; returns 1 for a blank,
+# non-numeric, or negative value and 2 for a value above <max>, printing
+# nothing, so each caller logs its refusal in its own words.
+#
+# Leading zeros are stripped with a pure string match BEFORE any arithmetic
+# touches the value (so `010` is ten seconds, not bash-octal eight), and the
+# clamp is enforced by comparing digit COUNT (and, only on a tie, a
+# lexicographic compare of same-length decimal digit strings) rather than by
+# converting to a number first. Both are deliberate: `$((10#$raw))` on an
+# absurdly long digit-only operator value would overflow bash's signed
+# arithmetic and silently WRAP to some other in-range value - checking the
+# clamp on that wrapped result would be too late, since the wrap could land
+# back inside range. String comparison never has that failure mode because it
+# never evaluates the value as a number.
+_resolve_secs_override() {  # <raw> <max>
+  local raw=$1 max=$2 stripped max_digits
+  case "$raw" in ''|*[!0-9]*) return 1 ;; esac
+  stripped=""
+  [[ "$raw" =~ ^0*([0-9]*)$ ]] && stripped=${BASH_REMATCH[1]}
+  [ -n "$stripped" ] || stripped=0
+  max_digits=${#max}
+  # shellcheck disable=SC2071 # deliberate STRING compare: both operands are
+  # same-length, leading-zero-free digit strings, so lexicographic order equals
+  # numeric order - the point is comparing without ever converting to a number.
+  if [ "${#stripped}" -gt "$max_digits" ] \
+     || { [ "${#stripped}" -eq "$max_digits" ] && [[ "$stripped" > "$max" ]]; }; then
+    return 2
+  fi
+  printf '%s' "$stripped"
+}
+
+# resolve_busy_guard_escape_secs: resolve FM_BUSY_GUARD_ESCAPE_SECS into
+# BUSY_GUARD_ESCAPE_SECS_RESOLVED exactly once, rather than re-parsing and
+# re-validating it on every busy-guard attempt. 0 (and only 0) disables the
+# escape; a positive integer up to BUSY_GUARD_ESCAPE_SECS_MAX sets the
+# interval; anything else - blank, non-numeric, negative, or above the clamp -
+# is refused with one loud log line and the default applied, never a silent
+# permanent disable. Called once by fm_super_main at daemon start; tests call
+# it directly to set up the resolved value before exercising inject_msg. The
+# leading-zero and overflow-safe clamp handling lives in _resolve_secs_override
+# above.
+resolve_busy_guard_escape_secs() {
+  local raw=${FM_BUSY_GUARD_ESCAPE_SECS:-$BUSY_GUARD_ESCAPE_SECS_DEFAULT} val rc
+  val=$(_resolve_secs_override "$raw" "$BUSY_GUARD_ESCAPE_SECS_MAX") && rc=0 || rc=$?
+  case $rc in
+    1)
+      log "inject busy-guard escape: FM_BUSY_GUARD_ESCAPE_SECS='${raw}' is not zero or a positive integer; refusing it and using the default (${BUSY_GUARD_ESCAPE_SECS_DEFAULT}s) instead"
+      val=$BUSY_GUARD_ESCAPE_SECS_DEFAULT ;;
+    2)
+      log "inject busy-guard escape: FM_BUSY_GUARD_ESCAPE_SECS='${raw}' exceeds the ${BUSY_GUARD_ESCAPE_SECS_MAX}s clamp; using the default (${BUSY_GUARD_ESCAPE_SECS_DEFAULT}s) instead"
+      val=$BUSY_GUARD_ESCAPE_SECS_DEFAULT ;;
+  esac
+  BUSY_GUARD_ESCAPE_SECS_RESOLVED=$val
+}
+
+# resolve_busy_empty_streak_step_max: resolve BUSY_EMPTY_STREAK_STEP_MAX from
+# the EFFECTIVE housekeeping cadence, once, at daemon start. Each observed
+# busy-plus-empty tick credits at most one poll interval toward the escape, and
+# that interval is FM_HOUSEKEEPING_TICK - the cadence at which the main loop
+# actually retries a buffered escalation. Crediting a fixed 15s regardless
+# would multiply the configured escape window by tick/15 on any slower cadence
+# (a 60s tick turns a 300s bound into ~1200s of silence), which is exactly the
+# unbounded-silence failure this mechanism exists to cap. A zero, negative,
+# non-numeric, or absurdly large cadence cannot describe a real poll interval,
+# so the step cap falls back to the default rather than crediting 0s per
+# observation (an escape that never fires) or a whole day at once.
+resolve_busy_empty_streak_step_max() {
+  local raw=${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT} val rc
+  val=$(_resolve_secs_override "$raw" "$BUSY_GUARD_ESCAPE_SECS_MAX") && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$val" -eq 0 ]; then
+    log "inject busy-guard escape: FM_HOUSEKEEPING_TICK='${raw}' is not a positive integer poll interval; crediting at most the default (${HOUSEKEEPING_TICK_DEFAULT}s) per observed busy+empty tick"
+    val=$HOUSEKEEPING_TICK_DEFAULT
+  fi
+  BUSY_EMPTY_STREAK_STEP_MAX=$val
+}
+
 # --- injection --------------------------------------------------------------
 # inject_msg: send one escalation digest to the supervisor pane.
 # Returns 0 on successful inject (or empty buffer), non-zero if the pane is
@@ -1207,18 +1343,36 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict composer encoded \
+        streak_marker streak_age streak_mtime streak_prev streak_step \
+        escape_secs escape_fired
   state="${2:-$(_state_root)}"
+  # The busy-guard escape below measures a CONTINUOUS run of observed
+  # busy-verdict-plus-confirmed-empty-composer ticks, so its marker is resolved
+  # here, before every early return, and every path that ends without making
+  # that observation clears it. An unobserved gap (afk toggled off, an
+  # unencodable payload, the supervisor pane briefly gone during a herdr
+  # restart) must not let wall-clock time accrue toward the escape threshold:
+  # the marker records observed continuity, not elapsed time since it was
+  # first written.
+  streak_marker="$state/.subsuper-busy-empty-streak-since"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  afk_active "$state" || {
+    rm -f "$streak_marker" 2>/dev/null || true
+    log "inject deferred: afk inactive"
+    return 1
+  }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain
   # the exact away-supervisor kind without interpreting this payload's prose.
   msg=$(_collapse_newlines "$msg")
-  fm_operational_input_encode away-supervisor "$msg" encoded || return 1
+  fm_operational_input_encode away-supervisor "$msg" encoded || {
+    rm -f "$streak_marker" 2>/dev/null || true
+    return 1
+  }
   msg=$encoded
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   # BACKEND-AWARE (previously a raw `tmux display-message` pane-exists probe):
@@ -1227,11 +1381,111 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  fm_backend_target_exists "$backend" "$target" || return 1
-  # (3) Busy-guard: never inject into an in-use supervisor pane.
-  if pane_is_busy "$target" "$backend"; then
-    log "inject deferred: supervisor pane busy (agent mid-turn)"
+  fm_backend_target_exists "$backend" "$target" || {
+    rm -f "$streak_marker" 2>/dev/null || true
     return 1
+  }
+  # (3) Busy-guard: never inject into an in-use supervisor pane, with one
+  # bounded escape. A busy verdict (native or regex-fallback) that persists
+  # while the composer below reads provably empty is the exact false-positive
+  # this daemon can itself cause (2026-08-26 investigation: launching the
+  # daemon as an in-pane background job makes an idle claude pane's footer
+  # read permanently busy to herdr), and the max-defer retry above re-enters
+  # this same guard, so an unbounded silence was possible. The composer read
+  # is the accurate signal - it reads the actual input area and has never once
+  # been the deferring guard across six observed runs - so once the busy
+  # verdict has disagreed with a confirmed-empty composer for
+  # BUSY_GUARD_ESCAPE_SECS_RESOLVED straight, delivering is safer than
+  # deferring again. Only an exact 'empty' composer read counts: pending,
+  # unknown, and a bare dead-shell prompt still defer with no escape.
+  #
+  # The elapsed time measured here is EXACTLY that disagreement and nothing
+  # else: state/.subsuper-busy-empty-streak-since is a durable marker recording
+  # the CURRENT continuous run of (busy verdict AND confirmed-empty composer)
+  # observations - its contents hold the seconds observed so far and its mtime
+  # holds when the last observation was made, so each tick adds only the time
+  # since the previous observation, capped at BUSY_EMPTY_STREAK_STEP_MAX. Time
+  # the daemon never observed the pane at all (the main loop's pane-gone
+  # backoff, a crash backoff, a restart between flushes) therefore cannot accrue
+  # toward the escape: a bare wall-clock reading of a marker written before such
+  # a gap would let the very first observation afterwards escape immediately,
+  # typing into a pane that may have just genuinely started a turn. It is
+  # created on the first such observation and removed the instant the streak
+  # breaks - on any composer read that is not exactly 'empty', on any non-busy verdict, and
+  # once the escape has fired. It is deliberately NOT the escalation's own
+  # undelivered age (state/.subsuper-escalations.since, which belongs to the
+  # unrelated FM_MAX_DEFER_SECS mechanism): that age also accrues while
+  # delivery is deferred for reasons that have nothing to do with the busy
+  # guard - a human's half-typed composer draft, for one - so anchoring to it
+  # could fire the escape on the very first busy+empty observation, typing
+  # into a pane that had just genuinely started a turn. It is equally NOT an
+  # in-process variable: the crash-loop guard above makes daemon restarts a
+  # real, expected event, and a process-local clock would reset on each one,
+  # so a persistent false positive plus repeated restarts would defer forever
+  # - the exact failure this bound exists to end. A fresh away-session entry
+  # clears this marker along with the other delivery artifacts
+  # (fm_afk_clear_stale_artifacts, bin/fm-afk-start.sh), so a streak can never
+  # carry over from a prior session either.
+  #
+  # Fail-closed: if the marker cannot be created, is not a regular file, or
+  # cannot be stat'd, the streak age is 0 (keep deferring). The same holds for
+  # unreadable or corrupted contents. An unreadable or
+  # absent marker must never read as infinitely old -
+  # that would bypass the entire window on the first attempt, which is the
+  # bound's whole purpose.
+  escape_fired=0
+  if pane_is_busy "$target" "$backend"; then
+    composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+    if [ "$composer" != empty ]; then
+      rm -f "$streak_marker" 2>/dev/null || true
+      log "inject deferred: supervisor pane busy (${PANE_BUSY_LAST_SOURCE:-agent mid-turn})"
+      return 1
+    fi
+    streak_age=0
+    if [ -f "$streak_marker" ]; then
+      # Contents: seconds of disagreement observed so far. mtime: when the
+      # previous observation was made. This tick adds the time since that
+      # observation, capped at BUSY_EMPTY_STREAK_STEP_MAX, so a stretch the
+      # daemon never observed contributes at most a single poll interval.
+      streak_prev=
+      read -r streak_prev < "$streak_marker" 2>/dev/null || streak_prev=
+      case $streak_prev in ''|*[!0-9]*) streak_prev=0 ;; esac
+      # Strip leading zeros, then fail closed (0) on a value with more digits
+      # than the escape clamp could ever produce. inject_msg fires and removes
+      # the marker at BUSY_GUARD_ESCAPE_SECS_MAX at the latest, so anything
+      # longer is a corrupted marker - and comparing lengths, never the values,
+      # keeps a garbage value out of arithmetic that could overflow.
+      while [ "${#streak_prev}" -gt 1 ] && [ "${streak_prev#0}" != "$streak_prev" ]; do
+        streak_prev=${streak_prev#0}
+      done
+      [ "${#streak_prev}" -le "${#BUSY_GUARD_ESCAPE_SECS_MAX}" ] || streak_prev=0
+      streak_step=0
+      streak_mtime=$(_stat_file_mtime "$streak_marker") || streak_mtime=
+      if [ -n "$streak_mtime" ]; then
+        streak_step=$(( $(_now) - streak_mtime ))
+        [ "$streak_step" -ge 0 ] || streak_step=0
+        [ "$streak_step" -le "$BUSY_EMPTY_STREAK_STEP_MAX" ] || streak_step=$BUSY_EMPTY_STREAK_STEP_MAX
+      fi
+      streak_age=$(( 10#$streak_prev + streak_step ))
+    fi
+    # Rewriting the marker records this observation (contents) and its time
+    # (mtime) in one step; a first observation seeds it at 0.
+    { printf '%s\n' "$streak_age" > "$streak_marker"; } 2>/dev/null || true
+    [ -f "$streak_marker" ] || streak_age=0
+    escape_secs=${BUSY_GUARD_ESCAPE_SECS_RESOLVED:-$BUSY_GUARD_ESCAPE_SECS_DEFAULT}
+    if [ "$escape_secs" -gt 0 ] && [ "$streak_age" -ge "$escape_secs" ]; then
+      escape_fired=1
+      rm -f "$streak_marker" 2>/dev/null || true
+      log "inject busy-guard override: ${PANE_BUSY_LAST_SOURCE:-native agent-state} has read busy against a confirmed-empty composer for ${streak_age}s straight; delivering instead of deferring further"
+      # Fall through with composer already confirmed 'empty' by the read
+      # above; the guard below reuses that verdict rather than paying a
+      # second full backend capture for a value nothing could have changed.
+    else
+      log "inject deferred: supervisor pane busy (${PANE_BUSY_LAST_SOURCE:-agent mid-turn}); composer confirmed-empty for ${streak_age}s straight, escapes at ${escape_secs}s"
+      return 1
+    fi
+  else
+    rm -f "$streak_marker" 2>/dev/null || true
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
   #      composer. The shared classifier (fm_backend_composer_state ->
@@ -1242,7 +1496,11 @@ inject_msg() {  # <message> [state]
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
-  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  #      When the busy-guard escape above already fired, `composer` still holds
+  #      that branch's confirmed-'empty' read and is reused verbatim: nothing
+  #      between there and here can change the composer, so a second capture
+  #      would be a duplicate probe, not a re-check.
+  [ "$escape_fired" -eq 1 ] || composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
@@ -1258,6 +1516,12 @@ inject_msg() {  # <message> [state]
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
   if [ "$verdict" = empty ]; then
+    # Durable positive record: without this a successful delivery and a run
+    # that never had anything to deliver look identical in the log (the prior
+    # silent `return 0` recorded only failures), so there was no way to tell
+    # when away mode had last actually worked short of return-time reading.
+    printf '%s\n' "$(_now)" > "$state/.subsuper-last-delivery" 2>/dev/null || true
+    log "inject delivered: escalation submitted (verdict=empty)"
     return 0  # Backend confirmed the submit.
   fi
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
@@ -1607,7 +1871,9 @@ fm_super_main() {
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
-  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
+  resolve_busy_guard_escape_secs
+  resolve_busy_empty_streak_step_max
+  log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s; busy_guard_escape=${BUSY_GUARD_ESCAPE_SECS_RESOLVED}s"
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------

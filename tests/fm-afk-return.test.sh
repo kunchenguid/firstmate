@@ -87,6 +87,7 @@ test_return_gate_orders_catchup_before_bearings() {
   date +%s > "$dir/home/state/.afk"
   printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations"
   printf 'fm away-mode inject WEDGED: 4555s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
+  : > "$dir/home/state/.subsuper-busy-empty-streak-since"
   {
     printf '1784074271\t2\tsignal\trepair-task.status\tsignal: synthetic status\n'
     printf 'wake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency\n'
@@ -137,6 +138,7 @@ test_return_gate_orders_catchup_before_bearings() {
   [ ! -e "$gate" ] || fail "successful check left the return gate behind"
   [ ! -e "$dir/home/state/.subsuper-escalations" ] || fail "successful check left delivered escalation state behind"
   [ ! -e "$dir/home/state/.subsuper-inject-wedged" ] || fail "successful check left the wedge marker behind"
+  [ ! -e "$dir/home/state/.subsuper-busy-empty-streak-since" ] || fail "successful check left the busy+empty streak marker behind for the next away session"
   [ -s "$dir/home/state/.fake-drain" ] || fail "successful return consumed its wake before handling completed"
   [ ! -e "$dir/home/state/.fake-drain-acks" ] || fail "successful return acknowledged its wake inside evidence publication"
   assert_contains "$out" 'WAKE_ACK_REQUIRED: after handling completes' "successful return did not hand acknowledgement to the handling turn"
