@@ -46,6 +46,9 @@ if [ -e "$FAKE_GLAB_DIR/hang" ]; then
   sleep "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}"
   exit 1
 fi
+if [ -f "$FAKE_GLAB_DIR/delay" ]; then
+  sleep "$(cat "$FAKE_GLAB_DIR/delay")"
+fi
 endpoint=${*: -1}
 label=$(printf '%s' "$endpoint" | sed -n 's/.*labels=\([^&]*\).*/\1/p' | sed 's/%3A/:/g')
 fixture="$FAKE_GLAB_DIR/$label.ndjson"
@@ -77,6 +80,24 @@ issue() {
       created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-02T00:00:00Z",
       description: "Body of \($iid) with a tab\tand \"quotes\""
     }' "$@"
+}
+
+# issue_shape <web_url> <references-full-or-empty> <iid> <label...>: one issue with
+# its project fields spelled out, for the install shapes `issue` does not cover -
+# a GitLab under a relative URL root, and an answer with no references object.
+issue_shape() {
+  local url=$1 full=$2 iid=$3
+  shift 3
+  jq -cn --arg url "$url" --arg full "$full" --argjson iid "$iid" --args '
+    {
+      iid: $iid, title: "Issue \($iid)", state: "opened",
+      labels: $ARGS.positional,
+      web_url: $url,
+      author: { username: "alice" },
+      created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-02T00:00:00Z",
+      description: "Body of \($iid)"
+    }
+    | if $full == "" then . else . + { references: { full: $full } } end' "$@"
 }
 
 # serve <home> <label> [issue-json...]: what the fake glab answers for that label.
@@ -250,6 +271,46 @@ test_projects_filter_keeps_only_configured_projects() {
   pass "the projects list narrows the group's issues to the configured projects"
 }
 
+test_the_project_path_comes_from_the_canonical_reference() {
+  local home out report
+  # A GitLab served under a relative URL root ("/gitlab") puts the URL root in
+  # front of the project path in every web_url, so the canonical references.full
+  # is what the pair, the seen record and the pending details must be built from.
+  home=$(make_home relative-root)
+  write_config "$home" "{\"host\":\"$HOST\",\"group\":\"$GROUP\"}"
+  serve "$home" fm::todo \
+    "$(issue_shape "https://example.com/gitlab/acme/tools/backend-app/-/issues/12" "acme/tools/backend-app#12" 12 fm::todo)" \
+    "$(issue_shape "https://example.com/acme/tools/frontend-app/-/issues/3" "" 3 fm::todo)"
+  serve "$home" fm::human-replied
+  out="$home/out.txt"
+  run_check "$home" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "acme/tools/backend-app#12(fm::todo)" "the canonical reference did not give the project path"
+  assert_not_contains "$report" "gitlab/acme" "the relative URL root leaked into the project path"
+  assert_contains "$report" "acme/tools/frontend-app#3(fm::todo)" "the web_url fallback stopped working for an issue with no references"
+  run_sub "$home" pending \
+    | jq -e -s 'any(.[]; .issue == "acme/tools/backend-app#12" and .project == "acme/tools/backend-app")' >/dev/null \
+    || fail "the pending record carries a project path that is not the project's path_with_namespace"
+  assert_grep 'acme/tools/backend-app#12' "$home/state/.gitlab-issues-seen" "the seen record holds the wrong project path"
+  pass "the project path is the API's canonical reference, with web_url as the fallback"
+}
+
+test_a_relative_url_root_still_matches_the_projects_filter() {
+  local home out report
+  home=$(make_home relative-root-projects)
+  write_config "$home" "{\"host\":\"$HOST\",\"group\":\"$GROUP\",\"projects\":[\"backend-app\"]}"
+  serve "$home" fm::todo \
+    "$(issue_shape "https://example.com/gitlab/acme/tools/backend-app/-/issues/12" "acme/tools/backend-app#12" 12 fm::todo)" \
+    "$(issue_shape "https://example.com/gitlab/acme/tools/other-app/-/issues/13" "acme/tools/other-app#13" 13 fm::todo)"
+  serve "$home" fm::human-replied
+  out="$home/out.txt"
+  run_check "$home" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "gitlab-issue 1 new: acme/tools/backend-app#12(fm::todo)" "a configured project under a relative URL root was not matched"
+  assert_not_contains "$report" "other-app" "an unconfigured project leaked into the report"
+  pass "the projects filter matches a configured project on a relative-URL-root install"
+}
+
 test_intake_labels_and_host_come_from_the_config() {
   local home out log
   home=$(make_home labels)
@@ -404,6 +465,105 @@ SH
 
 # A paginated answer can list the same issue twice when issues shift between
 # page fetches; the report counts the pair once and pending must agree.
+test_a_lock_the_check_cannot_take_wakes_firstmate_once() {
+  local home gate handled_out handled_pid first second i
+  # A wedged writer holds the pending lock across two sweeps. The refusal is a
+  # poll error, and the reason emit_error dedupes on must be the same on both
+  # sweeps, or a stuck lock wakes firstmate on every FM_CHECK_INTERVAL.
+  home=$(make_home lock-error)
+  write_config "$home" "{\"host\":\"$HOST\",\"group\":\"$GROUP\"}"
+  serve "$home" fm::todo "$(issue acme/tools/backend-app 1 fm::todo)"
+  serve "$home" fm::human-replied
+  first="$home/first.txt"
+  second="$home/second.txt"
+  run_check "$home" "$first"
+
+  gate="$home/gate"
+  mkdir -p "$gate" "$home/slowjq"
+  cat > "$home/slowjq/jq" <<'SH'
+#!/usr/bin/env bash
+# Slow jq: hold the first read of the pending record open, so its caller keeps
+# the pending lock until the test says go. Every other call is the real jq.
+if [ ! -e "$SLOW_JQ_GATE/read" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "$SLOW_JQ_PENDING" ]; then
+      "$SLOW_JQ_REAL" "$@" > "$SLOW_JQ_GATE/answer"
+      rc=$?
+      : > "$SLOW_JQ_GATE/read"
+      while [ ! -e "$SLOW_JQ_GATE/go" ]; do sleep 0.05; done
+      cat "$SLOW_JQ_GATE/answer"
+      exit "$rc"
+    fi
+  done
+fi
+exec "$SLOW_JQ_REAL" "$@"
+SH
+  chmod 0755 "$home/slowjq/jq"
+
+  handled_out="$home/handled.txt"
+  env FM_CHECK_TIMEOUT=30 FM_HOME="$home" PATH="$home/slowjq:$home/fakebin:$PATH" \
+    SLOW_JQ_GATE="$gate" SLOW_JQ_PENDING="$home/state/.gitlab-issues-pending" SLOW_JQ_REAL="$(command -v jq)" \
+    "$CHECK" handled "acme/tools/backend-app#1" >"$handled_out" 2>&1 &
+  handled_pid=$!
+  i=0
+  while [ ! -e "$gate/read" ]; do
+    i=$((i + 1))
+    [ "$i" -le 200 ] || fail "handled never took the pending lock: $(cat "$handled_out")"
+    sleep 0.05
+  done
+
+  # A new issue arrives while the lock is wedged. Each sweep spends a different
+  # amount of its budget on the glab calls, so a reason built from the time left
+  # would differ between the two.
+  serve "$home" fm::todo "$(issue acme/tools/backend-app 1 fm::todo)" "$(issue acme/tools/backend-app 2 fm::todo)"
+  run_check "$home" "$first" FM_CHECK_TIMEOUT=8
+  # The second sweep spends most of its budget on the glab calls, so the time it
+  # has left for the lock is not the time the first sweep had.
+  printf '2\n' > "$home/gitlab/delay"
+  run_check "$home" "$second" FM_CHECK_TIMEOUT=8
+  rm -f "$home/gitlab/delay"
+  : > "$gate/go"
+  wait "$handled_pid" || fail "handled failed while the checks waited on its lock: $(cat "$handled_out")"
+
+  assert_contains "$(cat "$first")" "gitlab-issue poll error:" "a pending lock the sweep could not take was not reported"
+  [ ! -s "$second" ] || fail "the same wedged lock was reported twice, so it wakes firstmate on every sweep: $(cat "$second")"
+  run_sub "$home" pending | jq -e -s 'any(.[]; .issue == "acme/tools/backend-app#2") | not' >/dev/null \
+    || fail "a sweep that could not take the lock still wrote the pending details"
+
+  # The lock is free again, so the pair the refused sweeps left alone is reported.
+  run_check "$home" "$first"
+  assert_contains "$(cat "$first")" "gitlab-issue 1 new: acme/tools/backend-app#2(fm::todo)" "the pair the wedged lock deferred was never reported"
+  pass "a pending lock the sweep cannot take is one wake, not one per sweep, and defers the pair"
+}
+
+test_a_symlink_at_the_pending_record_is_refused_and_reported() {
+  local home out target
+  # The append is the only write to the pending record that does not arrive by
+  # rename, so a symlink there must be refused rather than followed: `pending`
+  # and `handled` both refuse it, so a pair marked seen through a symlink would
+  # be lost until a human took the label off and put it back.
+  home=$(make_home pending-symlink)
+  write_config "$home" "{\"host\":\"$HOST\",\"group\":\"$GROUP\"}"
+  serve "$home" fm::todo "$(issue acme/tools/backend-app 1 fm::todo)"
+  serve "$home" fm::human-replied
+  target="$home/not-the-pending-record"
+  : > "$target"
+  ln -s "$target" "$home/state/.gitlab-issues-pending"
+  out="$home/out.txt"
+  run_check "$home" "$out"
+  assert_contains "$(cat "$out")" "gitlab-issue poll error:" "a refused pending record was not reported as a poll error"
+  [ ! -s "$target" ] || fail "the append followed the symlink and wrote the issue details to its target"
+  assert_absent "$home/state/.gitlab-issues-seen" "the pair was marked seen although its details were never written"
+
+  # With the symlink gone the pair is still news, so the intake is not lost.
+  rm -f "$home/state/.gitlab-issues-pending"
+  run_check "$home" "$out"
+  assert_contains "$(cat "$out")" "gitlab-issue 1 new: acme/tools/backend-app#1(fm::todo)" "the refused pair was not reported by the next poll"
+  run_sub "$home" pending | jq -e -s 'any(.[]; .issue == "acme/tools/backend-app#1")' >/dev/null \
+    || fail "the next poll did not record the pending details"
+  pass "a symlink at the pending record is refused, reported, and leaves the pair to the next poll"
+}
+
 test_a_duplicated_issue_in_one_answer_yields_one_pending_record() {
   local home out pending
   home=$(make_home dup)
@@ -483,7 +643,7 @@ test_an_error_body_with_exit_zero_is_not_read_as_no_issues() {
 # --- arm and disarm -----------------------------------------------------------
 
 test_arm_registers_the_check_and_disarm_removes_every_trace() {
-  local home out status
+  local home out status owner
   home=$(make_home arm)
   status=0
   FM_HOME="$home" PATH="$home/fakebin:$PATH" "$CHECK" arm >/dev/null 2>&1 || status=$?
@@ -517,11 +677,20 @@ test_arm_registers_the_check_and_disarm_removes_every_trace() {
   expect_code 0 "$status" "shim run from another directory exit"
   assert_contains "$(cat "$out")" "backend-app#12(fm::todo)" "the shim did not poll the home it was armed for"
 
+  # A holder killed mid-sweep leaves the lock link and its owner directory behind,
+  # and once the check is retired nothing is left to reclaim them.
+  owner=$(mktemp -d "$home/state/.gitlab-issues.lock.owner.XXXXXX")
+  printf '1\n' > "$owner/pid"
+  ln -s "$owner" "$home/state/.gitlab-issues.lock"
+
   FM_HOME="$home" "$CHECK" disarm >/dev/null || fail "disarm failed"
   assert_absent "$home/state/gitlab-issues.check.sh" "disarm left the check shim behind"
   assert_absent "$home/state/gitlab-issues.check-trust" "disarm left the trust binding behind"
   assert_absent "$home/state/.gitlab-issues-seen" "disarm left the seen record behind"
   assert_absent "$home/state/.gitlab-issues-pending" "disarm left the pending record behind"
+  [ ! -L "$home/state/.gitlab-issues.lock" ] && [ ! -e "$home/state/.gitlab-issues.lock" ] \
+    || fail "disarm left the pending lock behind"
+  assert_absent "$owner" "disarm left the pending lock's owner directory behind"
   pass "arm registers a trusted 0700 shim and disarm removes the shim, its binding, and the records"
 }
 
@@ -540,6 +709,44 @@ test_arm_refuses_a_symlink_at_the_shim_path() {
   [ "$(stat -c %a "$target" 2>/dev/null || stat -f %Lp "$target")" = "$mode" ] || fail "arm changed the mode of the symlink's target"
   assert_absent "$home/state/gitlab-issues.check-trust" "arm registered a shim it refused to write"
   pass "a symlink at the shim path is refused instead of followed"
+}
+
+test_a_failed_re_arm_puts_the_bound_shim_back() {
+  local home moved out err status
+  # An armed, polling home is re-armed from a second copy of bin/, the shape a
+  # re-arm takes after the repo has moved: the shim embeds its own script path, so
+  # its bytes differ and are rewritten, and this copy's registration step fails.
+  # The home was working, so it must still be working afterwards.
+  home=$(make_home arm-rollback)
+  write_config "$home" "{\"host\":\"$HOST\",\"group\":\"$GROUP\"}"
+  serve "$home" fm::todo "$(issue acme/tools/backend-app 12 fm::todo)"
+  serve "$home" fm::human-replied
+  FM_HOME="$home" PATH="$home/fakebin:$PATH" "$CHECK" arm >/dev/null || fail "could not arm the issue check"
+
+  moved="$home/bin-moved"
+  mkdir -p "$moved"
+  ln -s "$ROOT/bin"/*.sh "$moved/"
+  rm -f "$moved/fm-check-register.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$moved/fm-check-register.sh"
+  chmod 0755 "$moved/fm-check-register.sh"
+
+  status=0
+  FM_HOME="$home" PATH="$home/fakebin:$PATH" "$moved/fm-gitlab-issues.sh" arm >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a re-arm that cannot register must fail"
+  assert_present "$home/state/gitlab-issues.check.sh" "a failed re-arm deleted the shim the working home was using"
+  assert_present "$home/state/gitlab-issues.check-trust" "a failed re-arm dropped the trust binding"
+
+  # The shim and its binding still agree, so the watcher runs the check instead of
+  # rejecting it as an unauthenticated state check.
+  out="$home/out.txt"
+  err="$home/err.txt"
+  status=0
+  env FM_HOME="$home" PATH="$home/fakebin:$PATH" FAKE_GLAB_DIR="$home/gitlab" FAKE_GLAB_LOG="$home/glab.log" \
+    FM_CHECK_TIMEOUT=30 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 \
+    "$CHECKPOINT" --seconds 15 >"$out" 2>"$err" || status=$?
+  expect_code 0 "$status" "watcher checkpoint exit"
+  assert_contains "$(cat "$out")" "gitlab-issue 1 new: acme/tools/backend-app#12(fm::todo)" "the home is no longer polling after a failed re-arm"
+  pass "a re-arm that cannot register puts the previously bound shim back"
 }
 
 test_armed_check_wakes_the_watcher() {
@@ -569,14 +776,19 @@ test_config_problems_name_the_field
 test_first_check_reports_and_records_then_stays_silent
 test_removed_label_forgets_the_pair_and_a_re_added_label_is_news
 test_projects_filter_keeps_only_configured_projects
+test_the_project_path_comes_from_the_canonical_reference
+test_a_relative_url_root_still_matches_the_projects_filter
 test_intake_labels_and_host_come_from_the_config
 test_many_new_pairs_are_bounded_to_one_line
 test_handled_removes_that_issue_and_refuses_an_unknown_one
 test_check_append_survives_a_concurrent_handled_rewrite
+test_a_lock_the_check_cannot_take_wakes_firstmate_once
+test_a_symlink_at_the_pending_record_is_refused_and_reported
 test_a_duplicated_issue_in_one_answer_yields_one_pending_record
 test_poll_error_is_reported_once_per_reason_per_hour
 test_a_hung_glab_is_bounded_and_reported
 test_an_error_body_with_exit_zero_is_not_read_as_no_issues
 test_arm_registers_the_check_and_disarm_removes_every_trace
 test_arm_refuses_a_symlink_at_the_shim_path
+test_a_failed_re_arm_puts_the_bound_shim_back
 test_armed_check_wakes_the_watcher

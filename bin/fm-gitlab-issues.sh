@@ -34,7 +34,8 @@
 # because the watcher runs this check from its own working directory. The group
 # endpoint already covers every project in the group and its subgroups, so the
 # optional `projects` list only narrows the result, matched on each issue's
-# project path taken from its web_url (falling back to references.full).
+# project path taken from the API's canonical references.full (falling back to
+# its web_url, which reads a relative URL root as part of the path).
 #
 # Private records, all under state/ and all removed by `disarm`:
 #
@@ -64,6 +65,9 @@
 # poll error and leaves the seen record alone, so the new pairs are reported by
 # the next poll instead of being marked seen without their details. `handled`
 # waits at most one FM_CHECK_TIMEOUT for the lock, longer than any sweep holds it.
+# `disarm` removes the lock and its owner directory too, because a holder killed
+# mid-sweep leaves both behind and a retired check has nothing left to reclaim
+# them.
 #
 # The report line is `gitlab-issue <n> new: <path>#<iid>(<label>) ...`, listing
 # the first MAX_LISTED pairs and counting the rest, capped to MAX_LINE characters.
@@ -348,15 +352,26 @@ fetch_label() {
   return 0
 }
 
+# The project path is read once, here, and interpolated into both jq programs
+# below: current_pairs decides which pairs are news and go into the seen record
+# while pending_records decides which of them get a details line, so the two
+# readings must not drift. references.full is the API's canonical
+# <group>/<project>#<iid> and is right on every install shape; the web_url
+# capture is the fallback, because a GitLab under a relative URL root
+# ("https://host/gitlab/<group>/<project>/-/issues/<iid>") makes it read the URL
+# root as part of the project path.
+PROJECT_PATH_JQ='
+    def project_path:
+      ((((.references // {}).full // "") | split("#") | .[0]) | select(type == "string" and length > 0))
+      // (((.web_url // "") | capture("^https?://[^/]+/(?<p>.+)/-/issues/[0-9]+/?$")? | .p) // null);
+'
+
 # current_pairs <label> <ndjson> : print "<path>#<iid>\t<label>" for each issue in
 # the configured projects that carries the label.
 current_pairs() {
   local label=$1 file=$2
   [ -s "$file" ] || return 0
-  jq -r --arg want "$label" --argjson projects "$PROJECTS_JSON" '
-    def project_path:
-      ((.web_url // "") | capture("^https?://[^/]+/(?<p>.+)/-/issues/[0-9]+/?$")? | .p)
-      // (((.references // {}).full // "") | split("#") | .[0] | select(length > 0));
+  jq -r --arg want "$label" --argjson projects "$PROJECTS_JSON" "$PROJECT_PATH_JQ"'
     (project_path) as $p
     | select($p != null and $p != "")
     | select(($projects | length) == 0 or any($projects[]; . == $p))
@@ -372,10 +387,7 @@ current_pairs() {
 pending_records() {
   local label=$1 file=$2 new=$3 epoch=$4
   [ -s "$file" ] || return 0
-  jq -c -s --arg want "$label" --argjson new "$new" --argjson epoch "$epoch" '
-    def project_path:
-      ((.web_url // "") | capture("^https?://[^/]+/(?<p>.+)/-/issues/[0-9]+/?$")? | .p)
-      // (((.references // {}).full // "") | split("#") | .[0] | select(length > 0));
+  jq -c -s --arg want "$label" --argjson new "$new" --argjson epoch "$epoch" "$PROJECT_PATH_JQ"'
     [ .[]
       | (project_path) as $p
       | select($p != null and $p != "")
@@ -491,8 +503,20 @@ action_check() {
   # sweep deadline leaves the seen record alone so the next poll reports the pairs.
   remaining=$((DEADLINE - $(real_epoch)))
   [ "$remaining" -ge 1 ] || remaining=1
+  # The reason is what emit_error dedupes on, so it names the fixed sweep budget
+  # rather than the seconds left this sweep; a wedged holder is one wake, not one
+  # per poll.
   if ! pending_lock_take "$remaining"; then
-    emit_error "could not lock $PENDING within ${remaining}s${FM_LOCK_HELD_PID:+ (held by pid $FM_LOCK_HELD_PID)}"
+    emit_error "could not lock $PENDING before the sweep deadline (watcher check timeout ${CHECK_TIMEOUT}s)"
+    return 0
+  fi
+  # The append is the one write to the pending record that does not go through
+  # private_write's rename, so it needs the guard the readers already apply: a
+  # symlink here would send the issue details somewhere `pending` and `handled`
+  # both refuse to read, and the seen record would still claim the pair reported.
+  if [ -L "$PENDING" ] || { [ -e "$PENDING" ] && [ ! -f "$PENDING" ]; }; then
+    pending_lock_release
+    emit_error "$PENDING is not a regular file"
     return 0
   fi
   if ! ( umask 077; cat "$SWEEP_DIR/pending" >> "$PENDING" ); then
@@ -619,12 +643,39 @@ shim_write() {
   fm_pr_private_file_valid "$CHECK_SHIM" 700 "$device"
 }
 
+# Keep a byte copy of a shim that is already in place, so a failed arm can put
+# back the shim a working home was already using rather than an equivalent
+# rewrite. The trust binding is over the bytes, so a rewrite would satisfy it
+# too, but a home that was armed stays armed with what it had.
+shim_backup() {
+  local device tmp
+  device=$(fm_pr_file_device "$STATE") || return 1
+  [ -n "$device" ] || return 1
+  tmp=$(umask 077; mktemp "$STATE/.fm-gitlab-issues-check.XXXXXX" 2>/dev/null) || return 1
+  if ! cat "$CHECK_SHIM" > "$tmp" 2>/dev/null \
+    || ! chmod 0700 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 700 "$device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  printf '%s\n' "$tmp"
+}
+
+ARM_BACKUP=
+
 # An unregistered shim is not inert: the watcher rejects it on every cycle and
 # wakes firstmate about unauthenticated state checks. So after a failed or
 # interrupted arm the home never holds a shim without a matching trust binding.
+# The shim a working home had is put back and kept only when it is still bound;
+# otherwise the shim goes, so the home is plainly not armed and the failure is
+# the only thing the operator has to act on.
 arm_rollback() {
   [ -z "$SHIM_WRITE_TMP" ] || rm -f -- "$SHIM_WRITE_TMP"
   SHIM_WRITE_TMP=
+  if [ -n "$ARM_BACKUP" ]; then
+    mv -f -- "$ARM_BACKUP" "$CHECK_SHIM" 2>/dev/null || rm -f -- "$ARM_BACKUP"
+    ARM_BACKUP=
+  fi
   fm_custom_check_registered "$STATE" "$CHECK_ID" || rm -f -- "$CHECK_SHIM"
 }
 
@@ -660,6 +711,15 @@ action_arm() {
       ;;
   esac
   want=$(shim_content "$home")
+  ARM_BACKUP=
+  if [ -f "$CHECK_SHIM" ] && [ ! -L "$CHECK_SHIM" ]; then
+    ARM_BACKUP=$(shim_backup) || {
+      printf 'fm-gitlab-issues: could not save the existing %s\n' "$CHECK_SHIM" >&2
+      return 1
+    }
+  fi
+  # The shim exists unbound from the rename until the register returns, so a
+  # signal in that window rolls back the same way a failure does.
   trap arm_interrupted HUP INT TERM
   if ! shim_write "$want"; then
     trap - HUP INT TERM
@@ -674,17 +734,26 @@ action_arm() {
     return 1
   fi
   trap - HUP INT TERM
+  [ -z "$ARM_BACKUP" ] || rm -f -- "$ARM_BACKUP"
+  ARM_BACKUP=
   printf 'armed: state/%s.check.sh\n' "$CHECK_ID"
   return 0
 }
 
 action_disarm() {
+  local leftover
   if [ -d "$STATE" ] && [ ! -L "$STATE" ]; then
     FM_HOME="$FM_HOME" "$UNREGISTER_BIN" "$CHECK_ID" >/dev/null || {
       printf 'fm-gitlab-issues: could not retire %s\n' "$CHECK_SHIM" >&2
       return 1
     }
-    rm -f -- "$SEEN" "$PENDING" "$ERROR_MARK"
+    rm -f -- "$SEEN" "$PENDING" "$ERROR_MARK" "$PENDING_LOCK"
+    # A holder killed mid-sweep leaves the lock link and its owner directory
+    # behind with nothing left to reclaim them once the check is retired.
+    for leftover in "$PENDING_LOCK".owner.*; do
+      [ -e "$leftover" ] || continue
+      rm -rf -- "$leftover"
+    done
   fi
   printf 'disarmed: state/%s.check.sh\n' "$CHECK_ID"
   return 0
