@@ -1222,16 +1222,23 @@ test_fm_lock_status_still_works_with_shared_lib() {
 # firing carries text, and it names what refused and where the episode state is.
 
 # Drive one home through the first exhausted failure and several consecutive
-# ones, returning the concatenated evidence of every blocking firing.
+# ones, publishing the concatenated evidence of every blocking firing in
+# LOUD_BLOCK_OUTPUT. It deliberately does NOT echo that evidence: fail() is an
+# `exit 1`, so a helper invoked as `all=$(...)` would kill only the substitution
+# subshell and let the caller report pass - the regression guard for the silent
+# block could not itself fail the suite.
+LOUD_BLOCK_OUTPUT=
+
 assert_every_block_is_loud() {  # <dir> <label>
   local dir=$1 label=$2 out status i
+  LOUD_BLOCK_OUTPUT=
   for i in 1 2 3 4 5; do
     out=$(run_autoarm "$dir" 2>/dev/null); status=$?
     expect_code 2 "$status" "$label: firing $i must hold the turn open for another retry"
     [ -n "$out" ] || fail "$label: firing $i blocked the turn with empty output"
     assert_contains "$out" ".claude-autoarm-epoch" \
       "$label: firing $i did not name the episode record"
-    printf '%s\n' "$out"
+    LOUD_BLOCK_OUTPUT="$LOUD_BLOCK_OUTPUT$out"$'\n'
   done
 }
 
@@ -1240,7 +1247,8 @@ test_consecutive_failures_never_block_silently() {
   dir=$(make_primary_dir "$TMP_ROOT/loud-consecutive")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" failed
-  all=$(assert_every_block_is_loud "$dir" "consecutive failure")
+  assert_every_block_is_loud "$dir" "consecutive failure"
+  all=$LOUD_BLOCK_OUTPUT
   notices=$(printf '%s\n' "$all" | grep -c 'automatic supervision mechanism is broken' || true)
   [ "$notices" -eq 1 ] \
     || fail "the episode delivered $notices full notices instead of exactly one"
@@ -1278,26 +1286,6 @@ test_arm_without_any_output_still_names_the_block() {
   pass "auto-arm: an arm with no output of its own still yields a block that names itself"
 }
 
-# The real condition behind the incident: a state directory that silently
-# reverts chmod, so nothing can hold a restricted mode. Reproduced only where
-# the host actually offers such a filesystem, and only after the revert is
-# measured rather than assumed.
-mode_incapable_parent() {
-  local candidate probe
-  for candidate in "${FM_TEST_MODE_INCAPABLE_PARENT:-}" /mnt/*/ /Volumes/*/; do
-    [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ] || continue
-    probe=$(mktemp -d "${candidate%/}/fm-mode-probe.XXXXXX" 2>/dev/null) || continue
-    : > "$probe/f" 2>/dev/null && chmod 600 "$probe/f" 2>/dev/null
-    if [ -f "$probe/f" ] && [ "$(fm_test_file_mode "$probe/f")" != 600 ]; then
-      rm -rf "$probe"
-      printf '%s\n' "${candidate%/}"
-      return 0
-    fi
-    rm -rf "$probe"
-  done
-  return 1
-}
-
 fm_test_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     /usr/bin/stat -f %Lp "$1" 2>/dev/null
@@ -1306,21 +1294,55 @@ fm_test_file_mode() {
   fi
 }
 
+# The real condition behind the incident: a state directory that silently
+# reverts chmod, so nothing can hold a restricted mode. Reproduced only where
+# the host actually offers such a filesystem, and only after the revert is
+# measured rather than assumed.
+#
+# Everything this suite puts on that filesystem - the probe and the fixture home
+# alike - lives under ONE dedicated root, registered for removal on every exit
+# path before anything is written into it. The mount root itself is a real user
+# location (a Windows drive under /mnt, a volume under /Volumes), so a fixture
+# leaked there by a failing assertion would be a permanent artifact outside any
+# temp root.
+mode_incapable_root() {
+  local candidate root probe
+  for candidate in "${FM_TEST_MODE_INCAPABLE_PARENT:-}" /mnt/*/ /Volumes/*/; do
+    [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ] || continue
+    root=$(mktemp -d "${candidate%/}/fm-autoarm-modeless.XXXXXX" 2>/dev/null) || continue
+    fm_test_track_dir "$root"
+    probe="$root/probe"
+    mkdir -p "$probe" 2>/dev/null || { rm -rf "$root"; continue; }
+    : > "$probe/f" 2>/dev/null && chmod 600 "$probe/f" 2>/dev/null
+    if [ -f "$probe/f" ] && [ "$(fm_test_file_mode "$probe/f")" != 600 ]; then
+      rm -rf "$probe"
+      printf '%s\n' "$root"
+      return 0
+    fi
+    rm -rf "$root"
+  done
+  return 1
+}
+
 test_mode_incapable_state_dir_never_blocks_silently() {
-  local parent dir all
-  if ! parent=$(mode_incapable_parent); then
+  local root dir all
+  if ! root=$(mode_incapable_root); then
     printf 'skip: no filesystem on this host reverts chmod 600; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
     return 0
   fi
-  dir=$(mktemp -d "$parent/fm-autoarm-modeless.XXXXXX") || fail "could not create a home on $parent"
+  dir=$(mktemp -d "$root/home.XXXXXX") || fail "could not create a home under $root"
   make_primary_dir "$dir" >/dev/null
+  # Ask for the restricted mode the real artifacts ask for, then prove it did
+  # not stick. Without the chmod the check is vacuous: umask 022 leaves a plain
+  # mkdir at 755 on a mode-capable filesystem too.
+  chmod 700 "$dir/state" 2>/dev/null || true
   [ "$(fm_test_file_mode "$dir/state")" != 700 ] \
-    || { rm -rf "$dir"; fail "$parent stopped reverting modes between the probe and the fixture"; }
+    || fail "$root stopped reverting modes between the probe and the fixture"
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" failed
-  all=$(assert_every_block_is_loud "$dir" "mode-incapable home") || { rm -rf "$dir"; return 1; }
+  assert_every_block_is_loud "$dir" "mode-incapable home"
+  all=$LOUD_BLOCK_OUTPUT
   assert_contains "$all" "watcher: FAILED" "the mode-incapable home dropped what refused"
-  rm -rf "$dir"
   pass "auto-arm: a state directory that cannot hold restricted modes never blocks a turn with empty output"
 }
 

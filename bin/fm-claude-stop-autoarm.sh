@@ -304,16 +304,18 @@ if [ "$HEALTHY" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
-  if [ ! -e "$FAILURE_ALARM" ] && fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+  ALARMED=0
+  [ -e "$FAILURE_ALARM" ] && ALARMED=1
+  if [ "$ALARMED" -eq 0 ] && fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     {
       printf 'firstmate watcher auto-arm HELD THIS TURN OPEN - a live watcher with a fresh beacon was verified, but the failure-episode reset for this home could not be recorded, so recovery is not yet provably closed.\n'
-      autoarm_refusal_evidence
-      printf 'Read %s (outcome=failed-suppressed) and the markers beside it. If this repeats, the state directory itself is refusing the write.\n' "$STATE/.claude-autoarm-epoch"
+      printf 'The arm is not the cause here: the bookkeeping write refused. Read %s (outcome=failed-suppressed), the markers it clears (%s, %s), and the lock serializing them (%s). If this repeats, the state directory itself is refusing the write.\n' \
+        "$STATE/.claude-autoarm-epoch" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$STATE/.turnend-claude-blocks.lock"
     } >&2
   fi
   if autoarm_commit failed-suppressed; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-    [ -e "$FAILURE_ALARM" ] && exit 0
+    [ "$ALARMED" -eq 1 ] && exit 0
     exit 2
   fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true

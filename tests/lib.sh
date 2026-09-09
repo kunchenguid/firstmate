@@ -174,6 +174,16 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+# fm_test_track_dir <dir>: register an already-created directory for the same
+# EXIT/INT/TERM removal as fm_test_tmproot's roots. Needed by a case whose
+# fixture cannot live under $TMPDIR because it must sit on a specific
+# filesystem (e.g. one that reverts chmod). Registration goes through the same
+# `$$`-keyed file for the same reason, so it works from a command substitution.
+fm_test_track_dir() {
+  [ -n "${1:-}" ] || return 1
+  printf '%s\n' "$1" >> "$FM_TEST_CLEANUP_REGISTRY"
+}
+
 trap fm_test_cleanup EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM
