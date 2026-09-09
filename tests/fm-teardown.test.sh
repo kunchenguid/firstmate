@@ -290,14 +290,19 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
-# Return one deterministic GitHub pull-request API payload. The exceptional
-# sparse-record classification uses gh-axi api directly, so no test needs a network.
+# Return the selected gh-axi --jq scalar response for a deterministic API
+# condition. The exceptional sparse-record classification consumes this public
+# interface, so no test needs a network or a JSON-only client mock.
 add_gh_api_response() {
-  local case_dir=$1 payload=$2
+  local case_dir=$1 body=$2
   cat > "$case_dir/fakebin/gh-axi" <<SH
 #!/usr/bin/env bash
 case "\${1:-}" in
-  api) printf '%s\\n' '$payload' ; exit 0 ;;
+  api)
+    case " \$* " in
+      *" --jq "*) printf '%s\\n' "$body"; exit 0 ;;
+    esac
+    ;;
 esac
 exit 1
 SH
@@ -911,7 +916,7 @@ test_reports_pr43_sparse_record_allows_only_api_confirmed_merge() {
   write_sparse_recovery_meta "$case_dir" "$id" direct-PR ship ''
   printf 'pr=%s\n' "$url" >> "$case_dir/state/$id.meta"
   git -C "$case_dir/project" remote set-url origin https://github.com/abtex/abtex-epicor-reports.git
-  add_gh_api_response "$case_dir" '{"merged":true,"merged_at":"2026-09-01T00:00:00Z","html_url":"https://github.com/abtex/abtex-epicor-reports/pull/43","base":{"repo":{"full_name":"abtex/abtex-epicor-reports"}}}'
+  add_gh_api_response "$case_dir" true
 
   set +e
   run_teardown_for "$TEARDOWN" "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -963,7 +968,7 @@ test_sparse_merge_record_refuses_when_api_does_not_confirm_merge() {
   write_sparse_recovery_meta "$case_dir" "$id" direct-PR ship ''
   printf 'pr=%s\n' "$url" >> "$case_dir/state/$id.meta"
   git -C "$case_dir/project" remote set-url origin https://github.com/abtex/abtex-epicor-reports.git
-  add_gh_api_response "$case_dir" '{"merged":false,"merged_at":null,"html_url":"https://github.com/abtex/abtex-epicor-reports/pull/43","base":{"repo":{"full_name":"abtex/abtex-epicor-reports"}}}'
+  add_gh_api_response "$case_dir" false
 
   set +e
   run_teardown_for "$TEARDOWN" "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -978,6 +983,100 @@ test_sparse_merge_record_refuses_when_api_does_not_confirm_merge() {
   assert_present "$case_dir/state/$id.meta" \
     "provably-landed-api-unconfirmed: unconfirmed API evidence erased the sparse record"
   pass "sparse merge record refuses when API evidence does not confirm a merge"
+}
+
+test_reportless_scout_with_endpoint_uses_ordinary_cleanup_guard() {
+  local case_dir id rc
+  id=reportless-scout-with-endpoint
+  case_dir=$(make_case reportless-scout-endpoint)
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    'kind=scout' \
+    'mode=no-mistakes' \
+    'spawn_gen=teardown-test-reportless-scout'
+
+  set +e
+  run_teardown_for "$TEARDOWN" "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "reportless-scout-endpoint: endpoint-bearing scout must use ordinary guard"
+  ! grep -Fq 'Cleanup classification: EMPTY' "$case_dir/stdout" \
+    || fail "reportless-scout-endpoint: EMPTY bypassed endpoint cleanup"
+  assert_present "$case_dir/state/$id.meta" \
+    "reportless-scout-endpoint: ordinary report guard erased the task record"
+  pass "reportless scout with endpoint does not bypass endpoint cleanup"
+}
+
+test_ambiguous_scout_recovery_identity_refuses() {
+  local case_dir id rc
+  id=ambiguous-scout-recovery
+  case_dir=$(make_case ambiguous-scout-recovery)
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "project=$case_dir/project" \
+    'kind=scout' \
+    'mode=no-mistakes' \
+    "worktree=$case_dir/lost-copy" \
+    "worktree=$case_dir/wt"
+
+  set +e
+  run_teardown_for "$TEARDOWN" "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ambiguous-scout-recovery: duplicate worktree identities must refuse"
+  assert_grep 'scout recovery identity is missing or ambiguous' "$case_dir/stderr" \
+    "ambiguous-scout-recovery: refusal did not name ambiguous evidence"
+  assert_present "$case_dir/state/$id.meta" \
+    "ambiguous-scout-recovery: ambiguous record was removed"
+  pass "ambiguous scout recovery identity refuses before EMPTY cleanup"
+}
+
+test_force_preserves_existing_scout_discard_authority() {
+  local case_dir rc
+  case_dir=$(make_case forced-scout-discard)
+  write_meta "$case_dir" no-mistakes scout
+  wt_commit_file "$case_dir" unpreserved.txt discardable "unpreserved scout work"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forced-scout-discard: explicit discard authority must still work"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "forced-scout-discard: --force did not retire the ordinary task record"
+  pass "explicit force still discards an ordinary reportless scout"
+}
+
+test_empty_scout_uses_fresh_remote_default_branch() {
+  local case_dir id rc task_head old_base
+  id=fresh-default-branch-scout
+  case_dir=$(make_case fresh-default-branch-scout)
+  write_sparse_recovery_meta "$case_dir" "$id" no-mistakes scout "$case_dir/wt"
+  wt_commit "$case_dir" "task commit only on old default"
+  task_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  old_base=$(git -C "$case_dir/wt" rev-parse HEAD^)
+  git -C "$case_dir/wt" push -q origin HEAD:main
+  git -C "$case_dir/origin.git" branch trunk "$old_base"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/trunk
+
+  set +e
+  run_teardown_for "$TEARDOWN" "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "fresh-default-branch-scout: old default ancestry must not prove EMPTY"
+  assert_grep 'task commits beyond the current upstream default branch' "$case_dir/stderr" \
+    "fresh-default-branch-scout: stale default branch was used"
+  assert_present "$case_dir/state/$id.meta" \
+    "fresh-default-branch-scout: stale default evidence erased the task record"
+  git -C "$case_dir/project" cat-file -e "$task_head^{commit}" \
+    || fail "fresh-default-branch-scout: fixture lost its task commit"
+  pass "EMPTY resolves the current remote default branch before checking ancestry"
 }
 
 # This starts with a real scout commit, then removes every ref and the isolated
@@ -3878,6 +3977,10 @@ test_empty_portfolio_scout_allows_when_behind_upstream
 test_reports_pr43_sparse_record_allows_only_api_confirmed_merge
 test_sparse_merge_record_refuses_when_api_evidence_is_unavailable
 test_sparse_merge_record_refuses_when_api_does_not_confirm_merge
+test_reportless_scout_with_endpoint_uses_ordinary_cleanup_guard
+test_ambiguous_scout_recovery_identity_refuses
+test_force_preserves_existing_scout_discard_authority
+test_empty_scout_uses_fresh_remote_default_branch
 test_lost_scout_work_refuses_and_faulty_absence_classifier_is_detected
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line

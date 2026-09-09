@@ -913,23 +913,50 @@ TEARDOWN_SKIP_ENDPOINT_CLEANUP=0
 # PROVABLY-LANDED proves the identified upstream pull request merged through its
 # forge API response. Every missing, unreadable, or ambiguous fact leaves the
 # classification REFUSED rather than treating absence as empty.
+cleanup_recovery_meta_count() {
+  local key=$1
+  LC_ALL=C awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$META" 2>/dev/null
+}
+
+cleanup_recovery_endpoint_metadata_present() {
+  local key count
+  for key in window endpoint_task_id backend terminal session pane workspace tab remote_host remote_root remote_home remote_backend; do
+    count=$(cleanup_recovery_meta_count "$key")
+    [ "$count" -eq 0 ] || return 0
+  done
+  return 1
+}
+
+cleanup_recovery_identity_is_unambiguous() {
+  local key count
+  for key in "$@"; do
+    count=$(cleanup_recovery_meta_count "$key")
+    [ "$count" -eq 1 ] || return 1
+  done
+  return 0
+}
+
 classify_cleanup_recovery() {
-  local kind project worktree top origin url_path owner repo rest number api branch dirty task_tmp
+  local kind project worktree top origin url_path owner repo rest number api branch dirty remote_head
   kind=$(fm_meta_get "$META" kind)
   [ -n "$kind" ] || kind=ship
   CLEANUP_CLASSIFICATION=NONE
   CLEANUP_CLASSIFICATION_REASON=
 
   if [ "$kind" = scout ] && { [ ! -e "$DATA/$ID/report.md" ] && [ ! -L "$DATA/$ID/report.md" ]; }; then
+    cleanup_recovery_endpoint_metadata_present && return 0
     CLEANUP_CLASSIFICATION=REFUSED
     CLEANUP_CLASSIFICATION_REASON="scout report is absent, but its isolated copy is not proven empty"
-    [ -d "$DATA" ] && [ ! -L "$DATA" ] || {
-      CLEANUP_CLASSIFICATION_REASON="cannot inspect the scout data directory for a report"
+    cleanup_recovery_identity_is_unambiguous kind project worktree || {
+      CLEANUP_CLASSIFICATION_REASON="scout recovery identity is missing or ambiguous"
       return 0
     }
-    task_tmp=$(fm_meta_get "$META" tasktmp)
-    [ -z "$task_tmp" ] || {
-      CLEANUP_CLASSIFICATION_REASON="scout has a recorded temporary task root that is not proof of emptiness"
+    [ "$(cleanup_recovery_meta_count pr)" -eq 0 ] && [ "$(cleanup_recovery_meta_count tasktmp)" -eq 0 ] || {
+      CLEANUP_CLASSIFICATION_REASON="scout recovery record has extra or ambiguous work evidence"
+      return 0
+    }
+    [ -d "$DATA" ] && [ ! -L "$DATA" ] || {
+      CLEANUP_CLASSIFICATION_REASON="cannot inspect the scout data directory for a report"
       return 0
     }
     [ -n "$WT" ] && [ -d "$WT" ] || {
@@ -984,8 +1011,16 @@ classify_cleanup_recovery() {
       CLEANUP_CLASSIFICATION_REASON="scout upstream remote is empty"
       return 0
     }
-    branch=$(git -C "$project" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-    branch=${branch#origin/}
+    remote_head=$(git -C "$worktree" ls-remote --symref origin HEAD 2>/dev/null) || {
+      CLEANUP_CLASSIFICATION_REASON="cannot freshly resolve the upstream default branch"
+      return 0
+    }
+    branch=$(printf '%s\n' "$remote_head" | awk '$1 == "ref:" && $3 == "HEAD" { print $2 }')
+    [ "$(printf '%s\n' "$branch" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 1 ] || {
+      CLEANUP_CLASSIFICATION_REASON="cannot resolve the upstream default branch"
+      return 0
+    }
+    branch=${branch#refs/heads/}
     case "$branch" in
       ''|*[!A-Za-z0-9._/-]*)
         CLEANUP_CLASSIFICATION_REASON="cannot resolve the upstream default branch"
@@ -1006,8 +1041,17 @@ classify_cleanup_recovery() {
   fi
 
   if [ "$kind" = ship ] && [ -z "$WT" ] && [ -n "$PR_URL" ]; then
+    cleanup_recovery_endpoint_metadata_present && return 0
     CLEANUP_CLASSIFICATION=REFUSED
     CLEANUP_CLASSIFICATION_REASON="missing isolated copy is not merge proof"
+    cleanup_recovery_identity_is_unambiguous kind project worktree pr || {
+      CLEANUP_CLASSIFICATION_REASON="ship recovery identity is missing or ambiguous"
+      return 0
+    }
+    [ "$(cleanup_recovery_meta_count tasktmp)" -eq 0 ] || {
+      CLEANUP_CLASSIFICATION_REASON="ship recovery record has temporary work evidence"
+      return 0
+    }
     [ -n "$PROJ" ] && [ -d "$PROJ" ] || {
       CLEANUP_CLASSIFICATION_REASON="cannot inspect the recorded project for upstream identity"
       return 0
@@ -1052,14 +1096,12 @@ classify_cleanup_recovery() {
         return 0
         ;;
     esac
-    api=$(cd "$PROJ" && gh-axi api "/repos/$owner/$repo/pulls/$number" 2>/dev/null) || {
+    api=$(cd "$PROJ" && gh-axi api "/repos/$owner/$repo/pulls/$number" --jq \
+      ".merged == true and (.merged_at | type == \"string\") and .html_url == \"$PR_URL\" and .base.repo.full_name == \"$owner/$repo\"" 2>/dev/null) || {
       CLEANUP_CLASSIFICATION_REASON="GitHub API could not authenticate or resolve the recorded pull request"
       return 0
     }
-    printf '%s\n' "$api" | jq -e --arg url "$PR_URL" --arg repo "$owner/$repo" '
-      .merged == true and (.merged_at | type == "string") and .html_url == $url
-      and .base.repo.full_name == $repo
-    ' >/dev/null 2>&1 || {
+    [ "$api" = true ] || {
       CLEANUP_CLASSIFICATION_REASON="GitHub API did not confirm the identified upstream pull request as merged"
       return 0
     }
@@ -1068,7 +1110,9 @@ classify_cleanup_recovery() {
   fi
 }
 
-classify_cleanup_recovery
+if [ "$FORCE" != --force ]; then
+  classify_cleanup_recovery
+fi
 case "$CLEANUP_CLASSIFICATION" in
   EMPTY|PROVABLY-LANDED)
     TEARDOWN_SKIP_ENDPOINT_CLEANUP=1
