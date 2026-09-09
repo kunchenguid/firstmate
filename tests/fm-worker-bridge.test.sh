@@ -20,6 +20,10 @@ if os.environ.get('BRIDGE_DESCENDANT'):
     while not os.path.exists(os.environ['BRIDGE_DESCENDANT']): time.sleep(.01)
 if os.environ.get('BRIDGE_SLEEP'): time.sleep(30)
 if os.environ.get('BRIDGE_FAIL'): sys.exit(7)
+if os.environ.get('BRIDGE_HUGE'):
+    if sys.argv[0].endswith('hermes'): print('session_id: exact-hermes-session', file=sys.stderr)
+    sys.stdout.buffer.write(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','response':'\\u754c'*700000}, ensure_ascii=False).encode())
+    sys.exit(0)
 if '--print' in sys.argv and sys.argv[sys.argv.index('--print')+1] == 'fail-json':
     print(json.dumps({'status':'FAILURE','response':'failed without id'})); sys.exit(0)
 if sys.argv[0].endswith('hermes'): print('session_id: exact-hermes-session', file=sys.stderr)
@@ -52,12 +56,20 @@ print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','res
             assert calls[0][calls[0].index('--continue')+1] == calls[1][calls[1].index('--continue')+1]
         assert 'state=idle' in (state/'probe.busy-state').read_text()
         assert (state/'probe.turn-ended').exists()
+        huge = subprocess.run(command,input='/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_HUGE='1'),timeout=30)
+        assert 'exceeded the 1 MiB protocol limit' in huge.stdout, huge.stdout[:400]
         if harness == 'antigravity':
             result = subprocess.run(command,input='fail-json\nretry\n/exit\n',capture_output=True,text=True,env=env,timeout=20)
             assert result.returncode == 0, result.stderr
             calls = [json.loads(line) for line in (base/'calls').read_text().splitlines()[-3:]]
             assert calls[2][calls[2].index('--conversation')+1] == 'conversation-exact'
             assert 'turn failed' in result.stdout
+            unbound = state/'unbound-brief'; unbound.write_text('fail-json')
+            result = subprocess.run(command[:-1]+[str(unbound)],input='retry\n/exit\n',capture_output=True,text=True,env=env,timeout=20)
+            assert result.returncode == 0, result.stderr
+            calls = [json.loads(line) for line in (base/'calls').read_text().splitlines()[-2:]]
+            assert '--conversation' not in calls[1], calls[1]
+            assert calls[1][calls[1].index('--print')+1] == 'fail-json\n\nretry', calls[1]
         result = subprocess.run(command,input='/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_FAIL='1'),timeout=20)
         assert 'turn failed' in result.stdout
         assert 'blocked:' in (state/'probe.status').read_text()

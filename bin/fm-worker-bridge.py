@@ -37,6 +37,7 @@ def main():
     root = Path(__file__).resolve().parent
     state = Path(args.state)
     session = 'firstmate-' + uuid.uuid4().hex
+    brief = Path(args.brief).read_text()
     conversation = None
     env = os.environ.copy()
     for key in ('CLAUDECODE', 'PI_CODING_AGENT', 'GROK_AGENT', 'FM_PI_HARNESS',
@@ -129,7 +130,8 @@ def main():
                 command += ['--reasoning', args.effort]
             payload = prompt
         else:
-            command = ['agy', '--print', prompt, '--output-format', 'json',
+            text = prompt if conversation or prompt == brief else brief.rstrip() + '\n\n' + prompt
+            command = ['agy', '--print', text, '--output-format', 'json',
                        '--dangerously-skip-permissions']
             if conversation:
                 command += ['--conversation', conversation]
@@ -138,12 +140,12 @@ def main():
             payload = ''
         if args.model:
             command += ['--model', args.model]
-        event('busy', 'turn-start')
-        print('Firstmate worker running', flush=True)
         process = None
         output_file = tempfile.TemporaryFile()
         error_file = tempfile.TemporaryFile()
         try:
+            event('busy', 'turn-start')
+            print('Firstmate worker running', flush=True)
             spawning = True
             process = subprocess.Popen(command, stdin=subprocess.PIPE,
                 stdout=output_file, stderr=error_file, text=True,
@@ -157,10 +159,12 @@ def main():
             terminate(process)
             output_file.seek(0)
             error_file.seek(0)
-            output = output_file.read(1024 * 1024 + 1).decode(errors='replace')
-            errors = error_file.read(1024 * 1024 + 1).decode(errors='replace')
-            if len(output) > 1024 * 1024 or len(errors) > 1024 * 1024:
+            raw_output = output_file.read(1024 * 1024 + 1)
+            raw_errors = error_file.read(1024 * 1024 + 1)
+            if len(raw_output) > 1024 * 1024 or len(raw_errors) > 1024 * 1024:
                 raise ValueError('CLI output exceeded the 1 MiB protocol limit')
+            output = raw_output.decode(errors='replace')
+            errors = raw_errors.decode(errors='replace')
             if errors:
                 print(errors, flush=True)
             success = process.returncode == 0
@@ -182,6 +186,8 @@ def main():
                     status.write('blocked: ' + args.harness + ' worker turn failed; inspect endpoint output\n')
                 print('Firstmate worker turn failed', flush=True)
             event('idle', 'turn-end' if success else 'turn-failed')
+            # Apply rejects stale generations before we emit the completion wake.
+            (state / (args.id + '.turn-ended')).touch()
         except KeyboardInterrupt:
             if process is not None and process.poll() is None:
                 try:
@@ -198,6 +204,7 @@ def main():
                     process.communicate()
             terminate(process)
             event('idle', 'turn-cancelled')
+            (state / (args.id + '.turn-ended')).touch()
             print('\nFirstmate worker cancelled', flush=True)
         except (OSError, ValueError) as error:
             print('Firstmate worker error: ' + str(error), flush=True)
@@ -208,10 +215,8 @@ def main():
             terminate(process)
             output_file.close()
             error_file.close()
-        # Apply rejects stale generations before we emit the completion wake.
-        (state / (args.id + '.turn-ended')).touch()
 
-    run(Path(args.brief).read_text())
+    run(brief)
     # readline supplies a real single-line composer and Ctrl+U editing.
     import readline  # noqa: F401
     while True:
@@ -222,7 +227,7 @@ def main():
         except KeyboardInterrupt:
             print()
             continue
-        if prompt in ('/exit', '/quit'):
+        if prompt == '/exit':
             break
         if prompt.strip():
             run(prompt)

@@ -7,6 +7,7 @@ This adapter does not automate the Antigravity desktop UI.
 ## Operating facts
 
 The bridge executes headless turns and binds every follow-up to the exact `conversation_id` returned by the preceding successful JSON result.
+Until a conversation id exists, every turn carries the task brief, so an interrupted or failed opening turn followed by a steer still runs with the brief and role scope.
 It requires both exit code zero and `status=SUCCESS` with a conversation id; a failed turn writes a blocked status wake instead of claiming completion.
 The bridge owns the stable readline composer, generation-bound busy events, turn-end wake, cancellation, and process cleanup; native TUI glyphs and Herdr's idle observations are not semantic state sources.
 On Herdr, the bridge reports native working/idle state through a generation-scoped lifecycle source and releases that source on exit.
