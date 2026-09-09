@@ -210,8 +210,9 @@ The detailed reconciliation and task chronology stay in the private audit report
 
 ## Semantic busy state
 
-The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.
+The original per-adapter semantic-source set behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) was live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.
 Each pass polled `state/<id>.busy-state` while a real turn ran.
+GitHub Copilot CLI was added later through the same spawn-installed worker-hook path, but its evidence here is the portable writer-and-classifier coverage in `tests/fm-busy-state.test.sh` and `tests/fm-busy-adapter-wiring.test.sh`, not a separate live harness run.
 
 | Harness | Version verified | Semantic source | Observed result |
 | --- | --- | --- | --- |
@@ -219,6 +220,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | omp | 18.1.11 | Extension `agent_start` / `agent_end` without `willContinue` | Live Herdr scout on `openai-codex/gpt-6-astra` (2026-09-05): the spawn seed `busy source=fm-spawn`, then `busy source=omp-ext event=agent-start`, then `idle source=omp-ext event=agent-end` at the natural end of the brief; a steer through `fm-send` reopened `busy … agent-start`, and a control-plane interrupt closed it with `idle … agent-end` (omp fires `agent_end` on an interrupted turn). `ctx.isIdle()` is deliberately not consulted because it reads false at a natural TUI `agent_end`. |
 | OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
+| GitHub Copilot CLI | 1.0.83-3 (portable hook contract) | Repository `userPromptSubmitted`, `agentStop`, and `sessionEnd` hooks keyed by the parent session id | The generated worker hook reopens `busy source=copilot-hook` only for the owning top-level session, settles `idle source=copilot-hook` on `agentStop` and `sessionEnd`, clears its latched session binding after settlement, ignores child-session stops, and still frees the next top-level session after turn-end-touch or idle-write failures. |
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
@@ -454,7 +456,7 @@ fm-claude-stop-autoarm: ok
 
 ## Watcher continuity
 
-The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
+The cross-harness evidence combines the 2026-07-17 live pass with later per-harness reruns: Claude's replacement Stop-owned path on 2026-07-24, Copilot's attached-task notification path on 2026-09-02, and omp's extension-owned continuity path on 2026-09-05, all against isolated project and home state.
 No credential material was copied into a fixture.
 
 ```text
@@ -463,6 +465,8 @@ codex-cli 0.144.4
 OpenCode 1.17.18
 Pi 0.80.10
 grok 0.2.103 (89c3d36fb6f1) [stable]
+GitHub Copilot CLI 1.0.83-3
+omp 18.1.11
 ```
 
 | Harness | Exact opt-in command | Observed guarantee |
