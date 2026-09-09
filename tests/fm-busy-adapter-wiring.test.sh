@@ -60,11 +60,22 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
 mod.default({ on: (name, fn) => { handlers[name] = fn; }, events: { on: (name, fn) => { handlers[name] = fn; } } });
-const ctx = { isIdle: () => process.env.MODE !== "settle-continuing" };
+const ctx = {
+  isIdle: () => {
+    // Pi throws exactly this from a ctx captured before a session
+    // replacement or reload; the extension may never leave the record
+    // frozen at busy when it happens.
+    if (process.env.MODE === "settle-stale-ctx") {
+      throw new Error("This extension ctx is stale after session replacement or reload.");
+    }
+    return process.env.MODE !== "settle-continuing";
+  },
+};
 switch (process.env.MODE) {
   case "agent-start": await handlers["agent_start"]({}, ctx); break;
   case "settle-idle": await handlers["agent_settled"]({}, ctx); break;
   case "settle-continuing": await handlers["agent_settled"]({}, ctx); break;
+  case "settle-stale-ctx": await handlers["agent_settled"]({}, ctx); break;
   case "settle-then-start":
     await handlers["agent_settled"]({}, ctx);
     await handlers["agent_start"]({}, ctx);
@@ -153,6 +164,35 @@ test_pi_extension_stale_incarnation_rejected() {
   out=$(drive_pi_ext "$ext" progress) || fail "stale progress drive failed: $out"
   [ ! -e "$state/$id.progress" ] || fail "stale native progress refreshed the new incarnation"
   pass "pi extension events from a superseded incarnation are rejected as stale"
+}
+
+test_pi_extension_stale_ctx_does_not_freeze_busy() {
+  local rec id=busy-pi-stale-ctx out state ext
+  rec=$(make_spawn_case pi-stale-ctx pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "pi spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+
+  out=$(drive_pi_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "busy pi-ext" ] || fail "agent_start must classify 'busy pi-ext', got '$out'"
+
+  # The settle arrives with a ctx captured before a session replacement, so
+  # ctx.isIdle() throws. Swallowing that and returning would strand the record
+  # at busy for the rest of the incarnation: no later event can clear it, so
+  # every recovery path keeps reading a dead worker as working.
+  out=$(drive_pi_ext "$ext" settle-stale-ctx) || fail "stale-ctx settle drive failed: $out"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "unknown pi-ext" ] \
+    || fail "a settle whose ctx.isIdle() throws must record unknown, not stay busy, got '$out'"
+
+  # unknown is a real edge, not a dead end: the next start still classifies busy.
+  out=$(drive_pi_ext "$ext" agent-start) || fail "post-stale agent_start drive failed: $out"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "busy pi-ext" ] || fail "a fresh run after an unusable settle must classify busy, got '$out'"
+  pass "pi extension records unknown when a stale ctx makes the idle verdict unusable, never freezing busy"
 }
 
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
@@ -425,6 +465,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
+test_pi_extension_stale_ctx_does_not_freeze_busy
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle

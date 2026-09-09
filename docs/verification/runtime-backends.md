@@ -981,8 +981,32 @@ ok - real herdr: no control verb removed the endpoint or the task's local copy
 ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
 ```
 
-The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
+The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering an agent over a stand-in foreground process, and not registering one at all, exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+
+### Stale agent registration cross-check
+
+Measured 2026-09-09 on `herdr 0.8.2-preview.2026-09-06-9e9bc8a14466`, in a guarded `bin/fm-herdr-lab.sh` lab session, against real panes and the real process table.
+One pane held only its shell; a second pane held a real non-shell foreground process (`herdr pane run <pane> sleep 900`).
+Each classification is `fm_backend_agent_state herdr <session>:<pane>`, compared between the pre-change adapter and the current one:
+
+| Pane and registry state | Before | After |
+| --- | --- | --- |
+| shell-only foreground, `agent get` reports `working` | `alive` | `dead` |
+| shell-only foreground, `agent get` reports `unknown` | `unreadable` | `dead` |
+| real foreground process, `agent get` reports `working` | `alive` | `alive` |
+| real foreground process, `agent get` reports `unknown` | `unreadable` | `unreadable` |
+| no registration at all (restore-husk shape) | `dead` | `dead` |
+| pane id absent | `missing` | `missing` |
+
+The two live panes of the running fleet were read only, and both still classified `alive` after the change, with `pane process-info` reporting `{"name":"node","argv0":"pi"}` as their foreground process.
+
+Two Herdr 0.8.2-preview CLI facts were established in the same session and are load-bearing for fixtures and for any external repair attempt:
+
+- `pane report-agent` and `pane release-agent` naming an integration's own source id (`--source herdr:pi`) exit 0 and change nothing; a neutral source id registers normally.
+- `pane report-agent --seq <n>` is silently ignored when the sequence does not advance the pane's own `state_change_seq`; omitting `--seq` registers reliably.
+
+The portable regression for the classifier is `tests/fm-backend-herdr.test.sh`, which drives it against real process groups with no Herdr installed.
 
 ### Away-mode transport
 

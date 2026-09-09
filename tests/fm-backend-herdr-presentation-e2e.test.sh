@@ -1442,6 +1442,23 @@ assert_no_projection_mutation_since "$START" "agent-free duplicate-token recover
 lab workspace get "$DUP1_WSID" >/dev/null 2>&1 || fail "duplicate-token recovery removed the first quarantined workspace"
 lab workspace get "$DUP2_WSID" >/dev/null 2>&1 || fail "duplicate-token recovery removed the second quarantined workspace"
 
+# A live agent is a registration AND a process: the classifier cross-checks the
+# pane's foreground processes, so this risk fixture holds the pane with a
+# stand-in process before registering (bin/backends/herdr.sh; no agent, model,
+# or token is spent). This suite drives every Herdr call through its own
+# logging `lab` wrapper, so the hold is written here rather than through the
+# shared fixture helper.
+lab pane run "$DUP1_PANE" sleep 900 >/dev/null \
+  || fail "could not start the duplicate-live-agent risk fixture's foreground process"
+DUP1_HELD=0
+for _ in $(seq 1 50); do
+  case "$(lab pane process-info --pane "$DUP1_PANE" | jq -r '.result.process_info.foreground_processes[]?.name')" in
+    *sleep*) DUP1_HELD=1; break ;;
+  esac
+  sleep 0.2
+done
+[ "$DUP1_HELD" = 1 ] \
+  || fail "herdr never reported the duplicate-live-agent risk fixture's foreground process"
 lab pane report-agent "$DUP1_PANE" --source fm-projection-e2e --agent test-agent --state idle >/dev/null \
   || fail "could not register the duplicate-live-agent risk fixture"
 START=$(log_line_count)

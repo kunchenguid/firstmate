@@ -3336,6 +3336,10 @@ EOF
 // continue automatically - auto-retries, auto-compaction retries, tool
 // loops, and queued continuations all keep the run un-settled, and a settle
 // that raced another extension's fresh run keeps state busy via isIdle().
+// A ctx captured before a session replacement or reload THROWS from
+// isIdle(), so that call is guarded: an unusable verdict records "unknown"
+// rather than returning, because returning would leave the record frozen at
+// busy for the rest of the incarnation with no later event able to clear it.
 // "turn_end" fires at every inner turn boundary (one LLM response plus its
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
@@ -3350,7 +3354,15 @@ const busyEvent = (state: string, event: string) =>
 export default function (pi: any) {
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_settled", (_event: any, ctx: any) => {
-    if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+    if (ctx && typeof ctx.isIdle === "function") {
+      let settled = false;
+      try {
+        settled = !!ctx.isIdle();
+      } catch (_err) {
+        return busyEvent("unknown", "agent-settled-ctx-stale");
+      }
+      if (!settled) return;
+    }
     return busyEvent("idle", "agent-settled");
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
