@@ -123,6 +123,55 @@ test_broken_secondmate_parent_chain_names_the_home() {
   pass "a broken secondmate parent chain names the home, not the project"
 }
 
+test_missing_recorded_parent_home_is_named() {
+  local dir out depth parent record_home
+  for depth in 1 2; do
+    dir=$(make_case "missing-parent-$depth")
+    fm_git_init_commit "$dir/project"
+    parent="$dir/absent parent"
+    record_home="$dir/home"
+    if [ "$depth" -eq 2 ]; then
+      record_home="$dir/intermediate"
+      mkdir -p "$record_home"
+      printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
+        "$record_home" > "$dir/home/.fm-secondmate-parent"
+    fi
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
+      "$parent" > "$record_home/.fm-secondmate-parent"
+
+    out=$(resolve_lock "$dir/home" "$dir/elsewhere" "$dir/project")
+    expect_code 1 "$?" "a missing recorded parent home should still refuse"
+    assert_contains "$out" "cannot resolve the recorded parent firstmate home: $parent" \
+      "the refusal did not name the missing recorded parent home at depth $depth"
+    assert_not_contains "$out" "$dir/home" \
+      "the refusal named the existing child home instead of the missing parent"
+    assert_absent "$parent" "the refusal created the missing parent home"
+
+    out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/elsewhere" \
+      bash -c '. "$1"; fm_firstmate_root_home "$FM_HOME"' _ "$LIB" 2>&1)
+    expect_code 1 "$?" "root resolution without diagnostics should still refuse"
+    [ -z "$out" ] || fail "root resolution without diagnostics should stay silent: $out"
+
+    mkdir -p "$parent"
+    out=$(resolve_lock "$dir/home" "$dir/elsewhere" "$dir/project")
+    expect_code 1 "$?" "the resolved parent with no state directory should still refuse"
+    assert_contains "$out" "the root firstmate home has no state directory: $parent/state" \
+      "the refusal did not advance to the parent's missing state directory"
+    assert_absent "$parent/state" "the refusal created the parent's missing state directory"
+
+    mkdir -p "$parent/state"
+    out=$(resolve_lock "$dir/home" "$dir/elsewhere" "$dir/project")
+    expect_code 0 "$?" "the parent chain with a root state directory should resolve"
+    case "$out" in
+      "$parent/state/.treehouse-project-"*.lock) ;;
+      *) fail "the resolved lock path did not name the parent root: $out" ;;
+    esac
+    assert_not_contains "$out" "fm_treehouse_project_lock_path:" \
+      "the resolved parent chain emitted a refusal diagnostic"
+    pass "a missing recorded parent at depth $depth is named until its root state exists"
+  done
+}
+
 test_unenterable_absolute_origin_is_named() {
   local dir out
   dir=$(make_case origin-absolute)
@@ -245,18 +294,18 @@ test_spawn_refusal_carries_the_named_cause() {
   fm_test_spawn_home "$home"
   fm_test_spawn_brief "$home" lock-naming-e2e
   fm_git_init_commit "$dir/project"
-  fakebin=$(make_spawn_fakebin "$dir")
+  fakebin=$(make_spawn_fakebin "$dir" orca)
   # The divergence that produced the original defect: the state root points away
   # from the home, so the library creates that directory and not the home's.
   mkdir -p "$dir/state-elsewhere"
   rmdir "$home/state" 2>/dev/null || rm -rf "$home/state"
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$dir/user-home" \
-    CLAUDE_CONFIG_DIR='' \
+    CLAUDE_CONFIG_DIR='' FM_BACKEND=orca \
     FM_STATE_OVERRIDE="$dir/state-elsewhere" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$dir/pane" TMUX="${TMUX:-fake,1,0}" \
     PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" lock-naming-e2e "$dir/project" --scout 2>&1)
+    "$ROOT/bin/fm-spawn.sh" lock-naming-e2e "$dir/project" --scout --backend tmux 2>&1)
   status=$?
   expect_code 1 "$status" "the spawn should refuse when the home has no state directory"$'\n'"$out"
   assert_contains "$out" "the root firstmate home has no state directory: $home/state" \
@@ -269,6 +318,7 @@ test_spawn_refusal_carries_the_named_cause() {
 test_missing_project_directory_is_named
 test_unresolvable_root_home_is_named
 test_broken_secondmate_parent_chain_names_the_home
+test_missing_recorded_parent_home_is_named
 test_unenterable_absolute_origin_is_named
 test_unenterable_relative_origin_is_named
 test_originless_non_git_project_is_named

@@ -1162,7 +1162,10 @@ fm_firstmate_root_home() {
       remote) break ;;
       *) return 1 ;;
     esac
-    parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 1
+    parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || {
+      [ "${2:-}" != --print-unresolved-parent ] || printf '%s\n' "$FM_SECONDMATE_PARENT_HOME"
+      return 1
+    }
     case "$seen" in *"|$parent|"*) return 1 ;; esac
     seen="$seen$home|"
     home=$parent
@@ -1212,8 +1215,12 @@ fm_treehouse_project_lock_path() {  # <project-dir>
     _fm_treehouse_lock_named "project directory does not exist" "$project"
     return 1
   }
-  root=$(fm_firstmate_root_home "$FM_HOME") || {
-    _fm_treehouse_lock_named "cannot resolve the root firstmate home from FM_HOME" "$FM_HOME"
+  root=$(fm_firstmate_root_home "$FM_HOME" --print-unresolved-parent) || {
+    if [ -n "$root" ]; then
+      _fm_treehouse_lock_named "cannot resolve the recorded parent firstmate home" "$root"
+    else
+      _fm_treehouse_lock_named "cannot resolve the root firstmate home from FM_HOME" "$FM_HOME"
+    fi
     return 1
   }
   origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
