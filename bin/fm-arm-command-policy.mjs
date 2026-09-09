@@ -912,9 +912,11 @@ export function isBlessedWatcherArmCommand(command, root, home) {
   if (!command || !root || !home) return false;
   const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
+  const finalNode = analysis.nodeInfos.at(-1);
   if (analysis.error || !blessedProgram(analysis, context)) return false;
-  if (analysis.nodeInfos.at(-1)?.protectedKind !== "arm") return false;
-  if (analysis.nodeInfos.at(-1)?.position.wrappers.length !== 1 || analysis.nodeInfos.at(-1)?.position.wrappers[0] !== "exec") return false;
+  if (finalNode?.protectedKind !== "arm") return false;
+  if (finalNode?.position.wrappers.length !== 1 || finalNode.position.wrappers[0] !== "exec") return false;
+  if (finalNode.position.words.length !== finalNode.position.index + 1) return false;
 
   const setup = analysis.nodeInfos.slice(0, -1).map((info) => setupKind(info, context));
   if (setup.some((kind) => kind !== "source" && kind !== "test-source")) return false;
@@ -923,7 +925,7 @@ export function isBlessedWatcherArmCommand(command, root, home) {
     if (setup[i + 1] !== "source" || analysis.program.separators[i] !== "&&") return false;
     i += 1;
   }
-  return resolvedCommandPath(analysis.nodeInfos.at(-1)?.position.command?.value, context.root) === path.join(context.root, "bin/fm-watch-arm.sh");
+  return resolvedCommandPath(finalNode.position.command?.value, context.root) === path.join(context.root, "bin/fm-watch-arm.sh");
 }
 
 function decision(command, root, home) {
