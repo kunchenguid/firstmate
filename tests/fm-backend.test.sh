@@ -811,17 +811,12 @@ SH
   printf '%s\n' "$fb"
 }
 
-# A private FM_HOME for one case, with its state/ directory already created.
-#
-# fm-spawn.sh resolves FM_HOME from FM_ROOT_OVERRIDE when FM_HOME is unset, so a
-# case that overrides only STATE/DATA/CONFIG still leaves FM_HOME on this
-# repository checkout. The shared Treehouse project lock is deliberately
-# anchored in the ROOT home's state/ directory (fm_treehouse_project_lock_path
-# in bin/fm-wake-lib.sh), which it requires but never creates - and the
-# checkout's state/ is gitignored, so whether it exists depends on which
-# unrelated test script wrote into the working copy first. A case that borrows
-# the checkout therefore reports on its neighbours instead of its subject. Every
-# case that drives fm-spawn.sh here owns a home of its own instead.
+# Successful spawn fixtures need a private FM_HOME with an existing state/ even
+# when FM_STATE_OVERRIDE points elsewhere; otherwise an unset FM_HOME leaves the
+# shared Treehouse lock dependent on the checkout's state/.
+# See fm_treehouse_project_lock_path in bin/fm-wake-lib.sh for lock ownership.
+# The three test_spawn_refuses_* cases deliberately clear every override to
+# exercise default-home resolution and do not use this helper.
 make_case_home() {  # <label> -> echoes a private FM_HOME whose state/ exists
   local home="$TMP_ROOT/case-home-$1"
   mkdir -p "$home/state"
