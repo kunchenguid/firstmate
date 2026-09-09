@@ -105,8 +105,11 @@ Get "https://api.github.com/": proxyconnect tcp: dial tcp 192.0.2.1:9: connect: 
 ```
 
 The status line is an RFC 9112 construct rather than a gh string, so it is the primary signal.
-Only a 401 or 403 in it means GitHub refused the active credential.
-A 2xx after a failed `gh auth status` means GitHub accepted the active credential and the failure belongs to another configured host or account, per the section above, so the probe reports it as `GH_AUTH_UNKNOWN` naming that entry rather than as a rejection.
+Only a 401, or a 403 that is not a rate limit, in it means GitHub refused the active credential.
+GitHub also answers 403 to a valid credential whose primary rate limit is spent, marked by an `x-ratelimit-remaining: 0` header, and 429 for secondary throttling, so those two are reported as `GH_AUTH_UNKNOWN` with a rate-limit detail rather than as a rejection.
+A 2xx after a failed `gh auth status` means GitHub accepted the active credential, so the probe reports it as `GH_AUTH_UNKNOWN` rather than as a rejection.
+When gh's failure line names a host other than github.com, the line says the failure belongs to another host or account, per the section above, and names it.
+When gh's failure line names github.com itself, or names no host, the line says only that `gh auth status` still failed and quotes it, because there is no other entry to point at.
 Any other status is likewise unknown, because it neither confirmed nor refused the credential.
 It is not sufficient alone: with no credential configured, gh attempts no request and prints no status line, yet this case does need `gh auth login`.
 

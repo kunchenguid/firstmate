@@ -1166,7 +1166,7 @@ ROWS
 # reproduces gh 2.96.0's observed behavior in that condition.
 # Writes a fake gh reproducing gh 2.96.0's observed behavior in one condition.
 # The real gh needs credentials and a network CI does not have.
-write_fake_gh() {  # <fakebin> <healthy|rejected|other-host-failed|unreachable|no-credential|hang>
+write_fake_gh() {  # <fakebin> <healthy|rejected|rate-limited|throttled|other-host-failed|own-host-failed|unreachable|no-credential|hang>
   local fakebin=$1 mode=$2
   case "$mode" in
     healthy)
@@ -1186,6 +1186,51 @@ if [ "${1:-}" = api ]; then
 fi
 printf '%s\n' '  X Failed to log in to github.com account octocat (keyring)' >&2
 printf '%s\n' '  - The token in keyring is invalid.' >&2
+exit 1
+SH
+      ;;
+    # GitHub answers 403 to a VALID token whose primary rate limit is spent, and
+    # marks it with x-ratelimit-remaining: 0. `auth status` validates with the
+    # same API, so it renders the same "invalid" verdict as a real rejection.
+    rate-limited)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'HTTP/2.0 403 Forbidden' 'X-Ratelimit-Limit: 5000' 'X-Ratelimit-Remaining: 0' '' '{"message":"API rate limit exceeded for user ID 1."}'
+  exit 1
+fi
+printf '%s\n' '  X Failed to log in to github.com account octocat (keyring)' >&2
+printf '%s\n' '  - The token in keyring is invalid.' >&2
+exit 1
+SH
+      ;;
+    # Secondary rate limiting answers 429 with no ratelimit-remaining header.
+    throttled)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'HTTP/2.0 429 Too Many Requests' 'Retry-After: 60' '' '{"message":"You have exceeded a secondary rate limit."}'
+  exit 1
+fi
+printf '%s\n' '  X Failed to log in to github.com account octocat (keyring)' >&2
+printf '%s\n' '  - The token in keyring is invalid.' >&2
+exit 1
+SH
+      ;;
+    # `auth status` failed on github.com ITSELF (a fault that cleared before
+    # the follow-up, or a validation failure short of a refusal), yet `api`
+    # completes with 200. There is no other host to blame here.
+    own-host-failed)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'HTTP/2.0 200 OK' 'X-Ratelimit-Limit: 5000' '' '{"current_user_url":"https://api.github.com/user"}'
+  exit 0
+fi
+printf '%s\n' 'github.com' \
+  '  X Failed to log in to github.com account octocat (keyring)' \
+  '  - Active account: true' \
+  '  - The token in keyring is invalid.' >&2
 exit 1
 SH
       ;;
@@ -1299,6 +1344,32 @@ test_gh_auth_probe_separates_rejection_from_an_unreachable_check() {
     "the unknown line must name the host gh auth status actually failed on"
   assert_not_contains "$out" "gho_fake" \
     "the excerpt must never repeat a token from gh auth status output"
+
+  # When gh's failure line names github.com itself, there is no other host to
+  # blame, and saying so would send the operator to log out of github.com.
+  out=$(gh_auth_probe_case "$dir/own-host" own-host-failed)
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "a credential github.com accepted with 200 is not a rejection whatever gh auth status said"
+  assert_contains "$out" "GH_AUTH_UNKNOWN: github.com accepted the credential but gh auth status still failed" \
+    "a failure gh pins on github.com itself gets the neutral wording"
+  assert_not_contains "$out" "another host" \
+    "the line must not blame another host when the excerpt names github.com"
+  assert_contains "$out" "github.com account octocat" \
+    "the neutral line still quotes what gh auth status said"
+
+  # A spent rate limit is a 403 for a credential GitHub has NOT refused; the
+  # x-ratelimit-remaining: 0 header is what tells it apart from a rejection,
+  # and a 429 is throttling by definition.
+  out=$(gh_auth_probe_case "$dir/rate-limited" rate-limited)
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "a rate-limited credential must never be reported as needing gh auth login"
+  assert_contains "$out" "GH_AUTH_UNKNOWN: github.com is rate-limiting this credential" \
+    "a 403 carrying x-ratelimit-remaining: 0 is throttling, reported as unconfirmed"
+  out=$(gh_auth_probe_case "$dir/throttled" throttled)
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "a 429 must never be reported as needing gh auth login"
+  assert_contains "$out" "GH_AUTH_UNKNOWN: github.com is rate-limiting this credential" \
+    "a 429 is throttling, reported as unconfirmed"
 
   # The regression itself: this used to print NEEDS_GH_AUTH and send the
   # operator to re-authenticate a credential nothing had rejected.
