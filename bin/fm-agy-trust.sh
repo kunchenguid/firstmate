@@ -119,7 +119,11 @@ while :; do
     break
   fi
   owner=$(lock_owner)
-  if [ -n "$owner" ] && ! lock_stale "$owner"; then
+  # An ownerless lock is a contender between its mkdir and its owner write,
+  # never a stale lock: wait it out rather than removing a live contender's
+  # directory out from under it. Only a present-but-stale owner authorizes
+  # removal below.
+  if [ -z "$owner" ] || ! lock_stale "$owner"; then
     lock_attempt=$((lock_attempt + 1))
     [ "$lock_attempt" -lt 100 ] || refuse "timed out waiting for '$LOCK'"
     sleep 0.1

@@ -402,6 +402,41 @@ test_agy_stale_trust_lock_is_broken() {
   pass "agy breaks a dead-owner trust lock instead of wedging behind it"
 }
 
+test_agy_live_trust_lock_is_never_broken() {
+  local dir proj wt home store out holder
+  dir="$TMP_ROOT/live-lock"
+  proj="$dir/project"
+  wt="$dir/wt"
+  home="$dir/home"
+  mkdir -p "$home"
+  fm_git_worktree "$proj" "$wt" "wt-live"
+  store="$home/.gemini/antigravity-cli"
+  mkdir -p "$store"
+  # A live holder occupies the lock for a few seconds; the helper must wait
+  # for its release rather than removing it, even across the mkdir-to-owner
+  # write window a racing contender can observe.
+  (
+    mkdir "$store/.fm-trust.lock" 2>/dev/null || exit 0
+    printf '%s:%s\n' "$$" "$(date +%s)" > "$store/.fm-trust.lock/owner"
+    sleep 4
+    rm -f "$store/.fm-trust.lock/owner"
+    rmdir "$store/.fm-trust.lock" 2>/dev/null || true
+  ) &
+  holder=$!
+  sleep 1
+  out=$(HOME="$home" "$ROOT/bin/fm-agy-trust.sh" "$wt" "$proj" 2>&1) || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "trust behind a live lock refused: $out"
+  }
+  wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "trusted: " "live-lock trust lacked its registration line"
+  jq -e --arg wt "$wt" '.trustedWorkspaces | index($wt)' "$store/settings.json" >/dev/null \
+    || fail "trust behind a live lock lost the worktree entry"
+  assert_absent "$store/.fm-trust.lock" "the live lock was left behind"
+  pass "agy waits out a live trust lock instead of removing it"
+}
+
 test_agy_refused_teardown_preserves_wiring() {
   local rec id=agy-refuse-z11 mode out rc hooks state
   for mode in created merged; do
@@ -448,6 +483,7 @@ test_agy_tracked_hooks_refused
 test_agy_merge_retains_worker_edits
 test_agy_concurrent_trust
 test_agy_stale_trust_lock_is_broken
+test_agy_live_trust_lock_is_never_broken
 
 test_agy_launch_carries_brief_with_native_model_effort
 test_agy_effort_xhigh_is_recorded_but_omitted
