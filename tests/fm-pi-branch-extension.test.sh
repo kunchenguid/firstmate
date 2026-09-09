@@ -54,6 +54,7 @@ install_pi_branch_extension_fixture() {
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -1244,8 +1245,8 @@ test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home }; })()`);
-const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus }; })()`);
+const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus } = globalThis.__t;
 import { readFileSync, writeFileSync } from "node:fs";
 
 const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
@@ -1331,7 +1332,18 @@ if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcom
 }
 
 // Only the sequence-bound acknowledgement closes it.
-const processed = mainTools.find((tool) => tool.name === "fm_branch_processed");
+const nativeTools = new Map();
+const messageTypes = new Set();
+bus.emit("firstmate:native-tools", {
+  register: (tool) => nativeTools.set(tool.name, tool),
+  allowMessageType: (type) => messageTypes.add(type),
+});
+if ([...nativeTools.keys()].sort().join(",") !== "fm_branch_outcomes,fm_branch_processed") throw new Error("native discovery exposed unrelated tools");
+for (const tool of mainTools) {
+  if (nativeTools.get(tool.name)?.execute !== tool.execute) throw new Error("native controls lost the original guards");
+}
+if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-merge,fm-branch-process") throw new Error("operational message allowlist changed");
+const processed = nativeTools.get("fm_branch_processed");
 if (!processed) throw new Error("main did not receive its acknowledgement tool");
 const routineAck = await processed.execute("ack-routine", { through: routineSeq }, undefined, undefined, {});
 if (!routineAck.isError || !routineAck.content.some((item) => item.type === "text" && item.text.includes("not an unprocessed captain outcome"))) {
@@ -2630,6 +2642,16 @@ if (cleared.options.model?.id === "cheap-1") {
 if (cleared.options.model?.provider !== "anthropic" || cleared.options.model?.id !== "main-model") {
   throw new Error(`clearing the pin did not return the branch to main's model: ${JSON.stringify(cleared.options.model)}`);
 }
+// A native main must use an explicit independent ordinary-Pi branch.
+registryModels.push({ provider: "openai-codex", id: "gpt-6-astra" });
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx({ model: { provider: "codex-native", id: "gpt-6-astra" } }));
+dispatch("signal: native main ordinary branch");
+await settle(() => (globalThis.__fmSessions ?? []).length === 6, "native-main branch build");
+const nativeBranch = globalThis.__fmSessions[5].options.model;
+if (nativeBranch?.provider !== "openai-codex" || nativeBranch?.id !== "gpt-6-astra") {
+  throw new Error(`native main inherited an unsafe branch runtime: ${JSON.stringify(nativeBranch)}`);
+}
 process.exit(0);
 EOF
   status=$?
@@ -2839,6 +2861,52 @@ if (
 ) {
   throw new Error(`post-clear resolution failure was not reported honestly: ${JSON.stringify(clearFailureNotices)}`);
 }
+
+// Under a codex-native main, Follow main reports the ordinary openai-codex
+// model the next build actually runs, and the picker never offers the main
+// native provider itself.
+registryModels.push({ provider: "codex-native", id: "gpt-6-astra" }, { provider: "openai-codex", id: "gpt-6-astra" });
+const nativeCtx = makeCtx({ model: { provider: "codex-native", id: "gpt-6-astra" } });
+const nativePromptCount = uiPrompts.length;
+const nativeNoticeCount = notices.length;
+uiSelections.push("Follow main (codex-native/gpt-6-astra)");
+await command.handler("", nativeCtx);
+const nativeOffer = uiPrompts[nativePromptCount];
+if (nativeOffer.options[0] !== "Follow main (codex-native/gpt-6-astra)" || nativeOffer.options.includes("codex-native/gpt-6-astra")) {
+  throw new Error(`the picker must offer following a native main without offering its native provider: ${JSON.stringify(nativeOffer.options)}`);
+}
+const nativeNotices = notices.slice(nativeNoticeCount);
+if (nativeNotices.length !== 1 || nativeNotices[0].type !== "info" || !nativeNotices[0].message.includes("openai-codex/gpt-6-astra")) {
+  throw new Error(`following a native main did not report the ordinary Pi model the build uses: ${JSON.stringify(nativeNotices)}`);
+}
+dispatch("signal: native follow");
+await settle(() => (globalThis.__fmSessions ?? []).length === 6, "native-main follow build");
+const nativeFollowed = globalThis.__fmSessions[5].options.model;
+if (nativeFollowed?.provider !== "openai-codex" || nativeFollowed?.id !== "gpt-6-astra") {
+  throw new Error(`the build did not run the model the picker reported: ${JSON.stringify(nativeFollowed)}`);
+}
+
+// When that ordinary model is unavailable, the picker reports the refusal the
+// next build enforces instead of claiming the branch keeps a recorded model.
+registryModels.splice(registryModels.findIndex((model) => model.provider === "openai-codex" && model.id === "gpt-6-astra"), 1);
+const refusalNoticeCount = notices.length;
+uiSelections.push("Follow main (codex-native/gpt-6-astra)");
+await command.handler("", nativeCtx);
+const refusalNotices = notices.slice(refusalNoticeCount);
+if (
+  refusalNotices.length !== 1 ||
+  refusalNotices[0].type !== "warning" ||
+  !refusalNotices[0].message.includes("refuses to build") ||
+  refusalNotices[0].message.includes("keeps the model its own session recorded")
+) {
+  throw new Error(`following an unavailable native main did not report the build refusal: ${JSON.stringify(refusalNotices)}`);
+}
+const refusedOffer = dispatch("signal: native follow refused");
+const refusal = await refusedOffer.settlement.then(() => null, (error) => error);
+if (!(refusal instanceof Error) || !refusal.message.includes("refuses to build")) {
+  throw new Error(`the build did not refuse as the picker reported: ${String(refusal)}`);
+}
+if (globalThis.__fmSessions.length !== 6) throw new Error("a refused native follow still built a branch");
 process.exit(0);
 EOF
   status=$?
@@ -3376,6 +3444,18 @@ const unparseable = globalThis.__fmSessions[0].options.model;
 if (unparseable?.provider !== "anthropic" || unparseable?.id !== "main-model") {
   throw new Error(`an unparseable pin must be treated as no pin and follow main: ${JSON.stringify(unparseable)}`);
 }
+// Even a registered native provider cannot be selected by the independent
+// supervision session: its persistent native thread belongs to main.
+registryModels.push({ provider: "codex-native", id: "gpt-6-astra" });
+writeFileSync(`${home}/config/supervision-branch-model`, "codex-native/gpt-6-astra\n");
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
+const nativeOffer = dispatch("signal: native branch pin refused");
+const nativeFailure = await nativeOffer.settlement.then(() => null, (error) => error);
+if (!(nativeFailure instanceof Error) || !nativeFailure.message.includes("ordinary Pi provider")) {
+  throw new Error(`native branch pin was not explicitly refused: ${String(nativeFailure)}`);
+}
+if (globalThis.__fmSessions.length !== 1) throw new Error("native pin built a shared native branch");
 process.exit(0);
 EOF
   status=$?
@@ -3726,6 +3806,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   home="$TMP_ROOT/dispatch-classify-home"
   mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
@@ -4154,6 +4235,7 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$fixture/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$fixture/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"

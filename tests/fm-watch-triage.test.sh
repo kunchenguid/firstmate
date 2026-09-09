@@ -3126,6 +3126,42 @@ test_busy_pane_turn_end_touch_resets_age() {
   pass "touching a busy worker's completed-turn marker resets the age and prevents an old-age escalation"
 }
 
+test_busy_pane_native_progress_resets_age() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-native-progress-resets-age); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-reset"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-reset.meta"
+  record_pi_busy "$state" busy-reset
+  printf 'working: setup complete\n' > "$state/busy-reset.status"
+  sig=$(seen_sig "$state/busy-reset.status"); printf '%s' "$sig" > "$state/.seen-busy-reset_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A wedge is already mid-escalation, as if several over-age polls already ran.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '1\n' > "$state/.wedge-escalations-$key"
+  # The worker has progressed without completing its long native turn.
+  touch "$state/busy-reset.progress"
+  touch -t 200001010000 "$state/busy-reset.meta"
+  touch -t 200001010000 "$state/busy-reset.turn-ended"
+  prime_turnend_seen "$state/busy-reset.turn-ended"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a fresh native activity on a busy pane was still escalated: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a fresh native activity on a busy pane printed a wake reason"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a fresh native activity did not clear the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a fresh native activity did not clear the escalation counter"
+  reap "$pid"
+  pass "native progress resets busy age without a completed turn or notification"
+}
+
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   local dir state fakebin out capture_file window key pane_hash sig pid n
   dir=$(make_case busy-turn-age-demand-inspect); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4431,6 +4467,7 @@ test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
+test_busy_pane_native_progress_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated

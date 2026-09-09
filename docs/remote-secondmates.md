@@ -52,6 +52,7 @@ The Nix and package-manager order after version-manager discovery is `~/.nix-pro
 Exact repeated entries are omitted.
 For the three Nix locations, a final `bin` symlink is resolved to its physical directory, while a path reached through symlinked ancestors remains in its documented position.
 Other final-component symlink directories, including `~/.local/bin`, are excluded.
+Because `~/.local/bin` precedes the package-manager directories, a stale self-updated `herdr` there shadows the one the account's login shell may resolve; the Herdr adapter steps around a client the running server refuses and `fm-remote-doctor.sh` names which client it selected ([`herdr-backend.md`](herdr-backend.md#client-selection)).
 The entrypoint resolves `git` only from the operator portion before prepending `<remote-root>/bin` for the authorized child.
 A checkout-local `bin/git` therefore cannot authorize an untracked command, and a host with no operator `git` receives an install-or-wrapper diagnostic before command execution.
 

@@ -311,11 +311,7 @@ pass "concurrent handoffs serialize staging through confirmed cleanup"
 # conservative procedure tasks-axi prints.
 write_backlog '- [ ] stale-lock-item - remote stale lock recovery (repo: alpha)'
 printf '999999:abandoned:0:1\n' > "$REMOTE/data/backlog.md.lock"
-if [ "$(uname 2>/dev/null)" = Darwin ]; then
-  touch -t 202001010000 "$REMOTE/data/backlog.md.lock"
-else
-  touch -d '2020-01-01 00:00:00' "$REMOTE/data/backlog.md.lock"
-fi
+touch -t 202001010000 "$REMOTE/data/backlog.md.lock"
 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios stale-lock-item >/dev/null \
   || fail "host-local stale lock recovery did not retry receipt"
 assert_grep 'stale-lock-item' "$REMOTE/data/backlog.md" "stale-lock receipt lost the item"

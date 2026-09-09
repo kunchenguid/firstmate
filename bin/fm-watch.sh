@@ -216,17 +216,17 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
-# may go with no completed turn: once its task's
-# state/<id>.turn-ended marker (or, before any turn has completed, the task's
-# spawn record) is this old, busy_turn_over_age routes the pane through
+# may go without a completed turn or explicit native-harness progress (the
+# marker-selection contract is in busy_turn_over_age below). Once this bound
+# is crossed, busy_turn_over_age routes the pane through
 # busy_turn_bound_check, which hands a crossed bound to the same
 # STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
 # non-busy stale - so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only, never an
 # automatic interrupt, signal, or restart - unless the crew declared the wait
-# itself, which takes the long pause cadence instead. A completed turn touches
-# turn-ended and resets the age. Set generously above any legitimate interval
-# between completed turns, including long tool calls, builds, or test runs.
+# itself, which takes the long pause cadence instead. Set generously above
+# any legitimate interval without observable progress, including silent long
+# tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A local secondmate's foreign queue is checked on every poll, but only after this
 # bounded interval with no drain progress can it produce a parent notification.
@@ -897,16 +897,17 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# busy_turn_over_age: 0 iff <task>'s latest completed-turn marker is at least
-# BUSY_TURN_MAX_SECS old. Ages the per-task turn-ended marker, the harness-neutral
-# signal every verified harness's turn-end hook touches; before any turn has
-# completed, ages the task's spawn record instead so a fresh task still gets a
-# bound. The caller checks that the pane is busy and routes a crossed bound
-# through busy_turn_bound_check, never anything that touches the worker itself.
+# busy_turn_over_age: 0 iff the last completed turn or explicit native-harness
+# progress is at least BUSY_TURN_MAX_SECS old. Progress is actual observed model
+# or tool activity, never a timer or a busy footer. It does not emit a wake or
+# change semantic busy state. Before either marker exists, age the spawn record.
+# The caller checks busy state and routes a crossed bound through inspection.
 busy_turn_over_age() {  # <task>
-  local task=$1 f
+  local task=$1 f progress
   f="$STATE/$task.turn-ended"
   [ -e "$f" ] || f="$STATE/$task.meta"
+  progress="$STATE/$task.progress"
+  if [ -f "$progress" ] && [ "$progress" -nt "$f" ]; then f="$progress"; fi
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 

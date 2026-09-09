@@ -1124,6 +1124,12 @@ unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","
 agy high effort is accepted^{"rules":[{"when":"agy coding","use":{"harness":"agy","model":"gemini-3.6-flash-high","effort":"high"}}]}^empty^
 unsupported agy xhigh effort is flagged^{"rules":[{"when":"agy coding","use":{"harness":"agy","model":"gemini-3.6-flash-high","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: agy:xhigh
 unsupported agy max effort is flagged^{"rules":[{"when":"agy coding","use":{"harness":"agy","model":"gemini-3.6-flash-high","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: agy:max
+native pi ultra is accepted^{"rules":[],"default":{"harness":"pi","model":"codex-native/gpt-6-astra","effort":"ultra"}}^empty^
+native signed pi ultra is accepted^{"rules":[{"when":"native reasoning","use":{"harness":"pi-signed","model":"codex-native/gpt-6-astra","effort":"ultra"}}]}^empty^
+ordinary pi ultra is refused^{"default":{"harness":"pi","model":"openai-codex/gpt-6-astra","effort":"ultra"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: pi:ultra
+missing native model ultra is refused^{"default":{"harness":"pi","effort":"ultra"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: pi:ultra
+empty native model ultra is refused^{"default":{"harness":"pi","model":"codex-native/","effort":"ultra"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: pi:ultra
+codex harness ultra is refused^{"default":{"harness":"codex","model":"codex-native/gpt-6-astra","effort":"ultra"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:ultra
 pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 muse shared efforts are accepted^{"rules":[{"when":"muse low","use":{"harness":"muse","effort":"low"}},{"when":"muse medium","use":{"harness":"muse","effort":"medium"}},{"when":"muse high","use":{"harness":"muse","effort":"high"}},{"when":"muse xhigh","use":{"harness":"muse","effort":"xhigh"}},{"when":"muse max","use":{"harness":"muse","effort":"max"}}]}^empty^

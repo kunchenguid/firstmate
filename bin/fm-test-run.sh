@@ -327,7 +327,7 @@ family_for_basename() {
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-branch-responsiveness-live-e2e.test.sh|\
-    fm-pi-primary-live-e2e.test.sh|fm-omp-primary-live-e2e.test.sh|\
+    fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|fm-omp-primary-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
@@ -1289,7 +1289,7 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
-    .pi/extensions/lib/fm-branch-dispatch.ts)
+    .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)
       # The portable suites that actually load these files, named one by one.
       # Left unmapped, a Pi extension library resolves through the reference
       # scan, which widens to each referencing suite's WHOLE family - and

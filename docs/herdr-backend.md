@@ -33,6 +33,16 @@ The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and
 Those script headers own release assets, checksums, download bounds, and post-install gates.
 Real harness credential tests remain opt-in rather than part of default CI.
 
+## Client selection
+
+Each operation routed through the adapter's session-scoped CLI helper starts with the first `herdr` on `PATH` unless that session has already selected another client.
+A host can carry more than one client, such as a self-updated copy in `~/.local/bin` beside a package-managed one, and a client older than the running server can receive error code `protocol_mismatch` on operational commands.
+On that refusal the adapter reads `status --json --session <name>` from each distinct `herdr` on `PATH` in order, adopts the first one the running server reports compatible, and retries the command on it once.
+The choice is reused only for later calls to the same session in that process; another session starts with the `PATH` default, and a later mismatch forces selection again so a changed server can return to that default.
+Ordinary adapter operations make no selection read on the happy path, status that supplies neither `.server.compatible` nor both client and server protocols leaves compatibility unknown, and no other failure triggers a reselection.
+`fm-remote-doctor.sh` reports the client selected for the remote session.
+Removing or upgrading the shadowing client is the durable fix; `bin/backends/herdr.sh` "client selection" owns the mechanics.
+
 ## Watching and task containers
 
 The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
