@@ -63,9 +63,8 @@
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
-# unresolved-decision completion gate verifies its captain-held inventory, except
-# for the explicit EMPTY classification below: no report, no task commits, and a
-# clean isolated copy at an ancestor of the freshly resolved upstream default.
+# unresolved-decision completion gate verifies its captain-held inventory, subject
+# to the recovery exceptions owned by docs/configuration.md "Runtime backend".
 # Before destructive cleanup, teardown validates task check artifacts as
 # ordinary single-link files on the state device. It refuses and preserves
 # task state when that proof fails; otherwise it removes the task's check,
@@ -125,7 +124,8 @@
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
-#   --legacy-record accepts a task record that predates the spawn_gen field:
+#   --legacy-record accepts an ordinary endpoint-bearing task record that predates
+#   the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
 #   --force the worktree still passes the ordinary landed-work checks. The
@@ -135,6 +135,8 @@
 #   an abandoned attempt left behind never counts as a published incarnation:
 #   the record still reads as a legacy record, so the endpoint gate runs again
 #   and the retry still needs --legacy-record.
+#   Endpoint-less recovery classifications use docs/configuration.md's "Backlog
+#   backend" applicability rule with or without this flag, without legacy stamping.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -895,9 +897,9 @@ else
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
-# This is the first cleanup authorization check. It is metadata-only and must
-# complete before fm-guard, a backend command, file removal, branch deletion,
-# worktree return, registry change, or process termination can run. EMPTY and
+# This is the first cleanup authorization check. Recovery may inspect Git and
+# fetch upstream evidence, but must complete before fm-guard, a backend command,
+# destructive cleanup, or process termination can run. EMPTY and
 # PROVABLY-LANDED may safely bypass endpoint validation only after their own
 # stricter evidence checks succeed.
 WT=$(fm_meta_get "$META" worktree)
@@ -995,6 +997,8 @@ classify_cleanup_recovery() {
       CLEANUP_CLASSIFICATION_REASON="scout copy is not registered to its recorded project"
       return 0
     }
+    # A fresh temporary index exposes edits hidden by assume-unchanged or
+    # skip-worktree without altering the worker's real index or its flags.
     status_script=$(cat <<'SH'
 git --no-optional-locks status --porcelain --ignored --untracked-files=all --ignore-submodules=none || exit 1
 git_dir=$(git rev-parse --absolute-git-dir) || exit 1

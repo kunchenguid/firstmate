@@ -34,7 +34,7 @@ Hard rules, in priority order:
 3. **Never tear down unlanded work.**
    Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
-   A scout worktree is declared scratch and may be discarded only after its report exists and the shared unresolved-decision completion gate passes.
+   Scout scratch disposal follows that guard; [`docs/configuration.md`](docs/configuration.md#runtime-backend-configbackend--fm_backend) owns its reportless recovery exceptions.
 4. **Crewmates never address the captain.**
    All crewmate communication flows through firstmate.
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
