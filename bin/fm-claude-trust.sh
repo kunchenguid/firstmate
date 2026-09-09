@@ -6,7 +6,8 @@
 # Usage: fm-claude-trust.sh <worktree> <project>
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
-# Prints one line naming what it registered; refuses loudly on anything else.
+# Records trust for BOTH paths and prints one line naming them; refuses loudly
+# on anything else.
 #
 # WHY THIS EXISTS. Claude Code gates a folder it has never seen behind an
 # interactive workspace-trust dialog, and --dangerously-skip-permissions does
@@ -19,6 +20,25 @@
 # it ever reads the brief. Registering the trust before launch is the only
 # control that reaches an interactive pane.
 #
+# WHY THE CANONICAL ROOT IS REGISTERED TOO. Claude Code 2.1.266 (read from its
+# bundle on 2026-09-09) runs two trust checks. The plain one walks up from cwd
+# and accepts the worktree's own entry. The second is a backstop shown when the
+# project's .claude/settings.json (or settings.local.json) carries
+# permissions.allow rules or additionalDirectories - the "This folder
+# pre-approves N tool permissions in .claude/settings.json" variant - and it
+# keys trust on the CANONICAL git root: the main checkout a linked worktree's
+# `.git` file points at, which for a firstmate worker is projects/<name>.
+# Registering the worktree alone therefore left such a worker parked on that
+# variant, and a primary checkout is exactly the path the scope test below
+# refuses as a <worktree>. So a spawn records hasTrustDialogAccepted for the
+# canonical root as well, UNCONDITIONALLY rather than only when the project's
+# settings currently carry gated grants: Claude keys the gate on the canonical
+# root regardless of which file supplies the grants, a settings file can gain
+# them between this registration and the launch or on the task branch itself,
+# and the entry is harmless for a project without them. With trust accepted,
+# that dialog's Escape ("No, continue without these permissions") continues the
+# session without the project's allow rules instead of exiting.
+#
 # THE SCOPE TEST IS THE SAFETY PROPERTY, and it is STRUCTURAL rather than a
 # path policy. <worktree> must be a LINKED git worktree - its own git dir,
 # sharing <project>'s common dir - whose top level is exactly the resolved
@@ -27,6 +47,24 @@
 # unrelated repo, a subdirectory of a worktree, a plain directory, and a home
 # directory are each refused. Refusal is a non-zero exit, never a warning and
 # never a silent skip.
+#
+# The canonical-root registration is an ADDITION derived from that validated
+# pair, never a relaxation of it, and it is never the <project> argument taken
+# on its own word. The root is what git itself names as the repository's main
+# working tree for the already-accepted worktree (the first entry of
+# `git worktree list --porcelain`, run inside it), and it is written only after
+# it is proven to be the common-dir OWNER: its own top level is exactly that
+# resolved path, its git dir IS the shared common dir, and it is neither the
+# home nor the Claude config directory. In the ordinary spawn <project> is that
+# root. A LINKED SPAWNING HOME (fm-spawn.sh's header: a firstmate home that is
+# itself a linked worktree of the project repository) is not, and Claude keys
+# its backstop on the repository's main checkout rather than on that home, so
+# the main checkout is what gets registered and the home's own path never is.
+# A repository with no main working tree (bare) has no canonical root and
+# refuses. A caller cannot register an arbitrary primary checkout this way,
+# because the worktree argument must independently pass as a linked worktree
+# of <project>'s repository first and the root then comes from git, not from
+# any argument.
 #
 # The test is deliberately NOT a treehouse or orca path prefix. Treehouse's
 # root is configurable (--root, TREEHOUSE_ROOT, config, and a relative
@@ -45,10 +83,11 @@
 # opt-in guard family (FM_*_LIVE_E2E=1) and record the result in
 # docs/verification/runtime-backends.md, rather than assuming the shape here.
 #
-# Only the launching user's own store is written: the projects entry for the
-# worktree path in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json, which must be a
-# regular file this uid owns. Every unrelated key and project entry is
-# preserved, and the replacement is atomic. fm-spawn.sh forwards CLAUDE_CONFIG_DIR
+# Only the launching user's own store is written: the projects entries for the
+# worktree path and its canonical root in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json,
+# which must be a regular file this uid owns. Every unrelated key and project
+# entry is preserved, including the other keys of an existing canonical-root
+# entry, and the replacement is atomic. fm-spawn.sh forwards CLAUDE_CONFIG_DIR
 # onto the claude launch verbatim rather than resolving it, and the worker's pane
 # starts in the task worktree, so only an absolute value names the same store on
 # both sides; a relative one is refused below rather than guessed at.
@@ -141,6 +180,28 @@ PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
 [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
 [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
 
+# The canonical root, derived from the accepted worktree through git rather than
+# taken from either argument: the repository's main working tree is the first
+# entry git lists, and a bare repository lists it as `bare` with no path.
+ROOT_LISTED=$(git -C "$WT_REAL" worktree list --porcelain 2>/dev/null | awk '
+  NR == 1 && /^worktree / { sub(/^worktree /, ""); print; exit }
+') || true
+[ -n "$ROOT_LISTED" ] || refuse "'$WT_REAL' has no main working tree to serve as its canonical root (a bare repository has none)"
+ROOT_REAL=$(real_dir "$ROOT_LISTED") || true
+[ -n "$ROOT_REAL" ] || refuse "the main working tree '$ROOT_LISTED' of '$WT_REAL' is not an accessible directory"
+# The owner proof: the listed root must be the primary checkout that OWNS the
+# shared common dir, and it must be a checkout root rather than a subdirectory.
+# The home and config guards apply to it for the same reason they apply to the
+# worktree: neither is ever a project checkout worth a standing trust entry.
+[ "$ROOT_REAL" != "$CONFIG_DIR_REAL" ] || refuse "canonical root '$ROOT_REAL' is the Claude config directory, not a project checkout"
+[ "$ROOT_REAL" != "${HOME_REAL:-}" ] || refuse "canonical root '$ROOT_REAL' is the home directory, not a project checkout"
+ROOT_TOP=$(git -C "$ROOT_REAL" rev-parse --show-toplevel 2>/dev/null) || true
+ROOT_TOP_REAL=$(real_dir "${ROOT_TOP:-/nonexistent}") || true
+[ "$ROOT_TOP_REAL" = "$ROOT_REAL" ] || refuse "canonical root '$ROOT_REAL' is not a checkout root (its root is '${ROOT_TOP_REAL:-unresolvable}')"
+ROOT_GIT_DIR=$(git -C "$ROOT_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
+ROOT_GIT_DIR=$(real_dir "${ROOT_GIT_DIR:-/nonexistent}") || true
+[ "$ROOT_GIT_DIR" = "$WT_COMMON" ] || refuse "canonical root '$ROOT_REAL' does not own the common git directory of '$WT_REAL'"
+
 # The store write needs node, and a missing interpreter refuses like every other
 # failure here. Degrading instead would launch a worker straight into the dialog
 # this registration exists to remove, which is the one outcome the whole control
@@ -190,11 +251,11 @@ fi
 # attempts, and it must fail loudly rather than report a trust it did not leave.
 # ponytail: fingerprint-and-refuse, not a lock; flock is absent on macOS and
 # cannot stop a vendor session's own rewrite anyway.
-if ! node - "$STORE" "$WT_REAL" <<'NODE'
+if ! node - "$STORE" "$WT_REAL" "$ROOT_REAL" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const [store, worktree] = process.argv.slice(2);
+const [store, ...targets] = process.argv.slice(2);
 const readStore = () => {
   try {
     return fs.readFileSync(store);
@@ -223,12 +284,17 @@ const attempt = () => {
   if (projects === null || typeof projects !== "object" || Array.isArray(projects)) {
     throw new Error(`${store} has a non-object "projects" value`);
   }
-  let entry = projects[worktree];
-  if (entry === undefined || entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-    entry = {};
+  // Both the worktree and its canonical root, in one replacement: an existing
+  // entry keeps every other key it carries (allowedTools, history, and the
+  // rest of what Claude records per project), and only the trust flag is set.
+  for (const target of targets) {
+    let entry = projects[target];
+    if (entry === undefined || entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      entry = {};
+    }
+    entry.hasTrustDialogAccepted = true;
+    projects[target] = entry;
   }
-  entry.hasTrustDialogAccepted = true;
-  projects[worktree] = entry;
   // Unpredictable name plus an exclusive create: the config directory may be
   // writable by another local account, and a predictable path could be
   // pre-created there as a symlink that a plain write would follow into some
@@ -250,7 +316,9 @@ const attempt = () => {
     if (!renamed) fs.rmSync(tmp, { force: true });
   }
   const back = JSON.parse(fs.readFileSync(store, "utf8"));
-  return back.projects?.[worktree]?.hasTrustDialogAccepted === true ? "recorded" : "dropped";
+  return targets.every((target) => back.projects?.[target]?.hasTrustDialogAccepted === true)
+    ? "recorded"
+    : "dropped";
 };
 try {
   for (let i = 0; i < 3; i += 1) {
@@ -265,11 +333,13 @@ try {
   console.error(`error: ${err.message}`);
   process.exit(1);
 }
-console.error(`error: ${store} did not retain trust for ${worktree} after 3 attempts`);
+console.error(`error: ${store} did not retain trust for ${targets.join(" and ")} after 3 attempts`);
 process.exit(1);
 NODE
 then
-  refuse "could not record trust for '$WT_REAL' in '$STORE'"
+  refuse "could not record trust for '$WT_REAL' and its canonical root '$ROOT_REAL' in '$STORE'"
 fi
 
-echo "trusted: $WT_REAL"
+# Both registered paths, so a spawn log shows exactly what Claude's two checks
+# will find.
+echo "trusted: $WT_REAL (canonical root: $ROOT_REAL)"
