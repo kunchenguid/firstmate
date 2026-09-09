@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016,SC2088,SC1083,SC1010
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
@@ -122,7 +123,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|gemini|muse|rovo|omp)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -215,30 +216,7 @@
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
-# Launch environment (config/launch-env-allowlist):
-#   Absent means unchanged ambient inheritance. A present readable regular file
-#   opts every launch (ship, scout, secondmate, raw command, and relaunch) into
-#   /usr/bin/env -i followed by /bin/sh -c of the existing launch command.
-#   Each line is one POSIX environment name, never a value or shell expression;
-#   blank lines and lines beginning with # are ignored. Invalid input refuses
-#   before launch, as do path inspection errors such as inaccessible config
-#   directories. An empty file retains only the operational floor below.
-#   Names are read once per spawn; values are expanded in the destination pane,
-#   not copied from the invoking process or written into the launch text.
-#   Unset names stay unset and empty values stay empty.
-#   The fixed operational floor is HOME PATH USER LOGNAME SHELL TERM COLORTERM
-#   LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP GOTMPDIR, plus backend identity/routing:
-#   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
-#   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
-#   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
-#   marker FM_TASK_ID that ship and scout panes receive above.
-#   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
-#   assignments still apply inside the filtered environment. Raw commands must
-#   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
-#   This is an exec environment boundary, not a sandbox for the pane's startup
-#   shell, credential files, same-user processes, or later shell initialization.
-#   See docs/configuration.md for provider/Git setup and supported limits.
-#   Launch templates live in launch_template() below; placeholders replaced before launch:
+# Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
@@ -379,24 +357,6 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
-if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist"); then
-  exit 1
-fi
-LAUNCH_ENV_NAMES=
-if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
-  if [ ! -f "$CONFIG/launch-env-allowlist" ] || [ ! -r "$CONFIG/launch-env-allowlist" ]; then
-    echo "error: config/launch-env-allowlist must be a readable regular file" >&2
-    exit 1
-  fi
-  if ! LAUNCH_ENV_NAMES=$(jq -Rrs '
-    split("\n") | map(select(. != "" and (startswith("#") | not))) |
-    if all(.[]; test("^[A-Za-z_][A-Za-z0-9_]*$")) then .[]
-    else error("expected environment names only") end
-  ' "$CONFIG/launch-env-allowlist" 2>/dev/null); then
-    echo "error: config/launch-env-allowlist must contain one environment name per line, blank lines, or # comments" >&2
-    exit 1
-  fi
-fi
 SUB_HOME_MARKER=".fm-secondmate-home"
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
@@ -424,6 +384,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-prime-lib.sh
+. "$SCRIPT_DIR/fm-prime-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
@@ -609,6 +571,12 @@ spawn_remote_secondmate() {
     harness=$positional
   else
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
+  fi
+  if [ "$harness" = prime-agent ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: prime-agent is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+    return 1
   fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
@@ -866,6 +834,8 @@ SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
+SPAWN_PRIME_PROJECT_LOCK=
+SPAWN_PRIME_PROJECT_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1000,6 +970,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
     fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
+  fi
+  if [ "$SPAWN_PRIME_PROJECT_LOCK_HELD" = 1 ]; then
+    SPAWN_PRIME_PROJECT_LOCK_HELD=0
+    fm_lock_release "$SPAWN_PRIME_PROJECT_LOCK" || true
   fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
@@ -1317,7 +1291,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    ''|claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|gemini|muse|rovo|omp)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1336,6 +1310,882 @@ elif [ "$KIND" = secondmate ]; then
 else
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
+fi
+raw_launch_unmodeled_expansion_token() {
+  printf '%s\n' __fm_raw_launch_unmodeled_expansion__
+}
+
+raw_launch_collect_braced_parameter() {  # <command> <start-index-after-brace>
+  local command_text=$1 i=$2 len ch next quote='' depth=1 literal='${' has_command=0
+  len=${#command_text}
+  while [ "$i" -lt "$len" ]; do
+    ch=${command_text:$i:1}
+    literal=$literal$ch
+    if [ -n "$quote" ]; then
+      if [ "$ch" = "$quote" ]; then
+        quote=
+      elif [ "$quote" != "'" ] && [ "$ch" = \\ ] && [ $((i + 1)) -lt "$len" ]; then
+        i=$((i + 1))
+        literal=$literal${command_text:$i:1}
+      fi
+      i=$((i + 1))
+      continue
+    fi
+    case "$ch" in
+      "'"|'"') quote=$ch ;;
+      '`') has_command=1; quote=$ch ;;
+      \\)
+        if [ $((i + 1)) -lt "$len" ]; then
+          i=$((i + 1))
+          literal=$literal${command_text:$i:1}
+        fi
+        ;;
+      '$')
+        if [ $((i + 1)) -lt "$len" ]; then
+          next=${command_text:$((i + 1)):1}
+          if [ "$next" = '(' ]; then
+            has_command=1
+          elif [ "$next" = '{' ]; then
+            depth=$((depth + 1))
+            i=$((i + 1))
+            literal=$literal$next
+          fi
+        fi
+        ;;
+      '}')
+        depth=$((depth - 1))
+        [ "$depth" -gt 0 ] || break
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  RAW_LAUNCH_COLLECT_LITERAL=$literal
+  RAW_LAUNCH_COLLECT_HAS_COMMAND=$has_command
+  RAW_LAUNCH_COLLECT_END=$i
+}
+
+raw_launch_collect_arithmetic_expansion() {  # <command> <start-index-after-double-paren>
+  local command_text=$1 i=$2 len ch quote='' depth=0 literal='$((' has_command=0
+  len=${#command_text}
+  while [ "$i" -lt "$len" ]; do
+    ch=${command_text:$i:1}
+    literal=$literal$ch
+    if [ -n "$quote" ]; then
+      if [ "$ch" = "$quote" ]; then
+        quote=
+      elif [ "$quote" != "'" ] && [ "$ch" = \\ ] && [ $((i + 1)) -lt "$len" ]; then
+        i=$((i + 1))
+        literal=$literal${command_text:$i:1}
+      fi
+      i=$((i + 1))
+      continue
+    fi
+    case "$ch" in
+      "'"|'"') quote=$ch ;;
+      '`') has_command=1; quote=$ch ;;
+      \\)
+        if [ $((i + 1)) -lt "$len" ]; then
+          i=$((i + 1))
+          literal=$literal${command_text:$i:1}
+        fi
+        ;;
+      '$')
+        if [ $((i + 1)) -lt "$len" ]; then
+          case "${command_text:$((i + 1)):1}" in '('|'{') has_command=1 ;; esac
+        fi
+        ;;
+      '(') depth=$((depth + 1)) ;;
+      ')')
+        if [ $((i + 1)) -lt "$len" ] && [ "${command_text:$((i + 1)):1}" = ')' ] && [ "$depth" -eq 0 ]; then
+          i=$((i + 1))
+          literal=$literal')'
+          break
+        fi
+        [ "$depth" -eq 0 ] || depth=$((depth - 1))
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  RAW_LAUNCH_COLLECT_LITERAL=$literal
+  RAW_LAUNCH_COLLECT_HAS_COMMAND=$has_command
+  RAW_LAUNCH_COLLECT_END=$i
+}
+
+raw_launch_shell_tokens() {  # <raw command>
+  local command_text=$1 len i ch next quote='' word='' inner depth op sub_quote
+  len=${#command_text}
+  i=0
+  while [ "$i" -lt "$len" ]; do
+    ch=${command_text:$i:1}
+    if [ -n "$quote" ]; then
+      if [ "$ch" = "$quote" ]; then
+        quote=
+      elif [ "$quote" = '"' ] && [ "$ch" = '$' ] && [ $((i + 1)) -lt "$len" ] && [ "${command_text:$((i + 1)):1}" = '{' ]; then
+        raw_launch_collect_braced_parameter "$command_text" $((i + 2))
+        if [ "$RAW_LAUNCH_COLLECT_HAS_COMMAND" -eq 1 ]; then
+          if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+          raw_launch_unmodeled_expansion_token
+        else
+          word=$word$RAW_LAUNCH_COLLECT_LITERAL
+        fi
+        i=$RAW_LAUNCH_COLLECT_END
+      elif [ "$quote" = '"' ] && [ "$ch" = '$' ] && [ $((i + 2)) -lt "$len" ] && [ "${command_text:$((i + 1)):1}" = '(' ] && [ "${command_text:$((i + 2)):1}" = '(' ]; then
+        raw_launch_collect_arithmetic_expansion "$command_text" $((i + 3))
+        if [ "$RAW_LAUNCH_COLLECT_HAS_COMMAND" -eq 1 ]; then
+          if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+          raw_launch_unmodeled_expansion_token
+        else
+          word=$word$RAW_LAUNCH_COLLECT_LITERAL
+        fi
+        i=$RAW_LAUNCH_COLLECT_END
+      elif [ "$quote" = '"' ] && [ "$ch" = '$' ] && [ $((i + 1)) -lt "$len" ] && [ "${command_text:$((i + 1)):1}" = '(' ] && { [ $((i + 2)) -ge "$len" ] || [ "${command_text:$((i + 2)):1}" != '(' ]; }; then
+        if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+        inner=
+        depth=1
+        sub_quote=
+        i=$((i + 2))
+        while [ "$i" -lt "$len" ] && [ "$depth" -gt 0 ]; do
+          ch=${command_text:$i:1}
+          if [ -n "$sub_quote" ]; then
+            inner=$inner$ch
+            if [ "$ch" = "$sub_quote" ]; then
+              sub_quote=
+            elif [ "$sub_quote" != "'" ] && [ "$ch" = \\ ] && [ $((i + 1)) -lt "$len" ]; then
+              i=$((i + 1))
+              inner=$inner${command_text:$i:1}
+            fi
+            i=$((i + 1))
+            continue
+          fi
+          case "$ch" in
+            "'"|'"'|'`') sub_quote=$ch; inner=$inner$ch ;;
+            \\)
+              inner=$inner$ch
+              if [ $((i + 1)) -lt "$len" ]; then
+                i=$((i + 1))
+                inner=$inner${command_text:$i:1}
+              fi
+              ;;
+            '(') depth=$((depth + 1)); inner=$inner$ch ;;
+            ')') depth=$((depth - 1)); [ "$depth" -eq 0 ] || inner=$inner$ch ;;
+            *) inner=$inner$ch ;;
+          esac
+          [ "$depth" -eq 0 ] || i=$((i + 1))
+        done
+        printf '%s\n' '$('
+        raw_launch_shell_tokens "$inner"
+        printf '%s\n' ')'
+      elif [ "$quote" = '"' ] && [ "$ch" = '`' ]; then
+        if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+        inner=
+        i=$((i + 1))
+        while [ "$i" -lt "$len" ]; do
+          ch=${command_text:$i:1}
+          [ "$ch" = '`' ] && break
+          inner=$inner$ch
+          i=$((i + 1))
+        done
+        printf '%s\n' '$('
+        raw_launch_shell_tokens "$inner"
+        printf '%s\n' ')'
+      elif [ "$quote" = '"' ] && [ "$ch" = \\ ] && [ $((i + 1)) -lt "$len" ]; then
+        i=$((i + 1))
+        word=$word${command_text:$i:1}
+      else
+        word=$word$ch
+      fi
+      i=$((i + 1))
+      continue
+    fi
+    case "$ch" in
+      "'"|'"') quote=$ch ;;
+      \\)
+        if [ $((i + 1)) -lt "$len" ]; then
+          i=$((i + 1))
+          word=$word${command_text:$i:1}
+        else
+          word=$word$ch
+        fi
+        ;;
+      $'\n')
+        if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+        printf '%s\n' ';'
+        ;;
+      ' '|$'\t'|$'\r')
+        if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+        ;;
+      '$')
+        next=
+        [ $((i + 1)) -lt "$len" ] && next=${command_text:$((i + 1)):1}
+        if [ "$next" = '{' ]; then
+          raw_launch_collect_braced_parameter "$command_text" $((i + 2))
+          if [ "$RAW_LAUNCH_COLLECT_HAS_COMMAND" -eq 1 ]; then
+            if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+            raw_launch_unmodeled_expansion_token
+          else
+            word=$word$RAW_LAUNCH_COLLECT_LITERAL
+          fi
+          i=$RAW_LAUNCH_COLLECT_END
+        elif [ "$next" = '(' ] && [ $((i + 2)) -lt "$len" ] && [ "${command_text:$((i + 2)):1}" = '(' ]; then
+          raw_launch_collect_arithmetic_expansion "$command_text" $((i + 3))
+          if [ "$RAW_LAUNCH_COLLECT_HAS_COMMAND" -eq 1 ]; then
+            if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+            raw_launch_unmodeled_expansion_token
+          else
+            word=$word$RAW_LAUNCH_COLLECT_LITERAL
+          fi
+          i=$RAW_LAUNCH_COLLECT_END
+        elif [ "$next" = '(' ]; then
+          if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+          inner=
+          depth=1
+          sub_quote=
+          i=$((i + 2))
+          while [ "$i" -lt "$len" ] && [ "$depth" -gt 0 ]; do
+            ch=${command_text:$i:1}
+            if [ -n "$sub_quote" ]; then
+              inner=$inner$ch
+              if [ "$ch" = "$sub_quote" ]; then
+                sub_quote=
+              elif [ "$sub_quote" != "'" ] && [ "$ch" = \\ ] && [ $((i + 1)) -lt "$len" ]; then
+                i=$((i + 1))
+                inner=$inner${command_text:$i:1}
+              fi
+              i=$((i + 1))
+              continue
+            fi
+            case "$ch" in
+              "'"|'"'|'`') sub_quote=$ch; inner=$inner$ch ;;
+              \\)
+                inner=$inner$ch
+                if [ $((i + 1)) -lt "$len" ]; then
+                  i=$((i + 1))
+                  inner=$inner${command_text:$i:1}
+                fi
+                ;;
+              '(') depth=$((depth + 1)); inner=$inner$ch ;;
+              ')') depth=$((depth - 1)); [ "$depth" -eq 0 ] || inner=$inner$ch ;;
+              *) inner=$inner$ch ;;
+            esac
+            [ "$depth" -eq 0 ] || i=$((i + 1))
+          done
+          printf '%s\n' '$('
+          raw_launch_shell_tokens "$inner"
+          printf '%s\n' ')'
+        else
+          word=$word$ch
+        fi
+        ;;
+      '`')
+        if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+        inner=
+        i=$((i + 1))
+        while [ "$i" -lt "$len" ]; do
+          ch=${command_text:$i:1}
+          [ "$ch" = '`' ] && break
+          inner=$inner$ch
+          i=$((i + 1))
+        done
+        printf '%s\n' '$('
+        raw_launch_shell_tokens "$inner"
+        printf '%s\n' ')'
+        ;;
+      ';'|'|'|'&'|'('|')')
+        if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+        printf '%s\n' "$ch"
+        ;;
+      '<'|'>')
+        if [ -n "$word" ]; then printf '%s\n' "$word"; word=; fi
+        if [ $((i + 1)) -lt "$len" ] && [ "${command_text:$((i + 1)):1}" = '(' ]; then
+          op=$ch
+          inner=
+          depth=1
+          sub_quote=
+          i=$((i + 2))
+          while [ "$i" -lt "$len" ] && [ "$depth" -gt 0 ]; do
+            ch=${command_text:$i:1}
+            if [ -n "$sub_quote" ]; then
+              inner=$inner$ch
+              if [ "$ch" = "$sub_quote" ]; then
+                sub_quote=
+              elif [ "$sub_quote" != "'" ] && [ "$ch" = \\ ] && [ $((i + 1)) -lt "$len" ]; then
+                i=$((i + 1))
+                inner=$inner${command_text:$i:1}
+              fi
+              i=$((i + 1))
+              continue
+            fi
+            case "$ch" in
+              "'"|'"'|'`') sub_quote=$ch; inner=$inner$ch ;;
+              \\)
+                inner=$inner$ch
+                if [ $((i + 1)) -lt "$len" ]; then
+                  i=$((i + 1))
+                  inner=$inner${command_text:$i:1}
+                fi
+                ;;
+              '(') depth=$((depth + 1)); inner=$inner$ch ;;
+              ')') depth=$((depth - 1)); [ "$depth" -eq 0 ] || inner=$inner$ch ;;
+              *) inner=$inner$ch ;;
+            esac
+            [ "$depth" -eq 0 ] || i=$((i + 1))
+          done
+          printf '%s\n' "$op("
+          raw_launch_shell_tokens "$inner"
+          printf '%s\n' ')'
+        else
+          printf '%s\n' "$ch"
+          [ $((i + 1)) -lt "$len" ] && [ "${command_text:$((i + 1)):1}" = "$ch" ] && i=$((i + 1))
+        fi
+        ;;
+      *) word=$word$ch ;;
+    esac
+    i=$((i + 1))
+  done
+  [ -z "$word" ] || printf '%s\n' "$word"
+}
+
+raw_launch_expand_shell_path() {  # <word>
+  local word=$1 cwd=${RAW_LAUNCH_SCAN_CWD:-${WT:-${PROJ_ABS:-$PWD}}}
+  case "$word" in
+    '~') word=${HOME:-~} ;;
+    '~/'*) word=${HOME:-~}${word#\~} ;;
+  esac
+  if [ -n "$cwd" ]; then
+    word=${word//\$\{PWD\}/$cwd}
+    word=${word//\$PWD/$cwd}
+    case "$word" in /*|'') ;; */*) word=$cwd/$word ;; esac
+  fi
+  printf '%s\n' "$word"
+}
+
+raw_launch_word_is_prime_agent() {  # <word>
+  local word expanded resolved canonical base search_path
+  word=$1
+  expanded=$(raw_launch_expand_shell_path "$word")
+  base=${expanded##*/}
+  [ "$base" != prime-agent ] || return 0
+  search_path=${RAW_LAUNCH_SCAN_PATH:-${PATH:-}}
+  case "$word" in
+    */*|'~'*|'$PWD'*|'${PWD}'*) resolved=$(PATH=$search_path command -v -- "$expanded" 2>/dev/null || printf '%s' "$expanded") ;;
+    *) RAW_LAUNCH_PATH_PIN=1; resolved=$(PATH=$search_path command -v -- "$word" 2>/dev/null) || return 0 ;;
+  esac
+  base=${resolved##*/}
+  [ "$base" != prime-agent ] || return 0
+  canonical=$(fm_cursor_canonical_path "$resolved") || canonical=$resolved
+  base=${canonical##*/}
+  [ "$base" != prime-agent ] || return 0
+  fm_prime_package_entry_matches "$expanded" || fm_prime_package_entry_matches "$resolved" || fm_prime_package_entry_matches "$canonical"
+}
+
+raw_launch_word_resolved_base() {  # <word>
+  local word expanded resolved canonical search_path
+  word=$1
+  expanded=$(raw_launch_expand_shell_path "$word")
+  search_path=${RAW_LAUNCH_SCAN_PATH:-${PATH:-}}
+  case "$word" in */*|'~'*|'$PWD'*|'${PWD}'*) resolved=$(PATH=$search_path command -v -- "$expanded" 2>/dev/null || printf '%s' "$expanded") ;; *) resolved=$(PATH=$search_path command -v -- "$word" 2>/dev/null || printf '%s' "$expanded") ;; esac
+  canonical=$(fm_cursor_canonical_path "$resolved") || canonical=$resolved
+  printf '%s\n' "${canonical##*/}"
+}
+
+raw_launch_word_is_shell() {  # <word>
+  local base
+  base=$(raw_launch_word_resolved_base "$1")
+  case "$base" in sh|bash|zsh|dash|ksh) return 0 ;; esac
+  return 1
+}
+
+raw_launch_word_is_node() {  # <word>
+  local base
+  base=$(raw_launch_word_resolved_base "$1")
+  base=${base#-}
+  case "$base" in node|nodejs) return 0 ;; esac
+  return 1
+}
+
+raw_launch_word_is_code_eval_interpreter() {  # <word>
+  local base
+  base=$(raw_launch_word_resolved_base "$1")
+  case "$base" in python|python[0-9]*|perl|ruby|php) return 0 ;; esac
+  return 1
+}
+
+raw_launch_word_is_env() {  # <word>
+  local base
+  base=$(raw_launch_word_resolved_base "$1")
+  [ "$base" = env ]
+}
+
+raw_launch_word_is_arch() {  # <word>
+  local base
+  base=$(raw_launch_word_resolved_base "$1")
+  [ "$base" = arch ]
+}
+
+raw_launch_word_is_time() {  # <word>
+  local base
+  base=$(raw_launch_word_resolved_base "$1")
+  [ "$base" = time ]
+}
+
+raw_launch_word_is_cd() {  # <word>
+  local base
+  base=$(raw_launch_word_resolved_base "$1")
+  [ "$base" = cd ]
+}
+
+raw_launch_word_is_forwarder() {  # <word>
+  local base
+  base=$(raw_launch_word_resolved_base "$1")
+  case "$base" in nohup|nice|setsid|timeout|gtimeout|stdbuf|gstdbuf) return 0 ;; esac
+  return 1
+}
+
+raw_launch_word_is_command_runner() {  # <word>
+  local word expanded base
+  word=$1
+  expanded=$(raw_launch_expand_shell_path "$word")
+  base=${expanded##*/}
+  case "$base" in npx|npm|pnpm|pnpx|yarn|bun|bunx|corepack) return 0 ;; esac
+  base=$(raw_launch_word_resolved_base "$word")
+  case "$base" in npx|npm|pnpm|pnpx|yarn|bun|bunx|corepack|npx-cli.js|npm-cli.js|pnpm.cjs|pnpx.cjs|yarn.js) return 0 ;; esac
+  return 1
+}
+
+raw_launch_token_is_assignment() {  # <word>
+  local name
+  case "$1" in [A-Za-z_]*=*) name=${1%%=*} ;; *) return 1 ;; esac
+  [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+}
+
+raw_launch_commit_assignments() {
+  local assignment name existing
+  local -a kept
+  [ "${#raw_pending[@]}" -gt 0 ] || return 0
+  for assignment in "${raw_pending[@]}"; do
+    name=${assignment%%=*}
+    kept=()
+    if [ "${#raw_vars[@]}" -gt 0 ]; then
+      for existing in "${raw_vars[@]}"; do
+        [ "${existing%%=*}" = "$name" ] || kept+=("$existing")
+      done
+    fi
+    if [ "${#kept[@]}" -gt 0 ]; then
+      raw_vars=("${kept[@]}" "$assignment")
+    else
+      raw_vars=("$assignment")
+    fi
+  done
+  raw_pending=()
+}
+
+raw_launch_variable_value() {  # <name>
+  local name=$1 i assignment
+  [ "${#raw_vars[@]}" -gt 0 ] || return 1
+  i=$((${#raw_vars[@]} - 1))
+  while [ "$i" -ge 0 ]; do
+    assignment=${raw_vars[$i]}
+    if [ "${assignment%%=*}" = "$name" ]; then
+      printf '%s\n' "${assignment#*=}"
+      return 0
+    fi
+    i=$((i - 1))
+  done
+  return 1
+}
+
+raw_launch_command_variable_value() {  # <word>
+  local word=$1 name
+  case "$word" in
+    '$'{*}) name=${word#'${'}; name=${name%'}'} ;;
+    '$'*) name=${word#'$'} ;;
+    *) return 1 ;;
+  esac
+  [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 2
+  raw_launch_variable_value "$name" || return 2
+}
+
+raw_launch_resolve_literal_variable_or_self() {  # <word>
+  local word=$1 value status
+  if value=$(raw_launch_command_variable_value "$word"); then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  status=$?
+  [ "$status" -eq 2 ] && return 2
+  printf '%s\n' "$word"
+  return 1
+}
+
+raw_launch_node_script_prime_agent_detected() {  # <tokens...>
+  local token resolved_token resolve_status skip_next=0
+  while [ "$#" -gt 0 ]; do
+    token=$1
+    shift
+    case "$token" in '<') return 0 ;; esac
+    case "$token" in ';'|'|'|'&'|'('|')'|'$('|'<('|'>('|'>') return 1 ;; esac
+    if [ "$skip_next" -eq 1 ]; then
+      skip_next=0
+      continue
+    fi
+    case "$token" in
+      --)
+        if [ "$#" -gt 0 ]; then
+          resolve_status=0
+          resolved_token=$(raw_launch_resolve_literal_variable_or_self "$1") || resolve_status=$?
+          [ "$resolve_status" -eq 2 ] && return 0
+          fm_prime_package_entry_matches "$(raw_launch_expand_shell_path "$resolved_token")" && return 0
+        fi
+        return 1
+        ;;
+      -e|-p|--eval|--print|-e?*|-p?*|--eval=*|--print=*|--run|--run=*) return 0 ;;
+      --check|--interactive) return 1 ;;
+      -r|--require|--import|--loader|--experimental-loader|-r?*|--require=*|--import=*|--loader=*|--experimental-loader=*) return 0 ;;
+      --conditions|--icu-data-dir|--openssl-config|--env-file) skip_next=1; continue ;;
+      --conditions=*|--icu-data-dir=*|--openssl-config=*|--env-file=*) continue ;;
+      -*) continue ;;
+    esac
+    resolve_status=0
+    resolved_token=$(raw_launch_resolve_literal_variable_or_self "$token") || resolve_status=$?
+    [ "$resolve_status" -eq 2 ] && return 0
+    fm_prime_package_entry_matches "$(raw_launch_expand_shell_path "$resolved_token")" && return 0
+    return 1
+  done
+  return 1
+}
+
+raw_launch_prime_agent_detected() {  # <raw command>
+  local command_text=$1 token expect_command=1 skip_redir=0 i j shell_script var_value var_status env_saved_cwd='' env_cwd_active=0 forwarder_base
+  local RAW_LAUNCH_SCAN_CWD=${RAW_LAUNCH_SCAN_CWD:-${WT:-${PROJ_ABS:-$PWD}}}
+  local RAW_LAUNCH_SCAN_PATH=${RAW_LAUNCH_SCAN_PATH:-${PATH:-}}
+  local -a tokens raw_vars raw_pending
+  tokens=()
+  raw_vars=()
+  raw_pending=()
+  while IFS= read -r token; do
+    tokens+=("$token")
+  done < <(raw_launch_shell_tokens "$command_text")
+  i=0
+  while [ "$i" -lt "${#tokens[@]}" ]; do
+    token=${tokens[$i]}
+    [ "$token" = __fm_raw_launch_unmodeled_expansion__ ] && return 0
+    if [ "$skip_redir" -eq 1 ]; then
+      skip_redir=0
+      case "$token" in
+        '$('|'<('|'>(') ;;
+        *)
+          if [ "$token" = '&' ] && [ $((i + 1)) -lt "${#tokens[@]}" ]; then
+            i=$((i + 2))
+          else
+            i=$((i + 1))
+          fi
+          continue
+          ;;
+      esac
+    fi
+    if [[ "$token" =~ ^[0-9]+$ ]] && [ $((i + 1)) -lt "${#tokens[@]}" ]; then
+      case "${tokens[$((i + 1))]}" in '<'|'>') i=$((i + 1)); continue ;; esac
+    fi
+    case "$token" in
+      '<'|'>') skip_redir=1; i=$((i + 1)); continue ;;
+      '$(')
+        [ "$expect_command" -eq 1 ] && return 0
+        raw_launch_commit_assignments
+        expect_command=1
+        i=$((i + 1))
+        continue
+        ;;
+      ';'|'|'|'&'|'('|')'|'<('|'>(')
+        raw_launch_commit_assignments
+        case "$token" in ';'|'|'|'&')
+          if [ "$env_cwd_active" -eq 1 ]; then
+            RAW_LAUNCH_SCAN_CWD=$env_saved_cwd
+            env_cwd_active=0
+          fi
+          ;;
+        esac
+        expect_command=1
+        i=$((i + 1))
+        continue
+        ;;
+    esac
+    if [ "$expect_command" -eq 1 ]; then
+      case "$token" in
+        if|then|elif|else|fi|for|while|until|do|done|case|esac|in|select|function|'{'|'}'|'!') i=$((i + 1)); continue ;;
+      esac
+      if raw_launch_token_is_assignment "$token"; then
+        case "${token%%=*}" in PATH|CDPATH|NODE_OPTIONS) return 0 ;; esac
+        var_value=${token#*=}
+        case "$var_value" in *'$'*|'') ;; *) raw_pending+=("$token") ;; esac
+        i=$((i + 1))
+        continue
+      fi
+      raw_pending=()
+      if var_value=$(raw_launch_command_variable_value "$token"); then
+        token=${var_value%% *}
+      else
+        var_status=$?
+        [ "$var_status" -eq 2 ] && return 0
+      fi
+      case "$token" in
+        export|readonly|declare|typeset|local)
+          j=$((i + 1))
+          while [ "$j" -lt "${#tokens[@]}" ]; do
+            token=${tokens[$j]}
+            case "$token" in ';'|'|'|'&'|'('|')'|'$('|'<('|'>(') break ;; esac
+            case "$token" in --|-*) j=$((j + 1)); continue ;; esac
+            if raw_launch_token_is_assignment "$token"; then
+              case "${token%%=*}" in PATH|CDPATH|NODE_OPTIONS) return 0 ;; esac
+            else
+              case "$token" in '$'*) return 0 ;; esac
+            fi
+            j=$((j + 1))
+          done
+          expect_command=0
+          i=$j
+          continue
+          ;;
+      esac
+      case "$token" in builtin|hash) return 0 ;; esac
+      if [ "$token" = eval ]; then
+        shell_script=
+        j=$((i + 1))
+        while [ "$j" -lt "${#tokens[@]}" ]; do
+          token=${tokens[$j]}
+          case "$token" in ';'|'|'|'&') break ;; esac
+          [ -z "$shell_script" ] || shell_script="$shell_script "
+          shell_script=$shell_script$token
+          j=$((j + 1))
+        done
+        [ -n "$shell_script" ] && raw_launch_prime_agent_detected "$shell_script" && return 0
+        expect_command=0
+        i=$j
+        continue
+      fi
+      if [ "$token" = command ]; then
+        i=$((i + 1))
+        while [ "$i" -lt "${#tokens[@]}" ]; do
+          token=${tokens[$i]}
+          case "$token" in -p) i=$((i + 1)); continue ;; --) i=$((i + 1)); break ;; -v|-V) expect_command=0; break ;; esac
+          break
+        done
+        continue
+      fi
+      if [ "$token" = exec ]; then
+        i=$((i + 1))
+        while [ "$i" -lt "${#tokens[@]}" ]; do
+          token=${tokens[$i]}
+          case "$token" in -c|-l) i=$((i + 1)); continue ;; -a) i=$((i + 2)); continue ;; --) i=$((i + 1)); break ;; esac
+          break
+        done
+        continue
+      fi
+      if raw_launch_word_is_env "$token"; then
+        i=$((i + 1))
+        while [ "$i" -lt "${#tokens[@]}" ]; do
+          token=${tokens[$i]}
+          if raw_launch_token_is_assignment "$token"; then
+            case "${token%%=*}" in PATH|CDPATH|NODE_OPTIONS) return 0 ;; esac
+            i=$((i + 1))
+            continue
+          fi
+          case "$token" in
+            -i|--ignore-environment|-0|--null) i=$((i + 1)); continue ;;
+            -u|--unset)
+              [ $((i + 1)) -lt "${#tokens[@]}" ] || return 0
+              i=$((i + 2))
+              continue
+              ;;
+            -C|--chdir)
+              [ $((i + 1)) -lt "${#tokens[@]}" ] || return 0
+              token=${tokens[$((i + 1))]}
+              case "$token" in ';'|'|'|'&'|'('|')'|'$('|'<('|'>('|''|'$'*) return 0 ;; esac
+              [ "$env_cwd_active" -eq 0 ] && env_saved_cwd=$RAW_LAUNCH_SCAN_CWD && env_cwd_active=1
+              RAW_LAUNCH_SCAN_CWD=$(raw_launch_expand_shell_path "$token")
+              i=$((i + 2))
+              continue
+              ;;
+            -C?*)
+              token=${token#-C}
+              case "$token" in ''|'$'*) return 0 ;; esac
+              [ "$env_cwd_active" -eq 0 ] && env_saved_cwd=$RAW_LAUNCH_SCAN_CWD && env_cwd_active=1
+              RAW_LAUNCH_SCAN_CWD=$(raw_launch_expand_shell_path "$token")
+              i=$((i + 1))
+              continue
+              ;;
+            --unset=*) i=$((i + 1)); continue ;;
+            --chdir=*)
+              token=${token#--chdir=}
+              case "$token" in ''|'$'*) return 0 ;; esac
+              [ "$env_cwd_active" -eq 0 ] && env_saved_cwd=$RAW_LAUNCH_SCAN_CWD && env_cwd_active=1
+              RAW_LAUNCH_SCAN_CWD=$(raw_launch_expand_shell_path "$token")
+              i=$((i + 1))
+              continue
+              ;;
+            -S|--split-string|-S?*|--split-string=*) return 0 ;;
+            --) i=$((i + 1)); break ;;
+            -*) return 0 ;;
+          esac
+          break
+        done
+        continue
+      fi
+      if raw_launch_word_is_arch "$token"; then
+        i=$((i + 1))
+        while [ "$i" -lt "${#tokens[@]}" ]; do
+          token=${tokens[$i]}
+          case "$token" in -*) i=$((i + 1)); continue ;; esac
+          break
+        done
+        continue
+      fi
+      if raw_launch_word_is_time "$token"; then
+        i=$((i + 1))
+        while [ "$i" -lt "${#tokens[@]}" ]; do
+          token=${tokens[$i]}
+          case "$token" in
+            -f|-o|--format|--output) i=$((i + 2)); continue ;;
+            -f?*|-o?*|--format=*|--output=*) i=$((i + 1)); continue ;;
+            -a|-p|-v|--append|--portability|--verbose|--quiet) i=$((i + 1)); continue ;;
+            --) i=$((i + 1)); break ;;
+            --help|--version) expect_command=0; break ;;
+            -*) return 0 ;;
+          esac
+          break
+        done
+        continue
+      fi
+      if raw_launch_word_is_forwarder "$token"; then
+        forwarder_base=$(raw_launch_word_resolved_base "$token")
+        i=$((i + 1))
+        if [ "$forwarder_base" = stdbuf ] || [ "$forwarder_base" = gstdbuf ]; then
+          return 0
+        fi
+        if [ "$forwarder_base" = timeout ] || [ "$forwarder_base" = gtimeout ]; then
+          while [ "$i" -lt "${#tokens[@]}" ]; do
+            token=${tokens[$i]}
+            case "$token" in ';'|'|'|'&'|'('|')'|'$('|'<('|'>(') break ;; esac
+            case "$token" in
+              --) i=$((i + 1)); [ "$i" -lt "${#tokens[@]}" ] && i=$((i + 1)); break ;;
+              --foreground|--preserve-status|-p|-v) i=$((i + 1)); continue ;;
+              -k|--kill-after|-s|--signal) i=$((i + 2)); continue ;;
+              --kill-after=*|--signal=*) i=$((i + 1)); continue ;;
+              --help|--version) expect_command=0; break ;;
+              -*) i=$((i + 1)); continue ;;
+            esac
+            i=$((i + 1))
+            break
+          done
+          continue
+        fi
+        while [ "$i" -lt "${#tokens[@]}" ]; do
+          token=${tokens[$i]}
+          case "$token" in ';'|'|'|'&'|'('|')'|'$('|'<('|'>(') break ;; esac
+          case "$token" in
+            --) i=$((i + 1)); break ;;
+            -n|--adjustment) i=$((i + 2)); continue ;;
+            --adjustment=*) i=$((i + 1)); continue ;;
+            -[0-9]*) i=$((i + 1)); continue ;;
+            -*) i=$((i + 1)); continue ;;
+          esac
+          break
+        done
+        continue
+      fi
+      if raw_launch_word_is_command_runner "$token"; then
+        return 0
+      fi
+      if raw_launch_word_is_cd "$token"; then
+        j=$((i + 1))
+        while [ "$j" -lt "${#tokens[@]}" ]; do
+          token=${tokens[$j]}
+          case "$token" in ';'|'|'|'&'|'('|')'|'$('|'<('|'>(') break ;; esac
+          case "$token" in
+            --) j=$((j + 1)); break ;;
+            -L|-P|-e) j=$((j + 1)); continue ;;
+            -*) return 0 ;;
+          esac
+          break
+        done
+        if [ "$j" -ge "${#tokens[@]}" ]; then
+          [ -n "${HOME:-}" ] || return 0
+          RAW_LAUNCH_SCAN_CWD=$HOME
+          i=$j
+          expect_command=0
+          continue
+        fi
+        token=${tokens[$j]}
+        case "$token" in
+          ';'|'|'|'&'|'('|')'|'$('|'<('|'>(')
+            [ -n "${HOME:-}" ] || return 0
+            RAW_LAUNCH_SCAN_CWD=$HOME
+            i=$j
+            expect_command=0
+            continue
+            ;;
+          '$'*) return 0 ;;
+          *) RAW_LAUNCH_SCAN_CWD=$(raw_launch_expand_shell_path "$token"); i=$((j + 1)); expect_command=0; continue ;;
+        esac
+      fi
+      raw_launch_word_is_prime_agent "$token" && return 0
+      if raw_launch_word_is_shell "$token"; then
+        j=$((i + 1))
+        while [ "$j" -lt "${#tokens[@]}" ]; do
+          token=${tokens[$j]}
+          case "$token" in '<') return 0 ;; esac
+          case "$token" in ';'|'|'|'&'|'('|')'|'$(') break ;; esac
+          case "$token" in
+            --) break ;;
+            -c|-[!-]*c*)
+              if [ $((j + 1)) -lt "${#tokens[@]}" ]; then
+                shell_script=${tokens[$((j + 1))]}
+                raw_launch_prime_agent_detected "$shell_script" && return 0
+              fi
+              break
+              ;;
+            -o|-O|+o|+O|--rcfile|--init-file) j=$((j + 2)); continue ;;
+            --rcfile=*|--init-file=*) j=$((j + 1)); continue ;;
+            -*) ;;
+            *) break ;;
+          esac
+          j=$((j + 1))
+        done
+      fi
+      if raw_launch_word_is_node "$token"; then
+        raw_launch_node_script_prime_agent_detected "${tokens[@]:$((i + 1))}" && return 0
+      fi
+      if raw_launch_word_is_code_eval_interpreter "$token"; then
+        j=$((i + 1))
+        while [ "$j" -lt "${#tokens[@]}" ]; do
+          token=${tokens[$j]}
+          case "$token" in '<') return 0 ;; esac
+          case "$token" in ';'|'|'|'&'|'('|')'|'$('|'<('|'>(') break ;; esac
+          case "$token" in --) break ;; -c|-c?*|-e|-e?*|-E|-E?*|-r|-r?*) return 0 ;; esac
+          j=$((j + 1))
+        done
+      fi
+      expect_command=0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+refuse_raw_prime_launch() {
+  echo "error: Prime isolation boundary: Prime Agent cannot be launched as a raw command; pass --harness prime-agent to use the verified path" >&2
+  exit 1
+}
+
+# A raw launch command that resolves to prime-agent is rejected at the
+# Prime isolation boundary even when --harness labels it differently; the
+# label cannot sanitize a raw Prime executable.
+RAW_PRIME_SCAN_TEXT=
+RAW_LAUNCH_SCAN_PATH=${PATH:-}
+RAW_LAUNCH_PATH_PIN=0
+if [ -n "$ARG3" ]; then
+  case "$ARG3" in
+    *' '*) RAW_PRIME_SCAN_TEXT=$ARG3; raw_launch_prime_agent_detected "$ARG3" && refuse_raw_prime_launch ;;
+  esac
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
@@ -1365,6 +2215,31 @@ pi_supports_tui_mode() {
   local executable=$1 help
   help=$("$executable" --help 2>&1) || return 1
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
+}
+
+prime_version_supports_scoped_daemon() {  # <version>
+  local version=$1 major minor patch_rest patch
+  IFS=. read -r major minor patch_rest _ <<< "$version"
+  patch=${patch_rest%%[!0-9]*}
+  case "$major$minor$patch" in *[!0-9]*|'') return 1 ;; esac
+  [ "$major" -gt 0 ] && return 0
+  [ "$major" -eq 0 ] || return 1
+  [ "$minor" -gt 8 ] && return 0
+  [ "$minor" -eq 8 ] || return 1
+  [ "$patch" -ge 1 ]
+}
+
+spawn_sha256_string() {  # <value>
+  local value=$1 digest
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$value" | sha256sum 2>/dev/null | awk '{print $1}') || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$value" | shasum -a 256 2>/dev/null | awk '{print $1}') || return 1
+  else
+    return 1
+  fi
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$digest"
 }
 
 # omp pre-launch model validation. `omp models --json` (omp 18.1.11) prints
@@ -1526,7 +2401,15 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
-    # muse (Muse Code): a positional prompt starts the supervised interactive
+    # Prime Agent: a Pi-family CLI with its own executable identity and lifecycle.
+    # Clears foreign harness markers and ambient credential variables that a
+    # primary can leak into the spawn environment.
+    # The brief rides the canonical operational-input envelope as one positional.
+    # --daemon-socket carries the per-task daemon path; -e loads the
+    # firstmate-owned semantic lifecycle extension outside the worktree.
+    # Project-scoped HOME, PRIME_AGENT_CODING_AGENT_DIR, and
+    # PRIME_AGENT_SESSION_DIR are set by the outer env wrap below.
+    prime-agent) printf '%s' 'env -u CLAUDECODE -u GROK_AGENT -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS -u PI_MODEL -u PI_CODING_AGENT -u AI_AGENT -u FM_PI_HARNESS -u PRIME_API_KEY -u PRIME_AGENT_TRACES_API_KEY -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GITHUB_TOKEN -u NPM_TOKEN -u NODE_AUTH_TOKEN -u GITLAB_TOKEN -u GL_TOKEN -u BITBUCKET_TOKEN -u HF_TOKEN -u HUGGINGFACE_HUB_TOKEN -u COHERE_API_KEY -u MISTRAL_API_KEY -u GEMINI_API_KEY -u GOOGLE_API_KEY -u XAI_API_KEY -u GROK_API_KEY -u GROQ_API_KEY -u TOGETHER_API_KEY -u OPENROUTER_API_KEY -u AZURE_OPENAI_API_KEY -u AWS_SESSION_TOKEN -u ANTHROPIC_OAUTH_TOKEN -u ANTHROPIC_AUTH_TOKEN -u GH_TOKEN -u SERPER_API_KEY -u PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN -u PRIME_TEAM_ID -u GOOGLE_APPLICATION_CREDENTIALS -u google_application_credentials -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL -u SSH_AUTH_SOCK -u SSH_AGENT_PID -u GIT_ASKPASS -u SSH_ASKPASS -u SUDO_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND -u PRIME_AGENT_CODING_AGENT_SESSION_DIR __PRIMEBIN__ __MODELFLAG____EFFORTFLAG__--daemon-socket __PRIMEDAEMON__ -e __PRIMEEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;    # muse (Muse Code): a positional prompt starts the supervised interactive
     # session. --yolo is the single flag that makes a crewmate pane viable: muse
     # ships approval prompts AND a filesystem/network sandbox ON by default
     # (--sandbox-network defaults to proxy-only, which refuses outright without a
@@ -1584,8 +2467,16 @@ case "$ARG3" in
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+    RAW_PRIME_SCAN_TEXT=$LAUNCH
+    raw_launch_prime_agent_detected "$LAUNCH" && refuse_raw_prime_launch
+    # Find the first real executable word, skipping env assignments and shell
+    # builtins (command, exec, env) that prefix the actual command.
+    read -r -a raw_words <<< "$LAUNCH"
+    for word in "${raw_words[@]}"; do
+      case "$word" in [A-Za-z_]*=*) continue ;; esac
+      case "$word" in command|exec|env) continue ;; esac
+      HARNESS=$(basename "$word")
+      break
     done
     ;;
   '')
@@ -1631,13 +2522,17 @@ if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini 
   exit 1
 fi
 
-# rovo carries the same primary-supervision gap as muse: no turn-end hook, no
-# verified primary integration, so a secondmate (a firstmate instance that must
-# itself act as a primary) could never be supervised. Refuse loudly rather than
-# standing one up with no way to arm its watch cycle.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
-  echo "error: rovo is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
+# Prime Agent and rovo carry the same primary-supervision gap as muse: no verified
+# primary integration, so a secondmate (a firstmate instance that must itself act
+# as a primary) could never be supervised. Refuse loudly rather than standing one
+# up with no way to arm its watch cycle.
+if [ "$KIND" = secondmate ]; then
+  case "$HARNESS" in
+    prime-agent|rovo)
+      echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 case "$HARNESS" in
@@ -1652,6 +2547,12 @@ case "$HARNESS" in
     fi
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    ;;
+  prime-agent)
+    PRIME_BIN=$(type -P prime-agent 2>/dev/null) || {
+      echo "error: prime-agent executable not found on PATH; install it or select a different verified harness" >&2
+      exit 1
+    }
     ;;
   cursor)
     # `cursor` is not the CLI name, and the legacy alias `agent` is far too
@@ -1789,12 +2690,6 @@ resolve_rovo_binary() {
 # supervision like a wedged worker rather than a missing credential.
 muse_worker_meta_api_key_present() {
   local session worker_env
-  if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
-    case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
-      *$'\nMETA_API_KEY\n'*) ;;
-      *) return 1 ;;
-    esac
-  fi
   [ "$BACKEND" = tmux ] || return 1
   if [ -n "${TMUX:-}" ]; then
     session=$(tmux display-message -p '#S' 2>/dev/null) || return 1
@@ -1818,7 +2713,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|gemini|muse|rovo|omp)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1853,6 +2748,12 @@ effort_flag_for_harness() {
     pi|pi-signed)
       # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
       # its --thinking flag.
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    prime-agent)
+      # Prime Agent accepts the same --thinking vocabulary as Pi (verified 0.8.0).
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
@@ -2169,6 +3070,9 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
     exit 1
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+fi
+if [ -n "$RAW_PRIME_SCAN_TEXT" ]; then
+  RAW_LAUNCH_SCAN_CWD=${WT:-$PROJ_ABS} raw_launch_prime_agent_detected "$RAW_PRIME_SCAN_TEXT" && refuse_raw_prime_launch
 fi
 [ -f "$BRIEF" ] || { echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2; exit 1; }
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
@@ -3087,6 +3991,9 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
+if [ -n "$RAW_PRIME_SCAN_TEXT" ]; then
+  RAW_LAUNCH_SCAN_CWD=${WT:-$PROJ_ABS} raw_launch_prime_agent_detected "$RAW_PRIME_SCAN_TEXT" && refuse_raw_prime_launch
+fi
 
 # Pre-register Claude's workspace trust for the worktree, at the first point the
 # worktree is known and before any per-task state is created below. The dialog
@@ -3124,6 +4031,86 @@ mkdir -p "$TASK_TMP/gotmp"
 # check or leak into a commit.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
+# Prime Agent project-scoped state setup (runs after STATE_REAL is resolved)
+PRIME_GIT_CONFIG_ENV_CLEANUP=
+if [ "$HARNESS" = prime-agent ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  PRIME_PROJECT_DIGEST=$(spawn_sha256_string "$PROJ_ABS") || {
+    echo "error: cannot create project-scoped Prime Agent state: invalid project digest" >&2
+    exit 1
+  }
+  PRIME_PROJECT_HASH=${PRIME_PROJECT_DIGEST:0:16}
+  PRIME_HOME_DIGEST=$(spawn_sha256_string "$STATE_REAL") || {
+    echo "error: cannot create project-scoped Prime Agent state: invalid home digest" >&2
+    exit 1
+  }
+  PRIME_HOME="$STATE_REAL/prime-projects/$PRIME_PROJECT_HASH/home"
+  PRIME_DIR="$PRIME_HOME/.prime/agent"
+  PRIME_SESSION_DIR="$PRIME_DIR/sessions"
+  PRIME_HOME_HASH=${PRIME_HOME_DIGEST:0:8}
+  PRIME_DAEMON_SOCKET="/tmp/firstmate-prime-$PRIME_PROJECT_HASH-$PRIME_HOME_HASH"
+  mkdir -p "$PRIME_DIR" "$PRIME_SESSION_DIR"
+  PRIME_EXT="$STATE_REAL/$ID.prime-ext.ts"
+  sq_primeext=$(shell_quote "$PRIME_EXT")
+  sq_primehome=$(shell_quote "$PRIME_HOME")
+  sq_primegit=$(shell_quote "$PRIME_HOME/.gitconfig")
+  sq_primedir=$(shell_quote "$PRIME_DIR")
+  sq_primesession=$(shell_quote "$PRIME_SESSION_DIR")
+  sq_primedaemon=$(shell_quote "$PRIME_DAEMON_SOCKET")
+  # Credential and configuration isolation: redirect every ambient
+  # credential and config root into the project-scoped home so a worker
+  # cannot leak or inherit the operator's credentials.
+  mkdir -p "$PRIME_HOME/.config" "$PRIME_HOME/.local/share" "$PRIME_HOME/.cache"     "$PRIME_HOME/.local/state" "$PRIME_HOME/.local/run" "$PRIME_HOME/.config/gh"     "$PRIME_HOME/.config/gcloud" "$PRIME_HOME/.aws" "$PRIME_HOME/.azure"     "$PRIME_HOME/.docker" "$PRIME_HOME/.kube" "$PRIME_HOME/.cache/huggingface"     "$PRIME_HOME/.gnupg" "$PRIME_DIR/kernel-venv"
+  if [ -d "$PROJ_ABS/.agents" ]; then
+    ln -sfn "$PROJ_ABS/.agents" "$PRIME_HOME/.agents"
+  elif [ -L "$PRIME_HOME/.agents" ]; then
+    rm -f "$PRIME_HOME/.agents"
+  fi
+  _prime_git_name=$(git config --global --get user.name 2>/dev/null || true)
+  _prime_git_email=$(git config --global --get user.email 2>/dev/null || true)
+  SPAWN_PRIME_PROJECT_LOCK="$STATE_REAL/prime-projects/$PRIME_PROJECT_HASH.lock"
+  mkdir -p "$(dirname "$SPAWN_PRIME_PROJECT_LOCK")"
+  fm_lock_acquire_wait "$SPAWN_PRIME_PROJECT_LOCK"
+  SPAWN_PRIME_PROJECT_LOCK_HELD=1
+  _prime_git_tmp="$PRIME_HOME/.gitconfig.tmp.${BASHPID:-$$}"
+  : > "$_prime_git_tmp"
+  if [ -n "$_prime_git_name" ] && [ -n "$_prime_git_email" ]; then
+    git config --file "$_prime_git_tmp" user.name "$_prime_git_name"
+    git config --file "$_prime_git_tmp" user.email "$_prime_git_email"
+  fi
+  mv "$_prime_git_tmp" "$PRIME_HOME/.gitconfig"
+  fm_lock_release "$SPAWN_PRIME_PROJECT_LOCK"
+  SPAWN_PRIME_PROJECT_LOCK_HELD=0
+  sq_primeconfig=$(shell_quote "$PRIME_HOME/.config")
+  sq_primedata=$(shell_quote "$PRIME_HOME/.local/share")
+  sq_primecache=$(shell_quote "$PRIME_HOME/.cache")
+  sq_primestate=$(shell_quote "$PRIME_HOME/.local/state")
+  sq_primeruntime=$(shell_quote "$PRIME_HOME/.local/run")
+  sq_primegh=$(shell_quote "$PRIME_HOME/.config/gh")
+  sq_primegcloud=$(shell_quote "$PRIME_HOME/.config/gcloud")
+  sq_primekernel=$(shell_quote "$PRIME_DIR/kernel-venv")
+  sq_primepython=$(shell_quote "$PRIME_DIR/kernel-venv/bin/python")
+  sq_primeawscreds=$(shell_quote "$PRIME_HOME/.aws/credentials")
+  sq_primeawsconf=$(shell_quote "$PRIME_HOME/.aws/config")
+  sq_primeazure=$(shell_quote "$PRIME_HOME/.azure")
+  sq_primedocker=$(shell_quote "$PRIME_HOME/.docker")
+  sq_primekube=$(shell_quote "$PRIME_HOME/.kube/config")
+  sq_primehf=$(shell_quote "$PRIME_HOME/.cache/huggingface")
+  sq_primegnupg=$(shell_quote "$PRIME_HOME/.gnupg")
+  sq_primenpm=$(shell_quote "$PRIME_HOME/.npmrc")
+  sq_primenetrc=$(shell_quote "$PRIME_HOME/.netrc")
+  PRIME_GIT_CONFIG_ENV_CLEANUP="for __fm_git_config_env in \$(env | awk -F= '\$1 ~ /^GIT_CONFIG_(KEY|VALUE)_[0-9]+\$/ { print \$1 }'); do unset \"\$__fm_git_config_env\"; done; for __fm_secret_env in \$(env | awk -F= '\$1 ~ /(^|_)(TOKEN|API_KEY|SECRET|AUTH_TOKEN|PRIVATE_KEY|DEPLOY_KEY|SIGNING_KEY)(_|\$)/ || \$1 ~ /(PASSWORD|PASSWD|AUTH_CONFIG|CREDENTIALS)/ || \$1 ~ /(^|_)(URL|URI|DSN)\$/ || \$1 ~ /^(PGPASSWORD|MYSQL_PWD|REDISCLI_AUTH)$/ { print \$1 }'); do unset \"\$__fm_secret_env\"; done; unset GIT_CONFIG_PARAMETERS; "
+  PRIME_VERSION=$(env -i PATH="${PATH:-/usr/bin:/bin}" HOME="$PRIME_HOME" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$PRIME_HOME/.gitconfig" GIT_CONFIG_COUNT=0 PRIME_AGENT_CODING_AGENT_DIR="$PRIME_DIR" PRIME_AGENT_SESSION_DIR="$PRIME_SESSION_DIR" XDG_CONFIG_HOME="$PRIME_HOME/.config" XDG_DATA_HOME="$PRIME_HOME/.local/share" XDG_CACHE_HOME="$PRIME_HOME/.cache" XDG_STATE_HOME="$PRIME_HOME/.local/state" XDG_RUNTIME_DIR="$PRIME_HOME/.local/run" GH_CONFIG_DIR="$PRIME_HOME/.config/gh" CLOUDSDK_CONFIG="$PRIME_HOME/.config/gcloud" PRIME_AGENT_KERNEL_VENV="$PRIME_DIR/kernel-venv" PRIME_AGENT_KERNEL_PYTHON="$PRIME_DIR/kernel-venv/bin/python" AWS_SHARED_CREDENTIALS_FILE="$PRIME_HOME/.aws/credentials" AWS_CONFIG_FILE="$PRIME_HOME/.aws/config" AZURE_CONFIG_DIR="$PRIME_HOME/.azure" DOCKER_CONFIG="$PRIME_HOME/.docker" KUBECONFIG="$PRIME_HOME/.kube/config" HF_HOME="$PRIME_HOME/.cache/huggingface" GNUPGHOME="$PRIME_HOME/.gnupg" NPM_CONFIG_USERCONFIG="$PRIME_HOME/.npmrc" NETRC="$PRIME_HOME/.netrc" "$PRIME_BIN" --version 2>/dev/null) || {
+    echo "error: Prime Agent requires version 0.8.1 or newer with --daemon-socket support; version probe failed" >&2
+    exit 1
+  }
+  PRIME_VERSION=${PRIME_VERSION##*v}
+  PRIME_VERSION=${PRIME_VERSION%% *}
+  if ! prime_version_supports_scoped_daemon "$PRIME_VERSION"; then
+    echo "error: Prime Agent requires version 0.8.1 or newer with --daemon-socket support; found $PRIME_VERSION" >&2
+    exit 1
+  fi
+  LAUNCH="HOME=$sq_primehome GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=$sq_primegit GIT_CONFIG_COUNT=0 PRIME_AGENT_CODING_AGENT_DIR=$sq_primedir PRIME_AGENT_SESSION_DIR=$sq_primesession XDG_CONFIG_HOME=$sq_primeconfig XDG_DATA_HOME=$sq_primedata XDG_CACHE_HOME=$sq_primecache XDG_STATE_HOME=$sq_primestate XDG_RUNTIME_DIR=$sq_primeruntime GH_CONFIG_DIR=$sq_primegh CLOUDSDK_CONFIG=$sq_primegcloud PRIME_AGENT_KERNEL_VENV=$sq_primekernel PRIME_AGENT_KERNEL_PYTHON=$sq_primepython AWS_SHARED_CREDENTIALS_FILE=$sq_primeawscreds AWS_CONFIG_FILE=$sq_primeawsconf AZURE_CONFIG_DIR=$sq_primeazure DOCKER_CONFIG=$sq_primedocker KUBECONFIG=$sq_primekube HF_HOME=$sq_primehf GNUPGHOME=$sq_primegnupg NPM_CONFIG_USERCONFIG=$sq_primenpm NETRC=$sq_primenetrc $LAUNCH"
+fi
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
@@ -3154,9 +4141,8 @@ if [ "$KIND" != secondmate ]; then
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok and rovo stay on their isolated
   # rendered-tail fallbacks and standalone Kimi stays unknown until
-  # fm_busy_kimi_verified opens, so none of the three is armed here. Gemini IS
-  # armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a verified
-  # open-close pair.
+  # fm_busy_kimi_verified opens, so none of the three is armed here. Gemini and
+  # Prime are armed through firstmate-owned lifecycle hooks.
   BUSY_GEN=
   case "$HARNESS" in
     codex*)
@@ -3167,7 +4153,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed|omp)
+    claude*|opencode*|pi|pi-signed|prime-agent|omp)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -3303,6 +4289,65 @@ export const FmBusyState = async () => {
 };
 EOF
       exclude_path '.opencode/plugins/fm-busy-state.js'
+      ;;
+    prime-agent)
+      state_literal=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$STATE_REAL")
+      id_literal=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$ID")
+      gen_literal=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$BUSY_GEN")
+      turnend_literal=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$TURNEND")
+      busy_event_literal=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$FM_ROOT/bin/fm-busy-event.sh")
+      cat > "$PRIME_EXT" <<EOF
+import { execFile } from "node:child_process";
+const STATE_DIR = $state_literal;
+const TASK_ID = $id_literal;
+const BUSY_GEN = $gen_literal;
+const TURNEND_PATH = $turnend_literal;
+const BUSY_EVENT = $busy_event_literal;
+const coordinatorKey = STATE_DIR + "\0" + TASK_ID + "\0" + BUSY_GEN;
+const coordinators = globalThis.__firstmatePrimeBusyCoordinators ??= new Map();
+const coordinator = coordinators.get(coordinatorKey) ?? { active: new Set(), compacting: new Set() };
+coordinators.set(coordinatorKey, coordinator);
+const eventSession = (event) => String(event?.sessionId ?? event?.sessionID ?? event?.session?.id ?? event?.runId ?? event?.id ?? "root");
+const busyEvent = (state, event) =>
+  new Promise((resolve) => {
+    execFile(BUSY_EVENT, [
+      "apply", STATE_DIR, TASK_ID, state,
+      "--gen", BUSY_GEN, "--source", "prime-ext", "--event", event,
+    ], () => resolve());
+  });
+const touchTurnEnd = () =>
+  new Promise((resolve) => {
+    execFile("touch", [TURNEND_PATH], () => resolve());
+  });
+const publishActiveState = (event) =>
+  coordinator.active.size > 0 || coordinator.compacting.size > 0
+    ? busyEvent("busy", event)
+    : busyEvent("unknown", event);
+export default function (pi) {
+  pi.on("agent_start", (event) => {
+    const session = eventSession(event);
+    coordinator.compacting.delete(session);
+    coordinator.active.add(session);
+    return busyEvent("busy", "agent-start");
+  });
+  pi.on("session_before_compact", (event) => {
+    const session = eventSession(event);
+    coordinator.active.add(session);
+    coordinator.compacting.add(session);
+    return busyEvent("busy", "session-before-compact");
+  });
+  pi.on("turn_end", () => touchTurnEnd());
+  pi.on("agent_end", (event) => {
+    const session = eventSession(event);
+    if (event?.willContinue === true || coordinator.compacting.has(session)) {
+      coordinator.active.add(session);
+      return busyEvent("busy", "agent-end-will-continue");
+    }
+    coordinator.active.delete(session);
+    return publishActiveState("agent-end");
+  });
+}
+EOF
       ;;
     pi|pi-signed)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
@@ -3565,7 +4610,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id prime_home prime_agent_dir prime_session_dir prime_daemon_socket home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3608,6 +4653,12 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
+  fi
+  if [ "$HARNESS" = prime-agent ]; then
+    echo "prime_home=$PRIME_HOME"
+    echo "prime_agent_dir=$PRIME_DIR"
+    echo "prime_session_dir=$PRIME_SESSION_DIR"
+    echo "prime_daemon_socket=$PRIME_DAEMON_SOCKET"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
@@ -3742,13 +4793,17 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
   omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
+  prime-agent) LAUNCH=${LAUNCH//__PRIMEBIN__/"$(shell_quote "$PRIME_BIN")"}; LAUNCH=${LAUNCH//__PRIMEEXT__/$sq_primeext}; LAUNCH=${LAUNCH//__PRIMEDAEMON__/$sq_primedaemon} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo)
+  claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|gemini|muse|rovo)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac
+if [ "$HARNESS" = prime-agent ]; then
+  LAUNCH="$PRIME_GIT_CONFIG_ENV_CLEANUP$LAUNCH"
+fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
@@ -3841,25 +4896,8 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
 fi
-if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
-  LAUNCH_ENV_PREFIX='/usr/bin/env -i'
-  for env_name in HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE \
-    TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
-    HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
-    CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID \
-    $LAUNCH_ENV_NAMES; do
-    # Only validated names enter shell syntax. Values expand once, quoted, in
-    # the pane shell and never become source text or spawn-process snapshots.
-    # shellcheck disable=SC2016
-    printf -v env_arg '${%s+"%s=$%s"}' "$env_name" "$env_name" "$env_name"
-    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $env_arg"
-  done
-  if [ -n "$SPAWN_TRACEPARENT" ]; then
-    # shellcheck disable=SC2016
-    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
-  fi
-  LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
+if [ "$RAW_LAUNCH" -eq 1 ] && [ "$RAW_LAUNCH_PATH_PIN" -eq 1 ]; then
+  LAUNCH="export PATH=$(shell_quote "${RAW_LAUNCH_SCAN_PATH:-${PATH:-}}") ; $LAUNCH"
 fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"

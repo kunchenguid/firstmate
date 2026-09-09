@@ -37,6 +37,8 @@
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
+#   prime-ext        Prime Agent per-task extension (agent_start/session_before_compact busy;
+#                    inactive agent_end unknown; idle classifies unknown legacy-prime-idle)
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
@@ -44,7 +46,7 @@
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, rovo-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
-#   kimi-unverified, codex-unverified, capture-failed, no-target
+#   legacy-prime-idle, kimi-unverified, codex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
@@ -198,6 +200,7 @@ fm_busy_sources_for_harness() {  # <harness>
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
+    prime-agent) adapter=prime-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
@@ -897,7 +900,9 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     r_state=${out%% *}
     out=${out#* }
     r_source=${out%% *}
-    if fm_busy_source_trusted "$harness" "$r_source"; then
+    if [ "$harness" = prime-agent ] && [ "$r_source" = prime-ext ]          && [ "$r_state" = idle ]; then
+      printf 'unknown legacy-prime-idle'
+    elif fm_busy_source_trusted "$harness" "$r_source"; then
       printf '%s %s' "$r_state" "$r_source"
     else
       printf 'unknown source-mismatch'

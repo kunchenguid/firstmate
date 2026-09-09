@@ -53,6 +53,7 @@ export PATH
 # the executable identity, which is exactly the signal under test.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
+ln -s "$SLEEP_BIN" "$LAB/bin/prime-agent"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # omp (Oh My Pi) is a single binary whose live process name is the bare word
 # `omp`; the two decoys are the substrings an unanchored glob would misread.
@@ -122,7 +123,7 @@ title_classifies_agent() {  # <target>
 
 # Does the foreground-process-group identity, including argv[0], name one?
 comms_classify_agent() {  # <target>
-  local name
+  local name args argv0 pid
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ] && return 0
@@ -134,6 +135,19 @@ EOF
     [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ] && return 0
   done <<EOF
 $(fm_backend_tmux_foreground_argv0s "$1")
+EOF
+  while IFS= read -r args; do
+    [ -n "$args" ] || continue
+    argv0=${args%%[[:space:]]*}
+    [ "$(fm_backend_tmux_classify_process_name '' "$argv0")" = agent ] && return 0
+  done <<EOF
+$(fm_backend_tmux_foreground_args "$1")
+EOF
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    fm_prime_node_pid_matches "$pid" && return 0
+  done <<EOF
+$(fm_backend_tmux_foreground_pids "$1")
 EOF
   return 1
 }
@@ -159,6 +173,39 @@ new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+new_window prime-agent "$LAB/bin/prime-agent" 900
+wait_for_state "$SESSION:prime-agent" alive \
+  || fail "a running prime-agent process must classify alive"
+pass "tmux liveness: prime-agent's exact executable identity classifies alive"
+
+NODE_BIN=$(command -v node 2>/dev/null || true)
+if [ -n "$NODE_BIN" ]; then
+  PRIME_NODE_ROOT="$LAB/node-prime/node_modules/prime-agent"
+  mkdir -p "$PRIME_NODE_ROOT/dist/bundle"
+  printf '%s\n' '{"name":"prime-agent","bin":{"prime-agent":"dist/bundle/cli.js"}}' > "$PRIME_NODE_ROOT/package.json"
+  printf '%s\n' 'setInterval(() => {}, 60000);' > "$PRIME_NODE_ROOT/dist/bundle/cli.js"
+  printf '%s\n' 'setInterval(() => {}, 60000);' > "$LAB/node-tool.js"
+
+  new_window prime-node "$NODE_BIN" "$PRIME_NODE_ROOT/dist/bundle/cli.js"
+  wait_for_state "$SESSION:prime-node" alive \
+    || fail "Prime's manifest-owned Node entrypoint must classify alive"
+
+  PRIME_LINKED_ROOT="$LAB/Linked Prime"
+  mkdir -p "$PRIME_LINKED_ROOT/dist/bundle"
+  printf '%s\n' '{"name":"prime-agent","bin":{"prime-agent":"dist/bundle/cli.js"}}' > "$PRIME_LINKED_ROOT/package.json"
+  printf '%s\n' 'setInterval(() => {}, 60000);' > "$PRIME_LINKED_ROOT/dist/bundle/cli.js"
+  new_window prime-node-linked "$NODE_BIN" "$PRIME_LINKED_ROOT/dist/bundle/cli.js"
+  wait_for_state "$SESSION:prime-node-linked" alive \
+    || fail "Prime's linked source-checkout Node entrypoint must classify alive"
+
+  new_window prime-node-decoy "$NODE_BIN" "$LAB/node-tool.js" "$PRIME_NODE_ROOT/dist/bundle/cli.js"
+  wait_for_state "$SESSION:prime-node-decoy" ambiguous \
+    || fail "Prime's entrypoint as a later Node argument must stay ambiguous"
+  pass "tmux liveness: Prime's Node script operand classifies without widening to later arguments"
+else
+  echo "skip: node not found, so Prime's Node entrypoint liveness case cannot run"
+fi
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy
@@ -371,6 +418,24 @@ fi
 [ "$(fm_tmux_composer_state "$SESSION:cursor-exited")" != empty ] \
   || fail "a dead-shell pane still showing Cursor's composer must never read empty"
 pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
+
+PRIME_PROBE_LOG="$LAB/prime-probes.log"
+: > "$PRIME_PROBE_LOG"
+fm_prime_node_pid_matches() {
+  printf '%s\n' "$1" >> "$PRIME_PROBE_LOG"
+  return 1
+}
+[ "$(fm_backend_agent_state tmux "$SESSION:idle")" = dead ] \
+  || fail "idle shell liveness changed while measuring Prime probes"
+[ -s "$PRIME_PROBE_LOG" ] \
+  || fail "Prime argv probing skipped a non-Node-titled foreground process"
+if [ -n "$NODE_BIN" ]; then
+  : > "$PRIME_PROBE_LOG"
+  fm_backend_agent_state tmux "$SESSION:prime-node-decoy" >/dev/null
+  [ -s "$PRIME_PROBE_LOG" ] \
+    || fail "Prime argv probing did not run for a Node foreground process"
+fi
+pass "tmux liveness probes Prime argv independently of process title"
 
 cleanup_all
 trap - EXIT

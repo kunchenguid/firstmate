@@ -343,6 +343,15 @@ FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # bin/fm-busy-lib.sh, never from this row.
 FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+# Prime Agent renders a braille-spinner busy line with an elapsed-time cell:
+#   ⠸ Thinking · 3s   ⠼ Executing · 2s · ↑ 80 tokens   ⠧ Waiting for IPython kernel... 2s
+# The spinner shares Pi's braille frame set but the elapsed format is distinct.
+# Multi-unit times are zero-padded from the second unit onward (1m 02s, not 1m 2s),
+# so the separator before the elapsed excludes m/h/d to prevent matching an
+# unpadded trailing unit as a standalone seconds value. The line must start
+# with the spinner (after optional whitespace) so an embedded fragment never
+# acknowledges delivery.
+FM_DELIVERY_PRIME_BUSY_REGEX_DEFAULT='^[[:space:]]*(⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏)[[:space:]]+.+([[:space:]]·[[:space:]]|[^mhd][[:space:]])([0-9]+s|[0-9]+m[[:space:]]+[0-9][0-9]s|[0-9]+h[[:space:]]+[0-9][0-9]m[[:space:]]+[0-9][0-9]s|[0-9]+d[[:space:]]+[0-9][0-9]h[[:space:]]+[0-9][0-9]m[[:space:]]+[0-9][0-9]s)($|[[:space:]]·)'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -355,6 +364,7 @@ fm_busy_lines_match() {  # [harness]
       codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
+      prime-agent) regex=$FM_DELIVERY_PRIME_BUSY_REGEX_DEFAULT ;;
       omp) regex=$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;

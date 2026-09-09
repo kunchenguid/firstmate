@@ -26,6 +26,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-prime-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-prime-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -56,8 +58,8 @@ fm_backend_tmux_send_key() {  # <target> <key>
 # submit with Enter, retried (Enter only, never retyped) until the composer
 # clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
 # that file for the composer-verification contract and echoed verdicts.
-fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  fm_tmux_submit_core "$@"
+fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
+  fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5" "${7:-}"
 }
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
@@ -175,7 +177,7 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # omp (Oh My Pi) is anchored for the same reason as muse: its live process
     # name is the bare word `omp` (verified, omp 18.1.11) and a glob would claim
     # unrelated commands such as ompd or comp.
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp) printf 'agent' ;;
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp|prime-agent) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
@@ -356,6 +358,18 @@ EOF
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     if fm_gemini_pid_is_gemini "$pid"; then
+      printf 'alive'
+      return 0
+    fi
+  done <<EOF
+$(fm_backend_tmux_foreground_pids "$target")
+EOF
+
+  # Prime Agent runs as a bare `node` bundle whose identity lives in argv[1],
+  # so it needs the same argv-boundary-preserving pid probe as Gemini.
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if fm_prime_node_pid_matches "$pid"; then
       printf 'alive'
       return 0
     fi

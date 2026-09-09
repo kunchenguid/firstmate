@@ -2774,22 +2774,22 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # mid-turn). When <allow-rendered> is 1, an idle native baseline may also take
 # the pane's rendered busy footer, because live Claude keeps agent_status idle
 # through a whole turn.
-fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
-  local target=$1 allow_rendered=${2:-0} raw
+fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered> [harness]
+  local target=$1 allow_rendered=${2:-0} harness=${3:-} raw
   raw=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   case "$raw" in
     working) printf 'busy'; return 0 ;;
   esac
   if [ "$allow_rendered" = 1 ]; then
-    fm_backend_herdr_rendered_busy_state "$target"
+    fm_backend_herdr_rendered_busy_state "$target" "$harness"
   else
     printf 'idle'
   fi
 }
 
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0
+  local harness=${7:-} raw_status footer_baseline='' allow_rendered=0 enter_sent=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -2801,7 +2801,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   if [ "$baseline" = idle ]; then
     allow_rendered=1
   else
-    footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target")
+    footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target" "$harness")
   fi
   while :; do
     if fm_backend_herdr_send_key "$target" Enter; then
@@ -2835,7 +2835,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       verdict=$(fm_backend_herdr_composer_state "$target")
       if [ "$verdict" = pending ] && [ "$raw_status" != working ] \
         && [ "$footer_baseline" = idle ] \
-        && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then
+        && [ "$(fm_backend_herdr_rendered_busy_state "$target" "$harness")" = busy ]; then
         verdict=busy
       fi
       case "$verdict" in
@@ -2850,7 +2850,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         printf 'send-failed'
       else
         fm_composer_queued_enter_verdict "$verdict" \
-          "$(fm_backend_herdr_queued_enter_busy "$target" "$allow_rendered")"
+          "$(fm_backend_herdr_queued_enter_busy "$target" "$allow_rendered" "$harness")"
       fi
       return 0
     fi

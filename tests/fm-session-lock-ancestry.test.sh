@@ -87,6 +87,13 @@ SH
   pass "session-lock: a version-named Claude Code session is identified from its install path and argv[0]"
 }
 
+test_prime_agent_is_not_a_session_lock_primary() {
+  if lib_eval "$FAKEBIN" 'fm_harness_process_matches prime-agent prime-agent'; then
+    fail "session-lock identity accepted prime-agent as a primary harness"
+  fi
+  pass "session-lock: prime-agent is not a primary harness"
+}
+
 test_ordinary_paths_are_never_harness_processes() {
   local dir fakebin shape
   dir="$TMP_ROOT/ordinary-paths"
@@ -357,6 +364,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 }
 
 test_version_named_session_is_identified_on_both_platforms
+test_prime_agent_is_not_a_session_lock_primary
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
