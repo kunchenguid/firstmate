@@ -38,7 +38,12 @@ chmod +x "$SLEEPER"
 TRACK_TMUX_SESSIONS=""
 GLOBAL_CLEANUP() {
   rm -f "$SLEEPER" 2>/dev/null || true
-  local s
+  local s h
+  for h in ${HARNESS_CASE_HOMES:-}; do
+    s=$(harness_case_session "$h")
+    [ -z "$s" ] || tmux kill-session -t "$s" 2>/dev/null || true
+    rm -rf "$h" 2>/dev/null || true
+  done
   for s in $TRACK_TMUX_SESSIONS; do
     tmux kill-session -t "$s" 2>/dev/null || true
   done
@@ -1094,7 +1099,7 @@ e2e_tmux() {
 # ---------------------------------------------------------------------------
 e2e_tmux_forwards_only_a_provable_supervisor_harness() {
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (tmux harness-forwarding e2e)"; return 0; }
-  local cap_session home_tmp cap_pane got
+  local cap_session cap_pane got asserted=0
   cap_session="fm-afk-launch-harness-$$"
   tmux new-session -d -s "$cap_session" 2>/dev/null || { fail "tmux harness e2e: could not create captain session"; return 0; }
   TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
@@ -1102,58 +1107,79 @@ e2e_tmux_forwards_only_a_provable_supervisor_harness() {
 
   # A foreign launcher: ANTIGRAVITY_AGENT marks THIS process agy, while the
   # supervised pane is the plain shell created above, which is not agy.
-  home_tmp=$(harness_case_home) || return 0
-  got=$(run_harness_case "$home_tmp" "$cap_pane" env -u FM_SUPERVISOR_HARNESS ANTIGRAVITY_AGENT=1)
-  if [ -z "$got" ] || [ "$got" = UNSET ]; then
-    pass "tmux harness e2e: an overridden target forwards no harness, so the daemon falls back to deferral"
-  else
-    fail "tmux harness e2e: the launcher declared its own harness '$got' for a pane it does not run in"
+  if harness_case_home; then
+    got=$(run_harness_case "$HARNESS_CASE_HOME" "$cap_pane" env -u FM_SUPERVISOR_HARNESS ANTIGRAVITY_AGENT=1)
+    if [ -z "$got" ] || [ "$got" = UNSET ]; then
+      pass "tmux harness e2e: an overridden target forwards no harness, so the daemon falls back to deferral"
+    else
+      fail "tmux harness e2e: the launcher declared its own harness '$got' for a pane it does not run in"
+    fi
+    asserted=$((asserted + 1))
+    harness_case_stop "$HARNESS_CASE_HOME" "$cap_pane"
   fi
-  harness_case_stop "$home_tmp" "$cap_pane"
 
   # The operator states the target pane's harness: that value is authoritative
   # and must survive verbatim, including over the launcher's own marker.
-  home_tmp=$(harness_case_home) || return 0
-  got=$(run_harness_case "$home_tmp" "$cap_pane" env ANTIGRAVITY_AGENT=1 FM_SUPERVISOR_HARNESS=claude)
-  if [ "$got" = claude ]; then
-    pass "tmux harness e2e: an operator-stated supervisor harness reaches the daemon verbatim"
-  else
-    fail "tmux harness e2e: the operator-stated harness did not reach the daemon (got '$got')"
+  if harness_case_home; then
+    got=$(run_harness_case "$HARNESS_CASE_HOME" "$cap_pane" env ANTIGRAVITY_AGENT=1 FM_SUPERVISOR_HARNESS=claude)
+    if [ "$got" = claude ]; then
+      pass "tmux harness e2e: an operator-stated supervisor harness reaches the daemon verbatim"
+    else
+      fail "tmux harness e2e: the operator-stated harness did not reach the daemon (got '$got')"
+    fi
+    asserted=$((asserted + 1))
+    harness_case_stop "$HARNESS_CASE_HOME" "$cap_pane"
   fi
-  harness_case_stop "$home_tmp" "$cap_pane"
 
   # No target override: the launcher IS in the supervised pane (TMUX_PANE names
   # it), so its own detected harness does describe that pane and is forwarded.
-  home_tmp=$(harness_case_home) || return 0
-  got=$(run_harness_case "$home_tmp" '' env -u FM_SUPERVISOR_HARNESS -u FM_SUPERVISOR_TARGET \
-    ANTIGRAVITY_AGENT=1 TMUX_PANE="$cap_pane")
-  if [ "$got" = agy ]; then
-    pass "tmux harness e2e: the launcher forwards its own harness when it is the supervised pane"
-  else
-    fail "tmux harness e2e: the daemon received '$got' from a launcher that is the supervised pane"
+  if harness_case_home; then
+    got=$(run_harness_case "$HARNESS_CASE_HOME" '' env -u FM_SUPERVISOR_HARNESS -u FM_SUPERVISOR_TARGET \
+      ANTIGRAVITY_AGENT=1 TMUX_PANE="$cap_pane")
+    if [ "$got" = agy ]; then
+      pass "tmux harness e2e: the launcher forwards its own harness when it is the supervised pane"
+    else
+      fail "tmux harness e2e: the daemon received '$got' from a launcher that is the supervised pane"
+    fi
+    asserted=$((asserted + 1))
+    harness_case_stop "$HARNESS_CASE_HOME" "$cap_pane"
   fi
-  harness_case_stop "$home_tmp" "$cap_pane"
+
+  # A setup failure must never let this test report success having asserted
+  # nothing: the count is the guard, and it runs whatever the cases did.
+  if [ "$asserted" -eq 3 ]; then
+    pass "tmux harness e2e: all three forwarding cases were exercised"
+  else
+    fail "tmux harness e2e: only $asserted of 3 forwarding cases ran; the rest were skipped by a setup failure"
+  fi
 
   tmux kill-session -t "$cap_session" 2>/dev/null || true
 }
 
+# Build one case home in the TEST shell (never a command substitution) so a
+# setup failure reaches FAILED instead of dying in a subshell. Registers the
+# home for GLOBAL_CLEANUP before anything can create a daemon session, so the
+# trap can reap that session from the launcher's own record even if this test
+# aborts between the launch and the stop.
+HARNESS_CASE_HOME=
+HARNESS_CASE_HOMES=""
 harness_case_home() {
-  local home_tmp
-  home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-harness.XXXXXX")
-  cat > "$home_tmp/recorder.sh" <<SH
+  HARNESS_CASE_HOME=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-harness.XXXXXX") || {
+    fail "tmux harness e2e: could not create a case home"; return 1; }
+  HARNESS_CASE_HOMES="$HARNESS_CASE_HOMES $HARNESS_CASE_HOME"
+  cat > "$HARNESS_CASE_HOME/recorder.sh" <<SH
 #!/usr/bin/env bash
-printf '%s' "\${FM_SUPERVISOR_HARNESS-UNSET}" > "$home_tmp/received"
+printf '%s' "\${FM_SUPERVISOR_HARNESS-UNSET}" > "$HARNESS_CASE_HOME/received"
 exec sleep 600
 SH
-  chmod +x "$home_tmp/recorder.sh"
-  confirm_posture "$home_tmp" || { fail "tmux harness e2e: could not confirm fixture posture"; rm -rf "$home_tmp"; return 1; }
-  printf '%s' "$home_tmp"
+  chmod +x "$HARNESS_CASE_HOME/recorder.sh"
+  confirm_posture "$HARNESS_CASE_HOME" || { fail "tmux harness e2e: could not confirm fixture posture"; return 1; }
 }
 
 # Launch one daemon through the real launcher under <env-prefix...> and echo the
 # FM_SUPERVISOR_HARNESS value its entry process actually received.
 run_harness_case() {  # <home> <target-or-empty> <env-prefix...>
-  local home_tmp=$1 target=$2 rec deadline
+  local home_tmp=$1 target=$2 deadline
   shift 2
   if [ -n "$target" ]; then
     set -- "$@" FM_SUPERVISOR_TARGET="$target"
@@ -1162,17 +1188,27 @@ run_harness_case() {  # <home> <target-or-empty> <env-prefix...>
     FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
     FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$home_tmp/recorder.sh" \
     "$LAUNCH" start >/dev/null 2>&1
-  rec=$(cut -f2 "$home_tmp/state/.afk-daemon-terminal" 2>/dev/null || true)
-  [ -z "$rec" ] || TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $rec"
   deadline=$(( $(date +%s) + 20 ))
   while [ ! -e "$home_tmp/received" ] && [ "$(date +%s)" -lt "$deadline" ]; do sleep 0.2; done
   cat "$home_tmp/received" 2>/dev/null || printf 'NOTHING'
 }
 
+# Stop the daemon and prove its session is gone BEFORE removing the home, since
+# the home holds the only record of that session's name.
 harness_case_stop() {  # <home> <target>
+  local session
   FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" \
     FM_SUPERVISOR_TARGET="$2" FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" stop >/dev/null 2>&1
+  session=$(harness_case_session "$1")
+  if [ -n "$session" ] && tmux has-session -t "$session" 2>/dev/null; then
+    fail "tmux harness e2e: daemon session '$session' survived stop"
+    return 0
+  fi
   rm -rf "$1" 2>/dev/null || true
+}
+
+harness_case_session() {  # <home>
+  cut -f2 "$1/state/.afk-daemon-terminal" 2>/dev/null || true
 }
 
 unit_clear_stale

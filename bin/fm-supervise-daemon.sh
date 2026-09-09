@@ -78,16 +78,28 @@
 #                                   tmux target or a herdr "<session>:<pane-id>"
 #                                   target; which one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
-#          FM_SUPERVISOR_HARNESS    harness rendering the supervisor pane
-#                                   (override; forwarded by bin/fm-afk-launch.sh
-#                                   from inside the captain pane, because a
-#                                   daemon launched into its own terminal is a
-#                                   child of the terminal server and cannot read
-#                                   that pane's harness from its own ancestry).
-#                                   Absent, the daemon detects its own harness,
-#                                   which is correct only on the harness-native
-#                                   launch paths. Scopes the composer proofs
-#                                   run against that pane before injection.
+#          FM_SUPERVISOR_HARNESS    harness rendering the supervisor pane, which
+#                                   a daemon launched into its own terminal
+#                                   cannot read from its own ancestry (it is a
+#                                   child of the terminal server, not of that
+#                                   pane). bin/fm-afk-launch.sh forwards an
+#                                   operator-supplied value verbatim, forwards
+#                                   its own detected harness only when the pane
+#                                   it ran in IS the supervised one, and
+#                                   forwards NOTHING when FM_SUPERVISOR_TARGET
+#                                   was overridden without a stated harness,
+#                                   since the two panes may run different
+#                                   harnesses. An absent value is therefore the
+#                                   deliberate fail-safe, not a launcher bug:
+#                                   the daemon falls back to detecting its own
+#                                   harness, which is correct only on the
+#                                   harness-native launch paths and otherwise
+#                                   resolves unknown, so the harness-scoped
+#                                   checks are skipped and escalations defer.
+#                                   Set it yourself to supervise a pane this
+#                                   daemon cannot identify. Scopes the busy and
+#                                   composer proofs run against that pane before
+#                                   injection.
 #          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr;
 #                                   override; otherwise auto-discovered the same
 #                                   way bin/fm-backend.sh's fm_backend_detect
