@@ -82,6 +82,8 @@ config/trace-context  optional presence flag enabling default-off native W3C tra
 config/turnend-churn-absorb  optional presence flag opting this home into the default-off absorb of bare turn-end wakes on pane churn; LOCAL, gitignored, and not inherited; see docs/configuration.md "Turn-end pane-churn absorb"
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
+config/project-sources/  per-project record of the checkout a project was worked in before firstmate had it, and whether that checkout or the repository is its knowledge home; LOCAL, gitignored, machine-specific and NOT inherited by secondmate homes; read by bin/fm-project-memory.sh (docs/project-memory.md)
+config/project-recipe-budget  optional token budget for the start-of-work capability digest a spawn renders from a project's recipe catalog; LOCAL, gitignored; absent means the default in bin/fm-project-recipes.sh
 config/watched-tools.json  optional list of the tools this home depends on, read by the update check armed with bin/fm-tool-update-check.sh; LOCAL, gitignored, firstmate-maintained but human-editable, and NOT inherited by secondmate homes; see docs/configuration.md "Watched tool updates"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
@@ -91,6 +93,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin fleet navigation registry recording each project's standing delivery posture; firstmate-private, parsed for mechanical sync and seeding by fm-project-mode.sh (section 6)
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
+  project-local/<project>/  material that must reach a worker but must never enter the project's history; staged into each task copy at spawn and left intact by teardown (bin/fm-project-local.sh)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
@@ -262,6 +265,8 @@ A secondmate is idle by default and acts only on work routed by the main firstma
 It reconciles its own work under way after restart, then waits silently; an empty queue never authorizes a survey, audit, or self-directed improvement sweep.
 Do not reconstruct or supervise a secondmate's child tree from the main home.
 
+A project's knowledge home is not always its repository, and a project started somewhere else usually leaves most of its knowledge behind: [`docs/project-memory.md`](docs/project-memory.md) owns how firstmate records that home, detects what never travelled into the clone, carries material that cannot be committed into each task copy, and keeps a project's recipe catalog current.
+
 Route durable knowledge to its most specific owner:
 
 - Home-domain captain preferences and working style belong in `data/captain.md` after inspect-then-update.
@@ -269,6 +274,7 @@ Route durable knowledge to its most specific owner:
 - Fleet-local operational facts belong in curated, home-local `data/learnings.md`.
 - Task-scoped notes belong with the backlog item, and investigation findings belong in the scout report.
 - Knowledge useful to almost every contributor to one project belongs in that project's committed `AGENTS.md`.
+- A repeatable way of working in a project - something that project can do and the exact way it is asked for - belongs in that project's own recipe catalog, which every spawn renders into a bounded start-of-work digest; `bin/fm-project-recipes.sh` owns it.
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
 
 Firstmate never writes a project's `AGENTS.md` directly.

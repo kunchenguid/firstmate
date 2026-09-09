@@ -60,12 +60,44 @@ A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote 
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 
+## Project memory intake
+
+Adding, cloning, or registering a project is the moment its accumulated knowledge is either recovered or silently left behind, and it is the cheapest moment to recover it.
+Complete this intake as part of every add, clone, or registration; a project genuinely created from nothing has no prior home, so record that and skip the rest.
+
+First establish where the project was worked before firstmate had it, and which place is actually its home.
+Ask the captain for the path when it is not obvious, and ask which of the two it is: the repository is the home and the other checkout is a working copy, or that checkout is the home and the repository is a mirror that has not been fed in a long time.
+Do not infer the second from a stale remote alone; a project can be quiet without having moved.
+Record the answer with `bin/fm-project-memory.sh source set`, using `--canonical source` for the second case, and treat a project with no prior working copy as the normal state it is.
+
+Then run `bin/fm-project-memory.sh scan <project>` and read its report.
+The scan only reports; it never writes to that checkout, which routinely holds the captain's live uncommitted work.
+[`docs/project-memory.md`](../../../docs/project-memory.md) owns what the report's categories mean and how the whole capability fits together.
+
+Bring the findings to the captain as a decision, never as an action already taken.
+Sort what the scan found into three outcomes and propose one for each item, with a short reason:
+
+- Version it as it stands, through the project's own delivery path.
+- Anonymise it first, then version it.
+- Keep it out of the project's history entirely, and carry it to workers through the local material store instead.
+
+Anonymisation is a standing captain decision, not a per-case judgment: a knowledge document holding real client or patient material has names, phone numbers, and email addresses replaced with placeholders before anything is committed, with the analysis and its conclusions left fully intact, and this holds even when the repository is private.
+When a document cannot be anonymised without destroying what makes it useful, propose the third outcome rather than a partial redaction.
+
+Firstmate never commits any of it itself.
+Versioning is dispatched as ordinary work through that project's delivery path, and material the captain keeps out goes into the store with `bin/fm-project-local.sh` so it still reaches every worker.
+For a project whose home is a local checkout, the store is the main path rather than the exception, because there is no commit for that knowledge to land in.
+
+Finally, establish the project's recipe catalog so what is learned later stops evaporating: `bin/fm-project-recipes.sh` owns it, and creating it writes into the project, so it is dispatched as work or performed under a concrete captain approval like any other project write.
+
 ## Create a project
 
 Creating a GitHub repository is outward-facing.
 Before making that remote change, propose the repository name, owner or organization, visibility, and delivery posture, defaulting visibility to private and the posture to `no-mistakes-prod-only`, then obtain the captain's explicit consent for those exact values; a stated default never replaces that consent.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
 After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery posture.
+
+A project created from nothing has no earlier home to recover, so record that during the memory intake above and establish only its recipe catalog.
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.

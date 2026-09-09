@@ -305,6 +305,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captain-hold-lifecycle.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },
@@ -321,15 +325,7 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/captain-hold-lifecycle.md",
-      "audience": "maintainer-architecture"
-    },
-    {
       "path": "docs/documentation-audiences.md",
-      "audience": "maintainer-architecture"
-    },
-    {
-      "path": "docs/extension-bindings.md",
       "audience": "maintainer-architecture"
     },
     {
@@ -351,6 +347,10 @@
     {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
+    },
+    {
+      "path": "docs/extension-bindings.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/fm-test-isolation-proof.md",
@@ -377,16 +377,20 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/project-memory.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/remote-secondmates.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/scripts.md",
       "audience": "operator-current"
     },
     {
       "path": "docs/secondmate-parent-channel.md",
       "audience": "maintainer-architecture"
-    },
-    {
-      "path": "docs/scripts.md",
-      "audience": "operator-current"
     },
     {
       "path": "docs/sessionstart-nudge.md",

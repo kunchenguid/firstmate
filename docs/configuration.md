@@ -259,6 +259,22 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Project source checkouts (config/project-sources/)
+
+`config/project-sources/<project>` records where a project was worked before this home had a clone of it, and which of the two places is the project's actual knowledge home.
+The record is two keys, `path=` (one absolute path) and `canonical=repo|source`, and is written with `bin/fm-project-memory.sh source set`.
+`canonical=repo` means the repository history is the home, so anything sitting only in that checkout is a leak to repair; `canonical=source` means the checkout is the home and its repository is a mirror, so divergence there is expected rather than a defect.
+Having no record for a project is a normal state, never an error.
+These records are machine-local, because the path exists only on the host holding that checkout, so they are not inherited by secondmate homes.
+[`project-memory.md`](project-memory.md) owns the capability, and the helper's own header owns the exact record format and validation.
+
+## Project recipe digest budget (config/project-recipe-budget)
+
+`config/project-recipe-budget` is the optional token allowance for the start-of-work capability digest a spawn renders from a project's recipe catalog.
+It holds one positive base-10 integer followed by exactly one newline; absent means the built-in default in `bin/fm-project-recipes.sh`, whose header owns that value, the catalog format, and the re-verification horizon.
+The estimate is the same conservative `ceil(UTF-8 bytes / 3)` local approximation the startup-memory budget above uses, not a provider-exact tokenizer.
+A catalog that outgrows this allowance is the signal to consolidate its entries; raising the ceiling instead recreates as a wall of text the problem the digest exists to solve.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

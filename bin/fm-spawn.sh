@@ -2369,6 +2369,18 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       fi
     fi
   fi
+  # Start-of-work capability digest. A project that records what it can do and
+  # how each capability is asked for (bin/fm-project-recipes.sh) hands every
+  # worker that catalog before it touches anything, the same way firstmate reads
+  # its own session-start digest. The catalog is read from the project's
+  # canonical knowledge home, which is the recorded source checkout for a
+  # project whose home is a local directory rather than its repository. A
+  # project with no catalog contributes nothing and costs nothing.
+  SPAWN_RECIPE_DIGEST=
+  if SPAWN_RECIPE_HOME=$("$FM_ROOT/bin/fm-project-memory.sh" home "$(basename "$PROJ_ABS")" --clone "$PROJ_ABS" 2>/dev/null); then
+    SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" 2>/dev/null || true)
+  fi
+
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
@@ -2378,6 +2390,9 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     cat "$SOURCE_BRIEF" &&
       printf '\n' &&
       fm_brief_worker_role &&
+      if [ -n "$SPAWN_RECIPE_DIGEST" ]; then
+        printf '\n%s\n' "$SPAWN_RECIPE_DIGEST"
+      fi &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi
@@ -3364,6 +3379,22 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+fi
+
+# Per-project local material: project knowledge that must reach the worker but
+# must never enter the project's history - collaborator-owned material, files
+# holding real client data, per-machine configuration, and everything outside
+# git in a project whose canonical home is a local checkout. The store is
+# private to this home (bin/fm-project-local.sh), and staging it excludes the
+# destination and then verifies git cannot see it, so the worker is not merely
+# told not to commit it. An empty or absent store stages nothing; a store that
+# cannot be staged safely refuses the spawn rather than launching a worker that
+# could commit it.
+if [ "$KIND" != secondmate ] && [ -n "$WT" ]; then
+  if ! "$FM_ROOT/bin/fm-project-local.sh" stage "$(basename "$PROJ_ABS")" "$WT"; then
+    echo "error: could not stage $(basename "$PROJ_ABS") local material into $WT; refusing to launch" >&2
+    exit 1
+  fi
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,

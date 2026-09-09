@@ -61,11 +61,14 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
-# Ship tasks include a project-memory section so durable project-intrinsic
-# learnings can be committed to AGENTS.md through the project's delivery path;
-# it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
-# over copied detail) and defers self-governance recognition and insertion to
-# fm-ensure-agents-md.sh's contract.
+# Ship and scout tasks include a project-memory section, built once here so the
+# two scaffolds cannot drift. It carries the AGENTS.md authoring bar (widely
+# useful knowledge only, pointers over copied detail), the rule that durable
+# knowledge must leave the disposable copy before teardown, the pointer to the
+# project's own recipe catalog for a repeatable way of working, and the
+# read-only handling of staged local material. Self-governance recognition and
+# insertion defer to fm-ensure-agents-md.sh, and the recipe catalog's format,
+# budget, and curation contract to fm-project-recipes.sh.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
@@ -212,6 +215,37 @@ Firstmate steers you through durable message files in $INBOX_DIR.
 When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list $INBOX_DIR/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
+
+# Ship and scout scaffolds share one owner for the project-memory contract so
+# the two cannot drift. It carries what the disposable copy makes easy to lose:
+# durable knowledge has to be promoted before teardown, a repeatable way of
+# working belongs in the project's own recipe catalog, and staged local material
+# is read-only reference that never becomes a commit.
+IFS= read -r -d '' PROJECT_MEMORY_SECTION <<EOF || true
+# Project memory
+If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+Record only project knowledge useful to almost every future session.
+For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
+If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
+Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+This copy is disposable and disappears when the task ends, so anything durable you learned here is lost unless you promote it before you finish.
+Carry it into the project's own committed surface through this task's delivery path; never leave it only in this copy, in a scratch file, or in your terminal.
+
+If you learned a repeatable way of working in this project - something the project can do and the exact way it is asked for - record it as a recipe in \`.agents/recipes.md\`.
+\`$FM_ROOT/bin/fm-project-recipes.sh --help\` owns that catalog's format, its digest budget, and its re-verification contract; run \`$FM_ROOT/bin/fm-project-recipes.sh init .\` when the project has no catalog yet.
+Rewrite or delete an entry you found wrong rather than adding a second one beside it, and refresh an entry's date only for a capability this task actually exercised.
+
+A \`.fm-local/\` directory in this copy is reference material firstmate staged for this task: read it, never commit it, and never quote its raw contents into a PR, an issue, or anything else outward-facing.
+EOF
+PROJECT_MEMORY_SECTION=${PROJECT_MEMORY_SECTION%$'\n'}
+
+IFS= read -r -d '' SCOUT_MEMORY_SECTION <<EOF || true
+# Project memory
+If the investigation revealed a repeatable way of working in this project - something the project can do and the exact way it is asked for - write it in the report in the recipe shape \`$FM_ROOT/bin/fm-project-recipes.sh --help\` describes, so firstmate can route it into the project's own catalog.
+A \`.fm-local/\` directory in this worktree is reference material firstmate staged for this task: read it, never commit it, and never quote its raw contents into the report or anything else outward-facing.
+EOF
+SCOUT_MEMORY_SECTION=${SCOUT_MEMORY_SECTION%$'\n'}
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
@@ -413,6 +447,8 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 $INBOX_SECTION
 
+$SCOUT_MEMORY_SECTION
+
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -504,12 +540,7 @@ $ASK_USER_BLOCK
 
 $INBOX_SECTION
 
-# Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
-Record only project knowledge useful to almost every future session.
-For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+$PROJECT_MEMORY_SECTION
 
 $DOD
 EOF

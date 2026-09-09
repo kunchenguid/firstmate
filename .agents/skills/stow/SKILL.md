@@ -222,6 +222,9 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
      In a secondmate home, route a newly discovered shared preference to the main firstmate through marked status or a document pointer instead of editing the inherited file.
    - Project-intrinsic knowledge never goes directly into a project's `AGENTS.md`.
      Route it through a normal ship task so a crewmate records it with `bin/fm-ensure-agents-md.sh` and the project's delivery path.
+   - A repeatable way of working in a project - something that project can do and the exact way it is asked for - belongs in that project's own recipe catalog rather than in this home's memory, because there it serves the captain's own sessions as much as any worker firstmate dispatches.
+     Route it through the same normal ship task, and leave the catalog's format, digest budget, and re-verification contract to `bin/fm-project-recipes.sh`.
+     A project whose knowledge home is a local checkout rather than its repository takes that same route under a concrete captain approval for the write; `project-management` owns that intake.
    - Knowledge general to every Firstmate user belongs in this repo's shared tracked material through the normal branch, no-mistakes, PR, and captain-merge path.
    - For task-scoped notes, inspect the item with `bin/fm-tasks-axi.sh show <id> --full`, classify the change as new, duplicate, superseding, or obsolete, then use a considered replacement body through `bin/fm-tasks-axi.sh update <id> --body-file <path>`.
      Use `--archive-body` when recoverability matters.
