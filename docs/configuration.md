@@ -212,6 +212,16 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Continuous supervision (config/continuous-supervision)
+
+The optional local, gitignored `config/continuous-supervision` presence flag keeps the existing guarded supervisor daemon active between attended turns.
+The daemon retains the same durable wake queue, composer-empty proof, retry, singleton lock, and escalation behavior used in away mode, while remaining independent of the captain's away posture.
+Mutable session bootstrap runs `bin/fm-continuous-supervision.sh ensure`, which starts a missing service or retargets it after a Firstmate relaunch; detect-only and lock-refused bootstrap never start it.
+The supported service shape is a dedicated detached tmux session, including remote Linux secondmate homes.
+The opt-in is per-home and is not inherited; enable it explicitly in each remote secondmate home that should recover supervision after relaunch.
+Run `bin/fm-continuous-supervision.sh enable` from the home session to opt in, `status` to inspect it, and `disable` to remove the flag and stop only its exact recorded service session.
+Disabling continuous supervision does not alter tasks, worktrees, queued wakes, or away-mode state.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.

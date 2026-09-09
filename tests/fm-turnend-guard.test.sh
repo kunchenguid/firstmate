@@ -2008,6 +2008,31 @@ test_hook_away_daemon_allows_between_watcher_cycles() {
   pass "fm-turnend-guard: a live away-mode daemon satisfies supervision with no watcher holding the lock"
 }
 
+test_hook_continuous_daemon_allows_between_watcher_cycles() {
+  local dir pid out status boundary=0
+  dir=$(make_primary_dir "$TMP_ROOT/hook-continuous-daemon-live")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/config"
+  : > "$dir/config/continuous-supervision"
+  touch "$dir/state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live continuous-supervision daemon holder"
+  }
+  while [ "$boundary" -lt 3 ]; do
+    boundary=$((boundary + 1))
+    out=$(run_hook "$dir" false); status=$?
+    expect_code 0 "$status" "continuous supervision must cover watcher hand-off $boundary at turn end"
+    [ -z "$out" ] || fail "continuous daemon ownership produced a block banner at boundary $boundary: $out"
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "continuous daemon remains valid supervision across three turn boundaries"
+}
+
 test_hook_away_daemon_allows_over_dead_watcher_lock() {
   local dir pid dead out status
   dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-daemon-dead-watcher")
@@ -2270,6 +2295,7 @@ test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_away_daemon_allows_between_watcher_cycles
+test_hook_continuous_daemon_allows_between_watcher_cycles
 test_hook_away_daemon_allows_over_dead_watcher_lock
 test_hook_away_mode_blocks_without_any_supervisor
 test_hook_away_mode_blocks_on_dead_daemon
