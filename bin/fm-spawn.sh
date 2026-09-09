@@ -50,6 +50,12 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
+#   --posture and --clause <id> are the supervision branch's justification for a
+#   fresh spawn while the away-posture record exists (contract:
+#   bin/fm-lease-lib.sh): --posture cites main's standing authority relocated by
+#   the record, --clause <id> cites a recorded `dispatch` clause. Exactly one may
+#   be given, neither applies to --relaunch, and the accepted justification is
+#   printed as `authority: <citation>` for the ledger.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -449,6 +455,9 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+AFK_POSTURE=0
+AFK_CLAUSE=
+AFK_CLAUSE_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -472,6 +481,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      clause) AFK_CLAUSE=$a; AFK_CLAUSE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -495,6 +505,9 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --posture) AFK_POSTURE=1 ;;
+    --clause) want_value=clause ;;
+    --clause=*) AFK_CLAUSE=${a#--clause=}; AFK_CLAUSE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -529,6 +542,7 @@ esac
 # task's own durable record below. Contradicting it on the command line is a
 # refusal rather than a silently-ignored flag.
 if [ "$RELAUNCH" -eq 1 ]; then
+  [ "$AFK_POSTURE" -eq 0 ] && [ "$AFK_CLAUSE_SET" -eq 0 ] || { echo "error: --posture and --clause justify a fresh spawn only; a relaunch is ordinary recovery and needs neither" >&2; exit 1; }
   [ "$BACKEND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2; exit 1; }
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
@@ -1134,14 +1148,18 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   echo "error: spawn refused: state directory does not exist at $STATE" >&2
   exit 1
 fi
-# Role partition: spawning NEW work is MAIN-owned. A relaunch of an existing
+# Role partition, record-aware: spawning NEW work is MAIN-owned while
+# attended, and under the away-posture record the supervision branch spawns
+# only with the --posture or --clause justification. A relaunch of an existing
 # task is legitimate branch recovery (fm-control drives it through this same
-# entrypoint), so only a fresh spawn refuses the branch actor (contract:
+# entrypoint), so only a fresh spawn is guarded (contract:
 # bin/fm-lease-lib.sh; no-op in homes without a branch actor).
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 if [ "$RELAUNCH" -ne 1 ]; then
-  fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+  [ "$AFK_POSTURE" -eq 0 ] || fm_lease_justify posture || exit 2
+  [ "$AFK_CLAUSE_SET" -eq 0 ] || fm_lease_justify clause "$AFK_CLAUSE" || exit 2
+  fm_lease_forbid_branch "new-task spawn (fm-spawn)" dispatch
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"

@@ -1328,6 +1328,167 @@ EOF
   pass "watcher-failure repair stays with main even with a live, accepting branch listener"
 }
 
+test_pi_away_posture_offers_every_row_and_alarms_instead_of_waking_main() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-away-posture-root"
+  home="$TMP_ROOT/pi-away-posture-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  # The arm wrapper's first cycle per scenario closes with a check-kind trigger
+  # (main-only while attended) and its successor holds until the one stop file
+  # written when every scenario is done, so no successor close pollutes a later
+  # scenario; a failure scenario closes every cycle as a watcher failure. The
+  # alarm owner is a recorder, so the routing decision is what is asserted.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+if [ -e "${FM_ARM_FAIL:?}" ]; then
+  printf 'watcher: FAILED - synthetic cycle failure\n'
+  exit 1
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+if [ "$(grep -c '^arm=' "$FM_ARM_LOG")" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'check: some-poll.check.sh: merged\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+SH
+  cat > "$repo/bin/fm-afk-alarm.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_ALARM_LOG:?}"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-afk-alarm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_FAIL="$home/state/.arm-fail" FM_ALARM_LOG="$home/alarm.log" \
+    FM_ARM_LOG="$home/arm.log" FM_STOP_FILE="$home/arm.stop" \
+    FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=1 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const home = process.env.FM_HOME;
+const alarmLog = process.env.FM_ALARM_LOG;
+async function pause(ms) { await new Promise((resolve) => setTimeout(resolve, ms)); }
+async function until(predicate, label) {
+  for (let i = 0; i < 300; i += 1) {
+    if (predicate()) return;
+    await pause(10);
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+const alarms = () => (existsSync(alarmLog) ? readFileSync(alarmLog, "utf8").trim().split("\n").filter(Boolean) : []);
+
+// Every scenario shares one queue shape: a check row (main-only while attended)
+// beside an ordinary signal row. The away-posture record's presence is the
+// only variable, and the same dispatcher build answers each run.
+async function runScenario({ away, acceptor, fail }) {
+  rmSync(alarmLog, { force: true });
+  writeFileSync(process.env.FM_ARM_LOG, "");
+  writeFileSync(`${home}/state/away-task.meta`, "project=/projects/approved\nwindow=fm-away-task\n");
+  writeFileSync(
+    `${home}/state/.wake-queue`,
+    "1\t1\tcheck\tsome-poll.check.sh\tcheck: some-poll.check.sh: merged\n1\t2\tsignal\taway-task.status\tsignal: away-task working\n",
+  );
+  if (away) writeFileSync(`${home}/state/.afk-contract`, "version: 1\n");
+  else rmSync(`${home}/state/.afk-contract`, { force: true });
+  if (fail) writeFileSync(process.env.FM_ARM_FAIL, "");
+  else rmSync(process.env.FM_ARM_FAIL, { force: true });
+  const offers = [];
+  const mainPrompts = [];
+  let tool = null;
+  const handlers = new Map();
+  const bus = {
+    on(channel, handler) {
+      handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+      return () => {};
+    },
+    emit(channel, data) {
+      for (const handler of handlers.get(channel) ?? []) handler(data);
+    },
+  };
+  bus.on("fm-branch-supervision:dispatch", (offer) => {
+    offers.push({ message: offer.message, eligible: offer.eligible });
+    if (acceptor && offer.eligible) offer.accept();
+  });
+  const pi = {
+    on() {},
+    events: bus,
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      mainPrompts.push(message);
+    },
+  };
+  const mod = await import(`${pathToFileURL(process.env.PLUGIN).href}?scenario=${away}-${acceptor}-${fail}`);
+  mod.default(pi);
+  await tool.execute("tool-call-away", {}, undefined, undefined, {});
+  // What each scenario settles on: a main follow-up, an accepted branch offer,
+  // or an alarm. The settled signal is asserted below, so no scenario can pass
+  // by timing out quietly.
+  const settled = () => {
+    if (fail) return alarms().length > 0 || mainPrompts.length > 0;
+    if (!away) return mainPrompts.length > 0;
+    if (acceptor) return offers.some((offer) => offer.eligible);
+    return alarms().length > 0;
+  };
+  await until(settled, `scenario away=${away} acceptor=${acceptor} fail=${fail}`);
+  await pause(100);
+  return { offers, mainPrompt: mainPrompts[0] ?? "", mainPrompts, alarms: alarms() };
+}
+
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+
+// Attended: the check trigger is never offered eligible, main gets the wake,
+// no alarm is raised.
+const attended = await runScenario({ away: false, acceptor: true, fail: false });
+if (attended.offers.length !== 1 || attended.offers[0].eligible) {
+  throw new Error(`attended check trigger was offered eligible: ${JSON.stringify(attended.offers)}`);
+}
+if (!attended.mainPrompt.includes("check: some-poll.check.sh: merged")) throw new Error(`attended check wake did not reach main: ${attended.mainPrompt}`);
+if (attended.alarms.length !== 0) throw new Error(`attended routing raised an alarm: ${JSON.stringify(attended.alarms)}`);
+
+// Away: the same check trigger is offered eligible and the branch owns it;
+// main receives nothing and no alarm is needed.
+const away = await runScenario({ away: true, acceptor: true, fail: false });
+if (away.offers.length !== 1 || !away.offers[0].eligible) {
+  throw new Error(`away check trigger was not offered eligible: ${JSON.stringify(away.offers)}`);
+}
+if (away.mainPrompt !== "") throw new Error(`away wake reached main: ${away.mainPrompt}`);
+if (away.alarms.length !== 0) throw new Error(`a branch-owned away wake raised an alarm: ${JSON.stringify(away.alarms)}`);
+
+// Away with no acceptor (the branch is down): main still receives nothing;
+// the alarm owner is invoked with the wake reason and the rows stay queued.
+const awayUnowned = await runScenario({ away: true, acceptor: false, fail: false });
+if (awayUnowned.mainPrompt !== "") throw new Error(`an unowned away wake reached main: ${awayUnowned.mainPrompt}`);
+if (awayUnowned.alarms.length !== 1 || !awayUnowned.alarms[0].startsWith("raise check: some-poll.check.sh: merged")) {
+  throw new Error(`an unowned away wake did not raise the alarm: ${JSON.stringify(awayUnowned.alarms)}`);
+}
+if (!readFileSync(`${home}/state/.wake-queue`, "utf8").includes("some-poll.check.sh")) throw new Error("the alarm path consumed the durable queue rows");
+
+// A watcher-failure close: attended it wakes main; away it becomes the alarm.
+const attendedFailure = await runScenario({ away: false, acceptor: true, fail: true });
+if (!attendedFailure.mainPrompt.includes("watcher: FAILED")) throw new Error(`attended watcher failure did not reach main: ${attendedFailure.mainPrompt}`);
+if (attendedFailure.alarms.length !== 0) throw new Error("an attended watcher failure raised the away alarm");
+const awayFailure = await runScenario({ away: true, acceptor: true, fail: true });
+if (awayFailure.mainPrompt !== "") throw new Error(`an away watcher failure reached main: ${awayFailure.mainPrompt}`);
+if (awayFailure.alarms.length === 0 || !awayFailure.alarms.some((line) => line.includes("watcher: FAILED"))) {
+  throw new Error(`an away watcher failure did not raise the alarm: ${JSON.stringify(awayFailure.alarms)}`);
+}
+if (awayFailure.offers.length !== 0) throw new Error(`a watcher failure was offered to the branch: ${JSON.stringify(awayFailure.offers)}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "the away-posture record must route every row to the branch and every failure to the alarm: $out"
+  [ -z "$out" ] || fail "Pi away-posture routing test printed output: $out"
+  pass "under the away-posture record the dispatcher offers every row to the branch and alarms instead of waking main"
+}
+
 test_pi_handling_delivery_failure_is_typed_once() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-handling-fail-root"
@@ -3989,6 +4150,7 @@ test_pi_distinct_files_mixed_batch_routes_whole_batch_to_main
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_needs_decision
 test_pi_heartbeat_restoration_failure_stays_on_main
 test_pi_watcher_failure_never_offered_to_branch
+test_pi_away_posture_offers_every_row_and_alarms_instead_of_waking_main
 test_pi_handling_delivery_failure_is_typed_once
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry

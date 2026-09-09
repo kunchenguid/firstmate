@@ -1487,9 +1487,10 @@ SH
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home, sentToMain, mainEntries, defaultSessionCtx }; })()`);
-const { dispatch, fire, settle, home, sentToMain, mainEntries, defaultSessionCtx } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home, sentToMain, mainEntries, mainUserMessages, defaultSessionCtx, bus, makeOffer, outcomeScript, realRoot }; })()`);
+const { dispatch, fire, settle, home, sentToMain, mainEntries, mainUserMessages, defaultSessionCtx, bus, makeOffer, outcomeScript, realRoot } = globalThis.__t;
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 // Default-on: with no config/pi-supervision-branch grant file present at
 // all (this driver never writes one), a task-scoped wake is still accepted
@@ -1587,17 +1588,122 @@ if (dispatch("check: unresolved fleet event", []).accepted) {
   throw new Error("branch accepted an unscoped, non-heartbeat fleet wake");
 }
 
-// Away mode still owns supervision regardless of default-on eligibility.
+// The legacy daemon flag declines nothing on Pi any more: the away daemon is
+// never launched here, so a leftover state/.afk is not a posture.
 writeFileSync(`${home}/state/.afk`, "");
-if (dispatch("signal: while afk").accepted) throw new Error("branch accepted a wake during away mode");
+if (!dispatch("signal: legacy flag present").accepted) throw new Error("a leftover legacy away flag declined a wake");
 rmSync(`${home}/state/.afk`);
-if (!dispatch("signal: gates cleared").accepted) throw new Error("branch refused a wake with gates cleared");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 3, "branch wake prompts");
+if (globalThis.__fmPrompts[2].includes("POSTURE: AWAY")) throw new Error("an attended wake carried the away posture tail");
+
+// THE AWAY POSTURE (docs/pi-supervision-branch.md "Postures"). The record is
+// written only by its owner; its presence makes the branch take the wake,
+// read the record at the wake's tail (never in the prefix), and let a
+// captain-verdict outcome accumulate unprocessed instead of opening main's
+// processing turn. The captain's return archives the record, and the next run
+// boundary presents what accumulated.
+const contractEnv = { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` };
+const proposed = spawnSync("bash", [`${realRoot}/bin/fm-afk-contract.sh`, "propose", "--words", "merge task-9 when green",
+  "--action", "merge", "--object", "task-9 PR", "--when", "checks green"], { encoding: "utf8", env: contractEnv });
+if (proposed.status !== 0) throw new Error(`could not propose the away record: ${proposed.stderr}`);
+const confirmed = spawnSync("bash", [`${realRoot}/bin/fm-afk-contract.sh`, "confirm"], { encoding: "utf8", env: contractEnv });
+if (confirmed.status !== 0) throw new Error(`could not confirm the away record: ${confirmed.stderr}`);
+if (!existsSync(`${home}/state/.afk-contract`)) throw new Error("the record owner wrote no record");
+const processingCount = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process").length;
+const processingBefore = processingCount();
+const awayOffer = dispatch("signal: task-9 done: PR https://example.com/pr/9 checks green");
+if (!awayOffer.accepted) throw new Error("the branch declined a wake under the away-posture record");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 4, "away wake prompt");
+const awayPrompt = globalThis.__fmPrompts[3];
+if (!awayPrompt.startsWith("FIRSTMATE SUPERVISION WAKE: signal: task-9 done")) throw new Error(`the wake reason moved: ${awayPrompt}`);
+const tailAt = awayPrompt.indexOf("POSTURE: AWAY");
+if (tailAt < 0 || tailAt < awayPrompt.indexOf("finish with fm_branch_report")) {
+  throw new Error(`the posture is not at the tail of the wake: ${awayPrompt}`);
+}
+if (!awayPrompt.includes("Away posture (confirmed):")) throw new Error(`the wake tail lacks the record's read-back: ${awayPrompt}`);
+if (!awayPrompt.includes("task-9 PR")) throw new Error(`the wake tail lacks the recorded clause: ${awayPrompt}`);
+const awaySession = globalThis.__fmSessions[globalThis.__fmSessions.length - 1];
+if (!awaySession.options.customTools.find((tool) => tool.name === "bash")) throw new Error("away session lost its tools");
+// The prefix names the tail heading as a rule, but never carries the record
+// itself: no read-back, no clause text, nothing per-wake.
+const loaderPrompt = globalThis.__fmLoaders[globalThis.__fmLoaders.length - 1].options.systemPrompt;
+if (loaderPrompt.includes("Away posture (confirmed)") || loaderPrompt.includes("task-9 PR") || loaderPrompt.includes("The record, verbatim:")) {
+  throw new Error("the posture record leaked into the byte-stable prompt prefix");
+}
+const awayReport = awaySession.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const cited = await awayReport.execute(
+  "away-merge",
+  { task: "task-9", verdict: "captain", summary: "merged PR https://example.com/pr/9 under the record", citation: "posture" },
+  undefined,
+  undefined,
+  {},
+);
+if (cited.isError) throw new Error(`a posture-cited report failed: ${JSON.stringify(cited)}`);
+const citedRow = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8")
+  .trim().split("\n").map((line) => JSON.parse(line))
+  .find((row) => row.summary.startsWith("merged PR https://example.com/pr/9 under the record"));
+if (!citedRow || citedRow.citation !== "posture") throw new Error(`the ledger row lost its citation: ${JSON.stringify(citedRow)}`);
+const citedEntry = mainEntries.find((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === citedRow.seq);
+if (!citedEntry || citedEntry.data.citation !== "posture") throw new Error("the visible entry lost the citation");
+if (processingCount() !== processingBefore) throw new Error("a captain outcome opened main's processing turn while away");
+if (!outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line)).some((row) => row.seq === citedRow.seq)) {
+  throw new Error("the away captain row is not accumulating as unprocessed");
+}
+const bogus = await awayReport.execute(
+  "bogus-citation",
+  { task: "task-9", verdict: "routine", summary: "cited nothing real", citation: "clause 9" },
+  undefined,
+  undefined,
+  {},
+);
+if (!bogus.isError) throw new Error("a citation of an absent clause was accepted");
+await fire("agent_settled", {});
+if (processingCount() !== processingBefore) throw new Error("a run boundary while away opened main's processing turn");
+
+// A check row - main-only while attended - is taken under the record, and a
+// prompt that claims one is not scoped by task, so the branch may report it as
+// fleet.
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tcheck\tsome-poll.check.sh\tcheck: some-poll.check.sh: merged\n");
+let finishCheckPrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishCheckPrompt = resolve; });
+const checkOffer = makeOffer("check: some-poll.check.sh: merged", [], false, true);
+bus.emit("fm-branch-supervision:dispatch", checkOffer);
+if (!checkOffer.accepted) throw new Error("the branch declined a check row under the away-posture record");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 5, "away check-row prompt");
+const checkSession = globalThis.__fmSessions[globalThis.__fmSessions.length - 1];
+const checkReport = checkSession.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const fleetReport = await checkReport.execute(
+  "check-row-outcome",
+  { task: "fleet", verdict: "routine", summary: "confirmed the merge the poll reported" },
+  undefined,
+  undefined,
+  {},
+);
+if (fleetReport.isError) throw new Error(`a fleet report for a claimed check row was refused: ${JSON.stringify(fleetReport)}`);
+finishCheckPrompt();
+await checkOffer.settlement;
+globalThis.__fmOnBranchPrompt = undefined;
+if (mainUserMessages.length !== 0) throw new Error("an away wake leaked to main as a user message");
+
+// The return: the record is archived by its owner, and the next run boundary
+// presents the accumulated captain rows with their citations.
+const archived = spawnSync("bash", [`${realRoot}/bin/fm-afk-contract.sh`, "archive"], { encoding: "utf8", env: contractEnv });
+if (archived.status !== 0) throw new Error(`could not archive the away record: ${archived.stderr}`);
+if (existsSync(`${home}/state/.afk-contract`)) throw new Error("archive left the record behind");
+await fire("agent_settled", {});
+if (processingCount() !== processingBefore + 1) throw new Error(`the return did not present the accumulated captain rows exactly once: ${processingCount() - processingBefore}`);
+const returned = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process").pop();
+if (!returned.message.content.includes(`[seq ${citedRow.seq}] task-9: merged PR https://example.com/pr/9 under the record (authority: posture)`)) {
+  throw new Error(`the return presentation lost the row or its citation: ${returned.message.content}`);
+}
+if (!dispatch("signal: gates cleared").accepted) throw new Error("branch refused a wake after the return");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 6, "post-return wake prompt");
+if (globalThis.__fmPrompts[5].includes("POSTURE: AWAY")) throw new Error("a wake after the return still carried the away tail");
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "default-on eligibility, heartbeat routing, and afk gating must bind: $out"
+  expect_code 0 "$status" "default-on eligibility, heartbeat routing, and both postures must bind: $out"
 
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$TMP_ROOT/gating-home-2" FM_ROOT_OVERRIDE="$broken" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -1625,7 +1731,7 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "broken-branch settlement must return delivery ownership to the watcher: $out"
-  pass "branch default-on eligibility (task-scoped, heartbeat, afk) binds and a broken branch rejects to watcher fallback"
+  pass "branch default-on eligibility (task-scoped, heartbeat, both postures) binds and a broken branch rejects to watcher fallback"
 }
 
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under() {
@@ -4028,6 +4134,57 @@ if (mixed.eligibleSeqs.slice().sort().join(",") !== "2,3") {
 if (!mixed.projects.includes(project)) {
   throw new Error(`eligible project context lost: ${JSON.stringify(mixed.projects)}`);
 }
+
+// THE AWAY POSTURE collapses the partition (docs/pi-supervision-branch.md
+// "Postures"): the same mixed queue, scanned with the record present, claims
+// the check row too, names it in checkSeqs, and stays uncorrupted. A heartbeat
+// row is claimed by any away scan, and a decision-owned signal or stale row is
+// claimed while still being named in needsDecisionKeys for the dispatcher.
+const awayMixed = scopeForUnreadWake(state, false, true);
+if (!awayMixed.eligible || awayMixed.eligibleSeqs.slice().sort().join(",") !== "1,2,3" || awayMixed.corrupted) {
+  throw new Error(`the away scan did not claim every row of the mixed queue: ${JSON.stringify(awayMixed)}`);
+}
+if (awayMixed.checkSeqs.join(",") !== "1") throw new Error(`the away scan did not name its check row: ${JSON.stringify(awayMixed)}`);
+if (mixed.checkSeqs.length !== 0) throw new Error(`an attended scan named a check row it never claims: ${JSON.stringify(mixed)}`);
+writeFileSync(`${state}/task-a.status`, "needs-decision [key=cleanup]: choose destructive cleanup\n");
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\theartbeat\theartbeat\theartbeat",
+    "1\t2\tsignal\ttask-a.status\tneeds-decision: task-a.status",
+    "1\t3\tstale\tfm-window\tstale: fm-window (awaiting the captain)",
+  ].join("\n"),
+);
+const attendedDecisions = scopeForUnreadWake(state, false);
+if (attendedDecisions.eligible || attendedDecisions.eligibleSeqs.length !== 0 || attendedDecisions.corrupted) {
+  throw new Error(`attended decision rows were offered to the branch: ${JSON.stringify(attendedDecisions)}`);
+}
+const awayDecisions = scopeForUnreadWake(state, false, true);
+if (!awayDecisions.eligible || awayDecisions.eligibleSeqs.slice().sort().join(",") !== "1,2,3" || awayDecisions.corrupted) {
+  throw new Error(`the away scan did not claim the heartbeat and decision rows: ${JSON.stringify(awayDecisions)}`);
+}
+if (awayDecisions.needsDecisionKeys.slice().sort().join(",") !== "fm-window,task-a.status") {
+  throw new Error(`the away scan stopped naming its decision rows: ${JSON.stringify(awayDecisions)}`);
+}
+if (awayDecisions.eligibleTasks.join(",") !== "task-a" || awayDecisions.checkSeqs.length !== 0) {
+  throw new Error(`the away scan mis-scoped its decision rows: ${JSON.stringify(awayDecisions)}`);
+}
+// The two vetoes that describe a broken queue stay vetoes in both postures.
+writeFileSync(`${state}/.wake-queue`, "1\t1\tsignal\tno-such-task.status\tsignal: unmapped");
+const awayUnresolvable = scopeForUnreadWake(state, false, true);
+if (!awayUnresolvable.corrupted || awayUnresolvable.eligible) throw new Error(`the away scan claimed an unresolvable row: ${JSON.stringify(awayUnresolvable)}`);
+writeFileSync(`${state}/.wake-queue`, "1\t1\tbogus\tx\tbogus row");
+const awayUnknownKind = scopeForUnreadWake(state, false, true);
+if (!awayUnknownKind.corrupted || awayUnknownKind.eligible) throw new Error(`the away scan claimed an unknown row kind: ${JSON.stringify(awayUnknownKind)}`);
+writeFileSync(`${state}/task-a.status`, "working: routine work\n");
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tcheck\tx-inbox\tcheck: pending x mention",
+    "1\t2\tsignal\ttask-a.status\tsignal: task-a.status",
+    "1\t3\tstale\tfm-window\tstale: fm-window",
+  ].join("\n"),
+);
 
 if (!(await activateEligibleRowsOwner(state, process.env.GRANT, process.pid, "fixture"))) {
   throw new Error("branch owner activation failed");

@@ -50,9 +50,36 @@
 #     other actor cannot claim between the check and the guarded mutation. A
 #     home without the current Pi session lock cannot have a live lease, so
 #     the guard is a no-op there - non-Pi behavior is unchanged by construction.
-#   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns -
-#     merging a PR, landing local-only work, spawning workers - refuse the
-#     branch actor outright, lease or no lease.
+#   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns in the
+#     attended posture - merging a PR, landing local-only work, spawning
+#     workers, answering a decision - refuse the branch actor outright, lease
+#     or no lease, while no away-posture record exists.
+#   - Record-aware partition (the away posture, docs/pi-supervision-branch.md
+#     "Postures"): while the away-posture record state/.afk-contract exists
+#     (owner: bin/fm-afk-contract.sh), main is parked and its standing
+#     authority relocates to the supervision branch. The branch then passes
+#     the same guard only with an explicit justification the guarded script
+#     collected from its own flags and registered through fm_lease_justify:
+#     `posture` (main's standing authority, relocated by the record) or
+#     `clause:<id>` (a recorded mandate clause). A justification is checked
+#     STRUCTURALLY and only structurally: the record must be a confirmed,
+#     readable record; a clause id must name an accepted clause of that
+#     record (a refused clause never executes); and the clause's recorded
+#     action verb must equal the verb the guarded script guards (a `merge`
+#     clause cannot justify a spawn). Clause condition text is never parsed
+#     or judged here - whether a precondition holds is the supervision
+#     session's judgment at execution time (captain's mandate: no static
+#     natural-language parser anywhere in the away posture). The accepted
+#     justification is exported as FM_AFK_CITATION so the caller can print
+#     it and the branch can cite it on the outcome ledger row
+#     (bin/fm-branch-outcome.sh append --citation).
+#     Being away never changes the authority set: a justification named by
+#     ANY actor is validated the same way, an absent or archived record grants
+#     nothing (no clause survives the return), and only the verbs merge,
+#     land, dispatch, and answer are guarded - discard, wake-me, and every
+#     destructive, irreversible, or security-sensitive action have no guarded
+#     entrypoint that accepts a justification at all, so no clause text can
+#     pre-authorize them for either actor in either posture.
 #   - "backlog" is a reserved claimable resource name used by the branch
 #     prompt around its own data/backlog.md writes. This is deliberately
 #     branch-side containment only; main's tasks-axi path has no executable
@@ -61,7 +88,8 @@
 # Sourced by bin/fm-send.sh, bin/fm-control.sh, bin/fm-teardown.sh,
 # bin/fm-pr-merge.sh, bin/fm-merge-local.sh, bin/fm-spawn.sh, and
 # bin/fm-lease.sh. Callers must have $STATE resolved before calling. No side
-# effects on source. set -u / set -e safe.
+# effects on source beyond resetting the in-process justification state.
+# set -u / set -e safe.
 
 # Distinct from usage errors (2), the gate refusal (3), and fm-send's
 # unconfirmed submit (3): recognizable as "the other supervision actor holds
@@ -206,13 +234,142 @@ fm_lease_guard_release() {
   fm_lock_release "$lock"
 }
 
-# fm_lease_forbid_branch <action-label>: refuse (exit FM_LEASE_REFUSE_EXIT)
-# when the current actor is the supervision branch. Guards the main-owned role
-# partition; a home with no branch never sets the actor and always passes.
+# The justification the guarded script collected from its own --posture or
+# --clause <id> flag. In-process state only: it is reset here on source so an
+# inherited environment value can never justify a guarded action silently.
+FM_AFK_JUSTIFICATION=
+# The citation an accepted justification earns: "posture" or "clause <id>".
+FM_AFK_CITATION=
+# The mandate verbs a guarded entrypoint may be justified for. Every other
+# verb of the clause grammar (bin/fm-afk-contract.sh) has no guarded
+# entrypoint, by design.
+FM_LEASE_AFK_VERBS="merge land dispatch answer"
+
+# fm_lease_afk_record_present: 0 iff the away-posture record exists. The path
+# is the one bin/fm-afk-contract.sh writes; every other reader of that record
+# (validation, clause rows) goes through that script below.
+fm_lease_afk_record_present() {
+  [ -f "$STATE/.afk-contract" ]
+}
+
+fm_lease_afk_contract() {
+  FM_STATE_OVERRIDE="$STATE" "$FM_LEASE_LIB_DIR/fm-afk-contract.sh" "$@"
+}
+
+# fm_lease_justify posture | clause <id>: register the justification the
+# guarded script parsed from --posture or --clause <id>. Exactly one may be
+# given. Returns 2 (with stderr) on a malformed call.
+fm_lease_justify() {
+  local kind=${1:-} id=${2:-}
+  case "$kind" in
+    posture)
+      [ "$#" -eq 1 ] || { echo "error: --posture takes no value" >&2; return 2; }
+      ;;
+    clause)
+      case "$id" in
+        '' | *[!0-9]* | 0*) echo "error: --clause requires a positive clause id from the away-posture record's read-back" >&2; return 2 ;;
+      esac
+      ;;
+    *) echo "error: fm_lease_justify expects posture or clause <id>" >&2; return 2 ;;
+  esac
+  if [ -n "$FM_AFK_JUSTIFICATION" ]; then
+    echo "error: pass exactly one justification: --posture or --clause <id>" >&2
+    return 2
+  fi
+  if [ "$kind" = posture ]; then
+    FM_AFK_JUSTIFICATION=posture
+  else
+    FM_AFK_JUSTIFICATION="clause:$id"
+  fi
+}
+
+# fm_lease_afk_authorize <action-label> <mandate-verb>: validate the registered
+# justification against the away-posture record, structurally (see the header).
+# Sets FM_AFK_CITATION and returns 0 when it holds; prints the refusal and
+# returns 1 otherwise.
+fm_lease_afk_authorize() {
+  local action=$1 verb=$2 id rows row row_id row_action refused refused_id refused_missing
+  case " $FM_LEASE_AFK_VERBS " in
+    *" $verb "*) ;;
+    *)
+      echo "error: $action refused - '$verb' is not a verb a guarded entrypoint may be justified for (wiring bug; guarded verbs: $FM_LEASE_AFK_VERBS)" >&2
+      return 1
+      ;;
+  esac
+  if ! fm_lease_afk_contract validate >/dev/null 2>&1; then
+    echo "error: $action refused - a justification needs a confirmed, readable away-posture record at state/.afk-contract, and there is none; an archived record grants no authority (no clause survives the return)" >&2
+    return 1
+  fi
+  case "$FM_AFK_JUSTIFICATION" in
+    posture)
+      FM_AFK_CITATION=posture
+      return 0
+      ;;
+    clause:*) id=${FM_AFK_JUSTIFICATION#clause:} ;;
+    *)
+      echo "error: $action refused - no justification registered" >&2
+      return 1
+      ;;
+  esac
+  rows=$(fm_lease_afk_contract clauses 2>/dev/null) || {
+    echo "error: $action refused - the away-posture record's clauses could not be read" >&2
+    return 1
+  }
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    row_id=${row%%$'\t'*}
+    [ "$row_id" = "$id" ] || continue
+    row_action=${row#*$'\t'}
+    row_action=${row_action%%$'\t'*}
+    if [ "$row_action" != "$verb" ]; then
+      echo "error: $action refused - clause $id of the away-posture record is a '$row_action' clause, not a '$verb' clause; a clause authorizes only the action it names" >&2
+      return 1
+    fi
+    FM_AFK_CITATION="clause $id"
+    return 0
+  done <<EOF
+$rows
+EOF
+  refused=$(fm_lease_afk_contract refused 2>/dev/null) || refused=
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    refused_id=${row%%$'\t'*}
+    [ "$refused_id" = "$id" ] || continue
+    refused_missing=${row##*$'\t'}
+    echo "error: $action refused - clause $id was refused at read-back ($refused_missing) and never executes" >&2
+    return 1
+  done <<EOF
+$refused
+EOF
+  echo "error: $action refused - the away-posture record has no clause $id" >&2
+  return 1
+}
+
+# fm_lease_forbid_branch <action-label> <mandate-verb>: the role partition,
+# record-aware. Main passes (a justification it named is still validated).
+# The branch is refused outright while no away-posture record exists, refused
+# under the record until a justification is registered, and passes once
+# fm_lease_afk_authorize accepts that justification for <mandate-verb>. A
+# refusal exits FM_LEASE_REFUSE_EXIT; a home with no branch never sets the
+# actor and always passes.
 fm_lease_forbid_branch() {
-  local action=$1 actor
+  local action=$1 verb=${2:-} actor
   actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+  if [ -z "$verb" ]; then
+    echo "error: $action refused - the guard was called without the mandate verb it guards (wiring bug)" >&2
+    exit "$FM_LEASE_REFUSE_EXIT"
+  fi
+  if [ -n "$FM_AFK_JUSTIFICATION" ]; then
+    fm_lease_afk_authorize "$action" "$verb" || exit "$FM_LEASE_REFUSE_EXIT"
+  fi
   [ "$actor" = branch ] || return 0
-  echo "error: $action refused - the supervision branch never performs this action; report the outcome and leave it to main (role partition: docs/pi-supervision-branch.md)" >&2
-  exit "$FM_LEASE_REFUSE_EXIT"
+  if ! fm_lease_afk_record_present; then
+    echo "error: $action refused - the supervision branch never performs this action in the attended posture; report the outcome and leave it to main (role partition: docs/pi-supervision-branch.md)" >&2
+    exit "$FM_LEASE_REFUSE_EXIT"
+  fi
+  if [ -z "$FM_AFK_JUSTIFICATION" ]; then
+    echo "error: $action refused - the away-posture record exists, so the supervision branch performs this action only with an explicit justification: --posture (main's standing authority, relocated to you by the record) or --clause <id> (a recorded mandate clause naming this action); the justification is what the outcome ledger cites" >&2
+    exit "$FM_LEASE_REFUSE_EXIT"
+  fi
+  return 0
 }

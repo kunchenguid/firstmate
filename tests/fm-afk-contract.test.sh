@@ -216,7 +216,7 @@ test_readback_renders_words_verbatim_and_both_lists() {
   assert_contains "$out" '  refused clauses:' 'refused list header'
   assert_contains "$out" '    2. "action=merge object=regardless of checks when=(none)" - refused: missing when' 'refused clause'
   assert_contains "$out" 'every clause expires at return' 'the never-set reminder'
-  assert_contains "$out" 'recorded clauses are held for the return brief and are not executed by this release' 'the not-executed notice'
+  assert_contains "$out" 'recorded clauses are held for the return brief; a clause acts only when the supervision session cites it to a guarded gate and judges its condition to hold, never a refused one' 'the not-a-promise notice'
   assert_contains "$out" 'forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text; no recorded clause is authority by itself' 'the hard authority invariant'
   assert_contains "$out" 'Say go to confirm' 'confirmation prompt'
   # The verbatim words survive the record byte for byte, trailing newline included.
@@ -262,7 +262,7 @@ test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
   [ -f "$record" ] || fail "the confirmed posture record is absent"
   assert_contains "$out" 'Away posture confirmed at ' 'announcement opens with the confirmation time'
   assert_contains "$out" 'hold-for-return only. No phone channel is configured; anything that needs you waits for your return.' 'announcement says hold-for-return only, aloud'
-  assert_contains "$out" '1 mandate clause(s) recorded, 1 refused, and 0 flagged as naming a never-set concept; recorded clauses are held for the return brief and are not executed by this release; forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.' 'announcement counts clauses and states the hard authority invariant'
+  assert_contains "$out" '1 mandate clause(s) recorded, 1 refused, and 0 flagged as naming a never-set concept; recorded clauses are held for the return brief and act only when the supervision session cites one to a guarded gate; forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.' 'announcement counts clauses and states the hard authority invariant'
   assert_contains "$out" 'Expected return: not given. Spend cap: 4 concurrent workers.' 'announcement carries the defaults'
   [ "$(contract "$home" field version)" = 1 ] || fail "record version is not 1"
   [ "$(contract "$home" field reach_channels)" = none ] || fail "reach channels are not none"

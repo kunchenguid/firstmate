@@ -64,13 +64,28 @@
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab because the head comes only from the live read.
 #
+# Authority under the away posture (contract: bin/fm-lease-lib.sh). Merging is
+# main-owned while attended; while the away-posture record exists the
+# supervision branch merges only with an explicit justification, --posture
+# (main's standing authority, relocated by the record) or --clause <id> (a
+# recorded `merge` clause), and refuses without one. A justification, from
+# either actor, also makes this script read the GitHub pull request's checks
+# live before merging: under --posture every check must be green, because
+# standing authority never merges a red pull request; under --clause every
+# check that is not green must be named with --red <check-name>, which the
+# session passes only when the cited clause names that failing check or
+# condition - whether the clause does is the session's judgment, never a
+# grammar here. A check read that fails refuses the merge. GitLab already
+# requires a succeeded head pipeline, so --red is refused there. The accepted
+# justification is printed as `authority: <citation>` for the ledger.
+#
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
 # no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed merge's
 # destination, normal-case deduplication, and at-least-once recovery.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--posture | --clause <id> [--red <check-name>]...] [-- <extra forge merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,6 +99,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -104,7 +121,45 @@ PR_NUMBER=$FM_PR_NUMBER
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
-[ "${1:-}" = "--" ] && shift
+# Justification flags precede the optional -- separator and the forge's own
+# extra arguments; anything else ends this parse and stays a forge argument.
+RED_CHECKS=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --posture) fm_lease_justify posture || exit 2; shift ;;
+    --clause) fm_lease_justify clause "${2:-}" || exit 2; shift 2 ;;
+    --clause=*) fm_lease_justify clause "${1#--clause=}" || exit 2; shift ;;
+    --red)
+      [ -n "${2:-}" ] || { echo "error: --red requires a check name" >&2; exit 2; }
+      RED_CHECKS+=("$2")
+      shift 2
+      ;;
+    --red=*)
+      [ -n "${1#--red=}" ] || { echo "error: --red requires a check name" >&2; exit 2; }
+      RED_CHECKS+=("${1#--red=}")
+      shift
+      ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+if [ "${#RED_CHECKS[@]}" -gt 0 ]; then
+  case "$FM_AFK_JUSTIFICATION" in
+    clause:*) ;;
+    posture)
+      echo "error: --red cannot accompany --posture: standing authority never merges a red pull request; only a recorded clause that names the failing check or condition can" >&2
+      exit 2
+      ;;
+    *)
+      echo "error: --red names a check a recorded clause covers, so it requires --clause <id>" >&2
+      exit 2
+      ;;
+  esac
+  if [ "$PROVIDER" = gitlab ]; then
+    echo "error: --red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+    exit 2
+  fi
+fi
 
 caller_has_merge_method() {
   local arg
@@ -199,13 +254,12 @@ META="$STATE/$ID.meta"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# Role partition: merging is MAIN-owned; the Pi supervision branch reports the
-# green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
-# without a branch actor). This precedes reading the task record, because the
-# wrong actor is refused for its role whatever that record says.
-# shellcheck source=bin/fm-lease-lib.sh
-. "$SCRIPT_DIR/fm-lease-lib.sh"
-fm_lease_forbid_branch "PR merge (fm-pr-merge)"
+# Role partition, record-aware: merging is MAIN-owned while attended; under
+# the away-posture record the supervision branch merges only with the
+# justification registered above (contract: bin/fm-lease-lib.sh; no-op in
+# homes without a branch actor). This precedes reading the task record,
+# because the wrong actor is refused for its role whatever that record says.
+fm_lease_forbid_branch "PR merge (fm-pr-merge)" merge
 
 if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
@@ -216,6 +270,62 @@ if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   exit 1
 fi
 MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+
+# Every GitHub check that is not green right now, one name per line: a status
+# context whose state is not SUCCESS, or a check run that has not completed
+# with SUCCESS, NEUTRAL, or SKIPPED (so a pending check is not green either).
+# Exits nonzero when the live read cannot be made or its rollup cannot be
+# read, so a malformed answer is a failed read and never an empty red set.
+github_checks_not_green() {
+  local json
+  command -v gh >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  json=$(gh pr view "$URL" --json statusCheckRollup 2>/dev/null) || return 1
+  printf '%s' "$json" | jq -r '
+    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
+    | .statusCheckRollup[]
+    | if .__typename == "CheckRun" then
+        {name: (.name // ""), ok: (.status == "COMPLETED" and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED"))}
+      else
+        {name: (.context // ""), ok: (.state == "SUCCESS")}
+      end
+    | select(.ok | not)
+    | if .name == "" then "(unnamed check)" else .name end
+  ' 2>/dev/null || return 1
+}
+
+# Under a justification the merge must prove its checks first (header). A
+# red check is a check that is not green; --posture never covers one, and
+# --clause covers exactly the checks the session named with --red.
+afk_require_checks_covered() {
+  local red name covered
+  if ! red=$(github_checks_not_green); then
+    echo "error: PR merge refused - under the away-posture record the pull request's checks are read live before merging (gh and jq required), and that read failed; nothing was merged" >&2
+    exit 1
+  fi
+  [ -n "$red" ] || return 0
+  if [ "$FM_AFK_JUSTIFICATION" = posture ]; then
+    echo "error: PR merge refused - standing authority never merges a red pull request, and these checks are not green: $(printf '%s' "$red" | tr '\n' ',' | sed 's/,$//; s/,/, /g')" >&2
+    exit 1
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    covered=0
+    for check in "${RED_CHECKS[@]+"${RED_CHECKS[@]}"}"; do
+      [ "$check" = "$name" ] && covered=1
+    done
+    [ "$covered" -eq 1 ] || {
+      echo "error: PR merge refused - check '$name' is not green and the cited clause justification does not name it; pass --red '$name' only when that clause names this failing check or condition" >&2
+      exit 1
+    }
+  done <<EOF
+$red
+EOF
+  return 0
+}
+if [ -n "$FM_AFK_JUSTIFICATION" ] && [ "$PROVIDER" = github ]; then
+  afk_require_checks_covered
+fi
 
 MERGE_CONTROL_LOCK=
 merge_control_cleanup() {
@@ -721,6 +831,7 @@ case "$PROVIDER" in
     if [ "$FM_PR_GITHUB_MERGED" = true ]; then
       printf 'verified: %s is merged (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
+      [ -z "$FM_AFK_CITATION" ] || printf 'authority: %s\n' "$FM_AFK_CITATION"
     elif [ "$FM_PR_GITHUB_QUEUED" = true ]; then
       printf 'verified: %s is queued (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
@@ -747,6 +858,7 @@ case "$PROVIDER" in
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
+    [ -z "$FM_AFK_CITATION" ] || printf 'authority: %s\n' "$FM_AFK_CITATION"
     ;;
   *)
     echo "error: invalid PR merge request" >&2

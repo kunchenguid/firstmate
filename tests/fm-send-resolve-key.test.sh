@@ -30,6 +30,12 @@
 #      (the operator path the OPEN DECISIONS hint names), while an unrelated
 #      writer's answered: note still cannot hijack or clear that key. A reserved
 #      key this send cannot close refuses before anything is sent.
+#   9. Answering a needs-decision key is the gate-answer path (bin/fm-lease-lib.sh):
+#      the supervision branch is refused while attended, refused under the
+#      away-posture record until it passes --posture or an `answer` clause, and
+#      then closes the decision with its citation printed; a blocked: key stays
+#      ordinary steering the branch may answer without any of that, and the
+#      flags without --resolve-key refuse.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -541,6 +547,70 @@ test_flag_misuse_refuses() {
   pass "fm-send --resolve-key: --key, empty message, explicit targets, and malformed keys refuse loudly"
 }
 
+test_branch_decision_answer_follows_the_record() {
+  local dir fb log home err rc out
+  dir="$TMP_ROOT/branch-answer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home branch-answer)
+  fm_write_meta "$home/state/t8.meta" "window=sess:fm-t8" "kind=ship"
+  printf 'needs-decision [key=api]: REST or RPC\nblocked [key=dep]: waiting on a dependency\n' > "$home/state/t8.status"
+
+  # Attended: a blocker is ordinary steering the branch may clear; a decision is
+  # main-owned and refuses the branch outright.
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_SUPERVISION_ACTOR=branch \
+    "$SEND" t8 --resolve-key dep "dependency refreshed, carry on" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -eq 0 ] || fail "the branch could not clear a blocker while attended: $(cat "$err")"
+  grep -F 'resolved [key=dep]' "$home/state/t8.status" >/dev/null || fail "the branch's blocker answer did not close the key"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_SUPERVISION_ACTOR=branch \
+    "$SEND" t8 --resolve-key api "REST" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -eq 6 ] || fail "the branch answered a decision while attended: rc=$rc $(cat "$err")"
+  assert_contains "$(cat "$err")" "decision answer (fm-send --resolve-key) refused" "the attended decision refusal lost its action label"
+  if grep -F 'resolved [key=api]' "$home/state/t8.status" >/dev/null; then fail "a refused decision answer still closed the key"; fi
+
+  # Under the record: refused without a justification, refused under a clause
+  # that is not an answer clause, and closed with the citation under --posture.
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" propose \
+    --action merge --object 't8 PR' --when 'green' \
+    --action answer --object 'the API-shape question on t8' --when 'it is asked' >/dev/null 2>&1 \
+    || fail "could not propose the away record"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null 2>&1 \
+    || fail "could not confirm the away record"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_SUPERVISION_ACTOR=branch \
+    "$SEND" t8 --resolve-key api "REST" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -eq 6 ] || fail "the branch answered a decision under the record without a justification: rc=$rc"
+  assert_contains "$(cat "$err")" "--clause <id>" "the away refusal did not name the justification forms"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_SUPERVISION_ACTOR=branch \
+    "$SEND" t8 --resolve-key api --clause 1 "REST" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -eq 6 ] || fail "a merge clause justified a decision answer: rc=$rc"
+  assert_contains "$(cat "$err")" "is a 'merge' clause, not a 'answer' clause" "the verb-mismatch refusal lost its wording"
+  if grep -F 'resolved [key=api]' "$home/state/t8.status" >/dev/null; then fail "a refused away answer still closed the key"; fi
+  out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_SUPERVISION_ACTOR=branch \
+    "$SEND" t8 --resolve-key api --clause 2 "REST, as the clause pre-answered" 2>"$err"); rc=$?
+  [ "$rc" -eq 0 ] || fail "an answer clause did not let the branch answer: rc=$rc $(cat "$err")"
+  grep -F 'resolved [key=api]' "$home/state/t8.status" >/dev/null || fail "the clause-justified answer did not close the key"
+  assert_contains "$out" "authority: clause 2" "the clause citation was not printed"
+
+  # --posture on a second decision, and the flags without --resolve-key refuse.
+  printf 'needs-decision [key=name]: pick a name\n' >> "$home/state/t8.status"
+  out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_SUPERVISION_ACTOR=branch \
+    "$SEND" t8 --resolve-key name --posture "keep the current name" 2>"$err"); rc=$?
+  [ "$rc" -eq 0 ] || fail "--posture did not let the branch answer under the record: rc=$rc $(cat "$err")"
+  grep -F 'resolved [key=name]' "$home/state/t8.status" >/dev/null || fail "the posture-justified answer did not close the key"
+  assert_contains "$out" "authority: posture" "the posture citation was not printed"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_SUPERVISION_ACTOR=branch \
+    "$SEND" t8 --posture "just a steer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "--posture without --resolve-key was accepted"
+  assert_contains "$(cat "$err")" "require --resolve-key" "the flag-without-key refusal was not explicit"
+
+  # Main answers as it always did, with no flag, in both postures.
+  printf 'needs-decision [key=main]: main decides\n' >> "$home/state/t8.status"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t8 --resolve-key main "decided" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -eq 0 ] || fail "main could not answer a decision under the record: $(cat "$err")"
+  grep -F 'resolved [key=main]' "$home/state/t8.status" >/dev/null || fail "main's answer did not close the key"
+  pass "fm-send --resolve-key: a decision answer is main-owned attended and relocates to the branch only under a validated justification"
+}
+
 # The reported silent no-op: fm-send --resolve-key on a reserved pending-reply-*
 # key used to write "answered: ..." and exit 0 while the classify fold left the
 # decision open. The operator path must actually close it, using the owning
@@ -733,6 +803,7 @@ test_remote_secondmate_answer_closes_locally
 test_remote_reply_corr_tag_does_not_block_resolve_key
 test_remote_transport_failure_does_not_close
 test_flag_misuse_refuses
+test_branch_decision_answer_follows_the_record
 test_reserved_pending_reply_key_closes_through_resolve_key
 test_unrelated_writer_cannot_close_or_hijack_reserved_key
 test_unclosable_reserved_key_refuses_before_send

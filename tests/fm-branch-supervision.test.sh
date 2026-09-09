@@ -594,7 +594,7 @@ test_home_without_branch_is_untouched() {
   printf 'harness=claude\n' > "$home/state/fake.meta"
   printf '%s\n' "$PPID" > "$home/state/.pi-branch-extension-loaded"
   printf 'branch\t%s\t123\n' "$PPID" > "$home/state/.lease-task-reused"
-  out=$(STATE="$home/state" bash -c '. "$1"; fm_lease_guard task-reused "probe"; fm_lease_forbid_branch "probe"; echo silent-pass' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
+  out=$(STATE="$home/state" bash -c '. "$1"; fm_lease_guard task-reused "probe"; fm_lease_forbid_branch "probe" merge; echo silent-pass' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
   [ "$out" = "silent-pass" ] || fail "guard helpers honored a leftover Pi lease in a no-lock Claude home: $out"
   [ ! -e "$home/state/.lease-task-reused" ] || fail "guard kept a leftover Pi lease without a session lock"
 
@@ -837,6 +837,227 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
   pass "the branch cannot force a teardown or bypass fm-control for a relaunch"
 }
 
+# --- the away posture: record-aware role partition and the ledger citation ---
+
+# Write a confirmed away-posture record into <home> with three accepted clauses
+# (1 merge, 2 install, 3 discard, 4 land, 5 dispatch, 6 answer) and one refused
+# clause (7, an unlisted verb), through the record's owner.
+write_away_record() {  # <home>
+  local home=$1 rc=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" propose \
+    --words 'merge task-x when green, install on the mini, discard task-w if its rerun fails twice' \
+    --action merge --object "task-x PR" --when 'checks green' \
+    --action install --object 'the prerelease on the mini' --when 'after clause 1' \
+    --action discard --object 'the worktree of task-w' --when 'its rerun fails twice' \
+    --action land --object 'task-x local branch' --when 'ready' \
+    --action dispatch --object 'queued item task-q' --when 'its blocker clears' \
+    --action answer --object 'the ask-user finding on task-x' --when 'it asks about the API shape' \
+    --action fix --object 'anything that breaks' --when 'it breaks' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 3 ] || fail "fixture proposal expected exit 3 (one refused clause), got $rc"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null 2>&1 \
+    || fail "fixture record could not be confirmed"
+  [ -f "$home/state/.afk-contract" ] || fail "fixture record was not written"
+}
+
+test_away_posture_record_relocates_main_authority_under_justification() {
+  local home root out status
+  home="$TMP_ROOT/afk-partition-home"
+  root="$TMP_ROOT/afk-partition-root"
+  mkdir -p "$home/state" "$root"
+  git init -q -b main "$root"
+  git -C "$root" commit -q --allow-empty -m init
+  ln -s "$ROOT/bin" "$root/bin"
+  write_away_record "$home"
+
+  # Under the record the branch is still refused WITHOUT a justification, and
+  # the refusal names the two forms it accepts.
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "branch fm-pr-merge under the record without a justification exited $status, not 6: $out"
+  assert_contains "$out" "--posture" "the refusal did not name --posture"
+  assert_contains "$out" "--clause <id>" "the refusal did not name --clause"
+  assert_not_contains "$out" "never performs this action in the attended posture" "the away refusal used the attended wording"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-merge-local.sh" task-x 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "branch fm-merge-local under the record without a justification exited $status, not 6: $out"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "branch fm-spawn under the record without a justification exited $status, not 6: $out"
+
+  # --posture relocates main's standing authority: the partition passes and
+  # each script fails on its ORDINARY later validation instead (exit != 6).
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 --posture 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "--posture did not relocate merge authority to the branch: $out"
+  assert_contains "$out" "task metadata is unavailable" "posture-justified merge lost its ordinary error: $out"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-merge-local.sh" task-x --posture 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "--posture did not relocate landing authority to the branch: $out"
+  assert_contains "$out" "no meta for task task-x" "posture-justified landing lost its ordinary error: $out"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off --posture 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "--posture did not relocate spawn authority to the branch: $out"
+
+  # --clause <id> passes only for an accepted clause whose verb IS the guarded
+  # action: clause 1 (merge) justifies a merge, clause 4 (land) a landing,
+  # clause 5 (dispatch) a spawn.
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 --clause 1 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "a merge clause did not justify the branch's merge: $out"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-merge-local.sh" task-x --clause 4 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "a land clause did not justify the branch's landing: $out"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off --clause=5 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "a dispatch clause did not justify the branch's spawn: $out"
+
+  # A clause authorizes only the action it names: an install clause cannot
+  # justify a merge, a merge clause cannot justify a spawn.
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 --clause 2 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an install clause justified a merge: $status: $out"
+  assert_contains "$out" "is a 'install' clause, not a 'merge' clause" "verb mismatch refusal lost its wording"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off --clause 1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "a merge clause justified a spawn: $status: $out"
+
+  # A refused clause never executes, and an id the record does not hold
+  # justifies nothing.
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 --clause 7 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "a refused clause justified a merge: $status: $out"
+  assert_contains "$out" "was refused at read-back" "refused-clause refusal lost its wording"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 --clause 42 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an absent clause id justified a merge: $status: $out"
+  assert_contains "$out" "has no clause 42" "absent-clause refusal lost its wording"
+
+  # Exactly one justification, well-formed.
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 --posture --clause 1 2>&1)
+  status=$?
+  [ "$status" -eq 2 ] || fail "two justifications were accepted: $status: $out"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-merge-local.sh" task-x --clause abc 2>&1)
+  status=$?
+  [ "$status" -eq 2 ] || fail "a malformed clause id was accepted: $status: $out"
+
+  # THE NEVER-SET, for every actor: a discard clause (3) has no guarded
+  # entrypoint, so it justifies nothing for the branch or for main - not a
+  # merge, not a landing, not a spawn - and a forced teardown stays refused for
+  # the branch under the record whatever the record says.
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 --clause 3 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "a discard clause justified a branch merge: $status: $out"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 --clause 3 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "a discard clause justified a main merge: $status: $out"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" task-x --clause 3 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "a discard clause justified a main landing: $status: $out"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off --clause 3 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "a discard clause justified a main spawn: $status: $out"
+  printf 'window=fm-task-w\nworktree=%s/wt-w\nproject=%s\nkind=ship\nmode=no-mistakes\n' "$home" "$root" > "$home/state/task-w.meta"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-teardown.sh" task-w --force 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "branch forced teardown under the record exited $status, not 6: $out"
+  assert_contains "$out" "cannot discard work" "the forced-teardown refusal changed under the record"
+  rm -f "$home/state/task-w.meta"
+
+  # Main's own authority is unchanged by the record: main still passes the
+  # partition with no flag at all, and a well-formed clause it names is
+  # validated (clause 1 justifies a merge for main too, exit != 6).
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" task-x 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "main hit the partition refusal under the record"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 --clause 1 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "main's merge clause was refused: $out"
+
+  # NO CLAUSE SURVIVES THE RETURN: once the record is archived, --posture and
+  # --clause justify nothing for either actor, and the branch is back to the
+  # attended refusal.
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null \
+    || fail "fixture record could not be archived"
+  [ ! -e "$home/state/.afk-contract" ] || fail "archive left the record in place"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 --clause 1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an archived record's clause justified a branch merge: $status: $out"
+  assert_contains "$out" "no clause survives the return" "archived-record refusal lost its wording"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-merge-local.sh" task-x --posture 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "--posture justified a branch landing after the return: $status: $out"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 --clause 1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an archived record's clause justified a main merge: $status: $out"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "branch merge after the return exited $status, not 6"
+  assert_contains "$out" "never performs this action in the attended posture" "the attended refusal did not return with the record gone"
+
+  # The guard itself refuses a call that names no verb, and a justification
+  # inherited from the environment is ignored (in-process state only).
+  out=$(STATE="$home/state" FM_SUPERVISION_ACTOR=branch bash -c '. "$1"; fm_lease_forbid_branch "probe"' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "a verb-less guard call passed: $status: $out"
+  assert_contains "$out" "wiring bug" "verb-less guard refusal lost its wording"
+  write_away_record "$home"
+  out=$(FM_HOME="$home" FM_AFK_JUSTIFICATION=posture FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-merge-local.sh" task-x 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an environment-supplied justification was honored: $status: $out"
+  pass "the away-posture record relocates main's authority to the branch only under a validated --posture or --clause, never for the never-set, and never past the return"
+}
+
+test_outcome_store_citation_is_validated_against_the_record() {
+  local home out status row
+  home="$TMP_ROOT/citation-home"
+  mkdir -p "$home/state"
+
+  # No record: a citation names authority that does not exist.
+  out=$(FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" append --task task-x --verdict captain --summary "merged" --citation posture 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "a citation without a record was accepted: $status: $out"
+  [ ! -s "$home/state/branch-outcomes.jsonl" ] || fail "a refused citation still appended a row"
+
+  write_away_record "$home"
+  out=$(FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" append --task task-x --verdict captain --summary "merged the PR" --citation posture 2>&1) \
+    || fail "a posture citation under the record was refused: $out"
+  [ "$out" = 1 ] || fail "first citation row did not get seq 1: $out"
+  out=$(FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" append --task task-x --verdict routine --summary "dispatched task-q" --citation "clause 5" 2>&1) \
+    || fail "an accepted clause citation was refused: $out"
+  out=$(FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" append --task task-x --verdict captain --summary "x" --citation "clause 7" 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "a refused clause was citable: $status: $out"
+  out=$(FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" append --task task-x --verdict captain --summary "x" --citation "clause 42" 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "an absent clause was citable: $status: $out"
+  out=$(FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" append --task task-x --verdict captain --summary "x" --citation "whatever" 2>&1)
+  status=$?
+  [ "$status" -eq 2 ] || fail "a malformed citation was accepted: $status: $out"
+
+  # The rows carry the citation and stay readable through every consumer.
+  row=$(FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" unread | head -1)
+  [ "$(printf '%s' "$row" | jq -r .citation)" = posture ] || fail "the posture citation was not stored: $row"
+  row=$(FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" list --recent 1)
+  [ "$(printf '%s' "$row" | jq -r .citation)" = "clause 5" ] || fail "the clause citation was not stored: $row"
+  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 2 || fail "cited rows could not be marked read"
+  out=$(FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)
+  [ "$(printf '%s' "$out" | jq -r .seq)" = 1 ] || fail "the cited captain row was not listed unprocessed: $out"
+  out=$(FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" append --task task-x --verdict routine --summary "no citation" 2>&1) \
+    || fail "an uncited row after cited rows was refused: $out"
+
+  # After the return the record is archived and nothing can cite it.
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null || fail "archive failed"
+  out=$(FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-branch-outcome.sh" append --task task-x --verdict captain --summary "x" --citation "clause 1" 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "an archived record's clause was citable: $status: $out"
+  assert_contains "$out" "archived record cannot be cited" "archived-citation refusal lost its wording"
+  pass "the outcome ledger records a citation only for an accepted clause or the posture of a live record"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
@@ -857,3 +1078,5 @@ test_guard_holds_exclusivity_through_mutation
 test_claim_refuses_the_other_actors_name_loudly
 test_release_actor_drops_only_that_actors_leases
 test_branch_cannot_force_teardown_or_directly_relaunch
+test_away_posture_record_relocates_main_authority_under_justification
+test_outcome_store_citation_is_validated_against_the_record

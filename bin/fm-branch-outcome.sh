@@ -6,8 +6,18 @@
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
 #     "verdict":"routine"|"captain","summary":"...","silent":true|false,
-#     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
-#     or status provenance remain valid and are treated as visible.
+#     "statusEndpoint":N,"statusIdent":"..."} plus, on a row that reports an
+#     action the away-posture record authorized, "citation":"posture" or
+#     "citation":"clause <id>". Legacy rows without `silent`, status
+#     provenance, or a citation remain valid and are treated as visible.
+#   - Citation (the ledger half of bin/fm-lease-lib.sh's record-aware role
+#     partition): `posture` cites main's standing authority relocated by the
+#     away-posture record, `clause <id>` cites an accepted clause of that
+#     record. append validates a citation STRUCTURALLY against the current
+#     record through bin/fm-afk-contract.sh (a confirmed record must exist,
+#     and a clause id must name an accepted clause) and refuses otherwise, so
+#     an archived record can never be cited (no clause survives the return);
+#     clause text itself is never parsed or judged here.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted by any
@@ -59,7 +69,8 @@
 #
 # Usage:
 #   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
-#       --summary <text> [--wake <text>] [--silent true|false]
+#       --summary <text> [--wake <text>] [--silent true|false] \
+#       [--citation posture|"clause <id>"]
 #     Append one outcome record; prints the assigned seq.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
@@ -107,7 +118,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--citation posture|\"clause <id>\"] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -177,6 +188,10 @@ read_processed() {
 last_seq() {
   [ -s "$STORE" ] || { printf '0\n'; return 0; }
   jq -Rse '
+    def provenance_valid:
+      (.silent | type) == "boolean"
+      and ((.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint <= 9007199254740991 and .statusEndpoint == (.statusEndpoint | floor))
+      and ((.statusIdent | type) == "string" and (.statusIdent | test("[\\t\\n]") | not));
     def valid:
       type == "object"
       and (
@@ -184,9 +199,12 @@ last_seq() {
         or (keys == ["epoch", "seq", "silent", "summary", "task", "verdict", "wake"] and (.silent | type) == "boolean")
         or (
           keys == ["epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake"]
-          and (.silent | type) == "boolean"
-          and ((.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint <= 9007199254740991 and .statusEndpoint == (.statusEndpoint | floor))
-          and ((.statusIdent | type) == "string" and (.statusIdent | test("[\\t\\n]") | not))
+          and provenance_valid
+        )
+        or (
+          keys == ["citation", "epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake"]
+          and provenance_valid
+          and ((.citation | type) == "string" and (.citation | test("^(posture|clause [1-9][0-9]*)$")))
         )
       )
       and ((.seq | type) == "number" and .seq >= 1 and .seq <= 9007199254740991 and .seq == (.seq | floor))
@@ -427,6 +445,7 @@ case "$CMD" in
     SUMMARY=''
     WAKE=''
     SILENT=false
+    CITATION=''
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --task) TASK=${2:-}; shift 2 || usage ;;
@@ -434,9 +453,32 @@ case "$CMD" in
         --summary) SUMMARY=${2:-}; shift 2 || usage ;;
         --wake) WAKE=${2:-}; shift 2 || usage ;;
         --silent) SILENT=${2:-}; shift 2 || usage ;;
+        --citation) CITATION=${2:-}; shift 2 || usage ;;
         *) usage ;;
       esac
     done
+    if [ -n "$CITATION" ]; then
+      case "$CITATION" in
+        posture) ;;
+        "clause "[1-9]|"clause "[1-9][0-9]*) ;;
+        *)
+          echo "error: --citation must be 'posture' or 'clause <id>'" >&2
+          exit 2
+          ;;
+      esac
+      if ! FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1; then
+        echo "error: refusing append because the citation names an away-posture record that does not exist or is not confirmed; an archived record cannot be cited" >&2
+        exit 1
+      fi
+      if [ "$CITATION" != posture ]; then
+        CITED_ID=${CITATION#clause }
+        if ! FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" clauses 2>/dev/null \
+            | cut -f1 | grep -qx -- "$CITED_ID"; then
+          echo "error: refusing append because the away-posture record has no accepted clause $CITED_ID" >&2
+          exit 1
+        fi
+      fi
+    fi
     [ -n "$TASK" ] || usage
     outcome_index_path "$TASK" >/dev/null || usage
     [ -n "$SUMMARY" ] || usage
@@ -460,10 +502,12 @@ case "$CMD" in
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
+    CITATION_FIELD=''
+    [ -z "$CITATION" ] || CITATION_FIELD=$(printf ',"citation":"%s"' "$CITATION")
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"%s}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
-      "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+      "$(json_escape "$CAPTURED_STATUS_IDENT")" "$CITATION_FIELD" >> "$STORE"
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still

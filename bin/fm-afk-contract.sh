@@ -72,9 +72,12 @@
 # A clause missing a required field is refused with that field named, recorded
 # under refused:, read back beside the accepted list, and never executes. Ids
 # are the input ordinals across accepted and refused clauses.
-# THIS RELEASE RECORDS CLAUSES AND DOES NOT EXECUTE THEM: the guarded gates learn
-# to cite a clause in a later phase, and the announcement and return brief both
-# say so, so a recorded clause is never mistaken for a promise.
+# A RECORDED CLAUSE IS NOT A PROMISE: it acts only where a guarded gate accepts
+# a clause citation from the supervision session (bin/fm-lease-lib.sh's
+# record-aware partition, the Pi supervision session today) and that session
+# judges the clause's condition to hold; the announcement and the return brief
+# both say so. The per-clause execution ledger in the return brief is a later
+# phase.
 # HARD RULE: forbidden, destructive, irreversible, and security-sensitive actions
 # are never pre-authorizable regardless of clause text, and no recorded clause is
 # authority by itself.
@@ -577,7 +580,7 @@ EOF
   [ "$count" -gt 0 ] || printf '    (none)\n'
   printf '  everything else waits for your return: no red merge without its named check, no discard without a named object and condition, never credentials, legal, financial, or attended prompts, nothing by analogy, and every clause expires at return.\n'
   printf '  hard rule: forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text; no recorded clause is authority by itself.\n'
-  printf '  recorded clauses are held for the return brief and are not executed by this release.\n'
+  printf '  recorded clauses are held for the return brief; a clause acts only when the supervision session cites it to a guarded gate and judges its condition to hold, never a refused one.\n'
 }
 
 fm_afk_contract_render_announcement() {  # <path>
@@ -589,7 +592,7 @@ fm_afk_contract_render_announcement() {  # <path>
   if [ "$accepted" -eq 0 ] && [ "$refused" -eq 0 ]; then
     clause_text='No mandate clauses recorded. Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.'
   else
-    clause_text="$accepted mandate clause(s) recorded, $refused refused, and $flagged flagged as naming a never-set concept; recorded clauses are held for the return brief and are not executed by this release; forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself."
+    clause_text="$accepted mandate clause(s) recorded, $refused refused, and $flagged flagged as naming a never-set concept; recorded clauses are held for the return brief and act only when the supervision session cites one to a guarded gate; forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself."
   fi
   printf 'Away posture confirmed at %s: hold-for-return only. %s %s Expected return: %s. Spend cap: %s concurrent workers.\n' \
     "$(fm_afk_contract_read_field "$path" confirmed)" \

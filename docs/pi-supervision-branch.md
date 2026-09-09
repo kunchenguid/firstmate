@@ -9,6 +9,7 @@ Fleet supervision on the Pi primary harness runs on a second conversation - the 
 Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, then merges each outcome back into the captain conversation's transcript.
 Ordinary main-only rows remain on main even when eligible task-local rows share their queue, except that a decision-owned signal or stale trigger keeps its entire coalesced trigger batch on main.
 An unresolvable row makes the scan unsafe and returns the whole wake to main, and every watcher-failure alarm also stays on main.
+All of that describes the attended posture; the away posture, recorded by `state/.afk-contract`, hands every row to the branch and parks main (see "Postures" below).
 Captain-relevant branch outcomes persist as exact, sequence-keyed visible transcript entries and then open one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence.
 The design source is the captain-approved forked-supervision architecture board, a captain-private fleet record (a self-contained HTML explainer with the measured cache and judgment evidence); this document records the shape it landed as, and the delivering PR cites the board artifact itself.
 
@@ -22,7 +23,7 @@ The supervision branch itself is Pi-only by construction:
 ## Components and their owners
 
 - Wake dispatch: `.pi/extensions/fm-primary-pi-watch.ts` stays the dispatcher; `.pi/extensions/lib/fm-branch-dispatch.ts` owns the offer handshake and row eligibility, while [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor consume contract.
-  A successful row grant transfers ownership of exactly the currently branch-eligible rows to the branch; a check-kind triggering close (merge-confirmation polls, Relay mentions, credential/auth failures, and every other legitimately main-only class) is never offered even when other rows are eligible, no acceptor (extension absent, legacy away daemon flag, branch broken) keeps today's wake-to-main path for that close, and watcher-failure alarms always go to main because only main can repair the watcher cycle.
+  A successful row grant transfers ownership of exactly the currently branch-eligible rows to the branch; a check-kind triggering close (merge-confirmation polls, Relay mentions, credential/auth failures, and every other legitimately main-only class) is never offered even when other rows are eligible, no acceptor (extension absent, branch broken) keeps today's wake-to-main path for that close, and watcher-failure alarms always go to main because only main can repair the watcher cycle; every one of those main deliveries becomes the away alarm instead while the away-posture record exists ("Postures" below).
   A decision-owned event surfaced by `bin/fm-watch.sh`'s signal path gets the identical treatment even though it keeps the ordinary `signal` kind.
   `signal_files_actionable` marks the queued payload `needs-decision:` for a newly surfaced `needs-decision`, a `captain-held` declaration surfaced through the no-verb fallback, or a pending-reply second-mate escalation; `scopeForUnreadWake` excludes every marked row from what the branch may claim.
   For a stale row, `scopeForUnreadWake` folds the mapped task's status log and excludes the row when any `needs-decision` remains open or the current meaningful declaration is `captain-held`; an unreadable or symlinked status log fails the scope closed rather than influencing routing.
@@ -55,8 +56,8 @@ The supervision branch itself is Pi-only by construction:
   A captain row advances the cursor only after its matching visible session entry exists, while locked session-start replay stops before the first captain row so it cannot acknowledge that outcome through prose alone.
   A routine note has no such sequence-keyed record, so if its cursor write fails after the note was delivered the next reconciliation sends that note once more.
   That asymmetry is a known limitation of the routine delivery representation rather than of the ordering above, it predates delivery moving off Pi's render thread, and closing it means giving routine delivery a durable idempotent record - tracked as follow-up `fm-pi-routine-delivery-idempotency-followup-r1` and pinned meanwhile by `tests/fm-pi-branch-extension.test.sh`.
-- Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the main-only role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
-  The guards are wired into `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` (overlap, lease-checked, with claim serialization retained through the mutation) and `fm-pr-merge.sh`, `fm-merge-local.sh`, and `fm-spawn.sh` (main-owned, branch refused; a relaunch through `fm-control` stays branch-legal recovery).
+- Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the record-aware role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
+  The guards are wired into `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` (overlap, lease-checked, with claim serialization retained through the mutation) and `fm-pr-merge.sh`, `fm-merge-local.sh`, `fm-spawn.sh`, and `fm-send.sh --resolve-key` for a decision (main-owned while attended and relocated to the branch under the away-posture record only with a validated `--posture` or `--clause <id>` justification; a relaunch through `fm-control` stays branch-legal recovery in both postures).
 - Autonomy: supervision is default-on for every task once a Pi primary session owns the fleet lock (docs/configuration.md "Pi supervision branch"); no captain grant file is required.
   A fleet-wide heartbeat is separately eligible only when every row other than a check or decision-owned signal/stale row is a heartbeat row or a resolvable task-local row (see "Heartbeat routing" below); every other fleet-wide or unresolvable wake, and every watcher-failure alarm, stays on main.
   The branch recomputes eligibility immediately before prompting the branch to drain and publishes the exact eligible row set to `state/.branch-eligible-rows` through `writeEligibleRowsSnapshot`.
@@ -64,7 +65,7 @@ The supervision branch itself is Pi-only by construction:
   [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the consume-side guarantee that neither actor can present or acknowledge the other's claim.
   Heartbeat keeps its own all-or-nothing recheck over the rows it can claim: it takes every branch-ownable unread row or none of them, and an unresolvable task-local row still defers the whole review to main.
   A producer can still append a row in the instant between that final check and drain startup; this accepted residual follows the confused-agent-grade boundary above rather than claiming adversarial queue isolation.
-  A legacy away daemon flag and a broken branch between its bounded recovery probes keep today's wake-to-main behavior; the away-posture record alone leaves the branch active.
+  A broken branch between its bounded recovery probes keeps today's wake-to-main behavior while attended; the legacy `state/.afk` daemon flag means nothing on Pi, where the daemon is never launched.
 
 ## Off-thread delivery
 
@@ -148,11 +149,31 @@ A provider an extension registered only into main's runtime, such as pi-devin-au
 That carve-out is scoped to provider registration alone: the branch keeps its `noExtensions`, `noSkills`, and `noContextFiles` isolation, the copy is never persisted, a provider whose registration fails to compose is simply unavailable, and `tests/fm-pi-branch-extension.test.sh` pins the pin-and-fallthrough behavior.
 No caching machinery beyond this exists, deliberately: any later dynamic content in the branch prefix silently removes most of the cache benefit, which is why `bin/fm-branch-prompt.sh`'s header is the contract's single owner and `tests/fm-branch-supervision.test.sh` pins the output to byte identity.
 
-## Away mode
+## Postures
 
-On Pi the away daemon is no longer launched: `/afk` writes the away-posture record (`state/.afk-contract`, owned by `bin/fm-afk-contract.sh`) and never the `state/.afk` daemon flag, so the branch keeps its attended shape under the record until the posture-aware dispatch lands in a later phase.
-The branch's decline while `state/.afk` exists is retained only for a legacy flag left by an older daemon launch.
-What the branch already does for the captain is unchanged: it absorbs the routine majority that previously interrupted the captain's conversation, applying the same escalation etiquette the daemon applies on the harnesses that still run one.
+One supervision session runs in two postures, attended and away, and the posture is a file: the away-posture record `state/.afk-contract`, written only by `bin/fm-afk-contract.sh` when the captain confirms `/afk`'s read-back and archived by the return path on the captain's first unmarked message.
+The record is never inferred from chat and never placed in the branch's byte-stable prompt prefix; the dispatcher reads its presence at every routing decision and the branch reads it at the tail of every wake.
+On Pi the away daemon is never launched, so the watcher is the single owner of supervision in both postures, and a leftover `state/.afk` flag declines nothing.
+
+While the record exists:
+
+- Every actionable row is branch-eligible: check rows, decision-owned signal and stale rows, and heartbeat rows are claimed by the branch on whatever wake finds them unread, and the trigger class no longer forces a batch to main.
+  The two vetoes that describe a broken queue, an unresolvable task-local row and a structurally invalid row, stay vetoes in both postures.
+  A prompt that claims a check row is not scoped by task, so the branch may report it as `fleet`.
+- Main receives no wakes.
+  A wake the branch cannot take and every watcher-failure alarm are routed to `bin/fm-afk-alarm.sh` instead of a main follow-up: it appends the loud local marker `state/.afk-supervisor-alarm` and holds the backlog task `fm-afk-supervisor-alarm` for the captain, while the durable wake queue keeps the rows for the return drain.
+  The return brief leads with supervisor health, which reads that marker.
+- The wake message ends with the record's read-back under a `POSTURE: AWAY` heading, so the branch knows the posture and the recorded clauses at execution time without any prefix change.
+- Captain-verdict outcomes accumulate unprocessed in the outcome store.
+  Their visible entries still persist, but no processing turn opens on the parked main; the first run boundary after the record is gone, ordinarily the captain's return message, presents the accumulated rows exactly as after any other gap, and the return brief lists them.
+- Main's standing authority relocates to the branch, and the record adds exactly what its clauses name.
+  `fm_lease_forbid_branch` passes the branch actor only with a justification the guarded script collected from its own flags: `--posture` for main's standing authority relocated by the record, or `--clause <id>` for a recorded clause whose action verb matches the guarded action.
+  The check is structural only: the record must be confirmed and readable, the clause must be accepted, and its verb must match; whether a clause's stated condition holds is the branch's judgment at execution time, never a grammar, by the captain's standing rule that no static natural-language parser exists anywhere in the away posture.
+  `bin/fm-pr-merge.sh` under a justification also reads the pull request's checks live: standing authority never merges a red pull request, and a clause covers a check that is not green only when the branch names it with `--red <check-name>`, which it does only when the cited clause names that failing check or condition.
+  The accepted justification is printed as `authority: <citation>` and recorded on the outcome ledger row through `fm_branch_report`'s `citation`, which `bin/fm-branch-outcome.sh append --citation` validates against the live record.
+
+The authority invariant, pinned by `tests/fm-branch-supervision.test.sh`, `tests/fm-pr-merge.test.sh`, and `tests/fm-send-resolve-key.test.sh`: being away changes how the captain is informed and what happens at a captain-owned decision point, never firstmate's authority set.
+No action lies outside standing authority plus the active clauses; the never-set (credential entry, legal or financial acceptance, an attended prompt, an unnamed discard, a security-sensitive action) has no guarded entrypoint that accepts a justification, so a `discard` or `wake-me` clause unlocks nothing for either actor in either posture and a forced teardown stays refused for the branch; a red merge is refused unless the clause names the failing check; and no clause survives the return, because an archived record validates as absent and every justification and citation that names it is refused.
 
 ## Verification
 

@@ -359,8 +359,8 @@ test_return_brief_composes_from_record_store_and_held_set() {
     || fail "the brief is missing a section: $out"
   [ "$health_line" -lt "$clauses_line" ] && [ "$clauses_line" -lt "$waiting_line" ] && [ "$waiting_line" -lt "$failed_line" ] \
     || fail "the brief sections are out of order (health $health_line, clauses $clauses_line, waiting $waiting_line, failed $failed_line)"
-  assert_contains "$out" '1. merge task fix-windows PR when checks green - recorded, not executed by this release' "the accepted clause was not listed as recorded-only"
-  assert_contains "$out" '2. prerelease repo no-mistakes when after clause 1 - recorded, not executed by this release' "the second clause was not listed"
+  assert_contains "$out" '1. merge task fix-windows PR when checks green - recorded; acts only when cited to a guarded gate' "the accepted clause was not listed with its not-a-promise suffix"
+  assert_contains "$out" '2. prerelease repo no-mistakes when after clause 1 - recorded; acts only when cited to a guarded gate' "the second clause was not listed"
   assert_contains "$out" '3. "action=merge object=everything when=(none)" - refused at entry: missing when' "the refused clause was not listed with its missing part"
   assert_contains "$out" 'merge the windows fix when green, then cut a prerelease' "the captain's verbatim words were not carried into the brief"
   assert_contains "$out" 'fix-windows,queued,task' "the held backlog item was not listed under waiting on you"
@@ -383,7 +383,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
   printf 'resolved [key=dep]: the upstream dependency landed\n' >> "$dir/home/state/other.status"
   printf 'resolved [key=token]: the token was refreshed\n' >> "$dir/home/state/fix-windows.status"
   second=$(run_return "$dir" check) || fail "the remediated return did not clear: $second"
-  assert_contains "$second" '1. merge task fix-windows PR when checks green - recorded, not executed by this release' "check did not re-render the mandate from the archived record"
+  assert_contains "$second" '1. merge task fix-windows PR when checks green - recorded; acts only when cited to a guarded gate' "check did not re-render the mandate from the archived record"
   assert_contains "$second" 'supervision ran through the away window with no detected gap' "check lost the health snapshot taken at begin"
   assert_contains "$second" 'catch-up clear' "check did not clear the gate"
   [ ! -e "$gate" ] || fail "the cleared check left the gate behind"
@@ -594,13 +594,20 @@ test_return_brief_health_leads_with_a_gap() {
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$(( $(date +%s) - 900 ))" '+%Y%m%d%H%M.%S')" "$dir/home/state/.last-watcher-beat"
   else touch -m -d "@$(( $(date +%s) - 900 ))" "$dir/home/state/.last-watcher-beat"; fi
   : > "$dir/home/state/.fake-drain"
+  # Two alarms the away session raised instead of waking the parked main
+  # (bin/fm-afk-alarm.sh's marker).
+  printf '1784074000\twatcher: FAILED - Pi extension could not restore watcher continuity\n1784074300\tsignal: task-9 could not be taken by the branch\n' \
+    > "$dir/home/state/.afk-supervisor-alarm"
   out=$(run_return "$dir" begin) || fail "a clean fleet with a supervision gap should still clear the gate: $out"
   assert_contains "$out" 'GAP: watcher downtime was detected during the away window' "the downtime marker was not reported as a gap"
   assert_contains "$out" 'GAP: the watcher beat was ' "the stale beacon was not reported as a gap"
+  assert_contains "$out" 'GAP: the supervisor raised 2 alarm(s) during the away window; first: watcher: FAILED - Pi extension could not restore watcher continuity' \
+    "the away alarms were not reported as a gap"
   assert_not_contains "$out" 'no detected gap' "a gap window was reported as clean"
   gap_line=$(line_of "$out" 'GAP: watcher downtime')
   clean_line=$(line_of "$out" 'Mandate clauses:')
   [ "$gap_line" -lt "$clean_line" ] || fail "the gap was not reported before the mandate"
+  [ ! -e "$dir/home/state/.afk-supervisor-alarm" ] || fail "a cleared return left the alarm marker behind"
   pass "the return brief leads with supervisor health and names every detected gap"
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--posture | --clause <id>] [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -170,6 +170,14 @@
 # open-decision ledger fm-wake-drain folds lives in this home's own state dir
 # (a remote mate's escalations reach it through the parent-replies ingest);
 # only the answer message crosses the backend or remote transport.
+# Answering a decision is the gate-answer path and is main-owned while attended:
+# when any named key is an open needs-decision or a captain-held task (a
+# blocked: key is ordinary steering and stays lease-guarded only), the
+# supervision branch is refused outright without the away-posture record and,
+# under the record, refused until it passes --posture (main's standing authority
+# relocated by the record) or --clause <id> (a recorded `answer` clause), whose
+# accepted citation is printed as `authority: <citation>` for the ledger
+# (contract: bin/fm-lease-lib.sh). Either flag without --resolve-key is refused.
 #
 # Chat is also a channel that carries keyed captain answers, so the same flag
 # feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
@@ -489,9 +497,20 @@ while :; do
       FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
       shift
       ;;
+    --posture) fm_lease_justify posture || exit 1; shift ;;
+    --clause)
+      [ $# -ge 2 ] || { echo "error: --clause requires a clause id" >&2; exit 1; }
+      fm_lease_justify clause "$2" || exit 1
+      shift 2
+      ;;
+    --clause=*) fm_lease_justify clause "${1#--clause=}" || exit 1; shift ;;
     *) break ;;
   esac
 done
+if [ -n "$FM_AFK_JUSTIFICATION" ] && [ -z "$RESOLVE_KEYS" ]; then
+  echo "error: --posture and --clause justify answering a decision, so they require --resolve-key" >&2
+  exit 1
+fi
 
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
@@ -610,6 +629,18 @@ if [ -n "$RESOLVE_KEYS" ]; then
     echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
+  # The gate-answer path: a key that is an open needs-decision, or already a
+  # captain-held task, is a decision, and answering one is main-owned while
+  # attended (the header's answering-a-decision contract). A blocked: key is
+  # ordinary steering and takes no partition guard.
+  RESOLVE_IS_DECISION=0
+  [ -z "$RESOLVE_HOLD_KEYS" ] || RESOLVE_IS_DECISION=1
+  for k in $RESOLVE_STATUS_KEYS; do
+    [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" = needs-decision ] && RESOLVE_IS_DECISION=1
+  done
+  if [ "$RESOLVE_IS_DECISION" -eq 1 ]; then
+    fm_lease_forbid_branch "decision answer (fm-send --resolve-key)" answer
+  fi
   # Refuse before send when a named status-log key cannot actually close: a
   # reserved key with an answered: note is a silent no-op in the fold.
   resolve_excerpt=$(printf '%s' "$*" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
@@ -659,6 +690,7 @@ fm_send_close_resolved_keys() {  # <answer-text>
         ;;
     esac
   done
+  [ -z "$FM_AFK_CITATION" ] || printf 'authority: %s\n' "$FM_AFK_CITATION"
 }
 
 # Feed the answered captain-held tasks to the ONE keyed-answer intake, as keyed

@@ -68,6 +68,10 @@
 #   (av) a base branch with no queue rule says nothing about a merge queue
 #   (aw) a refusal built on the gh-axi view says the merge queue could not be
 #       observed, and judges that view's state like the queue-aware one
+#   (ax) under the away-posture record the branch merges with --posture only
+#       when every check is green, prints the citation, and never merges red
+#   (ay) a --clause merge covers a red check only when --red names it, and a
+#       failed live check read refuses; --red needs a clause, never --posture
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -385,6 +389,253 @@ write_github_outcome() {
     "merged=$merged" \
     "queued=$queued" \
     "base=$base" > "$case_dir/github-outcome"
+}
+
+# gh mock for the away-posture cases: answers fm-pr-check.sh's headRefOid
+# lookup, the merge-outcome graphql read, and the statusCheckRollup read from
+# the case's checks JSON (FM_TEST_GH_CHECKS); a missing checks file makes that
+# read fail. Args: case_dir head_sha
+add_gh_mock_with_checks() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *statusCheckRollup*)
+        [ -f "\$FM_TEST_GH_CHECKS" ] || { echo 'error: could not resolve checks' >&2; exit 1; }
+        cat "\$FM_TEST_GH_CHECKS"
+        exit 0
+        ;;
+    esac
+    ;;
+  "api graphql")
+    cat "\$FM_TEST_GH_OUTCOME"
+    exit 0
+    ;;
+  api\ *)
+    cat "\$FM_TEST_GH_RULES"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+  ln -sf "$JQ_BIN" "$case_dir/fakebin/jq"
+}
+
+# A confirmed away-posture record in the case's home with clause 1 a merge
+# clause and clause 2 an install clause, written through the record's owner.
+write_case_away_record() {  # <case_dir>
+  local case_dir=$1
+  FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-afk-contract.sh" propose \
+    --words 'merge task-x1 even if lint is red' \
+    --action merge --object 'task-x1 PR' --when 'checks green except lint' \
+    --action install --object 'the prerelease on the mini' --when 'after clause 1' >/dev/null 2>&1 \
+    || fail "away record proposal failed"
+  FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null 2>&1 \
+    || fail "away record confirm failed"
+}
+
+write_checks_json() {  # <file> <lint-conclusion>
+  cat > "$1" <<JSON
+{"statusCheckRollup":[
+  {"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"},
+  {"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"$2"},
+  {"__typename":"StatusContext","context":"license/cla","state":"SUCCESS"}
+]}
+JSON
+}
+
+# (ax)
+test_away_posture_merge_requires_green_checks() {
+  local case_dir rc
+  case_dir=$(make_case away-posture-green)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111
+  add_gh_mock_with_checks "$case_dir" 1111111111111111111111111111111111111111
+  : > "$case_dir/gh-axi.log"
+  write_case_away_record "$case_dir"
+  write_checks_json "$case_dir/checks.json" SUCCESS
+
+  set +e
+  FM_TEST_GH_CHECKS="$case_dir/checks.json" FM_SUPERVISION_ACTOR=branch \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 --posture \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "away-posture-green: a green PR should merge under --posture: $(cat "$case_dir/stderr")"
+  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "away-posture-green: gh-axi pr merge was not invoked with the default method: $(cat "$case_dir/gh-axi.log")"
+  assert_grep 'authority: posture' "$case_dir/stdout" "away-posture-green: the citation was not printed: $(cat "$case_dir/stdout")"
+  grep -q 'statusCheckRollup' "$case_dir/gh.log" || fail "away-posture-green: the checks were not read live before merging"
+
+  # The same PR with one red check: standing authority never merges red, and
+  # the forge is never asked.
+  case_dir=$(make_case away-posture-red)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2222222222222222222222222222222222222222
+  add_gh_mock_with_checks "$case_dir" 2222222222222222222222222222222222222222
+  : > "$case_dir/gh-axi.log"
+  write_case_away_record "$case_dir"
+  write_checks_json "$case_dir/checks.json" FAILURE
+  set +e
+  FM_TEST_GH_CHECKS="$case_dir/checks.json" FM_SUPERVISION_ACTOR=branch \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 --posture \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "away-posture-red: a red PR must refuse under --posture"
+  assert_grep 'standing authority never merges a red pull request' "$case_dir/stderr" "away-posture-red: refusal lost its wording"
+  assert_grep 'lint' "$case_dir/stderr" "away-posture-red: the refusal did not name the red check"
+  ! grep -q 'pr merge' "$case_dir/gh-axi.log" || fail "away-posture-red: the forge was asked to merge a red PR"
+  ! grep -q 'authority:' "$case_dir/stdout" || fail "away-posture-red: a refused merge printed a citation"
+
+  # Main is untouched by any of it: no flag, no checks read, the merge as before.
+  case_dir=$(make_case away-posture-main)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 3333333333333333333333333333333333333333
+  add_gh_mock_with_checks "$case_dir" 3333333333333333333333333333333333333333
+  : > "$case_dir/gh-axi.log"
+  write_case_away_record "$case_dir"
+  write_checks_json "$case_dir/checks.json" FAILURE
+  set +e
+  FM_TEST_GH_CHECKS="$case_dir/checks.json" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "away-posture-main: main's unflagged merge changed: $(cat "$case_dir/stderr")"
+  ! grep -q 'statusCheckRollup' "$case_dir/gh.log" || fail "away-posture-main: main's merge read checks it never read before"
+  pass "under the away-posture record --posture merges only a green PR and prints its citation"
+}
+
+# (ay)
+test_away_posture_clause_covers_only_a_named_red_check() {
+  local case_dir rc
+  # Red lint, clause 1 cited, lint not named: refused before the forge.
+  case_dir=$(make_case away-clause-unnamed)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 4444444444444444444444444444444444444444
+  add_gh_mock_with_checks "$case_dir" 4444444444444444444444444444444444444444
+  : > "$case_dir/gh-axi.log"
+  write_case_away_record "$case_dir"
+  write_checks_json "$case_dir/checks.json" FAILURE
+  set +e
+  FM_TEST_GH_CHECKS="$case_dir/checks.json" FM_SUPERVISION_ACTOR=branch \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 --clause 1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "away-clause-unnamed: an unnamed red check must refuse"
+  assert_grep "check 'lint' is not green and the cited clause justification does not name it" "$case_dir/stderr" \
+    "away-clause-unnamed: refusal lost its wording"
+  ! grep -q 'pr merge' "$case_dir/gh-axi.log" || fail "away-clause-unnamed: the forge was asked to merge"
+
+  # The same, with --red lint: the clause covers exactly that check.
+  case_dir=$(make_case away-clause-named)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555
+  add_gh_mock_with_checks "$case_dir" 5555555555555555555555555555555555555555
+  : > "$case_dir/gh-axi.log"
+  write_case_away_record "$case_dir"
+  write_checks_json "$case_dir/checks.json" FAILURE
+  set +e
+  FM_TEST_GH_CHECKS="$case_dir/checks.json" FM_SUPERVISION_ACTOR=branch \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 --clause 1 --red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "away-clause-named: a named red check should merge under its clause: $(cat "$case_dir/stderr")"
+  grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "away-clause-named: gh-axi pr merge was not invoked"
+  assert_grep 'authority: clause 1' "$case_dir/stdout" "away-clause-named: the clause citation was not printed: $(cat "$case_dir/stdout")"
+
+  # A pending check is not green: naming lint does not cover a still-running build.
+  case_dir=$(make_case away-clause-pending)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  add_gh_mock_with_checks "$case_dir" 6666666666666666666666666666666666666666
+  : > "$case_dir/gh-axi.log"
+  write_case_away_record "$case_dir"
+  cat > "$case_dir/checks.json" <<'JSON'
+{"statusCheckRollup":[
+  {"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":null},
+  {"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"}
+]}
+JSON
+  set +e
+  FM_TEST_GH_CHECKS="$case_dir/checks.json" FM_SUPERVISION_ACTOR=branch \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 --clause 1 --red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "away-clause-pending: a pending check must not read as green"
+  assert_grep "check 'build' is not green" "$case_dir/stderr" "away-clause-pending: the pending check was not named"
+
+  # The live read failing refuses rather than merging blind.
+  case_dir=$(make_case away-clause-unreadable)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
+  add_gh_mock_with_checks "$case_dir" 7777777777777777777777777777777777777777
+  : > "$case_dir/gh-axi.log"
+  write_case_away_record "$case_dir"
+  set +e
+  FM_TEST_GH_CHECKS="$case_dir/absent-checks.json" FM_SUPERVISION_ACTOR=branch \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 --clause 1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "away-clause-unreadable: a failed checks read must refuse"
+  assert_grep 'that read failed' "$case_dir/stderr" "away-clause-unreadable: refusal lost its wording"
+  ! grep -q 'pr merge' "$case_dir/gh-axi.log" || fail "away-clause-unreadable: the forge was asked to merge"
+  # A rollup that is not a list is a failed read too, never an empty red set.
+  printf '{"statusCheckRollup":null}\n' > "$case_dir/absent-checks.json"
+  set +e
+  FM_TEST_GH_CHECKS="$case_dir/absent-checks.json" FM_SUPERVISION_ACTOR=branch \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 --posture \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "away-clause-unreadable: a malformed rollup must refuse"
+  assert_grep 'that read failed' "$case_dir/stderr" "away-clause-unreadable: the malformed-rollup refusal lost its wording"
+  ! grep -q 'pr merge' "$case_dir/gh-axi.log" || fail "away-clause-unreadable: a malformed rollup let the forge merge"
+
+  # --red is a clause's instrument: it needs --clause and never rides --posture,
+  # and an install clause cannot justify a merge at all.
+  case_dir=$(make_case away-clause-flags)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
+  add_gh_mock_with_checks "$case_dir" 8888888888888888888888888888888888888888
+  : > "$case_dir/gh-axi.log"
+  write_case_away_record "$case_dir"
+  write_checks_json "$case_dir/checks.json" FAILURE
+  set +e
+  FM_TEST_GH_CHECKS="$case_dir/checks.json" FM_SUPERVISION_ACTOR=branch \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 --posture --red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-clause-flags: --red with --posture must be a usage refusal"
+  assert_grep 'cannot accompany --posture' "$case_dir/stderr" "away-clause-flags: refusal lost its wording"
+  set +e
+  FM_TEST_GH_CHECKS="$case_dir/checks.json" FM_SUPERVISION_ACTOR=branch \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 --red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-clause-flags: --red without --clause must be a usage refusal"
+  set +e
+  FM_TEST_GH_CHECKS="$case_dir/checks.json" FM_SUPERVISION_ACTOR=branch \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 --clause 2 --red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 6 "$rc" "away-clause-flags: an install clause must not justify a merge"
+  ! grep -q 'pr merge' "$case_dir/gh-axi.log" || fail "away-clause-flags: the forge was asked to merge on a refused justification"
+  pass "a clause covers a red check only when --red names it, a pending or unreadable check refuses, and --red never rides --posture"
 }
 
 test_verified_merge_records_pr_and_head() {
@@ -2331,3 +2582,5 @@ test_unreadable_user_backend_config_refuses_the_merge
 test_untraversable_user_backend_config_directory_refuses_the_merge
 test_absent_user_backend_config_directory_and_backlog_still_merge
 test_backend_override_bypasses_unreadable_user_config
+test_away_posture_merge_requires_green_checks
+test_away_posture_clause_covers_only_a_named_red_check

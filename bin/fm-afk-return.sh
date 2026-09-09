@@ -14,8 +14,8 @@
 # (bin/fm-branch-outcome.sh), the held set in the backlog (tasks-axi), and the
 # status logs. Its order is fixed: supervisor health across the away window
 # first, then every mandate clause the captain recorded, including superseded
-# in-session read-backs (this release records clauses and does not execute them,
-# and the brief says so), then what is
+# in-session read-backs (a clause acts only when the supervision session cites
+# it to a guarded gate; the per-clause ledger listing is a later phase), then what is
 # waiting on the captain, then what was tried and failed or could not be fixed,
 # then what the away session handled, then cost. The health snapshot is taken
 # BEFORE the daemon shutdown so the shutdown itself cannot read as a gap.
@@ -242,7 +242,8 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.afk-supervisor-alarm"
 }
 
 return_guard() {
@@ -261,7 +262,7 @@ return_guard() {
 # --- supervisor health, snapshotted before anything is shut down ------------
 
 health_snapshot() {  # <evidence-file>
-  local evidence=$1 beat_age lines=""
+  local evidence=$1 beat_age lines="" alarm_count
   beat_age=$(fm_path_age "$STATE/.last-watcher-beat")
   if [ -e "$STATE/.watcher-down" ]; then
     lines="GAP: watcher downtime was detected during the away window (recovery marker present)"
@@ -277,6 +278,13 @@ GAP: the watcher beat was ${beat_age}s old at return (grace ${RETURN_GRACE}s)"
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
     lines="$lines
 delivery wedged: $(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)"
+  fi
+  # The away posture's supervisor-failure channel (bin/fm-afk-alarm.sh): every
+  # alarm the session raised instead of waking the parked main.
+  if [ -s "$STATE/.afk-supervisor-alarm" ]; then
+    alarm_count=$(grep -c . "$STATE/.afk-supervisor-alarm" 2>/dev/null || printf 0)
+    lines="$lines
+GAP: the supervisor raised $alarm_count alarm(s) during the away window; first: $(head -1 "$STATE/.afk-supervisor-alarm" | cut -f2-)"
   fi
   if [ -z "$(printf '%s' "$lines" | tr -d '[:space:]')" ]; then
     lines="supervision ran through the away window with no detected gap (watcher beat ${beat_age}s old at return)"
@@ -321,7 +329,7 @@ render_mandate_record() {  # <record> [superseded-time]
     fi
     flag=$("$CONTRACT" flags --path "$record" | awk -F '\t' -v id="$id" '$1 == id { print $2 }')
     [ -z "$flag" ] || printf " - flagged: names '%s', a never-set concept that is never pre-authorizable" "$flag"
-    printf '%s - recorded, not executed by this release\n' "$suffix"
+    printf '%s - recorded; acts only when cited to a guarded gate\n' "$suffix"
   done <<EOF
 $("$CONTRACT" clauses --path "$record")
 EOF

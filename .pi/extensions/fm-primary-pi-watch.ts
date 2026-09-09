@@ -21,6 +21,15 @@
 // consumes at the user message_start carrying the exact wake text; either
 // event finishes the pending record, and a still-unconsumed record rides the
 // replacement handoff.
+//
+// Postures (stated once here; docs/pi-supervision-branch.md "Postures"):
+// the away-posture record state/.afk-contract is read as a file at every
+// routing decision, never inferred from chat. While it exists every
+// actionable row is offered to the branch as eligible and main is offered
+// nothing; a wake the branch cannot take and every watcher-failure alarm are
+// routed to bin/fm-afk-alarm.sh (a loud local marker plus a hold record) in
+// place of a main follow-up, while the durable wake queue keeps the rows for
+// the return drain. Nothing else about delivery or consumption changes.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -31,6 +40,7 @@ import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
 import {
+  afkPostureRecordPresent,
   createBranchDispatchOffer,
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
@@ -133,6 +143,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const afkAlarmScript = `${fmRoot}/bin/fm-afk-alarm.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/pi-primary-watch`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
@@ -512,12 +523,39 @@ export default function (pi: ExtensionAPI) {
     !calmPresentation.stockExportRendering &&
     !calmTranscriptClassIsVisible(itemClass);
 
+  // The away posture's replacement for a main follow-up: the marker and hold
+  // record bin/fm-afk-alarm.sh owns. Best-effort and detached - the durable
+  // wake queue, not this call, is what guarantees nothing is lost.
+  function raiseAfkAlarm(message: string): void {
+    const summary = message.split("\n").find((line) => line.trim().length > 0) ?? "supervision failure";
+    try {
+      const child = spawn("bash", [afkAlarmScript, "raise", summary], {
+        cwd: fmRoot,
+        stdio: "ignore",
+        detached: false,
+        env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
+      });
+      child.on("error", () => {});
+      child.unref();
+    } catch {
+      // The marker is best-effort; the queued rows remain durable regardless.
+    }
+  }
+
   async function sendWake(
     owner: SessionGeneration,
     message: string,
     pending?: PendingActionableClose,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
+    if (afkPostureRecordPresent(state)) {
+      // Main is parked while the away-posture record exists: this wake or
+      // alarm becomes the loud local marker and hold record instead, and the
+      // pending close counts as handled because the queue rows stay durable
+      // for the return drain.
+      raiseAfkAlarm(message);
+      return generationIsLive(owner);
+    }
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
@@ -606,7 +644,11 @@ export default function (pi: ExtensionAPI) {
     // signal/stale row still reach the branch on this cycle; it must never
     // also let a check-kind trigger itself slip past main's delivery.
     const isCheckTrigger = /^check:/.test(message);
-    const scope = scopeForUnreadWake(state, heartbeat);
+    // The away posture collapses the partition below: every actionable row is
+    // branch-eligible and the trigger class no longer forces anything to main
+    // (lib/fm-branch-dispatch.ts owns the per-row rule).
+    const afk = afkPostureRecordPresent(state);
+    const scope = scopeForUnreadWake(state, heartbeat, afk);
     // A signal close containing a needs-decision status file, or a stale close
     // for a captain-held task, gets the identical main-only treatment as a
     // check-kind trigger. The cross-reference deliberately includes every
@@ -626,7 +668,7 @@ export default function (pi: ExtensionAPI) {
       scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
     const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
     const isNeedsDecisionTrigger = triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
-    const eligible = !isCheckTrigger && !isNeedsDecisionTrigger && scope.eligible;
+    const eligible = afk ? scope.eligible : !isCheckTrigger && !isNeedsDecisionTrigger && scope.eligible;
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted ? offer.settlement : null;

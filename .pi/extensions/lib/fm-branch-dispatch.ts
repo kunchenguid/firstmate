@@ -1,4 +1,5 @@
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { runCommandAsync } from "./fm-async-exec.ts";
 
 // Shared wake-dispatch handshake between the Pi watcher extension (the
@@ -15,8 +16,29 @@ import { runCommandAsync } from "./fm-async-exec.ts";
 // means no branch took it and the watcher delivers to main exactly as it did
 // before the branch existed. Watcher-failure alarms are never offered - only
 // main can repair the watcher cycle (fm_watch_arm_pi lives on main).
+//
+// Postures (docs/pi-supervision-branch.md "Postures"). The away-posture record
+// state/.afk-contract (owner: bin/fm-afk-contract.sh) is the posture; it is
+// read as a file, never inferred from chat. While it exists the branch takes
+// EVERY actionable row - check rows, decision-owned rows, and heartbeat rows
+// included - and main is offered nothing; the dispatcher routes what the
+// branch cannot take, and every watcher-failure alarm, to the loud local
+// marker and hold record bin/fm-afk-alarm.sh owns instead of waking the
+// parked main.
 
 export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
+
+// The away-posture record's state-relative filename, exactly as
+// bin/fm-afk-contract.sh writes it. Presence is the only fact read here.
+export const AFK_CONTRACT_FILE = ".afk-contract";
+
+export function afkPostureRecordPresent(state: string): boolean {
+  try {
+    return statSync(join(state, AFK_CONTRACT_FILE)).isFile();
+  } catch {
+    return false;
+  }
+}
 
 export type UnreadWakeScopeStatus = "safe" | "empty" | "unsafe";
 
@@ -63,6 +85,12 @@ export interface UnreadWakeScope {
    * to main.
    */
   needsDecisionKeys: string[];
+  /**
+   * The check-kind rows included in eligibleSeqs. Non-empty only in the away
+   * posture, where the branch takes main's rows too; a check row names no
+   * task, so a prompt that claims one is not scoped by task.
+   */
+  checkSeqs: string[];
   taskByWakeKey: Record<string, string>;
 }
 
@@ -74,6 +102,7 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   eligibleTasks: [],
   corrupted: false,
   needsDecisionKeys: [],
+  checkSeqs: [],
   taskByWakeKey: {},
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
@@ -84,6 +113,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   eligibleTasks: [],
   corrupted: true,
   needsDecisionKeys: [],
+  checkSeqs: [],
   taskByWakeKey: {},
 };
 
@@ -122,6 +152,13 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // this repo's fm_wake_append could never have produced (an unknown kind, or a
 // line that fails the structural tab-field check) also still vetoes the whole
 // scan - that is queue corruption, not an everyday mixed queue.
+//
+// In the away posture (`afk`, the dispatcher's read of the away-posture
+// record) the partition above collapses: main is parked, so check rows,
+// decision-owned signal and stale rows, and heartbeat rows are all claimed by
+// the branch on whatever wake finds them unread. The two vetoes that describe
+// a broken queue rather than a routing choice - an unresolvable task-local row
+// and a structurally invalid or unknown row - stay vetoes in both postures.
 function statusLineVerb(line: string): string {
   const beforeColon = line.split(":", 1)[0].split("[", 1)[0].trim();
   const words = beforeColon.split(/\s+/);
@@ -187,7 +224,7 @@ function hasOpenNeedsDecision(
   return [...open.values()].includes("needs-decision");
 }
 
-export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWakeScope {
+export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = false): UnreadWakeScope {
   let queue = "";
   try {
     queue = readFileSync(`${state}/.wake-queue`, "utf8");
@@ -228,6 +265,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   const eligibleSeqs: string[] = [];
   const eligibleTasks = new Set<string>();
   const needsDecisionKeys: string[] = [];
+  const checkSeqs: string[] = [];
   const staleDecisionOwnership = new Map<string, boolean>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
@@ -242,13 +280,20 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     const kind = fields[2];
     const key = fields[3];
     if (kind === "heartbeat") {
-      if (heartbeat) eligibleSeqs.push(seq);
+      // Attended, a heartbeat row is claimed only by a heartbeat review; away,
+      // no main drain will ever take it, so any wake claims it.
+      if (heartbeat || afk) eligibleSeqs.push(seq);
       continue;
     }
     if (kind === "check") {
-      // Always main-owned, in every mode: excluded from what the branch may
-      // claim, never a reason to reject the rest of the queue and never a
-      // reason to send an otherwise-eligible heartbeat review to main.
+      // Main-owned while attended: excluded from what the branch may claim,
+      // never a reason to reject the rest of the queue and never a reason to
+      // send an otherwise-eligible heartbeat review to main. Away, the branch
+      // is the only actor, so the row is claimed unscoped.
+      if (afk) {
+        eligibleSeqs.push(seq);
+        checkSeqs.push(seq);
+      }
       continue;
     }
     let project = "";
@@ -256,12 +301,14 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     if (kind === "signal") {
       const payload = fields[4] ?? "";
       if (/^needs-decision:/.test(payload)) {
-        // Main-owned exactly like a check-kind row above: a needs-decision
-        // status append surfaced through the actionable signal path is
-        // excluded from what the branch may claim without vetoing the scan
-        // (docs/pi-supervision-branch.md "Autonomy").
+        // Main-owned exactly like a check-kind row above while attended: a
+        // needs-decision status append surfaced through the actionable signal
+        // path is excluded from what the branch may claim without vetoing the
+        // scan (docs/pi-supervision-branch.md "Autonomy"). Away, the branch
+        // takes the decision row like any other task-local row; the record
+        // decides what it may do about it (bin/fm-lease-lib.sh).
         needsDecisionKeys.push(key);
-        continue;
+        if (!afk) continue;
       }
       task = key.replace(/\.(?:status|turn-ended)$/, "");
       project = metadata.get(task) ?? "";
@@ -304,7 +351,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
         }
         if (staleDecisionOwnership.get(statusPath)) {
           needsDecisionKeys.push(key);
-          continue;
+          if (!afk) continue;
         }
       }
     } else {
@@ -333,6 +380,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     eligibleTasks: [...eligibleTasks],
     corrupted: false,
     needsDecisionKeys,
+    checkSeqs,
     taskByWakeKey: Object.fromEntries(taskByKey),
   };
 }

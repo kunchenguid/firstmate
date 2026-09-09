@@ -20,8 +20,22 @@
 // file lives in .pi/extensions, so no
 // other harness ever loads it. Supervision is default-on for every task once
 // this Pi session owns the fleet lock: no captain grant file is required.
-// Away mode (or a broken branch between its bounded recovery probes) keeps
-// today's wake-to-main behavior untouched regardless.
+// A broken branch between its bounded recovery probes keeps today's
+// wake-to-main behavior.
+//
+// Postures (docs/pi-supervision-branch.md "Postures"): the away-posture
+// record state/.afk-contract (owner: bin/fm-afk-contract.sh) is read as a
+// file at the tail of every wake and at every captain-outcome presentation,
+// never inferred from chat and never placed in the byte-stable prompt prefix.
+// While it exists the branch takes every row the dispatcher offers, the
+// record's read-back is appended to the wake message so the branch knows the
+// posture and the recorded clauses at execution time, captain-verdict
+// outcomes accumulate unprocessed in the store instead of opening the
+// processing turn on the parked main, and the guarded scripts accept the
+// branch's --posture or --clause justification (bin/fm-lease-lib.sh), which
+// fm_branch_report records on the ledger row as its citation. The first
+// unmarked captain message removes the record; the next run boundary then
+// presents the accumulated captain rows exactly as after any other gap.
 //
 // Prefix stability (the cache contract, owner: bin/fm-branch-prompt.sh
 // header): the branch's system prompt is the generator's byte-stable output,
@@ -97,6 +111,7 @@ import {
 } from "./lib/fm-calm-visibility.ts";
 import {
   activateEligibleRowsOwner,
+  afkPostureRecordPresent,
   deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
@@ -123,11 +138,11 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
-const afkFlag = join(state, ".afk");
 const sessionsDir = join(state, "branch-session");
 const sessionPointer = join(state, ".branch-session");
 const mirrorCursorFile = join(state, ".branch-mirror-cursor");
 const promptScript = join(fmRoot, "bin", "fm-branch-prompt.sh");
+const afkContractScript = join(fmRoot, "bin", "fm-afk-contract.sh");
 const outcomeScript = join(fmRoot, "bin", "fm-branch-outcome.sh");
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
 const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
@@ -169,6 +184,16 @@ const PROCESSING_TRIGGERED_ATTEMPTS = 2;
 const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
 const PROVIDER_REPROBE_BASE_MS = 5 * 60 * 1000;
 const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
+// Appended to a wake message while the away-posture record exists. Per-wake
+// tail content, never prefix.
+const AWAY_POSTURE_TAIL =
+  "POSTURE: AWAY. The away-posture record state/.afk-contract exists, so the captain is not present and MAIN is parked: you take every row, including check rows and decision rows, and no outcome reaches the captain until the return brief. " +
+  "Main's standing authority is relocated to you for exactly this wake: a guarded action (bin/fm-pr-merge.sh, bin/fm-merge-local.sh, bin/fm-spawn.sh, bin/fm-send.sh --resolve-key for a decision) requires --posture when standing authority alone covers it (a green, in-scope merge under the project's yolo posture; dispatching queued work whose blockers cleared, within the recorded spend cap; a clear-cut decision ask-user-authority lets firstmate decide) or --clause <id> when a recorded clause below names the action and its object and you judge its stated condition to hold right now. " +
+  "Hold on doubt: a fork no rule and no clause covers is reported with verdict captain and left for the return. " +
+  "Never pass --red for a check unless the cited clause names that failing check or condition. " +
+  "Credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused for every actor in every posture, whatever a clause says. " +
+  "When a guarded command prints `authority: <citation>`, pass that exact text as fm_branch_report's citation so the ledger records it. " +
+  "The record, verbatim:";
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
@@ -186,6 +211,8 @@ type OutcomeRow = {
   verdict: Verdict;
   summary: string;
   silent: boolean;
+  /** The away-posture authority this outcome acted under, when it did. */
+  citation?: string;
 };
 type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
 type ProviderRecovery = {
@@ -204,10 +231,6 @@ const scriptEnv = {
 
 function offerEligible(offer: BranchDispatchOffer): boolean {
   return offer.eligible === true;
-}
-
-function afkActive(): boolean {
-  return existsSync(afkFlag);
 }
 
 // Pi persists provider failures as ordinary assistant messages and resolves
@@ -467,7 +490,10 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
   const silent = row.silent === true;
   if (silent && (row.task !== "fleet" || row.verdict !== "routine")) return null;
-  return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
+  if (row.citation !== undefined && (typeof row.citation !== "string" || !row.citation)) return null;
+  const parsed: OutcomeRow = { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
+  if (typeof row.citation === "string") parsed.citation = row.citation;
+  return parsed;
 }
 
 function parseVisibleOutcomeRecord(value: unknown): VisibleOutcomeRecord | null {
@@ -481,7 +507,13 @@ function sameOutcome(left: OutcomeRow, right: OutcomeRow): boolean {
     left.task === right.task &&
     left.verdict === right.verdict &&
     left.summary === right.summary &&
-    left.silent === right.silent;
+    left.silent === right.silent &&
+    left.citation === right.citation;
+}
+
+// The ledger citation as it reads on a visible entry or processing request.
+function citationSuffix(row: OutcomeRow): string {
+  return row.citation ? ` (authority: ${row.citation})` : "";
 }
 
 // Volatile mirror-collection state. Instance-scoped and cleared at the
@@ -1004,7 +1036,7 @@ export default function (pi: ExtensionAPI) {
   // beats an outcome that is never processed.
   async function processingRequestInput(rows: OutcomeRow[]): Promise<string> {
     const through = rows[rows.length - 1].seq;
-    const listed = rows.map((row) => `[seq ${row.seq}] ${row.task}: ${row.summary}`).join("\n");
+    const listed = rows.map((row) => `[seq ${row.seq}] ${row.task}: ${row.summary}${citationSuffix(row)}`).join("\n");
     const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
     try {
       return await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", body);
@@ -1024,6 +1056,14 @@ export default function (pi: ExtensionAPI) {
     const rows = await readUnprocessedOutcomes(expectedGeneration);
     if (rows === null) return false;
     if (rows.length === 0) {
+      processing = null;
+      return true;
+    }
+    // Away posture: main is parked, so no processing turn opens. The rows stay
+    // unprocessed in the store (their visible entries already exist), and the
+    // first presentation after the record is gone - the run boundary of the
+    // captain's return message, or session start - hands them to main.
+    if (afkPostureRecordPresent(state)) {
       processing = null;
       return true;
     }
@@ -1145,6 +1185,10 @@ export default function (pi: ExtensionAPI) {
         silent: Type.Optional(Type.Boolean({
           description: "True only when a fleet-wide heartbeat review found literally nothing worth reporting; omit or use false whenever any action was taken or any routine result is worth a note",
         })),
+        citation: Type.Optional(Type.String({
+          description:
+            "Away posture only: the justification a guarded script accepted for an action this outcome reports - exactly 'posture' or 'clause <id>', copied from its authority: line. Omit when no guarded action was taken.",
+        })),
       }),
       execute: async (_toolCallId, params) => {
         const task = String((params as { task: unknown }).task || "").trim();
@@ -1152,6 +1196,7 @@ export default function (pi: ExtensionAPI) {
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
+        const citation = String((params as { citation?: unknown }).citation ?? "").trim();
         if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
@@ -1166,6 +1211,7 @@ export default function (pi: ExtensionAPI) {
         }
         const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
         if (wake) appendArgs.push("--wake", wake);
+        if (citation) appendArgs.push("--citation", citation);
         // Ownership, the durable append, and the delivery it authorizes are
         // ONE unit of the delivery queue: store-before-visible-delivery and
         // this report's place in sequence order are exactly what another
@@ -1390,6 +1436,22 @@ ${context.command}
     }
   }
 
+  // The away posture at the tail of a wake: the record's own read-back (its
+  // clauses, verbatim) plus the standing rule for acting under it. Read per
+  // wake so the byte-stable prefix never carries posture; a read-back that
+  // cannot be rendered still names the posture, because the record's
+  // presence is the fact the guarded scripts enforce either way.
+  async function awayPostureTail(): Promise<string> {
+    let readback = "";
+    try {
+      const rendered = await runCommandAsync("bash", [afkContractScript, "readback"], { cwd: fmRoot, env: scriptEnv });
+      if (rendered.status === 0) readback = (rendered.stdout || "").trim();
+    } catch {
+      readback = "";
+    }
+    return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat every clause as unavailable and hold on doubt)"}`;
+  }
+
   function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false): Promise<void> {
     const acceptedSelectionRevision = branchSelectionRevision;
     const delivery = branchChain
@@ -1415,7 +1477,10 @@ ${context.command}
         await flushMirror(session, acceptedGeneration);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
-        const scope = scopeForUnreadWake(state, heartbeat);
+        // The posture is read here, at the tail of this wake, never earlier
+        // and never into the prompt prefix.
+        const afk = afkPostureRecordPresent(state);
+        const scope = scopeForUnreadWake(state, heartbeat, afk);
         // A newly-arrived main-owned (check-kind) row never bounces this
         // whole recheck back to main - scopeForUnreadWake excludes it from
         // eligibleSeqs rather than vetoing the scan, in a heartbeat review as
@@ -1443,10 +1508,15 @@ ${context.command}
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;
         const entryOffset = sessionManager.getEntries().length;
-        wakeTaskScope = heartbeat ? null : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        // A claimed check row names no task, so a prompt carrying one is not
+        // scoped by task (only possible in the away posture).
+        wakeTaskScope = heartbeat || scope.checkSeqs.length > 0
+          ? null
+          : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        const postureTail = afk ? await awayPostureTail() : "";
         try {
           await session.prompt(
-            `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
+            `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.${postureTail}`,
           );
         } finally {
           wakeTaskScope = null;
@@ -1546,7 +1616,6 @@ ${context.command}
     // effects.
     if (!offerEligible(offer)) return;
     if (!generationOwnsLockSync(generation)) return; // cold start pre-lock, secondary session, or shutdown
-    if (afkActive()) return; // the away daemon owns supervision while afk
     const recoveryProbe = Boolean(
       branchBroken &&
       providerRecovery &&
@@ -2212,7 +2281,7 @@ ${context.command}
     const record = parseVisibleOutcomeRecord(entry.data);
     if (!record || record.verdict !== "captain") return undefined;
     return new Text(
-      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", ` [seq ${record.seq}] ${record.task}: ${record.summary}`)}`,
+      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", ` [seq ${record.seq}] ${record.task}: ${record.summary}${citationSuffix(record)}`)}`,
       1,
       0,
     );
