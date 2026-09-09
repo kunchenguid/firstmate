@@ -17,7 +17,7 @@ Select only its documented trust choice from the active Firstmate home, binding 
 No observed dialog proves only that launch.
 
 Each supported harness handles its folder-trust gate differently, and the tool reference owns the detail.
-Claude gates a fresh worktree and cannot be answered by key, so the spawn pre-registers the path in Claude's own store.
+Claude gates a fresh worktree and cannot be answered by key, so the spawn pre-registers the worktree and its canonical git root in Claude's own store; `../harness/claude.md` owns why both paths matter.
 Cursor suppresses its dialog with launch-time `--trust`, and Muse suppresses its own with `--yolo`.
 Grok dodges its gate instead of granting trust, because its project picker appears only outside a project and the spawn starts in the isolated git root.
 Pi gates the fresh-worktree case too, but unlike Claude its dialog is answered with Enter, and `references/harness/pi.md` owns that recipe and where the decision persists.
