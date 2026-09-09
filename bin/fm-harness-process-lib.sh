@@ -56,6 +56,22 @@ fm_harness_copilot_path_matches() {  # <path>
   [ "${1##*/}" = copilot ]
 }
 
+fm_harness_copilot_node_bundle_script_matches() {  # <comm> <args> <script>
+  local comm=$1 args=$2 script=$3 base argv0
+  [ -n "$script" ] || return 1
+  base=${comm##*/}
+  args=$(fm_harness_normalize_args "$args")
+  argv0=${args%%[[:space:]]*}
+  case "$base:${argv0##*/}" in
+    node:node|node-*:node-*|node[0-9]*:node[0-9]*|MainThread:node|MainThread:node-*|MainThread:node[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$script" in
+    */copilot/bin/copilot) return 0 ;;
+  esac
+  return 1
+}
+
 fm_harness_normalize_args() {  # <args>
   local args=${1-}
   printf '%s' "${args#"${args%%[![:space:]]*}"}"
@@ -135,7 +151,7 @@ fm_harness_process_matches_live() {  # <comm> <args>
     return 0
   fi
   if script=$(fm_harness_interpreter_script_path "$comm" "$args") \
-     && [ "${script##*/}" = copilot ]; then
+     && fm_harness_copilot_node_bundle_script_matches "$comm" "$args" "$script"; then
     fm_harness_set_match_name copilot
     return 0
   fi
@@ -158,7 +174,8 @@ fm_harness_process_matches_live() {  # <comm> <args>
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
 #   3. a bare interpreter (node, python, MainThread) running a harness script
-#      path in its first non-flag script token.
+#      path in its first non-flag script token; Copilot is narrower here and
+#      accepts only the verified node bundle layout ending /copilot/bin/copilot.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 argv0 name script
@@ -169,7 +186,7 @@ fm_harness_process_matches() {  # <comm> <args>
     return 0
   fi
   if script=$(fm_harness_interpreter_script_path "$comm" "$args"); then
-    if [ "${script##*/}" = copilot ]; then
+    if fm_harness_copilot_node_bundle_script_matches "$comm" "$args" "$script"; then
       name=copilot
     elif name=$(fm_harness_path_name "$script"); then
       [ "$name" != copilot ] || name=

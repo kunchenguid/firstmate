@@ -70,12 +70,22 @@ test_shared_matcher_normalizes_indented_args() {
     || fail "the shared matcher did not recognize an indented versioned Claude argv0"
   [ "$out" = claude ] || fail "indented versioned Claude argv0 detected as '$out'"
 
+  out=$(helper_eval 'fm_harness_process_name MainThread "   node /opt/copilot/bin/copilot --allow-all"') \
+    || fail "the shared matcher did not recognize an indented Copilot node-bundle path"
+  [ "$out" = copilot ] || fail "indented Copilot node-bundle path detected as '$out'"
+
   out=$(helper_eval "fm_harness_process_name node '   $cursor_path --trust --yolo'") \
     || fail "the shared matcher did not recognize an indented Cursor bundled argv0"
   [ "$out" = cursor ] || fail "indented Cursor bundled argv0 detected as '$out'"
 
   if helper_eval 'fm_harness_process_name MainThread "   /opt/copilot/bin/runner.js --allow-all"' >/dev/null 2>&1; then
     fail "the shared matcher treated an indented Copilot-path decoy as Copilot"
+  fi
+  if helper_eval 'fm_harness_process_name MainThread "   node /tmp/copilot --allow-all"' >/dev/null 2>&1; then
+    fail "the shared matcher treated an arbitrary node script named copilot as Copilot"
+  fi
+  if helper_eval 'fm_harness_process_name python "   python /opt/copilot/bin/copilot --allow-all"' >/dev/null 2>&1; then
+    fail "the shared matcher treated a python copilot script path as Copilot"
   fi
   if helper_eval 'fm_harness_process_name node "   /tmp/cursor-agent/bin/runner --trust --yolo"' >/dev/null 2>&1; then
     fail "the shared matcher treated an indented Cursor-path decoy as Cursor"
@@ -193,6 +203,8 @@ case "$pid:$field:${FM_TEST_LOCK_SHAPE:-copilot-mainthread}" in
   700:args=:copilot-mainthread) printf '%s\n' ' copilot --allow-all' ;;
   700:comm=:copilot-nativepath) printf '%s\n' '/opt/copilot/bin/copilot' ;;
   700:args=:copilot-nativepath) printf '%s\n' ' /opt/copilot/bin/copilot --allow-all' ;;
+  700:comm=:copilot-node-bundle) printf '%s\n' 'MainThread' ;;
+  700:args=:copilot-node-bundle) printf '%s\n' ' node /opt/copilot/bin/copilot --allow-all' ;;
   700:comm=:cursor-bundled) printf '%s\n' 'node' ;;
   700:args=:cursor-bundled) printf '%s\n' ' /Users/u/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent --trust --yolo' ;;
   700:ppid=:*) printf '%s\n' 1 ;;
@@ -204,7 +216,7 @@ SH
   chmod +x "$fakebin/ps"
   printf '700\n' > "$dir/state/.lock"
 
-  for shape in copilot-mainthread copilot-nativepath cursor-bundled; do
+  for shape in copilot-mainthread copilot-nativepath copilot-node-bundle cursor-bundled; do
     got=$(FM_TEST_LOCK_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
       || fail "$shape: the indented session was not found in the ancestry"
     [ "$got" = 700 ] || fail "$shape: ancestry resolved '$got', expected 700"
