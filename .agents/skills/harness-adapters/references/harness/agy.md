@@ -27,8 +27,8 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 This wiring belongs only to the canonical exact `agy` adapter template, which receives busy-state wiring, the turn-end hook, and trusted busy state together.
 A raw agy-shaped launch is an unverified escape hatch: it receives no busy-state wiring or turn-end hook and therefore has no trusted busy state.
 Installation refuses tracked `.agents/hooks.json` files because generated commands could enter project commits.
-For untracked files, `bin/fm-agy-lib.sh` owns installation and retirement while preserving project keys.
-`../../../../../bin/fm-agy-lib.sh` owns both directions, and the duplicate idle from the two closers is idempotent and deliberately not de-duplicated.
+[`fm-agy-lib.sh`](../../../../../bin/fm-agy-lib.sh) owns installation and retirement for untracked files while preserving project keys.
+The duplicate idle from the two closers is idempotent and deliberately not de-duplicated.
 Each hook command prints the empty JSON object agy's hook contract requires and tolerates a refused event, so a stale-generation writer can never break agy's own lifecycle.
 
 ## Detection

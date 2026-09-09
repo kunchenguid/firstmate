@@ -250,11 +250,9 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # is written into the worktree, whose own .gemini/settings.json belongs to
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
-    # agy's hooks live in the worktree's .agents/hooks.json, which may be the
-    # project's own committed file, so it is NEVER listed here: blind removal
-    # would delete project configuration. bin/fm-agy-lib.sh owns the
-    # create-or-merge install and the byte-exact restore. Only the
-    # firstmate-owned sidecars retire through this table.
+    # Never list agy's worktree hooks here, since blind removal would delete
+    # project keys. bin/fm-agy-lib.sh must retire installed hooks before this
+    # table removes the recovery sidecars.
     agy)
       printf '%s\n' "$state/$id.agy-hooks-mode"
       printf '%s\n' "$state/$id.agy-hooks-backup"

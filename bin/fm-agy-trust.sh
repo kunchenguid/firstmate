@@ -28,9 +28,9 @@
 # subdirectory, a plain directory, and a home directory are each refused.
 #
 # Only the launching user's own store is written. Every unrelated key and entry
-# is preserved and the replacement is atomic. The store is read, merged with
-# jq, fingerprinted, and read back; a store that moved under us is retried,
-# then refused rather than clobbered.
+# is preserved and the replacement is atomic. A directory lock serializes
+# Firstmate writers across the read, merge, and publish sequence. Fingerprint
+# checks retry detected external changes; external writers do not share the lock.
 set -u
 unset CDPATH \
   GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_INDEX_FILE \

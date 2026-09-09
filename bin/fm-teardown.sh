@@ -3206,10 +3206,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-    # agy's hooks file may be the project's own committed file, so it retires
-    # through the lib's byte-exact restore rather than removal - and only
-    # when this task actually installed agy hooks, so a project file this
-    # task never touched is never rewritten.
+    # Retire installed agy wiring through its owner only after safety checks
+    # pass, preserving project keys in an existing untracked hooks file.
     if [ -f "$STATE/$ID.agy-hooks-mode" ]; then
       fm_agy_hooks_remove "$WT" "$STATE" "$ID" || exit 1
     fi
@@ -3226,9 +3224,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  # Same agy rule as above: restore through the lib, only when this task
-  # installed agy hooks, and before the worktree return below so a merged
-  # tracked file is back to its committed bytes before any dirty check.
+  # Retire installed agy wiring through its owner before returning the slot.
   if [ -f "$STATE/$ID.agy-hooks-mode" ]; then
     fm_agy_hooks_remove "$WT" "$STATE" "$ID" || exit 1
   fi

@@ -84,7 +84,7 @@ fm_agy_hooks_install() {
 }
 
 # fm_agy_drop_key: remove only our named key from <hooks> via jq. Best-effort
-# fallback when the install record or backup is missing; 0 on success.
+# cleanup for a created file that acquired project keys; 0 on success.
 fm_agy_drop_key() {  # <hooks>
   local hooks=$1 tmp
   [ -f "$hooks" ] || return 0
