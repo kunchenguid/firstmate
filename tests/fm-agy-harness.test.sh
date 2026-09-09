@@ -437,6 +437,30 @@ test_agy_live_trust_lock_is_never_broken() {
   pass "agy waits out a live trust lock instead of removing it"
 }
 
+test_agy_ownerless_old_lock_is_broken() {
+  local dir proj wt home store out
+  dir="$TMP_ROOT/ownerless-lock"
+  proj="$dir/project"
+  wt="$dir/wt"
+  home="$dir/home"
+  mkdir -p "$home"
+  fm_git_worktree "$proj" "$wt" "wt-ownerless"
+  store="$home/.gemini/antigravity-cli"
+  mkdir -p "$store"
+  # A creator killed between its mkdir and its owner write: a lock directory
+  # with no owner file and an old mtime. This must break rather than wedge,
+  # while a fresh ownerless directory still waits (see the live-lock case).
+  mkdir -p "$store/.fm-trust.lock"
+  touch -d '5 minutes ago' "$store/.fm-trust.lock"
+  out=$(HOME="$home" "$ROOT/bin/fm-agy-trust.sh" "$wt" "$proj" 2>&1) \
+    || fail "trust behind an abandoned ownerless lock refused: $out"
+  assert_contains "$out" "trusted: " "ownerless-lock trust lacked its registration line"
+  jq -e --arg wt "$wt" '.trustedWorkspaces | index($wt)' "$store/settings.json" >/dev/null \
+    || fail "trust behind an abandoned ownerless lock lost the worktree entry"
+  assert_absent "$store/.fm-trust.lock" "a broken ownerless lock was left behind"
+  pass "agy breaks an abandoned ownerless trust lock instead of wedging behind it"
+}
+
 test_agy_refused_teardown_preserves_wiring() {
   local rec id=agy-refuse-z11 mode out rc hooks state
   for mode in created merged; do
@@ -484,6 +508,7 @@ test_agy_merge_retains_worker_edits
 test_agy_concurrent_trust
 test_agy_stale_trust_lock_is_broken
 test_agy_live_trust_lock_is_never_broken
+test_agy_ownerless_old_lock_is_broken
 
 test_agy_launch_carries_brief_with_native_model_effort
 test_agy_effort_xhigh_is_recorded_but_omitted

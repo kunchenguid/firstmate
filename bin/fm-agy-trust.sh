@@ -94,6 +94,15 @@ LOCK="$STORE_DIR/.fm-trust.lock"
 # than permanently, and a live holder is never broken: only a dead pid or an
 # expired timestamp authorizes removal.
 lock_owner() { cat "$LOCK/owner" 2>/dev/null; }
+# Portable directory mtime in epoch seconds. macOS (BSD) stat uses `-f`,
+# Linux (GNU) stat uses `-c`; detect the platform once rather than chaining
+# fallbacks, because GNU `-f` is filesystem stat and exits 0 with garbage.
+# Same contract as bin/fm-busy-event.sh's lock_mtime.
+if [ "$(uname)" = Darwin ]; then
+  lock_dir_mtime() { /usr/bin/stat -f %m "$LOCK" 2>/dev/null; }
+else
+  lock_dir_mtime() { stat -c %Y "$LOCK" 2>/dev/null; }
+fi
 lock_stale() {  # <owner-line> -> 0 when the lock may be broken
   local owner=$1 opid ots now
   case "$owner" in
@@ -119,15 +128,29 @@ while :; do
     break
   fi
   owner=$(lock_owner)
-  # An ownerless lock is a contender between its mkdir and its owner write,
-  # never a stale lock: wait it out rather than removing a live contender's
-  # directory out from under it. Only a present-but-stale owner authorizes
-  # removal below.
-  if [ -z "$owner" ] || ! lock_stale "$owner"; then
-    lock_attempt=$((lock_attempt + 1))
-    [ "$lock_attempt" -lt 100 ] || refuse "timed out waiting for '$LOCK'"
-    sleep 0.1
-    continue
+  if [ -n "$owner" ]; then
+    # A present owner decides it: a live holder is waited out, never removed.
+    if ! lock_stale "$owner"; then
+      lock_attempt=$((lock_attempt + 1))
+      [ "$lock_attempt" -lt 100 ] || refuse "timed out waiting for '$LOCK'"
+      sleep 0.1
+      continue
+    fi
+  else
+    # An ownerless lock is either a contender between its mkdir and its owner
+    # write, or a creator killed inside that window. The directory's own mtime
+    # tells them apart: a legitimate mkdir-to-owner write is one printf, so a
+    # fresh directory waits while an old one breaks. An unreadable mtime reads
+    # as just created and waits rather than breaking blind.
+    now=$(date +%s)
+    mtime=$(lock_dir_mtime || true)
+    case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
+    if [ $((now - mtime)) -lt "${FM_AGY_TRUST_OWNERLESS_STALE_SECS:-10}" ]; then
+      lock_attempt=$((lock_attempt + 1))
+      [ "$lock_attempt" -lt 100 ] || refuse "timed out waiting for '$LOCK'"
+      sleep 0.1
+      continue
+    fi
   fi
   rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null || true
   lock_attempt=$((lock_attempt + 1))
