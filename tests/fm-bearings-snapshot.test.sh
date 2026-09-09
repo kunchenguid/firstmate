@@ -1065,7 +1065,7 @@ write_running_task() {  # <home> <id> <spawn-gen-or-empty>
     >> "$home/data/backlog.md"
 }
 
-test_running_elapsed_is_rendered_or_explicitly_unknown() {
+test_running_elapsed_is_opt_in_and_then_rendered_or_unknown() {
   local home fakebin toon json
   home=$(make_home running-elapsed)
   mkdir -p "$home/projects/ship-wt"
@@ -1080,6 +1080,18 @@ test_running_elapsed_is_rendered_or_explicitly_unknown() {
   write_running_task "$home" future-start "s$((FIXTURE_NOW_EPOCH + 600)).111.6"
   printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+
+  # Unconfigured: the same fixture, with recorded starts to render, carries no
+  # running surface at all rather than a default projection.
+  json=$(run "$home" "$fakebin" --json)
+  toon=$(run "$home" "$fakebin")
+  printf '%s' "$json" | jq -e '
+    [.in_flight[] | select(has("running"))] | length == 0
+  ' >/dev/null || fail "an unconfigured home must render no running column: $json"
+  assert_contains "$toon" 'in_flight[8]{id,kind,state,repo,doing}' \
+    "an unconfigured home's TOON Underway rows must keep their original columns"
+
+  : > "$home/config/worker-running-time"
   json=$(run "$home" "$fakebin" --json)
   toon=$(run "$home" "$fakebin")
   printf '%s' "$json" | jq -e '
@@ -1103,7 +1115,7 @@ test_running_elapsed_is_rendered_or_explicitly_unknown() {
   assert_contains "$toon" 'in_flight[8]{id,kind,state,repo,running,doing}' \
     "TOON Underway rows must carry the running column"
   assert_contains "$toon" ',1h 14m,' "the rendered elapsed time must reach the TOON rows"
-  pass "Underway reports elapsed running time and names an unreadable start"
+  pass "Underway reports elapsed running time only once the home opts in"
 }
 
 test_active_child_running_time_comes_from_its_own_home() {
@@ -1132,6 +1144,10 @@ EOF
     "harness=claude" "kind=ship" "mode=no-mistakes"
   record_claude_state "$mate/state" phase9 busy
   printf 'working [key=phase9]: implementing Phase 9 parity\n' > "$mate/state/phase9.status"
+  # The primary pushes this flag into every secondmate home, so the fixture opts
+  # in on both sides exactly as a converged fleet does.
+  : > "$home/config/worker-running-time"
+  : > "$mate/config/worker-running-time"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
@@ -3296,7 +3312,7 @@ test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
-test_running_elapsed_is_rendered_or_explicitly_unknown
+test_running_elapsed_is_opt_in_and_then_rendered_or_unknown
 test_active_child_running_time_comes_from_its_own_home
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges

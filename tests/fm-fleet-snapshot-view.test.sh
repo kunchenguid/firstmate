@@ -69,6 +69,13 @@ record_claude_idle() {  # <state-dir> <id>
     --source claude-hook --event stop
 }
 
+record_claude_busy() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+}
+
 write_fixture() {  # <home>
   local home=$1 fixture_gen
   mkdir -p "$home/projects/alpha-worktree" "$home/projects/scout-worktree" "$home/secondmate-home"
@@ -1045,8 +1052,71 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# The runtime surface is opt-in precisely so an unconfigured home's canonical
+# snapshot is byte-for-byte what it was before the surface existed. Both states
+# are exercised against one fixture so the flag is the only difference.
+test_running_time_surface_is_opt_in() {
+  local home fakebin off on off_summary on_summary observed=1783792800
+  home=$(make_home running-time-optin)
+  mkdir -p "$home/projects/ship-worktree"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] ship-task - Ship Task (repo: alpha) (kind: ship) (since 2026-07-07)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/ship-task.meta" \
+    "window=firstmate:fm-ship-task" \
+    "worktree=$home/projects/ship-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=s$((observed - 4440)).111.1"
+  record_claude_busy "$home/state" ship-task
+  printf 'working: building the thing\n' > "$home/state/ship-task.status"
+  fakebin=$(make_fakebin "$home")
+
+  off=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH="$observed" \
+    "$SNAPSHOT" --json)
+  printf '%s' "$off" | jq -e '
+    [.tasks[] | select(has("runtime"))] | length == 0
+  ' >/dev/null || fail "an unconfigured home must carry no runtime fields at all: $off"
+  off_summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH="$observed" \
+    "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$off_summary" | jq -e '
+    (.active_children | length) == 1
+      and ([.active_children[] | select(has("running_seconds"))] | length) == 0
+  ' >/dev/null || fail "an unconfigured home summary must carry no running_seconds: $off_summary"
+
+  : > "$home/config/worker-running-time"
+  on=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH="$observed" \
+    "$SNAPSHOT" --json)
+  printf '%s' "$on" | jq -e --argjson started "$((observed - 4440))" '
+    .tasks[] | select(.id == "ship-task")
+    | .runtime.started_epoch == $started and .runtime.running_seconds == 4440
+  ' >/dev/null || fail "an opted-in home must derive the recorded start: $on"
+  on_summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH="$observed" \
+    "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$on_summary" | jq -e '
+    .active_children[] | select(.id == "ship-task") | .running_seconds == 4440
+  ' >/dev/null || fail "an opted-in home summary must carry running_seconds: $on_summary"
+
+  # Everything else about the two documents must be identical, so opting in adds
+  # the surface and changes nothing already there.
+  [ "$(printf '%s' "$off" | jq -S .)" = "$(printf '%s' "$on" | jq -S 'del(.tasks[].runtime)')" ] \
+    || fail "opting in changed a snapshot field other than runtime"
+  [ "$(printf '%s' "$off_summary" | jq -S .)" \
+    = "$(printf '%s' "$on_summary" | jq -S 'del(.active_children[].running_seconds)')" ] \
+    || fail "opting in changed a home-summary field other than running_seconds"
+  pass "the runtime surface is absent until config/worker-running-time opts the home in"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_running_time_surface_is_opt_in
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
