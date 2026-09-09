@@ -184,7 +184,7 @@ run_spawn() {
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_TMUX_ENV_LOG="$case_dir/tmux-env.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
-    FM_AGY_READY_POLLS=5 FM_AGY_DELIVERY_POLLS=3 FM_AGY_POLL_INTERVAL=0 \
+    FM_AGY_READY_POLLS=${FM_AGY_READY_POLLS:-5} FM_AGY_DELIVERY_POLLS=3 FM_AGY_POLL_INTERVAL=0 \
     PATH="$BASE_PATH" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" \
       "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@"
@@ -760,6 +760,63 @@ EOF
   pass ".agents/hooks.json: the Stop hook returns one object and allows the stop when the guard is unavailable"
 }
 
+# Agy repaints an incomplete composer for a second or two after the
+# workspace-trust dialog is accepted. Accepting the first frame that classifies
+# empty typed the brief pointer into that repaint window and aborted the spawn
+# with "not proven empty after Enter": 2 hard failures in 11 real spawns on
+# 1.1.28. These two cases pin the difference through the real bin/fm-spawn.sh,
+# using a frame script whose ONLY isolated good frame sits inside the repaint.
+AGY_REPAINT_SCRIPT=bad,good,bad,bad,good,good
+
+run_spawn_repaint() {  # <case-dir> <home> <proj> <wt> <fakebin> <id> <stable-polls>
+  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6 stable=$7
+  : > "$case_dir/frame.counter"
+  : > "$case_dir/pointer.frame"
+  FM_FAKE_AGY_READY_SCRIPT="$AGY_REPAINT_SCRIPT" \
+    FM_FAKE_AGY_FRAME_COUNTER="$case_dir/frame.counter" \
+    FM_FAKE_POINTER_FRAME="$case_dir/pointer.frame" \
+    FM_AGY_READY_STABLE_POLLS="$stable" \
+    FM_AGY_READY_POLLS=12 \
+    run_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id"
+}
+
+test_agy_ready_gate_rejects_a_lone_good_repaint_frame() {
+  local id rec frame
+  id="agy-repaint-stable-z1-$$"
+  AGY_RUNTIME_TASK_TMP="/tmp/fm-$id"
+  rec=$(make_spawn_case repaintstable "$id")
+  read_spawn_record "$rec"
+  run_spawn_repaint "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" 2 \
+    >"$CASE_DIR/spawn.out" 2>&1
+  frame=$(cat "$CASE_DIR/pointer.frame" 2>/dev/null || true)
+  [ -n "$frame" ] \
+    || fail "the spawn never delivered the brief pointer through the repaint window: $(cat "$CASE_DIR/spawn.out")"
+  # Frame 2 is the isolated good frame; frames 5 and 6 are the first pair that
+  # holds. Anything before 6 means a repaint frame was accepted as ready.
+  [ "$frame" -ge 6 ] \
+    || fail "the readiness gate accepted ready at frame $frame, inside the post-trust repaint window"
+  pass "fm-spawn: the Agy readiness gate waits for the empty composer to hold, not one good frame"
+}
+
+test_agy_ready_gate_without_stability_types_into_the_repaint() {
+  local id rec frame
+  id="agy-repaint-single-z1-$$"
+  AGY_RUNTIME_TASK_TMP="/tmp/fm-$id"
+  rec=$(make_spawn_case repaintsingle "$id")
+  read_spawn_record "$rec"
+  # The pre-fix behavior, pinned explicitly so the case above cannot go
+  # vacuous: one good frame is enough, so the gate releases on the isolated
+  # frame 2 and the pointer is typed before frame 5, which is where the first
+  # pair of consecutive good frames begins.
+  run_spawn_repaint "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" 1 \
+    >"$CASE_DIR/spawn.out" 2>&1
+  frame=$(cat "$CASE_DIR/pointer.frame" 2>/dev/null || true)
+  [ -n "$frame" ] || fail "the single-frame gate never typed the pointer at all"
+  [ "$frame" -lt 5 ] \
+    || fail "expected the single-frame gate to release inside the repaint window (before frame 5), got frame $frame"
+  pass "fm-spawn: with stability disabled the gate releases inside the repaint window, so the guard above is real"
+}
+
 test_separated_composer_is_structural
 test_separated_composer_is_harness_scoped
 test_agy_busy_signature_is_harness_scoped
@@ -783,3 +840,5 @@ test_agy_tracked_seatbelts_allow_without_returning_an_object
 test_agy_tracked_seatbelt_denies_at_exit_zero
 test_agy_tracked_hooks_anchor_on_the_hook_loaded_root
 test_agy_tracked_stop_hook_always_returns_one_object
+test_agy_ready_gate_rejects_a_lone_good_repaint_frame
+test_agy_ready_gate_without_stability_types_into_the_repaint

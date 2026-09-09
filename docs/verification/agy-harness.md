@@ -23,6 +23,7 @@ It drives the real `bin/fm-spawn.sh`, `bin/fm-crew-state.sh`, `bin/fm-send.sh`, 
 The guard is the adapter's only live evidence; the refusals of foreign, mismatched, or malformed Stop payloads and the omission of unsupported effort levels have no live surface and are portable-suite facts (`tests/fm-agy-harness.test.sh`), reported as such rather than as live results.
 The second command spends no tokens and refreshes the liveness row in [`runtime-backends.md`](runtime-backends.md).
 Both fail naming the Agy version rather than skipping when the binary is installed and the guard is requested.
+A spawn that aborts with `not proven empty after Enter` means the post-trust repaint window has grown past the settle defaults recorded under "Brief pointer delivery"; widen `FM_AGY_READY_STABLE_POLLS`, `FM_AGY_SUBMIT_SETTLE`, or `FM_AGY_SUBMIT_RETRIES` and record the new floor here.
 
 ## Version and command surface
 
@@ -184,6 +185,38 @@ Each command therefore requires an executable script under that parent's `bin/`,
 The seatbelt entries stand down by returning nothing, and the Stop entry by returning `{}`, because those are this release's allow renderings for their events.
 `tests/fm-agy-harness.test.sh` runs the tracked command strings from a foreign root, an unregistered root, and a directory that is not a Firstmate checkout.
 
+## Brief pointer delivery
+
+Spawning a worker failed outright about one launch in five before the settle fix, and it failed loudly rather than silently:
+
+```text
+error: Agy brief pointer submission was not proven empty after Enter (unknown)
+```
+
+Two independent live evidence passes on 2026-09-09 hit it: 1 abort in 7 spawns in the first, then 2 hard failures in 11 real spawns in the second, which captured pane frames every 0.4s and identified the cause.
+Agy repaints an incomplete composer for one to two seconds after the workspace-trust dialog is accepted.
+`agy_wait_for_ready` released on the FIRST frame that classified as an empty composer, so a single good frame inside that repaint satisfied it; the pointer was then typed with no settle, and the post-Enter emptiness proof gave up after about 1.5 seconds.
+The window and worktree were left behind for a manual relaunch, so nothing was corrupted.
+
+Three changes in `bin/fm-spawn.sh` close it, all still environment-overridable:
+
+| Knob | Was | Now | Why |
+| --- | --- | --- | --- |
+| `FM_AGY_READY_STABLE_POLLS` | (no such check) | 2 | the empty composer must hold across consecutive polls, so the repaint window cannot supply a ready verdict |
+| `FM_AGY_SUBMIT_SETTLE` | 0 | 0.4 | the typed pointer settles before Enter |
+| `FM_AGY_SUBMIT_RETRIES` | 3 | 6 | the post-Enter emptiness proof gets about 3s rather than about 1.5s |
+
+`tests/fm-agy-harness.test.sh` drives the real `bin/fm-spawn.sh` against a frame script whose only isolated good frame sits inside the repaint, and asserts both directions: with the stability requirement the pointer is typed only after the verdict holds, and with it disabled the gate still releases inside the repaint window, so the guard cannot go vacuous.
+
+## Primary-side seatbelt: untested
+
+The tracked `.agents/hooks.json` seatbelts have NOT been driven inside a live Agy PRIMARY, and this record does not claim they have.
+Three attempts on 2026-09-09 stalled in `Generating...` for three to five minutes without ever reaching a tool call, and a hookless control lab on the same account stalled identically, so the stall is the account or the model rather than anything in this change.
+
+What IS proven live is the transport those hooks depend on: the four PreToolUse renderings above were driven four times against the real binary inside the e2e guard, which is what establishes that only silence allows and that a returned object blocks at either exit status.
+The wrapper logic that sits between that transport and the seatbelt scripts is covered by the portable suite, which executes the tracked command strings themselves.
+Re-drive this scenario when the account reaches tool calls again, and record the result here rather than inferring it.
+
 ## Busy footer, composer, and the feedback survey
 
 The idle composer tail captured on 1.1.28 after the brief turn:
@@ -280,11 +313,15 @@ ok - live Agy adapter guard: agy 1.1.28 drove spawn, hooks, steer, seatbelt deci
 ```
 
 ```text
-FM_TEST_END 2026-09-09T12:23:01Z tests/fm-agy-live-e2e.test.sh exit=0 duration_ms=74187 gate_skip=false
-FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=74312
+FM_TEST_END 2026-09-09T14:07:48Z tests/fm-agy-live-e2e.test.sh exit=0 duration_ms=63939 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=64003
 ```
 
 That run took the no-banner interrupt path recorded above, so the two-signal interrupt check is exercised rather than assumed.
+
+The guard is not yet reliable on every run against this account.
+One run on 2026-09-09 reached the busy stage and then found the recorded endpoint gone (`state: unknown - source: none - no current-state source available`) after a clean sixth Stop payload, with no Agy crash record; the run before it aborted at the interrupt banner.
+Re-run rather than reading a single failure as adapter drift, and read the failure text before concluding which surface moved.
 
 The drift guard on the same host classified `agy 1.1.28: title='agy' foreground=[agy ]` alive beside Claude, Codex, and Cursor.
 

@@ -3026,18 +3026,35 @@ agy_capture_has_empty_composer() {  # <plain-pane-capture>
   [ "$(fm_composer_separated_state "$1" 2>/dev/null || printf unknown)" = empty ]
 }
 
+# Readiness needs a STABLE empty composer, not one good frame. Agy keeps
+# repainting an incomplete composer for one to two seconds after the
+# workspace-trust dialog is accepted, and a single transiently good frame in
+# that window used to satisfy this gate: the brief pointer was then typed into
+# a composer still being redrawn, and the post-Enter emptiness proof failed, so
+# the spawn aborted. That was 2 hard failures in 11 real spawns on 1.1.28
+# (docs/verification/agy-harness.md "Brief pointer delivery"). Requiring the
+# verdict to hold across consecutive polls costs one extra poll on a settled
+# pane and rejects the repaint window.
 agy_wait_for_ready() {
   local pane i=0 max=${FM_AGY_READY_POLLS:-80} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  local stable_needed=${FM_AGY_READY_STABLE_POLLS:-2} stable=0
   local trust_accepted=0
+  [ "$stable_needed" -ge 1 ] 2>/dev/null || stable_needed=1
   while [ "$i" -lt "$max" ]; do
     pane=$(agy_capture)
     if agy_capture_has_trust_dialog "$pane"; then
+      stable=0
       if [ "$trust_accepted" -eq 0 ]; then
         spawn_send_key "$T" Enter || return 1
         trust_accepted=1
       fi
     elif agy_capture_has_empty_composer "$pane"; then
-      return 0
+      stable=$((stable + 1))
+      [ "$stable" -ge "$stable_needed" ] && return 0
+    else
+      # Any non-empty frame restarts the count, so the repaint window cannot
+      # accumulate isolated good frames into a false ready verdict.
+      stable=0
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
@@ -4134,9 +4151,13 @@ if [ "$HARNESS" = agy ]; then
     exit 1
   fi
   AGY_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
-  AGY_SUBMIT_RETRIES=${FM_AGY_SUBMIT_RETRIES:-3}
+  # Agy needs the typed pointer to settle before Enter, and needs longer than
+  # the shared 3-retry default to prove the composer emptied afterwards; the
+  # old 0 settle and ~1.5s proof window were the other half of the aborted-spawn
+  # failure recorded in docs/verification/agy-harness.md.
+  AGY_SUBMIT_RETRIES=${FM_AGY_SUBMIT_RETRIES:-6}
   AGY_SUBMIT_SLEEP=${FM_AGY_SUBMIT_SLEEP:-${FM_AGY_POLL_INTERVAL:-0.5}}
-  AGY_SUBMIT_SETTLE=${FM_AGY_SUBMIT_SETTLE:-0}
+  AGY_SUBMIT_SETTLE=${FM_AGY_SUBMIT_SETTLE:-0.4}
   rm -f -- "$TURNEND"
   AGY_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$AGY_POINTER" "$AGY_SUBMIT_RETRIES" \

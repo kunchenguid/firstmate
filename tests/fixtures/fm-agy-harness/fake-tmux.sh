@@ -18,6 +18,26 @@ fake_screen() {
         '  No, exit'
       ;;
     ready)
+      # With FM_FAKE_AGY_READY_SCRIPT set (a comma-separated list of good/bad),
+      # each capture in the ready state consumes the next entry and the last
+      # entry repeats. `bad` renders the INCOMPLETE composer Agy repaints for a
+      # second or two right after trust acceptance: the opening rule and the
+      # prompt without the closing rule, which the separated-composer proof
+      # must not read as an empty composer.
+      if [ -n "${FM_FAKE_AGY_READY_SCRIPT:-}" ]; then
+        frame=$(cat "$FM_FAKE_AGY_FRAME_COUNTER" 2>/dev/null || printf 0)
+        frame=$((frame + 1))
+        printf '%s\n' "$frame" > "$FM_FAKE_AGY_FRAME_COUNTER"
+        verdict=$(printf '%s' "$FM_FAKE_AGY_READY_SCRIPT" | cut -d, -f"$frame")
+        [ -n "$verdict" ] || verdict=$(printf '%s' "$FM_FAKE_AGY_READY_SCRIPT" | tr ',' '\n' | tail -1)
+        if [ "$verdict" = bad ]; then
+          printf '%s\n' \
+            'Antigravity CLI' \
+            '────────────────────────────────────────────────────────────────' \
+            '>'
+          return 0 2>/dev/null || exit 0
+        fi
+      fi
       printf '%s\n' \
         'Antigravity CLI' \
         '────────────────────────────────────────────────────────────────' \
@@ -80,6 +100,11 @@ case "${1:-}" in
           ;;
         *)
           printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
+          # Which ready frame the readiness gate accepted before typing. That
+          # index is the observable difference between accepting one good frame
+          # and requiring the verdict to hold.
+          [ -z "${FM_FAKE_POINTER_FRAME:-}" ] \
+            || cat "$FM_FAKE_AGY_FRAME_COUNTER" 2>/dev/null > "$FM_FAKE_POINTER_FRAME"
           printf 'pointer-typed\n' > "$FM_FAKE_AGY_STATE"
           ;;
       esac
