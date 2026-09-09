@@ -50,6 +50,14 @@ SH
   cat > "$fb/gh" <<'SH'
 #!/usr/bin/env bash
 echo "gh $*" >> "$NET_LOG"
+if [ "$1 $2" = 'auth token' ]; then
+  [ "$3 $4 $5 $6" = '--hostname github.com --user example-user' ] || exit 1
+  printf 'fixture-selected\n'
+  exit 0
+fi
+if [ "${FAKE_GH_REQUIRE_ACCOUNT:-0}" = 1 ]; then
+  [ "${GH_TOKEN:-}" = fixture-selected ] && [ "${GH_HOST:-}" = github.com ] || exit 1
+fi
 if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
 if [ "${FAKE_GH_SLEEP:-0}" = 1 ]; then sleep 30; fi
 if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
@@ -1402,7 +1410,11 @@ test_include_prs_is_the_only_fetch_path() {
   printf '%s' "$json" | jq -e '
     .candidate_prs | any(.[]; .num == "9" and .task == "ship-task" and .checks == "passing" and .review == "APPROVED")
   ' >/dev/null || fail "candidate_prs must carry the fetched PR cross-referenced to its task: $json"
-  pass "--include-prs is the only path that fetches, and it enriches correctly"
+  printf 'github.com/kunchenguid example-user\n' > "$home/config/github-accounts"
+  json=$(GH_TOKEN='' GITHUB_TOKEN='' FAKE_GH_REQUIRE_ACCOUNT=1 run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '.candidate_prs | any(.[]; .checks == "passing")' >/dev/null \
+    || fail "mapped identity did not reach PR check enrichment"
+  pass "--include-prs is the only path that fetches, and it enriches with per-repository accounts"
 }
 
 test_partial_github_failure_degrades() {

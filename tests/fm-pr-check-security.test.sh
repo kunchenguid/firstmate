@@ -2129,6 +2129,191 @@ test_gitlab_merged_poll_retires() {
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_github_credential_boundaries() {
+  local dir run config out rule pid1 pid2
+  dir=$(make_case github-credential-boundaries)
+  run="$ROOT/bin/fm-pr-lib.sh"
+  config="$dir/home/config/github-accounts"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "$1 $2" = 'auth token' ]; then
+  [ "$3 $4 $5" = '--hostname github.com --user' ] || exit 2
+  printf 'auth %s\n' "$6" >> "$FM_TEST_GH_LOG"
+  case "$6" in
+    work-user) printf 'fixture-work\n' ;;
+    personal-user) printf 'fixture-personal\n' ;;
+    *) printf 'credential-secret-sentinel\n' >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+case "${GH_TOKEN:-${GITHUB_TOKEN:-}}" in
+  fixture-work) identity=work ;;
+  fixture-personal) identity=personal ;;
+  explicit) identity=explicit ;;
+  '') identity=active ;;
+  *) exit 2 ;;
+esac
+printf 'call %s host=%s\n' "$identity" "${GH_HOST:-}" >> "$FM_TEST_GH_LOG"
+if [ -n "${FM_TEST_BARRIER:-}" ]; then
+  touch "$FM_TEST_BARRIER/$1"
+  for ((i=0; i<100; i++)); do
+    [ -f "$FM_TEST_BARRIER/one" ] && [ -f "$FM_TEST_BARRIER/two" ] && break
+    sleep 0.1
+  done
+  [ -f "$FM_TEST_BARRIER/one" ] && [ -f "$FM_TEST_BARRIER/two" ] || exit 3
+fi
+printf '%s %s\n' "$identity" "${GH_HOST:-}"
+SH
+  chmod +x "$dir/fakebin/gh"
+  github_probe() {
+    GH_TOKEN='' GITHUB_TOKEN='' FM_CONFIG_OVERRIDE="$dir/home/config" \
+      FM_TEST_GH_LOG="$dir/gh.log" PATH="$dir/fakebin:$BASE_PATH" bash "$run" --github "$@"
+  }
+  # No config is the single-account fast path, with no token-store access.
+  out=$(github_probe github.com work-org/project gh probe)
+  [ "$out" = 'active github.com' ] || fail "unconfigured account changed"
+  assert_no_grep 'auth ' "$dir/gh.log" "unconfigured path accessed credentials"
+  printf '# explicit mapping\ngithub.com/work-org work-user\ngithub.com/work-org/shared personal-user\n' > "$config"
+  out=$(github_probe github.com Work-Org/Project gh probe)
+  [ "$out" = 'work github.com' ] || fail "case-insensitive owner selection failed"
+  out=$(github_probe github.com work-org/shared gh probe)
+  [ "$out" = 'personal github.com' ] || fail "repository override did not beat owner"
+  out=$(github_probe github.com work-org-suffix/project gh probe)
+  [ "$out" = 'active github.com' ] || fail "owner boundary leaked account"
+  out=$(github_probe github.com other/work-org gh probe)
+  [ "$out" = 'active github.com' ] || fail "repository name matched owner"
+  if github_probe gitlab.example work-org/project gh probe > "$dir/refused.out" 2>&1; then
+    fail "GitHub credential used on another host"
+  fi
+  out=$(GH_HOST=enterprise.example github_probe github.com work-org/project gh probe)
+  [ "$out" = 'work github.com' ] || fail "ambient host redirected GitHub request"
+  # Both commands are in the forge simultaneously, with disjoint credentials.
+  mkdir "$dir/barrier"
+  FM_TEST_BARRIER="$dir/barrier" github_probe github.com work-org/project gh one > "$dir/one.out" & pid1=$!
+  FM_TEST_BARRIER="$dir/barrier" github_probe github.com work-org/shared gh two > "$dir/two.out" & pid2=$!
+  wait "$pid1" || fail "first concurrent account command failed"
+  wait "$pid2" || fail "second concurrent account command failed"
+  [ "$(cat "$dir/one.out")" = 'work github.com' ] && [ "$(cat "$dir/two.out")" = 'personal github.com' ] \
+    || fail "concurrent commands mixed credentials"
+  # Explicit GitHub tokens win, even over bad opt-in configuration.
+  printf 'malformed\n' > "$config"
+  out=$(GH_TOKEN=explicit GITHUB_TOKEN=fixture-work FM_CONFIG_OVERRIDE="$dir/home/config" \
+    FM_TEST_GH_LOG="$dir/gh.log" PATH="$dir/fakebin:$BASE_PATH" bash "$run" --github github.com work-org/project gh probe)
+  [ "$out" = 'explicit github.com' ] || fail "GH_TOKEN lost precedence"
+  out=$(GH_TOKEN='' GITHUB_TOKEN=explicit FM_CONFIG_OVERRIDE="$dir/home/config" \
+    FM_TEST_GH_LOG="$dir/gh.log" PATH="$dir/fakebin:$BASE_PATH" bash "$run" --github github.com work-org/project gh probe)
+  [ "$out" = 'explicit github.com' ] || fail "GITHUB_TOKEN lost precedence"
+  # shellcheck disable=SC2016 # Shell-looking bytes must remain inert configuration data.
+  for rule in 'bad' 'github.com/work-org work-user extra' 'evil.example/work-org work-user' \
+    'github.com/work-org/ work-user' 'github.com/work-org/project/extra work-user' \
+    'github.com/work-org --user' 'github.com/work-org $(touch-pwned)' \
+    $'github.com/work-org work-user\nGITHUB.COM/WORK-ORG personal-user'; do
+    printf '%s\n' "$rule" > "$config"
+    : > "$dir/gh.log"
+    if github_probe github.com work-org/project gh probe > "$dir/refused.out" 2>&1; then
+      fail "malformed or ambiguous account map accepted"
+    fi
+    [ ! -s "$dir/gh.log" ] || fail "invalid config accessed credentials or forge"
+  done
+  printf 'github.com/work-org unavailable-user\n' > "$config"
+  if github_probe github.com work-org/project gh probe > "$dir/refused.out" 2>&1; then
+    fail "unavailable configured credential fell back to active account"
+  fi
+  assert_no_grep 'credential-secret-sentinel' "$dir/refused.out" "credential diagnostic leaked a secret"
+  assert_no_grep 'call ' "$dir/gh.log" "credential failure reached forge"
+  printf 'github.com/work-org work-user\n' > "$config"
+  GH_TOKEN='' GITHUB_TOKEN='' FM_CONFIG_OVERRIDE="$dir/home/config" FM_TEST_GH_LOG="$dir/gh.log" \
+    PATH="$dir/fakebin:$BASE_PATH" bash -x "$run" --github github.com work-org/project gh probe > "$dir/trace.out" 2> "$dir/trace.err"
+  assert_no_grep 'fixture-work' "$dir/trace.err" "shell tracing leaked selected credential"
+  mv "$config" "$dir/mapping"
+  ln -s "$dir/mapping" "$config"
+  if github_probe github.com work-org/project gh probe >/dev/null 2>&1; then fail "symlink config accepted"; fi
+  rm "$config"
+  mkdir "$config"
+  if github_probe github.com work-org/project gh probe >/dev/null 2>&1; then fail "directory config accepted"; fi
+  rmdir "$config"
+  : > "$config"
+  out=$(github_probe github.com work-org/project gh probe)
+  [ "$out" = 'active github.com' ] || fail "empty config changed default"
+  unset -f github_probe
+  pass "GitHub account scope, precedence, concurrency, errors and secret isolation"
+}
+
+test_dual_github_accounts() {
+  local dir url out before
+  dir=$(make_case dual-accounts)
+  url=https://github.com/work-org/project/pull/7
+  write_task_meta "$dir"
+  printf 'github.com/work-org work-user\n' > "$dir/home/config/github-accounts"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  'auth token')
+    [ "$*" = 'auth token --hostname github.com --user work-user' ] || exit 1
+    printf 'fixture-work\n'; exit 0 ;;
+esac
+if [ "${GH_TOKEN:-${GITHUB_TOKEN:-}}" = fixture-work ]; then identity=work; else identity=personal; fi
+printf '%s %s\n' "$identity" "$*" >> "$FM_TEST_GH_LOG"
+case "$*" in *work-org*) [ "$identity" = work ] || exit 1 ;; esac
+case "$*" in
+  *headRefOid*) printf '0123456789abcdef0123456789abcdef01234567\n' ;;
+  *'--json state'*) printf '%s\n' "${FM_TEST_GH_STATE:-MERGED}" ;;
+  'api graphql'*)
+    [ "$identity" = work ] || exit 1
+    printf 'state=MERGED\nmerged=true\nqueued=false\nbase=main\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
+  # Smallest counterfactual: the same read works with only a command token changed.
+  out=$(GH_TOKEN=fixture-work run_check_entry "$dir" task-a "$url") || fail "explicit token registration failed"
+  grep -q '^pr_head=' "$dir/home/state/task-a.meta" || fail "counterfactual token did not resolve head"
+  out=$(GH_TOKEN=fixture-work FM_TEST_GH_LOG="$dir/gh.log" PATH="$dir/fakebin:$BASE_PATH" \
+    "$POLL" --validated github "$url" github.com work-org/project 7)
+  [ "$out" = merged ] || fail "counterfactual token did not resolve merged PR"
+  # Mapping must restore the same public path without switching the active account.
+  out=$(GH_TOKEN='' GITHUB_TOKEN='' run_check_entry "$dir" task-a "$url") || fail "mapped registration failed"
+  grep -q '^pr_head=' "$dir/home/state/task-a.meta" || fail "mapped registration lost head while explicit token succeeds"
+  out=$(GH_TOKEN='' GITHUB_TOKEN='' FM_TEST_GH_LOG="$dir/gh.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin") || fail "mapped watcher failed"
+  case "$out" in check:*task-a.check.sh:*merged) ;; *) fail "mapped poll lost merged outcome: $out" ;; esac
+  assert_poll_absent "$dir/home/state" task-a
+  # The guarded merge uses the same identity for gh-axi and every outcome read.
+  cat > "$dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${GH_TOKEN:-}" = fixture-work ] && [ "${GH_HOST:-}" = github.com ] || exit 1
+printf 'work %s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+[ "$1 $2" = 'pr merge' ] || exit 2
+printf 'merged\n'
+SH
+  chmod +x "$dir/fakebin/gh-axi"
+  GH_TOKEN='' GITHUB_TOKEN='' run_merge_entry "$dir" task-a "$url" > "$dir/merge.out" 2> "$dir/merge.err" \
+    || fail "mapped guarded merge failed"
+  assert_grep "verified: $url is merged" "$dir/merge.out" "merge was not independently verified"
+  assert_grep 'work pr merge' "$dir/gh-axi.log" "merge command did not use selected account"
+  assert_no_grep 'fixture-work' "$dir/home/state/task-a.meta" "metadata contains credentials"
+  assert_no_grep 'fixture-work' "$dir/home/state/task-a.pr-poll" "poll data contains credentials"
+  # An unavailable account cannot replace a valid registration or attempt merge.
+  before=$(state_snapshot "$dir/home/state")
+  printf 'github.com/work-org unavailable-user\n' > "$dir/home/config/github-accounts"
+  if GH_TOKEN='' GITHUB_TOKEN='' run_check_entry "$dir" task-a "$url" > "$dir/unavailable.out" 2>&1; then
+    fail "unavailable account armed a poll"
+  fi
+  [ "$(state_snapshot "$dir/home/state")" = "$before" ] || fail "failed registration changed task artifacts"
+  : > "$dir/gh-axi.log"
+  if GH_TOKEN='' GITHUB_TOKEN='' run_merge_entry "$dir" task-a "$url" > "$dir/unavailable.out" 2>&1; then
+    fail "unavailable account attempted merge"
+  fi
+  [ ! -s "$dir/gh-axi.log" ] || fail "credential failure attempted a forge mutation"
+  printf 'github.com/work-org work-user\n' > "$dir/home/config/github-accounts"
+  if GH_TOKEN='' GITHUB_TOKEN='' run_merge_entry "$dir" task-a "$url" -- --hostname evil.example > "$dir/host.out" 2>&1; then
+    fail "merge host override accepted"
+  fi
+  [ ! -s "$dir/gh-axi.log" ] || fail "host override reached forge"
+  pass "dual GitHub registration, trusted monitoring and guarded merging share account selection"
+}
+
+test_github_credential_boundaries
+test_dual_github_accounts
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report

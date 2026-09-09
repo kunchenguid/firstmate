@@ -218,9 +218,12 @@ repo_slug() {  # <url>
 
 # Bounded gh call; prints stdout, non-zero on timeout/failure. gh only.
 # bin/fm-timeout-lib.sh owns the bound itself.
-gh_bounded() {  # <args...>
+gh_bounded() {  # <owner/repository> <args...>
+  local repo=$1
+  shift
   fm_run_timed "$FM_BEARINGS_PR_TIMEOUT" \
-    env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
+    env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+    bash "$SCRIPT_DIR/fm-pr-lib.sh" --github github.com "$repo" gh "$@"
 }
 
 if [ "$INCLUDE_PRS" = 1 ]; then
@@ -252,7 +255,7 @@ EOF
     for repo in $repos; do
       if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
       nrepos=$((nrepos + 1))
-      out=$(gh_bounded pr list --repo "$repo" --state open --limit "$pr_fetch_limit" \
+      out=$(gh_bounded "$repo" pr list --repo "$repo" --state open --limit "$pr_fetch_limit" \
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'

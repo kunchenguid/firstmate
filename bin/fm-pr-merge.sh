@@ -53,9 +53,10 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
-# Extra args must not include --repo or -R in any form, including a bundled
-# short-option cluster such as -yR, because the repository comes only from the
-# URL, nor --sha on GitLab because the head comes only from the live read.
+# Extra args must not include --repo, --hostname, or -R in any form, including
+# a bundled short-option cluster such as -yR, because the repository and host
+# come only from the URL, nor --sha on GitLab because the head comes only from
+# the live read.
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -158,8 +159,8 @@ reject_repo_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --repo|--repo=*)
-        echo "error: extra merge arguments must not override the repository" >&2
+      --repo|--repo=*|--hostname|--hostname=*)
+        echo "error: extra merge arguments must not override the repository or host" >&2
         return 1
         ;;
       --*) ;;
@@ -334,7 +335,7 @@ github_read_outcome_with_gh() {
   local state='' merged='' queued='' base=''
 
   # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
-  if ! fields=$(gh api graphql \
+  if ! fields=$(fm_pr_github_run github.com "$PR_OWNER/$PR_REPO" gh api graphql \
     -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged isInMergeQueue baseRefName}}}' \
     -F "owner=$PR_OWNER" -F "repo=$PR_REPO" -F "number=$PR_NUMBER" \
     --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring), "queued=" + (.isInMergeQueue | tostring), "base=" + (.baseRefName // "")' \
@@ -370,7 +371,7 @@ FIELDS
 
 github_read_outcome_with_gh_axi() {
   local output state
-  if ! output=$(gh-axi pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null); then
+  if ! output=$(fm_pr_github_run github.com "$PR_OWNER/$PR_REPO" gh-axi pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null); then
     return 1
   fi
   if ! state=$(printf '%s\n' "$output" | awk '
@@ -448,7 +449,7 @@ github_read_queue_method() {
   command -v gh >/dev/null 2>&1 || return 0
   [ -n "$FM_PR_GITHUB_BASE" ] || return 0
   branch_path=$(github_urlencode_path_segment "$FM_PR_GITHUB_BASE")
-  if ! methods=$(gh api \
+  if ! methods=$(fm_pr_github_run github.com "$PR_OWNER/$PR_REPO" gh api \
     --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" \
     --jq '.[] | select(.type == "merge_queue") | "merge_method=" + (.parameters.merge_method // "")' \
     2>/dev/null); then
@@ -639,7 +640,7 @@ case "$PROVIDER" in
       FM_PR_GITHUB_AUTO_REQUESTED=true
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
-    if merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    if merge_output=$(fm_pr_github_run github.com "$PR_OWNER/$PR_REPO" gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1); then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
     else
