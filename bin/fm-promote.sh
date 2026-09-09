@@ -160,7 +160,9 @@ fi
 # the --yes ban is the delivery hole this file used to leave open.
 RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ -n "$RECORDED_BASE" ]; then
-  RETURN_STEP="3. Return to a clean \`$RECORDED_BASE\` base, then create your branch: \`git checkout -b fm/$ID\`."
+  RETURN_BASE=$RECORDED_BASE
+  [ "$MODE" = local-only ] || RETURN_BASE="origin/$RECORDED_BASE"
+  RETURN_STEP="3. Return to a clean \`$RETURN_BASE\` base, then create your branch: \`git checkout -b fm/$ID\`."
 else
   RETURN_STEP="3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`."
 fi

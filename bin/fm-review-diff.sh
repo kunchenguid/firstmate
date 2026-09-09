@@ -85,7 +85,8 @@ if [ -f "$BRIEF" ]; then
 fi
 git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 \
   || { echo "error: $BRIEF records an invalid crew branch: $BRANCH" >&2; exit 1; }
-git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null \
+BRANCH_REF="refs/heads/$BRANCH"
+git -C "$WT" rev-parse --verify --quiet "$BRANCH_REF" >/dev/null \
   || { echo "error: recorded crew branch $BRANCH does not exist in $WT" >&2; exit 1; }
 
 pr_number_from_target() {
@@ -138,7 +139,7 @@ resolve_pr_head() {
 
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
-COMPARE_REF=$BRANCH
+COMPARE_REF=$BRANCH_REF
 if [ -n "$PR_URL" ]; then
   if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
     COMPARE_REF=$PR_HEAD
@@ -152,21 +153,23 @@ if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # origin/<base> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$COMPARE_BASE:refs/remotes/origin/$COMPARE_BASE" --quiet
   BASE="origin/$COMPARE_BASE"
+  BASE_REF="refs/remotes/origin/$COMPARE_BASE"
 else
   BASE="$COMPARE_BASE"
+  BASE_REF="refs/heads/$COMPARE_BASE"
 fi
 
-git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
+git -C "$WT" rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
 echo "diff base: $BASE"
-if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
+if git -C "$WT" diff --quiet "$BASE_REF...$COMPARE_REF" --; then
   echo "no changes vs $BASE"
   exit 0
 fi
 
-git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
+git -C "$WT" diff --stat "$BASE_REF...$COMPARE_REF" --
 if ! "$STAT_ONLY"; then
   echo
-  git -C "$WT" diff "$BASE...$COMPARE_REF" --
+  git -C "$WT" diff "$BASE_REF...$COMPARE_REF" --
 fi

@@ -171,18 +171,21 @@ test_unreachable_pr_head_falls_back_with_warning() {
 }
 
 test_recorded_base_branch_is_compare_base() {
-  local case_dir out
+  local case_dir out develop_sha
   case_dir=$(make_case recorded-base)
   git -C "$case_dir/wt" checkout -q -b develop
   printf 'from-develop\n' > "$case_dir/wt/develop.txt"
   git -C "$case_dir/wt" add develop.txt
   git -C "$case_dir/wt" commit -qm "develop tip"
+  develop_sha=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/wt" push -q origin develop
   printf 'crew-only\n' > "$case_dir/wt/crew.txt"
   git -C "$case_dir/wt" add crew.txt
   git -C "$case_dir/wt" commit -qm "crew on develop"
   git -C "$case_dir/wt" branch -f fm/task-x1 HEAD
   git -C "$case_dir/wt" checkout -q fm/task-x1
+  git -C "$case_dir/wt" tag origin/develop refs/heads/main
+  git -C "$case_dir/wt" tag fm/task-x1 "$develop_sha"
 
   write_task_meta "$case_dir"
   out=$(run_review_diff "$case_dir" task-x1)

@@ -2502,12 +2502,12 @@ freshen_spawn_worktree_base() {  # <worktree>
             echo "error: could not fetch 'origin/$BASE_BRANCH' for pooled worktree '$worktree'; refusing to launch from an unverifiable base" >&2
             return 1
           fi
-          target="origin/$BASE_BRANCH"
+          target="refs/remotes/origin/$BASE_BRANCH"
           ;;
         2)
           if [ "${MODE:-}" = local-only ] || [ "$KIND" = scout ]; then
             if git -C "$worktree" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
-              target="$BASE_BRANCH"
+              target="refs/heads/$BASE_BRANCH"
             else
               echo "error: --base-branch '$BASE_BRANCH' does not exist locally or on origin for pooled worktree '$worktree'; refusing to fall back to the default branch" >&2
               return 1
@@ -2525,7 +2525,7 @@ freshen_spawn_worktree_base() {  # <worktree>
     else
       if [ "${MODE:-}" = local-only ] || [ "$KIND" = scout ]; then
         if git -C "$worktree" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
-          target="$BASE_BRANCH"
+          target="refs/heads/$BASE_BRANCH"
         else
           echo "error: --base-branch '$BASE_BRANCH' does not exist locally for pooled worktree '$worktree'; refusing to launch without that requested base" >&2
           return 1

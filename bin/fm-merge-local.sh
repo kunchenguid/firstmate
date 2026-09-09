@@ -66,7 +66,8 @@ if [ -f "$BRIEF" ]; then
     BRANCH=$recorded_branch
   fi
 fi
-git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
+BRANCH_REF="refs/heads/$BRANCH"
+git -C "$PROJ" rev-parse --verify --quiet "$BRANCH_REF" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 TARGET=$DEFAULT
@@ -78,7 +79,8 @@ if [ -n "$recorded_base" ]; then
   }
   TARGET=$recorded_base
 fi
-git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$TARGET" >/dev/null || { echo "error: landing branch $TARGET does not exist in $PROJ" >&2; exit 1; }
+TARGET_REF="refs/heads/$TARGET"
+git -C "$PROJ" rev-parse --verify --quiet "$TARGET_REF" >/dev/null || { echo "error: landing branch $TARGET does not exist in $PROJ" >&2; exit 1; }
 
 # The project's main checkout must stay on its default branch unless it is
 # already on the landing target. firstmate never writes here otherwise.
@@ -93,24 +95,24 @@ if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
 fi
 
 # Clean fast-forward only: TARGET must be an ancestor of BRANCH.
-if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET" "$BRANCH"; then
+if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "$BRANCH_REF"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $TARGET (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $TARGET, then retry." >&2
   exit 1
 fi
 
-before=$(git -C "$PROJ" rev-parse --short "$TARGET")
+before=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 if [ "$cur" = "$TARGET" ]; then
-  git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
+  git -C "$PROJ" merge --ff-only "$BRANCH_REF" >/dev/null
 else
-  target_worktree=$(git -C "$PROJ" for-each-ref --format='%(worktreepath)' "refs/heads/$TARGET")
+  target_worktree=$(git -C "$PROJ" for-each-ref --format='%(worktreepath)' "$TARGET_REF")
   if [ -n "$target_worktree" ]; then
     echo "error: $TARGET is checked out in $target_worktree; refusing to update-ref it" >&2
     exit 1
   fi
   # Stay on the default checkout and fast-forward the named base in place.
   git -C "$PROJ" update-ref -m "fm-merge-local: fast-forward $TARGET to $BRANCH" \
-    "refs/heads/$TARGET" "$(git -C "$PROJ" rev-parse "$BRANCH")" "$(git -C "$PROJ" rev-parse "$TARGET")"
+    "$TARGET_REF" "$(git -C "$PROJ" rev-parse "$BRANCH_REF")" "$(git -C "$PROJ" rev-parse "$TARGET_REF")"
 fi
-after=$(git -C "$PROJ" rev-parse --short "$TARGET")
+after=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"

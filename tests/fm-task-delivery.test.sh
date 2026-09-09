@@ -369,6 +369,26 @@ STUB
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
   done
 
+  for mode in no-mistakes direct-PR local-only; do
+    id="promote-named-base-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+    meta="$home/state/$id.meta"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=develop\n' "$id" > "$meta"
+    FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout --base-branch develop >/dev/null 2>&1 \
+      || fail "$mode: named-base scout brief generation should succeed"
+    fill_brief_subsections "$home/data/$id/brief.md" \
+      "Ship the named-base change." "Preserve the selected base."
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off >/dev/null 2>&1 \
+      || fail "$mode: named-base promotion should succeed"
+    payload="$home/data/$id/ship-instructions.md"
+    if [ "$mode" = local-only ]; then
+      assert_grep 'Return to a clean `develop` base' "$payload" \
+        "local-only promotion did not select the local recorded base"
+    else
+      assert_grep 'Return to a clean `origin/develop` base' "$payload" \
+        "$mode promotion did not select the remote recorded base"
+    fi
+  done
+
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
   assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
     "promoted no-mistakes worker did not receive the ask-user escalation rule"

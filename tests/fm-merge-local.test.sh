@@ -91,15 +91,17 @@ test_metadata_base_is_authoritative() {
   commit_on "$project" develop develop.txt
   commit_on "$project" "fm/$id" crew.txt
   git -C "$project" checkout -q main
-  main_before=$(git -C "$project" rev-parse main)
+  main_before=$(git -C "$project" rev-parse refs/heads/main)
+  git -C "$project" tag develop refs/heads/main
+  git -C "$project" tag "fm/$id" refs/heads/develop
   printf '%s\n' 'base_branch=develop' >> "$meta"
   printf '%s\n' 'Base branch contract: base_branch=release' \
     > "$case_dir/home/data/$id/brief.md"
   run_merge "$case_dir" "$id" >/dev/null \
     || fail "merge-local refused the metadata-recorded base"
-  [ "$(git -C "$project" rev-parse main)" = "$main_before" ] \
+  [ "$(git -C "$project" rev-parse refs/heads/main)" = "$main_before" ] \
     || fail "merge-local moved main instead of the metadata-recorded base"
-  [ "$(git -C "$project" rev-parse develop)" = "$(git -C "$project" rev-parse fm/$id)" ] \
+  [ "$(git -C "$project" rev-parse refs/heads/develop)" = "$(git -C "$project" rev-parse refs/heads/fm/$id)" ] \
     || fail "merge-local did not land on the metadata-recorded base"
   pass "merge-local treats task metadata as the landing-base authority"
 }

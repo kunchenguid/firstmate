@@ -725,16 +725,19 @@ test_base_branch_resets_to_named_origin_tip() {
   git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
     commit -qm develop-tip
   git -C "$CASE_DIR/publisher" push --quiet origin develop
+  git -C "$POOL_DIR" tag origin/develop "$INITIAL_SHA"
   scaffold_ship_brief "$id" no-mistakes develop
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
   status=$?
   expect_code 0 "$status" "spawn --base-branch should refresh to the named origin tip"
-  current_main=$(git -C "$POOL_DIR" rev-parse --verify --quiet origin/main || true)
-  current_develop=$(git -C "$POOL_DIR" rev-parse --verify --quiet origin/develop)
+  current_main=$(git -C "$POOL_DIR" rev-parse --verify --quiet refs/remotes/origin/main || true)
+  current_develop=$(git -C "$POOL_DIR" rev-parse --verify --quiet refs/remotes/origin/develop)
   branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ -n "$current_develop" ] || fail "spawn --base-branch develop left origin/develop unresolved"
   [ "$branch_head" = "$current_develop" ] || fail "spawn --base-branch develop did not reset to origin/develop"
+  [ "$branch_head" != "$(git -C "$POOL_DIR" rev-parse refs/tags/origin/develop)" ] \
+    || fail "spawn --base-branch develop selected a colliding tag"
   [ -z "$current_main" ] || [ "$branch_head" != "$current_main" ] || fail "spawn --base-branch develop reset to origin/main"
   assert_grep 'only on develop' "$POOL_DIR/develop-only.txt" \
     "spawn --base-branch develop omitted the named-branch tip content"
