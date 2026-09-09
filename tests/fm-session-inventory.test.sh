@@ -102,6 +102,16 @@ write_lavish_stub() {  # <fakebin> [<file> <status> <pending>]...
   chmod +x "$fakebin/lavish-axi"
 }
 
+# A stand-in for the harness pool directory. It must sit OUTSIDE the home, the
+# way a real unclaimed pool process does: a directory inside the home would make
+# the fixture claim its own pool as a session working in that home.
+make_pool() {  # <home>
+  local pool
+  pool=$TMP_ROOT/pool-$(basename "$1")
+  mkdir -p "$pool"
+  printf '%s\n' "$pool"
+}
+
 make_home() {  # <name>
   local home=$TMP_ROOT/$1
   mkdir -p "$home/state" "$home/data" "$home/projects" "$home/config"
@@ -156,6 +166,10 @@ run_view() {  # <home> <args...>
 # bare `sleep` - losing both the harness name and the argv this fixture exists
 # to present. The extra no-op keeps each fake session a real, correctly named
 # process.
+# Each spec line is "<cwd>|<argv>": a real working directory for the child plus
+# the argv it should present. The working directory is what distinguishes a
+# claimed session from an idle pool process, so the fixture has to set it for
+# real rather than describe it.
 DAEMON_BODY="$TMP_ROOT/fm-fake-daemon.sh"
 cat > "$DAEMON_BODY" <<'SH'
 #!/usr/bin/env bash
@@ -164,8 +178,10 @@ fake=$2
 ready=$3
 while IFS= read -r line; do
   [ -n "$line" ] || continue
+  child_cwd=${line%%|*}
+  child_argv=${line#*|}
   # shellcheck disable=SC2086 # deliberate: the spec line IS the child argv
-  "$fake" -c 'sleep 120; :' $line &
+  ( cd "$child_cwd" && exec "$fake" -c 'sleep 120; :' $child_argv ) &
 done < "$spec"
 : > "$ready"
 sleep 120
@@ -208,15 +224,16 @@ start_daemon_tree() {  # <home> <child-argv-file>
 # --- cases -------------------------------------------------------------------
 
 test_two_concurrent_sessions_are_ambiguous() {
-  local home spec daemon json sessions owner rows
+  local home spec daemon json sessions owner rows pool
   home=$(make_home two-sessions)
   finish_backlog "$home"
   write_lavish_stub "$FAKEBIN"
   spec="$home/children"
-  cat > "$spec" <<'EOF'
-sess-a --session-id aaaa --agent claude --permission-mode bypassPermissions
-sess-b --session-id bbbb --agent claude --permission-mode bypassPermissions
-pool-a --bg-spare /tmp/cc-daemon/spare/1111.claim.sock
+  pool=$(make_pool "$home")
+  cat > "$spec" <<EOF
+$home|sess-a --session-id aaaa --agent claude --permission-mode bypassPermissions
+$home|sess-b --session-id bbbb --agent claude --permission-mode bypassPermissions
+$pool|pool-a --bg-spare /tmp/cc-daemon/spare/1111.claim.sock
 EOF
   start_daemon_tree "$home" "$spec"
   daemon=$DAEMON_PID
@@ -230,36 +247,37 @@ EOF
   [ "$sessions" = 2 ] || fail "expected 2 live sessions, got '$sessions'"
 
   rows=$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")
-    | "\(.label)=\(.detail)"] | sort | join(" ")')
-  case "$rows" in
-    *'session=drives this home: ambiguous'*) ;;
-    *) fail "each live session must say it cannot be told apart: $rows" ;;
-  esac
-  case "$rows" in
-    *'spare=drives this home: no'*) ;;
-    *) fail "an idle pool process drives no home whatever the ancestry says: $rows" ;;
-  esac
+    | .detail] | sort | unique | join(" ")')
+  [ "$rows" = "drives this home: ambiguous" ] \
+    || fail "each live session must say it cannot be told apart: $rows"
+  # The idle pool process is not this home's session and is not listed as one;
+  # it is only counted, so nothing is claimed on another home's behalf.
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')" = 1 ] \
+    || fail "an idle pool process must be counted as belonging elsewhere, not listed here"
+  [ "$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")] | length')" = 2 ] \
+    || fail "only the sessions working in this home may be listed"
 
   # The captain-facing surface must lead with the ambiguity, not bury it.
   local rendered
   rendered=$(COLUMNS=100 run_view "$home" --color never)
-  assert_contains "$rendered" "2 background sessions share harness daemon $daemon" \
-    "the view must say plainly that several sessions share one daemon"
+  assert_contains "$rendered" "2 background sessions are working in this home at once" \
+    "the view must say plainly that two sessions are working in this home at once"
 
   kill_spawned
   pass "inventory: two concurrent background sessions read as ambiguous, and the view says so"
 }
 
 test_single_session_is_attributed_to_this_home() {
-  local home spec daemon json owner drives
+  local home spec daemon json owner drives pool
   home=$(make_home one-session)
   finish_backlog "$home"
   write_lavish_stub "$FAKEBIN"
   spec="$home/children"
-  cat > "$spec" <<'EOF'
-sess-a --session-id aaaa --agent claude --permission-mode bypassPermissions
-pool-a --bg-spare /tmp/cc-daemon/spare/1111.claim.sock
-pool-b --bg-spare /tmp/cc-daemon/spare/2222.claim.sock
+  pool=$(make_pool "$home")
+  cat > "$spec" <<EOF
+$home|sess-a --session-id aaaa --agent claude --permission-mode bypassPermissions
+$pool|pool-a --bg-spare /tmp/cc-daemon/spare/1111.claim.sock
+$pool|pool-b --bg-spare /tmp/cc-daemon/spare/2222.claim.sock
 EOF
   start_daemon_tree "$home" "$spec"
   daemon=$DAEMON_PID
@@ -268,41 +286,114 @@ EOF
   json=$(run_inventory "$home" --json) || fail "inventory failed for a single session"
   owner=$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')
   [ "$owner" = single ] || fail "one live session under the daemon must read as single, got '$owner'"
-  drives=$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "harness-session" and .label == "session") | .detail')
+  drives=$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "harness-session") | .detail')
   [ "$drives" = "drives this home: yes" ] \
     || fail "the only live session under the lock-owning daemon drives this home, got '$drives'"
-  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.spares')" = 2 ] \
-    || fail "both idle pool processes must still be inventoried"
+  # The two idle pool processes are working outside this home, so they are
+  # counted as belonging elsewhere rather than listed as this home's sessions.
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')" = 2 ] \
+    || fail "both idle pool processes must be accounted for as belonging elsewhere"
 
   kill_spawned
   pass "inventory: a single background session is attributed to this home"
 }
 
-test_conflicting_argv_is_reported_unknown() {
-  local home spec daemon json
-  home=$(make_home unknown-role)
+# Argv must not decide anything. This fixture presents a process carrying BOTH a
+# session token and a pool token - the shape a vendor rename or a reused spare
+# produces - while working in this home. Where the process is working is the
+# only signal that counts, so the contradiction in its argv changes nothing.
+# This is the regression guard against reintroducing argv role classification.
+test_contradictory_argv_does_not_decide_the_role() {
+  local home spec daemon json pool
+  home=$(make_home contradictory-argv)
   finish_backlog "$home"
   write_lavish_stub "$FAKEBIN"
   spec="$home/children"
-  # Both a session token and a pool token: a vendor rename must surface, never
-  # silently reclassify a live session as an idle spare.
-  cat > "$spec" <<'EOF'
-odd --session-id cccc --bg-spare /tmp/cc-daemon/spare/3333.claim.sock
+  pool=$(make_pool "$home")
+  cat > "$spec" <<EOF
+$home|odd --session-id cccc --bg-spare /tmp/cc-daemon/spare/3333.claim.sock
 EOF
   start_daemon_tree "$home" "$spec"
   daemon=$DAEMON_PID
   printf '%s\n' "$daemon" > "$home/state/.lock"
 
-  json=$(run_inventory "$home" --json) || fail "inventory failed for a conflicting argv"
-  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.unknown')" = 1 ] \
-    || fail "conflicting session and pool tokens must report role unknown"
-  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.spares')" = 0 ] \
-    || fail "a conflicting argv must never be counted as a known idle spare"
+  json=$(run_inventory "$home" --json) || fail "inventory failed for a contradictory argv"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')" = 1 ] \
+    || fail "a process working in this home is a live session whatever its argv says"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')" = 0 ] \
+    || fail "a pool token must never move a process working in this home elsewhere"
   [ "$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')" = single ] \
-    || fail "an unclassified row still counts as a candidate driver"
+    || fail "one session working in this home reads as single"
 
   kill_spawned
-  pass "inventory: a conflicting harness argv is reported unknown rather than guessed"
+  pass "inventory: a contradictory harness argv does not decide the role"
+}
+
+# THE MEASURED FAILURE. A harness pre-warms pooled processes and turns one into
+# a session by CLAIMING it; the claimed process keeps the argv it was started
+# with, so argv alone cannot tell a live session from an idle spare. What does
+# change is the working directory: an unclaimed process still sits in the pool,
+# and a claimed one is working in the home it was claimed for. Reported against
+# the real fleet this was four live sessions in one home shown as zero.
+test_claimed_pool_process_is_a_live_session() {
+  local home spec daemon json pool
+  home=$(make_home claimed-pool)
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  pool=$(make_pool "$home")
+  spec="$home/children"
+  cat > "$spec" <<EOF
+$home|claimed-a --bg-spare /tmp/cc-daemon/spare/aaaa.claim.sock
+$pool|idle-a --bg-spare /tmp/cc-daemon/spare/bbbb.claim.sock
+EOF
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
+  printf '%s\n' "$daemon" > "$home/state/.lock"
+
+  json=$(run_inventory "$home" --json) || fail "inventory failed for a claimed pool process"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')" = 1 ] \
+    || fail "a pool process working in this home is a live session, whatever argv it kept"
+  [ "$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")] | length')" = 1 ] \
+    || fail "the live session must be listed, and the still-idle one must not be"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "harness-session") | .detail')" \
+    = "drives this home: yes" ] \
+    || fail "a session working in this home drives it"
+
+  kill_spawned
+  pass "inventory: a claimed pool process working in this home counts as a live session"
+}
+
+# The concurrency hazard itself, in the shape it actually occurs: several
+# claimed processes working in one home at once.
+test_several_claimed_sessions_in_one_home_are_ambiguous() {
+  local home spec daemon json pool
+  home=$(make_home claimed-many)
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  pool=$(make_pool "$home")
+  spec="$home/children"
+  cat > "$spec" <<EOF
+$home|claimed-a --bg-spare /tmp/cc-daemon/spare/aaaa.claim.sock
+$home|claimed-b --bg-spare /tmp/cc-daemon/spare/bbbb.claim.sock
+$pool|idle-a --bg-spare /tmp/cc-daemon/spare/cccc.claim.sock
+EOF
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
+  printf '%s\n' "$daemon" > "$home/state/.lock"
+
+  json=$(run_inventory "$home" --json) || fail "inventory failed for several claimed sessions"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')" = 2 ] \
+    || fail "both claimed processes working in this home must be counted"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')" = ambiguous ] \
+    || fail "two live sessions in one home is the ambiguity the captain must see"
+
+  local rendered
+  rendered=$(COLUMNS=100 run_view "$home" --color never)
+  assert_contains "$rendered" "2 background sessions" \
+    "the view must lead with the fact that two sessions share this home"
+
+  kill_spawned
+  pass "inventory: several claimed sessions in one home read as ambiguous"
 }
 
 test_stale_lock_pid_is_not_attributed() {
@@ -396,6 +487,81 @@ test_row_without_a_safe_close_stays_out_of_the_unasked_line() {
 # A task the captain is deliberately holding is not an overdue running session.
 # The backlog captain-hold lifecycle already surfaces it, so repeating it in the
 # unasked session-start line would report one parked decision from two places.
+# THE SECOND MEASURED FAILURE. The age column answered "how old is the task",
+# not "how long has this been running". A task thought up last week and started
+# ten minutes ago was flagged as overdue, which makes the warning worthless.
+# What costs the captain money and attention is running time, so that is what
+# the threshold keys on; task age is still reported, separately.
+test_worker_age_is_running_time_not_task_age() {
+  local home spec daemon json pool worktree
+  home=$(make_home runtime-age)
+  worktree="$home/projects/fresh-worker-worktree"
+  mkdir -p "$worktree"
+  write_worker "$home" fresh-worker 30
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  # A worker whose task was filed a month ago but whose process started moments
+  # ago: the process is working in the recorded worktree, which is what ties the
+  # two together.
+  pool=$(make_pool "$home")
+  spec="$home/children"
+  cat > "$spec" <<EOF
+$worktree|worker-proc --session-id dddd --agent claude
+EOF
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
+  printf '%s\n' "$daemon" > "$home/state/.lock"
+
+  json=$(run_inventory "$home" --json) || fail "inventory failed for a freshly started worker"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "fresh-worker") | .age_source')" = process ] \
+    || fail "a worker with a live process must be aged from that process, not from its task record"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "fresh-worker") | .age_days')" = 0 ] \
+    || fail "a worker that started moments ago has not been running for days"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "fresh-worker") | .stale')" = false ] \
+    || fail "an old task with a fresh worker must not be flagged as overdue"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "fresh-worker") | .task_age_days')" = 30 ] \
+    || fail "the task age must still be reported, separately from running time"
+
+  local out
+  out=$(run_inventory "$home" --stale-lines) || fail "--stale-lines failed"
+  assert_not_contains "$out" "fresh-worker" \
+    "a worker running for minutes must never occupy the unasked session-start line"
+
+  out=$(COLUMNS=110 run_view "$home" --color never)
+  assert_contains "$out" "TASK" "the view must show task age as its own column"
+
+  kill_spawned
+  pass "inventory: a worker is aged by its running time, with task age reported separately"
+}
+
+# The other direction, and the case the captain actually complained about: a
+# worker with no live process is abandoned work still holding a worktree. It is
+# aged by the work's own date and stays in the overdue warning, because dropping
+# it would silently hide the thing he asked to be told about.
+test_worker_with_no_live_process_is_aged_by_its_task() {
+  local home json out
+  home=$(make_home no-process)
+  write_worker "$home" gone-worker 30
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+
+  json=$(run_inventory "$home" --json) || fail "inventory failed for a worker with no live process"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "gone-worker") | .age_source')" = backlog-since ] \
+    || fail "with nothing running, the work's own date is the honest age"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "gone-worker") | .age_days')" = 30 ] \
+    || fail "a worker abandoned for 30 days is 30 days old"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "gone-worker") | .stale')" = true ] \
+    || fail "abandoned work past the threshold must still be marked overdue"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "gone-worker") | .task_age_days')" = 30 ] \
+    || fail "the task age is still reported in its own field"
+
+  out=$(run_inventory "$home" --stale-lines) || fail "--stale-lines failed"
+  assert_contains "$out" "gone-worker" \
+    "abandoned work past the threshold belongs in the unasked session-start line"
+
+  pass "inventory: a worker with no live process is aged by its task and stays overdue"
+}
+
 test_captain_held_work_stays_out_of_the_unasked_line() {
   local home json out
   home=$(make_home held)
@@ -591,14 +757,15 @@ EOF
 }
 
 test_inventory_closes_nothing_it_reports() {
-  local home spec daemon children pid
+  local home spec daemon children pid pool
   home=$(make_home read-only)
   finish_backlog "$home"
   write_lavish_stub "$FAKEBIN"
   spec="$home/children"
-  cat > "$spec" <<'EOF'
-sess-a --session-id aaaa --agent claude
-pool-a --bg-spare /tmp/cc-daemon/spare/1111.claim.sock
+  pool=$(make_pool "$home")
+  cat > "$spec" <<EOF
+$home|sess-a --session-id aaaa --agent claude
+$pool|pool-a --bg-spare /tmp/cc-daemon/spare/1111.claim.sock
 EOF
   start_daemon_tree "$home" "$spec"
   daemon=$DAEMON_PID
@@ -622,10 +789,14 @@ EOF
 
 test_two_concurrent_sessions_are_ambiguous
 test_single_session_is_attributed_to_this_home
-test_conflicting_argv_is_reported_unknown
+test_claimed_pool_process_is_a_live_session
+test_several_claimed_sessions_in_one_home_are_ambiguous
+test_contradictory_argv_does_not_decide_the_role
 test_stale_lock_pid_is_not_attributed
 test_nothing_old_prints_nothing_at_session_start
 test_stale_rows_carry_their_exact_close_command
+test_worker_age_is_running_time_not_task_age
+test_worker_with_no_live_process_is_aged_by_its_task
 test_row_without_a_safe_close_stays_out_of_the_unasked_line
 test_captain_held_work_stays_out_of_the_unasked_line
 test_review_pages_are_listed_and_aged

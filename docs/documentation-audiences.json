@@ -457,6 +457,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/running-session-overview.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },

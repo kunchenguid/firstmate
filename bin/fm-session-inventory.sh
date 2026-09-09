@@ -28,7 +28,11 @@
 #   stale_after_days  the age at or above which a row is marked stale.
 #   rows[]            uniform rows, ordered kind-then-age, described below.
 #   counts            {total, stale, notify, by_kind{worker,review,service,harness_session}}.
-#   harness_sessions  {root_pid, lock_pid, lock_owner, sessions, spares, unknown}.
+#   harness_sessions  {root_pid, lock_pid, lock_owner, sessions, elsewhere}.
+#                     `sessions` counts the live harness sessions working in THIS
+#                     home; `elsewhere` counts the other harness processes under
+#                     the same harness - pool machinery and other homes'
+#                     sessions - which are neither listed nor claimed.
 #                     lock_owner is the honest answer to "which background
 #                     session drives this home": "unique" when exactly one
 #                     session owns the recorded lock, "single" when only one
@@ -48,10 +52,20 @@
 #   detail        one extra descriptive string, or null.
 #   pid           process id when the row is a live process, else null.
 #   started       UTC start time when known, else null.
-#   age_seconds   age in seconds when known, else null. age_days is whole days.
-#   age_source    where the age came from: "process", "backlog-since",
+#   age_seconds   how long this row has been around, in seconds, or null when
+#                 that cannot be established. age_days is whole days. For a
+#                 worker this is its RUNNING time whenever a live harness
+#                 process is working in its worktree, and the age of the work
+#                 itself when no process is running - abandoned work still
+#                 holding a worktree is exactly what the overdue warning is for.
+#   age_source    where that age came from: "process" (running time),
+#                 "backlog-since" (nothing running, so the work's own date),
 #                 "file-mtime", or null.
 #   stale         true when age_days >= stale_after_days.
+#   task_age_seconds, task_age_days
+#                 how long the WORK has existed, for a worker row. Always
+#                 reported, so a running worker shows its running time and the
+#                 age of its task side by side.
 #   held          true when the captain is deliberately holding this work.
 #   notify        true when the row is stale, has a close command, and is not
 #                 held. A row with no single safe close command is not something
@@ -67,15 +81,19 @@
 #                 "manual" means there is no single safe command here.
 #   close_note    why, when close_safety is not "safe".
 #
-# HARNESS-SESSION IDENTITY is deliberately built on the two most structural
-# signals available. Whether a process is a verified harness is decided by
-# bin/fm-session-lock-lib.sh, the fleet's single owner of that question; the
-# parent/child relation is a kernel fact read from ps. Only the session-vs-spare
-# ROLE reads vendor-supplied argv, and it reads two independent tokens rather
-# than one: a session-identity token and a spare-pool token. When they conflict,
-# or neither appears, the row is reported with role "unknown" and still shown,
-# so a renamed vendor flag surfaces loudly instead of silently reclassifying a
-# live session as an idle pool process.
+# HARNESS-SESSION IDENTITY is built on kernel facts only. Whether a process is a
+# verified harness is decided by bin/fm-session-lock-lib.sh, the fleet's single
+# owner of that question; the parent/child relation and the working directory
+# come from the kernel. No vendor argv string is read at all.
+#
+# That matters because a harness pre-warms pooled processes and turns one into a
+# session by CLAIMING it, and a claimed process keeps the argv it started with.
+# Reading argv therefore cannot tell a live session from an idle spare - measured
+# against the real fleet, it reported four live sessions in one home as zero.
+# The working directory does change on a claim: an unclaimed process still sits
+# in the harness pool, a claimed one works in the home it was claimed for. So a
+# process is a session FOR THIS HOME when its working directory is this home,
+# and everything else under the same harness is counted without being claimed.
 #
 # NO NETWORK, NO WRITES. The fleet snapshot underneath is run with
 # FM_SNAPSHOT_LOCAL_ONLY=1, which is what makes the read-only promise above
@@ -162,9 +180,9 @@ note_source() {  # <name> <ok:0|1> <reason>
 
 # One row per line. Empty field = null in JSON. The trailing `held` column is 1
 # for work the captain is deliberately holding.
-emit_row() {  # kind id label belongs_to detail pid age_seconds age_source close close_safety close_note [held]
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12:-0}" >> "$ROWS"
+emit_row() {  # kind id label belongs_to detail pid age_seconds age_source close close_safety close_note [held] [task_age_seconds]
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12:-0}" "${13:-}" >> "$ROWS"
 }
 
 # --- the one process-table read ----------------------------------------------
@@ -196,6 +214,67 @@ else
   note_source process-table 0 'ps produced no readable process table'
 fi
 
+# Working directory per pid, read once for every harness process found.
+#
+# THIS IS THE SIGNAL THAT DECIDES WHAT IS A LIVE SESSION. A harness pre-warms
+# pooled processes and turns one into a session by CLAIMING it, and the claimed
+# process keeps the argv it was started with - so argv cannot tell a live
+# session from an idle spare, and reading it that way reported four live
+# sessions in one home as zero. What does change on a claim is the working
+# directory: an unclaimed process still sits in the harness pool, and a claimed
+# one is working in the home or worktree it was claimed for. That is a kernel
+# fact, not a vendor string, and it is also what ties a running process to the
+# task it is running.
+CWDMAP="$WORK/cwd.tsv"
+: > "$CWDMAP"
+read_cwds() {  # <pid>...
+  local pid joined
+  [ "$#" -gt 0 ] || return 0
+  if [ -r /proc/self/cwd ]; then
+    for pid in "$@"; do
+      printf '%s\t%s\n' "$pid" "$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    done > "$CWDMAP"
+    return 0
+  fi
+  command -v lsof >/dev/null 2>&1 || return 1
+  joined=$(printf '%s,' "$@"); joined=${joined%,}
+  # One batched call: per-pid invocations cost more than the whole rest of the
+  # collection put together.
+  lsof -a -d cwd -Fpn -p "$joined" 2>/dev/null | LC_ALL=C awk '
+    /^p/ { pid = substr($0, 2); next }
+    /^n/ { if (pid != "") { printf "%s\t%s\n", pid, substr($0, 2); pid = "" } }' > "$CWDMAP"
+}
+# Every process's working directory in one call. Used where the interesting set
+# is not known in advance, so that filtering on the directory can come before
+# the far more expensive question of whether a pid is a verified harness.
+read_all_cwds() {
+  local pid
+  if [ -r /proc/self/cwd ]; then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      printf '%s\t%s\n' "$pid" "$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    done < <(LC_ALL=C awk -F'\t' '{ print $1 }' "$PSTABLE") > "$CWDMAP"
+    return 0
+  fi
+  command -v lsof >/dev/null 2>&1 || return 1
+  lsof -a -d cwd -Fpn 2>/dev/null | LC_ALL=C awk '
+    /^p/ { pid = substr($0, 2); next }
+    /^n/ { if (pid != "") { printf "%s\t%s\n", pid, substr($0, 2); pid = "" } }' > "$CWDMAP"
+  [ -s "$CWDMAP" ]
+}
+
+cwd_of() {  # <pid>
+  LC_ALL=C awk -F'\t' -v want="$1" '$1 == want { print $2; exit }' "$CWDMAP"
+}
+# True when <cwd> is <dir> itself or lies inside it.
+path_within() {  # <cwd> <dir>
+  local cwd=$1 dir=$2
+  [ -n "$cwd" ] && [ -n "$dir" ] || return 1
+  [ "$cwd" = "$dir" ] && return 0
+  case "$cwd" in "$dir"/*) return 0 ;; esac
+  return 1
+}
+
 ps_field() {  # <pid> <1=ppid|2=age|3=args>
   LC_ALL=C awk -F'\t' -v want="$1" -v col="$2" '$1 == want { print $(col + 1); exit }' "$PSTABLE"
 }
@@ -211,6 +290,61 @@ file_age_seconds() {  # <path>
   fi
   case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$((NOW_EPOCH - mtime))"
+}
+
+# Every live harness process working in one of this home's worker worktrees.
+# A worker is matched to its running process by that directory: the process a
+# worker is running in has the worker's own worktree as its cwd, whatever
+# backend hosts the pane and whatever the harness called itself.
+#
+# WORKING DIRECTORY IS READ FIRST, ON PURPOSE. Deciding whether a pid is a
+# verified harness is the expensive question here - the owning library shells
+# out per process - and asking it of every process on the machine cost about
+# fifteen seconds on a 900-process desktop, five times the whole rest of the
+# command and well past the budget the session-start line is allowed. Working
+# directories come from one batched read for every process at once, so filtering
+# on them first leaves only the handful of processes actually sitting in a
+# worker's worktree to verify. Same answer, one cheap question before the dear
+# one.
+WORKER_PROCS="$WORK/worker-procs.tsv"
+: > "$WORKER_PROCS"
+collect_worker_processes() {  # <worktree>...
+  local pid cwd age dir saved keep
+  [ "$#" -gt 0 ] || return 0
+  [ -s "$PSTABLE" ] || return 0
+  saved=$CWDMAP
+  CWDMAP="$WORK/worker-cwd.tsv"
+  if read_all_cwds; then
+    while IFS=$'\t' read -r pid cwd; do
+      [ -n "$pid" ] && [ -n "$cwd" ] || continue
+      keep=0
+      for dir in "$@"; do
+        if path_within "$cwd" "$dir"; then keep=1; break; fi
+      done
+      [ "$keep" = 1 ] || continue
+      # Only now, for the few survivors, ask the expensive question.
+      is_harness_pid "$pid" || continue
+      age=$(ps_field "$pid" 2)
+      printf '%s\t%s\t%s\n' "$pid" "$age" "$cwd" >> "$WORKER_PROCS"
+    done < "$CWDMAP"
+  fi
+  CWDMAP=$saved
+}
+
+# Longest-running harness process working in <dir>. Longest rather than newest
+# because a worker's own process tree can be several harness processes deep, and
+# the outermost one is the incarnation that has actually been up the whole time.
+worker_runtime_seconds() {  # <worktree>
+  local dir=$1 best='' pid age cwd
+  [ -n "$dir" ] || return 1
+  while IFS=$'\t' read -r pid age cwd; do
+    [ -n "$pid" ] || continue
+    path_within "$cwd" "$dir" || continue
+    case "$age" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$best" ] || [ "$age" -gt "$best" ]; then best=$age; fi
+  done < "$WORKER_PROCS"
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
 }
 
 # --- 1. workers, from the fleet snapshot (the single owner of fleet state) ----
@@ -234,24 +368,47 @@ collect_workers() {
     return 0
   fi
   note_source fleet-snapshot 1 ''
-  local id kind repo window worktree since meta_path state hold_kind
-  local busy close safety cnote age age_source held
-  while IFS=$'\t' read -r id kind repo window worktree since meta_path state hold_kind; do
+  local id kind repo window worktree since state hold_kind
+  local busy close safety cnote age age_source held task_age
+  # The worktrees come from the snapshot, so the process scan can be narrowed to
+  # the directories that can possibly host a worker before any pid is verified.
+  local -a worktrees=()
+  while IFS= read -r worktree; do
+    [ -n "$worktree" ] || continue
+    worktrees+=("$worktree")
+  done < <(jq -r '.tasks[]? | (.paths.worktree.path // .paths.home.path // "") | select(. != "")' \
+    "$snapshot_file" | LC_ALL=C sort -u)
+  collect_worker_processes ${worktrees[@]+"${worktrees[@]}"}
+  while IFS=$'\t' read -r id kind repo window worktree since state hold_kind; do
     [ -n "$id" ] || continue
-    age=''
-    age_source=''
+    # RUNNING TIME FIRST, TASK AGE ONLY WHEN NOTHING IS RUNNING. Reading the
+    # task's own date whenever it existed flagged a worker that started ten
+    # minutes ago as overdue, because the task had been filed weeks earlier;
+    # that makes the warning worthless. So a worker with a live harness process
+    # working in its own worktree is aged by that process.
+    #
+    # A worker with NO live process is not thereby uninteresting: it is
+    # abandoned work still holding a worktree, and how long it has sat there is
+    # exactly what the captain asked to be told about. For that row the task's
+    # own date is the honest age, and age_source says so, so nothing is silently
+    # dropped from the overdue warning just because its process is gone.
+    task_age=''
     if [ -n "$since" ]; then
       # tasks-axi records a date; midnight UTC is the honest floor for its age.
-      age=$(date -u -j -f '%Y-%m-%d %H:%M:%S' "$since 00:00:00" +%s 2>/dev/null \
+      task_age=$(date -u -j -f '%Y-%m-%d %H:%M:%S' "$since 00:00:00" +%s 2>/dev/null \
         || date -u -d "$since 00:00:00" +%s 2>/dev/null || true)
-      if [ -n "$age" ]; then
-        age=$((NOW_EPOCH - age))
-        [ "$age" -ge 0 ] || age=0
-        age_source=backlog-since
+      if [ -n "$task_age" ]; then
+        task_age=$((NOW_EPOCH - task_age))
+        [ "$task_age" -ge 0 ] || task_age=0
       fi
     fi
-    if [ -z "$age" ] && [ -n "$meta_path" ] && age=$(file_age_seconds "$meta_path"); then
-      age_source="file-mtime"
+    age=''
+    age_source=''
+    if [ -n "$worktree" ] && age=$(worker_runtime_seconds "$worktree"); then
+      age_source=process
+    elif [ -n "$task_age" ]; then
+      age=$task_age
+      age_source=backlog-since
     fi
     busy=$state
     if [ "$kind" = secondmate ]; then
@@ -274,7 +431,7 @@ collect_workers() {
     held=0
     [ "$hold_kind" != captain ] || held=1
     emit_row worker "$id" "$kind" "${repo:-$id}" "${window:+window $window}${worktree:+ in $worktree}" \
-      '' "${age:-}" "$age_source" "$close" "$safety" "$cnote" "$held"
+      '' "${age:-}" "$age_source" "$close" "$safety" "$cnote" "$held" "${task_age:-}"
   done < <(jq -r '
       .tasks[]? |
       [ .id,
@@ -283,7 +440,6 @@ collect_workers() {
         (.endpoint.target // ""),
         (.paths.worktree.path // .paths.home.path // ""),
         (.backlog.since // ""),
-        (.paths.meta.path // ""),
         (.current_state.state // ""),
         (.backlog.hold_kind // "")
       ] | @tsv' "$snapshot_file")
@@ -417,22 +573,12 @@ collect_services() {
 }
 
 # --- 4. concurrent harness background sessions -------------------------------
-# Role signals. Two independent tokens per verdict so no single vendor string is
-# load-bearing, and a conflict or a miss reports "unknown" rather than guessing.
-session_role() {  # <args>
-  local args=$1 session=0 spare=0
-  case "$args" in *--session-id*) session=$((session + 1)) ;; esac
-  case "$args" in *' --agent '*) session=$((session + 1)) ;; esac
-  case "$args" in *--bg-spare*) spare=$((spare + 1)) ;; esac
-  case "$args" in */spare/*) spare=$((spare + 1)) ;; esac
-  if [ "$session" -gt 0 ] && [ "$spare" -eq 0 ]; then
-    printf 'session\n'
-  elif [ "$spare" -gt 0 ] && [ "$session" -eq 0 ]; then
-    printf 'spare\n'
-  else
-    printf 'unknown\n'
-  fi
-}
+# Scope. Only harness processes descended from the harness that owns this home's
+# recorded session lock are considered, so this can never claim a neighbouring
+# firstmate installation's work. Among those, a process is a SESSION FOR THIS
+# HOME when its working directory is this home; everything else under the same
+# harness is pool machinery or another home's session, and is counted without
+# being claimed or detailed.
 
 is_harness_pid() {  # <pid>
   local pid=$1 comm args
@@ -458,25 +604,36 @@ harness_root_of() {  # <pid>
   printf '%s\n' "$outermost"
 }
 
-pid_is_descendant_of() {  # <pid> <ancestor>
-  local pid=$1 ancestor=$2 hop=0
-  while [ "$hop" -lt 32 ]; do
-    pid=$(ps_field "$pid" 1)
-    case "$pid" in ''|0|1) return 1 ;; esac
-    [ "$pid" = "$ancestor" ] && return 0
-    hop=$((hop + 1))
+# Every harness process descended from <pid>, breadth-first and depth-bounded.
+# Two levels is what a pty host plus its session needs today; the bound is
+# generous so a deeper vendor arrangement is still enumerated rather than
+# silently cut off.
+harness_descendants_of() {  # <pid>
+  local depth=0 child parent
+  local -a frontier=("$1") next=()
+  while [ "${#frontier[@]}" -gt 0 ] && [ "$depth" -lt 6 ]; do
+    next=()
+    for parent in "${frontier[@]}"; do
+      while IFS= read -r child; do
+        [ -n "$child" ] || continue
+        is_harness_pid "$child" || continue
+        printf '%s\n' "$child"
+        next+=("$child")
+      done < <(ps_children "$parent")
+    done
+    frontier=("${next[@]+"${next[@]}"}")
+    depth=$((depth + 1))
   done
-  return 1
 }
 
 HARNESS_ROOT=
 HARNESS_LOCK_PID=
 HARNESS_LOCK_OWNER=not_checked
+HARNESS_OTHER=0
 
 collect_harness_sessions() {
-  local lock_pid root child args role drives close safety cnote age
-  local candidates=0 owner_rows=0 i
-  local -a sessions=() roles=() drive_of=()
+  local lock_pid root pid cwd age close safety cnote
+  local -a candidates=() mine=()
   lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$lock_pid" in ''|*[!0-9]*) lock_pid='' ;; esac
   HARNESS_LOCK_PID=$lock_pid
@@ -486,8 +643,6 @@ collect_harness_sessions() {
     return 0
   fi
   if [ -z "$lock_pid" ]; then
-    # Normal for a home no session is currently driving, so this is a fact and
-    # not a warning; lock_owner already carries it.
     HARNESS_LOCK_OWNER=absent
     note_source harness-sessions 1 'this home records no session lock, so no harness is scoped to it'
     return 0
@@ -499,83 +654,45 @@ collect_harness_sessions() {
   fi
   root=$(harness_root_of "$lock_pid")
   HARNESS_ROOT=$root
+
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    candidates+=("$pid")
+  done < <(harness_descendants_of "$root")
+  # A harness with no descendants is itself the only thing that can be running.
+  [ "${#candidates[@]}" -gt 0 ] || candidates=("$root")
+
+  if ! read_cwds "${candidates[@]}"; then
+    HARNESS_LOCK_OWNER=not_checked
+    note_source harness-sessions 0 \
+      'cannot read process working directories here, so a live session cannot be told from an idle pool process'
+    return 0
+  fi
   note_source harness-sessions 1 ''
 
-  while IFS= read -r child; do
-    [ -n "$child" ] || continue
-    is_harness_pid "$child" || continue
-    sessions+=("$child")
-  done < <(ps_children "$root")
-  # A root with no harness children is itself the only session.
-  [ "${#sessions[@]}" -gt 0 ] || sessions=("$root")
-
-  # First pass: role, and whether this row can be attributed the recorded lock.
-  # A pooled spare is running no session at all, so it drives no home whatever
-  # the ancestry says; only a session or an unclassified row is a candidate.
-  for child in "${sessions[@]}"; do
-    args=$(ps_field "$child" 3)
-    role=$(session_role "$args")
-    roles+=("$role")
-    if [ "$role" = spare ]; then
-      drive_of+=(no)
-      continue
-    fi
-    candidates=$((candidates + 1))
-    if [ "$child" = "$lock_pid" ] || pid_is_descendant_of "$lock_pid" "$child"; then
-      drive_of+=(yes)
-      owner_rows=$((owner_rows + 1))
-    elif [ "$lock_pid" = "$root" ] || pid_is_descendant_of "$child" "$lock_pid"; then
-      # The measured failure mode: the lock names the shared harness daemon, so
-      # every session under it reads as the owner and none can be told apart.
-      drive_of+=(ambiguous)
+  for pid in "${candidates[@]}"; do
+    cwd=$(cwd_of "$pid")
+    if path_within "$cwd" "$FM_HOME"; then
+      mine+=("$pid")
     else
-      drive_of+=(no)
+      HARNESS_OTHER=$((HARNESS_OTHER + 1))
     fi
   done
 
-  if [ "$owner_rows" = 1 ]; then
-    HARNESS_LOCK_OWNER=unique
-  elif [ "$candidates" = 0 ]; then
-    HARNESS_LOCK_OWNER=none
-  elif [ "$candidates" = 1 ]; then
-    HARNESS_LOCK_OWNER=single
-  else
-    HARNESS_LOCK_OWNER=ambiguous
-  fi
-  # One live candidate under the lock-owning daemon is the session this home is
-  # driven from, even when the lock itself names the daemon. Several candidates
-  # and no attributable owner is the ambiguity worth showing on every row.
-  i=0
-  while [ "$i" -lt "${#drive_of[@]}" ]; do
-    if [ "${drive_of[$i]}" != no ]; then
-      case "$HARNESS_LOCK_OWNER" in
-        single) drive_of[i]=yes ;;
-        ambiguous) drive_of[i]=ambiguous ;;
-      esac
-    fi
-    i=$((i + 1))
-  done
+  case "${#mine[@]}" in
+    0) HARNESS_LOCK_OWNER=none ;;
+    1) HARNESS_LOCK_OWNER=single ;;
+    *) HARNESS_LOCK_OWNER=ambiguous ;;
+  esac
 
-  i=0
-  for child in "${sessions[@]}"; do
-    role=${roles[$i]}
-    drives=${drive_of[$i]}
-    i=$((i + 1))
-    age=$(ps_field "$child" 2)
-    case "$role" in
-      spare)
-        close="kill $child"
-        safety=safe
-        cnote='idle pool process; the harness starts a fresh one when it needs it'
-        ;;
-      *)
-        close="kill $child"
-        safety=confirm
-        cnote='a live session: closing it can lose an unfinished turn'
-        ;;
-    esac
-    emit_row harness-session "$child" "$role" "harness daemon $root" \
-      "drives this home: $drives" "$child" "$age" process "$close" "$safety" "$cnote"
+  for pid in "${mine[@]}"; do
+    age=$(ps_field "$pid" 2)
+    close="kill $pid"
+    safety=confirm
+    cnote='a live session: closing it can lose an unfinished turn'
+    emit_row harness-session "$pid" session "harness $root" \
+      "drives this home: $(if [ "$HARNESS_LOCK_OWNER" = ambiguous ]; then printf ambiguous; else printf yes; fi)" \
+      "$pid" "$age" process "$close" "$safety" "$cnote"
   done
 }
 
@@ -594,6 +711,7 @@ JSON=$(
     --arg harness_root "$HARNESS_ROOT" \
     --arg lock_pid "$HARNESS_LOCK_PID" \
     --arg lock_owner "$HARNESS_LOCK_OWNER" \
+    --argjson other "$HARNESS_OTHER" \
     --rawfile sources_raw "$SOURCES" \
     '
     def blank_null: if . == "" then null else . end;
@@ -611,7 +729,10 @@ JSON=$(
          close: (.[8] | blank_null),
          close_safety: (.[9] // "manual"),
          close_note: (.[10] | blank_null),
-         held: (.[11] == "1")}
+         held: (.[11] == "1"),
+         task_age_seconds: (.[12] | as_num)}
+        | .task_age_days = (if .task_age_seconds == null then null
+                            else (.task_age_seconds / 86400 | floor) end)
         | .age_days = (if .age_seconds == null then null else (.age_seconds / 86400 | floor) end)
         | .stale = (.age_days != null and .age_days >= $stale_days)
         | .notify = (.stale and .close != null and (.held | not))
@@ -645,9 +766,8 @@ JSON=$(
          root_pid: ($harness_root | as_num),
          lock_pid: ($lock_pid | as_num),
          lock_owner: $lock_owner,
-         sessions: ([$ordered[] | select(.kind == "harness-session" and .label == "session")] | length),
-         spares: ([$ordered[] | select(.kind == "harness-session" and .label == "spare")] | length),
-         unknown: ([$ordered[] | select(.kind == "harness-session" and .label == "unknown")] | length)
+         sessions: ([$ordered[] | select(.kind == "harness-session")] | length),
+         elsewhere: $other
        },
        sources: $sources}
     ' < "$ROWS"

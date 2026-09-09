@@ -1,27 +1,31 @@
 #!/usr/bin/env bash
 # tests/fm-session-inventory-live-e2e.test.sh - opt-in drift guard for the
-# session-vs-spare role verdict in bin/fm-session-inventory.sh.
+# live-session verdict in bin/fm-session-inventory.sh.
 #
-# Why this file exists: everything else about a harness background session is
+# Why this file exists: almost everything about a harness background session is
 # structural - whether a process is a verified harness is owned by
 # bin/fm-session-lock-lib.sh, and the parent/child relation is a kernel fact.
-# The one remaining judgement reads vendor-supplied argv: is this daemon child a
-# live session, or an idle pooled spare waiting to claim work? That answer comes
-# from flags the harness vendor controls and can rename in any release. Get it
-# wrong in the pooled direction and a real concurrent session is presented to
-# the captain as a harmless idle process - exactly the confusion this overview
-# exists to end. Only a real harness release can cause that regression, and no
-# stub can see it.
+# The remaining judgement is which of those processes is a live session working
+# in THIS home, and it is answered from the process working directory.
+#
+# That answer depends on one piece of real vendor behaviour: a harness pre-warms
+# pooled processes and turns one into a session by CLAIMING it, and a claimed
+# process works in the home or worktree it was claimed for. Reading argv instead
+# is what this guard used to check, and it is exactly what failed - a claimed
+# process keeps the argv it started with, so four live sessions in one home were
+# reported as zero. If a future release stops moving a claimed process into the
+# home, the overview would silently go back to reporting zero sessions while
+# several are running. Only a real harness release can cause that, and no stub
+# can see it.
 #
 # Two independent checks run here, and each fails naming the harness and its
 # version:
-#   1. Every installed harness is launched bare, as a real process, and must not
-#      be reported as an idle spare. A real session reading as pool is the
-#      dangerous direction of the error.
-#   2. If a real harness daemon is running on this machine, every harness child
-#      of it must be reported with a KNOWN role. An "unknown" there is the
-#      earliest possible warning that a vendor flag was renamed, while the
-#      inventory is still refusing to guess rather than mislabelling anything.
+#   1. Every installed harness is launched bare, as a real process, working in a
+#      scratch home. It must be reported as a live session OF THAT HOME. A real
+#      session reading as absent is the dangerous direction of the error.
+#   2. If this machine has a real home whose recorded lock names a live harness,
+#      every harness process under it must be accounted for - either as a
+#      session of that home or as belonging elsewhere - with none unexplained.
 #
 # Both checks drive the ordinary `--json` contract against a scratch home whose
 # recorded session lock names the process under test. Nothing here reads the
@@ -36,7 +40,7 @@
 set -u
 
 if [ "${FM_SESSION_ROLE_DRIFT:-0}" != 1 ]; then
-  echo "skip: set FM_SESSION_ROLE_DRIFT=1 to run the installed-harness session-role drift guard"
+  echo "skip: set FM_SESSION_ROLE_DRIFT=1 to run the installed-harness live-session drift guard"
   exit 0
 fi
 
@@ -72,8 +76,11 @@ REAL_TMUX=$(command -v tmux)
 # shellcheck disable=SC1091
 . "$ROOT/bin/fm-cursor-lib.sh"
 
-mkdir -p "$LAB/home/state" "$LAB/home/data"
-printf '## In flight\n\n## Queued\n\n## Done\n' > "$LAB/home/data/backlog.md"
+# The scratch home is what each probe harness is launched IN, because working in
+# the home is precisely the signal under test.
+HOME_DIR="$LAB/home"
+mkdir -p "$HOME_DIR/state" "$HOME_DIR/data"
+printf '## In flight\n\n## Queued\n\n## Done\n' > "$HOME_DIR/data/backlog.md"
 
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n control -c "$LAB" \
   || fail "could not start the private tmux server"
@@ -82,11 +89,11 @@ printf '## In flight\n\n## Queued\n\n## Done\n' > "$LAB/home/data/backlog.md"
 # session lock. That is the ordinary path: the inventory scopes harness sessions
 # to the harness that owns the recorded lock.
 inventory_for() {  # <pid>
-  printf '%s\n' "$1" > "$LAB/home/state/.lock"
-  FM_HOME="$LAB/home" "$INVENTORY" --json
+  printf '%s\n' "$1" > "$HOME_DIR/state/.lock"
+  FM_HOME="$HOME_DIR" "$INVENTORY" --json
 }
 
-# --- 1. a real, live harness process must never be reported as a pooled spare -
+# --- 1. a real, live harness working in a home must be reported as its session -
 
 CHECKED=0
 SKIPPED=
@@ -126,9 +133,11 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   # cursor blocks on a workspace-trust prompt in a directory it has never seen;
   # --trust is the same flag fm-spawn passes for the same reason.
   [ "$harness" = cursor ] && launch_args="--trust"
+  # The window is opened IN the scratch home: a harness working in a home is
+  # what a claimed session looks like, and what must be reported as one.
   # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
-  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB" -- "$bin_path" $launch_args \
-    || fail "$harness ($version): could not launch a window for the role probe"
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$HOME_DIR" -- "$bin_path" $launch_args \
+    || fail "$harness ($version): could not launch a window for the live-session probe"
 
   pid=
   observed=
@@ -154,19 +163,16 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
     continue
   fi
   owner=$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')
-  role=$(printf '%s' "$json" | jq -r --argjson pid "$pid" \
-    '.rows[] | select(.kind == "harness-session" and .pid == $pid) | .label')
+  sessions=$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')
 
   [ "$owner" != stale ] || fail \
     "HARNESS IDENTITY DRIFT: a live $harness $version process is not recognised as a harness at all, so the running-session overview can never scope this home. Observed argv: [$observed]. bin/fm-session-lock-lib.sh owns that identity."
-  [ -n "$role" ] || fail \
-    "$harness $version: the inventory reported no row for the live process it was pointed at (lock_owner=$owner, argv [$observed])"
-  [ "$role" != spare ] || fail \
-    "SESSION-ROLE DRIFT: a live $harness $version process is reported as an idle pooled spare. The overview would present a real concurrent session to the captain as a harmless idle process. Observed argv: [$observed]. Fix the pool tokens in session_role in bin/fm-session-inventory.sh."
+  [ "${sessions:-0}" -ge 1 ] || fail \
+    "LIVE-SESSION DRIFT: a live $harness $version process working in a home is reported as no session at all (lock_owner=$owner). The overview would tell the captain nothing is running while a real session is. This release may no longer move a claimed process into the home it was claimed for; observed argv: [$observed]. The working-directory rule in bin/fm-session-inventory.sh is what needs revisiting."
 
-  note "$harness $version: role='$role' argv=[$observed]"
+  note "$harness $version: sessions=$sessions lock_owner=$owner argv=[$observed]"
   "$REAL_TMUX" -L "$SOCKET" kill-window -t "$SESSION:$harness" >/dev/null 2>&1 || true
-  pass "session role: a live $harness $version process is not reported as a pooled spare"
+  pass "live session: a working $harness $version process is reported as this home's session"
   CHECKED=$((CHECKED + 1))
 done
 
@@ -177,7 +183,7 @@ if [ -n "$SKIPPED" ]; then
   note "unverified on this machine (not installed):$SKIPPED"
 fi
 
-# --- 2. every child of THIS HOME's lock-owning harness must have a known role -
+# --- 2. every harness process under a real home's lock must be accounted for --
 
 # Scoped exactly as production is scoped. bin/fm-session-inventory.sh only ever
 # enumerates the harness that owns a home's recorded session lock, so a
@@ -203,20 +209,21 @@ else
       json=$(inventory_for "$lock_pid") || fail "the inventory command failed for lock pid $lock_pid"
       owner=$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')
       root=$(printf '%s' "$json" | jq -r '.harness_sessions.root_pid // "none"')
-      count=$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")] | length')
+      sessions=$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')
+      elsewhere=$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')
+      rows=$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")] | length')
       if [ "$owner" = stale ] || [ "$owner" = absent ]; then
         note "the session lock in $ROLE_HOME names no live harness right now, so the lock-owner half of this guard checked nothing"
-      elif [ "${count:-0}" -eq 0 ]; then
-        note "harness $root has no background sessions right now, so the lock-owner half of this guard checked nothing"
+      elif [ "$owner" = not_checked ]; then
+        fail "LIVE-SESSION DRIFT: the working directory of the processes under harness $root could not be read here, so a live session cannot be told from an idle pool process at all. That is the one input the verdict rests on."
       else
-        unknown=$(printf '%s' "$json" | jq -r \
-          '[.rows[] | select(.kind == "harness-session" and .label == "unknown") | "\(.pid)"] | join(" ")')
-        if [ -n "$unknown" ]; then
-          argv=$(ps -o args= -p "${unknown%% *}" 2>/dev/null || true)
-          fail "SESSION-ROLE DRIFT: background session(s) $unknown under harness $root match neither the session nor the pool tokens, so the overview cannot tell the captain whether they are real concurrent sessions. Observed argv: [$argv]. Teach session_role in bin/fm-session-inventory.sh the tokens this release actually uses."
-        fi
-        note "harness $root: $(printf '%s' "$json" | jq -r '"\(.harness_sessions.sessions) session(s), \(.harness_sessions.spares) spare(s), lock_owner=\(.harness_sessions.lock_owner)"')"
-        pass "session role: all $count background session(s) under this home lock-owning harness are reported with a known role"
+        # Every listed row must be a session of this home, and the counted total
+        # must match: a process that is neither claimed nor counted is one the
+        # overview has quietly lost.
+        [ "$rows" = "$sessions" ] || fail \
+          "LIVE-SESSION DRIFT: harness $root reports $sessions session(s) but lists $rows row(s); the overview is counting and showing different things."
+        note "harness $root: $sessions session(s) in this home, $elsewhere elsewhere, lock_owner=$owner"
+        pass "live session: every harness process under this home lock-owning harness is accounted for"
       fi
       ;;
   esac

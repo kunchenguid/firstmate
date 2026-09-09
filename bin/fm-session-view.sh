@@ -143,9 +143,11 @@ render_once() {
       else "\((($secs // 0) / 60) | floor)m" end;
     def age_text: age_of(.age_seconds; .age_days);
     def what:
-      if .kind == "harness-session" then "\(.id) \(if .label == "spare" then "idle spare" elif .label == "session" then "live session" else "unclassified" end)"
+      if .kind == "harness-session" then "\(.id) live session"
       elif .kind == "worker" then "\(.id) (\(.label // "task")\(if .held then ", held" else "" end))"
       else (.label // .id) end;
+    def task_age_text:
+      if .task_age_days == null then "" else "\(.task_age_days)d" end;
     def kind_text:
       if .kind == "harness-session" then "harness"
       elif .kind == "review" then "review"
@@ -153,26 +155,25 @@ render_once() {
 
     ($width) as $w
     | (if $w < 60 then 1 else 0 end) as $narrow
-    # Idle pool processes are not sessions and there can be many of them, so the
-    # quiet ones collapse into one line. Every one that is old enough to act on
-    # still gets its own row, and --stale-only and --json keep them all.
-    | ([.rows[] | select(.kind == "harness-session" and .label == "spare" and (.stale | not))]) as $idle
-    | ([.rows[] | select($stale_only == 0 or .stale)
-        | select(.kind != "harness-session" or .label != "spare" or .stale)]) as $shown
+    | ([.rows[] | select($stale_only == 0 or .stale)]) as $shown
     | ([.rows[] | select(.notify) | select($stale_only == 0 or .stale)]) as $closeable
     | 7 as $kindw
-    | ([($w - 7 - 12 - 12), 34] | min) as $whatw
-    | (if $narrow == 1 then 0 else ([($w - $kindw - $whatw - 12), 12] | max) end) as $belongw
+    # AGE is what the "!" marks: running time for a worker with a live process,
+    # and the age of the work itself for one with none. TASK is how long the
+    # work has existed, and is shown only when there is room for it.
+    | (if $w < 78 then 0 else 6 end) as $taskw
+    | ([($w - 7 - 12 - 12 - $taskw), 34] | min) as $whatw
+    | (if $narrow == 1 then 0 else ([($w - $kindw - $whatw - $taskw - 12), 12] | max) end) as $belongw
     | bold("Sessions - \(.fm_home)"),
       dim("\(.generated) - \(.counts.total) running, \(.counts.stale) over \(.stale_after_days) days"
           + (if $watching == 1 then " - redraw every \($interval)s" else "" end)),
       (.harness_sessions as $h
        | if $h.lock_owner == "ambiguous" then
-           warn("! \($h.sessions + $h.unknown) background sessions share harness daemon \($h.root_pid) and none can be told apart as the driver of this home")
+           warn("! \($h.sessions) background sessions are working in this home at once, under worker runtime \($h.root_pid)")
          elif $h.lock_owner == "stale" then
            warn("! the recorded session lock (\($h.lock_pid)) is no longer a live harness process")
          elif $h.lock_owner == "none" then
-           dim("no live background session under harness daemon \($h.root_pid)")
+           dim("no background session is working in this home")
          elif $h.lock_owner == "absent" then
            dim("no session is currently driving this home")
          elif $h.lock_owner == "single" or $h.lock_owner == "unique" then
@@ -188,19 +189,19 @@ render_once() {
        else
          bold("  " + pad("KIND"; $kindw) + " " + pad("WHAT"; $whatw)
               + (if $narrow == 1 then "" else " " + pad("BELONGS TO"; $belongw) end)
-              + "  AGE"),
+              + "  " + pad("AGE"; 8)
+              + (if $taskw == 0 then "" else pad("TASK"; $taskw) end)),
          ($shown[] |
            (if .stale then warn("!") else " " end) + " "
            + pad(kind_text; $kindw) + " " + pad(clip(what; $whatw); $whatw)
            + (if $narrow == 1 then "" else " " + pad(clip_tail(.belongs_to; $belongw); $belongw) end)
-           + "  " + age_text)
+           + "  " + pad(age_text; 8)
+           + (if $taskw == 0 then "" else pad(task_age_text; $taskw) end))
        end),
-      (if ($idle | length) == 0 or $stale_only == 1 then empty else
-         dim("  " + pad("harness"; $kindw) + " "
-             + pad(clip("+\($idle | length) idle spares (pool, not sessions)"; $whatw); $whatw)
-             + (if $narrow == 1 then "" else " " + pad(""; $belongw) end)
-             + "  " + age_of(([$idle[].age_seconds] | max); ([$idle[].age_days] | max)))
-       end),
+      (.harness_sessions as $h
+       | if ($h.elsewhere // 0) == 0 or $stale_only == 1 then empty
+         else dim("  \($h.elsewhere) other process(es) under the same worker runtime belong to the pool or to other homes")
+         end),
       (if ($closeable | length) == 0 then empty else
          "",
          bold("To close"),

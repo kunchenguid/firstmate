@@ -262,6 +262,8 @@ It renders `bin/fm-session-inventory.sh --json`, which is the structured owner o
 Close commands are printed for you to run, and a row that could lose work in progress says so on the line below its command.
 
 Anything at or over the stale threshold is marked with a leading `!`.
+The age it is measured against is how long a worker has been RUNNING whenever a live process is working in its own local copy, and the age of the work itself when nothing is running, so abandoned work still holding a local copy is surfaced rather than hidden.
+A worker's task age is also shown in its own column when the pane is wide enough.
 `FM_SESSION_STALE_DAYS` sets that threshold and defaults to 3 days.
 The same threshold drives the unasked `SESSIONS_STALE:` lines a session start prints through [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh); set `FM_BOOTSTRAP_STALE_SESSIONS=0` to opt a home out of those lines.
 
@@ -276,6 +278,8 @@ In WezTerm, one line opens that pane beside the current one and keeps it there:
 ```sh
 wezterm cli split-pane --right --percent 35 --cwd /path/to/firstmate -- bash -lc 'exec bin/fm-session-view.sh --watch'
 ```
+
+A background session is recognised as this home's by the directory it is working in, not by the arguments it was started with, because a harness keeps its pooled start-up arguments after being claimed for real work; [`docs/verification/running-session-overview.md`](verification/running-session-overview.md) records that measurement and the guard that refreshes it.
 
 `--interval` sets the redraw cadence; it defaults to 60 seconds and refuses anything under 15, because a faster redraw would poll harder than supervision itself for a display that changes on the scale of minutes.
 The view stays readable without colour and in a narrow pane: `--color never` disables colour (so does `NO_COLOR`), the "belongs to" column is dropped below 60 columns, and close commands are always printed unabridged so they stay pasteable.
