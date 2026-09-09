@@ -199,6 +199,7 @@ test_unenterable_worktree_top_is_named() {
   mkdir -p "$dir/project"
   # git reports a toplevel that is not there by the time it is entered: the
   # shape a checkout removed underneath a running spawn produces.
+  # shellcheck disable=SC2016 # Expand shim variables at runtime; interpolate only dir here.
   shim=$(git_shim "$dir/shim" '
 for a in "$@"; do
   [ "$a" = "--show-toplevel" ] && { echo "'"$dir"'/vanished"; exit 0; }
@@ -215,6 +216,7 @@ test_unhashable_identity_is_named() {
   local dir out shim
   dir=$(make_case identity-hash)
   mkdir -p "$dir/project"
+  # shellcheck disable=SC2016 # Expand variables when the generated shim runs.
   shim=$(git_shim "$dir/shim" '
 for a in "$@"; do
   [ "$a" = "get-url" ] && { echo "https://example.invalid/x.git"; exit 0; }
