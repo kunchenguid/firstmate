@@ -1252,7 +1252,7 @@ fm_treehouse_project_lock_path() {  # <project-dir>
     identity=$resolved
   fi
   hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || {
-    _fm_treehouse_lock_named "cannot hash the project lock identity, so git is unusable here" "$identity"
+    _fm_treehouse_lock_named "cannot hash the project lock identity, so git is unusable here" "$project"
     return 1
   }
   [ -d "$root/state" ] || {

@@ -212,23 +212,32 @@ done')
   pass "an unenterable worktree top is named in the refusal"
 }
 
-test_unhashable_identity_is_named() {
-  local dir out shim
+test_hash_failure_names_project_without_exposing_origin() {
+  local dir out shim origin
   dir=$(make_case identity-hash)
-  mkdir -p "$dir/project"
-  # shellcheck disable=SC2016 # Expand variables when the generated shim runs.
+  fm_git_init_commit "$dir/project"
+  origin='https://fixture-user:fixture-token@example.invalid/x.git'
+  git -C "$dir/project" remote add origin "$origin"
+  # Capture the hash command's stdin to prove the refusal reaches the original
+  # identity, while the operator's diagnostic must not disclose its credentials.
+  # shellcheck disable=SC2016 # Expand shim variables at runtime; interpolate only dir here.
   shim=$(git_shim "$dir/shim" '
-for a in "$@"; do
-  [ "$a" = "get-url" ] && { echo "https://example.invalid/x.git"; exit 0; }
-  [ "$a" = "hash-object" ] && exit 1
-done')
+if [ "$1" = hash-object ]; then
+  cat > "'"$dir"'/hash-input"
+  exit 1
+fi')
   out=$(resolve_lock "$dir/home" "$dir/elsewhere" "$dir/project" "$shim")
   expect_code 1 "$?" "an unusable git should still refuse"
+  [ "$(cat "$dir/hash-input")" = "$origin" ] || \
+    fail "the failing hash command did not receive the original project identity"
   assert_contains "$out" "cannot hash the project lock identity" \
     "the refusal did not say the project identity could not be hashed"
-  assert_contains "$out" "https://example.invalid/x.git" \
-    "the refusal did not name the identity it failed to hash"
-  pass "an identity that cannot be hashed is named in the refusal"
+  assert_not_contains "$out" "fixture-user" "the hash refusal exposed the origin username"
+  assert_not_contains "$out" "fixture-token" "the hash refusal exposed the origin token"
+  assert_not_contains "$out" "$origin" "the hash refusal exposed the raw origin"
+  assert_contains "$out" "$dir/project" \
+    "the hash refusal did not name the affected project directory"
+  pass "a hash failure names the project without exposing origin credentials"
 }
 
 test_missing_root_state_directory_is_named() {
@@ -270,7 +279,8 @@ test_spawn_refusal_carries_the_named_cause() {
   local dir home fakebin out status
   dir=$(make_case spawn-e2e)
   home="$dir/spawn-home"
-  fm_test_spawn_home "$home"
+  # CI has no agent to detect; pin the fixture harness before the lock guard.
+  fm_test_spawn_home "$home" claude
   fm_test_spawn_brief "$home" lock-naming-e2e
   fm_git_init_commit "$dir/project"
   fakebin=$(make_spawn_fakebin "$dir" orca)
@@ -301,7 +311,7 @@ test_unenterable_absolute_origin_is_named
 test_unenterable_relative_origin_is_named
 test_originless_non_git_project_is_named
 test_unenterable_worktree_top_is_named
-test_unhashable_identity_is_named
+test_hash_failure_names_project_without_exposing_origin
 test_missing_root_state_directory_is_named
 test_resolved_lock_path_stays_silent
 test_spawn_refusal_carries_the_named_cause
