@@ -1552,6 +1552,11 @@ SH
   wait_for "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
     || fail "the post-TERM reuse fixture did not claim its source"
   POST_TERM_RUNNER=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim")
+  # The child can publish its PID before startup releases the source lock.
+  # Cross that boundary before suspending the runner, or retirement waits on
+  # a stopped lock owner instead of exercising the signal checks below.
+  FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" pe "$HPOST_TERM" list >/dev/null \
+    || fail "the post-TERM fixture never finished its source launch"
   kill -STOP "$POST_TERM_RUNNER" || fail "the post-TERM fixture could not keep its leader alive"
   cat > "$POST_TERM_BIN/ps" <<SH
 #!/usr/bin/env bash
