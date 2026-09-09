@@ -174,6 +174,12 @@ case "${1:-}" in
     done
     [ "$_print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
+  list-panes)
+    # target_exists's presence probe (was a display-message pane read); gated by
+    # the same FM_FAKE_TMUX_PANE_ALIVE flag so a "dead" pane fails the check.
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+    printf 'fakepane\n'
+    exit 0 ;;
   list-windows)
     [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
     exit 0 ;;
@@ -262,6 +268,7 @@ case "${1:-}" in
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
+  list-panes) printf 'fakepane\n'; exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
   list-windows) exit 0 ;;
   send-keys)

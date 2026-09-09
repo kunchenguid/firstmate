@@ -203,6 +203,13 @@ fm_backend_orca_capture() {  # <terminal-id> <lines>
   fm_backend_orca_json_text "$out"
 }
 
+# fm_backend_orca_target_exists: the Orca half of fm_backend_target_exists's
+# cheap READ-ONLY presence probe. A one-line capture of the recorded terminal:
+# an unreadable terminal fails, which IS "does not exist" for this purpose.
+fm_backend_orca_target_exists() {  # <target> [expected-label]
+  fm_backend_orca_capture "$1" 1 >/dev/null 2>&1
+}
+
 fm_backend_orca_json_text() {  # <json>
   printf '%s' "$1" | node -e '
 const fs = require("fs");

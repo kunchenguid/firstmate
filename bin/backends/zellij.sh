@@ -373,6 +373,14 @@ fm_backend_zellij_parse_target() {  # <target>
 # fm_backend_zellij_target_ready: parse the target and verify its session and
 # pane are alive. When the caller knows the owning firstmate task label, verify
 # the pane belongs to that named tab before trusting the numeric pane id.
+# fm_backend_zellij_target_exists: the zellij half of fm_backend_target_exists's
+# cheap READ-ONLY presence probe. Zellij never auto-starts a session on a plain
+# readiness read, so target_ready already IS the passive existence check; this
+# thin alias keeps the dispatcher uniform.
+fm_backend_zellij_target_exists() {  # <target> [expected-label]
+  fm_backend_zellij_target_ready "$@"
+}
+
 fm_backend_zellij_target_ready() {  # <target> [expected-label]
   local expected_label=${2:-} tab_id
   fm_backend_zellij_parse_target "$1" || return 1
