@@ -50,18 +50,23 @@
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          NEEDS_GH_AUTH means GitHub was reached and the credential is the
-#          established problem: it answered and gh still refused it, or no
-#          credential is configured at all. The operator action is
-#          `gh auth login`.
-#          GH_AUTH_UNKNOWN means the probe established NOTHING - it timed out,
-#          could not reach GitHub, or gh is not installed - so the credential is
-#          neither confirmed nor rejected. The operator action is to check the
-#          network and retry, never to re-authenticate a credential nothing
-#          rejected. `gh auth status` cannot make this distinction itself: it
-#          exits non-zero and reports the token invalid when its own API call
-#          could not complete, and it carries no timeout, so the probe is
-#          hard-bounded here and a failure is disambiguated by whether an HTTP
-#          exchange with GitHub completed. Silence still means confirmed healthy.
+#          established problem: it answered 401 or 403 for the active
+#          credential, or no credential is configured at all. The operator
+#          action is `gh auth login`.
+#          GH_AUTH_UNKNOWN means the probe did not establish that - it timed
+#          out, could not reach GitHub, gh is not installed, or github.com
+#          accepted the active credential while `gh auth status` failed for
+#          another configured host or account (the line names which) - so the
+#          active credential is neither confirmed nor rejected. The operator
+#          action is to check the network or the named host and retry, never
+#          to re-authenticate a credential nothing rejected. `gh auth status`
+#          cannot make this distinction itself: it exits non-zero and reports
+#          the token invalid when its own API call could not complete, it exits
+#          non-zero when ANY configured host or account fails rather than only
+#          the active one, and it carries no timeout, so the probe is
+#          hard-bounded here and a failure is disambiguated by the status code
+#          of an HTTP exchange with github.com. Silence still means confirmed
+#          healthy.
 #          docs/verification/github-auth-probe.md records the dated gh-version
 #          evidence those two classifications rest on.
 #          FM_GH_AUTH_TIMEOUT bounds the `gh auth status` probe when it is a
@@ -1553,36 +1558,55 @@ detect_home_summary_publication() {
 #
 # So bound the probe, and disambiguate a failure with one follow-up that asks a
 # protocol question instead of re-reading gh's prose: did an HTTP exchange with
-# GitHub complete at all? `gh api / -i` prints the response status line when it
-# did. Two independent signals carry the re-authenticate verdict, so no single
-# vendor string is load-bearing:
-#   - an RFC 9112 status line, meaning GitHub answered and gh still refused the
-#     credential; or
+# github.com complete, and with what status? `gh api / -i` prints the response
+# status line when it did. Two independent signals carry the re-authenticate
+# verdict, so no single vendor string is load-bearing:
+#   - an RFC 9112 status line carrying 401 or 403, meaning GitHub answered and
+#     refused the active credential; or
 #   - gh's own instruction to run `gh auth login`, meaning no credential exists
 #     to validate.
+# A 2xx status line after a failed `gh auth status` means the opposite: GitHub
+# accepted the active credential, and gh's exit status came from another
+# configured host or account, because it exits non-zero when ANY of them fails.
+# That is reported as GH_AUTH_UNKNOWN naming the failing entry, never as a
+# re-authenticate verdict for a credential GitHub just accepted.
 # docs/verification/github-auth-probe.md records the dated per-gh-version
 # evidence for every claim above; re-run it after a gh major upgrade.
-# Neither present means the probe established nothing. That is reported as
-# GH_AUTH_UNKNOWN and never as health, because "wait or check your network" and
-# "run gh auth login" are different operator actions and a check that guesses
-# between them is the defect being fixed here.
+# Neither signal present means the probe established nothing. That is reported
+# as GH_AUTH_UNKNOWN and never as health, because "wait or check your network"
+# and "run gh auth login" are different operator actions and a check that
+# guesses between them is the defect being fixed here.
 GH_AUTH_TIMEOUT_DEFAULT=20
 GH_AUTH_REACH_TIMEOUT=10
 
 gh_auth_bound() {
   local bound=${FM_GH_AUTH_TIMEOUT:-$GH_AUTH_TIMEOUT_DEFAULT}
-  # Zero is rejected with the malformed values: `timeout 0` and the perl
-  # fallback's `alarm 0` both mean "no deadline", which is the stall this exists
-  # to prevent.
-  case "$bound" in ''|*[!0-9]*|0) bound=$GH_AUTH_TIMEOUT_DEFAULT ;; esac
+  # Zero in any spelling is rejected with the malformed values: `timeout 0` and
+  # the perl fallback's `alarm 0` both mean "no deadline", which is the stall
+  # this exists to prevent.
+  case "$bound" in ''|*[!0-9]*) bound=$GH_AUTH_TIMEOUT_DEFAULT ;; esac
+  [ "$bound" -gt 0 ] 2>/dev/null || bound=$GH_AUTH_TIMEOUT_DEFAULT
   printf '%s\n' "$bound"
+}
+
+# One line of `gh auth status` output naming the host or account it failed on,
+# for the GH_AUTH_UNKNOWN detail. gh prints no token here without --show-token,
+# and anything token-shaped is redacted regardless.
+gh_auth_status_excerpt() {  # <gh auth status output>
+  local line
+  line=$(printf '%s\n' "$1" | LC_ALL=C grep -m1 -E '^[[:space:]]*X ' || true)
+  [ -n "$line" ] \
+    || line=$(printf '%s\n' "$1" | LC_ALL=C grep -m1 -v -E '^[[:space:]]*$' || true)
+  line=$(printf '%s\n' "$line" \
+    | LC_ALL=C sed -E 's/^[[:space:]]+//; s/(gh[a-z]_|github_pat_)[A-Za-z0-9_]+/<redacted>/g')
+  printf '%s\n' "${line:0:160}"
 }
 
 # Prints nothing when GitHub confirms the credential, NEEDS_GH_AUTH when the
 # credential is the established problem, and GH_AUTH_UNKNOWN when the probe
 # could not establish either.
 gh_auth_probe() {
-  local bound rc reach
+  local bound rc status_out reach status_line status_code detail
   if ! command -v gh >/dev/null 2>&1; then
     # detect_local_tools owns the actionable MISSING: gh line. This one says
     # only that the credential itself is unconfirmed, so a `only` phase that
@@ -1591,7 +1615,7 @@ gh_auth_probe() {
     return 0
   fi
   bound=$(gh_auth_bound)
-  fm_run_timed "$bound" gh auth status >/dev/null 2>&1 </dev/null
+  status_out=$(fm_run_timed "$bound" gh auth status 2>&1 </dev/null)
   rc=$?
   [ "$rc" -eq 0 ] && return 0
   if [ "$rc" -eq 124 ]; then
@@ -1599,10 +1623,26 @@ gh_auth_probe() {
     return 0
   fi
   reach=$(fm_run_timed "$GH_AUTH_REACH_TIMEOUT" gh api / -i 2>&1 </dev/null)
-  if printf '%s\n' "$reach" | LC_ALL=C grep -q '^HTTP/[0-9]'; then
-    echo "NEEDS_GH_AUTH"
-    return 0
-  fi
+  status_line=$(printf '%s\n' "$reach" | LC_ALL=C grep -m1 '^HTTP/[0-9]' || true)
+  status_code=${status_line#* }
+  status_code=${status_code%% *}
+  status_code=${status_code%$'\r'}
+  detail=$(gh_auth_status_excerpt "$status_out")
+  [ -z "$detail" ] || detail=" ($detail)"
+  case "$status_code" in
+    401|403)
+      echo "NEEDS_GH_AUTH"
+      return 0
+      ;;
+    2[0-9][0-9])
+      echo "GH_AUTH_UNKNOWN: github.com accepted the credential but gh auth status failed for another host or account${detail}"
+      return 0
+      ;;
+    ?*)
+      echo "GH_AUTH_UNKNOWN: github.com answered ${status_code} without confirming or rejecting the credential${detail}"
+      return 0
+      ;;
+  esac
   case "$reach" in
     *"gh auth login"*) echo "NEEDS_GH_AUTH"; return 0 ;;
   esac

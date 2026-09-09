@@ -1166,7 +1166,7 @@ ROWS
 # reproduces gh 2.96.0's observed behavior in that condition.
 # Writes a fake gh reproducing gh 2.96.0's observed behavior in one condition.
 # The real gh needs credentials and a network CI does not have.
-write_fake_gh() {  # <fakebin> <healthy|rejected|unreachable|no-credential|hang>
+write_fake_gh() {  # <fakebin> <healthy|rejected|other-host-failed|unreachable|no-credential|hang>
   local fakebin=$1 mode=$2
   case "$mode" in
     healthy)
@@ -1186,6 +1186,30 @@ if [ "${1:-}" = api ]; then
 fi
 printf '%s\n' '  X Failed to log in to github.com account octocat (keyring)' >&2
 printf '%s\n' '  - The token in keyring is invalid.' >&2
+exit 1
+SH
+      ;;
+    # github.com is healthy but hosts.yml also carries a host whose token fails:
+    # `auth status` exits 1 for ANY failing host or account, while `api` on
+    # github.com still completes with 200 because the active credential is
+    # fine. The token line is deliberately unmasked so the probe's output can
+    # be checked for never repeating it.
+    other-host-failed)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'HTTP/2.0 200 OK' 'X-Ratelimit-Limit: 5000' '' '{"current_user_url":"https://api.github.com/user"}'
+  exit 0
+fi
+printf '%s\n' 'github.com' \
+  '  ✓ Logged in to github.com account octocat (keyring)' \
+  '  - Active account: true' \
+  '  - Token: gho_fakefakefakefakefakefakefakefakefake' \
+  '' \
+  'ghe.example.com' \
+  '  X Failed to log in to ghe.example.com account someone (hosts.yml)' \
+  '  - Active account: true' \
+  '  - The token in hosts.yml is invalid.' >&2
 exit 1
 SH
       ;;
@@ -1258,9 +1282,23 @@ test_gh_auth_probe_separates_rejection_from_an_unreachable_check() {
 
   out=$(gh_auth_probe_case "$dir/rejected" rejected)
   assert_contains "$out" "NEEDS_GH_AUTH" \
-    "GitHub answered and refused the credential, which is the one case that needs gh auth login"
+    "GitHub answered 401 for the credential, which is the one case that needs gh auth login"
   assert_not_contains "$out" "GH_AUTH_UNKNOWN" \
     "a credential GitHub actually rejected is established, not unknown"
+
+  # The other half of the false alarm: `gh auth status` exits 1 when ANY
+  # configured host or account fails, so a stale second host in hosts.yml used
+  # to send the operator to re-authenticate a github.com credential that
+  # GitHub had just answered 200 to.
+  out=$(gh_auth_probe_case "$dir/other-host" other-host-failed)
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "a credential github.com accepted with 200 must never be reported as needing gh auth login"
+  assert_contains "$out" "GH_AUTH_UNKNOWN" \
+    "a failed gh auth status against an accepted credential is unconfirmed, not silence"
+  assert_contains "$out" "ghe.example.com" \
+    "the unknown line must name the host gh auth status actually failed on"
+  assert_not_contains "$out" "gho_fake" \
+    "the excerpt must never repeat a token from gh auth status output"
 
   # The regression itself: this used to print NEEDS_GH_AUTH and send the
   # operator to re-authenticate a credential nothing had rejected.
@@ -1282,7 +1320,7 @@ test_gh_auth_probe_separates_rejection_from_an_unreachable_check() {
 }
 
 test_gh_auth_probe_cannot_stall_the_startup_stage() {
-  local dir="$TMP_ROOT/gh-auth-stall" out started elapsed
+  local dir="$TMP_ROOT/gh-auth-stall" out started elapsed zero_pid zeros_pid
 
   started=$(date +%s)
   out=$(gh_auth_probe_case "$dir/bounded" hang FM_GH_AUTH_TIMEOUT=2)
@@ -1296,14 +1334,28 @@ test_gh_auth_probe_cannot_stall_the_startup_stage() {
 
   # A non-positive bound is not a bound: `timeout 0` and `alarm 0` both disable
   # the deadline, so a malformed override must fall back to the default rather
-  # than silently restoring the unbounded stall.
+  # than silently restoring the unbounded stall. `00` is zero too, in every
+  # mechanism's parser, so it must not slip past a textual check. Both cases
+  # wait out the default bound, so they run side by side.
+  mkdir -p "$dir"
   started=$(date +%s)
-  out=$(gh_auth_probe_case "$dir/zero" hang FM_GH_AUTH_TIMEOUT=0)
+  gh_auth_probe_case "$dir/zero" hang FM_GH_AUTH_TIMEOUT=0 > "$dir/zero.out" 2>&1 &
+  zero_pid=$!
+  gh_auth_probe_case "$dir/zeros" hang FM_GH_AUTH_TIMEOUT=00 > "$dir/zeros.out" 2>&1 &
+  zeros_pid=$!
+  wait "$zero_pid" || true
+  wait "$zeros_pid" || true
   elapsed=$(( $(date +%s) - started ))
+  out=$(cat "$dir/zero.out")
   assert_contains "$out" "GH_AUTH_UNKNOWN" \
     "a zero bound must still be bounded by the default, not disabled"
+  out=$(cat "$dir/zeros.out")
+  assert_contains "$out" "GH_AUTH_UNKNOWN" \
+    "a bound spelled 00 must still be bounded by the default, not disabled"
+  assert_contains "$out" "within 20s" \
+    "a bound spelled 00 must fall back to the 20s default, not run as written"
   [ "$elapsed" -lt 110 ] \
-    || fail "a zero bound disabled the deadline; the probe ran ${elapsed}s"
+    || fail "a zero bound disabled the deadline; the probes ran ${elapsed}s"
 
   pass "bootstrap's GitHub auth probe is bounded and a malformed bound cannot disable it"
 }

@@ -48,6 +48,33 @@ $ echo $?
 ```
 
 So the exit status is not a verdict, and neither is the rendered "invalid" text.
+
+## `gh auth status` fails for any configured host, not only the active credential
+
+Verified 2026-09-09 against `gh version 2.96.0 (2026-07-02)` on darwin 27.0.0.
+The github.com credential is the same healthy keyring token as above; `hosts.yml` additionally lists a second host whose token is invalid.
+
+```
+$ GH_CONFIG_DIR=<two-host config> gh auth status
+github.com
+  ✓ Logged in to github.com account <user> (keyring)
+  - Active account: true
+
+ghe.invalid
+  X Failed to log in to ghe.invalid account someone (<config>/hosts.yml)
+  - Active account: true
+  - The token in <config>/hosts.yml is invalid.
+$ echo $?
+1
+$ GH_CONFIG_DIR=<two-host config> gh api / -i
+HTTP/2.0 200 OK
+$ echo $?
+0
+```
+
+So a stale or unreachable second host makes `gh auth status` exit 1 every session while github.com keeps accepting the active credential.
+A probe that treats any completed exchange as a rejection turns that into a `NEEDS_GH_AUTH` for a credential GitHub just answered 200 to, which is the same false alarm by a different route.
+This is why the probe discriminates on the status code rather than on the presence of a status line.
 `--json hosts` carries the underlying cause but only inside a raw Go error string (`non-200 OK status code: 401 Unauthorized ...` versus `dial tcp ...: connect: connection refused`), and it always exits 0, so it moves the same prose dependency rather than removing it.
 
 ## `gh auth status` carries no timeout of its own
@@ -65,7 +92,7 @@ Elapsed 60281ms, meaning the 60s caller bound fired.
 An unroutable address fails faster (~7s on this host, because the connect fails rather than stalling), so a short local experiment does not establish a bound and none should be inferred from one.
 This is why `FM_GH_AUTH_TIMEOUT` is applied through `bin/fm-timeout-lib.sh` rather than relying on the enclosing stage budget.
 
-## An HTTP status line is the discriminator, with a second independent signal
+## The HTTP status code is the discriminator, with a second independent signal
 
 Verified 2026-09-03, gh 2.96.0.
 `gh api / -i` prints the response status line exactly when an HTTP exchange with GitHub completed, whatever the credential verdict:
@@ -78,6 +105,9 @@ Get "https://api.github.com/": proxyconnect tcp: dial tcp 192.0.2.1:9: connect: 
 ```
 
 The status line is an RFC 9112 construct rather than a gh string, so it is the primary signal.
+Only a 401 or 403 in it means GitHub refused the active credential.
+A 2xx after a failed `gh auth status` means GitHub accepted the active credential and the failure belongs to another configured host or account, per the section above, so the probe reports it as `GH_AUTH_UNKNOWN` naming that entry rather than as a rejection.
+Any other status is likewise unknown, because it neither confirmed nor refused the credential.
 It is not sufficient alone: with no credential configured, gh attempts no request and prints no status line, yet this case does need `gh auth login`.
 
 ```
@@ -87,6 +117,7 @@ To get started with GitHub CLI, please run:  gh auth login
 
 That instruction is the second, independent signal, and either one carries the re-authenticate verdict.
 The unreachable output above contains neither, which is what keeps the two apart.
+The `GH_AUTH_UNKNOWN` detail for a failed-elsewhere credential is the first `X` line of the `gh auth status` output with anything token-shaped redacted; the plain output carries no token without `--show-token`, so the redaction is a guard rather than a dependency.
 
 `gh auth token` is NOT usable as a credential-presence probe: with `GH_CONFIG_DIR` pointing at an empty directory it still exits 0 and prints the keyring token, because the keyring is not scoped by the config directory.
 
@@ -100,9 +131,10 @@ The credential was healthy and untouched throughout; only reachability changed.
 | --- | --- | --- |
 | network reachable | 1032ms | nothing - sign-in confirmed |
 | API unreachable | 15190ms | `GH_AUTH_UNKNOWN: could not reach GitHub to confirm the credential` |
+| second host in `hosts.yml` fails, github.com healthy (2026-09-09) | 1067ms | `GH_AUTH_UNKNOWN: github.com accepted the credential but gh auth status failed for another host or account (X Failed to log in to ghe.invalid account someone (<config>/hosts.yml))` |
 
-Before this probe existed, the second row printed `NEEDS_GH_AUTH`, which is the
-false alarm that made the check untrustworthy.
+Before this probe existed, the second row printed `NEEDS_GH_AUTH`, which is the false alarm that made the check untrustworthy.
+The third row printed `NEEDS_GH_AUTH` under the probe's first revision, which keyed on the presence of a status line rather than its code.
 
 ## What re-verifies this
 

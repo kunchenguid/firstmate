@@ -24,10 +24,11 @@ When any diagnostic needs captain attention, report the plain consequence and re
   For `quota-axi`, bootstrap requires it because firstmate reads its current output directly before resolving every crew-dispatch profile array; without it, report the missing requirement and do not choose around an unexamined candidate.
 - `MISSING_MANUAL: <tool> (instructions: <url>)` - tell the captain why the tool is required and give them the printed instructions URL, but do not pass the tool to `bin/fm-bootstrap.sh install`; wait for the captain to complete the manual installation, then rerun session start to confirm the dependency is present.
 - `BACKEND_INVALID: <name> (known: <names>)` - the resolved runtime backend has no verified dependency or lifecycle contract, so do not dispatch work until the invalid `FM_BACKEND` or `config/backend` value is corrected to one of the listed backends.
-- `NEEDS_GH_AUTH` - GitHub was reached and the credential is the established problem, so ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
-  The probe now confirms an HTTP exchange with GitHub completed before printing this, so it no longer fires for an unreachable network; take it at face value and do not re-derive reachability yourself.
-- `GH_AUTH_UNKNOWN: <what could not be established>` - the credential is neither confirmed nor rejected, because the probe timed out, could not reach GitHub, or found no `gh` installed.
+- `NEEDS_GH_AUTH` - GitHub answered 401 or 403 for the active credential, or no credential is configured at all, so ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
+  The probe now requires that status code from github.com before printing this, so it no longer fires for an unreachable network or for a failure on some other configured host; take it at face value and do not re-derive reachability yourself.
+- `GH_AUTH_UNKNOWN: <what could not be established>` - the active credential is neither confirmed nor rejected, because the probe timed out, could not reach GitHub, found no `gh` installed, or github.com accepted the credential while `gh auth status` failed for another configured host or account.
   Do not ask the captain to re-authenticate: nothing rejected the credential, and a sign-in that is actually fine is the common case here.
+  When the line names another host or account, that is a stale or unreachable `hosts.yml` entry for the captain to fix or `gh auth logout -h <host>`, not a github.com problem.
   Treat it like `NETWORK_CHECKS`: report the concrete thing that could not be checked, and rerun the deferred stage once the network is back.
   Do not dispatch work that needs GitHub until a later run confirms the sign-in, and never read this line as healthy.
   [`docs/verification/github-auth-probe.md`](../../../docs/verification/github-auth-probe.md) records why `gh auth status` cannot make this call itself.
