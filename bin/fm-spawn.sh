@@ -3136,6 +3136,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # looping forever.
   SLOT_CONFLICT_RETRIES=${FM_SPAWN_SLOT_CONFLICT_RETRIES:-3}
   slot_attempt=0
+  rejected_wt_real=""
   while :; do
     slot_attempt=$((slot_attempt + 1))
     spawn_send_text_line "$WT_TARGET" 'treehouse get'
@@ -3172,7 +3173,19 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     # misconfiguration would need machinery this path does not want - so the
     # refusal has to be self-explaining instead: carry the last path seen and the
     # reason it was rejected, and report both at the deadline.
+    #
+    # On a retry, the pane starts out still sitting in the just-rejected
+    # worktree from the previous attempt, and that worktree is itself a real,
+    # isolated git worktree - it would pass the same two-consecutive-reads
+    # check before the newly resent 'treehouse get' has actually run, since
+    # spawn_send_text_line returns as soon as the keys are injected, not once
+    # the shell has interpreted them. Require more consecutive agreeing reads
+    # before re-accepting a candidate that matches the just-rejected slot, so
+    # a couple of stale immediate reads can't be mistaken for the new
+    # 'treehouse get' having already settled back into the same place.
+    SLOT_REJECT_CONFIRM_READS=5
     candidate=""
+    candidate_reads=0
     last_seen=""
     last_reason="the pane reported no path"
     WT=""
@@ -3181,14 +3194,26 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       [ -z "$p" ] || last_seen="$p"
       if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
         p_real=$(real_path_or_raw "$p")
-        last_reason="it is an isolated worktree, but no second read agreed with it"
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+        if [ "$p_real" = "$candidate" ]; then
+          candidate_reads=$((candidate_reads + 1))
+        else
+          candidate="$p_real"
+          candidate_reads=1
+        fi
+        if [ -n "$rejected_wt_real" ] && [ "$p_real" = "$rejected_wt_real" ]; then
+          required_reads=$SLOT_REJECT_CONFIRM_READS
+          last_reason="it is the same worktree slot rejected on the previous attempt, and has not yet re-agreed enough times to trust it as genuinely settled"
+        else
+          required_reads=2
+          last_reason="it is an isolated worktree, but no second read agreed with it"
+        fi
+        if [ "$candidate_reads" -ge "$required_reads" ]; then
           WT="$p"
           break
         fi
-        candidate="$p_real"
       else
         candidate=""
+        candidate_reads=0
         [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
       sleep 1
@@ -3211,6 +3236,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     SLOT_CONFLICT_ID=${SLOT_CONFLICT%% *}
     SLOT_CONFLICT_FIELD=${SLOT_CONFLICT#* }
+    rejected_wt_real=$(real_path_or_raw "$WT")
     echo "warning: treehouse handed task $ID the worktree slot '$WT', but task $SLOT_CONFLICT_ID's recorded $SLOT_CONFLICT_FIELD already claims it; requesting another slot (attempt $slot_attempt/$SLOT_CONFLICT_RETRIES)" >&2
     if [ "$slot_attempt" -ge "$SLOT_CONFLICT_RETRIES" ]; then
       echo "error: treehouse kept handing task $ID a worktree slot another live task's meta already records after $SLOT_CONFLICT_RETRIES attempts (last: '$WT', claimed by task $SLOT_CONFLICT_ID's $SLOT_CONFLICT_FIELD); refusing to launch into a contested slot; inspect window $T" >&2
