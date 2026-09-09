@@ -12,10 +12,13 @@
 # A remote second mate always runs on the Herdr backend in the dedicated
 # fm-remote session. Its account therefore needs the Firstmate-owned Aqua Herdr
 # agent plus the sibling dev.firstmate.remote-job worker that runs normal fm-on
-# commands through the Aqua or Linux job-worker path. Doctor remains invokable
-# over the plain-SSH bootstrap path to inspect and repair that worker. SSH cannot
-# create an Aqua session, so a host with no GUI login is a human gap rather than
-# something --fix attempts to bypass.
+# commands through the Aqua or Linux job-worker path. On darwin, that Herdr
+# agent starts the server through the remote account's login shell (`-l -c`)
+# so the Aqua login session gets login-shell environment and login-keychain
+# access; exec keeps herdr in the foreground under launchd. Doctor remains
+# invokable over the plain-SSH bootstrap path to inspect and repair that worker.
+# SSH cannot create an Aqua session, so a host with no GUI login is a human
+# gap rather than something --fix attempts to bypass.
 #
 # Line protocol, one fact per line, stable for script consumers:
 #   mode=check|fix
@@ -167,8 +170,61 @@ launch_agent_is_aqua() {
   return 1
 }
 
-render_launch_agent() { # <resolved-herdr-path>
-  local herdr_bin=$1
+launch_agent_shell_quote() { # <value>
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+launch_agent_xml_escape() { # <value>
+  printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+}
+
+# Directory Services UserShell is the account's real login shell on darwin
+# (bash, fish, zsh, ...). Fall back without failing the render: $SHELL, then
+# /bin/sh. Separate -l and -c so fish accepts the flags.
+resolve_launch_agent_shell() {
+  local user raw shell
+  if [ -n "${FM_LAUNCH_AGENT_SHELL:-}" ] && [ -x "$FM_LAUNCH_AGENT_SHELL" ]; then
+    printf '%s' "$FM_LAUNCH_AGENT_SHELL"
+    return 0
+  fi
+  user=$(id -un 2>/dev/null || true)
+  if [ -n "$user" ] && command -v dscl >/dev/null 2>&1 && command -v perl >/dev/null 2>&1; then
+    raw=$(perl -e '$SIG{ALRM} = sub { exit 124 }; alarm 2; exec @ARGV' \
+      dscl . -read "/Users/$user" UserShell 2>/dev/null || true)
+    shell=$(printf '%s\n' "$raw" | awk '
+      /^UserShell:[[:space:]]+/ {
+        sub(/^UserShell:[[:space:]]+/, "")
+        if (length) { print; exit }
+      }
+    ')
+    if [ -n "$shell" ] && [ -x "$shell" ]; then
+      printf '%s' "$shell"
+      return 0
+    fi
+  fi
+  if [ -n "${SHELL:-}" ] && [ -x "$SHELL" ]; then
+    printf '%s' "$SHELL"
+    return 0
+  fi
+  printf '%s' /bin/sh
+}
+
+# Login-shell command that execs the resolved herdr so launchd keeps one
+# foreground process in the Aqua session (login-keychain access) instead of
+# letting herdr self-daemonize into a Background session. KeepAlive stays
+# unconditionally true: this agent uniquely owns fm-remote, and a
+# SuccessfulExit=false plus busy-socket no-op would change the existing
+# restart-on-any-exit contract.
+launch_agent_exec_command() { # <resolved-herdr-path>
+  printf 'exec %s server --session %s' \
+    "$(launch_agent_shell_quote "$1")" \
+    "$(launch_agent_shell_quote "$HERDR_SESSION_NAME")"
+}
+
+render_launch_agent() { # <resolved-herdr-path> <resolved-login-shell>
+  local herdr_bin=$1 shell=$2 exec_cmd shell_xml
+  shell_xml=$(launch_agent_xml_escape "$shell")
+  exec_cmd=$(launch_agent_exec_command "$herdr_bin")
   cat <<XML
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -178,10 +234,10 @@ render_launch_agent() { # <resolved-herdr-path>
 	<string>$LAUNCH_AGENT_LABEL</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>$herdr_bin</string>
-		<string>server</string>
-		<string>--session</string>
-		<string>$HERDR_SESSION_NAME</string>
+		<string>$shell_xml</string>
+		<string>-l</string>
+		<string>-c</string>
+		<string>$exec_cmd</string>
 	</array>
 	<key>LimitLoadToSessionType</key>
 	<string>Aqua</string>
@@ -198,26 +254,27 @@ render_launch_agent() { # <resolved-herdr-path>
 XML
 }
 
-launch_agent_contract_matches() {
-  local herdr_bin actual expected
+launch_agent_contract_matches() { # <resolved-login-shell>
+  local shell=$1 herdr_bin actual expected
   [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ] || return 1
   herdr_bin=$(command -v herdr 2>/dev/null) || return 1
   actual=$(tr -d ' \t\r\n' < "$LAUNCH_AGENT_PLIST" 2>/dev/null) || return 1
-  expected=$(render_launch_agent "$herdr_bin" | tr -d ' \t\r\n') || return 1
+  expected=$(render_launch_agent "$herdr_bin" "$shell" | tr -d ' \t\r\n') || return 1
   [ "$actual" = "$expected" ]
 }
 
-launch_agent_loaded_contract_matches() {
-  local loaded herdr_bin herdr_compact plist_compact log_compact args
+launch_agent_loaded_contract_matches() { # <resolved-login-shell>
+  local shell=$1 loaded herdr_bin exec_compact shell_compact plist_compact log_compact args
   herdr_bin=$(command -v herdr 2>/dev/null) || return 1
   loaded=$(launchctl print "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" 2>/dev/null) || return 1
   loaded=$(printf '%s' "$loaded" | tr -d ' \t\r\n') || return 1
-  herdr_compact=$(printf '%s' "$herdr_bin" | tr -d ' \t\r\n') || return 1
+  exec_compact=$(launch_agent_exec_command "$herdr_bin" | tr -d ' \t\r\n') || return 1
+  shell_compact=$(printf '%s' "$shell" | tr -d ' \t\r\n') || return 1
   plist_compact=$(printf '%s' "$LAUNCH_AGENT_PLIST" | tr -d ' \t\r\n') || return 1
   log_compact=$(printf '%s' "$LAUNCH_AGENT_LOG" | tr -d ' \t\r\n') || return 1
-  args="arguments={$herdr_compact"'server--session'"$HERDR_SESSION_NAME}"
+  args="arguments={${shell_compact}-l-c${exec_compact}}"
   [[ "$loaded" == *"path=$plist_compact"* ]] || return 1
-  [[ "$loaded" == *"program=$herdr_compact"* ]] || return 1
+  [[ "$loaded" == *"program=$shell_compact"* ]] || return 1
   [[ "$loaded" == *"$args"* ]] || return 1
   [[ "$loaded" == *"stdoutpath=$log_compact"* ]] || return 1
   [[ "$loaded" == *"stderrpath=$log_compact"* ]] || return 1
@@ -491,7 +548,8 @@ check_gui_session() {
     "log that account in once at the console, and enable automatic login in System Settings > Users & Groups if the machine runs headless; SSH cannot create a GUI session, and Firstmate never writes an auto-login password or changes FileVault"
 }
 
-check_launch_agent() {
+check_launch_agent() { # <resolved-login-shell>
+  local shell=$1
   if [ "$PLATFORM" != darwin ]; then
     record launchagent "skip: launch agents apply only on darwin"
     record launchagent-scope "skip: launch agents apply only on darwin"
@@ -499,7 +557,7 @@ check_launch_agent() {
     return 0
   fi
   if [ -f "$LAUNCH_AGENT_PLIST" ] && [ ! -L "$LAUNCH_AGENT_PLIST" ]; then
-    if launch_agent_contract_matches; then
+    if launch_agent_contract_matches "$shell"; then
       record launchagent "ok: $LAUNCH_AGENT_PLIST matches the Firstmate-owned contract"
     else
       record launchagent "fixable: $LAUNCH_AGENT_PLIST does not match the current Firstmate-owned contract" \
@@ -516,17 +574,18 @@ check_launch_agent() {
       "rerun this command with --fix to install it"
     record launchagent-scope "skip: no launch agent is installed yet"
   fi
-  check_launch_agent_loaded
+  check_launch_agent_loaded "$shell"
 }
 
-check_launch_agent_loaded() {
+check_launch_agent_loaded() { # <resolved-login-shell>
+  local shell=$1
   if [ -z "$UID_NUM" ] || ! command -v launchctl >/dev/null 2>&1; then
     record launchagent-loaded "human: the launch agent domain gui/<uid> cannot be inspected on this account" \
       "restore launchctl and a readable account uid, then rerun this command"
     return 0
   fi
   if launchctl print "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; then
-    if launch_agent_loaded_contract_matches; then
+    if launch_agent_loaded_contract_matches "$shell"; then
       record launchagent-loaded "ok: gui/$UID_NUM/$LAUNCH_AGENT_LABEL matches the effective contract"
     else
       record launchagent-loaded "fixable: gui/$UID_NUM/$LAUNCH_AGENT_LABEL does not match the effective Firstmate-owned contract" \
@@ -582,14 +641,15 @@ check_entrypoint_link() {
     "rerun this command with --fix to create it"
 }
 
-run_checks() {
+run_checks() { # <resolved-login-shell>
+  local shell=$1
   CHECK_NAMES=()
   CHECK_VALUES=()
   CHECK_ACTIONS=()
   check_herdr
   check_gui_session
   check_remote_job_worker
-  check_launch_agent
+  check_launch_agent "$shell"
   check_herdr_server
   check_entrypoint_link
 }
@@ -600,8 +660,8 @@ fix_report() { # <check> applied|failed <text>
   printf 'fix %s=%s: %s\n' "$1" "$2" "$3"
 }
 
-write_launch_agent() {
-  local herdr_bin tmp
+write_launch_agent() { # <resolved-login-shell>
+  local shell=$1 herdr_bin tmp
   if ! herdr_bin=$(command -v herdr 2>/dev/null); then
     fix_report launchagent failed "herdr does not resolve, so no launch agent was written"
     return 1
@@ -618,14 +678,14 @@ write_launch_agent() {
   fi
   mkdir -p "$LAUNCH_AGENT_LOG_DIR" 2>/dev/null || true
   tmp="$LAUNCH_AGENT_DIR/.$LAUNCH_AGENT_LABEL.plist.tmp.$$"
-  render_launch_agent "$herdr_bin" > "$tmp"
+  render_launch_agent "$herdr_bin" "$shell" > "$tmp"
   chmod 0644 "$tmp" 2>/dev/null || true
   if ! mv -f -- "$tmp" "$LAUNCH_AGENT_PLIST" 2>/dev/null; then
     rm -f -- "$tmp"
     fix_report launchagent failed "cannot publish $LAUNCH_AGENT_PLIST"
     return 1
   fi
-  fix_report launchagent applied "wrote the Aqua-scoped $LAUNCH_AGENT_LABEL launch agent running $herdr_bin server"
+  fix_report launchagent applied "wrote the Aqua-scoped $LAUNCH_AGENT_LABEL launch agent running $herdr_bin server via $shell -l -c"
 }
 
 # Reload rather than plain bootstrap so a rewritten plist replaces a stale
@@ -693,8 +753,8 @@ link_entrypoint() {
   fix_report entrypoint-link applied "linked $ENTRYPOINT_LINK to $want"
 }
 
-apply_fixes() {
-  local i name value launch_agent_written=0 launch_agent_reloaded=0 remote_job_fixed=0
+apply_fixes() { # <resolved-login-shell>
+  local shell=$1 i name value launch_agent_written=0 launch_agent_reloaded=0 remote_job_fixed=0
   repair_required_wrappers
   i=0
   while [ "$i" -lt "${#CHECK_NAMES[@]}" ]; do
@@ -711,7 +771,7 @@ apply_fixes() {
       launchagent|launchagent-scope)
         [ "$launch_agent_written" -eq 0 ] || continue
         launch_agent_written=1
-        write_launch_agent || continue
+        write_launch_agent "$shell" || continue
         # A freshly written plist runs nothing until it is (re)loaded, and only
         # an existing GUI session can hold it.
         check_is_ok gui-session || continue
@@ -758,12 +818,16 @@ else
 fi
 printf 'platform=%s\n' "$PLATFORM"
 
-run_checks
+LAUNCH_AGENT_SHELL=
+if [ "$PLATFORM" = darwin ]; then
+  LAUNCH_AGENT_SHELL=$(resolve_launch_agent_shell)
+fi
+run_checks "$LAUNCH_AGENT_SHELL"
 if [ "$MODE" = fix ]; then
-  apply_fixes
+  apply_fixes "$LAUNCH_AGENT_SHELL"
   # Re-derive every check from the host itself, so what prints below is the
   # state after repair rather than the intent of a repair.
-  run_checks
+  run_checks "$LAUNCH_AGENT_SHELL"
 fi
 
 if [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || ! remote_job_identity_ok; then
