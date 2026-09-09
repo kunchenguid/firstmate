@@ -252,7 +252,7 @@ Two firstmate-specific rules layer on top of that guidance:
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
 Every pipeline fix round moves the branch, so verification against an earlier HEAD no longer covers what ships: after the last fix round, re-run the verification this brief requires and re-collect its evidence against the exact final HEAD.
-Append \`done: PR {url} checks green\` only once CI is green AND that final-HEAD verification and evidence exist, and name the final HEAD and where the evidence is; CI green alone, local checks alone, an implementation commit alone, or a green earlier HEAD are not ready.
+Append \`done: PR {url} checks green\` only once CI is green AND that final-HEAD verification and evidence exist, and name the full final HEAD SHA and where the evidence is; CI green alone, local checks alone, an implementation commit alone, or a green earlier HEAD are not ready.
 Then keep the worktree and wait for the configured merge authority - validation passed is never merged - and report a new gate, a failure, or an external approval wait rather than treating it as completion.
 EOF
       ;;
