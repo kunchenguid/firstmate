@@ -10,14 +10,19 @@
 # unconfigured home reads exactly as it did before the surface existed. Only the
 # file's presence is read; its contents are ignored.
 #
-# Both producers consult this one function rather than testing the path
-# themselves, because the bearings TOON encoder takes its column set from the
-# first Underway row: a producer that disagreed with the projection about the
-# flag would silently render rows against the wrong columns.
+# Both producers consult this one function rather than resolving the home config
+# directory or testing the path themselves, because the bearings TOON encoder
+# takes its column set from the first Underway row: a producer that disagreed
+# with the projection about the flag would silently render rows against the
+# wrong columns. The whole decision - which config directory the standard
+# FM_CONFIG_OVERRIDE / FM_HOME / FM_ROOT_OVERRIDE overrides select, and whether
+# the flag is in it - lives here, so exactly one expression decides it.
 #
 # See docs/configuration.md "Worker running time (config/worker-running-time)".
 
-# True when <config-dir> opts this home into the running-time surface.
-fm_running_time_enabled() {  # <config-dir>
-  [ -n "${1:-}" ] && [ -e "$1/worker-running-time" ]
+# True when this home opts into the running-time surface.
+fm_running_time_enabled() {
+  local config
+  config="${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}/config}"
+  [ -e "$config/worker-running-time" ]
 }

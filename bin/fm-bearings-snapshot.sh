@@ -98,11 +98,10 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-running-time-lib.sh"
 
-# The same config directory the canonical snapshot resolves, so both ends of one
-# invocation agree about the column.
-RUNNING_TIME_CONFIG="${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}/config}"
+# The lib resolves the same config directory the canonical snapshot does, so both
+# ends of one invocation agree about the column.
 RUNNING_TIME=0
-fm_running_time_enabled "$RUNNING_TIME_CONFIG" && RUNNING_TIME=1
+fm_running_time_enabled && RUNNING_TIME=1
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}

@@ -231,7 +231,7 @@ esac
 . "$SCRIPT_DIR/fm-running-time-lib.sh"  # fm_running_time_enabled: the opt-in owner
 
 RUNNING_TIME=0
-fm_running_time_enabled "$CONFIG" && RUNNING_TIME=1
+fm_running_time_enabled && RUNNING_TIME=1
 
 usage() {
   cat <<'EOF'

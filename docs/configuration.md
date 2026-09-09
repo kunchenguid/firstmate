@@ -216,7 +216,7 @@ With the flag absent, `bin/fm-fleet-snapshot.sh` emits no runtime fields and `bi
 With it present, every task row carries `runtime.started_epoch` and `runtime.running_seconds`, an active child in a home summary carries the `running_seconds` its own home measured, and the bearings Underway rows gain a rendered `running` column before `doing`.
 Both values come from the `spawn_gen` incarnation token the spawn already records, and both are null when no start is recorded, so a reader never renders a fabricated elapsed time.
 The flag is inherited by secondmate homes, because the running time of a child row is measured by the home that owns that child rather than by the home rendering the report.
-`bin/fm-running-time-lib.sh` owns the opt-in rule that both producers consult, and each producer's header owns its exact fields.
+`bin/fm-running-time-lib.sh` owns the whole opt-in rule that both producers consult, resolving the home config directory from the standard overrides as well as testing for the flag, and each producer's header owns its exact fields.
 
 ## Gate defaults (.no-mistakes.yaml)
 
