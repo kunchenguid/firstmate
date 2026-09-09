@@ -196,10 +196,11 @@
 #   resets to its tip. When no origin is detected and --base-branch is omitted,
 #   spawn skips that remote freshness check and launches from the clean
 #   worktree's current HEAD. --base-branch <branch> keeps that same pooled
-#   path and instead resets to the named branch: origin/<branch> when origin
-#   has it, otherwise the local branch. A requested name that exists on
-#   neither refuses immediately and never falls back to the remote default or
-#   to an origin-less skip. An unverifiable ref-specific fetch also refuses.
+#   path and instead resets to the named branch: origin/<branch> for scouts and
+#   PR delivery, or the local branch for local-only delivery. A requested name
+#   that does not exist at the required destination refuses immediately and
+#   never falls back to the remote default or to an origin-less skip. An
+#   unverifiable ref-specific fetch also refuses.
 #   The spawn records base_branch=<branch> in state/<id>.meta only when the
 #   flag is set. A no-mistakes ship then passes `axi run --base-branch
 #   <branch>` so the pipeline opens against that integration branch; do not
@@ -2503,10 +2504,15 @@ freshen_spawn_worktree_base() {  # <worktree>
           target="origin/$BASE_BRANCH"
           ;;
         2)
-          if git -C "$worktree" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
-            target="$BASE_BRANCH"
+          if [ "${MODE:-}" = local-only ]; then
+            if git -C "$worktree" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
+              target="$BASE_BRANCH"
+            else
+              echo "error: --base-branch '$BASE_BRANCH' does not exist locally or on origin for pooled worktree '$worktree'; refusing to fall back to the default branch" >&2
+              return 1
+            fi
           else
-            echo "error: --base-branch '$BASE_BRANCH' does not exist locally or on origin for pooled worktree '$worktree'; refusing to fall back to the default branch" >&2
+            echo "error: --base-branch '$BASE_BRANCH' does not exist on origin for pooled worktree '$worktree'; ${MODE:+$MODE }delivery requires a remote base" >&2
             return 1
           fi
           ;;
@@ -2516,10 +2522,15 @@ freshen_spawn_worktree_base() {  # <worktree>
           ;;
       esac
     else
-      if git -C "$worktree" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
-        target="$BASE_BRANCH"
+      if [ "${MODE:-}" = local-only ]; then
+        if git -C "$worktree" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
+          target="$BASE_BRANCH"
+        else
+          echo "error: --base-branch '$BASE_BRANCH' does not exist locally for pooled worktree '$worktree'; refusing to launch without that requested base" >&2
+          return 1
+        fi
       else
-        echo "error: --base-branch '$BASE_BRANCH' does not exist locally for pooled worktree '$worktree'; refusing to launch without that requested base" >&2
+        echo "error: --base-branch '$BASE_BRANCH' has no origin ref for pooled worktree '$worktree'; ${MODE:+$MODE }delivery requires a remote base" >&2
         return 1
       fi
     fi

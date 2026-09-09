@@ -761,9 +761,9 @@ test_absent_base_branch_leaves_default_freshen_and_meta() {
   pass "omitting --base-branch keeps default-branch freshen and does not record a PR target"
 }
 
-test_base_branch_uses_local_branch_when_origin_lacks_it() {
+test_local_only_base_branch_uses_local_branch_when_origin_lacks_it() {
   local rec id out status local_sha
-  id='pool-base-branch-local-r6'
+  id='pool-base-branch-local-r7'
   rec=$(make_case base-branch-local "$id")
   read_case_record "$rec"
   git -C "$POOL_DIR" checkout --quiet -B local-only
@@ -773,18 +773,52 @@ test_base_branch_uses_local_branch_when_origin_lacks_it() {
     commit -qm local-only
   local_sha=$(git -C "$POOL_DIR" rev-parse HEAD)
   git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
-  scaffold_ship_brief "$id" no-mistakes local-only
+  scaffold_ship_brief "$id" local-only local-only
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch local-only)
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch local-only)
   status=$?
-  expect_code 0 "$status" "spawn --base-branch should use a local branch when origin lacks it"
+  expect_code 0 "$status" "local-only spawn --base-branch should use a local branch when origin lacks it"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_sha" ] \
     || fail "spawn --base-branch local-only did not reset to the local branch tip"
   if git -C "$POOL_DIR" rev-parse --verify --quiet origin/main >/dev/null; then
     [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
       || fail "spawn --base-branch local-only fell back to origin/main"
   fi
-  pass "spawn --base-branch uses a local branch when origin lacks it"
+  pass "local-only spawn --base-branch uses a local branch when origin lacks it"
+}
+
+test_pr_modes_refuse_base_missing_from_origin() {
+  local rec id out status before mode slug
+  for mode in no-mistakes direct-PR; do
+    case "$mode" in
+      no-mistakes) slug=no-mistakes ;;
+      direct-PR) slug=direct-pr ;;
+    esac
+    id="pool-base-branch-pr-refuse-${slug}-r7"
+    rec=$(make_case "base-branch-pr-refuse-$slug" "$id")
+    read_case_record "$rec"
+    git -C "$POOL_DIR" checkout --quiet -B local-only
+    printf 'only local\n' > "$POOL_DIR/local-only.txt"
+    git -C "$POOL_DIR" add local-only.txt
+    git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -qm local-only
+    git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
+    scaffold_ship_brief "$id" "$mode" local-only
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+    out=$(run_spawn "$id" --mode "$mode" --yolo off --base-branch local-only)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$mode spawn accepted a --base-branch missing from origin"
+    assert_contains "$out" "does not exist on origin" \
+      "$mode spawn did not identify the missing remote base"
+    assert_contains "$out" "$mode delivery requires a remote base" \
+      "$mode spawn did not explain why a local base is insufficient"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "$mode spawn moved HEAD after refusing its missing remote base"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "$mode spawn recorded metadata after refusing its missing remote base"
+  done
+  pass "PR delivery modes refuse a named base missing from origin"
 }
 
 test_base_branch_ref_fetch_failure_refuses_local_fallback() {
@@ -829,8 +863,8 @@ test_missing_base_branch_refuses_without_default_fallback() {
   out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch no-such-branch)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded with a nonexistent --base-branch"
-  assert_contains "$out" "does not exist locally or on origin" \
-    "spawn did not clearly refuse a missing --base-branch"
+  assert_contains "$out" "does not exist on origin" \
+    "PR delivery spawn did not clearly refuse a missing remote --base-branch"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD after refusing a missing --base-branch"
   pass "a nonexistent --base-branch refuses without falling back to the default"
@@ -848,11 +882,11 @@ test_originless_base_branch_uses_local_or_refuses() {
     commit -qm originless-develop
   local_sha=$(git -C "$POOL_DIR" rev-parse HEAD)
   git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
-  scaffold_ship_brief "$id" no-mistakes develop
+  scaffold_ship_brief "$id" local-only develop
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch develop)
   status=$?
-  expect_code 0 "$status" "origin-less spawn --base-branch should use the local named branch"$'\n'"$out"
+  expect_code 0 "$status" "origin-less local-only spawn should use the local named branch"$'\n'"$out"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_sha" ] \
     || fail "origin-less --base-branch did not reset to the local named branch"
   assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
@@ -861,9 +895,9 @@ test_originless_base_branch_uses_local_or_refuses() {
   id='pool-originless-base-missing-r1'
   rec=$(make_originless_case originless-base-missing "$id")
   read_case_record "$rec"
-  scaffold_ship_brief "$id" no-mistakes develop
+  scaffold_ship_brief "$id" local-only develop
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch develop)
   status=$?
   [ "$status" -ne 0 ] || fail "origin-less spawn skipped a missing requested base"
   assert_contains "$out" "does not exist locally" \
@@ -983,7 +1017,8 @@ test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
 test_base_branch_resets_to_named_origin_tip
 test_absent_base_branch_leaves_default_freshen_and_meta
-test_base_branch_uses_local_branch_when_origin_lacks_it
+test_local_only_base_branch_uses_local_branch_when_origin_lacks_it
+test_pr_modes_refuse_base_missing_from_origin
 test_base_branch_ref_fetch_failure_refuses_local_fallback
 test_missing_base_branch_refuses_without_default_fallback
 test_originless_base_branch_uses_local_or_refuses
