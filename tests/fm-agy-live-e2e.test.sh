@@ -483,19 +483,27 @@ RING_REC="$LAB/state/$TASK.inbox/handled/001.msg"
 [ -f "$RING_REC" ] || fail "agy $VERSION: the handled steering record needed for the re-ring drive is missing"
 RING_DRAFT='captain half typed line'
 tmux send-keys -t "$WINDOW" -l "$RING_DRAFT" || fail "could not type the pending draft into the Agy composer"
+# Agy paints typed input a few characters behind the keystrokes, so the
+# composer classifies pending off a partial draft (`> captain half typ`)
+# seconds before the whole line is on screen. Wait for BOTH the verdict and the
+# fully rendered draft, or the intact-draft assertion below races Agy's own
+# repaint and fails on a pane the re-ring never touched.
 i=0
-while [ "$i" -lt 30 ] && [ "$(composer_state)" != pending ]; do
+while [ "$i" -lt 30 ]; do
+  [ "$(composer_state)" = pending ] && pane | grep -Fq "$RING_DRAFT" && break
   sleep 1
   i=$((i + 1))
 done
 [ "$(composer_state)" = pending ] \
   || fail "agy $VERSION: a composer holding unsubmitted text did not classify pending (got $(composer_state)); the watcher would type over a captain's draft"
+pane | grep -Fq "$RING_DRAFT" \
+  || fail "agy $VERSION: the pending draft was never rendered in full, so the intact-draft check below would prove nothing; tail: $(pane_tail 6 | tr '\n' '|')"
 FM_COMPOSER_HARNESS="$RING_HARNESS" FM_HOME="$LAB" fm_task_inbox_ring tmux "$WINDOW" "$RING_REC" agy
 RING_RC=$?
 [ "$RING_RC" -eq 1 ] \
   || fail "agy $VERSION: the re-ring returned $RING_RC instead of deferring on a proven pending composer"
 pane | grep -Fq "$RING_DRAFT" \
-  || fail "agy $VERSION: the deferred re-ring did not leave the pending draft intact in the composer"
+  || fail "agy $VERSION: the deferred re-ring did not leave the pending draft intact in the composer; composer verdict $(composer_state), tail: $(pane_tail 6 | tr '\n' '|')"
 note "re-ring deferred on the real pending composer and left the draft untouched"
 
 # Clear the draft one keystroke per character, so the same record now rings.
