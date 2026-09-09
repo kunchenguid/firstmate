@@ -1030,6 +1030,37 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+### Composite worktree id shape
+
+Response shapes were observed on 2026-09-08 against `/opt/homebrew/bin/orca` with a running Orca app reporting `result.runtime.appVersion` 1.4.194.
+This entry is a response-shape observation firstmate made against the live app, not a full lifecycle smoke, and it does not supersede the 1.4.116 readiness evidence above.
+
+```sh
+orca status --json
+orca worktree list --json
+```
+
+Observed fields:
+
+```text
+result.runtime.appVersion=1.4.194
+result.runtime.reachable=true
+result.runtime.state=ready
+```
+
+Every worktree id Orca listed was composite, `<repo id>::<absolute worktree path>`, including the worktree a real `bin/fm-spawn.sh` run had created through `orca worktree create`.
+The observed ids carried a real repository UUID and a real absolute path; both are redacted here because the observation was made against a private project checkout:
+
+```text
+<repo uuid>::/Users/<user>/orca/workspaces/<project>/fm-<task id>
+```
+
+That task's recorded `orca_worktree_id=` was byte-identical to the listed id, and its path half equalled its recorded `worktree=`.
+[`orca-backend.md`](../orca-backend.md) owns the format and the cleanup rule that requires exactly that agreement.
+The portable regression pinning the rule is `tests/fm-teardown-endpoint-safety.test.sh`.
+
+Releasing a live Orca worktree was not exercised here, so the real teardown leg stays unverified until structural validation of the composite id ships.
+
 ## cmux
 
 The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.
