@@ -77,6 +77,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
+# MSYS-host detection for the Windows namespace-mode tolerance below.
+# shellcheck source=bin/fm-windows-process-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-windows-process-lib.sh"
 
 # Shared, backend-neutral normalized-transition shape and the single-owner
 # status->action policy table (bin/fm-transition-lib.sh). This adapter's event
@@ -798,7 +801,15 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
   expected_uid=$(id -u 2>/dev/null) || return 1
   owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir") || return 1
   mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
-  [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+  # MSYS (Git Bash) has no POSIX dir modes: stat reports 755 for every
+  # user-created directory regardless of mkdir -m 700, because Windows ACLs
+  # carry the restriction instead. Accept the mode MSYS deterministically
+  # reports; the owner check still binds the namespace to one user.
+  if fm_host_is_windows; then
+    [ "$owner" = "$expected_uid" ] && { [ "$mode" = 700 ] || [ "$mode" = 755 ]; }
+  else
+    [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+  fi
 }
 
 # Resolve the one verified running named-session socket path as an absolute
