@@ -156,6 +156,10 @@ store_rows_load() {  # <since-epoch>
 }
 
 STATUS_SCAN_ERROR=
+status_path_readable() {
+  [ -f "$1" ] && [ -r "$1" ] && [ ! -L "$1" ]
+}
+
 scan_open_blockers() {  # -> tab-separated blocker rows
   local meta id status key verb summary clean_summary open
   STATUS_SCAN_ERROR=
@@ -164,7 +168,7 @@ scan_open_blockers() {  # -> tab-separated blocker rows
     id=$(basename "$meta")
     id=${id%.meta}
     status="$STATE/$id.status"
-    if [ ! -f "$status" ] || [ ! -r "$status" ] || [ -L "$status" ]; then
+    if ! status_path_readable "$status"; then
       STATUS_SCAN_ERROR=$status
       return 1
     fi
@@ -345,7 +349,7 @@ EOF
 
 render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
   local evidence=$1 blockers=$2 since=$3 now record superseded superseded_at archive_dir stamp
-  local tag task key summary count routine captain live held_err last verb rows
+  local tag task key summary count routine captain live held_err last verb rows status
   now=$(date +%s)
   printf '=== Return brief'
   if [ -n "$since" ]; then
@@ -401,13 +405,14 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
-    [ -f "$STATE/$task.status" ] || continue
+    status="$STATE/$task.status"
+    status_path_readable "$status" || continue
     while IFS="$(printf '\t')" read -r key verb summary; do
       [ "$verb" = needs-decision ] || continue
       count=$((count + 1))
       printf '  - %s [key=%s] needs your decision: %s\n' "$task" "$key" "$(printf '%s' "$summary" | clean_field)"
     done <<EOF
-$(status_open_decisions "$STATE/$task.status")
+$(status_open_decisions "$status")
 EOF
   done
   rows=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { printf "  - %s: %s\n", $2, $5 }')
@@ -429,7 +434,9 @@ EOF
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
-    last=$(last_status_line "$STATE/$task.status")
+    status="$STATE/$task.status"
+    status_path_readable "$status" || continue
+    last=$(last_status_line "$status")
     [ "$(status_line_verb "$last")" = failed ] || continue
     count=$((count + 1))
     printf '  - %s: %s\n' "$task" "$(printf '%s' "$last" | clean_field)"

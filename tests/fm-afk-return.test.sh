@@ -544,7 +544,7 @@ test_unreadable_status_file_keeps_catchup_gated() {
   gate="$dir/home/state/.afk-return-catchup"
   status="$dir/home/state/unreadable.status"
   printf 'window=synthetic:fm-unreadable\nbackend=tmux\nkind=ship\n' > "$dir/home/state/unreadable.meta"
-  printf 'blocked [key=hidden]: hidden blocker\n' > "$dir/status-source"
+  printf 'needs-decision [key=hidden]: private captain decision\nfailed: private failure detail\n' > "$dir/status-source"
   ln -s "$dir/status-source" "$status"
   touch "$dir/home/state/.last-watcher-beat"
   : > "$dir/home/state/.fake-drain"
@@ -555,13 +555,15 @@ test_unreadable_status_file_keeps_catchup_gated() {
   [ "$rc" -eq 3 ] || fail "an unreadable status should keep catch-up gated (rc=$rc): $out"
   [ -f "$gate" ] || fail "an unreadable status did not retain the return gate"
   assert_contains "$out" "status file unreadable: $status; catch-up stays gated" "the partial brief did not name the unreadable status"
+  assert_not_contains "$out" 'private captain decision' "the brief followed the refused status symlink for a decision"
+  assert_not_contains "$out" 'private failure detail' "the brief followed the refused status symlink for a failure"
   rm "$status"
   : > "$status"
   out=$(run_return "$dir" check) || fail "catch-up did not clear after the status file was repaired: $out"
   assert_contains "$out" 'catch-up clear' "the repaired status did not clear catch-up"
   assert_not_contains "$out" 'status file unreadable:' "the repaired status retained stale failure evidence"
   [ ! -e "$gate" ] || fail "the repaired status left the return gate behind"
-  pass "an unreadable status gates catch-up until a successful reread"
+  pass "an unreadable status stays private and gates until a successful reread"
 }
 
 test_return_guard_refuses_while_the_record_exists() {
