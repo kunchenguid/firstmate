@@ -148,7 +148,8 @@ fm_tasks_axi_backend_resolve() {  # <tasks-axi-working-directory>
     return 0
   fi
   local config="$root/.tasks.toml"
-  if { [ -e "$config" ] || [ -L "$config" ]; } && { [ ! -f "$config" ] || [ ! -r "$config" ]; }; then
+  if { [ -d "${config%/*}" ] && [ ! -x "${config%/*}" ]; } ||
+    { { [ -e "$config" ] || [ -L "$config" ]; } && { [ ! -f "$config" ] || [ ! -r "$config" ]; }; }; then
     printf 'tasks-axi backend configuration cannot be read at %s\n' "$config" >&2
     return 2
   fi
@@ -158,7 +159,8 @@ fm_tasks_axi_backend_resolve() {  # <tasks-axi-working-directory>
   fi
   if [ -n "${HOME:-}" ]; then
     config="$HOME/.tasks-axi/config.toml"
-    if { [ -e "$config" ] || [ -L "$config" ]; } && { [ ! -f "$config" ] || [ ! -r "$config" ]; }; then
+    if { [ -d "${config%/*}" ] && [ ! -x "${config%/*}" ]; } ||
+      { { [ -e "$config" ] || [ -L "$config" ]; } && { [ ! -f "$config" ] || [ ! -r "$config" ]; }; }; then
       printf 'tasks-axi backend configuration cannot be read at %s\n' "$config" >&2
       return 2
     fi

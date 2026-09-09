@@ -2237,6 +2237,56 @@ test_unreadable_user_backend_config_refuses_the_merge() {
   pass "fm-pr-merge refuses when its user backend configuration cannot be read"
 }
 
+test_untraversable_user_backend_config_directory_refuses_the_merge() {
+  local case_dir rc user_config
+  case_dir=$(make_case untraversable-user-backend-config-directory-refuses)
+  user_config="$case_dir/user-home/.tasks-axi/config.toml"
+  mkdir -p "$case_dir/wt" "${user_config%/*}"
+  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  : > "$case_dir/gh-axi.log"
+  rm -f "$case_dir/home/.tasks.toml" "$case_dir/home/data/backlog.md"
+  printf '%s\n' 'backend = "beads"' > "$user_config"
+  chmod 000 "${user_config%/*}"
+
+  set +e
+  FM_TEST_USER_HOME="$case_dir/user-home" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/66 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  chmod 755 "${user_config%/*}"
+
+  expect_code 1 "$rc" "untraversable-user-backend-config-directory-refuses: an unreadable authority route must refuse"
+  assert_grep "tasks-axi backend configuration cannot be read at $user_config" "$case_dir/stderr" \
+    "untraversable-user-backend-config-directory-refuses: the unreadable authority route was not named"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "untraversable-user-backend-config-directory-refuses: the forge was called despite an unreadable authority route"
+  pass "fm-pr-merge refuses when its user backend configuration directory cannot be traversed"
+}
+
+test_absent_user_backend_config_directory_and_backlog_still_merge() {
+  local case_dir rc
+  case_dir=$(make_case absent-user-backend-config-directory-and-backlog-merges)
+  mkdir -p "$case_dir/wt" "$case_dir/user-home"
+  add_gh_mocks "$case_dir" 6767676767676767676767676767676767676767
+  : > "$case_dir/gh-axi.log"
+  rm -f "$case_dir/home/.tasks.toml" "$case_dir/home/data/backlog.md"
+
+  set +e
+  FM_TEST_USER_HOME="$case_dir/user-home" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/67 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "absent-user-backend-config-directory-and-backlog-merges: sound defaults and no backlog must permit merging"
+  [ "$(grep -c '^pr merge ' "$case_dir/gh-axi.log")" -eq 1 ] \
+    || fail "absent-user-backend-config-directory-and-backlog-merges: the forge must merge exactly once"
+  grep -qxF 'pr merge 67 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "absent-user-backend-config-directory-and-backlog-merges: the expected merge was not attempted"
+  pass "fm-pr-merge proceeds once when its user configuration directory and backlog are genuinely absent"
+}
+
 test_backend_override_bypasses_unreadable_user_config() {
   local case_dir rc user_config
   case_dir=$(make_case backend-override-bypasses-unreadable-user-config)
@@ -2278,4 +2328,6 @@ test_absent_backlog_still_merges
 test_unreadable_backlog_refuses_the_merge
 test_unreadable_backend_config_refuses_the_merge
 test_unreadable_user_backend_config_refuses_the_merge
+test_untraversable_user_backend_config_directory_refuses_the_merge
+test_absent_user_backend_config_directory_and_backlog_still_merge
 test_backend_override_bypasses_unreadable_user_config
