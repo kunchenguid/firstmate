@@ -98,6 +98,27 @@ fm_path_mtime() {
   fi
 }
 
+fm_path_identity() {
+  local path=$1 identity
+  [ -e "$path" ] || return 1
+  if [ "$_FM_UNAME" = Darwin ]; then
+    identity=$(/usr/bin/stat -L -f '%d:%i' "$path" 2>/dev/null) || return 1
+  else
+    identity=$(stat -Lc '%d:%i' "$path" 2>/dev/null) || return 1
+  fi
+  case "$identity" in
+    ''|*[!0-9:]*) return 1 ;;
+  esac
+  printf '%s\n' "$identity"
+}
+
+fm_paths_same_object() {
+  local left=$1 right=$2 left_identity right_identity
+  left_identity=$(fm_path_identity "$left") || return 1
+  right_identity=$(fm_path_identity "$right") || return 1
+  [ "$left_identity" = "$right_identity" ]
+}
+
 fm_path_age() {
   local path=$1 m
   m=$(fm_path_mtime "$path") || { echo 999999; return; }
@@ -144,8 +165,10 @@ fm_watcher_lock_matches_pid() {
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$home" ] || return 1
-  [ "$lock_path" = "$watch_path" ] || return 1
+  [ -d "$lock_home" ] && [ -d "$home" ] || return 1
+  [ -f "$lock_path" ] && [ -f "$watch_path" ] || return 1
+  fm_paths_same_object "$lock_home" "$home" || return 1
+  fm_paths_same_object "$lock_path" "$watch_path" || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ] || return 1
