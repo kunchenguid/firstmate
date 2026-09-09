@@ -182,9 +182,14 @@ PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
 
 # The canonical root, derived from the accepted worktree through git rather than
 # taken from either argument: the repository's main working tree is the first
-# entry git lists, and a bare repository lists it as `bare` with no path.
+# record git lists. A bare repository still lists its own directory first, with
+# a `bare` line inside that record, so the whole first record is read and a bare
+# one yields no root.
 ROOT_LISTED=$(git -C "$WT_REAL" worktree list --porcelain 2>/dev/null | awk '
-  NR == 1 && /^worktree / { sub(/^worktree /, ""); print; exit }
+  /^worktree / && root == "" { root = substr($0, 10); next }
+  /^bare$/ { bare = 1 }
+  /^$/ { exit }
+  END { if (!bare) print root }
 ') || true
 [ -n "$ROOT_LISTED" ] || refuse "'$WT_REAL' has no main working tree to serve as its canonical root (a bare repository has none)"
 ROOT_REAL=$(real_dir "$ROOT_LISTED") || true

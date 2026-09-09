@@ -344,7 +344,7 @@ test_bare_repository_worktree_is_refused() {
   git -C "$bare" worktree add --quiet --detach "$wt" HEAD
   out=$(run_trust "$CONFIG" "$wt" "$bare")
   expect_code 1 $? "a worktree of a bare repository must be refused: $out"
-  assert_contains "$out" "bare" "the refusal did not say the repository has no main working tree"
+  assert_contains "$out" "has no main working tree" "the refusal did not say the repository has no main working tree"
   assert_not_trusted "$CONFIG/.claude.json" "$wt" "a bare repository's worktree was trusted without a canonical root"
   pass "fm-claude-trust.sh: refuses a worktree whose repository has no main checkout"
 }
