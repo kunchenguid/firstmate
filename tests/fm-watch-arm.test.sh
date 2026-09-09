@@ -607,6 +607,70 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
   pass "watch-arm: restart publishes recovery before clearing a reused-pid watcher lock"
 }
 
+test_restart_clears_reused_pid_lock_recorded_under_an_equivalent_home() {
+  local dir home state fakebin armout unrelated owner alias_home
+  dir=$(make_case restart-equivalent-home-recovery)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  owner="$state/.watch.lock.owner.fixture"
+  alias_home="$dir/home-alias"
+  mkdir -p "$home/data" "$owner"
+  ln -s "$home" "$alias_home"
+
+  sleep 300 &
+  unrelated=$!
+  printf '%s\n' "$unrelated" > "$owner/pid"
+  printf '%s\n' "$alias_home" > "$owner/fm-home"
+  printf '%s\n' "$WATCH" > "$owner/watcher-path"
+  printf '%s\n' 'reused-pid-does-not-match' > "$owner/pid-identity"
+  ln -s "$owner" "$state/.watch.lock"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$armout"
+  wait_for_exit "$ARM_PID" 80 \
+    || fail "restart did not surface recovery for an equivalently spelled recorded home"
+  grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+    || fail "restart left a reused-pid lock recorded under an equivalent home spelling: $(cat "$armout")"
+  is_live_non_zombie "$unrelated" || fail "restart signaled the unrelated process whose pid was reused"
+  kill "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  pass "watch-arm: restart clears a reused-pid lock recorded under an equivalent home spelling"
+}
+
+test_restart_leaves_a_distinct_home_lock_untouched() {
+  local dir home state fakebin armout unrelated owner other_home status
+  dir=$(make_case restart-distinct-home-recovery)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  owner="$state/.watch.lock.owner.fixture"
+  other_home="$dir/other-home"
+  mkdir -p "$home/data" "$owner" "$other_home"
+
+  sleep 300 &
+  unrelated=$!
+  printf '%s\n' "$unrelated" > "$owner/pid"
+  printf '%s\n' "$other_home" > "$owner/fm-home"
+  printf '%s\n' "$WATCH" > "$owner/watcher-path"
+  printf '%s\n' 'reused-pid-does-not-match' > "$owner/pid-identity"
+  ln -s "$owner" "$state/.watch.lock"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$armout"
+  wait_for_exit "$ARM_PID" 80
+  status=$?
+  [ "$status" -ne 124 ] || fail "restart stayed live against a foreign home's lock"
+  [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$unrelated" ] \
+    || fail "restart cleared a watcher lock recorded for a genuinely different home"
+  [ ! -e "$state/.watcher-down" ] \
+    || fail "restart published downtime for a watcher lock it does not own"
+  is_live_non_zombie "$unrelated" || fail "restart signaled the unrelated process whose pid was reused"
+  kill "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  pass "watch-arm: restart leaves a watcher lock recorded for a distinct home untouched"
+}
+
 test_markerless_legacy_queue_is_recovered_on_arm() {
   local dir home state fakebin row
   dir=$(make_case markerless-legacy-arm)
@@ -809,6 +873,8 @@ test_interrupted_handling_is_redrained_on_rearm
 test_malformed_marker_is_quarantined_once
 test_recovery_consumption_serializes_queue_publication
 test_restart_preserves_recovery_across_reused_pid_lock
+test_restart_clears_reused_pid_lock_recorded_under_an_equivalent_home
+test_restart_leaves_a_distinct_home_lock_untouched
 test_markerless_legacy_queue_is_recovered_on_arm
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing

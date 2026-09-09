@@ -167,8 +167,8 @@ fm_watcher_lock_matches_pid() {
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ -d "$lock_home" ] && [ -d "$home" ] || return 1
   [ -f "$lock_path" ] && [ -f "$watch_path" ] || return 1
-  fm_paths_same_object "$lock_home" "$home" || return 1
-  fm_paths_same_object "$lock_path" "$watch_path" || return 1
+  [ "$lock_home" = "$home" ] || fm_paths_same_object "$lock_home" "$home" || return 1
+  [ "$lock_path" = "$watch_path" ] || fm_paths_same_object "$lock_path" "$watch_path" || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
   [ "$current_identity" = "$lock_identity" ] || return 1
