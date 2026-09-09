@@ -199,6 +199,7 @@ fm_busy_sources_for_harness() {  # <harness>
     gemini*) adapter=gemini-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
+    hermes|antigravity) adapter=worker-bridge ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'

@@ -39,6 +39,9 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
 
 detect_own() {
+  case "${FM_WORKER_BRIDGE_HARNESS:-}" in
+    hermes|antigravity) printf '%s\n' "$FM_WORKER_BRIDGE_HARNESS"; return ;;
+  esac
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
   # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,

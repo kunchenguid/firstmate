@@ -1590,3 +1590,55 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Hermes and Antigravity worker bridges
+
+On 2026-09-08 (America/Los_Angeles), the Antigravity CLI changelog identified release 1.1.27, and Hermes reported `Hermes Agent v0.21.1 (2026.9.7)` with local commit `4a39a3ff`.
+The active bridge implementations are crewmate/scout-only; their harness references own operating limits.
+
+```sh
+bin/fm-test-run.sh tests/fm-worker-bridge.test.sh tests/fm-harness-adapter-references.test.sh
+FM_WORKER_BRIDGE_LIVE=1 FM_BRIDGE_HARNESSES=antigravity bin/fm-test-run.sh tests/fm-worker-bridge-live-e2e.test.sh
+```
+
+Portable lifecycle evidence:
+
+```text
+PASS: both bridges preserve session identity, turn state, failures, cancellation and exit
+```
+
+The portable guard exercises real subprocesses behind stubbed vendor commands, including signal-driven cancellation, SIGTERM cleanup with no surviving child, exact follow-up session binding, blocked failure reporting, and generation-bound state.
+The credentialed Antigravity guard passed with this output:
+
+```text
+PASS: antigravity real CLI initial turn, exact conversation follow-up, tmux liveness, inbox acknowledgement, fm-send, fm-control interrupt and exit
+```
+
+The control plane reports cancellation delivery as `cancel=unconfirmed`; the bridge proves its child process group ended, not a vendor-side cancellation acknowledgement.
+The credentialed Antigravity guard uses real tmux, requires an unseen reversed code word from the second turn, and checks the durable steering inbox acknowledgement before allowing exit.
+The shell trampoline is necessary on macOS: the installed Python launcher replaces a custom Python argv[0], whereas a persistent Bash parent preserves the explicit `fm-worker-bridge` process identity for the existing two-source liveness classifier.
+
+Hermes credentialed verification is blocked on this host, not passed:
+
+```text
+No inference provider configured. Run 'hermes model' to choose a provider and
+model, or set an API key (OPENROUTER_API_KEY, OPENAI_API_KEY, etc.) in
+~/.hermes/.env.
+```
+
+Once Hermes authentication is configured, refresh both tools with `FM_WORKER_BRIDGE_LIVE=1 bin/fm-test-run.sh tests/fm-worker-bridge-live-e2e.test.sh` before trusting Hermes dispatch.
+Neither bridge establishes a primary or secondmate supervision protocol.
+
+The full Antigravity scout path also passed on Herdr 0.9.0, protocol 22, using a guarded named lab and a canonical temporary home:
+
+```sh
+FM_WORKER_BRIDGE_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-worker-bridge-herdr-live-e2e.test.sh
+```
+
+```text
+PASS: real Herdr fm-spawn Antigravity scout, report, busy/idle lifecycle, acknowledged follow-up, control exit and teardown
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=141993
+```
+
+This guard exercises the actual spawn template, Treehouse lease, native CLI tool writes, generation-bound semantic state, Herdr lifecycle registration, durable inbox acknowledgement, control-plane exit, and guarded scout teardown.
+Herdr's native registration and the bridge's semantic record are distinct observations; the latter owns Firstmate's busy verdict.

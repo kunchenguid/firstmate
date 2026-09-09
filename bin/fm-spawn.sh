@@ -124,7 +124,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|hermes|antigravity)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -1325,7 +1325,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|hermes|antigravity)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1444,6 +1444,7 @@ launch_template() {
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
+    hermes|antigravity) printf '%s' 'env FM_WORKER_BRIDGE_HARNESS=__BRIDGEHARNESS__ __BRIDGEBIN__ --harness __BRIDGEHARNESS__ --state __BRIDGESTATE__ --id __BRIDGEID__ --gen __BRIDGEGEN__ --backend __BRIDGEBACKEND__ --brief __BRIEF__ __MODELFLAG____EFFORTFLAG__' ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
@@ -1634,7 +1635,7 @@ esac
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
 # secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = hermes ] || [ "$HARNESS" = antigravity ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -1649,6 +1650,20 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
 fi
 
 case "$HARNESS" in
+  hermes|antigravity)
+    if [ "$HARNESS" = antigravity ]; then
+      case "$EFFORT" in
+        ''|default|low|medium|high) ;;
+        *) echo "error: antigravity supports only low, medium, and high effort" >&2; exit 1 ;;
+      esac
+    fi
+    BRIDGE_NATIVE_BIN=$HARNESS
+    [ "$HARNESS" != antigravity ] || BRIDGE_NATIVE_BIN=agy
+    if ! command -v python3 >/dev/null || ! command -v "$BRIDGE_NATIVE_BIN" >/dev/null; then
+      echo "error: $HARNESS worker bridge requires python3 and $BRIDGE_NATIVE_BIN on PATH" >&2
+      exit 1
+    fi
+    ;;
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
@@ -1835,7 +1850,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|hermes|antigravity)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1845,6 +1860,11 @@ effort_flag_for_harness() {
   local harness=$1 effort=$2 model=${3:-}
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
+    hermes|antigravity)
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
     claude)
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
@@ -3188,7 +3208,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed|omp)
+    claude*|opencode*|pi|pi-signed|omp|hermes|antigravity)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -3775,6 +3795,12 @@ case "$HARNESS" in
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
   omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
 esac
+LAUNCH=${LAUNCH//__BRIDGEBIN__/"$(shell_quote "$FM_ROOT/bin/fm-worker-bridge.sh")"}
+LAUNCH=${LAUNCH//__BRIDGEHARNESS__/"$(shell_quote "$HARNESS")"}
+LAUNCH=${LAUNCH//__BRIDGESTATE__/"$(shell_quote "$STATE")"}
+LAUNCH=${LAUNCH//__BRIDGEID__/"$(shell_quote "$ID")"}
+LAUNCH=${LAUNCH//__BRIDGEBACKEND__/"$(shell_quote "$BACKEND")"}
+LAUNCH=${LAUNCH//__BRIDGEGEN__/"$(shell_quote "${BUSY_GEN:-}")"}
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo)

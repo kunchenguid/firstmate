@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp) return 0 ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|hermes|antigravity) return 0 ;;
   esac
   return 1
 }
@@ -78,6 +78,7 @@ fm_control_harness_supported() {  # <harness>
 # unrecognized value returns nonzero rather than being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
+    hermes|antigravity) printf '%s' "$1" ;;
     pi) printf 'pi' ;;
     pi-signed) printf 'pi-signed' ;;
     omp) printf 'omp' ;;
@@ -104,7 +105,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|hermes|antigravity) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -120,7 +121,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo) printf 'Escape' ;;
-    grok) printf 'C-c' ;;
+    grok|hermes|antigravity) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
@@ -130,7 +131,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|hermes|antigravity) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -151,7 +152,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|hermes|antigravity) ;;
     *) return 1 ;;
   esac
 }
@@ -166,7 +167,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|hermes|antigravity) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -174,7 +175,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 # The command that exits the agent from its own composer.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
+    claude|opencode|grok|kimi|cursor|muse|rovo|hermes|antigravity) printf '/exit' ;;
     codex|pi|pi-signed|omp|gemini) printf '/quit' ;;
     *) return 1 ;;
   esac

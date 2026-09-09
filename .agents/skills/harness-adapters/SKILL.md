@@ -35,6 +35,7 @@ For recovery and control, use the exact `harness=` in `state/<id>.meta`; never i
 Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> interrupt|exit|relaunch`.
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
+Antigravity and Hermes bridge adapters are crew/scout-only; their selected references state the live-verification boundary.
 Muse and Gemini are verified only for crewmate and scout work, never a secondmate or primary.
 
 ## Detection
@@ -93,7 +94,9 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "gemini": "references/harness/gemini.md",
     "muse": "references/harness/muse.md",
     "rovo": "references/harness/rovo.md",
-    "omp": "references/harness/omp.md"
+    "omp": "references/harness/omp.md",
+    "hermes": "references/harness/hermes.md",
+    "antigravity": "references/harness/antigravity.md"
   }
 }
 ```
