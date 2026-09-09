@@ -18,6 +18,7 @@ if os.environ.get('BRIDGE_CHILD_PID'):
 if os.environ.get('BRIDGE_DESCENDANT'):
     subprocess.Popen([sys.executable, '-c', "import os,signal,time; signal.signal(signal.SIGINT,signal.SIG_IGN); signal.signal(signal.SIGTERM,signal.SIG_IGN); open(os.environ['BRIDGE_DESCENDANT'],'w').write(str(os.getpid())); time.sleep(30)"])
     while not os.path.exists(os.environ['BRIDGE_DESCENDANT']): time.sleep(.01)
+if os.environ.get('BRIDGE_IGNORE_SIGINT'): signal.signal(signal.SIGINT, signal.SIG_IGN)
 if os.environ.get('BRIDGE_SLEEP'): time.sleep(30)
 if os.environ.get('BRIDGE_FAIL'): sys.exit(7)
 if os.environ.get('BRIDGE_HUGE'):
@@ -26,6 +27,7 @@ if os.environ.get('BRIDGE_HUGE'):
     sys.exit(0)
 if os.environ.get('BRIDGE_BANNER'): print('Antigravity update available')
 if os.environ.get('BRIDGE_TRUNCATED'): print('error: print timeout expired (response may be truncated)', file=sys.stderr)
+if os.environ.get('BRIDGE_STDERR_NOISE'): print('error: benign diagnostic', file=sys.stderr)
 if '--print' in sys.argv and sys.argv[sys.argv.index('--print')+1].endswith('fail-json'):
     print(json.dumps({'status':'FAILURE','response':'failed without id'})); sys.exit(0)
 if sys.argv[0].endswith('hermes'): print('session_id: exact-hermes-session', file=sys.stderr)
@@ -79,9 +81,14 @@ print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','res
             calls = [json.loads(line) for line in (base/'calls').read_text().splitlines()[-2:]]
             assert '--conversation' not in calls[1], calls[1]
             assert calls[1][calls[1].index('--print')+1] == envelope('fail-json') + '\n\nretry', calls[1]
-            truncated = subprocess.run(command,input='/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_TRUNCATED='1'),timeout=20)
+            truncated = subprocess.run(command,input='again\n/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_TRUNCATED='1'),timeout=20)
             assert truncated.returncode == 0, truncated.stderr
-            assert 'turn failed' in truncated.stdout, truncated.stdout
+            assert truncated.stdout.count('turn failed') == 2, truncated.stdout
+            calls = [json.loads(line) for line in (base/'calls').read_text().splitlines()[-2:]]
+            assert calls[1][calls[1].index('--conversation')+1] == 'conversation-exact', calls[1]
+            noise = subprocess.run(command,input='/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_STDERR_NOISE='1'),timeout=20)
+            assert noise.returncode == 0, noise.stderr
+            assert 'turn failed' not in noise.stdout, noise.stdout
             banner = subprocess.run(command,input='again\n/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_BANNER='1'),timeout=20)
             assert banner.returncode == 0, banner.stderr
             assert banner.stdout.count('turn failed') == 2, banner.stdout
@@ -103,6 +110,21 @@ print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','res
         try: os.kill(child_pid, 0)
         except ProcessLookupError: pass
         else: raise AssertionError('cancel left a child alive')
+        (state/'probe.turn-ended').unlink()
+        process = subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=dict(env,BRIDGE_SLEEP='1',BRIDGE_IGNORE_SIGINT='1',BRIDGE_CHILD_PID=str(state/'double.pid')))
+        for _ in range(200):
+            if 'state=busy' in (state/'probe.busy-state').read_text() and (state/'double.pid').exists(): break
+            time.sleep(.05)
+        else: raise AssertionError('never busy before the double interrupt')
+        time.sleep(.2)
+        process.send_signal(signal.SIGINT)
+        time.sleep(.5)
+        process.send_signal(signal.SIGINT)
+        output,error = process.communicate('/exit\n',timeout=30)
+        assert process.returncode == 0, error
+        assert 'cancelled' in output, output
+        assert 'state=idle' in (state/'probe.busy-state').read_text()
+        assert (state/'probe.turn-ended').exists()
         process = subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=dict(env,BRIDGE_SLEEP='1',BRIDGE_CHILD_PID=str(state/'term-child.pid')))
         for _ in range(100):
             if (state/'term-child.pid').exists(): break

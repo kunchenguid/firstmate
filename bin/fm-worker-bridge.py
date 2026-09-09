@@ -24,6 +24,7 @@ import time
 
 PROTOCOL_LIMIT = 1024 * 1024
 ANTIGRAVITY_PRINT_TIMEOUT = '24h'
+ANTIGRAVITY_TRUNCATION_NOTE = '(response may be truncated)'
 
 
 def main():
@@ -192,11 +193,10 @@ def main():
             success = process.returncode == 0 and not overflow
             if args.harness == 'hermes':
                 success = success and bool(re.search(r'^session_id: \S+$', errors, re.M)) and bool(output.strip())
-            else:
-                success = success and not re.search(r'^error: ', errors, re.M)
             if args.harness == 'antigravity' and success:
                 success, response = antigravity_result(output)
                 print(response, flush=True)
+                success = success and ANTIGRAVITY_TRUNCATION_NOTE not in errors
             else:
                 print(output, flush=True)
             if not success:
@@ -207,23 +207,27 @@ def main():
             # Apply rejects stale generations before we emit the completion wake.
             (state / (args.id + '.turn-ended')).touch()
         except KeyboardInterrupt:
-            if process is not None and process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGINT)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            try:
+                if process is not None and process.poll() is None:
                     try:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        os.killpg(process.pid, signal.SIGINT)
                     except ProcessLookupError:
                         pass
-                    process.communicate()
-            terminate(process)
-            event('idle', 'turn-cancelled')
-            (state / (args.id + '.turn-ended')).touch()
-            print('\nFirstmate worker cancelled', flush=True)
+                    try:
+                        process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.communicate()
+                terminate(process)
+                event('idle', 'turn-cancelled')
+                (state / (args.id + '.turn-ended')).touch()
+                print('\nFirstmate worker cancelled', flush=True)
+            finally:
+                signal.signal(signal.SIGINT, terminated)
         except (OSError, ValueError) as error:
             print('Firstmate worker error: ' + str(error), flush=True)
             event('unknown', 'turn-error')

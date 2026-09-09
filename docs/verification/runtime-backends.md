@@ -1644,4 +1644,6 @@ This guard exercises the actual spawn template, Treehouse lease, native CLI tool
 Herdr's native registration and the bridge's semantic record are distinct observations; the latter owns Firstmate's busy verdict.
 
 The installed Antigravity release has since advanced to 1.1.28, whose changelog states that an expired `--print-timeout` now returns partial output and exits successfully with a warning on stderr.
-The bridge therefore dispatches an explicit 24h `--print-timeout` and records any run carrying agy's stable stderr `error:` marker as a failed turn; the credentialed evidence above was taken on 1.1.27 and should be refreshed on the current release.
+The bridge therefore dispatches an explicit 24h `--print-timeout` and records a run carrying agy's truncated-response note as a failed turn.
+That dispatch also now carries the canonical `launch-brief` envelope inside the `--print` argument, so the credentialed evidence above, taken on 1.1.27 against the earlier invocation, no longer covers the command Firstmate actually runs.
+Re-run both `FM_WORKER_BRIDGE_LIVE=1 bin/fm-test-run.sh tests/fm-worker-bridge-live-e2e.test.sh` and `FM_WORKER_BRIDGE_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-worker-bridge-herdr-live-e2e.test.sh` on the installed release and record their output here before installing this change.
