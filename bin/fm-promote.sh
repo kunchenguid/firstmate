@@ -172,8 +172,7 @@ if [ -n "$RECORDED_BASE" ]; then
       echo "error: local-only promotion requires recorded base '$RECORDED_BASE' as a local branch (refs/heads/$RECORDED_BASE); a base that exists only on origin cannot be landed locally" >&2
       exit 1
     fi
-  elif ! git -C "$PROMOTE_PROJ" show-ref --verify --quiet "refs/remotes/origin/$RECORDED_BASE" \
-    && ! git -C "$PROMOTE_PROJ" ls-remote --exit-code --heads origin "refs/heads/$RECORDED_BASE" >/dev/null 2>&1; then
+  elif ! git -C "$PROMOTE_PROJ" ls-remote --exit-code --heads origin "refs/heads/$RECORDED_BASE" >/dev/null 2>&1; then
     echo "error: $MODE promotion requires recorded base '$RECORDED_BASE' on origin; a local-only base cannot be a pull-request target" >&2
     exit 1
   fi

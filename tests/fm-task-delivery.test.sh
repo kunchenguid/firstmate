@@ -346,7 +346,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
   local home meta out sendroot payload mode id brief_dod delivered_dod
-  local named_proj origin_only local_only_proj status
+  local named_proj origin_only local_only_proj status stale_remote_sha
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -436,6 +436,23 @@ STUB
         "$mode promotion did not select the remote recorded base"
     fi
   done
+
+  stale_remote_sha=$(git -C "$named_proj" rev-parse refs/remotes/origin/develop)
+  git -C "$named_proj" push -q origin --delete develop
+  git -C "$named_proj" update-ref refs/remotes/origin/develop "$stale_remote_sha"
+  id=promote-stale-remote-base
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=develop\n' \
+    "$id" "$named_proj" "$named_proj" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout --base-branch develop >/dev/null 2>&1 \
+    || fail "stale-remote-base scout brief generation should succeed"
+  fill_brief_subsections "$home/data/$id/brief.md" "Reject stale remote." "Require live base."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted a deleted recorded remote base from a stale tracking ref"
+  assert_contains "$out" "requires recorded base 'develop' on origin" \
+    "promotion did not revalidate the recorded remote base"
+  assert_grep 'kind=scout' "$home/state/$id.meta" \
+    "stale remote-base refusal still flipped the task kind"
 
   origin_only="$TMP_ROOT/promote-dod/origin-only-proj"
   git init -q "$origin_only"

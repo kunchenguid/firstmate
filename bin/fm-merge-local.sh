@@ -69,8 +69,6 @@ fi
 BRANCH_REF="refs/heads/$BRANCH"
 git -C "$PROJ" rev-parse --verify --quiet "$BRANCH_REF" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
-TARGET=$DEFAULT
 recorded_base=$(grep '^base_branch=' "$META" | tail -n 1 | cut -d= -f2- || true)
 if [ -n "$recorded_base" ]; then
   git check-ref-format --branch "$recorded_base" >/dev/null 2>&1 || {
@@ -78,6 +76,10 @@ if [ -n "$recorded_base" ]; then
     exit 1
   }
   TARGET=$recorded_base
+  DEFAULT=$(default_branch || true)
+else
+  DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+  TARGET=$DEFAULT
 fi
 TARGET_REF="refs/heads/$TARGET"
 git -C "$PROJ" rev-parse --verify --quiet "$TARGET_REF" >/dev/null || { echo "error: landing branch $TARGET does not exist in $PROJ" >&2; exit 1; }
@@ -85,8 +87,8 @@ git -C "$PROJ" rev-parse --verify --quiet "$TARGET_REF" >/dev/null || { echo "er
 # The project's main checkout must stay on its default branch unless it is
 # already on the landing target. firstmate never writes here otherwise.
 cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
-if [ "$cur" != "$DEFAULT" ] && [ "$cur" != "$TARGET" ]; then
-  echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT' or landing branch '$TARGET'; cannot merge safely" >&2
+if [ "$cur" != "$TARGET" ] && { [ -z "$DEFAULT" ] || [ "$cur" != "$DEFAULT" ]; }; then
+  echo "error: $PROJ is on '$cur', expected default branch '${DEFAULT:-unresolved}' or landing branch '$TARGET'; cannot merge safely" >&2
   exit 1
 fi
 if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then

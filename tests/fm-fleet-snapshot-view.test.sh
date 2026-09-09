@@ -523,6 +523,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] reported-comma - Reported Scout data/reported-comma/report.md (repo: gamma, reported 2026-07-10) (kind: scout)
 - [x] done-note - Done Note local main (repo: delta, done 2026-07-11) (kind: ship)
 - [x] done-named - Done Named local develop (repo: delta, done 2026-07-11) (kind: ship)
+- [ ] queued-local-prose - Investigate local develop (repo: sample, kind: ship)
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
@@ -630,6 +631,10 @@ EOF
       and .done == "2026-07-11"
       and .completion == {verb:"done",date:"2026-07-11"}
   ' >/dev/null || fail "named-base local note did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "queued-local-prose")
+    | .title == "Investigate local develop" and .local_note == null
+  ' >/dev/null || fail "queued prose was misclassified as a local landing note"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")
     | .backlog.id == "bold-task"

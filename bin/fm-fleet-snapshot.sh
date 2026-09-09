@@ -393,30 +393,19 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def strip_title_artifacts:
       sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
-      | sub("[[:space:]]+-[[:space:]]+local [^[:space:]]+$"; "")
-      | sub("[[:space:]]+local [^[:space:]]+$"; "")
       | sub("[[:space:]]+-[[:space:]]*$"; "");
-    def clean_title:
+    def strip_local_title_artifact:
+      sub("[[:space:]]+-[[:space:]]+local [^[:space:]]+$"; "")
+      | sub("[[:space:]]+local [^[:space:]]+$"; "");
+    def clean_title($is_local_landing):
       strip_trailing_metadata
       | strip_title_artifacts
+      | if $is_local_landing then strip_local_title_artifact else . end
       | gsub("[[:space:]]+"; " ")
       | trim;
-    def title_of($rest):
-      $rest
-      | gsub(wrapped_url_pattern; "")
-      | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
-      | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
-      | clean_title;
     def blocked_by_ids($rest):
       [ $rest | scan("blocked-by:[[:space:]]+(?<id>[^[:space:])]+)") | .[0] ]
       | reduce .[] as $id ([]; if index($id) == null then . + [$id] else . end);
-    def blocked_reason($rest):
-      cap($rest; ".*blocked-by:[[:space:]]*[^[:space:])]+[[:space:]]+-[[:space:]]*(?<v>.*)$") as $reason
-      | if $reason == null then null
-        else ($reason | clean_title | if . == "" then null else . end)
-        end;
-    def local_note($rest):
-      cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local [^[:space:]]+)$");
     def completion($rest):
       (metadata_word($rest; "merged")) as $merged
       | (metadata_word($rest; "reported")) as $reported
@@ -425,6 +414,21 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         elif $reported != null then {verb:"reported",date:$reported}
         elif $done != null then {verb:"done",date:$done}
         else {verb:null,date:null} end;
+    def local_note($rest):
+      if (completion($rest).verb == "done") then
+        cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local [^[:space:]]+)$")
+      else null end;
+    def title_of($rest):
+      $rest
+      | gsub(wrapped_url_pattern; "")
+      | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
+      | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
+      | clean_title(local_note($rest) != null);
+    def blocked_reason($rest):
+      cap($rest; ".*blocked-by:[[:space:]]*[^[:space:])]+[[:space:]]+-[[:space:]]*(?<v>.*)$") as $reason
+      | if $reason == null then null
+        else ($reason | clean_title(false) | if . == "" then null else . end)
+        end;
     def row_match($line):
       (($line | capture("^[-*][[:space:]]+\\[(?<check>[ xX])\\][[:space:]]+(?<id>[^[:space:]]+)[[:space:]]+-[[:space:]]+(?<rest>.*)$")?) //
        (($line | capture("^[-*][[:space:]]+\\*\\*(?<id>[^*]+)\\*\\*[[:space:]]+-[[:space:]]+(?<rest>.*)$")?)

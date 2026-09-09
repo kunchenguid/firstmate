@@ -70,11 +70,13 @@ default_branch() {
   return 1
 }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -1 | cut -d= -f2- || true)
-COMPARE_BASE=$DEFAULT
+MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ -n "$RECORDED_BASE" ]; then
   COMPARE_BASE=$RECORDED_BASE
+else
+  DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+  COMPARE_BASE=$DEFAULT
 fi
 
 BRANCH="fm/$ID"
@@ -148,7 +150,10 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+if [ "$MODE" = local-only ]; then
+  BASE="$COMPARE_BASE"
+  BASE_REF="refs/heads/$COMPARE_BASE"
+elif git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<base> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$COMPARE_BASE:refs/remotes/origin/$COMPARE_BASE" --quiet

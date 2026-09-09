@@ -207,6 +207,57 @@ test_recorded_base_branch_is_compare_base() {
   pass "fm-review-diff uses recorded base_branch= as compare base, default otherwise"
 }
 
+test_local_only_recorded_base_does_not_require_default_or_remote_ref() {
+  local case_dir out
+  case_dir=$(make_case local-only-base)
+  git -C "$case_dir/project" branch develop main
+  git -C "$case_dir/wt" checkout -q develop
+  printf 'local-develop\n' > "$case_dir/wt/local-develop.txt"
+  git -C "$case_dir/wt" add local-develop.txt
+  git -C "$case_dir/wt" commit -qm "local develop tip"
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  printf 'local-crew\n' > "$case_dir/wt/local-crew.txt"
+  git -C "$case_dir/wt" add local-crew.txt
+  git -C "$case_dir/wt" commit -qm "local crew tip"
+  write_task_meta "$case_dir" "mode=local-only" "base_branch=develop"
+
+  out=$(run_review_diff "$case_dir" task-x1)
+  assert_contains "$out" 'diff base: develop' \
+    "local-only review did not use the local recorded base"
+  assert_not_contains "$out" 'origin/develop' \
+    "local-only review selected the remote-tracking base"
+  assert_not_contains "$out" 'local-develop' \
+    "local-only review included commits already on the recorded base"
+  assert_contains "$out" '+local-crew' \
+    "local-only review omitted crew changes"
+  pass "fm-review-diff uses a local recorded base without resolving the default"
+}
+
+test_recorded_base_branch_without_default() {
+  local case_dir out
+  case_dir=$(make_case recorded-base-no-default)
+  git -C "$case_dir/project" branch develop main
+  git -C "$case_dir/wt" checkout -q develop
+  printf 'local-develop\n' > "$case_dir/wt/local-develop.txt"
+  git -C "$case_dir/wt" add local-develop.txt
+  git -C "$case_dir/wt" commit -qm "local develop tip"
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  printf 'local-crew\n' > "$case_dir/wt/local-crew.txt"
+  git -C "$case_dir/wt" add local-crew.txt
+  git -C "$case_dir/wt" commit -qm "local crew tip"
+  git -C "$case_dir/project" checkout -q develop
+  git -C "$case_dir/project" branch -D main >/dev/null
+  git -C "$case_dir/project" remote remove origin
+  write_task_meta "$case_dir" "mode=local-only" "base_branch=develop"
+
+  out=$(run_review_diff "$case_dir" task-x1)
+  assert_contains "$out" 'diff base: develop' \
+    "review required an unrelated default branch before using the recorded base"
+  assert_contains "$out" '+local-crew' \
+    "review without a default omitted crew changes"
+  pass "fm-review-diff honors a recorded base when no default branch exists"
+}
+
 test_recorded_crew_branch_ignores_parked_head() {
   local case_dir out
   case_dir=$(make_case recorded-crew)
@@ -237,4 +288,6 @@ test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_recorded_base_branch_is_compare_base
+test_local_only_recorded_base_does_not_require_default_or_remote_ref
+test_recorded_base_branch_without_default
 test_recorded_crew_branch_ignores_parked_head

@@ -123,6 +123,23 @@ test_absent_metadata_base_uses_default() {
   pass "merge-local defaults to the project default when metadata omits a base"
 }
 
+test_recorded_base_without_default_branch_merges() {
+  local case_dir project id=task-no-default
+  case_dir=$(make_case no-default "$id")
+  project=$case_dir/project
+  git -C "$project" checkout -qb develop
+  git -C "$project" branch -D main >/dev/null
+  commit_on "$project" "fm/$id" work.txt
+  git -C "$project" checkout -q develop
+  printf '%s\n' 'base_branch=develop' >> "$case_dir/home/state/$id.meta"
+
+  run_merge "$case_dir" "$id" >/dev/null \
+    || fail "merge-local required a default branch before using the recorded base"
+  [ "$(git -C "$project" rev-parse develop)" = "$(git -C "$project" rev-parse "fm/$id")" ] \
+    || fail "merge-local did not land on the recorded base without a default branch"
+  pass "merge-local lands a recorded base without a conventional default branch"
+}
+
 test_invalid_metadata_base_refuses() {
   local case_dir project id=task-invalid out rc before
   case_dir=$(make_case invalid "$id")
@@ -170,6 +187,7 @@ test_omitted_crew_branch_uses_fm_id
 test_last_recorded_crew_branch_wins
 test_metadata_base_is_authoritative
 test_absent_metadata_base_uses_default
+test_recorded_base_without_default_branch_merges
 test_invalid_metadata_base_refuses
 test_diverged_branch_refuses
 
