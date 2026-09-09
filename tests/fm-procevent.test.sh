@@ -1530,6 +1530,28 @@ kill -0 "$noisy_child" 2>/dev/null && fail "TERM-resistant source child survived
 assert_absent "$staged" "retirement removes the tracked partial staging file"
 pass "live output stays bounded and retirement reaps the whole source group"
 
+# When the post-TERM cases fail they must say WHAT THEY SAW, not only that they
+# failed. This assertion has failed in CI and passed in every environment
+# available here, so the only instrument that reproduces it is the one we cannot
+# attach a debugger to. An assertion this change reworked which fails without
+# evidence is a defect in the change, not bad luck, so the evidence is collected
+# on the failure path only and costs nothing when the case passes.
+post_term_evidence() {  # <case> <runner-pid> <claim> <signals> <started-epoch> <retire-output>
+  local case=$1 runner=$2 claim=$3 signals=$4 started=$5 out=$6
+  {
+    printf 'post-TERM evidence (%s case)\n' "$case"
+    printf '  elapsed since retire started: %ss\n' "$(( $(date +%s) - started ))"
+    printf '  identity recorded at claim time: %s\n' "$(sed -n '4p' "$claim" 2>/dev/null || echo '<claim unreadable>')"
+    printf '  identity readable now (real ps): %s\n' "$(LC_ALL=C ps -p "$runner" -o lstart= 2>/dev/null || echo '<ps failed>')"
+    printf '  signals file: %s (%s bytes)\n' "$signals" "$(wc -c < "$signals" 2>/dev/null | tr -d ' ' || echo 0)"
+    printf '  leader state: %s\n' "$(ps -o pid=,ppid=,pgid=,stat= -p "$runner" 2>/dev/null || echo '<leader gone>')"
+    printf '  leader wchan: %s\n' "$(ps -o wchan= -p "$runner" 2>/dev/null || echo '<none>')"
+    printf '  live members of the runner group:\n'
+    ps -Ao pid,ppid,pgid,stat,wchan,command 2>/dev/null | awk -v g="$runner" 'NR==1 || $3==g' | sed 's/^/    /'
+    printf '  retire said: %s\n' "${out:-<no output>}"
+  } >&2
+}
+
 for post_term_case in mismatch unreadable unreadable-pgid nonleader; do
   HPOST_TERM="$TMP_ROOT/post-term-$post_term_case"; new_home "$HPOST_TERM"
   POST_TERM_SOURCE="$HPOST_TERM/source.sh"
@@ -1579,6 +1601,7 @@ exec "$REAL_PS" "\$@"
 SH
   chmod +x "$POST_TERM_BIN/ps"
   post_term_status=0
+  post_term_started=$(date +%s)
   post_term_out=$(PATH="$POST_TERM_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
     pe "$HPOST_TERM" retire post-term-src 2>&1) || post_term_status=$?
   case "$post_term_case" in
@@ -1598,7 +1621,12 @@ SH
       kill -KILL -"$POST_TERM_RUNNER" 2>/dev/null || true
       ;;
     *)
-      [ -s "$POST_TERM_SIGNALS" ] || fail "the post-TERM fixture never received TERM"
+      if [ ! -s "$POST_TERM_SIGNALS" ]; then
+        post_term_evidence "$post_term_case" "$POST_TERM_RUNNER" \
+          "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" "$POST_TERM_SIGNALS" \
+          "$post_term_started" "$post_term_out"
+        fail "the post-TERM fixture never received TERM"
+      fi
       [ "$post_term_status" -eq 0 ] \
         || fail "retirement abandoned a proved stop after $post_term_case identity: $post_term_out"
       assert_absent "$HPOST_TERM/state/procevent/post-term-src.source" \
