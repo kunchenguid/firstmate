@@ -653,7 +653,7 @@ test_backlog_callers_refuse_unreadable_backend_config() (
   local args=()
   case_dir="$TMP_ROOT/backend-callers"
   data="$case_dir/records"
-  id=backend-callers-row
+  id='backend-callers-row'
   mkdir -p "$data" "$case_dir/data" "$case_dir/config"
   printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$data/backlog.md"
   cp "$data/backlog.md" "$case_dir/data/backlog.md"
@@ -693,7 +693,7 @@ test_backlog_callers_refuse_unreadable_backend_config() (
 
 test_captain_hold_preserves_relocated_backlog_on_backend_error() {
   local case_dir home data config_state id out rc show
-  id=backend-hold-row
+  id='backend-hold-row'
   for config_state in dangling absent readable; do
     case_dir="$TMP_ROOT/backend-hold-$config_state"
     home="$case_dir/home"
