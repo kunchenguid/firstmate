@@ -318,6 +318,10 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# The token leads with the spawn's epoch second (s<epoch>.<pid>.<n>), which
+# bin/fm-fleet-snapshot.sh reads as that worker's start time in a home opted into
+# config/worker-running-time, so the prefix is an observed contract rather than an
+# opaque id (docs/configuration.md "Worker running time").
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
