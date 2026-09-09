@@ -166,6 +166,11 @@ pass "fixed: the workspace holds exactly the 2 replacement tabs after both respa
 
 herdr pane report-agent "$NEW_CREW_PANE_ID" --source fm-respawn-e2e --agent fm-respawn-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the respawned crewmate-shaped pane"
+# The registration alone is not a live agent: the classifier corroborates it
+# against the pane's real terminal ownership, so the fixture must occupy the
+# pane too (tests/herdr-test-safety.sh owns that contract).
+herdr_occupy_pane "$SESSION" "$NEW_CREW_PANE_ID" \
+  || fail "could not occupy the respawned crewmate-shaped pane for the live-agent fixture"
 
 if fm_backend_herdr_create_task "$CONTAINER" "$CREW_LABEL" "$PROJ_CWD" >/dev/null 2>&1; then
   fail "REGRESSION: create_task should refuse a same-labeled tab whose pane hosts a genuinely live registered agent"
