@@ -200,10 +200,10 @@ g3.meta
 Merge a Gitea pull request on the forge itself.
 The watch then reports the merge exactly as it does for a merge performed anywhere else.
 
-## The task backlog still cannot hold a Gitea URL
+## How the task backlog records a Gitea URL
 
-`tasks-axi` ships from a separate repository, `github.com/kunchenguid/tasks-axi`, so its validator is not firstmate's to widen and nothing here works around it.
-At version 0.2.5 its `--pr` validator is `/^https:\/\/[^?#\s]+\/pull\/\d+$/`, singular, so a Gitea URL is rejected:
+`tasks-axi` ships from a separate repository, `github.com/kunchenguid/tasks-axi`, so its validator is not firstmate's to widen from this checkout.
+At version 0.2.5 its `--pr` flag accepts only an http(s) URL whose path ends in `/pull/<number>`, singular, so a Gitea URL is rejected there:
 
 ```
 $ tasks-axi update gitea-probe --pr https://code.fedgroup.co.za:7990/Firefly/Zuri2/pulls/188
@@ -218,10 +218,21 @@ help[1]:
 
 The GitHub URL is accepted on the same command and the same throwaway backlog, so the rejection is the path segment and nothing else.
 
-Until that repository accepts `/pulls/<number>`, a Gitea pull request URL lives in the task's free-form note by deliberate choice, not by accident.
-The URL firstmate itself watches is unaffected: `bin/fm-pr-check.sh` records it as `pr=` in the task's own metadata, shown above.
+The backlog does hold the link, in the note rather than the pr field.
+`fm_backlog_completion_link_args` in `bin/fm-backlog-transition-lib.sh` is the single rule every close path uses, and it decides from the URL rather than from the forge.
+A URL whose path ends in `/pull/<number>` is recorded through `--pr` exactly as before.
+Any other URL is recorded through `--note`, which places it on its own body line under the closed row, still a link a reader can click.
+One rule therefore covers Gitea's `/pulls/<number>` and GitLab's `/-/merge_requests/<number>` alike, and nothing about a closed GitHub task changes.
+
+A URL that is not a well-formed https URL at all is still refused by the pending-close record validator, so an unrecordable close fails visibly rather than closing the row with a broken link.
+Widening the `--pr` validator to accept `/pulls/<number>` belongs to the `tasks-axi` repository and is filed there, not here.
+
+The URL firstmate itself watches is unaffected either way: `bin/fm-pr-check.sh` records it as `pr=` in the task's own metadata, shown above.
 
 ## Hermetic regression coverage
 
 `tests/fm-pr-check-security.test.sh` covers the parser, the poll, the arming refusals, and the merge refusal without reaching any instance.
 It pins the proven URL and a default-port Gitea URL as gitea, keeps a GitHub `/pull/<n>` URL and a GitLab `/-/merge_requests/<n>` URL parsing as before, rejects twenty-three near-miss Gitea URLs, and drives the poll against a fake curl and a fake `git credential fill` to assert the API address, the redacted argv, the escaped stdin config, and silence on every failure and every tampered sidecar.
+
+`tests/fm-teardown.test.sh` covers the close itself against the real `tasks-axi`.
+It tears a shipped task down three times, once per forge, and reads the closed row back through `tasks-axi show --full`: the GitHub URL lands in the row's `pr` link, the Gitea and GitLab URLs land in the row's body, and no pending-close record is left behind in any of the three.

@@ -229,13 +229,13 @@ fm_pr_gitea_credential_available() {
 # Gitea. The three shapes are disjoint, so the order below only fixes which
 # pattern is tried first and never changes which provider a URL resolves to.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github and gitea because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository and the Gitea API
-# addresses a pull request the same way. A gitlab URL leaves them empty, and
-# that path addresses the project by FM_PR_HOST and FM_PR_PATH instead, so a
-# merge request on any instance resolves without a hardcoded host. FM_PR_HOST
-# carries the port for a gitea URL that has one, because that port is part of
-# the canonical URL each consumer must reconstruct exactly.
+# FM_PR_OWNER and FM_PR_REPO are additionally set for github alone, because
+# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab or gitea URL
+# leaves them empty; those paths address the project by FM_PR_HOST and
+# FM_PR_PATH instead, so a merge request or pull request on any instance
+# resolves without a hardcoded host. FM_PR_HOST carries the port for a gitea URL
+# that has one, because that port is part of the canonical URL each consumer
+# must reconstruct exactly.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path owner repo
   local LC_ALL=C
@@ -294,12 +294,6 @@ fm_pr_url_parse() {
   FM_PR_URL=$raw
   FM_PR_HOST=$host
   FM_PR_PATH="$owner/$repo"
-  # Consumed by the Gitea API path, which addresses a pull request by
-  # owner/repository/index exactly as GitHub does.
-  # shellcheck disable=SC2034
-  FM_PR_OWNER=$owner
-  # shellcheck disable=SC2034
-  FM_PR_REPO=$repo
   FM_PR_NUMBER=${BASH_REMATCH[5]}
 }
 

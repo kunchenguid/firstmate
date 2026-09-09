@@ -426,20 +426,20 @@ EOF
   # Gitea is recognised by its plural "/pulls/" segment and never by hostname,
   # so a self-hosted instance on any host and any port resolves. The proven
   # instance in docs/gitea-merge-watch.md is the first row.
-  while IFS='|' read -r url host path owner repo number; do
+  while IFS='|' read -r url host path number; do
     [ -n "$url" ] || continue
     fm_pr_url_parse "$url" || fail "parser rejected a canonical Gitea pull request URL"
     [ "$FM_PR_PROVIDER" = gitea ] || fail "parser did not tag a Gitea pull request URL as gitea"
     [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Gitea pull request URL"
     [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Gitea authority"
     [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Gitea project path"
-    [ "$FM_PR_OWNER" = "$owner" ] || fail "parser returned wrong Gitea owner"
-    [ "$FM_PR_REPO" = "$repo" ] || fail "parser returned wrong Gitea repository"
     [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Gitea pull request number"
+    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
+      || fail "parser set GitHub owner/repository for a Gitea pull request URL"
   done <<'EOF'
-https://code.fedgroup.co.za:7990/Firefly/Zuri2/pulls/188|code.fedgroup.co.za:7990|Firefly/Zuri2|Firefly|Zuri2|188
-https://gitea.example.com/Firefly/Zuri2/pulls/7|gitea.example.com|Firefly/Zuri2|Firefly|Zuri2|7
-https://git.internal:3000/team/tools_v2.x/pulls/123456|git.internal:3000|team/tools_v2.x|team|tools_v2.x|123456
+https://code.fedgroup.co.za:7990/Firefly/Zuri2/pulls/188|code.fedgroup.co.za:7990|Firefly/Zuri2|188
+https://gitea.example.com/Firefly/Zuri2/pulls/7|gitea.example.com|Firefly/Zuri2|7
+https://git.internal:3000/team/tools_v2.x/pulls/123456|git.internal:3000|team/tools_v2.x|123456
 EOF
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
