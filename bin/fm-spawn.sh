@@ -115,7 +115,12 @@
 #   root Firstmate home's state directory before slot allocation and holds it through
 #   task metadata publication. Teardown holds that same lock while proving and
 #   returning a slot, so allocation cannot reuse a slot before its owner record
-#   is published. The local root is whatever bin/fm-wake-lib.sh's
+#   is published. Under that same lock it writes the slot's owner claim, which is
+#   what lets teardown refuse to return a slot reassigned since; bin/fm-wake-lib.sh
+#   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
+#   cannot be claimed refuses the spawn rather than launching a worker whose slot
+#   could later be released out from under its successor.
+#   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
 #   contention refuses rather than waits.
@@ -3126,6 +3131,22 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+
+  # Claim the pool slot for this task. Treehouse's own record is a live process
+  # lease, so it cannot say which task a slot belongs to once that task's worker
+  # exits - and that is exactly when the slot is handed on and this task's
+  # worktree= line goes stale. The claim is what lets bin/fm-teardown.sh refuse
+  # to return a slot that has since been reassigned, so a slot that cannot be
+  # claimed is refused here, at the cheapest point, rather than launching a
+  # worker whose slot teardown could later release out from under its successor.
+  # Written under the Treehouse project lock held from before slot allocation
+  # through metadata publication, so no other spawn or return sees a half-claim.
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+      echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
+      exit 1
+    fi
+  fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
