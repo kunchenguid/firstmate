@@ -979,12 +979,13 @@ test_branch_prefix_command_is_shell_safe() {
   local home id prefix marker brief command repo branch
   home="$TMP_ROOT/branch-prefix-shell-safe-home"
   marker="$TMP_ROOT/branch-prefix-shell-safe-marker"
-  id=brief-branch-safe-g3
+  id='brief-branch-safe-g3'
   prefix="\$(touch\${IFS}$marker)"
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only --branch-prefix "$prefix" >/dev/null 2>&1 \
     || fail "a ref-format-valid metacharacter prefix should scaffold safely"
   brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # The sed expression intentionally contains literal backticks.
   command=$(sed -n 's/^1\. First action: create your branch: `\(.*\)`$/\1/p' "$brief")
   [ -n "$command" ] || fail "generated brief exposed no branch-creation command"
   repo="$TMP_ROOT/branch-prefix-shell-safe-repo"
