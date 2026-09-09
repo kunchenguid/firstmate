@@ -15,17 +15,27 @@
 # decision, so this file delegates to it rather than widening the name match.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+# On MSYS-style Windows hosts the ps walks below cannot cross into the native
+# Windows processes above the shell, so the chain enumeration itself delegates
+# to this lib there.
+# shellcheck source=bin/fm-windows-process-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-windows-process-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
 # omp 18.1.11), and a substring match would claim ompd or comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
+# zai is a herdr-fork primary engine, a node bundle (npm package zai-cli, or a
+# repo checkout under a zai directory) hosted in a herdr-compatible pane. It is
+# verified live as a PRIMARY session identity on Windows (lock acquisition over
+# the Windows chain walk); it is not a verified spawn adapter.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|zai'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
-# bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
+# bin/fm-claude-stop-autoarm.sh. zai-cli is the npm package directory the zai
+# engine runs from; zai covers a repo-checkout path component.
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp zai zai-cli)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -108,7 +118,17 @@ fm_harness_process_matches() {  # <comm> <args>
 # claude), with no non-harness process between them. Which pid in that run is the
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
+#
+# On an MSYS-style Windows host the engine above this shell is a native Windows
+# process MSYS ps cannot see, so the same climb runs over the CIM identity lines
+# from bin/fm-windows-process-lib.sh instead
+# (fm_harness_ancestry_pids_windows). Every pid printed there is a native
+# Windows pid, because MSYS pids cannot address those processes.
 fm_harness_ancestry_pids() {
+  if fm_host_is_windows; then
+    fm_harness_ancestry_pids_windows
+    return
+  fi
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
@@ -124,6 +144,28 @@ fm_harness_ancestry_pids() {
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
   done
+  [ "$printed" -eq 1 ]
+}
+
+# Windows twin of the walk above, over the CIM chain lines. Same
+# climb-until-first-match and stop-at-first-non-harness-ancestor semantics, so
+# the contiguous-run rule for a Claude worker chain is identical; only the
+# enumeration and the pid space differ.
+fm_harness_ancestry_pids_windows() {
+  local line pid comm args extending=0 printed=0
+  while IFS= read -r line; do
+    line=${line%$'\r'}
+    [ -n "$line" ] || continue
+    IFS=$'\037' read -r pid comm args <<<"$line"
+    if fm_harness_process_matches "$comm" "$args"; then
+      printf '%s\n' "$pid"
+      printed=1
+      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+      extending=1
+    elif [ "$extending" -eq 1 ]; then
+      break
+    fi
+  done < <(fm_windows_ancestry_lines)
   [ "$printed" -eq 1 ]
 }
 
@@ -145,9 +187,17 @@ EOF
   printf '%s\n' "$outermost"
 }
 
-# True if $1 is a live process that looks like a verified harness.
+# True if $1 is a live process that looks like a verified harness. On Windows
+# the pid is a native Windows pid, resolved through the same CIM enumeration.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
+  local pid=$1 comm args line
+  if fm_host_is_windows; then
+    line=$(fm_windows_process_line "$pid") || return 1
+    line=${line%$'\r'}
+    IFS=$'\037' read -r _ comm args <<<"$line"
+    fm_harness_process_matches "$comm" "$args"
+    return
+  fi
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
