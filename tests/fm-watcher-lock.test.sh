@@ -525,6 +525,92 @@ test_watcher_self_evicts_on_lock_takeover() {
   pass "watcher self-evicts when the lock pid no longer names it"
 }
 
+# Shutdown must be bounded. Every recovery-marker transition takes the marker
+# lock, and the one the EXIT trap runs used to wait for it forever: with a live
+# holder, SIGTERM became a no-op and the only way to stop the watcher was
+# SIGKILL. A supervisor that cannot stop its watcher by signalling it has no
+# supervision, so this pins that the signalled watcher exits anyway and says
+# what it could not persist.
+test_shutdown_is_bounded_when_marker_lock_is_held() {
+  local dir state fakebin out err pid holder holder_pid holder_survived i rc seeded lock_kept
+  dir=$(make_case bounded-shutdown)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    && [ -e "$state/.last-watcher-beat" ] \
+    || fail "watcher did not publish its singleton lock and beacon"
+
+  # Seed a LIVE holder on the recovery marker lock. It has to be seeded after
+  # the watcher is up: the watcher takes this same lock at startup, and seeding
+  # first would wedge it there instead of at the shutdown path under test. Its
+  # stdio goes to /dev/null so a holder outliving a failed assertion can never
+  # hold a caller's output pipe open.
+  sleep 300 >/dev/null 2>&1 &
+  holder=$!
+  seeded=0
+  i=0
+  while [ "$i" -lt 200 ]; do
+    if mkdir "$state/.watcher-down.lock" 2>/dev/null; then
+      printf '%s\n' "$holder" > "$state/.watcher-down.lock/pid"
+      seeded=1
+      break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if [ "$seeded" -ne 1 ]; then
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not seed a live holder on the recovery marker lock"
+  fi
+
+  kill -TERM "$pid" 2>/dev/null || fail "could not signal the watcher"
+  # 20s ceiling against a 5s shutdown bound. Without the bound the watcher never
+  # exits at all, so this is a wide margin on a bounded path, not a tight race.
+  rc=0
+  wait_for_exit "$pid" 200 || rc=$?
+  # Read everything the holder is needed for, then retire it, so no assertion
+  # below can leave a 300s sleeper behind.
+  holder_pid=$(cat "$state/.watcher-down.lock/pid" 2>/dev/null || true)
+  holder_survived=0
+  is_live_non_zombie "$holder" && holder_survived=1
+  lock_kept=0
+  [ -e "$state/.watch.lock" ] && lock_kept=1
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  [ "$rc" -ne 124 ] \
+    || fail "signaled watcher did not stop while the recovery marker lock was held"
+  [ "$rc" -ne 0 ] || fail "signaled watcher exited successfully"
+  assert_grep 'recovery state could not be persisted within' "$err" \
+    "bounded shutdown did not report what it could not persist"
+  assert_grep "marker lock held by pid $holder" "$err" \
+    "bounded shutdown did not name the live holder it gave up on"
+  # It gave up on the lock rather than stealing it, and left the stale singleton
+  # evidence the next arm reclaims - the same outcome an unwritable marker has.
+  [ "$holder_pid" = "$holder" ] \
+    || fail "bounded shutdown clobbered the live marker-lock holder (got '$holder_pid')"
+  [ "$holder_survived" -eq 1 ] || fail "bounded shutdown killed the marker-lock holder"
+  [ "$lock_kept" -eq 1 ] \
+    || fail "bounded shutdown released the stale lock evidence it reported retaining"
+  pass "signaled watcher stops on a held recovery marker lock and reports what it could not persist"
+}
+
 test_arm_self_eviction_is_loud_without_successor() {
   local dir state fakebin armout armpid watcher_pid status i
   dir=$(make_case arm-self-evict)
@@ -1121,6 +1207,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
+test_shutdown_is_bounded_when_marker_lock_is_held
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger

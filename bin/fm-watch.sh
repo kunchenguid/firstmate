@@ -199,6 +199,17 @@ esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+# Longest watcher_cleanup may wait for the recovery-marker lock before it stops
+# anyway and reports what it could not persist. Shutdown is the one path that
+# must be bounded: every other recovery-marker caller may block, but this one
+# runs from the EXIT trap, so blocking here makes SIGTERM a no-op and leaves a
+# supervisor with a watcher that cannot be stopped. Generous enough that an
+# ordinary brief holder (a guard, an arm, a wake drain) still completes the
+# transition; short enough that a wedged holder cannot hold shutdown hostage.
+WATCHER_SHUTDOWN_LOCK_SECS=${FM_WATCHER_SHUTDOWN_LOCK_SECS:-5}
+case "$WATCHER_SHUTDOWN_LOCK_SECS" in
+  ''|*[!0-9]*|0) WATCHER_SHUTDOWN_LOCK_SECS=5 ;;
+esac
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
@@ -1487,6 +1498,11 @@ run_check_capture() {
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+  # This restores the file-level disposition, and it runs on EVERY check, so it
+  # is the site that outlives the other one. BOTH must change together: a change
+  # - or a mutation meant to prove the handler is load-bearing - applied only to
+  # the file-level `trap 'exit 1' HUP INT TERM` is silently undone here, and
+  # proves nothing about a watcher that has run at least one check.
   trap 'exit 1' HUP INT TERM
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
@@ -1786,7 +1802,7 @@ reconcile_requests_detached() {
 }
 
 watcher_cleanup() {
-  local cleanup_status=0 owns_lock=0 transition=release-lock
+  local cleanup_status=0 owns_lock=0 transition=release-lock transition_status=0
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
@@ -1797,14 +1813,33 @@ watcher_cleanup() {
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
-  if [ "$owns_lock" -eq 1 ] \
-    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
-    echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
-    cleanup_status=1
+  if [ "$owns_lock" -eq 1 ]; then
+    # Bounded for shutdown only (WATCHER_SHUTDOWN_LOCK_SECS above): stopping is
+    # this frame's whole job, so it reports what it could not finish rather than
+    # waiting for the marker lock forever. Either failure keeps the stale lock
+    # evidence the next arm reclaims, which is what this branch already did for
+    # a marker that could not be written.
+    FM_RECOVERY_MARKER_LOCK_TIMEOUT=$WATCHER_SHUTDOWN_LOCK_SECS
+    transition_status=0
+    fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime \
+      || transition_status=$?
+    FM_RECOVERY_MARKER_LOCK_TIMEOUT=
+    if [ "$transition_status" -eq 124 ]; then
+      echo "watcher: recovery state could not be persisted within ${WATCHER_SHUTDOWN_LOCK_SECS}s (marker lock held by pid ${FM_LOCK_HELD_PID:-unknown}); stopping and retaining stale lock evidence" >&2
+      cleanup_status=1
+    elif [ "$transition_status" -ne 0 ]; then
+      echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
+      cleanup_status=1
+    fi
   fi
   return "$cleanup_status"
 }
 trap watcher_cleanup EXIT
+# BOTH of the TERM traps in this file must change together. run_check_capture
+# re-installs this same disposition on every check (search for the other
+# `trap 'exit 1' HUP INT TERM`), so a change - or a mutation meant to prove this
+# handler is load-bearing - applied to only one site is silently undone by the
+# other and proves nothing.
 trap 'exit 1' HUP INT TERM
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command

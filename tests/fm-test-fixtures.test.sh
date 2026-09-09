@@ -139,7 +139,61 @@ test_spawn_home_layout() {
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 
+test_is_live_non_zombie_separates_gone_from_unreadable() {
+  local dir fakebin live zombie_file zombie rc note i
+  dir="$TMP_ROOT/liveness"
+  mkdir -p "$dir"
+  fakebin=$(fm_fakebin "$dir")
+
+  sleep 30 &
+  live=$!
+  rc=0
+  is_live_non_zombie "$live" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a running process was not reported live (rc=$rc)"
+
+  # A real zombie: the perl parent forks a child that exits at once and never
+  # reaps it, so the pid stays present and ps describes it as Z (Linux) or ZN
+  # (macOS). kill -0 succeeds on a zombie, so this is exactly the case a bare
+  # kill -0 gets wrong.
+  zombie_file="$dir/zombie.pid"
+  perl -e '$| = 1; my $p = fork; exit 0 unless $p;
+    open my $f, ">", $ARGV[0] or die $!; print {$f} "$p\n"; close $f; sleep 30' \
+    "$zombie_file" &
+  zombie=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -s "$zombie_file" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$zombie_file" ] || fail "zombie fixture never reported its child pid"
+  rc=0
+  is_live_non_zombie "$(cat "$zombie_file")" || rc=$?
+  [ "$rc" -eq 1 ] || fail "an unreaped zombie was not reported gone (rc=$rc)"
+
+  # ps that answers nothing for a pid that is still present. The empty answer
+  # must NOT be read as live: that direction is what made a ps hiccup and a
+  # genuinely stuck process indistinguishable.
+  fm_fake_exit0 "$fakebin" ps
+  note="$dir/unknown.err"
+  rc=0
+  PATH="$fakebin:$PATH" is_live_non_zombie "$live" 2> "$note" || rc=$?
+  [ "$rc" -eq 2 ] || fail "a silent ps for a present pid was not reported unknown (rc=$rc)"
+  assert_grep 'UNKNOWN, not live' "$note" "unknown liveness was not announced"
+
+  # Same silent ps, but the pid is gone: that is a definite answer, not unknown.
+  kill -KILL "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  rc=0
+  PATH="$fakebin:$PATH" is_live_non_zombie "$live" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a departed pid was not reported gone under a silent ps (rc=$rc)"
+
+  kill -KILL "$zombie" 2>/dev/null || true
+  wait "$zombie" 2>/dev/null || true
+  pass "is_live_non_zombie separates live, gone, and an unreadable ps"
+}
+
 test_touch_epoch_preserves_repeated_dst_hour
+test_is_live_non_zombie_separates_gone_from_unreadable
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers
 test_fake_gh_and_gh_axi

@@ -614,6 +614,44 @@ _fm_recovery_marker_write_locked() {
   fi
 }
 
+# Seconds a recovery-marker transition may wait for the marker lock before it
+# refuses instead of blocking. Empty - the default - keeps the ordinary
+# unbounded wait every mutation-critical caller relies on, so no existing caller
+# changes behavior. A caller whose whole job is to STOP sets it for its own
+# call: bin/fm-watch.sh's EXIT trap, where blocking on this lock turns "the
+# watcher stops" into "the watcher never stops" and makes a supervisor's signal
+# a no-op. On the deadline the transition returns 124 with FM_LOCK_HELD_PID
+# naming whoever still holds the lock.
+FM_RECOVERY_MARKER_LOCK_TIMEOUT="${FM_RECOVERY_MARKER_LOCK_TIMEOUT:-}"
+
+# The one place a recovery-marker transition takes the marker lock, so a bound
+# cannot be added to one acquisition and silently missed by the other.
+#
+# The bound is a deadline around the ORDINARY acquire, deliberately NOT
+# fm_lock_acquire_wait_bounded. That helper delegates acquisition to a child
+# process, and from that child the caller's OWN abandoned hold is
+# indistinguishable from a live foreign holder - so it cannot acquire a lock the
+# caller itself already holds. The exit path is exactly that case: a signal can
+# land inside a recovery-marker critical section and the EXIT trap then re-enters
+# it, which is why fm_lock_try_acquire carries an in-process self-held reclaim.
+# Measured: routing shutdown through the helper left the singleton lock behind
+# where the plain wait released it. Keeping fm_lock_try_acquire keeps that
+# reclaim, the stale-owner recovery, and every other acquisition rule identical;
+# the only added outcome is 124 on the deadline, with FM_LOCK_HELD_PID naming
+# whoever still holds it.
+_fm_recovery_marker_lock_acquire() {  # <lockdir>
+  local started
+  if [ -z "$FM_RECOVERY_MARKER_LOCK_TIMEOUT" ]; then
+    fm_lock_acquire_wait "$1"
+    return
+  fi
+  started=$SECONDS
+  while ! fm_lock_try_acquire "$1"; do
+    [ "$(( SECONDS - started ))" -lt "$FM_RECOVERY_MARKER_LOCK_TIMEOUT" ] || return 124
+    sleep 0.1
+  done
+}
+
 # Preserve a pending or announced episode's generation across downtime
 # republication so its outstanding acknowledgement remains usable, and keep an
 # already-announced generation announced so it cannot be re-presented until a
@@ -623,7 +661,7 @@ _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} lock saved_token generation='' status=pending
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$lock" || return 1
+  _fm_recovery_marker_lock_acquire "$lock" || return $?
   if [ -d "$marker" ] && [ ! -L "$marker" ]; then
     fm_lock_release "$lock"
     return 1
@@ -839,13 +877,13 @@ fm_recovery_transition() {
       ;;
     release-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return $?
       fm_lock_release "$target"
       ;;
     release-lock-existing)
       [ -n "$target" ] || return 1
       local lock="${marker}.lock"
-      fm_lock_acquire_wait "$lock" || return 1
+      _fm_recovery_marker_lock_acquire "$lock" || return $?
       if ! fm_recovery_marker_read "$marker"; then
         fm_lock_release "$lock"
         return 1
