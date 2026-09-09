@@ -435,6 +435,9 @@ fm_pr_poll_revoke_final() {
   if [ -e "$FM_PR_POLL_CHECK_DEST" ] || [ -L "$FM_PR_POLL_CHECK_DEST" ]; then
     rm -f -- "$FM_PR_POLL_CHECK_DEST" || failed=1
   fi
+  # Accepted limit: revoking a failed publication also loses the delivery clock.
+  # A retry may delay a nudge; it cannot produce a wrong one. This rare failure
+  # announces itself through the command error, so no separate clock is persisted.
   if [ -e "$FM_PR_POLL_REG_DEST" ] || [ -L "$FM_PR_POLL_REG_DEST" ]; then
     rm -f -- "$FM_PR_POLL_REG_DEST" || failed=1
   fi
@@ -577,7 +580,9 @@ fm_pr_poll_publish_prepared() {
   fi
 }
 
-fm_pr_poll_artifacts_valid() {
+# Optional captured metadata keeps validation bound to the snapshot's task
+# identity instead of a live metadata file that may have changed during probes.
+fm_pr_poll_artifacts_valid() {  # <state> <id> <template> [captured-meta]
   local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash data_identity check_identity
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
@@ -585,7 +590,7 @@ fm_pr_poll_artifacts_valid() {
   check="$state/$id.check.sh"
   data="$state/$id.pr-poll"
   registration="$state/$id.pr-poll-registration"
-  meta="$state/$id.meta"
+  meta=${4:-$state/$id.meta}
   fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
   fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1

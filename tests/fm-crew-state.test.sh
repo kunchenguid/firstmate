@@ -80,13 +80,15 @@ case "${1:-}" in
       status)
         shift
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
-        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
+        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi
+        exit "${FM_FAKE_STATUS_EXIT:-0}" ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
     esac
     ;;
   runs)
-    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}"
+    exit "${FM_FAKE_RUNS_EXIT:-0}" ;;
   daemon)
     # FM_FAKE_DAEMON_DOWN: the explicit down-probe fails, as the real
     # `no-mistakes daemon status` does when the daemon is not running.
@@ -205,6 +207,8 @@ reset_fakes() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_AXI_STATUS_RUN=""
   FM_FAKE_RUNS_LIST=""
+  FM_FAKE_STATUS_EXIT=0
+  FM_FAKE_RUNS_EXIT=0
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
@@ -219,6 +223,7 @@ reset_fakes() {
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN
+  export FM_FAKE_STATUS_EXIT FM_FAKE_RUNS_EXIT
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -1338,6 +1343,7 @@ test_no_run_herdr_husk_dead_still_reads_gone() {
   assert_contains "$out" "state: unknown" "a husk pane has no live current state"
   assert_contains "$out" "backend target gone" "a husk pane keeps its gone-class death evidence"
   assert_contains "$out" "agent gone, pane shell remains" "the husk verdict names what actually died"
+  assert_contains "$out" "source: endpoint-gone" "a confirmed herdr husk exposes authoritative death"
   assert_not_contains "$out" "backend unreachable" "a husk pane is not an unreachable backend"
   pass "a husk pane (agent gone) still reads gone for reclaim"
 }
@@ -1519,7 +1525,7 @@ test_dead_window_ignores_stale_status_log() {
   FM_FAKE_TMUX_MISSING=1
   local out; out=$(run_crew_state "$d" feat-dead)
   assert_contains "$out" "state: unknown" "dead window -> unknown"
-  assert_contains "$out" "source: none" "dead window -> none source"
+  assert_contains "$out" "source: endpoint-gone" "confirmed death has a distinct current-state source"
   assert_not_contains "$out" "source: status-log" "dead window does not reuse stale log"
   assert_contains "$out" "backend target gone" "an inventory that omits the window is positive death evidence"
   pass "dead window ignores stale status log"
@@ -1608,19 +1614,52 @@ SH
   toolbin=$(make_no_timeout_toolbin "$d")
   fm_write_meta "$d/state/feat-timeout.meta" "window=fm:fm-feat-timeout" "worktree=$d/wt" "kind=ship" \
     "harness=claude"
-  FM_FAKE_BUSY=1
-  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-timeout)
-  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
-    --source claude-hook --event user-prompt-submit
+  FM_FAKE_TMUX_MISSING=1
+  printf 'paused: waiting on maintainer\n' > "$d/state/feat-timeout.status"
   start=$SECONDS
   out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
   elapsed=$((SECONDS - start))
-  assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
-  assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"
+  assert_contains "$out" "state: unknown" "timed-out no-mistakes leaves the run unverified"
+  assert_contains "$out" "source: run-step" "endpoint death must not erase a timed-out lookup"
+  assert_contains "$out" "no-mistakes run lookup failed" "lookup failure remains visible"
   [ "$elapsed" -lt 5 ] || fail "perl timeout did not bound no-mistakes calls (elapsed ${elapsed}s)"
   calls=$(awk 'END { print NR + 0 }' "$calls_file" 2>/dev/null || echo 0)
   [ "$calls" -eq 1 ] || fail "empty no-mistakes status triggered extra lookups ($calls calls)"
   pass "no timeout command uses perl bound"
+}
+
+test_failed_run_lookup_is_not_endpoint_death() {
+  reset_fakes
+  local d out failure
+  d=$(new_case failed-run-lookup)
+  make_repo_on_branch "$d/wt" fm/failed-lookup
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/failed-lookup.meta" "window=fm:fm-failed-lookup" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_TMUX_MISSING=1
+  printf 'paused: waiting on maintainer\n' > "$d/state/failed-lookup.status"
+  for failure in empty-status partial-status runs-list; do
+    FM_FAKE_STATUS_EXIT=1
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_RUNS_EXIT=0
+    case "$failure" in
+      partial-status) FM_FAKE_AXI_STATUS=$(run_running fm/failed-lookup) ;;
+      runs-list)
+        FM_FAKE_STATUS_EXIT=0
+        FM_FAKE_AXI_STATUS=$(run_running fm/other-branch)
+        FM_FAKE_RUNS_EXIT=1 ;;
+    esac
+    out=$(run_crew_state "$d" failed-lookup)
+    assert_contains "$out" "state: unknown" "$failure leaves the run unverified"
+    assert_contains "$out" "source: run-step" "$failure must not become endpoint death"
+    assert_contains "$out" "no-mistakes run lookup failed" "$failure preserves the failure"
+  done
+  FM_FAKE_STATUS_EXIT=0
+  FM_FAKE_RUNS_EXIT=0
+  FM_FAKE_AXI_STATUS=""
+  out=$(run_crew_state "$d" failed-lookup)
+  assert_contains "$out" "source: endpoint-gone" "a successful empty lookup allows endpoint death"
+  pass "failed primary and fallback run lookups remain unverified despite endpoint death"
 }
 
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
@@ -2285,6 +2324,7 @@ test_no_run_tmux_unreadable_reads_unreachable_not_gone
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_failed_run_lookup_is_not_endpoint_death
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_remote_alive_with_log_uses_status_log

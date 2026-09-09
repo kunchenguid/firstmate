@@ -169,11 +169,13 @@ write_valid_payload() {  # <path>
     }
   ],
   "underway": [],
+  "awaiting": [],
   "landed": [],
   "charted": [
-    { "id": "sample-queued", "repo": "sample", "title": "Queued work", "reason": "", "dispatchable": true }
+    { "id": "sample-queued", "repo": "sample", "owner": "(main)", "title": "Queued work", "reason": "", "dispatchable": true }
   ],
-  "charted_more": 0
+  "charted_more": 0,
+  "awaiting_nudge_days": 7
 }
 EOF
 }
@@ -492,9 +494,9 @@ test_charted_kind_is_optional_and_accepts_both_values() {
   data="$home/payload.json"
   write_valid_payload "$data"
   jq '.charted = [
-        {"id":"a","repo":"sample","title":"Queued","reason":"","dispatchable":true},
-        {"id":"b","repo":"sample","title":"Queued too","reason":"gated","dispatchable":true,"kind":"queued"},
-        {"id":"c","repo":"sample","title":"Integrity notice","reason":"main inventory","dispatchable":false,"kind":"warning"}
+        {"id":"a","repo":"sample","owner":"(main)","title":"Queued","reason":"","dispatchable":true},
+        {"id":"b","repo":"sample","owner":"(main)","title":"Queued too","reason":"gated","dispatchable":true,"kind":"queued"},
+        {"id":"c","repo":"sample","owner":"(main)","title":"Integrity notice","reason":"main inventory","dispatchable":false,"kind":"warning"}
       ] | .charted_warning_more = 2' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   run_board "$home" build "$data" >/dev/null \
     || fail "an omitted, queued, and warning charted kind was refused"
@@ -763,6 +765,115 @@ test_build_refuses_a_nondecision_reconcile_value() {
   pass "build reserves reconcile across non-decision cards"
 }
 
+# --- ownership, the delivered state, and the exit rule ----------------------
+
+# Refuse <payload-mutation> and report why, without touching the board.
+refuse_mutation() {  # <home-name> <jq-mutation> <what-was-wrong>
+  local home data rc out
+  home=$(make_home "$1")
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq "$2" "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e
+  out=$(run_board "$home" build "$data" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$3 was accepted"
+  assert_absent "$home/.lavish/bearings-board.html" "$3 still produced a board"
+}
+
+test_build_requires_ownership_on_every_fleet_row() {
+  refuse_mutation ownerless-underway \
+    '.underway = [{"id":"a","repo":"sample","kind":"ship","state":"working","doing":"Work"}]' \
+    "an underway row with no owner"
+  refuse_mutation ownerless-charted '.charted[0] |= del(.owner)' "a charted row with no owner"
+  pass "build refuses an underway or charted row that does not say whose it is"
+}
+
+test_build_requires_a_delivered_row_to_carry_its_link_and_its_age() {
+  refuse_mutation delivered-nolink \
+    '.awaiting = [{"id":"a","repo":"sample","owner":"(main)","what":"Delivered","age_days":2}]' \
+    "a delivered row with no request link"
+  refuse_mutation delivered-noage \
+    '.awaiting = [{"id":"a","repo":"sample","owner":"(main)","what":"Delivered","pr_url":"https://github.com/o/r/pull/1"}]' \
+    "a delivered row with no age"
+  refuse_mutation delivered-badlink \
+    '.awaiting = [{"id":"a","repo":"sample","owner":"(main)","what":"Delivered","age_days":2,"pr_url":"http://github.com/o/r/pull/1"}]' \
+    "a delivered row whose link is not an https URL"
+  pass "build refuses a delivered row that cannot be looked at or aged"
+}
+
+# The exit rule is the board's, not the composer's memory: a row that has
+# already waited past awaiting_nudge_days belongs in Captain's Call, so the
+# delivered box can never quietly become a graveyard for it.
+test_build_refuses_a_delivered_row_that_has_already_aged_out() {
+  refuse_mutation delivered-aged \
+    '.awaiting = [{"id":"a","repo":"sample","owner":"(main)","what":"Long wait","age_days":7,"pr_url":"https://github.com/o/r/pull/1"}]' \
+    "a delivered row at the nudge threshold"
+  refuse_mutation delivered-way-aged \
+    '.awaiting = [{"id":"a","repo":"sample","owner":"(main)","what":"Long wait","age_days":23,"pr_url":"https://github.com/o/r/pull/1"}]' \
+    "a delivered row long past the nudge threshold"
+  refuse_mutation delivered-nothreshold '.awaiting_nudge_days = 0' "a payload with no usable nudge threshold"
+  pass "build refuses to leave an aged delivery sitting in the delivered box"
+}
+
+test_build_accepts_a_delivered_row_and_a_nudge_card() {
+  local home data
+  home=$(make_home delivered-accepted)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.awaiting = [{"id":"a","repo":"sample","owner":"(main)","what":"Delivered","age_days":6,
+        "pr_url":"https://github.com/o/r/pull/1"}]
+      | .captains_call += [{"key":"https://github.com/o/r/pull/2","type":"nudge","repo":"sample","title":"Nudge the maintainer",
+        "age_days":21,"pr_url":"https://github.com/o/r/pull/2",
+        "options":[{"value":"nudge","label":"Nudge them"},{"value":"leave","label":"Leave it"}]}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a valid delivered row and nudge card were refused"
+  extract_payload "$home/.lavish/bearings-board.html" \
+    | jq -e '(.awaiting | length) == 1
+        and ([.captains_call[] | select(.type == "nudge") | .key] == ["https://github.com/o/r/pull/2"])
+        and ([.captains_call[] | select(.type == "nudge") | .options[].value] == ["nudge","leave"])' >/dev/null \
+    || fail "the built board lost the delivered row or the nudge card"
+  pass "build accepts a delivered row under the threshold and a nudge card above it"
+}
+
+test_build_requires_a_nudge_card_to_carry_its_link_and_its_age() {
+  refuse_mutation nudge-task-key \
+    '.captains_call = [{"key":"nudge.foo","type":"nudge","repo":"sample","title":"Nudge","age_days":21,
+      "pr_url":"https://github.com/o/r/pull/1","options":[{"value":"leave","label":"Leave it"}]}]' \
+    "a task-shaped nudge key"
+  refuse_mutation nudge-nolink \
+    '.captains_call = [{"key":"https://github.com/o/r/pull/1","type":"nudge","repo":"sample","title":"Nudge","age_days":21,
+      "options":[{"value":"nudge","label":"Nudge them"}]}]' \
+    "a nudge card with no request link"
+  refuse_mutation nudge-noage \
+    '.captains_call = [{"key":"https://github.com/o/r/pull/1","type":"nudge","repo":"sample","title":"Nudge",
+      "pr_url":"https://github.com/o/r/pull/1","options":[{"value":"nudge","label":"Nudge them"}]}]' \
+    "a nudge card with no age"
+  pass "build refuses a nudge card that cannot say how long or point where"
+}
+
+test_nudges_use_request_identity_independent_of_task_ids() {
+  local home data
+  home=$(make_home nudge-key)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.captains_call += [
+        {"key":"https://github.com/o/r/pull/1","type":"nudge","repo":"sample","title":"Nudge the maintainer",
+         "age_days":21,"pr_url":"https://github.com/o/r/pull/1",
+         "options":[{"value":"nudge","label":"Nudge them"},{"value":"leave","label":"Leave it"}]},
+        {"key":"https://github.com/o/r/pull/2","type":"nudge","repo":"sample","title":"Nudge the other one",
+         "age_days":30,"pr_url":"https://github.com/o/r/pull/2",
+         "options":[{"value":"nudge","label":"Nudge them"}]}
+      ]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a request-keyed nudge was refused"
+  extract_payload "$home/.lavish/bearings-board.html" \
+    | jq -e '[.captains_call[] | select(.type == "nudge") | .key]
+        == ["https://github.com/o/r/pull/1", "https://github.com/o/r/pull/2"]' >/dev/null \
+    || fail "the request keys did not survive the build unchanged"
+  pass "request identities pass validation and reach nudge cards intact"
+}
+
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
@@ -781,3 +892,9 @@ test_build_fails_when_reconcile_cannot_establish_a_listener
 test_every_decision_card_carries_the_reconcile_choice
 test_build_refuses_a_payload_that_occupies_the_reconcile_value
 test_build_refuses_a_nondecision_reconcile_value
+test_build_requires_ownership_on_every_fleet_row
+test_build_requires_a_delivered_row_to_carry_its_link_and_its_age
+test_build_refuses_a_delivered_row_that_has_already_aged_out
+test_build_accepts_a_delivered_row_and_a_nudge_card
+test_build_requires_a_nudge_card_to_carry_its_link_and_its_age
+test_nudges_use_request_identity_independent_of_task_ids

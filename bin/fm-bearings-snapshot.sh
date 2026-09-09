@@ -44,8 +44,51 @@
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
 # Bearings never invents Underway rows from backlog-only ids; it discloses those
-# gaps in omitted[] and, when invalid, a Charted Next gate line so the four-section
+# gaps in omitted[] and, when invalid, a Charted Next gate line so the five-section
 # chat cannot claim an empty fleet while main current state is broken.
+#
+# DELIVERED, WAITING ON A MERGE WE DO NOT CONTROL, is its own bucket rather than
+# a flavour of in_flight. A row qualifies only when BOTH halves hold: the worker
+# declared an external wait, and no captain action is outstanding on that task.
+#
+# Complete on our side is affirmative, never "any state except working". The
+# delivery must have validated poll artifacts matching the captured task PR,
+# and the latest recorded event must be
+# the configured pause verb (default paused) from AGENTS.md section 8. Eligible
+# current states are paused, done, or unknown with source endpoint-gone from the
+# current-state reader's authoritative death classification. A done
+# event alone never declares an external wait. A later event supersedes the
+# declaration, and working, failed, blocked, or parked state is never eligible.
+#
+# A declared wait must also pass the captain-hold and unresolved-decision checks.
+# An absent hold alone does not prove that no captain action remains.
+# This is the same guarantee as the never-split
+# needs-you tile, wearing its other face: nothing that needs the captain may be
+# hidden, whether by splitting a tile or by re-labelling a row.
+#
+# Qualifying rows leave in_flight and gates, so the same work is counted once.
+# age_days is the whole-day wait from pr.merge_poll.armed_epoch, whose record
+# binding is owned by bin/fm-fleet-snapshot.sh. At or past
+# FM_BEARINGS_AWAITING_NUDGE_DAYS, a row remains in snapshot.awaiting with nudge
+# true; .agents/skills/bearings/SKILL.md owns its placement in Captain's Call.
+# Home summaries retain every delivery identity, timestamp, and request link.
+# Bearings computes current age, including from cached ledgers, before sorting
+# overdue then oldest rows and applying FM_BEARINGS_AWAITING (default 20).
+# Every overdue row survives even when their count exceeds that bound; only
+# younger deliveries may be omitted, with truncation disclosed in omitted[].
+#
+# .agents/skills/bearings/SKILL.md owns the delivery rationale and separate
+# repository merge-ownership posture.
+#
+# OWNERSHIP IS STRUCTURAL. Every in_flight, awaiting, landed, and gates row
+# carries owner - "(main)" for this home, the registered secondmate id for a
+# child - because a fleet whose homes work the SAME repository cannot be told
+# apart by repo. Renderers must read that field and never a title's prose.
+# For in_flight, awaiting, and gates, pr_url comes only from the task's captured
+# metadata, including through a secondmate's home summary; there is no prose
+# fallback when that link is absent. A backlog-reason or status-sentence URL is not
+# that task's request identity. tests/fm-bearings-snapshot.test.sh pins both
+# prose-rejection cases. Landed artifacts follow the Done projection below.
 #
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
@@ -63,6 +106,7 @@
 #   --include-prs    ALSO do live GitHub open-PR discovery + checks
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
+#   --all-awaiting   include every delivered row awaiting its maintainer
 #   --all-decisions  include every open decision and captain hold in the bounded snapshot
 #   --all-secondmates include every aggregated secondmate record
 #   --all-landed     include every landed record from every home (default: bounded)
@@ -79,14 +123,15 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
-# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
-. "$SCRIPT_DIR/fm-timeout-lib.sh"
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
 FM_BEARINGS_LANDED_PER_HOME=${FM_BEARINGS_LANDED_PER_HOME:-$FM_BEARINGS_LANDED}
 FM_BEARINGS_IN_FLIGHT=${FM_BEARINGS_IN_FLIGHT:-20}
+FM_BEARINGS_AWAITING=${FM_BEARINGS_AWAITING:-20}
 FM_BEARINGS_DECISIONS=${FM_BEARINGS_DECISIONS:-20}
 FM_BEARINGS_SECONDMATES=${FM_BEARINGS_SECONDMATES:-20}
 FM_BEARINGS_GATES=${FM_BEARINGS_GATES:-20}
@@ -96,6 +141,15 @@ FM_BEARINGS_UNHEALTHY=${FM_BEARINGS_UNHEALTHY:-20}
 FM_BEARINGS_PR_REPOS=${FM_BEARINGS_PR_REPOS:-10}
 FM_BEARINGS_PR_LIMIT=${FM_BEARINGS_PR_LIMIT:-20}
 FM_BEARINGS_PR_TIMEOUT=${FM_BEARINGS_PR_TIMEOUT:-20}
+# The single exit-rule constant in fm-classify-lib.sh: how many days a PR may wait on
+# its maintainer before the row stops being "still normal" and becomes the
+# captain's to nudge. 7 is measured, not guessed: across the last 200 merged
+# pull requests in this fleet's own upstream repository the merge latency was
+# 0.1 days at the median, 0.3 at the 75th percentile, 0.8 at the 90th, and 10.2 at its single
+# extreme, so a full week is roughly nine times the 90th percentile, absorbs a
+# weekend and a busy week, and still fires well before the longest merge this
+# sample contains. Provisional: only four of those merges were
+# our own deliveries, so a few dozen of ours would refine it.
 case "$FM_BEARINGS_PR_TIMEOUT" in ''|*[!0-9]*|0) FM_BEARINGS_PR_TIMEOUT=20 ;; esac
 validate_bound() {  # <name> <value>
   case "$2" in ''|*[!0-9]*|0) echo "fm-bearings-snapshot: $1 must be a positive integer" >&2; exit 2 ;; esac
@@ -103,6 +157,8 @@ validate_bound() {  # <name> <value>
 validate_bound FM_BEARINGS_LANDED "$FM_BEARINGS_LANDED"
 validate_bound FM_BEARINGS_LANDED_PER_HOME "$FM_BEARINGS_LANDED_PER_HOME"
 validate_bound FM_BEARINGS_IN_FLIGHT "$FM_BEARINGS_IN_FLIGHT"
+validate_bound FM_BEARINGS_AWAITING "$FM_BEARINGS_AWAITING"
+validate_bound FM_BEARINGS_AWAITING_NUDGE_DAYS "$FM_BEARINGS_AWAITING_NUDGE_DAYS"
 validate_bound FM_BEARINGS_DECISIONS "$FM_BEARINGS_DECISIONS"
 validate_bound FM_BEARINGS_SECONDMATES "$FM_BEARINGS_SECONDMATES"
 validate_bound FM_BEARINGS_GATES "$FM_BEARINGS_GATES"
@@ -115,7 +171,7 @@ validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 usage() {
   cat <<'EOF'
 usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
-                               [--all-in-flight] [--all-decisions]
+                               [--all-in-flight] [--all-awaiting] [--all-decisions]
                                [--all-secondmates] [--all-landed]
                                [--all-reports] [--all-queued]
                                [--all-recorded-prs] [--all-unhealthy]
@@ -126,11 +182,13 @@ Default collection performs bounded concurrent remote-ledger reads for registere
 remote homes under one shared snapshot budget and may refresh the parent-side cache.
 --include-prs additionally performs live GitHub discovery and checks.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,doing},
+Default fields: schema, home, generated, prs,
+  in_flight{id,kind,state,repo,owner,pr_url,doing},
+  awaiting_nudge_days, awaiting{id,what,repo,owner,pr_url,age_days,nudge},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
+  gates{id,title,blocked_by,reason,owner,pr_url}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
@@ -142,7 +200,18 @@ For every registered secondmate, readable structured facts from its own home are
   Parent events and bounded terminal reads are labeled fallback or contradiction
   evidence and never become current work. The provenance and freshness fields
   distinguish live and cached ledgers; a home without either is explicitly unreadable.
-Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
+awaiting holds work that shipped and now waits on a merge we do not control: the
+  delivery is recorded by an armed merge watch with a URL, the latest event must
+  declare the configured external-wait verb (FM_CLASSIFY_PAUSED_VERB, default paused),
+  and the current state must be paused, done, or unknown with source endpoint-gone
+  from an authoritative death classification. Unknown run state, a failed run
+  lookup, or an unreadable endpoint never qualifies. No captain action may be
+  outstanding, so a qualifying row is neither in_flight nor a gate.
+  age_days is that wait in whole days, preserved when the same
+  PR is re-recorded, and nudge marks a row at or past awaiting_nudge_days
+  (FM_BEARINGS_AWAITING_NUDGE_DAYS), which belongs in Captain's Call instead.
+  See bin/fm-bearings-snapshot.sh's header for delivery retention and bounds.
+Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight, --all-awaiting,
   --all-decisions (all open decisions and captain holds in the bounded snapshot),
   --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
@@ -155,6 +224,7 @@ INCLUDE_PRS=0
 ALL_REPORTS=0
 ALL_QUEUED=0
 ALL_IN_FLIGHT=0
+ALL_AWAITING=0
 ALL_DECISIONS=0
 ALL_SECONDMATES=0
 ALL_LANDED=0
@@ -169,6 +239,7 @@ while [ $# -gt 0 ]; do
     --all-reports) ALL_REPORTS=1 ;;
     --all-queued) ALL_QUEUED=1 ;;
     --all-in-flight) ALL_IN_FLIGHT=1 ;;
+    --all-awaiting) ALL_AWAITING=1 ;;
     --all-decisions) ALL_DECISIONS=1 ;;
     --all-secondmates) ALL_SECONDMATES=1 ;;
     --all-landed) ALL_LANDED=1 ;;
@@ -191,6 +262,10 @@ command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2
 "$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+NOW_EPOCH=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$NOW" +%s 2>/dev/null \
+  || date -u -d "$NOW" +%s 2>/dev/null \
+  || date +%s)
+case "$NOW_EPOCH" in ''|*[!0-9]*) NOW_EPOCH=$(date +%s) ;; esac
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
   if [ "$ALL_LANDED" = 1 ]; then
     SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json) || exit $?
@@ -306,9 +381,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --arg today "$BEARINGS_TODAY" \
   --arg prs "$PR_STATUS" \
   --arg fields "$FIELDS" \
+  --arg paused_verb "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" \
   --argjson landed_n "$FM_BEARINGS_LANDED" \
   --argjson landed_per_home_n "$FM_BEARINGS_LANDED_PER_HOME" \
   --argjson in_flight_n "$FM_BEARINGS_IN_FLIGHT" \
+  --argjson awaiting_n "$FM_BEARINGS_AWAITING" \
+  --argjson nudge_days "$FM_BEARINGS_AWAITING_NUDGE_DAYS" \
+  --argjson now_epoch "$NOW_EPOCH" \
   --argjson decisions_n "$FM_BEARINGS_DECISIONS" \
   --argjson secondmates_n "$FM_BEARINGS_SECONDMATES" \
   --argjson gates_n "$FM_BEARINGS_GATES" \
@@ -317,6 +396,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson unhealthy_n "$FM_BEARINGS_UNHEALTHY" \
   --argjson include_prs "$INCLUDE_PRS" \
   --argjson all_in_flight "$ALL_IN_FLIGHT" \
+  --argjson all_awaiting "$ALL_AWAITING" \
   --argjson all_decisions "$ALL_DECISIONS" \
   --argjson all_secondmates "$ALL_SECONDMATES" \
   --argjson all_landed "$ALL_LANDED" \
@@ -375,10 +455,31 @@ MODEL=$(printf '%s' "$SNAP" | jq \
            + ($base | fit($context_n - $title_n)))
         end
       end;
-  def as_gate($owner):
+  def as_gate($owner; $pr_url):
     {id, title:(.title | trunc(60)),
      blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
-     reason:(hold_gate_reason | trunc(40)), owner:$owner};
+     reason:(hold_gate_reason | trunc(40)), owner:$owner, pr_url:$pr_url};
+  def delivered_age($now; $epoch):
+    if $epoch == null or $now == 0 then null
+    else (($now - $epoch) / 86400 | floor | if . < 0 then 0 else . end) end;
+  # THE DELIVERY RECORD. Firstmate arms this watch only after a PR-ready signal
+  # from the worker, so an armed watch with a recorded URL is what "we shipped
+  # it" looks like in structure instead of in a title.
+  def delivery_recorded:
+    .pr.merge_poll.armed == true and .pr.url != null;
+  def complete_on_our_side:
+    .paths.status_log.last_event.state == $paused_verb
+    and (.current_state.state == "paused" or .current_state.state == "done"
+         or (.current_state.state == "unknown"
+             and .current_state.source == "endpoint-gone"));
+  # NOTHING THE CAPTAIN OWES IS EVER RE-LABELLED. A task he still owes an answer
+  # on is his call, whatever else is true of it, so it never reaches this bucket.
+  def captain_owed:
+    .backlog.hold_kind == "captain" or .backlog.hold_bucket != null
+    or .backlog.captain_actionable == true or .hints.pending_decision == true;
+  def delivered_and_waiting:
+    delivery_recorded and complete_on_our_side and (.backlog.state != "done")
+    and (captain_owed | not);
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -421,7 +522,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
            bearings_state:(
              if .current.state == "captain_decision" then
                if ($captain_holds | length) > 0 then "captain_decision"
-               elif (.active_children | length) > 0 then "active_child_work"
+               elif any(.active_children[]; .state == "working") then "active_child_work"
                elif ($backlog_holds | length) > 0 then "externally_held"
                else "unknown" end
              else .current.state end)
@@ -448,11 +549,44 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           reason:(.current.reason // "-")} ]) as $secondmates_all
   | ([ .tasks[]
        | select(.kind != "secondmate")
+       | select(delivered_and_waiting)
+       | (delivered_age($now_epoch; .pr.merge_poll.armed_epoch)) as $age
+       | {id,
+          what:((.backlog.title // .id) | trunc(70)),
+          repo:(.backlog.repo // .project // null),
+          owner:"(main)",
+          pr_url:.pr.url,
+          age_days:$age,
+          nudge:($age != null and $age >= $nudge_days)} ]
+     + [ $secondmate_views[] as $m
+         | $m.awaiting_merge[]?
+         | (delivered_age($now_epoch; .delivered_epoch)) as $age
+         | {id:($m.id + "/" + .id),
+            what:((.title // .id) | trunc(70)),
+            repo:(.repo // null),
+            owner:$m.id,
+            pr_url:.pr_url,
+            age_days:$age,
+            nudge:($age != null and $age >= $nudge_days)} ]
+     # Overdue first, then longest wait: the cap must never be what drops the
+     # one row that has aged out of this bucket and into the captain call.
+     | sort_by([(if .nudge then 0 else 1 end), -(.age_days // 0), .id])) as $awaiting_all
+  | (if $all_awaiting == 1 then $awaiting_all
+     else $awaiting_all[:([$awaiting_n, ([$awaiting_all[] | select(.nudge)] | length)] | max)]
+     end) as $awaiting_visible
+  | ([ $awaiting_all[] | .id ]) as $awaiting_ids
+  | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta")
+       | {key:.id, value:.pr.url} ] | from_entries) as $recorded_pr_by_id
+  | ([ .tasks[]
+       | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
+       | select(.id as $id | ($awaiting_ids | index($id)) == null)
        | {id, kind,
         state: .current_state.state,
         repo:(.backlog.repo // .project // null),
+        owner:"(main)",
+        pr_url:(if .pr.source == "meta" then .pr.url else null end),
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
@@ -462,6 +596,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             kind:(.kind // "secondmate"),
             state:(.state // "working"),
             repo:(.repo // null),
+            owner:$m.id,
+            pr_url:(.pr_url // null),
             doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record
@@ -497,7 +633,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
           blocked_by:"-",
           reason:"main inventory",
-          owner:"(main)"}]
+          owner:"(main)",
+          pr_url:null}]
       else [] end)
      + [ .backlog.records[]
          | . as $record
@@ -506,13 +643,16 @@ MODEL=$(printf '%s' "$SNAP" | jq \
               (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not))))
          | select(.captain_actionable != true)
          | select((.hold_bucket == null) or ($all_decisions == 0))
-         | as_gate("(main)") ]
+         | select(($awaiting_ids | index($record.id)) == null)
+         | as_gate("(main)"; ($recorded_pr_by_id[.id] // null)) ]
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?
+         | . as $row
          | select(.captain_actionable != true)
          | select((.hold_bucket == null) or ($all_decisions == 0))
-         | as_gate($m.id) ]) as $gates_all
+         | select(($awaiting_ids | index($m.id + "/" + $row.id)) == null)
+         | as_gate($m.id; (.pr_url // null)) ]) as $gates_all
   | ([ .scout_reports[]
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
@@ -525,6 +665,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       generated: $now,
       prs: $prs,
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
+      awaiting_nudge_days: $nudge_days,
+      awaiting: $awaiting_visible,
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
         | select(.reconcile_inventory != null)
@@ -559,6 +701,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         ((($snap.main_inventory.unstructured_current_count // 0)) as $n
          | if $n > 0 then {surface:("main unstructured current backlog row(s): \($n)"), reveal:"inspect main data/backlog.md In flight and Queued free-form rows"} else empty end),
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
+        (if ($awaiting_all | length) > ($awaiting_visible | length) then {surface:("awaiting showing \($awaiting_visible | length) of \($awaiting_all | length)"), reveal:"--all-awaiting"} else empty end),
         (($snap.secondmate_current.records // [])[] as $m
          | ([($m.omitted // [])[] | select(.surface == "active_children") | .count] | add // 0) as $n
          | if $n > 0 then {surface:("secondmate " + $m.id + " active children omitted by snapshot bound: \($n)"), reveal:"raise FM_SNAPSHOT_SECONDMATE_CHILDREN"} else empty end),

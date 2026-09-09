@@ -12,6 +12,9 @@ set -u
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 # shellcheck disable=SC1091
 . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$ROOT/bin/fm-pr-lib.sh"
 
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings)
@@ -36,6 +39,7 @@ exit 0
 SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
+case " $* " in *" -t unreadable:"*|*" -t unreadable "*) printf 'no current client\n' >&2; exit 1 ;; esac
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   capture-pane)
@@ -2974,3 +2978,918 @@ test_revealed_deferred_holds_show_their_deferral_reason
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed
+
+# --- delivered work, its owner, and its request link -----------------------
+# The captain's fleet and its second mate both work the SAME repository, so
+# "repo" cannot say whose a row is, and a shipped change waiting on an outside
+# maintainer is neither underway nor landed. These pin both facts as structure.
+
+# 2026-07-11T18:00:00Z, the clock every bearings fixture in this file reads.
+BEARINGS_FIXTURE_EPOCH=1783792800
+
+# Set a file's modification time from an epoch, which is what the delivered wait
+# is measured from.
+touch_epoch() {  # <file> <epoch>
+  if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+    touch -t "$(date -r "$2" +%Y%m%d%H%M.%S)" "$1"
+  else
+    touch -d "@$2" "$1"
+  fi
+}
+
+# Arm a task's merge watch the way bin/fm-pr-check.sh does, at <epoch>.
+arm_merge_poll() {  # <home> <id> <url> <epoch>
+  local meta="$1/state/$2.meta"
+  sed '/^pr=/d' "$meta" > "$meta.tmp"
+  printf 'pr=%s\n' "$3" >> "$meta.tmp"
+  mv "$meta.tmp" "$meta"
+  fm_pr_url_parse "$3" || fail "invalid fixture PR URL"
+  fm_pr_poll_prepare "$1/state" "$2" "$FM_PR_PROVIDER" "$FM_PR_URL" "$FM_PR_HOST" \
+    "$FM_PR_PATH" "$FM_PR_NUMBER" "$ROOT/bin/fm-pr-poll.sh" || fail "poll fixture preparation failed"
+  fm_pr_poll_publish_prepared || fail "poll fixture publication failed"
+  touch_epoch "$1/state/$2.pr-poll-registration" "$4"
+}
+
+# A home with one task still working and one shipped task whose merge watch is
+# armed at <armed-epoch>. Prints "<home>:<fakebin>".
+delivered_home() {  # <name> <armed-epoch>
+  local home fakebin
+  home=$(make_home "$1")
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] still-working - Work still moving (repo: firstmate) (kind: ship) (since 2026-07-01)
+- [ ] shipped-task - Delivered and waiting (repo: firstmate) (kind: ship) (since 2026-07-01)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/still-working.meta" \
+    "window=firstmate:fm-still-working" "worktree=$home/projects" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/acme/repo/pull/1"
+  record_claude_state "$home/state" still-working busy
+  fm_write_meta "$home/state/shipped-task.meta" \
+    "window=firstmate:fm-shipped-task" "worktree=$home/projects" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/acme/repo/pull/2"
+  record_claude_state "$home/state" shipped-task idle
+  printf 'paused: PR https://github.com/acme/repo/pull/2 waiting on the outside maintainer\n' > "$home/state/shipped-task.status"
+  arm_merge_poll "$home" shipped-task https://github.com/acme/repo/pull/2 "$2"
+  printf '%s:%s\n' "$home" "$fakebin"
+}
+
+run_at() {  # <home> <fakebin> <epoch> <args...>
+  local home=$1 fakebin=$2 epoch=$3 now; shift 3
+  now=$(date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ) || fail "invalid fixture time"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW="$now" \
+    NET_LOG="$home/net.log" "$BEARINGS" "$@"
+}
+
+test_delivered_work_leaves_underway_for_its_own_bucket() {
+  local pair home fakebin out
+  pair=$(delivered_home delivered-bucket $((BEARINGS_FIXTURE_EPOCH - 3 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.in_flight[].id] == ["still-working"])
+      and ((.awaiting | length) == 1)
+      and (.awaiting[0] | .id == "shipped-task"
+        and .owner == "(main)"
+        and .repo == "firstmate"
+        and .pr_url == "https://github.com/acme/repo/pull/2"
+        and .age_days == 3
+        and .nudge == false)
+      and ([.gates[].id] | index("shipped-task") == null)
+  ' >/dev/null || fail "a delivered task was not moved into its own bucket exactly once: $out"
+  pass "a delivered task leaves underway and the gates for one delivered row"
+}
+
+test_an_armed_merge_watch_does_not_move_work_that_is_still_running() {
+  local pair home fakebin out
+  pair=$(delivered_home delivered-still-working $((BEARINGS_FIXTURE_EPOCH - 3 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  arm_merge_poll "$home" still-working https://github.com/acme/repo/pull/1 \
+    $((BEARINGS_FIXTURE_EPOCH - 30 * 86400))
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.in_flight[].id] == ["still-working"]) and ([.awaiting[].id] == ["shipped-task"])
+  ' >/dev/null || fail "a running worker was reported as delivered: $out"
+  pass "an armed merge watch does not retire a worker that is still working"
+}
+
+test_an_underway_row_carries_its_owner_and_its_recorded_request() {
+  local pair home fakebin out
+  pair=$(delivered_home underway-owner $((BEARINGS_FIXTURE_EPOCH - 3 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .in_flight[0] | .owner == "(main)" and .pr_url == "https://github.com/acme/repo/pull/1"
+  ' >/dev/null || fail "an underway row lost its owner or its recorded request: $out"
+  pass "an underway row names its home and carries the request already recorded for it"
+}
+
+# The exit rule must be a number someone can point at, and it must be one-way:
+# a delivery that has waited long enough to be worth a nudge can never quietly
+# fall back into the delivered box on a later read.
+test_the_delivered_exit_rule_fires_at_its_threshold_and_never_reverses() {
+  local pair home fakebin out later
+  pair=$(delivered_home delivered-exit $((BEARINGS_FIXTURE_EPOCH - 7 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .awaiting_nudge_days == 7 and (.awaiting[0] | .age_days == 7 and .nudge == true)
+  ' >/dev/null || fail "the exit rule did not fire at its own threshold: $out"
+
+  out=$(run_at "$home" "$fakebin" $((BEARINGS_FIXTURE_EPOCH - 86400)) --json) \
+    || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '.awaiting[0] | .age_days == 6 and .nudge == false' >/dev/null \
+    || fail "the exit rule fired before its threshold: $out"
+
+  for later in 1 30 365; do
+    out=$(run_at "$home" "$fakebin" $((BEARINGS_FIXTURE_EPOCH + later * 86400)) --json) \
+      || fail "the snapshot failed"
+    printf '%s' "$out" | jq -e --argjson d "$later" '
+      .awaiting[0] | .nudge == true and .age_days == (7 + $d)
+    ' >/dev/null || fail "a crossed delivery fell back below the threshold after $later days: $out"
+  done
+  pass "the delivered exit rule fires at its named threshold and is one-way"
+}
+
+test_the_nudge_threshold_is_one_named_constant() {
+  local pair home fakebin out
+  pair=$(delivered_home delivered-threshold $((BEARINGS_FIXTURE_EPOCH - 3 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    FM_BEARINGS_AWAITING_NUDGE_DAYS=2 \
+    NET_LOG="$home/net.log" "$BEARINGS" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .awaiting_nudge_days == 2 and (.awaiting[0] | .age_days == 3 and .nudge == true)
+  ' >/dev/null || fail "the threshold is not the single constant the output reports: $out"
+  pass "the exit rule reads one named threshold, and the output states which"
+}
+
+test_a_secondmate_child_is_told_apart_from_main_work_in_the_same_repo() {
+  local home fakebin mate out
+  home=$(make_home mate-owner)
+  fakebin=$(make_fakebin "$home")
+  write_fixture "$home"
+  # The fixture's child is parked on a decision; this case is about two homes
+  # working the same repository at once, so put it back to work.
+  mate=$(fixture_mate_home "$home")
+  record_claude_state "$mate/state" mate busy
+  printf 'working: second mate child at work\n' > "$mate/state/mate.status"
+  out=$(run "$home" "$fakebin" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.in_flight[] | select(.id == "ship-task") | .owner] == ["(main)"])
+      and ([.in_flight[] | select(.id | startswith("mate/")) | .owner] | unique) == ["mate"]
+      and (([.in_flight[] | select(.repo == "firstmate") | .owner] | unique | length) == 2)
+  ' >/dev/null || fail "two homes working one repository were not told apart: $out"
+  pass "an underway row from a second mate is distinguishable from main work in the same repo"
+}
+
+# THE INVIOLABLE RULE, SECOND FACE. Nothing that needs the captain may be hidden
+# - not by splitting the needs-you tile, and not by re-labelling a row into the
+# waiting state. A request whose merge he still owes an answer on is his call,
+# however complete it is on our side, so it must never reach the delivered
+# bucket, never age there, and never wear a waiting badge. This one nearly got
+# past both the author and the review, which is exactly why it is a test.
+# R4: an upcoming row from a second mate must reach the parent with its recorded
+# request link, not a null. The link lives in the child home task metadata, so it
+# has to survive that home ledger projection to be usable at all.
+test_a_secondmate_queued_row_carries_its_recorded_request_link() {
+  local home fakebin mate out
+  home=$(make_home mate-queued-link)
+  fakebin=$(make_fakebin "$home")
+  write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)
+- [ ] mate-held - Held delivery with a recorded request (repo: firstmate) (kind: ship) (hold: waiting on the release) (hold-kind: external) (since 2026-07-01)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$mate/projects/mate-held"
+  fm_write_meta "$mate/state/mate-held.meta" \
+    "window=firstmate:fm-mate-held" "worktree=$mate/projects/mate-held" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/acme/repo/pull/91"
+  record_claude_state "$mate/state" mate-held idle
+  printf 'paused: waiting on the upstream release\n' > "$mate/state/mate-held.status"
+  out=$(run "$home" "$fakebin" --json) || fail "the snapshot failed"
+  # A secondmate gate keeps the child id and names its home in owner.
+  printf '%s' "$out" | jq -e '
+    [.gates[] | select(.id == "mate-held") | {owner, pr_url}]
+      == [{owner: "mate", pr_url: "https://github.com/acme/repo/pull/91"}]
+  ' >/dev/null || fail "a second mate upcoming row reached the parent without its link: $out"
+  pass "an upcoming row from a second mate carries its recorded request link to the parent"
+}
+
+test_a_request_waiting_on_the_captain_never_lands_in_the_waiting_state() {
+  local pair home fakebin out
+  pair=$(delivered_home captain-owed $((BEARINGS_FIXTURE_EPOCH - 30 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  # Same delivery as the plain case, except the captain owes an answer on it.
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] still-working - Work still moving (repo: firstmate) (kind: ship) (since 2026-07-01)
+- [ ] shipped-task - Delivered and waiting (repo: firstmate) (kind: ship) (hold: merge this? ) (hold-kind: captain) (since 2026-07-01)
+
+## Queued
+
+## Done
+EOF
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[].id] | index("shipped-task")) == null
+  ' >/dev/null || fail "a request the captain owes an answer on was filed as delivered: $out"
+  printf '%s' "$out" | jq -e '
+    ([.decisions_open[].id] | index("shipped-task")) != null
+  ' >/dev/null || fail "the captain call was hidden from Captain's Call as well: $out"
+  # A thirty-day wait is well past the exit rule, so aging cannot smuggle it back.
+  printf '%s' "$out" | jq -e '[.awaiting[] | select(.nudge)] == []' >/dev/null \
+    || fail "the captain call reappeared as an aged delivered row: $out"
+  pass "a request the captain owes an answer on is never re-labelled into the waiting state"
+}
+
+# R2: a delivery can resume for corrections and then fail. Its own state and
+# detail must survive rather than being reported as delivered.
+test_a_delivery_that_resumed_and_failed_keeps_its_own_state() {
+  local pair home fakebin out
+  pair=$(delivered_home resumed-failed $((BEARINGS_FIXTURE_EPOCH - 3 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  printf 'failed: corrections could not be validated\n' >> "$home/state/shipped-task.status"
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[].id] | index("shipped-task")) == null
+  ' >/dev/null || fail "a resumed delivery that failed was still reported as delivered: $out"
+  pass "a delivery that resumed and failed keeps its own state instead of reading as delivered"
+}
+
+# R6: the bound must never be what drops a row that has aged out of this bucket.
+test_an_overdue_delivery_survives_the_awaiting_bound() {
+  local pair home fakebin out i
+  pair=$(delivered_home overdue-bound $((BEARINGS_FIXTURE_EPOCH - 1 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  : > "$home/data/backlog.md"
+  printf '## In flight\n' >> "$home/data/backlog.md"
+  printf -- '- [ ] still-working - Work still moving (repo: firstmate) (kind: ship) (since 2026-07-01)\n' \
+    >> "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 4 ]; do
+    printf -- '- [ ] recent-%s - Recent delivery %s (repo: firstmate) (kind: ship) (since 2026-07-01)\n' \
+      "$i" "$i" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/recent-$i.meta" \
+      "window=firstmate:fm-recent-$i" "worktree=$home/projects" "project=firstmate" \
+      "harness=claude" "kind=ship" "mode=no-mistakes" \
+      "pr=https://github.com/acme/repo/pull/1$i"
+    record_claude_state "$home/state" "recent-$i" idle
+    printf 'paused: PR https://github.com/acme/repo/pull/1%s waiting on the outside maintainer\n' "$i" \
+      > "$home/state/recent-$i.status"
+    arm_merge_poll "$home" "recent-$i" "https://github.com/acme/repo/pull/1$i" \
+      $((BEARINGS_FIXTURE_EPOCH - 86400))
+    i=$((i + 1))
+  done
+  printf -- '- [ ] shipped-task - Delivered and waiting (repo: firstmate) (kind: ship) (since 2026-07-01)\n' \
+    >> "$home/data/backlog.md"
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  arm_merge_poll "$home" shipped-task https://github.com/acme/repo/pull/2 \
+    $((BEARINGS_FIXTURE_EPOCH - 40 * 86400))
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    FM_BEARINGS_AWAITING=2 \
+    NET_LOG="$home/net.log" "$BEARINGS" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.awaiting | length) == 2
+      and (.awaiting[0] | .id == "shipped-task" and .nudge == true and .age_days == 40)
+      and ([.omitted[].surface] | any(test("awaiting showing 2 of 5")))
+  ' >/dev/null || fail "the bound dropped the overdue delivery instead of ranking it first: $out"
+  pass "an overdue delivery outranks recent ones so the bound never drops it"
+}
+
+test_delivered_work_leaves_underway_for_its_own_bucket
+test_an_armed_merge_watch_does_not_move_work_that_is_still_running
+test_an_underway_row_carries_its_owner_and_its_recorded_request
+test_the_delivered_exit_rule_fires_at_its_threshold_and_never_reverses
+test_the_nudge_threshold_is_one_named_constant
+test_a_secondmate_child_is_told_apart_from_main_work_in_the_same_repo
+
+# The second mate delivers into a repository the fleet never merges, so the
+# delivered state is the terminal state of everything it produces. It has to
+# survive the trip through that home's own ledger, owner intact.
+test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row() {
+  local home fakebin mate out
+  home=$(make_home mate-delivered)
+  fakebin=$(make_fakebin "$home")
+  write_fixture "$home"
+  mate=$(fixture_mate_home "$home")
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Decide subscription order (repo: firstmate) (kind: ship) (since 2026-07-11)
+- [ ] mate-shipped - Second mate delivery waiting upstream (repo: firstmate) (kind: ship) (since 2026-07-01)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$mate/projects/mate-shipped"
+  fm_write_meta "$mate/state/mate-shipped.meta" \
+    "window=firstmate:fm-mate-shipped" "worktree=$mate/projects/mate-shipped" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "pr=https://github.com/acme/repo/pull/77"
+  record_claude_state "$mate/state" mate-shipped idle
+  printf 'paused: PR https://github.com/acme/repo/pull/77 waiting on the outside maintainer\n' > "$mate/state/mate-shipped.status"
+  arm_merge_poll "$mate" mate-shipped https://github.com/acme/repo/pull/77 \
+    $((BEARINGS_FIXTURE_EPOCH - 4 * 86400))
+  out=$(run "$home" "$fakebin" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[] | select(.id == "mate/mate-shipped")
+      | .owner == "mate" and .pr_url == "https://github.com/acme/repo/pull/77" and .age_days == 4]
+      == [true])
+      and ([.in_flight[].id] | index("mate/mate-shipped") == null)
+  ' >/dev/null || fail "a second mate's delivery did not reach the parent as a delivered row: $out"
+  pass "a second mate's delivery reaches the parent as a delivered row with its owner and link"
+}
+
+test_configured_wait_declarations_reach_both_delivery_projections() {
+  local home parent fakebin id window out ledger
+  home=$(make_home configured-wait)
+  make_valid_secondmate_home configured-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in configured-live configured-exited old-literal; do
+    printf -- '- [ ] %s - Waiting delivery (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" \
+      >> "$home/data/backlog.md"
+    window="firstmate:dead-$id"
+    [ "$id" != configured-live ] || window=firstmate:fm-configured-live
+    fm_write_meta "$home/state/$id.meta" "window=$window" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes" \
+      "pr=https://github.com/acme/repo/pull/2"
+    record_claude_state "$home/state" "$id" idle
+    printf 'awaiting: waiting on the outside maintainer\n' > "$home/state/$id.status"
+    arm_merge_poll "$home" "$id" https://github.com/acme/repo/pull/2 \
+      $((BEARINGS_FIXTURE_EPOCH - 8 * 86400))
+  done
+  printf 'paused: obsolete declaration\n' > "$home/state/old-literal.status"
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  out=$(FM_CLASSIFY_PAUSED_VERB=awaiting run "$home" "$fakebin" --json) || fail "configured wait snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[].id] | sort) == ["configured-exited", "configured-live"]
+      and all(.awaiting[]; .age_days == 8 and .nudge == true)
+      and [.in_flight[].id] == ["old-literal"]
+  ' >/dev/null || fail "the main projection did not honor the configured declaration or its nudge: $out"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "configured wait ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    ([.awaiting_merge[].id] | sort) == ["configured-exited", "configured-live"]
+      and (.awaiting_merge | any(.id == "configured-live" and .state == "paused"))
+      and (.awaiting_merge | any(.id == "configured-exited" and .state == "unknown"))
+      and [.active_children[].id] == ["old-literal"]
+  ' >/dev/null || fail "the home summary did not honor the configured declaration: $ledger"
+  parent=$(make_home configured-wait-parent)
+  append_secondmate_registry "$parent" configured-mate "$home"
+  fm_write_secondmate_meta "$parent/state/configured-mate.meta" "$home" "firstmate:fm-configured-mate" firstmate
+  out=$(FM_CLASSIFY_PAUSED_VERB=awaiting run "$parent" "$fakebin" --json) || fail "configured parent projection failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[].id] | sort) == ["configured-mate/configured-exited", "configured-mate/configured-live"]
+      and all(.awaiting[]; .age_days == 8 and .nudge == true)
+      and [.in_flight[].id] == ["configured-mate/old-literal"]
+  ' >/dev/null || fail "configured declarations lost their delivery or nudge in the parent: $out"
+  pass "the configured external-wait verb preserves live and exited deliveries and their nudges in both homes"
+}
+
+test_delivery_requires_a_declaration_and_eligible_current_state_in_both_homes() {
+  local home parent fakebin id window out ledger projected canonical meta
+  home=$(make_home delivery-state-matrix)
+  make_valid_secondmate_home delivery-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = 'axi status' ] || exit 0
+case "${PWD##*/}" in
+  run-failed) status=failed ;;
+  run-parked) status=fix_review ;;
+  run-done) status=completed ;;
+  run-lookup-failed) exit 1 ;;
+  run-unknown|run-unknown-exited) status=completed; printf 'outcome: unverified\n' ;;
+  *) exit 0 ;;
+esac
+printf 'branch: %s\nhead: %s\nstatus: %s\n' \
+  "$(git symbolic-ref --quiet --short HEAD)" "$(git rev-parse HEAD)" "$status"
+SH
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in declared-live declared-exited undeclared-done event-failed event-blocked live-working run-failed run-parked run-done run-unknown run-unknown-exited run-lookup-failed probe-unreadable; do
+    printf -- '- [ ] %s - Delivery state case (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" \
+      >> "$home/data/backlog.md"
+    mkdir -p "$home/projects/$id"
+    window="firstmate:fm-$id"
+    [ "$id" != declared-exited ] || window=firstmate:dead-declared-exited
+    [ "$id" != run-unknown-exited ] || window=firstmate:dead-run-unknown-exited
+    [ "$id" != run-lookup-failed ] || window=firstmate:dead-run-lookup-failed
+    [ "$id" != probe-unreadable ] || window=unreadable:fm-probe-unreadable
+    fm_write_meta "$home/state/$id.meta" \
+      "window=$window" "worktree=$home/projects/$id" "project=firstmate" \
+      "harness=claude" "kind=ship" "mode=no-mistakes" \
+      "pr=https://github.com/acme/repo/pull/2"
+    record_claude_state "$home/state" "$id" idle
+    printf 'paused: waiting on the outside maintainer\n' > "$home/state/$id.status"
+    arm_merge_poll "$home" "$id" https://github.com/acme/repo/pull/2 \
+      $((BEARINGS_FIXTURE_EPOCH - 3 * 86400))
+    case "$id" in
+      run-*) fm_git_init_commit "$home/projects/$id" ;;
+      undeclared-done) printf 'done: PR ready for approval\n' > "$home/state/$id.status" ;;
+      event-failed) printf 'working: correcting delivery\nfailed: corrections failed\n' >> "$home/state/$id.status" ;;
+      event-blocked) printf 'working: correcting delivery\nblocked: corrections need firstmate\n' >> "$home/state/$id.status" ;;
+      live-working) record_claude_state "$home/state" "$id" busy ;;
+    esac
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "main delivery snapshot failed"
+  printf '%s' "$out" | jq -e '
+    ([.awaiting[].id] | sort) == ["declared-exited", "declared-live", "run-done"]
+      and (.in_flight | any(.id == "undeclared-done" and .state == "done"
+        and .doing == "PR ready for approval"))
+      and (.in_flight | any(.id == "event-failed" and .state == "failed"
+        and .doing == "corrections failed"))
+      and (.in_flight | any(.id == "event-blocked" and .state == "blocked"
+        and .doing == "corrections need firstmate"))
+      and (.in_flight | any(.id == "live-working" and .state == "working"))
+      and (.in_flight | any(.id == "run-failed" and .state == "failed" and .doing == "run failed"))
+      and (.in_flight | any(.id == "run-parked" and .state == "parked" and .doing == "parked at fix_review"))
+      and (.in_flight | any(.id == "run-unknown" and .state == "unknown" and .doing == "outcome: unverified"))
+      and (.in_flight | any(.id == "run-unknown-exited" and .state == "unknown" and .doing == "outcome: unverified"))
+      and (.in_flight | any(.id == "run-lookup-failed" and .state == "unknown"
+        and .doing == "no-mistakes run lookup failed"))
+      and (.in_flight | any(.id == "probe-unreadable" and .state == "unknown"
+        and .doing == "backend unreachable (tmux endpoint state: unreadable)"))
+      and (.unhealthy_endpoints | any(.id == "declared-exited" and .exists == false))
+  ' >/dev/null || fail "main delivery classification hid an undeclared or superseded wait: $out"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "endpoint evidence snapshot failed"
+  printf '%s' "$canonical" | jq -e '
+    (.tasks | any(.id == "declared-exited" and .current_state.state == "unknown"
+      and .current_state.source == "endpoint-gone" and .endpoint.exists == false))
+      and (.tasks | any(.id == "run-unknown-exited" and .current_state.state == "unknown"
+        and .current_state.source == "run-step" and .endpoint.exists == false))
+      and (.tasks | any(.id == "run-lookup-failed" and .current_state.state == "unknown"
+        and .current_state.source == "run-step" and .endpoint.exists == false))
+      and (.tasks | any(.id == "probe-unreadable" and .current_state.state == "unknown"
+        and .current_state.source == "none" and .endpoint.exists == false))
+  ' >/dev/null || fail "fixture did not separate confirmed death, unverified runs, and failed probes: $canonical"
+
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "delivery ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    ([.awaiting_merge[].id] | sort) == ["declared-exited", "declared-live", "run-done"]
+      and (.awaiting_merge | any(.id == "declared-exited" and .state == "unknown"))
+      and .invalidity.kind == "terminal_in_flight"
+      and (.invalidity.ids | sort) == ["event-failed", "run-failed", "undeclared-done"]
+      and (.holds | any(.id == "event-blocked" and .reason == "corrections need firstmate"))
+      and (.holds | any(.id == "run-parked" and .reason == "parked at fix_review"))
+  ' >/dev/null || fail "the delivery exception suppressed a failed-child diagnostic or lost an exited wait: $ledger"
+
+  parent=$(make_home delivery-state-parent)
+  append_secondmate_registry "$parent" delivery-mate "$home"
+  fm_write_secondmate_meta "$parent/state/delivery-mate.meta" "$home" "firstmate:fm-delivery-mate" firstmate
+  printf 'working [key=run-failed]: old correction activity\n' > "$parent/state/delivery-mate.status"
+  projected=$(run "$parent" "$fakebin" --json) || fail "parent delivery snapshot failed"
+  printf '%s' "$projected" | jq -e --argjson main "$out" '
+    ([.awaiting[].id | sub("^delivery-mate/"; "")] | sort) == ($main.awaiting | map(.id) | sort)
+      and ([.in_flight[] | {id:(.id | sub("^delivery-mate/"; "")), state, doing}] | sort_by(.id))
+        == ([$main.in_flight[] | {id, state, doing}] | sort_by(.id))
+  ' >/dev/null || fail "secondmate delivery state or detail diverged on the way to the parent: $projected"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$parent" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "parent activity snapshot failed"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "delivery-mate")
+    | .parent_event.reconciliation.activities
+    | any(.verb == "working" and .key == "run-failed" and .verdict == "contradicts")
+  ' >/dev/null || fail "a failed delivery corroborated old working evidence: $canonical"
+  for meta in "$home/state/"*.meta; do
+    [ "$meta" = "$home/state/run-failed.meta" ] || rm "$meta"
+  done
+  printf '## In flight\n- [ ] run-failed - Failed correction (repo: firstmate) (kind: ship) (since 2026-07-01)\n\n## Queued\n\n## Done\n' \
+    > "$home/data/backlog.md"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "failed delivery ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    .state == "no_active_work"
+      and .invalidity == {kind:"terminal_in_flight",ids:["run-failed"]}
+      and [.active_children[] | {id,state,doing}] == [{id:"run-failed",state:"failed",doing:"run failed"}]
+  ' >/dev/null || fail "a failed delivery made its home appear to have active work: $ledger"
+  pass "both homes require a declared wait, retain exited deliveries, and preserve superseding states and diagnostics"
+}
+
+test_delivery_requires_matching_poll_evidence_and_no_open_decision() {
+  local home parent fakebin id out ledger worktree
+  home=$(make_home delivery-evidence)
+  make_valid_secondmate_home evidence-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = 'axi status' ] || exit 0
+printf 'branch: %s\nhead: %s\nstatus: completed\noutcome: checks-passed\n' \
+  "$(git symbolic-ref --quiet --short HEAD)" "$(git rev-parse HEAD)"
+SH
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in valid decision mismatch damaged missing; do
+    printf -- '- [ ] %s - Delivery evidence (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" >> "$home/data/backlog.md"
+    worktree="$home/projects/$id"
+    mkdir -p "$worktree"
+    [ "$id" != decision ] || fm_git_init_commit "$worktree"
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$worktree" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$home/state" "$id" idle
+    : > "$home/state/$id.status"
+    [ "$id" != decision ] || printf 'needs-decision [key=approval]: approve the delivery\n' > "$home/state/$id.status"
+    printf 'paused: waiting on upstream review\n' >> "$home/state/$id.status"
+    arm_merge_poll "$home" "$id" https://github.com/acme/repo/pull/2 "$BEARINGS_FIXTURE_EPOCH"
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  sed 's|pull/2|pull/3|' "$home/state/mismatch.meta" > "$home/state/mismatch.meta.tmp"
+  mv "$home/state/mismatch.meta.tmp" "$home/state/mismatch.meta"
+  printf '\nchanged\n' >> "$home/state/damaged.check.sh"
+  rm "$home/state/missing.check.sh"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "delivery evidence snapshot failed"
+  printf '%s' "$out" | jq -e '
+    [.tasks[] | select(.pr.merge_poll.armed) | .id] == ["decision", "valid"]
+      and (.tasks | any(.id == "decision" and .hints.pending_decision and .current_state.state == "done" and .current_state.source == "run-step"))
+      and (.tasks | any(.id == "mismatch" and .pr.url == "https://github.com/acme/repo/pull/3" and .pr.merge_poll.armed_epoch == null))
+  ' >/dev/null || fail "unverified poll evidence or a pending decision was lost: $out"
+  out=$(run "$home" "$fakebin" --json) || fail "main delivery evidence projection failed"
+  printf '%s' "$out" | jq -e '
+    [.awaiting[].id] == ["valid"]
+      and ([.in_flight[].id] | sort) == ["damaged", "decision", "mismatch", "missing"]
+  ' >/dev/null || fail "a captain-owed or unverified PR entered Delivered: $out"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "evidence ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    [.awaiting_merge[].id] == ["valid"]
+      and ([.active_children[].id] | sort) == ["damaged", "decision", "mismatch", "missing"]
+      and (.decisions_open | any(.id == "decision" and .key == "approval"))
+  ' >/dev/null || fail "the ledger hid a pending approval or invalid poll: $ledger"
+  parent=$(make_home delivery-evidence-parent)
+  append_secondmate_registry "$parent" evidence-mate "$home"
+  fm_write_secondmate_meta "$parent/state/evidence-mate.meta" "$home" "firstmate:fm-evidence-mate" firstmate
+  out=$(run "$parent" "$fakebin" --json) || fail "parent evidence projection failed"
+  printf '%s' "$out" | jq -e '
+    [.awaiting[].id] == ["evidence-mate/valid"]
+      and ([.in_flight[].id] | sort) == ["evidence-mate/damaged", "evidence-mate/decision", "evidence-mate/mismatch", "evidence-mate/missing"]
+  ' >/dev/null || fail "delivery evidence did not survive the parent projection: $out"
+  printf 'resolved [key=approval]: captain approved\npaused: waiting on upstream review\n' >> "$home/state/decision.status"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "resolved approval ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    ([.awaiting_merge[].id] | sort) == ["decision", "valid"]
+      and (.decisions_open | any(.id == "decision") | not)
+  ' >/dev/null || fail "an explicitly resolved approval still prevented delivery: $ledger"
+  pass "both delivery projections retain approvals after green CI until resolution and reject invalid poll artifacts"
+}
+
+test_long_request_links_survive_all_child_projections() {
+  local home parent fakebin url id ledger out
+  home=$(make_home long-request-links)
+  make_valid_secondmate_home link-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  url="https://gitlab.example/$(printf '%0170d' 1)/$(printf '%0170d' 2)/$(printf '%0170d' 3)/-/merge_requests/44"
+  printf '## In flight\n- [ ] delivered - Delivered (repo: firstmate) (kind: ship) (since 2026-07-01)\n- [ ] active - Working (repo: firstmate) (kind: ship) (since 2026-07-01)\n\n## Queued\n- [ ] queued - Next (repo: firstmate) (kind: ship)\n\n## Done\n' > "$home/data/backlog.md"
+  for id in delivered active queued; do
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$home/state" "$id" idle
+    printf 'paused: waiting on maintainer\n' > "$home/state/$id.status"
+    arm_merge_poll "$home" "$id" "$url" "$BEARINGS_FIXTURE_EPOCH"
+  done
+  record_claude_state "$home/state" active busy
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "long-link ledger failed"
+  printf '%s' "$ledger" | jq -e --arg url "$url" '
+    [.awaiting_merge[].pr_url] == [$url] and [.active_children[].pr_url] == [$url]
+      and [.queued[].pr_url] == [$url]
+  ' >/dev/null || fail "a child projection truncated a valid request URL: $ledger"
+  parent=$(make_home long-request-parent)
+  append_secondmate_registry "$parent" link-mate "$home"
+  fm_write_secondmate_meta "$parent/state/link-mate.meta" "$home" "firstmate:fm-link-mate" firstmate
+  out=$(run "$parent" "$fakebin" --json) || fail "long-link parent projection failed"
+  printf '%s' "$out" | jq -e --arg url "$url" '
+    [.awaiting[].pr_url] == [$url] and [.in_flight[].pr_url] == [$url]
+      and [.gates[] | select(.id == "queued") | .pr_url] == [$url]
+  ' >/dev/null || fail "the parent lost a complete recorded request: $out"
+  pass "full GitLab request URLs survive awaiting, active, and queued child projections"
+}
+
+test_failed_lookup_preserves_unresolved_decisions() {
+  local home parent fakebin out ledger
+  home=$(make_home lookup-decision)
+  make_valid_secondmate_home lookup-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/lookup-task"
+  fm_git_init_commit "$home/projects/lookup-task"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = 'axi status' ] || exit 0
+[ "${FM_TEST_RUN_RECOVERED:-0}" = 1 ] || exit 1
+printf 'branch: %s\nhead: %s\nstatus: running\n' \
+  "$(git symbolic-ref --quiet --short HEAD)" "$(git rev-parse HEAD)"
+SH
+  printf '## In flight\n- [ ] lookup-task - Review decision (repo: firstmate) (kind: ship) (since 2026-07-01)\n\n## Queued\n\n## Done\n' \
+    > "$home/data/backlog.md"
+  fm_write_meta "$home/state/lookup-task.meta" "window=firstmate:dead-lookup-task" \
+    "worktree=$home/projects/lookup-task" "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  printf 'needs-decision [key=review]: resolve the review gate\n' > "$home/state/lookup-task.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "lookup decision snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "lookup-task")
+    | .current_state.state == "unknown" and .current_state.source == "run-step"
+      and .hints.pending_decision == true
+      and [.hints.open_decisions[].key] == ["review"]
+  ' >/dev/null || fail "a failed lookup cleared the unresolved decision: $out"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) \
+    || fail "lookup decision ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    .counts.decisions_open == 1
+      and [.decisions_open[] | {id,key,verb}] == [{id:"lookup-task",key:"review",verb:"needs-decision"}]
+  ' >/dev/null || fail "the home ledger lost the decision during a lookup failure: $ledger"
+  parent=$(make_home lookup-decision-parent)
+  append_secondmate_registry "$parent" lookup-mate "$home"
+  fm_write_secondmate_meta "$parent/state/lookup-mate.meta" "$home" "firstmate:fm-lookup-mate" firstmate
+  printf 'needs-decision [key=review]: resolve the review gate\n' > "$parent/state/lookup-mate.status"
+  PATH="$fakebin:$PATH" refresh_local_secondmate_ledgers "$parent"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$parent" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "parent decision snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records[] | select(.id == "lookup-mate")
+    | .parent_event.reconciliation.decisions
+    | any(.key == "review" and .verdict == "corroborates")
+  ' >/dev/null || fail "a failed lookup contradicted the parent decision notification: $out"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_TEST_RUN_RECOVERED=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "recovered run snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "lookup-task")
+    | .current_state.state == "working" and .hints.open_decisions == []
+  ' >/dev/null || fail "verified resumed work did not clear the superseded decision: $out"
+  pass "lookup failures preserve keyed decisions and parent evidence until verified work resumes"
+}
+
+test_overdue_deliveries_survive_ledger_and_presentation_bounds() {
+  local home parent fakebin id age out ledger threshold
+  home=$(make_home overdue-overflow)
+  make_valid_secondmate_home overdue-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in overdue-1 overdue-2 overdue-3 overdue-4 young-1 young-2; do
+    age=8
+    case "$id" in young-*) age=1 ;; esac
+    printf -- '- [ ] %s - Delivered work (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes" "pr=https://github.com/acme/repo/pull/2"
+    record_claude_state "$home/state" "$id" idle
+    printf 'paused: waiting on maintainer\n' > "$home/state/$id.status"
+    arm_merge_poll "$home" "$id" https://github.com/acme/repo/pull/2 \
+      $((BEARINGS_FIXTURE_EPOCH - age * 86400))
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  out=$(FM_BEARINGS_AWAITING=2 run "$home" "$fakebin" --json) || fail "overdue main snapshot failed"
+  printf '%s' "$out" | jq -e '
+    [.awaiting[].id] == ["overdue-1", "overdue-2", "overdue-3", "overdue-4"]
+      and all(.awaiting[]; .nudge and .age_days == 8)
+      and (.omitted | any(.surface == "awaiting showing 4 of 6"))
+  ' >/dev/null || fail "the main bound hid an overdue delivery or misreported truncation: $out"
+  parent=$(make_home overdue-overflow-parent)
+  append_secondmate_registry "$parent" overdue-mate "$home"
+  fm_write_secondmate_meta "$parent/state/overdue-mate.meta" "$home" "firstmate:fm-overdue-mate" firstmate
+  for threshold in 7 30; do
+    ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+      FM_BEARINGS_AWAITING_NUDGE_DAYS=$threshold FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
+      "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "overdue ledger failed"
+    printf '%s' "$ledger" | jq -e --argjson threshold "$threshold" '
+      (.awaiting_merge | length) == 6 and .counts.awaiting_merge == 6
+        and (.omitted | any(.surface == "awaiting_merge") | not)
+    ' >/dev/null || fail "the home bound did not preserve overdue deliveries at its configured threshold: $ledger"
+    out=$(FM_BEARINGS_AWAITING_NUDGE_DAYS=$threshold FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
+      FM_BEARINGS_AWAITING=2 run "$parent" "$fakebin" --json) || fail "overdue parent snapshot failed"
+    printf '%s' "$out" | jq -e --argjson threshold "$threshold" '
+      (if $threshold == 7 then 4 else 2 end) as $shown
+      | (.awaiting | length) == $shown and all(.awaiting[]; .nudge == ($threshold == 7))
+        and (.omitted | any(.surface | startswith("secondmate overdue-mate delivered rows omitted")) | not)
+        and (.omitted | any(.surface == ("awaiting showing " + ($shown | tostring) + " of 6")))
+    ' >/dev/null || fail "the parent bound lost nudges or misreported snapshot truncation: $out"
+  done
+  pass "the ledger retains every delivery and the consuming bound discloses only younger omissions"
+}
+
+test_status_urls_never_become_child_request_links() {
+  local home parent fakebin id ledger out
+  home=$(make_home status-link-children)
+  make_valid_secondmate_home status-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in paused-child working-child; do
+    printf -- '- [ ] %s - Child work (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$home/state" "$id" idle
+    printf 'paused: dependency https://github.com/acme/repo/pull/99 is still under review\n' > "$home/state/$id.status"
+  done
+  record_claude_state "$home/state" working-child busy
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "status link snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) == 2
+      and all(.tasks[]; .pr.source == "status_event" and .pr.url == "https://github.com/acme/repo/pull/99")
+  ' >/dev/null || fail "the fixture did not expose the prose-derived URL: $out"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "status link ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    [.active_children[] | {id,pr_url}] == [{id:"working-child",pr_url:null}]
+      and .awaiting_merge == []
+  ' >/dev/null || fail "a status URL selected a nonworking child or became its request link: $ledger"
+  parent=$(make_home status-link-parent)
+  append_secondmate_registry "$parent" status-mate "$home"
+  fm_write_secondmate_meta "$parent/state/status-mate.meta" "$home" "firstmate:fm-status-mate" firstmate
+  out=$(run "$parent" "$fakebin" --json) || fail "status link parent projection failed"
+  printf '%s' "$out" | jq -e '
+    [.in_flight[] | {id,pr_url}] == [{id:"status-mate/working-child",pr_url:null}]
+      and .awaiting == []
+  ' >/dev/null || fail "a prose-derived request reached the parent: $out"
+  pass "status URLs neither select nonworking children nor become working-child request links"
+}
+
+test_backlog_reason_urls_never_become_child_request_links() {
+  local home parent fakebin id ledger out
+  home=$(make_home backlog-reason-link-children)
+  make_valid_secondmate_home backlog-reason-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in recorded-child unrecorded-child; do
+    printf -- '- [ ] %s - Held delivery (repo: firstmate) (kind: ship) (hold: dependency https://github.com/acme/repo/pull/99 is still under review) (hold-kind: external) (since 2026-07-01)\n' \
+      "$id" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/$id.meta" "window=firstmate:fm-$id" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$home/state" "$id" idle
+    printf 'paused: waiting on the upstream release\n' > "$home/state/$id.status"
+  done
+  printf 'pr=https://github.com/acme/repo/pull/2\n' >> "$home/state/recorded-child.meta"
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "backlog reason link snapshot failed"
+  printf '%s' "$out" | jq -e '
+    (.backlog.records | length) == 2
+      and all(.backlog.records[]; .hold_kind == "external" and .pr_url == "https://github.com/acme/repo/pull/99")
+      and ([.tasks[] | select(.id == "recorded-child") | .pr | {url,source}]
+        == [{url:"https://github.com/acme/repo/pull/2",source:"meta"}])
+  ' >/dev/null || fail "the fixture did not expose the conflicting backlog reason URL: $out"
+  out=$(run "$home" "$fakebin" --json) || fail "backlog reason main projection failed"
+  printf '%s' "$out" | jq -e '
+    [.gates[] | {id,owner,pr_url}] == [
+      {id:"recorded-child",owner:"(main)",pr_url:"https://github.com/acme/repo/pull/2"},
+      {id:"unrecorded-child",owner:"(main)",pr_url:null}]
+  ' >/dev/null || fail "a backlog reason URL became a main request link: $out"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "backlog reason link ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    .valid and [.queued[] | {id,pr_url}] == [
+      {id:"recorded-child",pr_url:"https://github.com/acme/repo/pull/2"},
+      {id:"unrecorded-child",pr_url:null}]
+  ' >/dev/null || fail "a backlog reason URL became a child request link: $ledger"
+  parent=$(make_home backlog-reason-link-parent)
+  append_secondmate_registry "$parent" backlog-reason-mate "$home"
+  fm_write_secondmate_meta "$parent/state/backlog-reason-mate.meta" "$home" "firstmate:fm-backlog-reason-mate" firstmate
+  out=$(run "$parent" "$fakebin" --json) || fail "backlog reason parent projection failed"
+  printf '%s' "$out" | jq -e '
+    [.gates[] | {id,owner,pr_url}] == [
+      {id:"recorded-child",owner:"backlog-reason-mate",pr_url:"https://github.com/acme/repo/pull/2"},
+      {id:"unrecorded-child",owner:"backlog-reason-mate",pr_url:null}]
+  ' >/dev/null || fail "a backlog reason URL reached the parent as a request link: $out"
+  pass "backlog reason URLs never replace recorded request links or supply missing links in either home"
+}
+
+test_cached_deliveries_age_before_the_consuming_bound() {
+  local home parent fakebin sshbin id out ledger phase now epoch
+  home=$(make_home cached-delivery-home)
+  make_valid_secondmate_home cached-mate "$home"
+  fakebin=$(make_fakebin "$home")
+  printf '## In flight\n' > "$home/data/backlog.md"
+  for id in 1 2 3; do
+    printf -- '- [ ] delivery-%s - Awaiting review (repo: firstmate) (kind: ship) (since 2026-07-01)\n' "$id" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/delivery-$id.meta" "window=firstmate:fm-delivery-$id" "worktree=$home/projects" \
+      "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$home/state" "delivery-$id" idle
+    printf 'paused: waiting on maintainer\n' > "$home/state/delivery-$id.status"
+    arm_merge_poll "$home" "delivery-$id" "https://github.com/acme/repo/pull/$id" \
+      $((BEARINGS_FIXTURE_EPOCH - 6 * 86400))
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_NOW_EPOCH="$BEARINGS_FIXTURE_EPOCH" FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "young delivery ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    [.awaiting_merge[].id] == ["delivery-1","delivery-2","delivery-3"]
+      and (.omitted | any(.surface == "awaiting_merge") | not)
+  ' >/dev/null || fail "young delivery evidence was truncated at the ledger boundary: $ledger"
+  printf '%s\n' "$ledger" > "$home/state/home-summary.json"
+  parent=$(make_home cached-delivery-parent)
+  sshbin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  printf -- '- cached-mate - cached deliveries (host: fixture-host; root: /remote/root; home: %s; scope: fixture; projects: firstmate; added 2026-07-01)\n' \
+    "$home" > "$parent/data/secondmates.md"
+  fm_write_meta "$parent/state/cached-mate.meta" "kind=secondmate" "mode=secondmate" "harness=pi" \
+    "remote_host=fixture-host" "remote_root=/remote/root" "home=$home"
+  for phase in fresh cached; do
+    now=2026-07-11T18:00:00Z
+    epoch=$BEARINGS_FIXTURE_EPOCH
+    if [ "$phase" = cached ]; then
+      now=2026-07-13T18:00:00Z
+      epoch=$((BEARINGS_FIXTURE_EPOCH + 2 * 86400))
+      rm "$home/state/home-summary.json"
+    fi
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$parent" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$sshbin/fake-ssh" \
+      FM_TEST_LEDGER_CALL_LOG="$parent/ledger-calls.log" FM_SNAPSHOT_CACHE_DIR="$parent/state/summary-cache" \
+      FM_SNAPSHOT_BUDGET=3 FM_SNAPSHOT_NOW="$now" FM_SNAPSHOT_NOW_EPOCH="$epoch" \
+      FM_BEARINGS_NOW="$now" FM_BEARINGS_AWAITING=2 "$BEARINGS" --json) || fail "$phase delivery snapshot failed"
+    printf '%s' "$out" | jq -e --arg phase "$phase" '
+      .secondmates[0].freshness == $phase
+        and (if $phase == "fresh" then
+          (.awaiting | length) == 2 and all(.awaiting[]; .age_days == 6 and (.nudge | not))
+            and (.omitted | any(.surface == "awaiting showing 2 of 3"))
+        else
+          [.awaiting[].id] == ["cached-mate/delivery-1","cached-mate/delivery-2","cached-mate/delivery-3"]
+            and [.awaiting[].pr_url] == ["https://github.com/acme/repo/pull/1","https://github.com/acme/repo/pull/2","https://github.com/acme/repo/pull/3"]
+            and all(.awaiting[]; .age_days == 8 and .nudge)
+            and (.omitted | any(.surface | startswith("awaiting showing")) | not)
+        end)
+    ' >/dev/null || fail "$phase delivery evidence did not age across the cache boundary: $out"
+  done
+  pass "cached young deliveries retain every identity and link when age promotes them beyond the bound"
+}
+
+test_a_parked_delivery_does_not_make_its_secondmate_home_working() {
+  local parent mate fakebin ledger out
+  parent=$(make_home parked-delivery-parent)
+  mate=$(make_home parked-delivery-mate)
+  fakebin=$(make_fakebin "$parent")
+  make_valid_secondmate_home parked-mate "$mate"
+  append_secondmate_registry "$parent" parked-mate "$mate"
+  fm_write_secondmate_meta "$parent/state/parked-mate.meta" "$mate" "firstmate:fm-parked-mate" firstmate
+  printf '## In flight\n- [ ] parked-delivery - Review gate (repo: firstmate) (kind: ship) (since 2026-07-01)\n\n## Queued\n\n## Done\n' \
+    > "$mate/data/backlog.md"
+  fm_write_meta "$mate/state/parked-delivery.meta" \
+    "window=firstmate:fm-parked-delivery" "worktree=$mate/projects" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "pr=https://github.com/acme/repo/pull/2"
+  record_claude_state "$mate/state" parked-delivery idle
+  printf 'needs-decision [key=review]: resolve the review gate\n' > "$mate/state/parked-delivery.status"
+  arm_merge_poll "$mate" parked-delivery https://github.com/acme/repo/pull/2 "$BEARINGS_FIXTURE_EPOCH"
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "parked delivery ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    .state == "captain_decision" and .counts.active_children == 1
+      and [.active_children[].state] == ["parked"] and .awaiting_merge == []
+      and (.decisions_open | any(.key == "review" and .source == "status"))
+      and (.queued | any(.hold_kind == "captain") | not)
+  ' >/dev/null || fail "parked fixture did not reach the status-only decision fallback: $ledger"
+  out=$(run "$parent" "$fakebin" --json) || fail "parked delivery projection failed"
+  printf '%s' "$out" | jq -e '
+    [.secondmates[].state] == ["unknown"] and .awaiting == []
+      and [.in_flight[] | {id,state,doing}] == [{id:"parked-mate/parked-delivery",state:"parked",doing:"resolve the review gate"}]
+  ' >/dev/null || fail "a parked delivery made its home appear to be working: $out"
+  record_claude_state "$mate/state" parked-delivery busy
+  out=$(run "$parent" "$fakebin" --json) || fail "resumed delivery projection failed"
+  printf '%s' "$out" | jq -e '
+    [.secondmates[].state] == ["active_child_work"]
+      and [.in_flight[].state] == ["working"]
+  ' >/dev/null || fail "a genuinely working child did not activate its home: $out"
+  record_claude_state "$mate/state" parked-delivery idle
+  printf '## In flight\n- [ ] parked-delivery - Review gate (repo: firstmate) (kind: ship) (since 2026-07-01)\n- [ ] z-working - Active work (repo: firstmate) (kind: ship) (since 2026-07-01)\n\n## Queued\n\n## Done\n' \
+    > "$mate/data/backlog.md"
+  fm_write_meta "$mate/state/z-working.meta" "window=firstmate:fm-z-working" "worktree=$mate/projects" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" z-working busy
+  ledger=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_SNAPSHOT_SECONDMATE_CHILDREN=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary) || fail "bounded working ledger failed"
+  printf '%s' "$ledger" | jq -e '
+    .state == "captain_decision" and .counts.active_children == 2
+      and [.active_children[] | {id,state}] == [{id:"z-working",state:"working"}]
+      and (.omitted | any(.surface == "active_children" and .count == 1))
+  ' >/dev/null || fail "a parked delivery crowded working evidence out of the child bound: $ledger"
+  out=$(FM_SNAPSHOT_SECONDMATE_CHILDREN=1 run "$parent" "$fakebin" --json) || fail "bounded working projection failed"
+  printf '%s' "$out" | jq -e '
+    [.secondmates[].state] == ["active_child_work"]
+      and [.in_flight[].id] == ["parked-mate/z-working"]
+      and (.omitted | any(.surface == "secondmate parked-mate active children omitted by snapshot bound: 1"))
+  ' >/dev/null || fail "the child bound hid a working home: $out"
+  pass "a parked delivery stays visible without activating its home until work resumes"
+}
+
+test_delivery_requires_a_declaration_and_eligible_current_state_in_both_homes
+test_configured_wait_declarations_reach_both_delivery_projections
+test_a_parked_delivery_does_not_make_its_secondmate_home_working
+test_failed_lookup_preserves_unresolved_decisions
+test_delivery_requires_matching_poll_evidence_and_no_open_decision
+test_long_request_links_survive_all_child_projections
+test_status_urls_never_become_child_request_links
+test_backlog_reason_urls_never_become_child_request_links
+test_cached_deliveries_age_before_the_consuming_bound
+test_overdue_deliveries_survive_ledger_and_presentation_bounds
+test_a_secondmate_delivery_reaches_the_parent_as_a_delivered_row
+test_a_request_waiting_on_the_captain_never_lands_in_the_waiting_state
+test_a_delivery_that_resumed_and_failed_keeps_its_own_state
+test_an_overdue_delivery_survives_the_awaiting_bound
+test_a_secondmate_queued_row_carries_its_recorded_request_link

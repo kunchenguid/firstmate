@@ -59,12 +59,21 @@
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
-#     against current_state; hints.pending_decision and hints.blocked_event are
-#     booleans derived from that set.
+#     against current_state. Only a non-secondmate's working state from run-step
+#     or pane clears the projected set; completion or failure does not answer
+#     an unresolved approval. hints.pending_decision and hints.blocked_event
+#     are booleans derived from that set.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
+#     pr.merge_poll.armed is true only when fm_pr_poll_artifacts_valid in
+#     bin/fm-pr-lib.sh validates the complete poll against the captured task
+#     metadata. A registration alone is insufficient. armed_epoch is the valid
+#     registration's modification time, or null when unavailable; the clock's
+#     same-PR preservation is owned by bin/fm-pr-check.sh. Neither an armed poll
+#     nor its age establishes an outside wait without the eligibility contract
+#     in bin/fm-bearings-snapshot.sh.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -77,8 +86,19 @@
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
-#     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. provenance.summary_source
+#     Each structured-home record carries active_children, awaiting_merge,
+#     decisions_open, holds, queued, landed, endpoints, counts, and omitted.
+#     active_children retains working children plus unheld metadata-backed PR
+#     tasks that do not qualify for awaiting_merge, preserving their actual
+#     states and recorded pr_url. Working children sort first, and only those
+#     children establish active_child_work; the array length is not activity.
+#     awaiting_merge is that home's DELIVERED work under the declared-wait
+#     eligibility contract in bin/fm-bearings-snapshot.sh. Only such a child is a recognized
+#     terminal-facing state rather than an inventory fault; one that resumed and
+#     failed keeps its diagnostic. All delivery evidence is retained, oldest first;
+#     the consuming snapshot computes current age before applying its bound.
+#     The field is additive: a ledger written before it simply
+#     omits it, and every reader must tolerate its absence. provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
@@ -201,6 +221,9 @@ esac
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
@@ -691,6 +714,7 @@ task_json_lines() {
   local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local merge_poll_armed merge_poll_epoch
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -731,6 +755,13 @@ task_json_lines() {
     if [ -z "$pr" ]; then
       pr_source=absent
     fi
+    merge_poll_armed=false
+    merge_poll_epoch=null
+    if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$meta"; then
+      merge_poll_armed=true
+      merge_poll_epoch=$(file_mtime_epoch "$STATE/$id.pr-poll-registration")
+      case "$merge_poll_epoch" in ''|*[!0-9]*) merge_poll_epoch=null ;; esac
+    fi
 
     current_file="$SNAPSHOT_TASK_DIR/$id.json"
     current_json=$(<"$current_file") || {
@@ -743,28 +774,9 @@ task_json_lines() {
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
     )
 
-    # Durable keyed open-decision set: fold the WHOLE status stream
-    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
-    # never mask a still-open captain decision. The set is derived purely from the
-    # keyed fold - never from report bodies or decision-like prose - and then
-    # reconciled against the crew LIFECYCLE, which only clears a stale decision the
-    # crew has provably moved past. Two lifecycle signals clear it, neither of which
-    # reads any report content:
-    #   - a live activity read (run-step or busy pane) that is working/done, so a
-    #     crew that resumed past a gate is not still reported as parked; and
-    #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
-    #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
-    #     report POINTER, never as a reopened pending decision.
-    # Secondmates are excluded from lifecycle clearing: they are persistent and
-    # multiplex many concerns onto one stream, so activity on one concern must
-    # never clear another concern's keyed decision. A parked/blocked state, or a
-    # non-authoritative status-log/none read on a still-live task, keeps the fold's
-    # open decision surfacing.
     open_decisions_tsv=$(status_open_decisions "$status_log")
-    if [ "$kind" != secondmate ] && \
-       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
-         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+    if [ "$kind" != secondmate ] && [ "$current_state" = working ] && \
+       { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; }; then
       open_decisions_tsv=""
     fi
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
@@ -816,6 +828,8 @@ task_json_lines() {
       --arg remote_root "$remote_root" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
+      --argjson merge_poll_armed "$merge_poll_armed" \
+      --argjson merge_poll_epoch "$merge_poll_epoch" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
@@ -854,7 +868,8 @@ task_json_lines() {
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
-        pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+        pr:{url:($pr | if . == "" then null else . end),source:$pr_source,
+          merge_poll:{armed:$merge_poll_armed,armed_epoch:$merge_poll_epoch}},
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
@@ -906,12 +921,13 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
       }'
 }
 
-# Project one home's canonical structured inventory into the bounded shape a
-# validated parent read needs.
+# Project one home's canonical structured inventory for a validated parent
+# read; the header owns per-surface bounds and delivery retention.
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
 secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
   jq -n \
+    --arg paused_verb "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" \
     --arg generated "$SNAPSHOT_NOW" \
     --argjson generated_epoch "$SNAPSHOT_EPOCH" \
     --arg home "$FM_HOME" \
@@ -926,6 +942,15 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
+    def delivered_and_waiting($work):
+      $work.hold_kind != "captain" and $work.hold_bucket == null
+      and $work.captain_actionable != true
+      and .hints.pending_decision != true
+      and .pr.merge_poll.armed == true and .pr.url != null
+      and .paths.status_log.last_event.state == $paused_verb
+      and (.current_state.state == "paused" or .current_state.state == "done"
+           or (.current_state.state == "unknown"
+               and .current_state.source == "endpoint-gone"));
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
@@ -960,6 +985,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | $tasks[]
          | select(.kind != "secondmate")
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
+         | select(delivered_and_waiting($work) | not)
          | {id,state:.current_state.state} ]) as $terminal_in_flight
     | ([if $backlog.present != true then
           {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
@@ -984,11 +1010,28 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | ([ $owned_in_flight[] as $work
          | select($work.current_role != "program")
          | $tasks[]
-         | select(.id == $work.id and .current_state.state == "working")
+         | select(.id == $work.id)
+         | select(.current_state.state == "working"
+                  or ($work.current_role != "held"
+                      and .pr.source == "meta" and .pr.url != null
+                      and (delivered_and_waiting($work) | not)))
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             source:.current_state.source,
-            doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
+            pr_url:(if .pr.source == "meta" then .pr.url else null end),
+            doing:((.current_state.detail // "") | trunc(120))} ]
+       | sort_by(if .state == "working" then 0 else 1 end)) as $active_all
+    | ([ $owned_in_flight[] as $work
+         | select($work.current_role != "program")
+         | $tasks[] as $task
+         | select($task.id == $work.id and $task.kind != "secondmate")
+         | select($task | delivered_and_waiting($work))
+         | {id:$task.id,kind:$task.kind,state:$task.current_state.state,
+            repo:(($work.repo // $task.project // null) | if . == null then null else trunc(120) end),
+            title:(($work.title // $task.id) | trunc(120)),
+            pr_url:$task.pr.url,
+            delivered_epoch:($task.pr.merge_poll.armed_epoch)} ]
+       | sort_by([(.delivered_epoch == null), .delivered_epoch, .id])) as $awaiting_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
@@ -1025,7 +1068,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
                    | index($invalidity.kind) | not))
        then "unknown"
        elif any($decisions_all[]; .verb == "needs-decision" or .verb == "captain-hold") then "captain_decision"
-       elif ($active_all | length) > 0 then "active_child_work"
+       elif any($active_all[]; .state == "working") then "active_child_work"
        elif ($holds_all | length) > 0 then "externally_held"
        else "no_active_work" end) as $state
     | {
@@ -1039,6 +1082,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         invalidity:$invalidity,
         state:$state,
         active_children:$active_all[:$child_n],
+        awaiting_merge:$awaiting_all,
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
         queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
@@ -1053,12 +1097,16 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           hold_age_days:(.hold_age_days // null),
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
+          pr_url:(. as $row
+            | ([$tasks[] | select(.id == $row.id and .pr.source == "meta")
+                | .pr.url] | first) // null),
           kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
         counts:{
           active_children:($active_all | length),
+          awaiting_merge:($awaiting_all | length),
           decisions_open:($decisions_all | length),
           holds:($holds_all | length),
           queued:($queued_all | length),
@@ -1594,6 +1642,7 @@ parent_evidence_reconciliation_json() {  # <summary-json-file> <activities-json>
     ([ $activities[] as $e
        | if $e.verb == "working" then
            ([ $summary.active_children[]
+              | select(.state == "working")
               | select(if ($e.key | keyed) then .id == $e.key else true end)
               | {surface:"active_children",id,key:null,verb:"working"}]) as $matches
            | result($e; $matches;
@@ -1810,6 +1859,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
          freshness:{status:$summary_freshness,observed_at:$observed,age_seconds:$summary_age},
          active_children:$summary.active_children,
+         awaiting_merge:($summary.awaiting_merge // []),
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
@@ -1842,7 +1892,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          reconcile_inventory:(if $summary_sampled then $summary.invalidity else null end),
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
-         active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
+         active_children:[],awaiting_merge:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,awaiting_merge:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}' >> "$records_file" || return 1
     fi
