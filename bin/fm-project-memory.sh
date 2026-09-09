@@ -27,6 +27,7 @@
 #
 # Usage (continued):
 #   fm-project-memory.sh home <project> [--clone <dir>]
+#   fm-project-memory.sh activity [<project>] [--home <dir>] [--window <seconds>] [--git-only]
 #
 # Each project may record a source checkout in config/project-sources/<project>,
 # a two-key record:
@@ -54,6 +55,26 @@
 #           months of normal working state as a fault, and the material reaches
 #           workers through the project's local material store
 #           (bin/fm-project-local.sh) rather than through a commit.
+#
+# A SOURCE-CANONICAL HOME IS SHARED AND IN USE. When the project's home is a
+# live local folder rather than a repository, there is no isolated copy standing
+# between a worker and the captain: he runs his own sessions in that same folder
+# while firstmate has work going there, and the two have already come within a
+# minute of colliding. Nothing here assumes that folder is still. Every command
+# in this file only ever reads it, and `activity` is the cheap, verifiable
+# answer to "is he working in there right now" that any authorized write must
+# consult first. Deliberately not a lock: a lock nobody can be sure the other
+# side honors is worse than an honest reading of what the folder is doing.
+#
+# `activity` reports two independent signals, either of which alone means the
+# folder is in use: a file changed within the window, and a git operation in
+# flight (an index lock, a merge, a rebase, a cherry-pick, a revert, a bisect).
+# It exits 0 when quiet, 3 when active, and 1 on an error, so a caller can gate
+# on it without parsing prose. `--git-only` reports the operation signal alone,
+# for a caller inside its own isolated copy, where recent writes are its own and
+# prove nothing about a second person in the folder. The file walk stops at the first hit, so the
+# common "he is working" answer costs almost nothing; only the quiet answer
+# walks the tree, which is why the window is small.
 #
 # `home` prints the directory that IS the project's knowledge home under that
 # record: the source checkout when it is canonical and reachable, and this
@@ -326,6 +347,86 @@ scan_agent_memory() {  # <repo> <limit> <label> <paths-out>
     printf 'AGENT_MEMORY_EXCLUDED (%s): none\n' "$label"
   fi
   AGENT_MEM_COUNT=$listed
+  return 0
+}
+
+# --- concurrency with whoever else is in the folder -------------------------
+
+# Portable past-timestamp anchor: a file whose mtime is <seconds> ago, so a
+# bounded `find -newer` can answer "did anything change since then" without
+# stat-ing every entry. Linux date lacks -r and macOS date lacks -d, the same
+# split bin/fm-supervision-lib.sh already handles for reading an mtime.
+activity_anchor() {  # <path> <seconds-ago>
+  local path=$1 seconds=$2 now stamp
+  now=$(date +%s) || return 1
+  if [ "$(uname)" = Darwin ]; then
+    stamp=$(date -r "$((now - seconds))" +%Y%m%d%H%M.%S 2>/dev/null) || return 1
+  else
+    stamp=$(date -d "@$((now - seconds))" +%Y%m%d%H%M.%S 2>/dev/null) || return 1
+  fi
+  : >"$path" || return 1
+  touch -t "$stamp" "$path" 2>/dev/null || return 1
+}
+
+# The git operation, if any, that the working copy is in the middle of. An
+# in-flight operation is unambiguous evidence that someone is working the folder
+# right now, and unlike a recent write it is never produced by simply reading.
+git_operation_in_flight() {  # <repo>; prints the operation name, or nothing
+  local repo=$1 gitdir
+  gitdir=$(source_git "$repo" rev-parse --absolute-git-dir 2>/dev/null) || return 0
+  [ -n "$gitdir" ] || return 0
+  [ -e "$gitdir/index.lock" ] && { printf 'index-lock\n'; return 0; }
+  [ -d "$gitdir/rebase-merge" ] || [ -d "$gitdir/rebase-apply" ] && { printf 'rebase\n'; return 0; }
+  [ -e "$gitdir/MERGE_HEAD" ] && { printf 'merge\n'; return 0; }
+  [ -e "$gitdir/CHERRY_PICK_HEAD" ] && { printf 'cherry-pick\n'; return 0; }
+  [ -e "$gitdir/REVERT_HEAD" ] && { printf 'revert\n'; return 0; }
+  [ -e "$gitdir/BISECT_LOG" ] && { printf 'bisect\n'; return 0; }
+  return 0
+}
+
+# Prints the report and sets ACTIVITY_STATE to active or quiet. .git is pruned
+# because git's own bookkeeping churns on a plain read and would report every
+# folder as busy; the operation check above covers what matters in there.
+ACTIVITY_STATE=quiet
+report_activity() {  # <home> <window-seconds> [git-only]
+  local home=$1 window=$2 git_only=${3:-0} anchor newest operation
+  ACTIVITY_STATE=quiet
+  printf 'HOME: %s\n' "$home"
+
+  operation=$(git_operation_in_flight "$home")
+  if [ -n "$operation" ]; then
+    printf 'GIT_OPERATION: %s\n' "$operation"
+    ACTIVITY_STATE=active
+  else
+    printf 'GIT_OPERATION: none\n'
+  fi
+
+  # A worker's own isolated copy is always writing, so a caller that only needs
+  # to know whether SOMEONE ELSE is mid-operation asks for the git signal alone;
+  # recent writes there prove nothing about a second person.
+  if [ "$git_only" -eq 1 ]; then
+    printf 'ACTIVITY: %s (git signal only; no file walk)\n' "$ACTIVITY_STATE"
+    return 0
+  fi
+
+  anchor=$(mktemp "${TMPDIR:-/tmp}/fm-project-activity.XXXXXX") || die "could not create a scratch file"
+  if ! activity_anchor "$anchor" "$window"; then
+    rm -f -- "$anchor"
+    printf 'ACTIVITY: unknown (this host could not build a comparison timestamp)\n'
+    ACTIVITY_STATE=active
+    return 0
+  fi
+  newest=$(find "$home" -name .git -prune -o -type f -newer "$anchor" -print -quit 2>/dev/null || true)
+  rm -f -- "$anchor"
+
+  if [ -n "$newest" ]; then
+    printf 'ACTIVITY: active (changed within the last %ss, for example: %s)\n' "$window" "${newest#"$home"/}"
+    ACTIVITY_STATE=active
+  elif [ "$ACTIVITY_STATE" = active ]; then
+    printf 'ACTIVITY: active (a git operation is in flight; no file changed within the last %ss)\n' "$window"
+  else
+    printf 'ACTIVITY: quiet (nothing changed in the last %ss)\n' "$window"
+  fi
   return 0
 }
 
@@ -718,6 +819,59 @@ case "$CMD" in
     fi
     [ -d "$HOME_DIR" ] || die "no reachable knowledge home for $NAME"
     printf '%s\n' "$HOME_DIR"
+    ;;
+  activity)
+    NAME=
+    ACT_HOME=
+    WINDOW=300
+    GIT_ONLY=0
+    case "${1:-}" in
+      '' | --*) ;;
+      *)
+        NAME=$1
+        shift
+        ;;
+    esac
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --home)
+          [ "$#" -gt 1 ] || die "--home requires a directory"
+          ACT_HOME=$2
+          shift 2
+          ;;
+        --window)
+          [ "$#" -gt 1 ] || die "--window requires a number of seconds"
+          WINDOW=$2
+          shift 2
+          ;;
+        --git-only)
+          GIT_ONLY=1
+          shift
+          ;;
+        *) die "unknown option: $1" ;;
+      esac
+    done
+    [ -n "$NAME" ] || [ -n "$ACT_HOME" ] || die "usage: activity <project> [--home <dir>] [--window <seconds>] [--git-only]"
+    [ -z "$NAME" ] || valid_project_name "$NAME" || die "invalid project name: $NAME"
+    case "$WINDOW" in
+      '' | *[!0-9]*) die "--window requires a whole number of seconds" ;;
+    esac
+    [ "$WINDOW" -gt 0 ] || die "--window requires a positive number of seconds"
+    if [ -z "$ACT_HOME" ]; then
+      ACT_HOME="$PROJECTS_DIR/$NAME"
+      if read_source_record "$NAME"; then
+        if [ "$SOURCE_RECORD_CANONICAL" = source ] && [ -d "$SOURCE_RECORD_PATH" ]; then
+          ACT_HOME=$SOURCE_RECORD_PATH
+        fi
+      else
+        RC=$?
+        [ "$RC" -eq 1 ] || exit 1
+      fi
+    fi
+    [ -d "$ACT_HOME" ] || die "no reachable knowledge home for ${NAME:-$ACT_HOME}"
+    ACT_HOME=$(cd "$ACT_HOME" && pwd -P)
+    report_activity "$ACT_HOME" "$WINDOW" "$GIT_ONLY"
+    [ "$ACTIVITY_STATE" = quiet ] || exit 3
     ;;
   scan)
     ALL=0

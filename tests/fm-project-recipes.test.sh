@@ -34,6 +34,25 @@ EOF
 
 today() { date -u +%Y-%m-%d; }
 
+# init is the one command that writes into a project directory, and that
+# directory can be a live folder someone else is mid-operation in.
+test_init_refuses_while_a_git_operation_is_in_flight() {
+  local world out rc gitdir
+  world=$(make_project inflight)
+  git init -q "$world/project"
+  gitdir=$(git -C "$world/project" rev-parse --absolute-git-dir)
+  : >"$gitdir/index.lock"
+  out=$(recipes_cmd "$world/home" init "$world/project") && rc=0 || rc=$?
+  expect_code 1 "$rc" "init wrote into a directory someone was mid-operation in"
+  assert_contains "$out" "git operation is in flight" "the refusal did not name the cause"
+  assert_absent "$world/project/.agents/recipes.md" "the refused init still created a catalog"
+  assert_absent "$world/project/AGENTS.md" "the refused init still wrote agent memory"
+  rm -f "$gitdir/index.lock"
+  out=$(recipes_cmd "$world/home" init "$world/project") || fail "init failed once the operation ended: $out"
+  assert_present "$world/project/.agents/recipes.md" "init did not create the catalog once the folder was free"
+  pass "fm-project-recipes.sh: init refuses while a git operation is in flight"
+}
+
 test_init_creates_the_catalog_and_points_agents_md_at_it() {
   local world out
   world=$(make_project init)
@@ -171,3 +190,4 @@ test_check_names_an_entry_nobody_reverified
 test_check_names_an_undated_entry
 test_check_reports_a_catalog_that_outgrew_its_budget
 test_digest_marks_an_entry_nobody_reverified
+test_init_refuses_while_a_git_operation_is_in_flight

@@ -31,6 +31,9 @@
 # `sync` copies each manifest path out of the project's canonical home
 # (bin/fm-project-memory.sh home) into the store. It only ever reads that
 # directory; the captain's live checkout is never written, staged, or cleaned.
+# That checkout is shared rather than still - he works in it while firstmate has
+# work going - so sync reports when the folder was being written while the copy
+# was taken instead of presenting a possibly torn file as clean.
 #
 # `stage` is the spawn-time step, called by bin/fm-spawn.sh once a task copy is
 # known to be isolated. It is idempotent and self-cleaning: a pool slot reused by
@@ -237,7 +240,7 @@ case "$CMD" in
       echo "empty"
       exit 0
     fi
-    FOUND=$(cd "$MATERIAL" && find . -mindepth 1 \( -type f -o -type l \) -printf '%P\n' 2>/dev/null | LC_ALL=C sort)
+    FOUND=$(cd "$MATERIAL" && find . -mindepth 1 \( -type f -o -type l \) -print 2>/dev/null | sed 's|^\./||' | LC_ALL=C sort)
     if [ -z "$FOUND" ]; then
       echo "empty"
     else
@@ -298,6 +301,13 @@ case "$CMD" in
     MANIFEST="$STORE/manifest"
     [ -f "$MANIFEST" ] || die "no manifest at $MANIFEST; list one path per line to pull from the project's canonical home"
     HOME_DIR=$(canonical_home "$NAME") || die "could not resolve the canonical home for $NAME"
+    # The canonical home can be a live folder the captain is working in while
+    # this copy is taken, so a file can be caught mid-write. This never blocks
+    # the sync - the store is a private cache and a re-run is free - but it must
+    # never be silent either, because a truncated file that reaches every worker
+    # is far worse than one that arrives late.
+    ACTIVE=0
+    "$SCRIPT_DIR/fm-project-memory.sh" activity --home "$HOME_DIR" >/dev/null 2>&1 || ACTIVE=1
     MATERIAL=$(material_dir "$NAME")
     mkdir -p "$MATERIAL"
     COPIED=0
@@ -331,7 +341,11 @@ case "$CMD" in
       COPIED=$((COPIED + 1))
     done <"$MANIFEST"
     refuse_symlinks "$MATERIAL"
+    "$SCRIPT_DIR/fm-project-memory.sh" activity --home "$HOME_DIR" >/dev/null 2>&1 || ACTIVE=1
     printf 'synced: %s from %s (%s paths copied, %s absent)\n' "$NAME" "$HOME_DIR" "$COPIED" "$MISSING"
+    if [ "$ACTIVE" -eq 1 ]; then
+      printf 'warning: %s was being worked in while this copy was taken, so a file may have been caught mid-write; re-run sync once it is quiet if anything looks truncated\n' "$HOME_DIR" >&2
+    fi
     ;;
   stage)
     NAME=${1:-}

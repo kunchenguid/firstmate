@@ -45,11 +45,77 @@ run_scan() {  # <world> [extra args...]
   FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" scan demo "$@" 2>&1
 }
 
-# A fingerprint of everything the scan could plausibly disturb: the working tree
-# and every loose file in .git, including the index and its timestamp.
+# Portable mtime, the same Linux/macOS split bin/fm-supervision-lib.sh handles.
+mtime_of() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
+# A fingerprint of everything the scan could plausibly disturb: every path in
+# the working tree with its size, and every loose file in .git with its size and
+# timestamp, so an index refresh the scan should never cause would show up here.
 fingerprint() {  # <dir>
-  find "$1" -printf '%P %y %s\n' 2>/dev/null | LC_ALL=C sort
-  find "$1/.git" -maxdepth 1 -type f -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort
+  (cd "$1" && find . -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r entry; do
+    if [ -f "$entry" ] && [ ! -L "$entry" ]; then
+      printf '%s f %s\n' "$entry" "$(wc -c <"$entry" | tr -d ' ')"
+    else
+      printf '%s other\n' "$entry"
+    fi
+  done)
+  find "$1/.git" -maxdepth 1 -type f -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r entry; do
+    printf '%s %s %s\n' "${entry#"$1"/}" "$(wc -c <"$entry" | tr -d ' ')" "$(mtime_of "$entry")"
+  done
+}
+
+# A source-canonical home is a folder the captain works in while firstmate has
+# work going there, so "is anyone in there right now" has to be answerable
+# before anything writes. Two independent signals, either one enough.
+# Push every mtime in a fixture well into the past, so "nothing changed
+# recently" is a fact about the fixture rather than a race with how fast the
+# suite runs.
+age_tree() {  # <dir>
+  find "$1" -exec touch -t 202001010000.00 {} + 2>/dev/null || true
+}
+
+test_activity_reports_a_folder_nobody_is_touching_as_quiet() {
+  local world out rc
+  world=$(make_world quiet)
+  age_tree "$world/source"
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" activity --home "$world/source" --window 1 2>&1) && rc=0 || rc=$?
+  expect_code 0 "$rc" "a folder nobody touched did not read as quiet"
+  assert_contains "$out" "ACTIVITY: quiet" "the report did not say the folder was quiet"
+  assert_contains "$out" "GIT_OPERATION: none" "the report did not clear the git signal"
+  pass "fm-project-memory.sh: a folder nobody is touching reads as quiet"
+}
+
+test_activity_reports_a_recent_write_as_active() {
+  local world out rc
+  world=$(make_world busy)
+  age_tree "$world/source"
+  mkdir -p "$world/source/active/repro_weekday"
+  printf 'his own test run\n' >"$world/source/active/repro_weekday/out.json"
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" activity --home "$world/source" 2>&1) && rc=0 || rc=$?
+  expect_code 3 "$rc" "a folder someone just wrote in did not read as active"
+  assert_contains "$out" "ACTIVITY: active" "the report did not say the folder was in use"
+  assert_contains "$out" "active/repro_weekday/out.json" "the report did not name what it saw change"
+  pass "fm-project-memory.sh: a recent write reads as active and names the file"
+}
+
+test_activity_reports_a_git_operation_in_flight() {
+  local world out rc gitdir
+  world=$(make_world inflight)
+  gitdir=$(git -C "$world/source" rev-parse --absolute-git-dir)
+  : >"$gitdir/index.lock"
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" activity --home "$world/source" --window 1 --git-only 2>&1) && rc=0 || rc=$?
+  expect_code 3 "$rc" "a git operation in flight did not read as active"
+  assert_contains "$out" "GIT_OPERATION: index-lock" "the in-flight git operation was not named"
+  rm -f "$gitdir/index.lock"
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" activity --home "$world/source" --window 1 --git-only 2>&1) && rc=0 || rc=$?
+  expect_code 0 "$rc" "the git-only signal stayed active after the operation ended"
+  pass "fm-project-memory.sh: an in-flight git operation reads as active on its own"
 }
 
 test_scan_never_writes_to_the_source_checkout() {
@@ -206,3 +272,6 @@ test_absent_source_record_is_a_normal_reported_state
 test_source_record_round_trips_and_home_resolves
 test_source_set_refuses_the_homes_own_clone
 test_scan_is_bounded_by_limit
+test_activity_reports_a_folder_nobody_is_touching_as_quiet
+test_activity_reports_a_recent_write_as_active
+test_activity_reports_a_git_operation_in_flight

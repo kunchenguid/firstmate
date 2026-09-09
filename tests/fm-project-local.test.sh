@@ -30,6 +30,40 @@ local_cmd() {  # <world> <args...>
   FM_HOME="$world/home" "$ROOT/bin/fm-project-local.sh" "$@" 2>&1
 }
 
+# Push every mtime in a fixture well into the past, so "nothing changed
+# recently" is a fact about the fixture rather than a race with the suite.
+age_tree() {  # <dir>
+  find "$1" -exec touch -t 202001010000.00 {} + 2>/dev/null || true
+}
+
+# The canonical home is shared: the captain works in it while a sync reads it,
+# so a file can be caught mid-write. The sync still succeeds - the store is a
+# private cache and re-running is free - but it must say so.
+test_sync_reports_a_home_that_was_being_worked_while_it_was_read() {
+  local world out
+  world=$(make_world concurrent)
+  mkdir -p "$world/home/config/project-sources" "$world/home/data/project-local/demo"
+  git_q init -q "$world/canonical"
+  printf 'x\n' >"$world/canonical/README.md"
+  git_q -C "$world/canonical" add README.md
+  git_q -C "$world/canonical" commit -qm initial
+  printf 'operational context\n' >"$world/canonical/CLAUDE.md"
+  FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/canonical" --canonical source >/dev/null ||
+    fail "source set failed"
+  printf 'CLAUDE.md\n' >"$world/home/data/project-local/demo/manifest"
+
+  out=$(local_cmd "$world" sync demo) || fail "sync failed while the home was in use: $out"
+  assert_contains "$out" "synced:" "the sync did not complete"
+  assert_contains "$out" "was being worked in while this copy was taken" \
+    "the sync said nothing about reading a folder someone was writing"
+
+  age_tree "$world/canonical"
+  out=$(local_cmd "$world" sync demo) || fail "sync failed on a quiet home: $out"
+  assert_not_contains "$out" "was being worked in while this copy was taken" \
+    "a quiet home still produced a concurrency warning"
+  pass "fm-project-local.sh: sync reports a home that was being worked while it was read"
+}
+
 test_staged_material_is_readable_and_cannot_be_committed() {
   local world out staged
   world=$(make_world stage)
@@ -94,9 +128,9 @@ test_sync_pulls_the_manifest_from_the_canonical_home_without_writing_to_it() {
   mkdir -p "$world/home/data/project-local/demo"
   printf '# what the workers need\nCLAUDE.md\nherramientas\n' >"$world/home/data/project-local/demo/manifest"
 
-  before=$(find "$world/canonical" -printf '%P %y %s\n' | LC_ALL=C sort)
+  before=$(cd "$world/canonical" && find . -print | LC_ALL=C sort)
   out=$(local_cmd "$world" sync demo) || fail "sync failed: $out"
-  after=$(find "$world/canonical" -printf '%P %y %s\n' | LC_ALL=C sort)
+  after=$(cd "$world/canonical" && find . -print | LC_ALL=C sort)
   [ "$before" = "$after" ] || fail "sync modified the canonical home"
 
   out=$(local_cmd "$world" list demo)
@@ -182,3 +216,4 @@ test_a_symlink_never_enters_the_store
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it
 test_a_reused_copy_never_keeps_the_previous_tasks_material
 test_stage_is_a_no_op_for_a_project_name_no_store_can_address
+test_sync_reports_a_home_that_was_being_worked_while_it_was_read

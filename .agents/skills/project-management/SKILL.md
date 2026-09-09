@@ -90,6 +90,10 @@ For a project whose home is a local checkout, the store is the main path rather 
 
 Finally, establish the project's recipe catalog so what is learned later stops evaporating: `bin/fm-project-recipes.sh` owns it, and creating it writes into the project, so it is dispatched as work or performed under a concrete captain approval like any other project write.
 
+When a project's home is a live local folder, the captain works in it at the same time as anyone firstmate sends there, and there is no isolated copy separating the two.
+Check with `bin/fm-project-memory.sh activity <project>` before proposing or performing any write into that folder, and say what it reported when you bring the write to him.
+An active folder is a reason to wait or to ask, never a reason to write carefully and hope; [`docs/project-memory.md`](../../../docs/project-memory.md) owns what the signals mean.
+
 ## Create a project
 
 Creating a GitHub repository is outward-facing.

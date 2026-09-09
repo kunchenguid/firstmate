@@ -47,6 +47,27 @@ Every read goes through one gated function that refuses any git subcommand outsi
 A source checkout on a Windows filesystem reached through `/mnt/c` is supported and is the case this was built against.
 Every walk is either a single git call or a bounded count, because an unbounded directory walk there is expensive.
 
+## A live home is shared, and never assumed still
+
+When a project's home is a local folder rather than a repository, there is no isolated copy standing between a worker and the captain.
+He runs his own sessions in that same folder while firstmate has work going there, and the two have already come within a minute of colliding: a worker was writing into the AutoEvals folder while he was running tests under `active/repro_weekday/` of it.
+Nothing in this capability assumes that folder is still.
+
+That is why every command here only ever reads it, and why the one command that writes into a project directory refuses when someone is mid-operation there.
+
+```sh
+bin/fm-project-memory.sh activity <project>
+bin/fm-project-memory.sh activity --home /path/to/the/folder --window 300
+```
+
+It reports two independent signals, either of which alone means the folder is in use: a file changed inside the window, and a git operation in flight (an index lock, a merge, a rebase, a cherry-pick, a revert, a bisect).
+It exits `0` when quiet and `3` when active, so it can gate a script without anyone parsing prose.
+The file walk stops at the first hit, so the "he is working" answer costs almost nothing and names one changed path as an example rather than the newest; only the quiet answer walks the tree, which is why the window is small.
+
+This is deliberately not a locking scheme.
+A lock neither side can be sure the other honors is worse than an honest reading of what the folder is doing, and the captain's own sessions would never take one.
+What the mechanism gives instead is a check any authorized write consults first, an unambiguous refusal when a git operation is in flight, and a sync that says so when it read a folder that was being written rather than presenting a possibly torn file as clean.
+
 ## Carrying what cannot be committed
 
 Some material must never enter a project's history: a collaborator's repository firstmate does not get to add files to, documents holding real client material, per-machine configuration, and everything outside git in a project whose home is a local checkout.

@@ -23,7 +23,9 @@
 #   fm-project-recipes.sh check <project-dir> [--budget <tokens>]
 #
 # `init` is the only subcommand that writes, and it writes only into the
-# directory it is given. `digest` and `check` never write anything.
+# directory it is given. It refuses while a git operation is in flight there,
+# because that directory can be a live folder the captain is working in at the
+# same time. `digest` and `check` never write anything.
 #
 # Entry format - one capability per `##` section:
 #
@@ -276,6 +278,15 @@ RECIPES="$DIR/$RECIPES_REL"
 
 case "$CMD" in
   init)
+    # `init` is the one command here that writes into a project directory, and
+    # that directory can be a live folder someone else is working in right now -
+    # a source-canonical home is shared, not an isolated copy. A git operation
+    # in flight is unambiguous evidence of exactly that, and unlike a recent
+    # write it is never produced by a worker's own quiet copy, so it is the one
+    # signal worth refusing on rather than guessing with a lock.
+    if ! "$SCRIPT_DIR/fm-project-memory.sh" activity --home "$DIR" --git-only >/dev/null 2>&1; then
+      die "a git operation is in flight in $DIR; someone is working there right now. Wait for it to finish, or check with \`fm-project-memory.sh activity --home $DIR\`"
+    fi
     "$SCRIPT_DIR/fm-ensure-agents-md.sh" "$DIR" >/dev/null || die "could not establish AGENTS.md in $DIR"
     if [ -L "$RECIPES" ]; then
       die "$RECIPES is a symlink; expected a regular file"
