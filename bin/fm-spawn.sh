@@ -196,11 +196,12 @@
 #   resets to its tip. When no origin is detected and --base-branch is omitted,
 #   spawn skips that remote freshness check and launches from the clean
 #   worktree's current HEAD. --base-branch <branch> keeps that same pooled
-#   path and instead resets to the named branch: origin/<branch> for scouts and
-#   PR delivery, or the local branch for local-only delivery. A requested name
-#   that does not exist at the required destination refuses immediately and
-#   never falls back to the remote default or to an origin-less skip. An
-#   unverifiable ref-specific fetch also refuses.
+#   path and instead resets to the named branch: origin/<branch> when present,
+#   or the local branch for scouts and local-only delivery. PR delivery refuses
+#   a named base absent from origin. A requested name that does not exist at the
+#   required destination refuses immediately and never falls back to the remote
+#   default or to an origin-less skip. An unverifiable ref-specific fetch also
+#   refuses.
 #   The spawn records base_branch=<branch> in state/<id>.meta only when the
 #   flag is set. A no-mistakes ship then passes `axi run --base-branch
 #   <branch>` so the pipeline opens against that integration branch; do not
@@ -2504,7 +2505,7 @@ freshen_spawn_worktree_base() {  # <worktree>
           target="origin/$BASE_BRANCH"
           ;;
         2)
-          if [ "${MODE:-}" = local-only ]; then
+          if [ "${MODE:-}" = local-only ] || [ "$KIND" = scout ]; then
             if git -C "$worktree" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
               target="$BASE_BRANCH"
             else
@@ -2522,7 +2523,7 @@ freshen_spawn_worktree_base() {  # <worktree>
           ;;
       esac
     else
-      if [ "${MODE:-}" = local-only ]; then
+      if [ "${MODE:-}" = local-only ] || [ "$KIND" = scout ]; then
         if git -C "$worktree" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
           target="$BASE_BRANCH"
         else

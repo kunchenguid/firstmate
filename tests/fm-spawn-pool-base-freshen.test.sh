@@ -761,7 +761,7 @@ test_absent_base_branch_leaves_default_freshen_and_meta() {
   pass "omitting --base-branch keeps default-branch freshen and does not record a PR target"
 }
 
-test_local_only_base_branch_uses_local_branch_when_origin_lacks_it() {
+test_local_only_and_scout_base_branch_use_local_when_origin_lacks_it() {
   local rec id out status local_sha
   id='pool-base-branch-local-r7'
   rec=$(make_case base-branch-local "$id")
@@ -785,6 +785,27 @@ test_local_only_base_branch_uses_local_branch_when_origin_lacks_it() {
       || fail "spawn --base-branch local-only fell back to origin/main"
   fi
   pass "local-only spawn --base-branch uses a local branch when origin lacks it"
+
+  id='pool-base-branch-local-scout-r8'
+  rec=$(make_case base-branch-local-scout "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" checkout --quiet -B local-scout
+  printf 'only local scout\n' > "$POOL_DIR/local-scout.txt"
+  git -C "$POOL_DIR" add local-scout.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm local-scout
+  local_sha=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
+  scaffold_scout_brief "$id" local-scout
+
+  out=$(run_spawn "$id" --scout --base-branch local-scout)
+  status=$?
+  expect_code 0 "$status" "scout --base-branch should use a local branch when origin lacks it"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_sha" ] \
+    || fail "scout --base-branch did not reset to the local branch tip"
+  assert_grep 'base_branch=local-scout' "$HOME_DIR/state/$id.meta" \
+    "scout did not record its local named base"
+  pass "scout --base-branch uses a local branch when origin lacks it"
 }
 
 test_pr_modes_refuse_base_missing_from_origin() {
@@ -906,6 +927,26 @@ test_originless_base_branch_uses_local_or_refuses() {
     "origin-less --base-branch did not refuse a missing requested base"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "origin-less --base-branch moved HEAD after refusing a missing local base"
+
+  id='pool-originless-base-scout-r2'
+  rec=$(make_originless_case originless-base-scout "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" checkout --quiet -B develop
+  printf 'originless scout develop\n' > "$POOL_DIR/originless-scout-develop.txt"
+  git -C "$POOL_DIR" add originless-scout-develop.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm originless-scout-develop
+  local_sha=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
+  scaffold_scout_brief "$id" develop
+
+  out=$(run_spawn "$id" --scout --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "origin-less scout should use its local named branch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_sha" ] \
+    || fail "origin-less scout did not reset to its local named branch"
+  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
+    "origin-less scout did not record its local named base"
   pass "origin-less --base-branch uses a local branch or refuses, never skips"
 }
 
@@ -1017,7 +1058,7 @@ test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
 test_base_branch_resets_to_named_origin_tip
 test_absent_base_branch_leaves_default_freshen_and_meta
-test_local_only_base_branch_uses_local_branch_when_origin_lacks_it
+test_local_only_and_scout_base_branch_use_local_when_origin_lacks_it
 test_pr_modes_refuse_base_missing_from_origin
 test_base_branch_ref_fetch_failure_refuses_local_fallback
 test_missing_base_branch_refuses_without_default_fallback
