@@ -22,7 +22,9 @@ bin/fm-project-memory.sh source set <project> /path/to/the/checkout --canonical 
 Do not infer the second from a quiet remote alone - ask.
 
 `bin/fm-project-memory.sh home <project>` prints whichever directory that record makes the project's knowledge home, and everything that has to read a project's committed agent memory or recipe catalog resolves it through that command instead of assuming the clone.
+A home that is the checkout and is not reachable right now - the disk behind `/mnt/c` is down - is never quietly answered with the clone, which is only a stale mirror of it: `home` and `activity` fail and say so, and a spawn goes ahead without the digest while telling the worker the recorded home by name and that it was not verified.
 Having no record is a normal state, not an error; a project created from nothing has no earlier home.
+`bin/fm-project-memory.sh source clear <project>` forgets a record.
 
 The record lives in `config/project-sources/<project>` because it is machine-local: the path exists only on the host holding that checkout, so it is not inherited by a secondmate home, which may run somewhere else.
 It is deliberately not a field in `data/projects.md`, which is fleet navigation prose whose delivery-posture parser must stay as narrow as it is.
@@ -81,6 +83,7 @@ bin/fm-project-local.sh list <project>
 
 `sync` reads its paths, one per line, from `data/project-local/<project>/manifest`.
 It says when the home was being worked in while the copy was taken, and says separately when that could not be determined, so a possibly torn file is never presented as clean.
+The store holds regular files only: a symlink anywhere under a path being added or synced is refused before anything is copied, so a refusal never leaves the store in a state that blocks every later spawn of the project.
 
 Every spawn stages the store into the task copy at `.fm-local/` before the worker starts.
 Staging adds that path to the repository's exclude file and then **verifies that git reports nothing under it**; if git can still see the material, the staged copy is removed and the spawn is refused, because a worker cannot be told not to commit something git is offering it.
@@ -112,7 +115,7 @@ A recipe such a worker learns or finds wrong travels back in its report, in the 
 For an ordinary project whose home is its repository, a recipe is promoted through the task's delivery path like any other project knowledge.
 
 The digest is bounded by `config/project-recipe-budget` (absent means the default in the script's header), using the same conservative local token estimate as firstmate's own startup memory.
-When the catalog outgrows the budget that is the signal to consolidate, not to raise the ceiling; without a ceiling this recreates the original problem inverted, as a wall of text.
+`check` measures what the digest actually renders, not the catalog file, and reports how many of the catalog's entries the digest can carry; when it cannot carry all of them that is the signal to consolidate, not to raise the ceiling; without a ceiling this recreates the original problem inverted, as a wall of text.
 The digest still carries an entry past that horizon, marked UNVERIFIED, so a worker never reads a lapsed recipe as current fact and may be the one who confirms or corrects it.
 `check` names those entries and exits nonzero, so a recipe that stopped being true is caught rather than trusted - the catalog is curated the way `data/learnings.md` is, rewritten and pruned rather than accumulated.
 

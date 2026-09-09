@@ -20,8 +20,8 @@
 #
 # Usage:
 #   fm-project-recipes.sh init <project-dir>
-#   fm-project-recipes.sh digest <project-dir> [--budget <tokens>] [--absolute]
-#   fm-project-recipes.sh check <project-dir> [--budget <tokens>]
+#   fm-project-recipes.sh digest <project-dir> [--absolute]
+#   fm-project-recipes.sh check <project-dir>
 #
 # `init` is the only subcommand that writes, and it writes only into the
 # directory it is given. It refuses while a git operation is in flight there,
@@ -34,6 +34,10 @@
 # It never renames, converts, or reconciles those files - a project that keeps
 # both as distinct real files is left exactly as it is apart from the pointer -
 # and it calls bin/fm-ensure-agents-md.sh only when the project has neither.
+# It never writes through a symlink: a CLAUDE.md that is a symlink to AGENTS.md
+# is already served by the pointer in AGENTS.md and is left alone, and one that
+# points anywhere else is refused, because writing through it would land the
+# pointer outside the directory this command was given.
 # `digest` and `check` never write anything.
 #
 # `digest --absolute` names the catalog by its absolute path instead of the
@@ -76,8 +80,11 @@
 # below. The estimate is the same conservative ceil(bytes/3) local approximation
 # bin/fm-startup-memory-budget-lib.sh owns for firstmate's own startup memory.
 #
-# `check` exits 1 when the catalog is over budget or holds a stale entry, so it
-# can gate as well as report; 0 when the catalog is clean or absent.
+# `check` measures what the digest actually renders - the `when:`/`ask:` blocks,
+# never the full entries - against that same budget, and reports how many of
+# the catalog's entries the digest can show. It exits 1 when the digest cannot
+# carry every entry or the catalog holds a stale entry, so it can gate as well
+# as report; 0 when the catalog is clean or absent.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -259,6 +266,48 @@ unverified_notes() {  # <recipes file> <out file>
   done < <(recipe_dates "$1")
 }
 
+# Pack the digest blocks into the budget: whole entries, in catalog order, and
+# always at least the first one. Prints the body, then one FM_RECIPE_SHOWN=<n>
+# line, so `digest` renders and `check` measures the very same packing.
+pack_blocks() {  # <blocks file> <limit bytes>
+  local used=0 shown=0 block= block_bytes=0 line
+  while IFS= read -r line; do
+    if [ "$line" = "$RECIPE_BREAK" ]; then
+      [ -n "$block" ] || continue
+      if [ $((used + block_bytes)) -le "$2" ] || [ "$shown" -eq 0 ]; then
+        printf '%s\n\n' "$block"
+        used=$((used + block_bytes))
+        shown=$((shown + 1))
+      else
+        break
+      fi
+      block=
+      block_bytes=0
+      continue
+    fi
+    if [ -z "$block" ]; then
+      block=$line
+    else
+      block="$block
+$line"
+    fi
+    block_bytes=$((block_bytes + ${#line} + 1))
+  done <"$1"
+  printf '%s\n' "FM_RECIPE_SHOWN=$shown"
+}
+
+# What the digest carries for every entry of the catalog, before the budget
+# cuts it: the same blocks `digest` packs, with the unverified marks, so the
+# figure `check` reports is the digest's own size and not the catalog file's.
+render_digest_blocks() {  # <recipes file> <blocks out> ; sets DIGEST_BYTES
+  local notes
+  notes=$(mktemp "${TMPDIR:-/tmp}/fm-project-recipes-notes.XXXXXX") || die "could not create a scratch file"
+  unverified_notes "$1" "$notes"
+  recipe_blocks "$1" "$notes" >"$2"
+  rm -f -- "$notes"
+  DIGEST_BYTES=$(grep -vxF "$RECIPE_BREAK" "$2" | LC_ALL=C wc -c | tr -d '[:space:]')
+}
+
 recipe_dates() {  # <recipes file>; prints "<heading>\t<date-or-empty>"
   awk '
     function flush() { if (h != "") printf "%s\t%s\n", h, d }
@@ -283,15 +332,9 @@ shift
 DIR=${1:-}
 [ -n "$DIR" ] || die "usage: $CMD <project-dir>"
 shift
-BUDGET=
 ABSOLUTE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --budget)
-      [ "$#" -gt 1 ] || die "--budget requires a token count"
-      BUDGET=$2
-      shift 2
-      ;;
     --absolute)
       [ "$CMD" = digest ] || die "--absolute applies only to digest"
       ABSOLUTE=1
@@ -300,14 +343,8 @@ while [ "$#" -gt 0 ]; do
     *) die "unknown option: $1" ;;
   esac
 done
-if [ -n "$BUDGET" ]; then
-  case "$BUDGET" in
-    '' | *[!0-9]*) die "--budget requires a positive integer" ;;
-  esac
-  [ "$BUDGET" -gt 0 ] || die "--budget requires a positive integer"
-else
-  BUDGET=$(read_budget)
-fi
+BUDGET=$(read_budget)
+LIMIT_BYTES=$((BUDGET * 3))
 
 DIR=$(resolve_dir "$DIR")
 RECIPES="$DIR/$RECIPES_REL"
@@ -331,6 +368,9 @@ case "$CMD" in
     if [ -e "$RECIPES" ] && [ ! -f "$RECIPES" ]; then
       die "$RECIPES exists and is not a regular file"
     fi
+    if [ -L "$DIR/CLAUDE.md" ] && ! { [ -f "$DIR/AGENTS.md" ] && [ ! -L "$DIR/AGENTS.md" ] && [ "$DIR/CLAUDE.md" -ef "$DIR/AGENTS.md" ]; }; then
+      die "$DIR/CLAUDE.md is a symlink that does not point to $DIR/AGENTS.md; refusing to write the pointer through it"
+    fi
     if [ ! -e "$RECIPES" ]; then
       mkdir -p "$DIR/.agents"
       skeleton "$(basename "$DIR")" >"$RECIPES"
@@ -350,7 +390,7 @@ case "$CMD" in
     if [ -f "$DIR/AGENTS.md" ]; then
       add_pointer "$DIR/AGENTS.md"
     fi
-    if [ -f "$DIR/CLAUDE.md" ]; then
+    if [ -f "$DIR/CLAUDE.md" ] && [ ! -L "$DIR/CLAUDE.md" ]; then
       if [ ! -f "$DIR/AGENTS.md" ] || ! imports_agents_md "$DIR/CLAUDE.md"; then
         add_pointer "$DIR/CLAUDE.md"
       fi
@@ -362,41 +402,10 @@ case "$CMD" in
     fi
     TOTAL=$(grep -c '^## ' "$RECIPES" || true)
     [ "${TOTAL:-0}" -gt 0 ] || exit 0
-    LIMIT_BYTES=$((BUDGET * 3))
     TMP=$(mktemp "${TMPDIR:-/tmp}/fm-project-recipes.XXXXXX") || die "could not create a scratch file"
-    NOTES=$(mktemp "${TMPDIR:-/tmp}/fm-project-recipes-notes.XXXXXX") || die "could not create a scratch file"
-    unverified_notes "$RECIPES" "$NOTES"
-    recipe_blocks "$RECIPES" "$NOTES" >"$TMP"
-    OUT=$(
-      used=0
-      shown=0
-      block=
-      block_bytes=0
-      while IFS= read -r line; do
-        if [ "$line" = "$RECIPE_BREAK" ]; then
-          [ -n "$block" ] || continue
-          if [ $((used + block_bytes)) -le "$LIMIT_BYTES" ] || [ "$shown" -eq 0 ]; then
-            printf '%s\n\n' "$block"
-            used=$((used + block_bytes))
-            shown=$((shown + 1))
-          else
-            break
-          fi
-          block=
-          block_bytes=0
-          continue
-        fi
-        if [ -z "$block" ]; then
-          block=$line
-        else
-          block="$block
-$line"
-        fi
-        block_bytes=$((block_bytes + ${#line} + 1))
-      done <"$TMP"
-      printf '%s\n' "FM_RECIPE_SHOWN=$shown"
-    )
-    rm -f -- "$TMP" "$NOTES"
+    render_digest_blocks "$RECIPES" "$TMP"
+    OUT=$(pack_blocks "$TMP" "$LIMIT_BYTES")
+    rm -f -- "$TMP"
     SHOWN=${OUT##*FM_RECIPE_SHOWN=}
     BODY=${OUT%FM_RECIPE_SHOWN=*}
     printf '# Project capabilities\n'
@@ -416,16 +425,27 @@ $line"
     printf 'run `fm-project-recipes.sh init %s` to start this project'"'"'s catalog\n' "$DIR"
       exit 0
     fi
-    fm_startup_memory_measure_file "$RECIPES" >/dev/null || die "$FM_STARTUP_MEMORY_BUDGET_ERROR"
-    TOKENS=$FM_STARTUP_MEMORY_MEASURE_TOKENS
+    [ -L "$RECIPES" ] && die "$RECIPES is a symlink; expected a regular file"
     TOTAL=$(grep -c '^## ' "$RECIPES" || true)
+    TOTAL=${TOTAL:-0}
+    SHOWN=0
+    TOKENS=0
+    if [ "$TOTAL" -gt 0 ]; then
+      TMP=$(mktemp "${TMPDIR:-/tmp}/fm-project-recipes.XXXXXX") || die "could not create a scratch file"
+      render_digest_blocks "$RECIPES" "$TMP"
+      OUT=$(pack_blocks "$TMP" "$LIMIT_BYTES")
+      rm -f -- "$TMP"
+      SHOWN=${OUT##*FM_RECIPE_SHOWN=}
+      TOKENS=$(fm_startup_memory_estimated_tokens_for_bytes "$DIGEST_BYTES") || die "could not estimate the digest size"
+    fi
     printf 'recipes: %s\n' "$RECIPES"
-    printf 'entries: %s\n' "${TOTAL:-0}"
-    printf 'estimated_tokens: %s\n' "$TOKENS"
+    printf 'entries: %s\n' "$TOTAL"
+    printf 'digest_estimated_tokens: %s\n' "$TOKENS"
     printf 'digest_budget_tokens: %s\n' "$BUDGET"
+    printf 'digest_shown: %s of %s\n' "$SHOWN" "$TOTAL"
     RC=0
-    if [ "$TOKENS" -gt "$BUDGET" ]; then
-      printf 'OVER_BUDGET: the catalog no longer fits the start-of-work digest; consolidate entries rather than raising the ceiling\n'
+    if [ "$SHOWN" -lt "$TOTAL" ]; then
+      printf 'OVER_BUDGET: the start-of-work digest can carry only %s of %s entries; consolidate entries rather than raising the ceiling\n' "$SHOWN" "$TOTAL"
       RC=1
     fi
     STALE=0

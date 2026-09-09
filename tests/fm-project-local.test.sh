@@ -195,6 +195,52 @@ test_a_symlink_never_enters_the_store() {
   pass "fm-project-local.sh: a symlink is refused rather than stored"
 }
 
+# A symlink nested inside an added directory must be refused BEFORE the tree is
+# copied: a refusal that left the symlink in the store would make every later
+# stage - and with it every spawn of the project - fail until someone cleaned
+# the store by hand. herramientas/ with a Python venv inside is the real case.
+test_a_nested_symlink_is_refused_before_it_poisons_the_store() {
+  local world out rc
+  world=$(make_world nested)
+  mkdir -p "$world/material-src/tools/venv/bin"
+  printf 'tool\n' >"$world/material-src/tools/replay.py"
+  printf 'interp\n' >"$world/material-src/tools/venv/bin/python3"
+  ln -s python3 "$world/material-src/tools/venv/bin/python"
+  out=$(local_cmd "$world" add demo "$world/material-src/tools" --as tools) && rc=0 || rc=$?
+  expect_code 1 "$rc" "a directory holding a nested symlink was accepted into the store"
+  assert_contains "$out" "symlink" "the refusal did not name the symlink"
+  [ -z "$(find "$world/home/data/project-local" -type l 2>/dev/null)" ] ||
+    fail "the refused add left a symlink in the store"
+  out=$(local_cmd "$world" list demo)
+  assert_not_contains "$out" "tools/replay.py" "the refused add still copied the directory into the store"
+  out=$(local_cmd "$world" stage demo "$world/copy") || fail "a later stage failed after the refused add: $out"
+  pass "fm-project-local.sh: a nested symlink is refused before anything enters the store"
+}
+
+test_sync_refuses_a_manifest_directory_holding_a_symlink_before_copying() {
+  local world out rc
+  world=$(make_world nestedsync)
+  mkdir -p "$world/home/config/project-sources" "$world/home/data/project-local/demo"
+  git_q init -q "$world/canonical"
+  printf 'x\n' >"$world/canonical/README.md"
+  git_q -C "$world/canonical" add README.md
+  git_q -C "$world/canonical" commit -qm initial
+  mkdir -p "$world/canonical/herramientas/venv/bin"
+  printf 'tool\n' >"$world/canonical/herramientas/replay.py"
+  printf 'interp\n' >"$world/canonical/herramientas/venv/bin/python3"
+  ln -s python3 "$world/canonical/herramientas/venv/bin/python"
+  FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/canonical" --canonical source >/dev/null ||
+    fail "source set failed"
+  printf 'herramientas\n' >"$world/home/data/project-local/demo/manifest"
+  out=$(local_cmd "$world" sync demo) && rc=0 || rc=$?
+  expect_code 1 "$rc" "sync copied a manifest directory holding a nested symlink"
+  assert_contains "$out" "symlink" "the refusal did not name the symlink"
+  [ -z "$(find "$world/home/data/project-local" -type l 2>/dev/null)" ] ||
+    fail "the refused sync left a symlink in the store"
+  out=$(local_cmd "$world" stage demo "$world/copy") || fail "a later stage failed after the refused sync: $out"
+  pass "fm-project-local.sh: sync refuses a manifest directory holding a symlink before copying it"
+}
+
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it() {
   local world out rc
   world=$(make_world visible)
@@ -241,6 +287,8 @@ test_an_empty_store_stages_nothing
 test_sync_pulls_the_manifest_from_the_canonical_home_without_writing_to_it
 test_sync_refuses_an_escaping_manifest_path
 test_a_symlink_never_enters_the_store
+test_a_nested_symlink_is_refused_before_it_poisons_the_store
+test_sync_refuses_a_manifest_directory_holding_a_symlink_before_copying
 test_staged_material_is_removed_and_refused_when_git_can_still_see_it
 test_a_reused_copy_never_keeps_the_previous_tasks_material
 test_stage_is_a_no_op_for_a_project_name_no_store_can_address

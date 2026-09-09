@@ -34,6 +34,10 @@ EOF
 
 today() { date -u +%Y-%m-%d; }
 
+set_budget() {  # <world> <tokens>
+  printf '%s\n' "$2" >"$1/home/config/project-recipe-budget"
+}
+
 # init is the one command that writes into a project directory, and that
 # directory can be a live folder someone else is mid-operation in.
 test_init_refuses_while_a_git_operation_is_in_flight() {
@@ -133,7 +137,8 @@ test_digest_names_the_catalog_by_absolute_path_on_request() {
   write_recipe "$world/project/.agents/recipes.md" "First capability" "$(today)"
   write_recipe "$world/project/.agents/recipes.md" "Second capability" "$(today)"
   home=$(cd "$world/project" && pwd -P)
-  out=$(recipes_cmd "$world/home" digest "$world/project" --absolute --budget 40) || fail "digest failed: $out"
+  set_budget "$world" 40
+  out=$(recipes_cmd "$world/home" digest "$world/project" --absolute) || fail "digest failed: $out"
   assert_contains "$out" "is in \`$home/.agents/recipes.md\`" "the digest did not name the catalog by its absolute path"
   assert_contains "$out" "read \`$home/.agents/recipes.md\` for the rest" \
     "the omission note did not name the catalog by its absolute path"
@@ -164,7 +169,8 @@ test_digest_is_bounded_and_says_what_it_left_out() {
   write_recipe "$world/project/.agents/recipes.md" "First capability" "$(today)"
   write_recipe "$world/project/.agents/recipes.md" "Second capability" "$(today)"
   write_recipe "$world/project/.agents/recipes.md" "Third capability" "$(today)"
-  out=$(recipes_cmd "$world/home" digest "$world/project" --budget 40) || fail "digest failed: $out"
+  set_budget "$world" 40
+  out=$(recipes_cmd "$world/home" digest "$world/project") || fail "digest failed: $out"
   assert_contains "$out" "First capability" "the bounded digest dropped its first entry"
   assert_not_contains "$out" "Third capability" "the digest exceeded its budget"
   assert_contains "$out" "of 3 capabilities shown" "the digest did not say what it left out"
@@ -243,17 +249,82 @@ EOF
   pass "fm-project-recipes.sh: check names an entry with no verification date"
 }
 
+# check measures what the digest renders, not the catalog file: a catalog whose
+# entries carry long gives:/notes: still fits the digest, and check must agree
+# with digest about that.
 test_check_reports_a_catalog_that_outgrew_its_budget() {
   local world out rc
   world=$(make_project overbudget)
   mkdir -p "$world/project/.agents"
   printf '# Agent recipes\n' >"$world/project/.agents/recipes.md"
-  write_recipe "$world/project/.agents/recipes.md" "One capability" "$(today)"
-  out=$(recipes_cmd "$world/home" check "$world/project" --budget 5) && rc=0 || rc=$?
-  expect_code 1 "$rc" "a catalog over its budget did not fail the check"
+  write_recipe "$world/project/.agents/recipes.md" "First capability" "$(today)"
+  write_recipe "$world/project/.agents/recipes.md" "Second capability" "$(today)"
+  write_recipe "$world/project/.agents/recipes.md" "Third capability" "$(today)"
+  set_budget "$world" 40
+  out=$(recipes_cmd "$world/home" check "$world/project") && rc=0 || rc=$?
+  expect_code 1 "$rc" "a catalog whose digest cannot carry every entry did not fail the check"
   assert_contains "$out" "OVER_BUDGET" "the over-budget catalog was not reported"
+  assert_contains "$out" "digest_shown: 1 of 3" "the check did not report how many entries the digest carries"
   assert_contains "$out" "consolidate" "the report did not say what to do about it"
-  pass "fm-project-recipes.sh: check reports a catalog that outgrew its digest budget"
+  pass "fm-project-recipes.sh: check reports a catalog whose digest cannot carry every entry"
+}
+
+test_check_agrees_with_digest_when_only_the_full_entries_are_long() {
+  local world out rc i
+  world=$(make_project longnotes)
+  mkdir -p "$world/project/.agents"
+  printf '# Agent recipes\n' >"$world/project/.agents/recipes.md"
+  i=0
+  while [ "$i" -lt 6 ]; do
+    cat >>"$world/project/.agents/recipes.md" <<EOF
+
+## Capability $i
+- when: it applies
+- ask: \`run $i\`
+- gives: $(printf 'a long description of what comes back %.0s' 1 2 3 4 5 6 7 8 9 10)
+- notes: $(printf 'a long note about a sharp edge nobody needs at start %.0s' 1 2 3 4 5 6 7 8 9 10)
+<!--r:$(today)-->
+EOF
+    i=$((i + 1))
+  done
+  set_budget "$world" 400
+  out=$(recipes_cmd "$world/home" digest "$world/project") || fail "digest failed: $out"
+  assert_contains "$out" "## Capability 5" "the digest did not carry every entry"
+  assert_not_contains "$out" "capabilities shown" "the digest reported an omission it did not make"
+  out=$(recipes_cmd "$world/home" check "$world/project") && rc=0 || rc=$?
+  expect_code 0 "$rc" "check failed a catalog whose digest carries every entry: $out"
+  assert_not_contains "$out" "OVER_BUDGET" "check measured the catalog file instead of the digest"
+  assert_contains "$out" "digest_shown: 6 of 6" "check did not report that the digest carries every entry"
+  pass "fm-project-recipes.sh: check agrees with digest when only the full entries are long"
+}
+
+# init writes only into the directory it is given. A CLAUDE.md that is a
+# symlink is never written through: the conventional link to AGENTS.md is
+# already served by the pointer in AGENTS.md, and a link anywhere else would
+# land the pointer outside the project.
+test_init_never_writes_through_a_symlinked_claude_md() {
+  local world out rc outside_before
+  world=$(make_project claudelink)
+  printf '# Agent memory\n' >"$world/project/AGENTS.md"
+  ln -s AGENTS.md "$world/project/CLAUDE.md"
+  out=$(recipes_cmd "$world/home" init "$world/project") || fail "init failed on the conventional CLAUDE.md -> AGENTS.md link: $out"
+  assert_grep ".agents/recipes.md" "$world/project/AGENTS.md" "AGENTS.md does not point at the catalog"
+  [ -L "$world/project/CLAUDE.md" ] || fail "init replaced the CLAUDE.md link"
+  [ "$(grep -c '\.agents/recipes\.md' "$world/project/AGENTS.md")" = 1 ] ||
+    fail "init wrote the pointer twice through the CLAUDE.md link"
+
+  world=$(make_project claudeaway)
+  mkdir -p "$world/elsewhere"
+  printf '# Someone else'"'"'s file\n' >"$world/elsewhere/CLAUDE.md"
+  outside_before=$(cat "$world/elsewhere/CLAUDE.md")
+  ln -s "$world/elsewhere/CLAUDE.md" "$world/project/CLAUDE.md"
+  out=$(recipes_cmd "$world/home" init "$world/project") && rc=0 || rc=$?
+  expect_code 1 "$rc" "init wrote through a CLAUDE.md that links outside the project"
+  assert_contains "$out" "symlink" "the refusal did not name the cause"
+  [ "$(cat "$world/elsewhere/CLAUDE.md")" = "$outside_before" ] ||
+    fail "init wrote the pointer into a file outside the project"
+  assert_absent "$world/project/.agents/recipes.md" "the refused init still created a catalog"
+  pass "fm-project-recipes.sh: init never writes through a symlinked CLAUDE.md"
 }
 
 test_init_creates_the_catalog_and_points_agents_md_at_it
@@ -268,5 +339,7 @@ test_an_absent_catalog_costs_nothing
 test_check_names_an_entry_nobody_reverified
 test_check_names_an_undated_entry
 test_check_reports_a_catalog_that_outgrew_its_budget
+test_check_agrees_with_digest_when_only_the_full_entries_are_long
+test_init_never_writes_through_a_symlinked_claude_md
 test_digest_marks_an_entry_nobody_reverified
 test_init_refuses_while_a_git_operation_is_in_flight

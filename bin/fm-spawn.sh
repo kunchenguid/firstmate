@@ -2384,16 +2384,31 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   # the scaffold's promote-through-delivery-path instruction: the worker never
   # writes into the captain's live folder, it puts what it learned in its
   # report, and firstmate carries that into the catalog under approval.
+  #
+  # A live home that is not reachable right now (exit 4: the path is printed
+  # but the folder is not there) never turns into the clone: the launch goes
+  # ahead without a digest, and the same section names the recorded home and
+  # says it was not verified, so the worker still never treats its copy's
+  # catalog as current or the repository as the home.
   SPAWN_RECIPE_DIGEST=
   SPAWN_RECIPE_LIVE_HOME=
-  if SPAWN_RECIPE_HOME=$("$FM_ROOT/bin/fm-project-memory.sh" home "$(basename "$PROJ_ABS")" --clone "$PROJ_ABS" 2>/dev/null); then
-    if [ "$(cd "$SPAWN_RECIPE_HOME" && pwd -P)" != "$(cd "$PROJ_ABS" && pwd -P)" ]; then
+  SPAWN_RECIPE_HOME_STATE=reachable
+  SPAWN_RECIPE_HOME=$("$FM_ROOT/bin/fm-project-memory.sh" home "$(basename "$PROJ_ABS")" --clone "$PROJ_ABS" 2>/dev/null) && SPAWN_RECIPE_HOME_RC=0 || SPAWN_RECIPE_HOME_RC=$?
+  case $SPAWN_RECIPE_HOME_RC in
+    0)
+      if [ "$(cd "$SPAWN_RECIPE_HOME" && pwd -P)" != "$(cd "$PROJ_ABS" && pwd -P)" ]; then
+        SPAWN_RECIPE_LIVE_HOME=$SPAWN_RECIPE_HOME
+        SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" --absolute 2>/dev/null || true)
+      else
+        SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" 2>/dev/null || true)
+      fi
+      ;;
+    4)
       SPAWN_RECIPE_LIVE_HOME=$SPAWN_RECIPE_HOME
-      SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" --absolute 2>/dev/null || true)
-    else
-      SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" 2>/dev/null || true)
-    fi
-  fi
+      SPAWN_RECIPE_HOME_STATE=unreachable
+      echo "warning: the knowledge home of $(basename "$PROJ_ABS") is $SPAWN_RECIPE_HOME and it is not reachable from this host; launching without its capability digest and telling the worker the home was not verified" >&2
+      ;;
+  esac
 
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
@@ -2408,7 +2423,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         printf '\n%s\n' "$SPAWN_RECIPE_DIGEST"
       fi &&
       if [ -n "$SPAWN_RECIPE_LIVE_HOME" ]; then
-        fm_brief_live_home_overlay "$SPAWN_RECIPE_LIVE_HOME" "$FM_ROOT"
+        fm_brief_live_home_overlay "$SPAWN_RECIPE_LIVE_HOME" "$FM_ROOT" "$SPAWN_RECIPE_HOME_STATE"
       fi &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"

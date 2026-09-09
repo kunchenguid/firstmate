@@ -171,13 +171,23 @@ EOF
 # nothing durable is promoted into the repository through the delivery path. The
 # worker is never granted a write into the captain's folder; what it learned
 # travels in its report and firstmate carries it into the catalog under approval.
-fm_brief_live_home_overlay() {  # <home-dir> <fm-root>
-  local home=$1 root=$2
+# When the recorded home could not be reached at spawn time the section still
+# names it, says so, and keeps every rule: the copy's catalog is no more
+# current for the home being down, and the repository is no more the home.
+fm_brief_live_home_overlay() {  # <home-dir> <fm-root> [unreachable]
+  local home=$1 root=$2 reachable=${3:-reachable}
   cat <<EOF
 
 # Project memory - this project's home is a live local folder
 This section supersedes the Project memory section above wherever the two disagree.
 This project's knowledge home is \`$home\`, a folder the captain works in himself; the repository this copy was taken from is a mirror, not where the project's knowledge lands.
+EOF
+  if [ "$reachable" = unreachable ]; then
+    cat <<EOF
+That folder was NOT reachable when this task was launched, so nothing in it could be verified and no capability digest could be read from it. Say so in your report, and treat everything you know about this project as possibly behind what that folder holds.
+EOF
+  fi
+  cat <<EOF
 Its recipe catalog is \`$home/.agents/recipes.md\`. The \`.agents/recipes.md\` in this copy is a stale mirror of it: never read it as current and never edit it as the catalog.
 You have no write access to that folder. Do not write anything under \`$home\`, and do not run \`$root/bin/fm-project-recipes.sh init\` there or in this copy.
 Do not promote recipes or other durable project knowledge into the repository through this task's delivery path.

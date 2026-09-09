@@ -236,8 +236,8 @@ test_source_record_round_trips_and_home_resolves() {
   world=$(make_world record)
   out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/source" --canonical source 2>&1) ||
     fail "source set failed: $out"
-  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source get demo 2>&1)
-  assert_contains "$out" "canonical=source" "the recorded knowledge home did not round-trip"
+  out=$(run_scan "$world")
+  assert_contains "$out" "HOME_KIND: source" "the recorded knowledge home did not round-trip"
   out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" home demo 2>&1)
   [ "$out" = "$(cd "$world/source" && pwd -P)" ] ||
     fail "home did not resolve to the canonical source checkout: $out"
@@ -246,6 +246,40 @@ test_source_record_round_trips_and_home_resolves() {
   [ "$out" = "$(cd "$world/home/projects/demo" && pwd -P)" ] ||
     fail "home did not fall back to the clone for a repo-canonical project: $out"
   pass "fm-project-memory.sh: the source record round-trips and home resolves both kinds"
+}
+
+test_source_clear_forgets_the_record() {
+  local world out
+  world=$(make_world clear)
+  record_source "$world" --canonical source
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source clear demo 2>&1) || fail "source clear failed: $out"
+  out=$(run_scan "$world")
+  assert_contains "$out" "SOURCE: none recorded" "the cleared record was still read"
+  pass "fm-project-memory.sh: source clear forgets the record"
+}
+
+# A source-canonical home that is not mounted right now (the Windows disk
+# behind /mnt/c is down) must never be answered with the clone: the clone is a
+# stale mirror, and a caller handed it in silence would read an old catalog as
+# current or report a folder as quiet that it never looked at.
+test_an_unreachable_canonical_home_is_refused_not_replaced_by_the_clone() {
+  local world out rc recorded
+  world=$(make_world unreachable)
+  record_source "$world" --canonical source
+  recorded=$(cd "$world/source" && pwd -P)
+  # The record holds the resolved path of the checkout; the directory itself is
+  # now missing, exactly as an unmounted disk would leave it.
+  rm -rf -- "$world/source"
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" home demo 2>/dev/null) && rc=0 || rc=$?
+  expect_code 4 "$rc" "home answered an unreachable canonical home with something other than exit 4"
+  [ "$out" = "$recorded" ] || fail "home did not print the recorded path of the unreachable home: $out"
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" home demo 2>&1 >/dev/null)
+  assert_contains "$out" "not reachable" "home did not say the canonical home is unreachable"
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" activity demo 2>&1) && rc=0 || rc=$?
+  expect_code 1 "$rc" "activity read the clone instead of failing on an unreachable canonical home"
+  assert_not_contains "$out" "ACTIVITY:" "activity reported a reading it could not have taken"
+  assert_contains "$out" "not reachable" "activity did not say the canonical home is unreachable"
+  pass "fm-project-memory.sh: an unreachable canonical home is refused rather than replaced by the clone"
 }
 
 test_source_set_refuses_the_homes_own_clone() {
@@ -285,6 +319,8 @@ test_unpushed_commits_are_reported
 test_source_canonical_divergence_is_not_reported_as_a_leak
 test_absent_source_record_is_a_normal_reported_state
 test_source_record_round_trips_and_home_resolves
+test_source_clear_forgets_the_record
+test_an_unreachable_canonical_home_is_refused_not_replaced_by_the_clone
 test_source_set_refuses_the_homes_own_clone
 test_scan_is_bounded_by_limit
 test_activity_reports_a_folder_nobody_is_touching_as_quiet

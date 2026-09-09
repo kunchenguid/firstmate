@@ -105,12 +105,15 @@ require_project() {  # <project>
 }
 
 # A symlink in the store would resolve against whatever the task copy happens to
-# contain, so the store holds regular files and directories only. Checked when
-# material enters the store and again before it is staged.
-refuse_symlinks() {  # <dir>
+# contain, so the store holds regular files and directories only. The source
+# tree is checked BEFORE anything is copied, so a refusal never leaves a
+# poisoned store behind that would block every later stage - and with it every
+# spawn of the project - until someone removes it by hand. The store itself is
+# checked again before it is staged.
+refuse_symlinks() {  # <dir> <what>
   local found
   found=$(find "$1" -type l -print -quit 2>/dev/null || true)
-  [ -z "$found" ] || die "refusing symlink in the local material store: $found"
+  [ -z "$found" ] || die "refusing symlink in $2: $found"
 }
 
 canonical_home() {  # <project>
@@ -162,7 +165,7 @@ stage_material() {  # <project> <worktree>
     [ -z "$(find "$material" -mindepth 1 -print -quit 2>/dev/null || true)" ]; then
     empty=1
   else
-    refuse_symlinks "$material"
+    refuse_symlinks "$material" "the local material store"
   fi
 
   [ -d "$wt" ] || die "task copy is not a directory: $wt"
@@ -269,6 +272,7 @@ case "$CMD" in
     [ -L "$SRC" ] && die "refusing to add a symlink: $SRC"
     [ -z "$AS" ] && AS=$(basename "$SRC")
     valid_relative_path "$AS" || die "invalid destination path: $AS"
+    [ -d "$SRC" ] && refuse_symlinks "$SRC" "$SRC"
     MATERIAL=$(material_dir "$NAME")
     mkdir -p "$MATERIAL/$(dirname "$AS")"
     if [ -d "$SRC" ]; then
@@ -279,7 +283,6 @@ case "$CMD" in
       cp -- "$SRC" "$MATERIAL/$AS" || die "could not copy $SRC"
     fi
     chmod -R u+w "$MATERIAL/$AS" 2>/dev/null || true
-    refuse_symlinks "$MATERIAL"
     echo "added: $NAME <- $AS"
     ;;
   remove)
@@ -328,6 +331,7 @@ case "$CMD" in
         MISSING=$((MISSING + 1))
         continue
       fi
+      [ -d "$HOME_DIR/$REL" ] && refuse_symlinks "$HOME_DIR/$REL" "$HOME_DIR/$REL"
       mkdir -p "$MATERIAL/$(dirname "$REL")"
       if [ -d "$HOME_DIR/$REL" ]; then
         chmod -R u+w "${MATERIAL:?}/$REL" 2>/dev/null || true
@@ -340,7 +344,6 @@ case "$CMD" in
       chmod -R u+w "$MATERIAL/$REL" 2>/dev/null || true
       COPIED=$((COPIED + 1))
     done <"$MANIFEST"
-    refuse_symlinks "$MATERIAL"
     note_home_activity "$HOME_DIR"
     printf 'synced: %s from %s (%s paths copied, %s absent)\n' "$NAME" "$HOME_DIR" "$COPIED" "$MISSING"
     if [ "$HOME_ACTIVE" -eq 1 ]; then

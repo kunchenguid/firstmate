@@ -100,6 +100,35 @@ test_spawn_reads_the_catalog_from_a_source_canonical_home() {
   pass "fm-spawn.sh: the capability digest comes from the project's canonical home"
 }
 
+# The Windows disk behind /mnt/c can be down when a task is launched. The
+# launch goes ahead, but the worker is told the recorded home by name and that
+# it was not verified; it never gets the clone's stale catalog as the real one
+# or the repository as the place its knowledge lands.
+test_spawn_names_an_unreachable_live_home_without_refusing_the_launch() {
+  local id=capgone-a1 out rc brief source
+  read_world "$(make_world capgone "$id")"
+  source="$TMP_ROOT/capgone/canonical"
+  fm_git_init_commit "$source"
+  write_catalog "$PROJ_DIR" "A stale capability the clone still carries"
+  FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    "$ROOT/bin/fm-project-memory.sh" source set "$(basename "$PROJ_DIR")" "$source" --canonical source >/dev/null ||
+    fail "source set failed"
+  source=$(cd "$source" && pwd -P)
+  rm -rf -- "$source"
+  out=$(run_spawn "$id") && rc=0 || rc=$?
+  expect_code 0 "$rc" "spawn refused the launch over an unreachable live home: $out"
+  assert_contains "$out" "not reachable" "spawn did not warn that the live home was unreachable"
+  brief="$HOME_DIR/data/$id/launch-brief.md"
+  assert_no_grep "A stale capability the clone still carries" "$brief" \
+    "the digest came from the clone while the canonical home was unreachable"
+  assert_grep "home is a live local folder" "$brief" "the launch brief does not say the project's home is a live folder"
+  assert_grep "knowledge home is \`$source\`" "$brief" "the launch brief does not name the recorded home"
+  assert_grep "NOT reachable when this task was launched" "$brief" "the launch brief does not say the home was not verified"
+  assert_grep "Do not promote recipes or other durable project knowledge into the repository" "$brief" \
+    "the launch brief sends knowledge through the delivery path while the home is down"
+  pass "fm-spawn.sh: an unreachable live home is named as unverified and the launch goes ahead"
+}
+
 test_spawn_stages_local_material_where_git_cannot_see_it() {
   local id=material-a1 out rc project
   read_world "$(make_world material "$id")"
@@ -131,5 +160,6 @@ test_a_project_with_neither_costs_nothing() {
 
 test_spawn_renders_the_project_capability_digest_into_the_launch_brief
 test_spawn_reads_the_catalog_from_a_source_canonical_home
+test_spawn_names_an_unreachable_live_home_without_refusing_the_launch
 test_spawn_stages_local_material_where_git_cannot_see_it
 test_a_project_with_neither_costs_nothing

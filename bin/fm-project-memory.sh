@@ -18,10 +18,8 @@
 # without passing that gate.
 #
 # Usage:
-#   fm-project-memory.sh source set <project> <path>
-#   fm-project-memory.sh source get <project>
+#   fm-project-memory.sh source set <project> <path> [--canonical repo|source]
 #   fm-project-memory.sh source clear <project>
-#   fm-project-memory.sh source list
 #   fm-project-memory.sh scan <project> [--limit <n>]
 #   fm-project-memory.sh scan --all [--limit <n>]
 #
@@ -69,20 +67,26 @@
 # `activity` reports two independent signals, either of which alone means the
 # folder is in use: a file changed within the window, and a git operation in
 # flight (an index lock, a merge, a rebase, a cherry-pick, a revert, a bisect).
-# It exits 0 when quiet, 3 when active, and 1 on an error, so a caller can gate
-# on it without parsing prose. `--git-only` reports the operation signal alone,
+# It exits 0 when quiet, 3 when active, and 1 on an error - including a
+# source-canonical home that is not reachable, which is never answered with a
+# reading of the clone - so a caller can gate on it without parsing prose. `--git-only` reports the operation signal alone,
 # for a caller inside its own isolated copy, where recent writes are its own and
 # prove nothing about a second person in the folder. The file walk stops at the first hit, so the
 # common "he is working" answer costs almost nothing; only the quiet answer
 # walks the tree, which is why the window is small.
 #
 # `home` prints the directory that IS the project's knowledge home under that
-# record: the source checkout when it is canonical and reachable, and this
-# home's clone otherwise. `--clone <dir>` names that fallback explicitly, for a
-# caller such as bin/fm-spawn.sh that already holds the project directory it is
-# working from and must not re-derive it. Callers that must read a project's committed agent
-# memory or recipe catalog resolve it through this command rather than assuming
-# the clone.
+# record: the source checkout when it is canonical, and this home's clone
+# otherwise. `--clone <dir>` names that clone explicitly, for a caller such as
+# bin/fm-spawn.sh that already holds the project directory it is working from
+# and must not re-derive it. A source-canonical home that is not reachable
+# (the Windows disk behind /mnt/c is down) is never quietly replaced by the
+# clone, which is only a stale mirror of it: `home` still prints the recorded
+# path but exits 4, so a caller that has to go on can name the home and say it
+# was not verified while every other caller fails on the status. `activity
+# <project>` resolves the same way and exits 1 there. Callers that must read a
+# project's committed agent memory or recipe catalog resolve it through this
+# command rather than assuming the clone.
 #
 # --limit bounds how many paths each category lists (default 40); the counts are
 # always complete. A source checkout on a Windows filesystem reached through
@@ -679,6 +683,36 @@ scan_project() {  # <project> <limit>
   return 0
 }
 
+# --- knowledge home ---------------------------------------------------------
+
+# The directory that is <project>'s knowledge home: the recorded source
+# checkout when it is canonical, else <clone>. A canonical home that cannot be
+# reached is refused rather than replaced by the clone, which is only a stale
+# mirror of it: the recorded path is still printed, and the return is 4, so a
+# caller that must go on without the home (a spawn) can still name it and say
+# it was not verified, while every other caller fails on the nonzero status.
+resolve_knowledge_home() {  # <project> <clone>; prints the directory
+  local project=$1 dir=$2 rc
+  if read_source_record "$project"; then
+    if [ "$SOURCE_RECORD_CANONICAL" = source ]; then
+      dir=$SOURCE_RECORD_PATH
+      if [ ! -d "$dir" ]; then
+        echo "project-memory: the knowledge home of $project is the source checkout $dir, and it is not reachable from this host; the clone is only a stale mirror of it" >&2
+        printf '%s\n' "$dir"
+        return 4
+      fi
+    fi
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] || return 1
+  fi
+  if [ ! -d "$dir" ]; then
+    echo "project-memory: no reachable knowledge home for $project" >&2
+    return 1
+  fi
+  printf '%s\n' "$dir"
+}
+
 # --- registry sweep ---------------------------------------------------------
 
 registry_projects() {
@@ -748,18 +782,6 @@ case "$CMD" in
         printf 'path=%s\ncanonical=%s\n' "$RESOLVED" "$CANONICAL" >"$REC"
         echo "recorded: $NAME source checkout $RESOLVED (canonical=$CANONICAL)"
         ;;
-      get)
-        NAME=${1:-}
-        [ -n "$NAME" ] || die "usage: source get <project>"
-        valid_project_name "$NAME" || die "invalid project name: $NAME"
-        if read_source_record "$NAME"; then
-          printf 'path=%s\ncanonical=%s\n' "$SOURCE_RECORD_PATH" "$SOURCE_RECORD_CANONICAL"
-        else
-          RC=$?
-          [ "$RC" -eq 1 ] || exit 1
-          echo "none recorded"
-        fi
-        ;;
       clear)
         NAME=${1:-}
         [ -n "$NAME" ] || die "usage: source clear <project>"
@@ -773,21 +795,7 @@ case "$CMD" in
           echo "none recorded"
         fi
         ;;
-      list)
-        [ -d "$SOURCES_DIR" ] || { echo "none recorded"; exit 0; }
-        FOUND=0
-        for REC in "$SOURCES_DIR"/*; do
-          [ -f "$REC" ] || continue
-          NAME=$(basename "$REC")
-          valid_project_name "$NAME" || continue
-          if read_source_record "$NAME"; then
-            printf '%s\t%s\t%s\n' "$NAME" "$SOURCE_RECORD_CANONICAL" "$SOURCE_RECORD_PATH"
-            FOUND=1
-          fi
-        done
-        [ "$FOUND" -eq 1 ] || echo "none recorded"
-        ;;
-      *) die "usage: source set|get|clear|list" ;;
+      *) die "usage: source set|clear" ;;
     esac
     ;;
   home)
@@ -806,16 +814,7 @@ case "$CMD" in
         *) die "unknown option: $1" ;;
       esac
     done
-    if read_source_record "$NAME"; then
-      if [ "$SOURCE_RECORD_CANONICAL" = source ] && [ -d "$SOURCE_RECORD_PATH" ]; then
-        HOME_DIR=$SOURCE_RECORD_PATH
-      fi
-    else
-      RC=$?
-      [ "$RC" -eq 1 ] || exit 1
-    fi
-    [ -d "$HOME_DIR" ] || die "no reachable knowledge home for $NAME"
-    printf '%s\n' "$HOME_DIR"
+    resolve_knowledge_home "$NAME" "$HOME_DIR" || exit $?
     ;;
   activity)
     NAME=
@@ -855,17 +854,9 @@ case "$CMD" in
     esac
     [ "$WINDOW" -gt 0 ] || die "--window requires a positive number of seconds"
     if [ -z "$ACT_HOME" ]; then
-      ACT_HOME="$PROJECTS_DIR/$NAME"
-      if read_source_record "$NAME"; then
-        if [ "$SOURCE_RECORD_CANONICAL" = source ] && [ -d "$SOURCE_RECORD_PATH" ]; then
-          ACT_HOME=$SOURCE_RECORD_PATH
-        fi
-      else
-        RC=$?
-        [ "$RC" -eq 1 ] || exit 1
-      fi
+      ACT_HOME=$(resolve_knowledge_home "$NAME" "$PROJECTS_DIR/$NAME") || exit 1
     fi
-    [ -d "$ACT_HOME" ] || die "no reachable knowledge home for ${NAME:-$ACT_HOME}"
+    [ -d "$ACT_HOME" ] || die "no reachable knowledge home for $ACT_HOME"
     ACT_HOME=$(cd "$ACT_HOME" && pwd -P)
     report_activity "$ACT_HOME" "$WINDOW" "$GIT_ONLY"
     [ "$ACTIVITY_STATE" = quiet ] || exit 3
