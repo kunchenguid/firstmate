@@ -3,10 +3,10 @@
 # launch it in a NON-VISIBLE tracked terminal per backend, record its exact id,
 # tear it down by that exact id, and reconcile a leaked one after a crash.
 #
-# Why this exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
+# Why this exists (docs/herdr-backend.md "Away-mode supervisor support"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
 # terminal it is already in. Harnesses with a native in-pane tracked-background
-# tool (claude, grok) run it there directly and it is fine. A harness with NO
+# tool (claude, grok) run it there via start-native, not bare. A harness with NO
 # native background mechanism (pi) has to manufacture a terminal, and doing that
 # by SPLITTING the captain's active pane visibly shrinks it - the regression this
 # script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
@@ -38,6 +38,10 @@
 #
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
+#
+# The terminal command declares FM_AFK_LAUNCH_OWNED=1 so bin/fm-afk-start.sh can
+# tell a launcher-hosted daemon from a bare operator invocation, which it refuses
+# (that unowned shape leaves no terminal record for stop/return to reconcile).
 #
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
@@ -414,7 +418,7 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     IFS=$'\t' read -r wsid pane <<< "$recovered"
   fi
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
+  cmd=$(printf 'exec env FM_AFK_LAUNCH_OWNED=1 FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
     "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
   if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
     fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
@@ -441,7 +445,7 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   nonce="$$-${RANDOM:-0}-$(date '+%s')"
   session="fm-afk-daemon-$hash-$nonce"
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
+  cmd=$(printf 'exec env FM_AFK_LAUNCH_OWNED=1 FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
     "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"

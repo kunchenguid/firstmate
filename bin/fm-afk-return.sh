@@ -2,10 +2,20 @@
 # fm-afk-return.sh - deterministic away-mode return catch-up gate.
 #
 # Usage:
-#   fm-afk-return.sh          Stop away mode, present catch-up, and open/check gate.
+#   fm-afk-return.sh          MUTATES: stop away mode, present catch-up, open the gate.
 #   fm-afk-return.sh begin    Same as the default command.
-#   fm-afk-return.sh check    Re-present and close the gate only after blockers resolve.
-#   fm-afk-return.sh guard    Read-only refusal while away or catch-up is pending.
+#   fm-afk-return.sh check    MUTATES: re-present an already-open gate and close it once
+#                             every blocker resolves. Refuses to START the return.
+#   fm-afk-return.sh guard    The only read-only command: report and refuse, never mutate.
+#                             Also loudly reports, without refusing, a leaked daemon
+#                             terminal record left behind by an already-ended away mode.
+#
+# `check` is NOT a status probe. It shares begin's stop-and-drain body so an
+# interrupted begin can be completed, so calling it while away mode is still
+# active and no gate is open would perform the whole return - clearing away mode
+# and shutting the daemon down - under a name that reads like a report. It
+# therefore refuses that case and names `begin` and `guard` instead. Use `guard`
+# to ask whether a return is pending without changing anything.
 #
 # `blocked:` is the crewmate protocol's firstmate-actionable verb. A live task's
 # open blocked event must be remediated and closed with `resolved [key=...]`, or
@@ -29,7 +39,7 @@ GATE="$STATE/.afk-return-catchup"
 LOCK="$STATE/.afk-return-catchup.lock"
 
 usage() {
-  sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 clean_field() {
@@ -126,6 +136,24 @@ clear_delivery_artifacts() {
     "$STATE/.subsuper-inject-wedged"
 }
 
+# check_may_proceed: `check` completes a return that `begin` already started; it
+# never starts one. write_pending_seed publishes the durable gate BEFORE any
+# lifecycle mutation, so "no gate" means no begin has run - and running check's
+# stop-and-drain body there would clear away mode and shut the daemon down under
+# a name that reads like a status probe. Refuse that exact case and name the two
+# commands that do mean it. Held under $LOCK by the caller so a concurrent begin
+# cannot publish the gate between this test and the mutation.
+check_may_proceed() {  # <mode>
+  local mode=$1
+  [ "$mode" = check ] || return 0
+  [ ! -e "$GATE" ] || return 0
+  [ -e "$STATE/.afk" ] || [ -e "$STATE/.afk-daemon-terminal" ] || return 0
+  printf 'fm-afk-return: refusing to start the away-mode return from check: away-mode lifecycle state is still live and no return catch-up is open\n' >&2
+  printf 'fm-afk-return: check re-presents and closes an already-open catch-up; it is not a read-only status probe\n' >&2
+  printf 'fm-afk-return: run bin/fm-afk-return.sh (or begin) to return, or bin/fm-afk-return.sh guard to report without changing anything\n' >&2
+  return 1
+}
+
 return_guard() {
   if [ -e "$STATE/.afk" ]; then
     printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
@@ -135,6 +163,16 @@ return_guard() {
     printf 'fm-afk-return: return catch-up is pending; remediate or durably reclassify every listed blocker, then run bin/fm-afk-return.sh check\n' >&2
     print_blockers "$GATE" >&2
     return 3
+  fi
+  # A leaked terminal is a loud, non-blocking report, not a refusal: away mode
+  # already ended by this point (the .afk check above returned), so there is no
+  # live lifecycle for ordinary captain work to wait on - only an orphaned
+  # terminal record fm-afk-launch.sh failed to tear down. Surface it and let
+  # ordinary work proceed; run `fm-afk-launch.sh stop` to reconcile it.
+  if [ -e "$STATE/.afk-daemon-terminal" ]; then
+    printf 'fm-afk-return: leaked away-mode daemon terminal record found with away mode already ended: %s\n' \
+      "$(tr '\t' ' ' < "$STATE/.afk-daemon-terminal" 2>/dev/null)" >&2
+    printf 'fm-afk-return: this does not block ordinary captain work; run bin/fm-afk-launch.sh stop to reconcile the leaked terminal\n' >&2
   fi
   return 0
 }
@@ -230,6 +268,11 @@ main() {
   mkdir -p "$STATE" || return 1
   fm_lock_acquire_wait "$LOCK"
   trap 'fm_lock_release "$LOCK"' EXIT
+  if ! check_may_proceed "$mode"; then
+    fm_lock_release "$LOCK"
+    trap - EXIT
+    return 2
+  fi
   write_pending_seed || { fm_lock_release "$LOCK"; trap - EXIT; return 1; }
   return_reconcile
   rc=$?
