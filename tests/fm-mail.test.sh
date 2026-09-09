@@ -1279,7 +1279,7 @@ PYEOF
   mv -f -- "$HOME_DIR/state/.mail-retry.tmp" "$HOME_DIR/state/.mail-retry"
 
   rc2=0
-  out3=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
+  _out3=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" \
     "71,72,73,74,75,76,77,78,79,80,81" "$ROOT/bin/fm-mail.py" "$HOME_DIR/state/.mail-retry-pos" 2>&1) || rc2=$?
   expect_code 0 "$rc2" "third retry poll must succeed"
   pos3=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
