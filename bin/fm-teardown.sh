@@ -63,7 +63,9 @@
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
-# unresolved-decision completion gate verifies its captain-held inventory.
+# unresolved-decision completion gate verifies its captain-held inventory, except
+# for the explicit EMPTY classification below: no report, no task commits, and a
+# clean isolated copy at an ancestor of the freshly resolved upstream default.
 # Before destructive cleanup, teardown validates task check artifacts as
 # ordinary single-link files on the state device. It refuses and preserves
 # task state when that proof fails; otherwise it removes the task's check,
@@ -415,6 +417,7 @@ TEARDOWN_LEGACY_ACCEPTED=0
 TEARDOWN_LEGACY_ENDPOINT=
 TEARDOWN_LEGACY_RETAINED_STAMP=
 TEARDOWN_LEGACY_PRESTAMP_SIZE=0
+TEARDOWN_LEGACY_RECORD_REFUSAL=
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
@@ -438,11 +441,9 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
       # or agent-less before any cleanup decision is made.
       TEARDOWN_LEGACY_PENDING=1
     elif [ "$TEARDOWN_LEGACY_GEN_COUNT" = 0 ]; then
-      echo "error: task $ID's record has no spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR); refusing automatic teardown - relaunch the task to publish an unambiguous incarnation, then retry teardown, or pass --legacy-record once its recorded endpoint is confirmed dead or agent-less" >&2
-      exit 1
+      TEARDOWN_LEGACY_RECORD_REFUSAL="task $ID's record has no spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR)"
     else
-      echo "error: task $ID's record has an unreadable spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR); refusing automatic teardown - fix the record, then retry teardown" >&2
-      exit 1
+      TEARDOWN_LEGACY_RECORD_REFUSAL="task $ID's record has an unreadable spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR)"
     fi
   else
     case "$FM_BACKLOG_META_SPAWN_GEN" in
@@ -455,8 +456,7 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
         # endpoint gate runs again on the retry instead of being skipped by
         # the abandoned attempt's own stamp.
         if [ "$LEGACY_RECORD_GIVEN" != 1 ]; then
-          echo "error: task $ID's record carries the legacy incarnation stamp $FM_BACKLOG_META_SPAWN_GEN left by an abandoned --legacy-record teardown, not an incarnation published by a spawn; refusing automatic teardown - relaunch the task to publish an unambiguous incarnation, then retry teardown, or pass --legacy-record once its recorded endpoint is confirmed dead or agent-less" >&2
-          exit 1
+          TEARDOWN_LEGACY_RECORD_REFUSAL="task $ID's record carries the legacy incarnation stamp $FM_BACKLOG_META_SPAWN_GEN left by an abandoned --legacy-record teardown, not an incarnation published by a spawn"
         fi
         TEARDOWN_LEGACY_PENDING=1
         TEARDOWN_LEGACY_RETAINED_STAMP=$FM_BACKLOG_META_SPAWN_GEN
@@ -897,19 +897,219 @@ fi
 
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
-# worktree return, registry change, or process termination can run.
-fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
-BACKEND=$FM_BACKEND_VALIDATED_BACKEND
-T=$FM_BACKEND_VALIDATED_TARGET
+# worktree return, registry change, or process termination can run. EMPTY and
+# PROVABLY-LANDED may safely bypass endpoint validation only after their own
+# stricter evidence checks succeed.
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
+PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+CLEANUP_CLASSIFICATION=NONE
+CLEANUP_CLASSIFICATION_REASON=
+TEARDOWN_SKIP_ENDPOINT_CLEANUP=0
+
+# A sparse recovery record normally cannot prove that no worker or isolated copy
+# still holds work, so endpoint validation remains mandatory. These two narrow
+# classifications are the exception: EMPTY proves a scout produced no work, and
+# PROVABLY-LANDED proves the identified upstream pull request merged through its
+# forge API response. Every missing, unreadable, or ambiguous fact leaves the
+# classification REFUSED rather than treating absence as empty.
+classify_cleanup_recovery() {
+  local kind project worktree top origin url_path owner repo rest number api branch dirty task_tmp
+  kind=$(fm_meta_get "$META" kind)
+  [ -n "$kind" ] || kind=ship
+  CLEANUP_CLASSIFICATION=NONE
+  CLEANUP_CLASSIFICATION_REASON=
+
+  if [ "$kind" = scout ] && { [ ! -e "$DATA/$ID/report.md" ] && [ ! -L "$DATA/$ID/report.md" ]; }; then
+    CLEANUP_CLASSIFICATION=REFUSED
+    CLEANUP_CLASSIFICATION_REASON="scout report is absent, but its isolated copy is not proven empty"
+    [ -d "$DATA" ] && [ ! -L "$DATA" ] || {
+      CLEANUP_CLASSIFICATION_REASON="cannot inspect the scout data directory for a report"
+      return 0
+    }
+    task_tmp=$(fm_meta_get "$META" tasktmp)
+    [ -z "$task_tmp" ] || {
+      CLEANUP_CLASSIFICATION_REASON="scout has a recorded temporary task root that is not proof of emptiness"
+      return 0
+    }
+    [ -n "$WT" ] && [ -d "$WT" ] || {
+      CLEANUP_CLASSIFICATION_REASON="missing isolated scout copy is not proof of emptiness"
+      return 0
+    }
+    [ -n "$PROJ" ] && [ -d "$PROJ" ] || {
+      CLEANUP_CLASSIFICATION_REASON="cannot inspect the scout project that owns the isolated copy"
+      return 0
+    }
+    worktree=$(CDPATH='' cd -- "$WT" 2>/dev/null && pwd -P) || {
+      CLEANUP_CLASSIFICATION_REASON="cannot resolve the isolated scout copy"
+      return 0
+    }
+    project=$(CDPATH='' cd -- "$PROJ" 2>/dev/null && pwd -P) || {
+      CLEANUP_CLASSIFICATION_REASON="cannot resolve the scout project"
+      return 0
+    }
+    [ "$worktree" != "$project" ] || {
+      CLEANUP_CLASSIFICATION_REASON="scout copy is the project checkout, not an isolated copy"
+      return 0
+    }
+    top=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) || {
+      CLEANUP_CLASSIFICATION_REASON="isolated scout copy is not an inspectable git worktree"
+      return 0
+    }
+    top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || {
+      CLEANUP_CLASSIFICATION_REASON="cannot resolve the isolated scout git top-level"
+      return 0
+    }
+    [ "$top" = "$worktree" ] || {
+      CLEANUP_CLASSIFICATION_REASON="recorded scout copy is not its git worktree root"
+      return 0
+    }
+    git -C "$project" worktree list --porcelain 2>/dev/null | grep -Fx "worktree $worktree" >/dev/null || {
+      CLEANUP_CLASSIFICATION_REASON="scout copy is not registered to its recorded project"
+      return 0
+    }
+    dirty=$(git -C "$worktree" status --porcelain --ignored --untracked-files=all 2>/dev/null) || {
+      CLEANUP_CLASSIFICATION_REASON="cannot inspect the isolated scout copy for tracked, untracked, or ignored material"
+      return 0
+    }
+    [ -z "$dirty" ] || {
+      CLEANUP_CLASSIFICATION_REASON="isolated scout copy contains tracked, untracked, or ignored material"
+      return 0
+    }
+    origin=$(git -C "$worktree" remote get-url origin 2>/dev/null) || {
+      CLEANUP_CLASSIFICATION_REASON="cannot resolve the scout upstream remote"
+      return 0
+    }
+    [ -n "$origin" ] || {
+      CLEANUP_CLASSIFICATION_REASON="scout upstream remote is empty"
+      return 0
+    }
+    branch=$(git -C "$project" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    branch=${branch#origin/}
+    case "$branch" in
+      ''|*[!A-Za-z0-9._/-]*)
+        CLEANUP_CLASSIFICATION_REASON="cannot resolve the upstream default branch"
+        return 0
+        ;;
+    esac
+    git -C "$worktree" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch" >/dev/null 2>&1 || {
+      CLEANUP_CLASSIFICATION_REASON="cannot freshly resolve the upstream default branch"
+      return 0
+    }
+    git -C "$worktree" merge-base --is-ancestor HEAD "refs/remotes/origin/$branch" 2>/dev/null || {
+      CLEANUP_CLASSIFICATION_REASON="isolated scout copy has task commits beyond the current upstream default branch"
+      return 0
+    }
+    CLEANUP_CLASSIFICATION=EMPTY
+    CLEANUP_CLASSIFICATION_REASON="no report, no task commits, and a clean isolated copy at an ancestor of origin/$branch"
+    return 0
+  fi
+
+  if [ "$kind" = ship ] && [ -z "$WT" ] && [ -n "$PR_URL" ]; then
+    CLEANUP_CLASSIFICATION=REFUSED
+    CLEANUP_CLASSIFICATION_REASON="missing isolated copy is not merge proof"
+    [ -n "$PROJ" ] && [ -d "$PROJ" ] || {
+      CLEANUP_CLASSIFICATION_REASON="cannot inspect the recorded project for upstream identity"
+      return 0
+    }
+    url_path=${PR_URL#https://github.com/}
+    [ "$url_path" != "$PR_URL" ] || {
+      CLEANUP_CLASSIFICATION_REASON="recorded pull request is not a canonical GitHub URL"
+      return 0
+    }
+    owner=${url_path%%/*}
+    rest=${url_path#*/}
+    repo=${rest%%/*}
+    rest=${rest#*/}
+    case "$owner:$repo:$rest" in
+      *[!A-Za-z0-9._:/-]*|*::*)
+        CLEANUP_CLASSIFICATION_REASON="recorded pull request identity is malformed"
+        return 0
+        ;;
+    esac
+    case "$rest" in
+      pull/[0-9]*) number=${rest#pull/} ;;
+      *)
+        CLEANUP_CLASSIFICATION_REASON="recorded pull request identity is malformed"
+        return 0
+        ;;
+    esac
+    case "$number" in
+      ''|*[!0-9]*)
+        CLEANUP_CLASSIFICATION_REASON="recorded pull request number is malformed"
+        return 0
+        ;;
+    esac
+    origin=$(git -C "$PROJ" remote get-url origin 2>/dev/null) || {
+      CLEANUP_CLASSIFICATION_REASON="cannot resolve the recorded project upstream"
+      return 0
+    }
+    origin=${origin%.git}
+    case "$origin" in
+      "https://github.com/$owner/$repo"|"git@github.com:$owner/$repo"|"ssh://git@github.com/$owner/$repo") ;;
+      *)
+        CLEANUP_CLASSIFICATION_REASON="recorded pull request does not match the project upstream"
+        return 0
+        ;;
+    esac
+    api=$(cd "$PROJ" && gh-axi api "/repos/$owner/$repo/pulls/$number" 2>/dev/null) || {
+      CLEANUP_CLASSIFICATION_REASON="GitHub API could not authenticate or resolve the recorded pull request"
+      return 0
+    }
+    printf '%s\n' "$api" | jq -e --arg url "$PR_URL" --arg repo "$owner/$repo" '
+      .merged == true and (.merged_at | type == "string") and .html_url == $url
+      and .base.repo.full_name == $repo
+    ' >/dev/null 2>&1 || {
+      CLEANUP_CLASSIFICATION_REASON="GitHub API did not confirm the identified upstream pull request as merged"
+      return 0
+    }
+    CLEANUP_CLASSIFICATION=PROVABLY-LANDED
+    CLEANUP_CLASSIFICATION_REASON="GitHub API confirmed $PR_URL merged"
+  fi
+}
+
+classify_cleanup_recovery
+case "$CLEANUP_CLASSIFICATION" in
+  EMPTY|PROVABLY-LANDED)
+    TEARDOWN_SKIP_ENDPOINT_CLEANUP=1
+    printf 'Cleanup classification: %s - %s\n' "$CLEANUP_CLASSIFICATION" "$CLEANUP_CLASSIFICATION_REASON"
+    ;;
+  REFUSED)
+    echo "REFUSED: cleanup classification REFUSED - $CLEANUP_CLASSIFICATION_REASON." >&2
+    exit 1
+    ;;
+esac
+
+if [ -n "$TEARDOWN_LEGACY_RECORD_REFUSAL" ]; then
+  if [ "$TEARDOWN_SKIP_ENDPOINT_CLEANUP" != 1 ]; then
+    echo "error: $TEARDOWN_LEGACY_RECORD_REFUSAL; refusing automatic teardown - relaunch the task to publish an unambiguous incarnation, then retry teardown, or pass --legacy-record once its recorded endpoint is confirmed dead or agent-less" >&2
+    exit 1
+  fi
+  if fm_backlog_row_probe "$DATA" "$ID" && [[ "$FM_BACKLOG_ROW_STATE" == in_flight* ]]; then
+    echo "REFUSED: cleanup classification $CLEANUP_CLASSIFICATION cannot retire an in-flight backlog row without an exact spawned incarnation." >&2
+    exit 1
+  elif [ "$FM_BACKLOG_ROW_RESULT" = error ]; then
+    echo "REFUSED: cannot verify whether sparse recovery record $ID still has an in-flight backlog row: $FM_BACKLOG_ROW_ERROR" >&2
+    exit 1
+  fi
+  TEARDOWN_BACKLOG_APPLIES=0
+  TEARDOWN_BACKLOG_SKIP_REASON="sparse $CLEANUP_CLASSIFICATION recovery record has no spawned incarnation"
+fi
+
+if [ "$TEARDOWN_SKIP_ENDPOINT_CLEANUP" = 1 ]; then
+  BACKEND=none
+  T=
+else
+  fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  T=$FM_BACKEND_VALIDATED_TARGET
+fi
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
-PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
@@ -3001,7 +3201,8 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
-if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
+if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ] \
+   && [ "$CLEANUP_CLASSIFICATION" != EMPTY ]; then
   REPORT="$DATA/$ID/report.md"
   if [ ! -f "$REPORT" ]; then
     echo "REFUSED: scout task $ID has no report at $REPORT." >&2
@@ -3275,7 +3476,7 @@ elif [ "$BACKEND" = herdr ]; then
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
-elif [ "$BACKEND" != orca ]; then
+elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_SKIP_ENDPOINT_CLEANUP" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then

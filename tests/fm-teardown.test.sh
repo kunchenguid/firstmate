@@ -42,6 +42,10 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
+#   (q6) reportless clean scouts at upstream-default ancestors       -> EMPTY
+#   (q7) sparse ship record + API-confirmed upstream PR merge       -> PROVABLY-LANDED
+#   (q8) missing scout copy, unavailable merge evidence, or a faulty absence
+#        classifier                                                     -> REFUSE / counterfactual red
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -201,6 +205,17 @@ write_meta() {
     "spawn_gen=teardown-test-task-x1"
 }
 
+# Sparse recovery records predate the endpoint and spawn-incarnation bindings.
+# They model only the named exceptional classifications, never ordinary cleanup.
+write_sparse_recovery_meta() {
+  local case_dir=$1 id=$2 mode=$3 kind=$4 worktree=${5-}
+  fm_write_meta "$case_dir/state/$id.meta" \
+    "project=$case_dir/project" \
+    "kind=$kind" \
+    "mode=$mode" \
+    "worktree=$worktree"
+}
+
 # Commit something on the worktree's task branch. Args: case_dir [message]
 wt_commit() {
   local case_dir=$1 msg=${2:-wt work}
@@ -273,6 +288,20 @@ echo "error: pull request not found" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Return one deterministic GitHub pull-request API payload. The exceptional
+# sparse-record classification uses gh-axi api directly, so no test needs a network.
+add_gh_api_response() {
+  local case_dir=$1 payload=$2
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  api) printf '%s\\n' '$payload' ; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
 }
 
 # Squash-merged history whose pipeline rebased the branch onto a newer main that
@@ -621,15 +650,21 @@ SH
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
-  # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
-  # home's backlog item itself; without it $DATA would resolve to the real
-  # repo's own home and a test could mutate live records.
+  run_teardown_for "$TEARDOWN" "$case_dir" task-x1 "$@"
+}
+
+# FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this home's
+# backlog item itself; without it $DATA would resolve to the real repo's own home
+# and a test could mutate live records.
+run_teardown_for() {
+  local teardown=$1 case_dir=$2 id=$3
+  shift 3
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
-    "$TEARDOWN" task-x1 "$@"
+    "$teardown" "$id" "$@"
 }
 
 # Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
@@ -820,6 +855,182 @@ test_no_mistakes_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+test_empty_pi_compaction_scout_allows() {
+  local case_dir id rc
+  id=pi-compaction-auto-trigger-failure-s1
+  case_dir=$(make_case empty-pi-compaction)
+  write_sparse_recovery_meta "$case_dir" "$id" no-mistakes scout "$case_dir/wt"
+
+  set +e
+  run_teardown_for "$TEARDOWN" "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "empty-pi-compaction: clean reportless scout should classify EMPTY"
+  assert_grep 'Cleanup classification: EMPTY' "$case_dir/stdout" \
+    "empty-pi-compaction: cleanup did not report EMPTY"
+  assert_absent "$case_dir/state/$id.meta" \
+    "empty-pi-compaction: EMPTY cleanup left its sparse record behind"
+  pass "pi-compaction empty scout is classified EMPTY and cleaned without an endpoint"
+}
+
+test_empty_portfolio_scout_allows_when_behind_upstream() {
+  local case_dir id rc land
+  id=portfolio-linear-stale-ticket-reconcile-s1
+  case_dir=$(make_case empty-portfolio-linear)
+  write_sparse_recovery_meta "$case_dir" "$id" no-mistakes scout "$case_dir/wt"
+  land="$case_dir/_advance-default"
+  git clone -q "$case_dir/origin.git" "$land"
+  git -C "$land" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "advance upstream default"
+  git -C "$land" push -q origin main
+  rm -rf "$land"
+
+  set +e
+  run_teardown_for "$TEARDOWN" "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "empty-portfolio-linear: old clean scout copy should classify EMPTY"
+  assert_grep 'Cleanup classification: EMPTY' "$case_dir/stdout" \
+    "empty-portfolio-linear: cleanup did not report EMPTY"
+  assert_grep 'origin/main' "$case_dir/stdout" \
+    "empty-portfolio-linear: EMPTY evidence did not name the freshly resolved default"
+  assert_absent "$case_dir/state/$id.meta" \
+    "empty-portfolio-linear: EMPTY cleanup left its sparse record behind"
+  pass "portfolio empty scout behind upstream is classified EMPTY and cleaned"
+}
+
+test_reports_pr43_sparse_record_allows_only_api_confirmed_merge() {
+  local case_dir id rc url
+  id=reports-canonical-malish-credential-vault-v1
+  url=https://github.com/abtex/abtex-epicor-reports/pull/43
+  case_dir=$(make_case provably-landed-reports-43)
+  write_sparse_recovery_meta "$case_dir" "$id" direct-PR ship ''
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/$id.meta"
+  git -C "$case_dir/project" remote set-url origin https://github.com/abtex/abtex-epicor-reports.git
+  add_gh_api_response "$case_dir" '{"merged":true,"merged_at":"2026-09-01T00:00:00Z","html_url":"https://github.com/abtex/abtex-epicor-reports/pull/43","base":{"repo":{"full_name":"abtex/abtex-epicor-reports"}}}'
+
+  set +e
+  run_teardown_for "$TEARDOWN" "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "provably-landed-reports-43: API-merged sparse record should clean"
+  assert_grep 'Cleanup classification: PROVABLY-LANDED' "$case_dir/stdout" \
+    "provably-landed-reports-43: cleanup did not report PROVABLY-LANDED"
+  assert_absent "$case_dir/state/$id.meta" \
+    "provably-landed-reports-43: API-confirmed cleanup left its sparse record behind"
+  pass "Reports PR 43 sparse record is classified PROVABLY-LANDED from API evidence"
+}
+
+test_sparse_merge_record_refuses_when_api_evidence_is_unavailable() {
+  local case_dir id rc url
+  id=reports-pr43-api-unavailable
+  url=https://github.com/abtex/abtex-epicor-reports/pull/43
+  case_dir=$(make_case provably-landed-api-unavailable)
+  write_sparse_recovery_meta "$case_dir" "$id" direct-PR ship ''
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/$id.meta"
+  git -C "$case_dir/project" remote set-url origin https://github.com/abtex/abtex-epicor-reports.git
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+
+  set +e
+  run_teardown_for "$TEARDOWN" "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "provably-landed-api-unavailable: unavailable API must refuse"
+  assert_grep 'cleanup classification REFUSED' "$case_dir/stderr" \
+    "provably-landed-api-unavailable: refusal did not identify its category"
+  assert_grep 'GitHub API could not authenticate or resolve' "$case_dir/stderr" \
+    "provably-landed-api-unavailable: refusal did not name missing merge evidence"
+  assert_present "$case_dir/state/$id.meta" \
+    "provably-landed-api-unavailable: unavailable API erased the sparse record"
+  pass "sparse merge record refuses when API merge evidence is unavailable"
+}
+
+test_sparse_merge_record_refuses_when_api_does_not_confirm_merge() {
+  local case_dir id rc url
+  id=reports-pr43-api-unconfirmed
+  url=https://github.com/abtex/abtex-epicor-reports/pull/43
+  case_dir=$(make_case provably-landed-api-unconfirmed)
+  write_sparse_recovery_meta "$case_dir" "$id" direct-PR ship ''
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/$id.meta"
+  git -C "$case_dir/project" remote set-url origin https://github.com/abtex/abtex-epicor-reports.git
+  add_gh_api_response "$case_dir" '{"merged":false,"merged_at":null,"html_url":"https://github.com/abtex/abtex-epicor-reports/pull/43","base":{"repo":{"full_name":"abtex/abtex-epicor-reports"}}}'
+
+  set +e
+  run_teardown_for "$TEARDOWN" "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "provably-landed-api-unconfirmed: non-merged API payload must refuse"
+  assert_grep 'cleanup classification REFUSED' "$case_dir/stderr" \
+    "provably-landed-api-unconfirmed: refusal did not identify its category"
+  assert_grep 'did not confirm the identified upstream pull request as merged' "$case_dir/stderr" \
+    "provably-landed-api-unconfirmed: refusal did not name unconfirmed merge evidence"
+  assert_present "$case_dir/state/$id.meta" \
+    "provably-landed-api-unconfirmed: unconfirmed API evidence erased the sparse record"
+  pass "sparse merge record refuses when API evidence does not confirm a merge"
+}
+
+# This starts with a real scout commit, then removes every ref and the isolated
+# copy. The remaining task record cannot prove what vanished, so it must refuse.
+# The paired mutation runs the same executable interface with only the missing-copy
+# branch changed to classify absence as EMPTY; that counterfactual must turn red.
+test_lost_scout_work_refuses_and_faulty_absence_classifier_is_detected() {
+  local case_dir id rc lost_head faulty_bin faulty
+  id=lost-scout-unpreserved-commit
+  case_dir=$(make_case lost-scout-work)
+  write_sparse_recovery_meta "$case_dir" "$id" no-mistakes scout "$case_dir/wt"
+  wt_commit_file "$case_dir" lost.txt irreplaceable "unpreserved scout work"
+  lost_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null
+  git -C "$case_dir/project" cat-file -e "$lost_head^{commit}" \
+    || fail "lost-scout-work: fixture lost its unpreserved commit before cleanup"
+
+  set +e
+  run_teardown_for "$TEARDOWN" "$case_dir" "$id" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lost-scout-work: vanished scout copy must refuse"
+  assert_grep 'cleanup classification REFUSED' "$case_dir/stderr" \
+    "lost-scout-work: refusal did not identify its category"
+  assert_grep 'missing isolated scout copy' "$case_dir/stderr" \
+    "lost-scout-work: refusal did not name the absence-versus-loss boundary"
+  assert_present "$case_dir/state/$id.meta" \
+    "lost-scout-work: refusal erased the recovery record"
+
+  faulty_bin="$case_dir/faulty-bin"
+  mkdir -p "$faulty_bin"
+  for helper in "$ROOT/bin"/*; do
+    ln -s "$helper" "$faulty_bin/$(basename "$helper")"
+  done
+  faulty="$faulty_bin/fm-teardown.sh"
+  rm "$faulty"
+  cp "$TEARDOWN" "$faulty"
+  perl -0pi -e 's{\[ -n "\$WT" \] && \[ -d "\$WT" \] \|\| \{\n      CLEANUP_CLASSIFICATION_REASON="missing isolated scout copy is not proof of emptiness"\n      return 0\n    \}}{[ -n "\$WT" ] \&\& [ -d "\$WT" ] || {\n      CLEANUP_CLASSIFICATION=EMPTY\n      CLEANUP_CLASSIFICATION_REASON="FAULTY missing copy treated as empty"\n      return 0\n    }}' "$faulty"
+  chmod +x "$faulty"
+
+  set +e
+  run_teardown_for "$faulty" "$case_dir" "$id" > "$case_dir/faulty.out" 2> "$case_dir/faulty.err"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "lost-scout-work: faulty absence classifier must wrongly allow cleanup"
+  assert_grep 'Cleanup classification: EMPTY' "$case_dir/faulty.out" \
+    "lost-scout-work: mutation counterfactual did not exercise EMPTY"
+  assert_absent "$case_dir/state/$id.meta" \
+    "lost-scout-work: faulty absence classifier did not expose destructive cleanup"
+  pass "lost scout refusal becomes red against a faulty absence-is-emptiness classifier"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -3662,6 +3873,12 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_empty_pi_compaction_scout_allows
+test_empty_portfolio_scout_allows_when_behind_upstream
+test_reports_pr43_sparse_record_allows_only_api_confirmed_merge
+test_sparse_merge_record_refuses_when_api_evidence_is_unavailable
+test_sparse_merge_record_refuses_when_api_does_not_confirm_merge
+test_lost_scout_work_refuses_and_faulty_absence_classifier_is_detected
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
