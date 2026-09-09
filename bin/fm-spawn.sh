@@ -309,11 +309,15 @@
 # firstmate's own environment. Every claude spawn records a resolved account,
 # the default single-store install included, where the resolved value is HOME
 # itself (bin/fm-claude-trust.sh resolves the unset default the same way). So an
-# absent claude_config_dir= carries exactly one meaning - a record written before
-# this field existed - and such a relaunch inherits the ambient account, which is
-# where that task's worker was already running. A relative value is refused
-# rather than resolved, from the environment and from the record alike, because
-# the two sides would otherwise name different stores.
+# absent claude_config_dir= never means the default store. It means one of two
+# things: a record written before this field existed, or a task that passed
+# through a non-claude harness, since only a claude* spawn records an account
+# and a relaunch onto another harness drops the line. Both inherit the ambient
+# account, which is where such a task's worker was already running, and both
+# stay safe because that one inherited value feeds the trust registration and
+# the launch alike. A relative value is refused rather than resolved, from the
+# environment and from the record alike, because the two sides would otherwise
+# name different stores.
 # claude* is the AUTHORITATIVE harness pattern for all three account sites - the
 # resolution, the trust registration, and the launch prefix - and it is the same
 # pattern the per-task busy-state wiring already arms on, because a task launched
@@ -1696,6 +1700,15 @@ case "$HARNESS" in
     # rather than resolve it, for the same reason bin/fm-claude-trust.sh does.
     # Each source is judged where it is taken, so the refusal names the side the
     # operator has to correct.
+    # The recorded value is judged here for every kind, including the crewmate
+    # kinds whose spawn calls bin/fm-claude-trust.sh moments later and would meet
+    # the same refusal there. The overlap is deliberate: this script validates
+    # its own input where it reads it, and leaning on another script to validate
+    # it is exactly the cross-script coupling this account plumbing exists to
+    # remove. Narrowing the guard to KIND=secondmate - the one kind that skips
+    # the helper - was considered and rejected, because it would tie this
+    # guard's correctness to which kinds happen to call the helper, and would rot
+    # silently the day that changes.
     if [ "$RELAUNCH" -eq 1 ]; then
       CLAUDE_ACCOUNT_DIR=$(fm_meta_get "$RELAUNCH_META" claude_config_dir)
       case $CLAUDE_ACCOUNT_DIR in
