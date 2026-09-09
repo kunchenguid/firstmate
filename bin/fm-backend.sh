@@ -388,6 +388,54 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# Orca worktree ids are natively composite, unlike every other backend's opaque
+# endpoint atoms: docs/orca-backend.md "Task shape and metadata" owns that format.
+# Validating its structure here keeps fm_backend_endpoint_atom_valid's character
+# class intact for the tmux, Herdr, Zellij, and cmux atoms that share it, and adds
+# a cross-record check the character class could never express: the id's own path
+# half must be the task's recorded worktree, so a record whose id names another
+# directory refuses instead of releasing the wrong worktree. Every failure mode is
+# a refusal; sets FM_BACKEND_ORCA_ID_REASON to the concrete reason on return 1.
+fm_backend_orca_worktree_id_valid() {  # <orca-worktree-id> <recorded-worktree>
+  local value=$1 recorded=$2 repo path
+  FM_BACKEND_ORCA_ID_REASON=
+  case "$value" in
+    *'::'*) ;;
+    *)
+      FM_BACKEND_ORCA_ID_REASON='is not <repo id>::<absolute worktree path>'
+      return 1
+      ;;
+  esac
+  repo=${value%%::*}
+  path=${value#*::}
+  if [ -z "$repo" ] || [ -z "$path" ]; then
+    FM_BACKEND_ORCA_ID_REASON='has an empty repository id or worktree path half'
+    return 1
+  fi
+  if ! fm_backend_endpoint_atom_valid "$repo"; then
+    FM_BACKEND_ORCA_ID_REASON='has a repository id half with unsupported characters'
+    return 1
+  fi
+  case "$path" in
+    /*) ;;
+    *)
+      FM_BACKEND_ORCA_ID_REASON='has a worktree path half that is not absolute'
+      return 1
+      ;;
+  esac
+  case "$path" in
+    *[[:cntrl:]]*)
+      FM_BACKEND_ORCA_ID_REASON='has a worktree path half containing a control character'
+      return 1
+      ;;
+  esac
+  if [ "$path" != "$recorded" ]; then
+    FM_BACKEND_ORCA_ID_REASON='names a worktree path that is not the recorded worktree'
+    return 1
+  fi
+  return 0
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -507,9 +555,12 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       }
       if [ "$window" != "fm-$id" ] \
-        || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_endpoint_atom_valid "$terminal"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
+      if ! fm_backend_orca_worktree_id_valid "$worktree_id" "$worktree"; then
+        echo "REFUSED: Orca worktree id for task $id $FM_BACKEND_ORCA_ID_REASON; preserving task state." >&2
         return 1
       fi
       window=$terminal

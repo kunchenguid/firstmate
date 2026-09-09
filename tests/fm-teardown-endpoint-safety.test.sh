@@ -8,6 +8,10 @@ set -u
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
 REAL_TMUX=$(command -v tmux || true)
+# Orca worktree ids are natively composite - <repo id>::<absolute worktree path>
+# (docs/orca-backend.md "Task shape and metadata") - so Orca fixtures here carry
+# that real shape rather than a simple atom.
+ORCA_REPO_ID=4ed83d32-9f01-49a2-808a-966c2035339e
 
 make_case() {  # <name>
   local dir=$1
@@ -273,7 +277,8 @@ test_supported_backend_endpoint_records_validate() {
   id=orca-task
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
-    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=worktree-9"
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=$ORCA_REPO_ID::$dir/worktree"
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Orca endpoint refused"
   [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "Orca validation did not select its terminal"
 
@@ -825,11 +830,111 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
   pass "Treehouse project locking still serializes two homes across the remote-seeded boundary"
 }
 
+# Orca's composite worktree id is validated by its own structural rule, not by
+# the shared endpoint-atom character class every other backend's atoms use.
+# Each case below is the whole reason for that split: the real shape must be
+# accepted, and every structural defect must still refuse and preserve state.
+test_orca_composite_worktree_id_validation() {
+  local dir id meta out rc
+  dir=$(make_case orca-composite-id)
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+
+  write_orca_meta() {  # <meta> <task-id> <orca_worktree_id>
+    fm_write_meta "$1" \
+      "window=fm-$2" "endpoint_task_id=$2" "terminal=term-7" \
+      "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+      "orca_worktree_id=$3"
+  }
+
+  refuses_orca_id() {  # <label> <orca_worktree_id> <expected-reason>
+    local label=$1 value=$2 reason=$3
+    write_orca_meta "$dir/home/state/refuse.meta" refuse-task "$value"
+    # Deliberately NOT a command substitution: the published-target assertion
+    # below reads globals the validator sets in the CURRENT shell.
+    set +e
+    fm_backend_validate_task_endpoint "$dir/home/state/refuse.meta" refuse-task \
+      > "$dir/refuse.out" 2>&1
+    rc=$?
+    set -e
+    out=$(cat "$dir/refuse.out")
+    [ "$rc" -ne 0 ] || fail "Orca id with $label was accepted"
+    assert_contains "$out" "$reason" "refusal for $label did not name its concrete reason"
+    assert_contains "$out" "preserving task state" "refusal for $label did not preserve task state"
+    [ -z "$FM_BACKEND_VALIDATED_TARGET" ] || fail "refused Orca id with $label still published a target"
+  }
+
+  # The exact shape a real `orca worktree create --json` returns.
+  id=orca-real-composite
+  meta="$dir/home/state/$id.meta"
+  write_orca_meta "$meta" "$id" "$ORCA_REPO_ID::$dir/worktree"
+  fm_backend_validate_task_endpoint "$meta" "$id" \
+    || fail "Orca's real composite worktree id was refused"
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = orca ] || fail "composite Orca id did not validate as orca"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "composite Orca id did not select the recorded terminal"
+
+  # A path half naming any other directory is the cross-record check this
+  # format's own structure makes possible, and the reason it is strictly
+  # stronger than a character class.
+  refuses_orca_id "a path half that is not the recorded worktree" \
+    "$ORCA_REPO_ID::$dir/project" "not the recorded worktree"
+  refuses_orca_id "a path half differing only by a trailing slash" \
+    "$ORCA_REPO_ID::$dir/worktree/" "not the recorded worktree"
+  refuses_orca_id "no :: separator at all" \
+    "$ORCA_REPO_ID" "is not <repo id>::<absolute worktree path>"
+  refuses_orca_id "a single colon instead of ::" \
+    "$ORCA_REPO_ID:$dir/worktree" "is not <repo id>::<absolute worktree path>"
+  refuses_orca_id "a relative path half" \
+    "$ORCA_REPO_ID::relative/worktree" "not absolute"
+  refuses_orca_id "an empty repo id half" \
+    "::$dir/worktree" "empty repository id or worktree path half"
+  refuses_orca_id "an empty path half" \
+    "$ORCA_REPO_ID::" "empty repository id or worktree path half"
+  refuses_orca_id "a tab in the path half" \
+    "$ORCA_REPO_ID::$(printf '%s\tx' "$dir/worktree")" "control character"
+  refuses_orca_id "a carriage return in the path half" \
+    "$ORCA_REPO_ID::$(printf '%s\rx' "$dir/worktree")" "control character"
+
+  # The repo id half stays bound by the shared endpoint-atom rule, so widening
+  # the composite format did not open the left half up.
+  refuses_orca_id "a slash in the repo id half" \
+    "bad/repo::$dir/worktree" "repository id half with unsupported characters"
+  refuses_orca_id "a space in the repo id half" \
+    "bad repo::$dir/worktree" "repository id half with unsupported characters"
+  # shellcheck disable=SC2016 # The un-expanded literal IS the hostile input under test.
+  refuses_orca_id "a shell metacharacter in the repo id half" \
+    'r$(touch /tmp/fm-orca-pwn)::'"$dir/worktree" "repository id half with unsupported characters"
+
+  pass "Orca composite worktree ids validate structurally: real shape accepted, every defect refused"
+}
+
+# The composite rule is Orca's alone. This pins the shared endpoint-atom rule
+# every other backend depends on, so an Orca-driven change can never quietly
+# teach tmux, Herdr, Zellij, or cmux atoms to accept a path or a separator.
+test_shared_endpoint_atom_rule_is_unchanged() {
+  local atom
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+
+  for atom in term-7 term_2830d9d8-c4bb-4d30-88c2-74085f45cf0c w1 lab 7 a.b_c%d@e+f; do
+    fm_backend_endpoint_atom_valid "$atom" || fail "endpoint atom rule rejected the still-valid atom '$atom'"
+  done
+  # shellcheck disable=SC2016 # These literals are the rejected inputs, not expressions to expand.
+  for atom in '' '/abs/path' 'a::b' 'a:b' 'a b' 'a/b' 'a;b' 'a$b' 'a*b' "$(printf 'a\tb')" "$(printf 'a\nb')"; do
+    ! fm_backend_endpoint_atom_valid "$atom" \
+      || fail "endpoint atom rule now accepts '$atom'; another backend's endpoint safety was weakened"
+  done
+
+  pass "shared endpoint-atom rule still refuses paths, separators, and control characters for every other backend"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
+test_orca_composite_worktree_id_validation
+test_shared_endpoint_atom_rule_is_unchanged
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup
