@@ -87,12 +87,15 @@ mkdir -p "$STORE_DIR" 2>/dev/null || true
 LOCK="$STORE_DIR/.fm-trust.lock"
 # Stale-proof mutual exclusion for concurrent spawns. The lock directory
 # carries an owner file with "<pid>:<epoch>"; mkdir stays the single atomic
-# arbiter, while a contender breaks only a lock whose owner pid is dead or
-# whose timestamp is older than a legitimate hold can ever be (a hold is a
-# single read-modify-rename of one small file). A SIGKILLed or OOM-killed
-# holder therefore blocks the next writer for at most one grace window rather
-# than permanently, and a live holder is never broken: only a dead pid or an
-# expired timestamp authorizes removal.
+# arbiter. A contender breaks only a lock whose owner pid is dead, whose
+# timestamp is older than a legitimate hold can ever be (a hold is a single
+# read-modify-rename of one small file), or whose directory is older than any
+# legitimate mkdir-to-owner write with no owner file at all. A SIGKILLed or
+# OOM-killed holder therefore blocks the next writer for at most one grace
+# window rather than permanently. A break verdict is revalidated immediately
+# before removal, so a contender that renewed the lock in between is waited
+# on instead of removed; whatever slips the residual microsecond window still
+# converges, because the following mkdir admits exactly one winner.
 lock_owner() { cat "$LOCK/owner" 2>/dev/null; }
 # Portable directory mtime in epoch seconds. macOS (BSD) stat uses `-f`,
 # Linux (GNU) stat uses `-c`; detect the platform once rather than chaining
@@ -118,6 +121,30 @@ lock_stale() {  # <owner-line> -> 0 when the lock may be broken
   fi
   return 0
 }
+# lock_breakable: 0 when the lock may be removed right now. A present owner
+# decides it (live waits, stale breaks); an ownerless lock breaks only once
+# its directory is older than any legitimate mkdir-to-owner write, so a
+# racing contender's fresh directory always waits instead.
+lock_breakable() {
+  local owner now mtime
+  owner=$(lock_owner)
+  if [ -n "$owner" ]; then
+    lock_stale "$owner" || return 1
+    return 0
+  fi
+  now=$(date +%s)
+  mtime=$(lock_dir_mtime || true)
+  case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
+  [ $((now - mtime)) -ge "${FM_AGY_TRUST_OWNERLESS_STALE_SECS:-10}" ]
+}
+lock_wait() {
+  # Every wait budget comfortably outlasts the 10s ownerless-stale threshold
+  # above, so a waiter can never exhaust its retries just before an abandoned
+  # lock becomes breakable.
+  lock_attempt=$((lock_attempt + 1))
+  [ "$lock_attempt" -lt 300 ] || refuse "timed out waiting for '$LOCK'"
+  sleep 0.1
+}
 lock_attempt=0
 while :; do
   if mkdir "$LOCK" 2>/dev/null; then
@@ -127,34 +154,17 @@ while :; do
     }
     break
   fi
-  owner=$(lock_owner)
-  if [ -n "$owner" ]; then
-    # A present owner decides it: a live holder is waited out, never removed.
-    if ! lock_stale "$owner"; then
-      lock_attempt=$((lock_attempt + 1))
-      [ "$lock_attempt" -lt 100 ] || refuse "timed out waiting for '$LOCK'"
-      sleep 0.1
-      continue
-    fi
-  else
-    # An ownerless lock is either a contender between its mkdir and its owner
-    # write, or a creator killed inside that window. The directory's own mtime
-    # tells them apart: a legitimate mkdir-to-owner write is one printf, so a
-    # fresh directory waits while an old one breaks. An unreadable mtime reads
-    # as just created and waits rather than breaking blind.
-    now=$(date +%s)
-    mtime=$(lock_dir_mtime || true)
-    case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
-    if [ $((now - mtime)) -lt "${FM_AGY_TRUST_OWNERLESS_STALE_SECS:-10}" ]; then
-      lock_attempt=$((lock_attempt + 1))
-      [ "$lock_attempt" -lt 100 ] || refuse "timed out waiting for '$LOCK'"
-      sleep 0.1
-      continue
-    fi
-  fi
+  # Fast path: a live lock waits without further checks.
+  lock_breakable || { lock_wait; continue; }
+  # Slow path: the verdict above may predate a racing contender's renewal, so
+  # revalidate immediately before removing. A renewed lock waits instead; only
+  # a verdict that survives revalidation removes. Whatever slips the residual
+  # microsecond window still converges: mkdir stays the single atomic arbiter,
+  # so exactly one contender wins the replacement and the other waits on it.
+  lock_breakable || { lock_wait; continue; }
   rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null || true
   lock_attempt=$((lock_attempt + 1))
-  [ "$lock_attempt" -lt 200 ] || refuse "timed out waiting for '$LOCK'"
+  [ "$lock_attempt" -lt 300 ] || refuse "timed out waiting for '$LOCK'"
   sleep 0.1
 done
 trap 'rm -f "$LOCK/owner" 2>/dev/null; rmdir "$LOCK" 2>/dev/null' EXIT
