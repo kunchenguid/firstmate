@@ -60,7 +60,8 @@ Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
 Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
-The endpoint validator in `bin/fm-backend.sh` accepts Orca's compound worktree identifiers while retaining task ownership and terminal checks.
+A recorded compound id of the form `<repo-id>::<absolute path>` passes endpoint validation only when the repo prefix is a valid endpoint atom and the embedded path equals the recorded `worktree=`.
+Legacy opaque ids stay valid, and the task-binding and terminal checks apply to both forms.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
