@@ -2832,6 +2832,8 @@ def check_result_plan_binding(root: Path, plan: dict[str, Any], report: Report) 
             and as_object(frozen.get("hashes")).get("benchmark.json") == current
             and load_json(root / "benchmark.json", PLAN_SCHEMA) == plan
         )
+        if valid:
+            check_launch_evidence(root, report)
         report.require(valid, "results.plan_binding", "plan matches its frozen and passing preflight bindings",
                        "plan differs from its frozen or passing preflight binding")
     except GateError as exc:
@@ -5059,15 +5061,10 @@ def frozen_inputs(root: Path, plan: dict[str, Any]) -> dict[str, str]:
         if isinstance(packet, dict) and nonempty_str(packet.get("id"))
     }
     for kind in ("packets", "ground-truth"):
-        present = {
-            path.relative_to(root / kind).parts[0]
-            if len(path.relative_to(root / kind).parts) > 1
-            else path.stem
-            for path in files_by_kind[kind]
-        }
-        missing = sorted(expected_packets - present)
+        missing = sorted(packet for packet in expected_packets
+                         if f"{kind}/{packet}.md" not in hashes)
         if missing:
-            raise GateError(f"{kind} is missing planned packet inputs: {', '.join(missing)}")
+            raise GateError(f"{kind} is missing planned packet inputs: required primary Markdown files for {', '.join(missing)}")
     for name in ("execution.json", *EVALUATOR_CONFIG_FILES):
         path = root / "evaluator" / name
         if path.is_file():

@@ -289,12 +289,16 @@ os.execv(sys.argv[2], sys.argv[2:])
                   "tree_binding": {key: "a" * 40 for key in
                                    ("original_sha", "original_tree", "neutral_sha", "neutral_tree", "base_tree", "patch_hash")}}
         identity = ("A", "entrant", "candidate", "A1")
-        (self.root / "benchmark.json").write_text(json.dumps({"tracks": {"A": {"packets": [{"id": "A1"}]}}}))
+        plan = {"schema": gate.PLAN_SCHEMA, "tracks": {"A": {"packets": [{"id": "A1"}]}}}
+        (self.root / "benchmark.json").write_text(json.dumps(plan))
         hashes = {kind + "/A1.md": hashlib.sha256((sample / name).read_bytes()).hexdigest()
                   for kind, name in (("packets", "packet.md"), ("ground-truth", "ground-truth.md"))}
+        hashes["benchmark.json"] = gate.sha256_file(self.root / "benchmark.json")
         (self.root / "freeze.json").write_text(json.dumps({"schema": gate.FREEZE_SCHEMA, "hashes": hashes}))
-        with mock.patch.object(gate, "check_result_plan_binding"), \
-             mock.patch.object(gate, "planned_sample_identities", return_value={identity}), \
+        receipt = {"schema": gate.RECEIPT_SCHEMA, "verdict": "pass", "plan_sha256": hashes["benchmark.json"],
+                   "evidence_sha256": gate.evidence_digest(self.root)}
+        (self.root / "preflight.receipt").write_text(json.dumps(receipt))
+        with mock.patch.object(gate, "planned_sample_identities", return_value={identity}), \
              mock.patch.object(gate, "validate_archived_projection"), \
              mock.patch.object(gate, "load_archived_measurements", return_value={"deterministic": 4}):
             valid_intervals = dict.fromkeys(gate.REQUIRED_TIMING_INTERVALS, 10)
@@ -310,11 +314,43 @@ os.execv(sys.argv[2], sys.argv[2:])
                 report = gate.Report("archive-verify")
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
-                    passed, _ = gate.check_archive(self.root, {}, report)
+                    passed, _ = gate.check_archive(self.root, plan, report)
                 self.assertEqual(passed, expected, output.getvalue())
                 if not expected:
                     self.assertIn("archived packet material differs from its frozen source" if replacement
                                   else "scored attempt lacks valid timing intervals", output.getvalue())
+
+            for kind, name in (("packets", "packet.md"), ("ground-truth", "ground-truth.md")):
+                forged = dict(hashes)
+                forged[f"{kind}/A1.md"] = gate.sha256_file(sample / name)
+                if forged == hashes:
+                    (sample / name).write_text("replacement")
+                    forged[f"{kind}/A1.md"] = gate.sha256_file(sample / name)
+                record["files"][name] = forged[f"{kind}/A1.md"]
+                (sample / "manifest.json").write_text(json.dumps(record))
+                (self.root / "freeze.json").write_text(json.dumps({"schema": gate.FREEZE_SCHEMA, "hashes": forged}))
+                report = gate.Report("archive-verify")
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    passed, _ = gate.check_archive(self.root, plan, report)
+                self.assertFalse(passed)
+                self.assertIn("launch evidence changed after the preflight", output.getvalue())
+
+    def test_freeze_requires_primary_packet_markdown_with_directory_inputs(self):
+        plan = {"tracks": {"A": {"packets": [{"id": "A1"}]}}}
+        (self.root / "benchmark.json").write_text(json.dumps(plan))
+        for kind in ("packets", "ground-truth", "scoring", "judge-prompts"):
+            path = self.root / kind / "A1/input.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("input")
+        for kind in ("packets", "ground-truth"):
+            with self.assertRaisesRegex(gate.GateError, "required primary Markdown files"):
+                gate.frozen_inputs(self.root, plan)
+            (self.root / kind / "A1.md").write_text("primary")
+        hashes = gate.frozen_inputs(self.root, plan)
+        for kind in ("packets", "ground-truth"):
+            self.assertIn(f"{kind}/A1.md", hashes)
+            self.assertIn(f"{kind}/A1/input.md", hashes)
 
     def test_container_images_require_explicit_digests(self):
         confine = str(ROOT / "bin/fm-bench-confine.sh")

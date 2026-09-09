@@ -2304,6 +2304,16 @@ receipt = json.loads(receipt_path.read_text())
 receipt["evaluator_sha256"] = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 PYFROZENSCORING
+  local digest
+  digest=$(bench_evidence_digest "$1")
+  python3 - "$1/preflight.receipt" "$digest" <<'PYRECEIPT'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+receipt = json.loads(path.read_text())
+receipt["evidence_sha256"] = sys.argv[2]
+path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+PYRECEIPT
 }
 
 bind_scoring_fixture() {
