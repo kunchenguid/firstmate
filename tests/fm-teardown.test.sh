@@ -1052,7 +1052,7 @@ test_empty_scout_refuses_hidden_nested_submodule_material() {
 test_sparse_recovery_backlog_with_legacy_option() {
   local case_dir category row rc
   for category in EMPTY PROVABLY-LANDED; do
-    for row in absent done in_flight; do
+    for row in absent 'done' in_flight; do
       case_dir=$(make_case "sparse-legacy-$category-$row")
       if [ "$category" = EMPTY ]; then
         write_sparse_recovery_meta "$case_dir" task-x1 no-mistakes scout "$case_dir/wt"
@@ -1066,8 +1066,8 @@ test_sparse_recovery_backlog_with_legacy_option() {
         printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$case_dir/data/backlog.md"
       else
         seed_backlog_in_flight "$case_dir"
-        if [ "$row" = done ]; then
-          tasks-axi done task-x1 --file "$case_dir/data/backlog.md" >/dev/null
+        if [ "$row" = 'done' ]; then
+          tasks-axi 'done' task-x1 --file "$case_dir/data/backlog.md" >/dev/null
         fi
       fi
       cp "$case_dir/data/backlog.md" "$case_dir/backlog.before"
@@ -1113,7 +1113,7 @@ test_empty_scout_closes_backlog_without_report() {
   expect_code 0 "$rc" "empty-scout-backlog: teardown should close the empty scout"
   assert_grep 'Cleanup classification: EMPTY' "$case_dir/stdout" \
     "empty-scout-backlog: cleanup did not report EMPTY"
-  [ "$(backlog_row_state "$case_dir")" = done ] \
+  [ "$(backlog_row_state "$case_dir")" = 'done' ] \
     || fail "empty-scout-backlog: cleanup left the backlog item open"
   ! grep -Fq 'report.md' "$case_dir/data/backlog.md" \
     || fail "empty-scout-backlog: completion recorded a nonexistent report"
