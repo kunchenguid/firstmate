@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|copilot|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -24,8 +24,14 @@
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
 # Model/effort come ONLY from this file - config/crew-harness stays a bare adapter
 # name and is never parsed for a model.
-# Detection layers: verified environment markers first, then process ancestry.
-# Record each newly verified env marker here.
+# Detection keeps established verified environment-marker precedence, then
+# falls back to process ancestry.
+# COPILOT_CLI is the one local exception: ancestry stays authoritative because
+# that marker can be inherited by a nested foreign harness, but when ancestry is
+# inconclusive the existing positive Gemini, Rovo, Pi, pi-signed, and Grok
+# markers still keep their established precedence and only the ambiguous
+# Copilot/Claude/Cursor conflict falls back to Copilot.
+# Record each newly verified env marker and ancestry shape here.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,29 +39,87 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-# shellcheck source=bin/fm-cursor-lib.sh
-. "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-harness-process-lib.sh
+. "$SCRIPT_DIR/fm-harness-process-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
 
+detect_ancestry() {
+  local pid=$$ comm args ancestry=''
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
+    args=${args#"${args%%[![:space:]]*}"}
+    if ancestry=$(fm_harness_process_name "$comm" "$args" 2>/dev/null); then
+      break
+    fi
+    if fm_gemini_path_is_gemini "$comm" 2>/dev/null; then
+      ancestry=gemini
+      break
+    fi
+    if fm_gemini_pid_is_gemini "$pid" 2>/dev/null; then
+      ancestry=gemini
+      break
+    fi
+    case "$(basename -- "$comm")" in
+      rovo) ancestry=rovo; break ;;
+      # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
+      # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
+      # name carries the version and CHANGES on every auto-update. Match the stable
+      # prefix rather than any exact name. Deliberately anchored, never *muse*, so
+      # unrelated commands (musescore, amuse) cannot be misread as this harness.
+      muse|muse-bin-*) ancestry=muse; break ;;
+      node*|python*|MainThread)
+        if fm_gemini_args_are_gemini "$args"; then
+          ancestry=gemini
+          break
+        fi
+        ;;
+    esac
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$pid" in ''|*[!0-9]*) break ;; esac
+    if [ "$pid" -le 1 ]; then
+      break
+    fi
+  done
+  [ -n "$ancestry" ] || return 1
+  if [ "$ancestry" = pi ] && [ "${PI_CODING_AGENT:-}" = "true" ] \
+     && [ "${FM_PI_HARNESS:-}" = pi-signed ]; then
+    echo pi-signed
+  else
+    echo "$ancestry"
+  fi
+}
+
+copilot_marker_fallback_allowed() {
+  [ "${GEMINI_CLI:-}" = "1" ] && return 1
+  [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && return 1
+  [ "${ROVODEV_CLI:-}" = "1" ] && return 1
+  [ "${PI_CODING_AGENT:-}" = "true" ] && return 1
+  [ "${GROK_AGENT:-}" = "1" ] && return 1
+  return 0
+}
+
 detect_own() {
-  # Layer 1: environment markers for verified harnesses.
-  # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
-  # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
-  # multiplexer's stored environment can silently misidentify one of them before
-  # ancestry is consulted. This is a precedence hazard, not evidence that
-  # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
-  # Cursor is checked BEFORE claude, deliberately. cursor-agent does NOT clear
-  # an inherited CLAUDECODE, so a cursor worker launched from a claude primary
-  # carries BOTH markers and whichever is tested first wins. Cursor's own
-  # markers are unambiguous when present, so ordering them first is what makes
-  # the verdict correct; bin/fm-spawn.sh additionally clears the foreign markers
-  # at the launch boundary. Both are kept: the launch sanitization only covers
-  # sessions fm-spawn started, while this ordering also covers a cursor session
-  # a human started by hand. Verified live on cursor-agent 2026.08.11-e8db854:
-  # CURSOR_INVOKED_AS=cursor-agent is set on the agent process itself, and
-  # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
+  local ancestry=''
+  # COPILOT_CLI reaches nested child harnesses, so a Copilot-marked process
+  # first asks ancestry which harness is actually running.
+  # When ancestry is inconclusive, only the ambiguous inherited Claude/Cursor
+  # conflict falls back to Copilot; Gemini, Rovo, Pi/pi-signed, and Grok keep
+  # their established own marker precedence because they are not always
+  # ancestry-detectable.
+  if [ "${COPILOT_CLI:-}" = "1" ]; then
+    ancestry=$(detect_ancestry 2>/dev/null || true)
+    if [ -n "$ancestry" ]; then
+      echo "$ancestry"
+      return
+    fi
+    if copilot_marker_fallback_allowed; then
+      echo copilot
+      return
+    fi
+  fi
+
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
   # Gemini is checked BEFORE claude for exactly cursor's reason above: the
@@ -100,94 +164,20 @@ detect_own() {
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
     return
   fi
-  # grok set GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
-  # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so the marker
-  # is unambiguous WHEN PRESENT - but it is not guaranteed present. A grok 1.0.0
-  # hook process carries GROK_HOOK_EVENT, GROK_HOOK_NAME, GROK_SESSION_ID, and
-  # GROK_WORKSPACE_ROOT with no GROK_AGENT at all (verified from the live process
-  # environment of a wedged grok 1.0.0 Stop hook, 2026-08-07). Treat this marker as
-  # a fast path only; the ancestry walk below is what actually guarantees grok is
-  # identified, and any rule that must be RELIABLE under grok has to test the hook
-  # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
   # muse (Muse Code) publishes no harness-identity marker of its own. The only
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
   # a per-session log PATH rather than an identity, and its export to tool
   # subprocesses is unverified (verified: muse 0.1.0-R708.1), so muse is detected
-  # by ancestry alone below. Do NOT promote MUSE_CURRENT_SESSION_LOG to a marker
-  # without verifying it reaches children AND that it cannot survive in a
-  # multiplexer's stored environment, which is the precedence hazard above.
-  # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args argv0
-  for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
-    if fm_cursor_process_matches "$comm" '' "$argv0"; then
-      echo cursor
-      return
-    fi
-    if fm_gemini_path_is_gemini "$comm"; then
-      echo gemini
-      return
-    fi
-    case "$(basename -- "$comm")" in
-      # gemini precedes claude here for the same precedence reason as the
-      # marker layer above, so a gemini worker under a claude primary is never
-      # read as claude. This arm covers a natively-named gemini binary only.
-      # It does NOT reach the currently installed CLI, which is a node bundle
-      # (~/.local/bin/gemini -> @google/gemini-cli/bundle/gemini.js): modern
-      # Node on Linux reports `comm` as MainThread rather than node (measured
-      # on Node v24.20.0), so neither this arm nor the node interpreter arm
-      # below matches a live gemini process. GEMINI_CLI above is therefore
-      # load-bearing for gemini rather than a fast path, which is why gemini
-      # is not offered as a primary or secondmate harness. Do NOT add
-      # MainThread to the interpreter arm to close this: that would make the
-      # args of EVERY node process searchable and let an unrelated node
-      # command carrying a harness name in its arguments claim an identity.
-      *claude*) echo claude; return ;;
-      *codex*) echo codex; return ;;
-      *opencode*) echo opencode; return ;;
-      *grok*) echo grok; return ;;
-      kimi) echo kimi; return ;;
-      rovo) echo rovo; return ;;
-      # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
-      # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
-      # name carries the version and CHANGES on every auto-update. Match the stable
-      # prefix rather than any exact name. Deliberately anchored, never *muse*, so
-      # unrelated commands (musescore, amuse) cannot be misread as this harness.
-      muse|muse-bin-*) echo muse; return ;;
-      pi-signed) echo pi; return ;;
-      pi) echo pi; return ;;
-      # omp is a Bun-compiled single binary whose process name is exactly `omp`
-      # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
-      # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
-      # comp, and similar unrelated commands are not misread as this harness.
-      # It sits above the node*|python* interpreter fallback deliberately: the
-      # optional claude-bridge extension runs a nested executable literally
-      # named `claude` with its own node child, and that fallback's *claude*
-      # args glob would otherwise claim it if that subtree were ever walked.
-      omp) echo omp; return ;;
-      node*|python*)
-        # Bare interpreter: match the harness name in its script path.
-        args=$(ps -o args= -p "$pid" 2>/dev/null)
-        if fm_gemini_args_are_gemini "$args"; then
-          echo gemini
-          return
-        fi
-        case "$args" in
-          *claude*) echo claude; return ;;
-          *codex*) echo codex; return ;;
-          *opencode*) echo opencode; return ;;
-          *grok*) echo grok; return ;;
-          *" pi "*|*/pi) echo pi; return ;;
-        esac ;;
-    esac
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
-      break
-    fi
-  done
-  echo unknown
+  # by ancestry alone below rather than by any inherited MUSE_* env. Do NOT
+  # promote MUSE_CURRENT_SESSION_LOG to a marker without verifying it reaches
+  # children AND that it cannot survive in a multiplexer's stored environment,
+  # which is the precedence hazard above.
+  if ancestry=$(detect_ancestry 2>/dev/null); then
+    echo "$ancestry"
+  else
+    echo unknown
+  fi
 }
 
 # True when an exact `omp` process sits within eight parents of this one. The

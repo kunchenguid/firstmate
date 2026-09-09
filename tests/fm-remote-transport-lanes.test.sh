@@ -53,6 +53,7 @@ cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
   "$ROOT/bin/fm-pending-reply-lib.sh" "$ROOT/bin/fm-task-inbox-lib.sh" \
   "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-marker-lib.sh" \
   "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-tmux-lib.sh" \
+  "$ROOT/bin/fm-harness-process-lib.sh" \
   "$ROOT/bin/fm-composer-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" \
   "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-timeout-lib.sh" \
   "$ROOT/bin/fm-ff-lib.sh" "$ROOT/bin/fm-secondmate-registry-lib.sh" \

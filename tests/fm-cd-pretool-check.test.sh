@@ -27,7 +27,8 @@ install_cd_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh"
-  cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-harness-process-lib.sh" \
+     "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-cd-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
   chmod +x "$dir/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-command-policy.mjs"
@@ -162,6 +163,11 @@ run_matrix_entry() {
       printf '%s' "$payload" | "$CHECK" --claude >"$out_file" 2>"$err_file"
       rc=$?
       ;;
+    copilot)
+      payload=$(jq -cn --arg command "$cmd" '{toolName:"bash",toolArgs:{command:$command}}')
+      printf '%s' "$payload" | "$CHECK" --copilot >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
     grok)
       payload=$(jq -cn --arg command "$cmd" '{toolName:"run_terminal_command",toolInput:{command:$command}}')
       printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
@@ -183,6 +189,14 @@ run_matrix_entry() {
     return
   fi
 
+  if [ "$entry" = copilot ]; then
+    [ "$rc" -eq 0 ] || fail "$id via $entry must deny through Copilot's native stdout object, got exit $rc"
+    [ ! -s "$err_file" ] || fail "$id via $entry deny must leave stderr empty: $(cat "$err_file")"
+    jq -e '.permissionDecision == "deny" and (.permissionDecisionReason | test("\\[persistent-cd\\]"))' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via copilot deny must carry Copilot's native decision object on stdout: $(cat "$out_file")"
+    return
+  fi
+
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
   jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[persistent-cd\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry the persistent-cd reason code on stderr: $(cat "$err_file")"
@@ -197,11 +211,11 @@ run_matrix_entry() {
 test_full_acceptance_matrix() {
   local i entry
   for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
-    for entry in codex claude grok opencode pi; do
+    for entry in codex claude copilot grok opencode pi; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
   done
-  pass "cd-guard acceptance matrix: ${#MATRIX_IDS[@]} cases x 5 harness entry forms, block/allow all correct"
+  pass "cd-guard acceptance matrix: ${#MATRIX_IDS[@]} cases x 6 harness entry forms, block/allow all correct"
 }
 
 # --- primary-checkout scoping ----------------------------------------------

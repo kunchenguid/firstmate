@@ -21,6 +21,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROVO_BIN=$(command -v rovo 2>/dev/null || true)
 [ -x "${ROVO_BIN:-}" ] || ROVO_BIN="$HOME/.local/bin/rovo"

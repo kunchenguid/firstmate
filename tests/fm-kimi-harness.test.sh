@@ -6,10 +6,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
-# from inside Cursor, Claude, Pi, or Grok inherits those markers, which outrank
-# the fake ancestry the detection cases set up. Drop the ambient markers so the
-# asserted verdict does not depend on which harness launched the suite.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+# from inside Cursor, Claude, Copilot, Gemini, Rovo, Pi, or Grok inherits
+# those markers, which outrank the fake ancestry the detection cases set up.
+# Drop the ambient markers so the asserted verdict does not depend on which
+# harness launched the suite.
+unset CLAUDECODE COPILOT_CLI COPILOT_AGENT_SESSION_ID COPILOT_LOADER_PID COPILOT_CLI_BINARY_VERSION GEMINI_CLI PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS ATLASSIAN_AGENT_TYPE ROVODEV_CLI
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -205,7 +206,7 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+  [ "$launch" = "env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
@@ -464,7 +465,7 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$fallback' --auto" ] \
+  [ "$launch" = "env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$fallback' --auto" ] \
     || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
@@ -549,13 +550,40 @@ SH
   chmod +x "$fakebin/ps"
 
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION \
     -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
-  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+  out=$(env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
     CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
-  pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+    COPILOT_CLI=1 CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = kimi ] || fail "real Kimi ancestry lost to inherited Copilot markers, got '$out'"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+pid=
+prev=
+for arg in "$@"; do
+  [ "$prev" = -o ] && field=$arg
+  [ "$prev" = -p ] && pid=$arg
+  prev=$arg
+done
+case "$field:$pid" in
+  comm=:*) printf '/bin/bash\n' ;;
+  ppid=:*) printf '1\n' ;;
+  args=:*) printf 'bash\n' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  out=$(env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u GROK_AGENT -u PI_CODING_AGENT -u FM_PI_HARNESS \
+    CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = claude ] || fail "Claude marker fallback changed without recognized ancestry, got '$out'"
+  pass "fm-harness: Kimi ancestry stays authoritative while verified markers keep precedence"
 }
 
 test_kimi_session_lock_identity() {

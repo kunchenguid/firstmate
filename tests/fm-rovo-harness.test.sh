@@ -6,14 +6,33 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
-# from inside Cursor, Claude, Pi, or Grok inherits those markers, which outrank
-# the fake ancestry the detection cases set up. Drop the ambient markers so the
-# asserted verdict does not depend on which harness launched the suite.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
+# from inside Cursor, Claude, Copilot, Gemini, Pi, or Grok inherits those
+# markers, which outrank the fake ancestry the detection cases set up. Drop the
+# ambient markers so the asserted verdict does not depend on which harness
+# launched the suite.
+unset CLAUDECODE COPILOT_CLI COPILOT_AGENT_SESSION_ID COPILOT_LOADER_PID COPILOT_CLI_BINARY_VERSION GEMINI_CLI PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
   ATLASSIAN_AGENT_TYPE ROVODEV_CLI
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-rovo-harness)
+
+make_neutral_ps() {
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' bash; exit 0 ;;
+  *"args="*) printf '%s\n' bash; exit 0 ;;
+  *"ppid="*) printf '%s\n' 1; exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+NO_ANCESTRY_FAKEBIN=$(make_neutral_ps "$TMP_ROOT/no-ancestry")
 
 # A stateful fake tmux for rovo's launch-then-send shape (the same shape kimi
 # uses): a positional brief is dead-on-arrival, so rovo launches BARE and only
@@ -387,9 +406,19 @@ SH
   [ "$out" = rovo ] || fail "rovo's ROVODEV_CLI marker did not outrank an inherited CLAUDECODE, got '$out'"
 
   out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    COPILOT_CLI=1 ATLASSIAN_AGENT_TYPE=rovo \
+    PATH="$NO_ANCESTRY_FAKEBIN:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = rovo ] || fail "rovo's ATLASSIAN_AGENT_TYPE marker lost to inherited COPILOT_CLI, got '$out'"
+
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    COPILOT_CLI=1 ROVODEV_CLI=1 \
+    PATH="$NO_ANCESTRY_FAKEBIN:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  [ "$out" = rovo ] || fail "rovo's ROVODEV_CLI marker lost to inherited COPILOT_CLI, got '$out'"
+
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
-  pass "fm-harness: rovo's markers outrank an inherited CLAUDECODE, and markerless ancestry still resolves rovo"
+  pass "fm-harness: rovo's markers outrank inherited Claude and Copilot markers, and markerless ancestry still resolves rovo"
 }
 
 test_rovo_control_lib_table() {

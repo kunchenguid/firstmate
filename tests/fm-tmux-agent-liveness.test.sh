@@ -24,6 +24,7 @@ pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
 SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
+BASH_BIN=$(command -v bash) || { echo "skip: bash not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
@@ -47,18 +48,24 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
-# binary, never copies: a copied platform binary fails code-signing validation
-# and is killed on macOS arm64. The symlink name is what the kernel records as
-# the executable identity, which is exactly the signal under test.
+# Stand-in "harness" binaries and names. These symlinks preserve a stable kernel
+# executable identity on platforms where a copied binary would fail signing, and
+# most cases still drive them via `exec -a` when the test needs an exact argv[0]
+# rather than a filesystem path. The fixtures keep the symlinked names around
+# for path-sensitive cases too. Cursor's own path is a bash symlink later
+# because its matcher requires the live command name itself.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
+ln -s "$SLEEP_BIN" "$LAB/bin/copilot"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # omp (Oh My Pi) is a single binary whose live process name is the bare word
 # `omp`; the two decoys are the substrings an unanchored glob would misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/omp"
-ln -s "$SLEEP_BIN" "$LAB/bin/ompd"
-ln -s "$SLEEP_BIN" "$LAB/bin/comp"
+# Keep only the path spellings here. GNU coreutils' multicall `sleep` refuses
+# a harness-name symlink such as `omp`, so the actual live process is launched
+# later with `exec -a` against these exact argv[0] paths instead.
+: > "$LAB/bin/omp"
+: > "$LAB/bin/ompd"
+: > "$LAB/bin/comp"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
@@ -77,7 +84,7 @@ ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
 # false `dead`.
 cat > "$LAB/bin/agent-launcher" <<SH
 #!/bin/sh
-"$LAB/bin/pi" 900 &
+bash -c "exec -a '$LAB/bin/pi' '$SLEEP_BIN' 900" &
 wait
 SH
 chmod +x "$LAB/bin/agent-launcher"
@@ -155,23 +162,53 @@ assert_sources_disagree() {  # <target> <label>
 # tmux and ps, while Linux can expose the symlink name through both, so the
 # version-string case below owns the cross-platform divergence assertion.
 
-new_window agent "$LAB/bin/claude-link" 900
+new_window agent bash -c "exec -a '$LAB/bin/claude-agent' '$SLEEP_BIN' 900"
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+new_window copilot bash -c "exec -a '$LAB/bin/copilot' '$SLEEP_BIN' 900"
+wait_for_state "$SESSION:copilot" alive \
+  || fail "a running Copilot foreground process must classify alive"
+pass "tmux liveness: a Copilot foreground process classifies alive"
+
+new_window copilot-argv bash -c "exec -a copilot '$SLEEP_BIN' 900"
+wait_for_state "$SESSION:copilot-argv" alive \
+  || fail "a process carrying Copilot only in argv zero must classify alive"
+pass "tmux liveness: Copilot argv-zero identity survives a non-Copilot kernel command"
+
+mkdir -p "$LAB/claude/tools" "$LAB/kimi"
+cat > "$LAB/claude/tools/report.py" <<'SH'
+#!/bin/sh
+while :; do sleep 60; done
+SH
+cat > "$LAB/kimi/build.js" <<'SH'
+#!/bin/sh
+while :; do sleep 60; done
+SH
+chmod +x "$LAB/claude/tools/report.py" "$LAB/kimi/build.js"
+
+new_window python-script-decoy bash -c "exec -a python '$BASH_BIN' '$LAB/claude/tools/report.py'"
+wait_for_state "$SESSION:python-script-decoy" ambiguous \
+  || fail "a python script merely located under a claude-named directory must stay ambiguous"
+
+new_window node-script-decoy bash -c "exec -a node '$BASH_BIN' '$LAB/kimi/build.js'"
+wait_for_state "$SESSION:node-script-decoy" ambiguous \
+  || fail "a node script merely located under a kimi-named directory must stay ambiguous"
+pass "tmux liveness: interpreter scripts under harness-named directories stay ambiguous"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy
 # worker would be torn down or relaunched. The decoys below are what keep the
 # fix from being a substring match that claims unrelated programs.
 
-new_window muse "$LAB/bin/muse-bin-0.1.0-R708.1" 900
+new_window muse bash -c "exec -a '$LAB/bin/muse-bin-0.1.0-R708.1' '$SLEEP_BIN' 900"
 wait_for_state "$SESSION:muse" alive \
   || fail "muse's version-suffixed binary name must classify alive"
 pass "tmux liveness: muse's version-suffixed muse-bin-<version> classifies alive"
 
 for decoy in musescore amuse muse-binary muse-bind; do
-  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  new_window "decoy-$decoy" bash -c "exec -a '$LAB/bin/$decoy' '$SLEEP_BIN' 900"
   wait_for_state "$SESSION:decoy-$decoy" ambiguous \
     || fail "'$decoy' merely contains 'muse' and must not classify as a live agent pane"
 done
@@ -182,13 +219,13 @@ pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
 # `omp`, with no path component to fall back on, so the anchored name is the
 # only signal and the two decoys prove it never widens into a substring match.
 
-new_window omp "$LAB/bin/omp" 900
+new_window omp bash -c "exec -a '$LAB/bin/omp' '$SLEEP_BIN' 900"
 wait_for_state "$SESSION:omp" alive \
   || fail "omp's bare binary name must classify alive"
 pass "tmux liveness: omp's bare binary name classifies alive"
 
 for decoy in ompd comp; do
-  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  new_window "decoy-$decoy" bash -c "exec -a '$LAB/bin/$decoy' '$SLEEP_BIN' 900"
   wait_for_state "$SESSION:decoy-$decoy" ambiguous \
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
@@ -222,7 +259,7 @@ fi
 
 # --- neither source names a harness: no invented agent ----------------------
 
-new_window unknown bash -c "exec -a 2.1.220 '$LAB/bin/notaharness' 900"
+new_window unknown bash -c "exec -a 2.1.220 '$SLEEP_BIN' 900"
 wait_for_state "$SESSION:unknown" ambiguous \
   || fail "a foreground process no name source attributes must stay ambiguous"
 pass "tmux liveness: a process neither name source attributes stays ambiguous rather than inventing an agent"
@@ -250,7 +287,7 @@ pass "tmux liveness: an idle shell pane classifies dead"
 # `set -m` gives the background job its own process group, which is what an
 # interactive shell does for a job an exited agent left behind.
 
-new_window background bash -c "set -m; '$LAB/bin/claude-link' 900 & printf '%s\n' \"\$!\" > '$LAB/bg.pid'; exec /bin/sh"
+new_window background bash -c "set -m; bash -c \"exec -a '$LAB/bin/claude-agent' '$SLEEP_BIN' 900\" & printf '%s\n' \"\$!\" > '$LAB/bg.pid'; exec /bin/sh"
 bg_pid=
 for _ in $(seq 1 100); do
   [ -s "$LAB/bg.pid" ] && bg_pid=$(cat "$LAB/bg.pid") && break
@@ -290,8 +327,6 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$ROOT/bin/fm-tmux-lib.sh"
 
-ln -s "$SLEEP_BIN" "$LAB/bin/cursor-agent"
-ln -s "$SLEEP_BIN" "$LAB/bin/notcursor"
 
 # Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
 # footer rows below it, and the terminal cursor left on a blank row past the
@@ -309,9 +344,12 @@ cursor_screen() {  # <composer-text> <ghost 0|1>
     "$open" "$text" "$close" "$LAB/wt"
 }
 
+ln -s "$BASH_BIN" "$LAB/bin/cursor-agent"
+ln -s "$BASH_BIN" "$LAB/bin/notcursor"
+
 open_composer_pane() {  # <window> <binary> <composer-text> <ghost 0|1>
   local window=$1 binary=$2 text=$3 ghost=$4
-  new_window "$window" bash -c "$(declare -f cursor_screen); LAB='$LAB'; cursor_screen '$text' '$ghost'; exec '$binary' 900"
+  new_window "$window" bash -c "$(declare -f cursor_screen); LAB='$LAB'; cursor_screen '$text' '$ghost'; exec '$binary' -c 'while :; do sleep 60; done'"
   local i=0
   while [ "$i" -lt 100 ]; do
     case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:$window" 2>/dev/null)" in

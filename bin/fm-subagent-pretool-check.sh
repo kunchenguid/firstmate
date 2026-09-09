@@ -34,13 +34,14 @@
 #   <PreToolUse JSON on stdin> | bin/fm-subagent-pretool-check.sh
 #   bin/fm-subagent-pretool-check.sh --tool '<tool-name>'
 #
-# Stdin mode extracts .tool_name for Claude and Codex, or .toolName for Grok.
+# Stdin mode extracts .toolName for Copilot and Grok, or .tool_name for Claude and Codex.
 # CLI mode is for adapters that already hold the tool name (OpenCode, Pi).
 #
 # Exit/output contract (identical shape to bin/fm-cd-pretool-check.sh):
 #   ALLOW - exit 0 and no output.
 #   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
-#          deny object on stdout unless --claude was supplied.
+#          deny object on stdout unless --claude or --copilot was supplied.
+#   DENY, --copilot - exit 0 and Copilot's own decision object on stdout.
 #   INERT - not a genuine primary home (a crewmate/scout task worktree or a
 #           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
 #   ESCAPE - FM_ALLOW_SUBAGENT=1 in the environment allows deliberately.
@@ -49,6 +50,7 @@
 # Claude requires stdout to remain empty on deny.
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
+# Copilot consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
 set -u
 
@@ -81,13 +83,14 @@ PLAN_ONLY_TOOLS='taskcreate taskupdate'
 TOOL=""
 TOOL_SET=0
 CLAUDE_MODE=0
+COPILOT_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude]
+Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude|--copilot]
 
-With no --tool, reads a PreToolUse-style JSON payload on stdin (Claude/Codex
-tool_name, or Grok toolName).
+With no --tool, reads a PreToolUse-style JSON payload on stdin (Copilot/Grok
+toolName, or Claude/Codex tool_name).
 Denies a delegation-SHAPED tool name in a genuine primary home.
 Claude primaries may also add an untracked per-home permissions.deny list that
 removes known delegation tools from the model schema before this hook is needed.
@@ -99,6 +102,7 @@ Fires only in a genuine firstmate primary home; it is a silent no-op in a
 crewmate/scout task worktree or any non-firstmate repo, where a worker using
 delegation tools is legitimate.
 Exits 0 to allow and 2 to deny, naming the real crewmate dispatch path instead.
+With --copilot, a deny is Copilot's own decision object on stdout and exit 0.
 Set FM_ALLOW_SUBAGENT=1 in the session environment to allow deliberately.
 Malformed transport fails open.
 EOF
@@ -121,6 +125,10 @@ while [ "$#" -gt 0 ]; do
       CLAUDE_MODE=1
       shift
       ;;
+    --copilot)
+      COPILOT_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -137,6 +145,12 @@ if [ "$TOOL_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
+  # shellcheck source=bin/fm-hook-host-lib.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
+  if [ "$CLAUDE_MODE" -eq 0 ] && [ "$COPILOT_MODE" -eq 0 ] \
+     && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+    exit 0
+  fi
   TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || exit 0
 fi
 
@@ -202,6 +216,12 @@ json_escape() {
 }
 
 ESCAPED=$(json_escape "$REASON")
+if [ "$COPILOT_MODE" -eq 1 ]; then
+  printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+if [ "$CLAUDE_MODE" -eq 0 ]; then
+  printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+fi
 exit 2

@@ -95,7 +95,8 @@ fm_test_fake_gh_axi() {
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
 # firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
 # set, each send-keys -l payload is appended one per line. Optional
-# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
+# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows. A capture file can
+# model interactive dialogs; an Enter clears it only when explicitly enabled.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -110,21 +111,58 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  capture-pane)
+    if [ -n "${FM_FAKE_TMUX_CAPTURE_FILE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE_FILE" ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE_FILE"
+    fi
+    exit 0
+    ;;
   list-windows)
     if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
       printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
     fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  kill-window)
+    [ -z "${FM_FAKE_TMUX_KILL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_KILL_LOG"
+    exit 0
+    ;;
+  has-session|new-session|new-window|set-window-option) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          case "$a" in
+            *'copilot --allow-all'*)
+              [ -z "${FM_FAKE_TMUX_COPILOT_LAUNCH_MARKER:-}" ] \
+                || printf 'pending\n' > "$FM_FAKE_TMUX_COPILOT_LAUNCH_MARKER"
+              ;;
+          esac
         fi
         prev=$a
+      done
+    fi
+    if [ -n "${FM_FAKE_TMUX_COPILOT_LAUNCH_MARKER:-}" ] \
+       && [ -f "$FM_FAKE_TMUX_COPILOT_LAUNCH_MARKER" ]; then
+      for a in "$@"; do
+        if [ "$a" = Enter ]; then
+          stage=$(cat "$FM_FAKE_TMUX_COPILOT_LAUNCH_MARKER")
+          if [ "$stage" = pending ] && [ -n "${FM_FAKE_TMUX_TRUST_DIALOG_FILE:-}" ] \
+             && [ -f "$FM_FAKE_TMUX_TRUST_DIALOG_FILE" ]; then
+            cp "$FM_FAKE_TMUX_TRUST_DIALOG_FILE" "$FM_FAKE_TMUX_CAPTURE_FILE"
+            printf 'shown\n' > "$FM_FAKE_TMUX_COPILOT_LAUNCH_MARKER"
+          elif [ "$stage" = shown ] \
+               && grep -Fq 'Confirm folder trust' "$FM_FAKE_TMUX_CAPTURE_FILE"; then
+            [ -z "${FM_FAKE_TMUX_TRUST_KEY_LOG:-}" ] || printf 'Enter\n' >> "$FM_FAKE_TMUX_TRUST_KEY_LOG"
+            if [ "${FM_FAKE_TMUX_TRUST_CLEAR_ON_ENTER:-0}" = 1 ]; then
+              printf 'Copilot ready\n' > "$FM_FAKE_TMUX_CAPTURE_FILE"
+              printf 'accepted\n' > "$FM_FAKE_TMUX_COPILOT_LAUNCH_MARKER"
+            fi
+          fi
+          break
+        fi
       done
     fi
     exit 0
@@ -292,6 +330,8 @@ fm_test_run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \
+    FM_COPILOT_TRUST_POLLS="${FM_TEST_COPILOT_TRUST_POLLS:-1}" \
+    FM_COPILOT_TRUST_POLL_INTERVAL="${FM_TEST_COPILOT_TRUST_POLL_INTERVAL:-0}" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
 }

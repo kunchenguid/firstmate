@@ -20,6 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-session-lock-ancestry)
 fm_git_identity fmtest fmtest@example.invalid
 
 LIB="$ROOT/bin/fm-session-lock-lib.sh"
+HELPER="$ROOT/bin/fm-harness-process-lib.sh"
 
 # Claude Code's native installer names the per-session executable by its version,
 # so the harness identity has to survive a basename that says nothing.
@@ -45,6 +46,53 @@ lib_eval() {  # <fakebin> <expression>
   " "$LIB"
 }
 
+helper_eval() {  # <expression>
+  local expr=$1
+  bash -c "
+    . \"\$0\"
+    $expr
+  " "$HELPER"
+}
+
+test_shared_matcher_normalizes_indented_args() {
+  local cursor_path out
+  cursor_path='/Users/u/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent'
+
+  out=$(helper_eval 'fm_harness_process_name MainThread "   copilot --allow-all"') \
+    || fail "the shared matcher did not recognize an indented Copilot MainThread argv0"
+  [ "$out" = copilot ] || fail "indented Copilot MainThread argv0 detected as '$out'"
+
+  out=$(helper_eval 'fm_harness_process_name /opt/copilot/bin/copilot "   /opt/copilot/bin/copilot --allow-all"') \
+    || fail "the shared matcher did not recognize an indented Copilot path argv0"
+  [ "$out" = copilot ] || fail "indented Copilot path argv0 detected as '$out'"
+
+  out=$(helper_eval 'fm_harness_process_name 2.1.220 "   /Users/u/.local/share/claude/versions/2.1.220 --resume"') \
+    || fail "the shared matcher did not recognize an indented versioned Claude argv0"
+  [ "$out" = claude ] || fail "indented versioned Claude argv0 detected as '$out'"
+
+  out=$(helper_eval 'fm_harness_process_name MainThread "   node /opt/copilot/bin/copilot --allow-all"') \
+    || fail "the shared matcher did not recognize an indented Copilot node-bundle path"
+  [ "$out" = copilot ] || fail "indented Copilot node-bundle path detected as '$out'"
+
+  out=$(helper_eval "fm_harness_process_name node '   $cursor_path --trust --yolo'") \
+    || fail "the shared matcher did not recognize an indented Cursor bundled argv0"
+  [ "$out" = cursor ] || fail "indented Cursor bundled argv0 detected as '$out'"
+
+  if helper_eval 'fm_harness_process_name MainThread "   /opt/copilot/bin/runner.js --allow-all"' >/dev/null 2>&1; then
+    fail "the shared matcher treated an indented Copilot-path decoy as Copilot"
+  fi
+  if helper_eval 'fm_harness_process_name MainThread "   node /tmp/copilot --allow-all"' >/dev/null 2>&1; then
+    fail "the shared matcher treated an arbitrary node script named copilot as Copilot"
+  fi
+  if helper_eval 'fm_harness_process_name python "   python /opt/copilot/bin/copilot --allow-all"' >/dev/null 2>&1; then
+    fail "the shared matcher treated a python copilot script path as Copilot"
+  fi
+  if helper_eval 'fm_harness_process_name node "   /tmp/cursor-agent/bin/runner --trust --yolo"' >/dev/null 2>&1; then
+    fail "the shared matcher treated an indented Cursor-path decoy as Cursor"
+  fi
+  pass "session-lock: the shared matcher normalizes indented argv0 without matching decoys"
+}
+
 test_version_named_session_is_identified_on_both_platforms() {
   local dir fakebin shape got
   dir="$TMP_ROOT/version-named"
@@ -63,9 +111,9 @@ while [ "$#" -gt 0 ]; do
 done
 case "$pid:$field:${FM_TEST_CLAUDE_SHAPE:-linux}" in
   700:comm=:linux) printf '%s\n' '2.1.220' ;;
-  700:args=:linux) printf '%s\n' '/opt/claude/versions/2.1.220 --resume' ;;
+  700:args=:linux) printf '%s\n' ' /opt/claude/versions/2.1.220 --resume' ;;
   700:comm=:macos) printf '%s\n' '/Users/u/.local/share/claude/versions/2.1.220' ;;
-  700:args=:macos) printf '%s\n' '/Users/u/.local/share/claude/versions/2.1.220 --resume' ;;
+  700:args=:macos) printf '%s\n' ' /Users/u/.local/share/claude/versions/2.1.220 --resume' ;;
   700:ppid=:*) printf '%s\n' 1 ;;
   *:comm=:*) printf '%s\n' bash ;;
   *:args=:*) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
@@ -105,9 +153,9 @@ while [ "$#" -gt 0 ]; do
 done
 case "$pid:$field:${FM_TEST_PATH_SHAPE:-hookdir}" in
   810:comm=:hookdir) printf '%s\n' '/home/u/.claude/hooks/notify.sh' ;;
-  810:args=:hookdir) printf '%s\n' '/home/u/.claude/hooks/notify.sh --quiet' ;;
+  810:args=:hookdir) printf '%s\n' ' /home/u/.claude/hooks/notify.sh --quiet' ;;
   810:comm=:piprefix) printf '%s\n' '/opt/pipeline/bin/runner' ;;
-  810:args=:piprefix) printf '%s\n' '/opt/pipeline/bin/runner --once' ;;
+  810:args=:piprefix) printf '%s\n' ' /opt/pipeline/bin/runner --once' ;;
   810:ppid=:*) printf '%s\n' 1 ;;
   *:comm=:*) printf '%s\n' bash ;;
   *:args=:*) printf '%s\n' 'bash /repo/bin/fm-watch-arm.sh' ;;
@@ -132,6 +180,52 @@ SH
     fi
   done
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
+}
+
+test_indented_copilot_and_cursor_sessions_hold_their_locks() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/indented-positive-shapes"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_LOCK_SHAPE:-copilot-mainthread}" in
+  700:comm=:copilot-mainthread) printf '%s\n' 'MainThread' ;;
+  700:args=:copilot-mainthread) printf '%s\n' ' copilot --allow-all' ;;
+  700:comm=:copilot-nativepath) printf '%s\n' '/opt/copilot/bin/copilot' ;;
+  700:args=:copilot-nativepath) printf '%s\n' ' /opt/copilot/bin/copilot --allow-all' ;;
+  700:comm=:copilot-node-bundle) printf '%s\n' 'MainThread' ;;
+  700:args=:copilot-node-bundle) printf '%s\n' ' node /opt/copilot/bin/copilot --allow-all' ;;
+  700:comm=:cursor-bundled) printf '%s\n' 'node' ;;
+  700:args=:cursor-bundled) printf '%s\n' ' /Users/u/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent --trust --yolo' ;;
+  700:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' ' bash /repo/bin/fm-watch-arm.sh' ;;
+  *:ppid=:*) printf '%s\n' 700 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '700\n' > "$dir/state/.lock"
+
+  for shape in copilot-mainthread copilot-nativepath copilot-node-bundle cursor-bundled; do
+    got=$(FM_TEST_LOCK_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$shape: the indented session was not found in the ancestry"
+    [ "$got" = 700 ] || fail "$shape: ancestry resolved '$got', expected 700"
+    FM_TEST_LOCK_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 700' \
+      || fail "$shape: a live indented session was not recognized as a harness"
+    FM_TEST_LOCK_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$shape: the indented session holding the lock did not recognize itself as the owner"
+  done
+  pass "session-lock: indented Copilot and Cursor sessions keep their lock identity"
 }
 
 test_harness_beyond_a_gap_never_owns_the_lock() {
@@ -230,6 +324,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-harness-process-lib.sh" "$dir/bin/fm-harness-process-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
@@ -356,8 +451,10 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
   pass "session-lock e2e: a version-named session under a harness-named daemon keeps its own lock"
 }
 
+test_shared_matcher_normalizes_indented_args
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
+test_indented_copilot_and_cursor_sessions_hold_their_locks
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_e2e_version_named_session_claims_the_home

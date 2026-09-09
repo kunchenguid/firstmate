@@ -237,12 +237,22 @@ test_stdin_transports_and_output_shapes() {
 
   rc=0
   : > "$OUT"; : > "$ERR"
+  printf '%s' '{"toolName":"task","toolArgs":{"description":"go"}}' \
+    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" --copilot > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 0 ] || fail "Copilot-shaped stdin must deny through Copilot's native stdout object, got exit $rc"
+  [ ! -s "$ERR" ] || fail "Copilot deny wrote stderr: $(cat "$ERR")"
+  jq -e '.permissionDecision == "deny" and (.permissionDecisionReason | startswith("[subagent-dispatch]"))' "$OUT" >/dev/null 2>&1 \
+    || fail "Copilot deny must write Copilot's native decision object on stdout: $(cat "$OUT")"
+
+  rc=0
+  : > "$OUT"; : > "$ERR"
   printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' \
     | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
       "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 0 ] || fail "Bash through stdin must allow, got exit $rc"
   [ ! -s "$OUT" ] && [ ! -s "$ERR" ] || fail "stdin allow wrote output"
-  pass "both stdin transports classify correctly and Claude's deny keeps stdout empty"
+  pass "Claude, Copilot, and Grok stdin transports classify correctly"
 }
 
 test_malformed_transport_fails_open() {
