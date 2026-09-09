@@ -521,6 +521,44 @@ test_non_claude_spawn_records_no_account_field() {
   pass "fm-spawn.sh: a non-claude spawn records no claude account"
 }
 
+# The account is resolved, registered and launched on the claude* pattern, never
+# an exact `claude`, because a task launched from a raw command records that
+# command's basename. Narrowing any one of the three sites would trust the
+# worktree in the resolved account while launching the worker with no account at
+# all, so it would start on the default store and meet the dialog the
+# registration exists to remove. The harness here is deliberately claude-PREFIXED
+# rather than claude, so an exact-match site cannot pass this.
+test_claude_prefixed_harness_trusts_and_launches_the_same_account() {
+  local case_dir home proj wt config fakebin launch_log out meta
+  case_dir="$TMP_ROOT/prefixed-account"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  config="$case_dir/claude-config"
+  launch_log="$case_dir/launch.log"
+  mkdir -p "$config"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude-alt)
+  fm_test_spawn_home "$home"
+  fm_git_worktree "$proj" "$wt" wt-prefixed
+  fm_test_spawn_brief "$home" prefixspawn
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$config" FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" prefixspawn "$proj" \
+    'claude-alt --dangerously-skip-permissions __BRIEF__' \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "the claude-prefixed spawn must succeed: $out"
+  assert_trusted "$config/.claude.json" "$wt" \
+    "the claude-prefixed spawn did not pre-register trust for its worktree"
+  assert_present "$launch_log" "the claude-prefixed spawn sent no launch command"
+  # The wedge this pins: trust registered in one store, worker launched at
+  # another. Both halves must name the account the registration wrote.
+  assert_grep "CLAUDE_CONFIG_DIR='$config'" "$launch_log" \
+    "the claude-prefixed launch carried no account, so the worker would start on the default store its worktree was never trusted in"
+  meta="$home/state/prefixspawn.meta"
+  [ "$(sed -n 's/^claude_config_dir=//p' "$meta")" = "$config" ] \
+    || fail "the claude-prefixed task record did not name the account it launched against: $(cat "$meta")"
+  pass "fm-spawn.sh: a claude-prefixed harness trusts and launches the same account"
+}
+
 test_fresh_worktree_is_trusted
 test_registration_is_idempotent
 test_primary_checkout_is_refused
@@ -543,4 +581,5 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
 test_claude_spawn_records_the_account_it_launched_against
 test_default_account_spawn_records_no_account_field
 test_non_claude_spawn_records_no_account_field
+test_claude_prefixed_harness_trusts_and_launches_the_same_account
 test_refused_spawn_leaves_no_task_state

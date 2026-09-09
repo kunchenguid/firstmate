@@ -309,6 +309,14 @@
 # record written before this field existed stays valid. A relative value is
 # refused rather than resolved, from the environment and from the record alike,
 # because the two sides would otherwise name different stores.
+# claude* is the AUTHORITATIVE harness pattern for all three account sites - the
+# resolution, the trust registration, and the launch prefix - and it is the same
+# pattern the per-task busy-state wiring already arms on, because a task launched
+# from a raw command records that command's basename rather than the exact
+# adapter name. Do not narrow any one of them to an exact `claude`: a task on a
+# claude-prefixed adapter would then have its worktree trusted in the resolved
+# account while its launch carried no account at all, so the worker would start
+# on the default store and meet the very dialog this registration removes.
 # Every claude launch also carries the attribution-off policy in its per-launch
 # --settings JSON, so a spawned worker never writes a Co-Authored-By trailer,
 # Claude-Session link, or generated-with line into a commit or PR body;
@@ -3852,9 +3860,14 @@ esac
 # value is the single-store default and needs no prefix. CLAUDE_ACCOUNT_DIR, not
 # the ambient variable: on a relaunch the account comes from the task's own
 # record rather than from firstmate's own process.
-if [ "$HARNESS" = claude ] && [ -n "$CLAUDE_ACCOUNT_DIR" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_ACCOUNT_DIR") $LAUNCH"
-fi
+# The pattern is claude*, matching the resolution and the trust registration
+# (header above owns why it must stay that way).
+case "$HARNESS" in
+  claude*)
+    [ -z "$CLAUDE_ACCOUNT_DIR" ] \
+      || LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_ACCOUNT_DIR") $LAUNCH"
+    ;;
+esac
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
