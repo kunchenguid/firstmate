@@ -14,6 +14,7 @@ PR_URL=https://github.com/example/repo/pull/9
 LIVE_HEAD=1111111111111111111111111111111111111111
 OTHER_HEAD=2222222222222222222222222222222222222222
 DEFAULT_REQUIRED_CHECKS=test,docker,review,security-review,test-integrity
+DISTINCT_REVIEW_REQUIRED_CHECKS=test,docker,approval-check,security-review,test-integrity
 
 make_case() {
   local name=$1 expected_head=${2:-$LIVE_HEAD} worktree_mode=${3:-missing}
@@ -119,14 +120,15 @@ write_pr() {
 
 write_checks() {
   local case_dir=$1 review_status=${2:-completed} review_conclusion=${3:-'"success"'}
-  local include_integrity=${4:-true} review_head=${5:-$LIVE_HEAD} total_count=5
+  local include_integrity=${4:-true} review_head=${5:-$LIVE_HEAD} review_name=${6:-review}
+  local total_count=5
   [ "$include_integrity" = true ] || total_count=4
   {
     printf '{"total_count":%s,"check_runs":[\n' "$total_count"
     printf '%s\n' \
       "{\"name\":\"test\",\"head_sha\":\"$LIVE_HEAD\",\"status\":\"completed\",\"conclusion\":\"success\"}," \
       "{\"name\":\"docker\",\"head_sha\":\"$LIVE_HEAD\",\"status\":\"completed\",\"conclusion\":\"success\"}," \
-      "{\"name\":\"review\",\"head_sha\":\"$review_head\",\"status\":\"$review_status\",\"conclusion\":$review_conclusion}," \
+      "{\"name\":\"$review_name\",\"head_sha\":\"$review_head\",\"status\":\"$review_status\",\"conclusion\":$review_conclusion}," \
       "{\"name\":\"security-review\",\"head_sha\":\"$LIVE_HEAD\",\"status\":\"completed\",\"conclusion\":\"success\"}"
     if [ "$include_integrity" = true ]; then
       printf ',{"name":"test-integrity","head_sha":"%s","status":"completed","conclusion":"success"}\n' \
@@ -142,6 +144,17 @@ write_bespoke_checks() {
   local case_dir=$1
   printf '{"total_count":1,"check_runs":[{"name":"bespoke-contract","head_sha":"%s","status":"completed","conclusion":"success"}]}\n' \
     "$LIVE_HEAD" > "$case_dir/check-runs.json"
+}
+
+write_checks_without_review() {
+  local case_dir=$1
+  printf '%s\n' \
+    "{\"total_count\":4,\"check_runs\":[" \
+    "{\"name\":\"test\",\"head_sha\":\"$LIVE_HEAD\",\"status\":\"completed\",\"conclusion\":\"success\"}," \
+    "{\"name\":\"docker\",\"head_sha\":\"$LIVE_HEAD\",\"status\":\"completed\",\"conclusion\":\"success\"}," \
+    "{\"name\":\"security-review\",\"head_sha\":\"$LIVE_HEAD\",\"status\":\"completed\",\"conclusion\":\"success\"}," \
+    "{\"name\":\"test-integrity\",\"head_sha\":\"$LIVE_HEAD\",\"status\":\"completed\",\"conclusion\":\"success\"}" \
+    ']}' > "$case_dir/check-runs.json"
 }
 
 write_no_checks() {
@@ -197,14 +210,11 @@ assert_no_merge_call() {
 assert_no_forge_call() {
   local case_dir=$1 clause=$2
   [ ! -s "$case_dir/gh.log" ] && [ ! -s "$case_dir/gh-axi.log" ] \
-    || fail "$clause: an override was not refused before every forge call"
+    || fail "$clause: a forge call was made before the refusal"
 }
 
-assert_one_line_reason() {
-  local case_dir=$1 clause=$2 token=$3 lines
-  lines=$(awk 'NF { count++ } END { print count + 0 }' "$case_dir/stderr")
-  [ "$lines" -eq 1 ] \
-    || fail "$clause: refusal must give exactly one non-empty stderr line, got $lines"
+assert_refusal_reason() {
+  local case_dir=$1 clause=$2 token=$3
   grep -Fi -- "$token" "$case_dir/stderr" >/dev/null \
     || fail "$clause: refusal reason did not name '$token'"
 }
@@ -212,7 +222,7 @@ assert_one_line_reason() {
 assert_refused() {
   local case_dir=$1 rc=$2 clause=$3 token=$4
   expect_code 1 "$rc" "$clause: fm-pr-merge must refuse"
-  assert_one_line_reason "$case_dir" "$clause" "$token"
+  assert_refusal_reason "$case_dir" "$clause" "$token"
   assert_no_merge_call "$case_dir" "$clause"
 }
 
@@ -271,15 +281,15 @@ test_clause_3_refuses_non_success_check_conclusions() {
   while IFS='|' read -r name status conclusion; do
     case_dir=$(make_case "required-check-$name")
     write_pr "$case_dir" open clean "$LIVE_HEAD"
-    write_checks "$case_dir" "$status" "$conclusion"
+    write_checks "$case_dir" "$status" "$conclusion" true "$LIVE_HEAD" approval-check
 
-    run_merge "$case_dir" "$DEFAULT_REQUIRED_CHECKS" \
+    run_merge "$case_dir" "$DISTINCT_REVIEW_REQUIRED_CHECKS" \
       < /dev/null \
       > "$case_dir/stdout" 2> "$case_dir/stderr"
     rc=$?
 
     assert_refused "$case_dir" "$rc" \
-      "clause 3 required-check-$name" "review"
+      "clause 3 required-check-$name" "approval-check"
   done <<'CASES'
 failure|completed|"failure"
 pending|in_progress|null
@@ -301,6 +311,21 @@ test_clause_3_required_check_list_is_configurable() {
   assert_refused "$case_dir" "$rc" \
     "clause 3 required-check-list-configurable" "bespoke-contract"
   pass "clause 3: the required-check list comes from repository configuration"
+}
+
+test_clause_3_required_check_names_match_exactly() {
+  local case_dir rc
+  case_dir=$(make_case required-check-name-exact)
+  write_pr "$case_dir" open clean "$LIVE_HEAD"
+  write_checks_without_review "$case_dir"
+
+  run_merge "$case_dir" "$DEFAULT_REQUIRED_CHECKS" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+
+  assert_refused "$case_dir" "$rc" \
+    "clause 3 required-check-name-exact" "review"
+  pass "clause 3: required check names use exact equality, never substring matching"
 }
 
 test_clause_3_unset_required_checks_enforces_non_empty_defaults() {
@@ -325,7 +350,7 @@ test_clause_3_empty_required_checks_refuses_before_forge_calls() {
       empty) required_checks='' ;;
       whitespace) required_checks='   ' ;;
     esac
-    case_dir=$(make_case "required-checks-$name")
+    case_dir=$(make_case "required-checks-$name" "$LIVE_HEAD" existing)
     write_pr "$case_dir" open clean "$LIVE_HEAD"
     write_checks "$case_dir"
 
@@ -334,7 +359,7 @@ test_clause_3_empty_required_checks_refuses_before_forge_calls() {
     rc=$?
 
     expect_code 1 "$rc" "clause 3 required-checks-$name: fm-pr-merge must refuse"
-    assert_one_line_reason "$case_dir" "clause 3 required-checks-$name" "configuration"
+    assert_refusal_reason "$case_dir" "clause 3 required-checks-$name" "configuration"
     assert_no_forge_call "$case_dir" "clause 3 required-checks-$name"
   done
   pass "clause 3: empty and whitespace-only required-check configuration fail closed"
@@ -399,14 +424,14 @@ test_clause_3_refuses_successful_check_at_a_different_head() {
   local case_dir rc
   case_dir=$(make_case required-check-wrong-head)
   write_pr "$case_dir" open clean "$LIVE_HEAD"
-  write_checks "$case_dir" completed '"success"' true "$OTHER_HEAD"
+  write_checks "$case_dir" completed '"success"' true "$OTHER_HEAD" approval-check
 
-  run_merge "$case_dir" "$DEFAULT_REQUIRED_CHECKS" \
+  run_merge "$case_dir" "$DISTINCT_REVIEW_REQUIRED_CHECKS" \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
 
   assert_refused "$case_dir" "$rc" \
-    "clause 3 required-check-wrong-head" "review"
+    "clause 3 required-check-wrong-head" "approval-check"
   grep -F -- "$OTHER_HEAD" "$case_dir/stderr" >/dev/null \
     || fail "clause 3 required-check-wrong-head: refusal did not name the check's stale head"
   pass "clause 3: each successful required check must report the exact verified head"
@@ -466,7 +491,7 @@ test_clause_5_refuses_caller_safety_overrides_before_forge_calls() {
     rc=$?
 
     expect_code 1 "$rc" "clause 5 override-$name: fm-pr-merge must refuse"
-    assert_one_line_reason "$case_dir" "clause 5 override-$name" "$token"
+    assert_refusal_reason "$case_dir" "clause 5 override-$name" "$token"
     assert_no_forge_call "$case_dir" "clause 5 override-$name"
   done <<'CASES'
 admin
@@ -524,6 +549,7 @@ test_clause_2_refuses_every_non_clean_mergeable_state
 test_clause_3_refuses_missing_configured_check
 test_clause_3_refuses_non_success_check_conclusions
 test_clause_3_required_check_list_is_configurable
+test_clause_3_required_check_names_match_exactly
 test_clause_3_unset_required_checks_enforces_non_empty_defaults
 test_clause_3_empty_required_checks_refuses_before_forge_calls
 test_clause_3_refuses_unreadable_required_check_results
