@@ -434,11 +434,13 @@ fm_git_identity() {
 
 # fm_git_init_commit <dir>: create a git repo at <dir> with a README and one
 # commit. Uses an inline identity so it works whether or not fm_git_identity was
-# called.
+# called. The initial branch is pinned rather than inherited from
+# init.defaultBranch, so a fixture that names main resolves the same on a
+# developer machine and on a runner that still defaults to master.
 fm_git_init_commit() {
   local dir=$1
   mkdir -p "$dir"
-  git -C "$dir" init -q
+  git -C "$dir" init -q -b main
   printf '# %s\n' "$(basename "$dir")" > "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial

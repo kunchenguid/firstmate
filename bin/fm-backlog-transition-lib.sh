@@ -25,8 +25,9 @@
 # and homes whose configured backlog backend is manual. Markdown homes that
 # keep no backlog file at all are likewise exempt. Those return-1 exemptions
 # are never errors; a home on any other configured backend has no markdown
-# file requirement at all. An unresolvable configured data directory or
-# incompatible tasks-axi instead returns 2 so callers refuse before mutation.
+# file requirement at all. An unresolvable configured data directory, a backend
+# resolution error, or incompatible tasks-axi instead returns 2 so callers
+# refuse before mutation.
 #
 # ADDRESSING. The markdown backend owns the explicit `--file <data>/backlog.md`
 # on every mutation and row probe so the change lands in the home that owns
@@ -36,8 +37,8 @@
 # `.tasks.toml` supplies its backend, done_keep, and the archive path and
 # backend-owned state remains discoverable. The parent of the data directory
 # is the addressing root rather than FM_HOME, so a home whose data directory
-# is relocated keeps its backlog and its archive together. A root with no
-# `.tasks.toml` gets tasks-axi's built-in defaults.
+# is relocated keeps its backlog and its archive together.
+# bin/fm-tasks-axi-lib.sh owns backend precedence and configuration failures.
 #
 # CRASH RECOVERY. Only teardown needs a durable record: it removes the meta and
 # with it the completion links, so a process killed between the two halves would
@@ -53,8 +54,9 @@
 # leaves the meta itself as the evidence that the row is owed a start.
 # A captain-held row uses the same record with a `mode=retain` line: replay then
 # records the deliverable and reopens the row instead of closing it, and never
-# closes a row that reads as an open captain call. An answer that closed the row
-# first simply retires the record.
+# closes a row that reads as an open captain call. An answer that closes the row
+# first applies any supported retained artifact from the validated record, then
+# replay simply retires the record.
 
 # Set by fm_backlog_transition_applies for a return-1 exemption.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -177,7 +179,7 @@ fm_backlog_data_relative() {  # <data-dir>
 }
 
 fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
-  local config=$1 data authorized_data=$2 kind=$3 file root
+  local config=$1 data authorized_data=$2 kind=$3 file root backend
   FM_BACKLOG_TRANSITION_SKIP=
   if [ "$kind" = secondmate ]; then
     FM_BACKLOG_TRANSITION_SKIP="secondmates are not backlog items"
@@ -192,7 +194,11 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
     return 2
   fi
   root=$(fm_backlog_root "$data") || return 2
-  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
+    FM_BACKLOG_TRANSITION_ERROR=$backend
+    return 2
+  }
+  if [ "$backend" = markdown ]; then
     file=$(fm_backlog_file "$data")
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then
       FM_BACKLOG_TRANSITION_SKIP="this home keeps no backlog at $file"
@@ -287,14 +293,16 @@ fm_tasks_axi() {
 }
 
 # Print one row's `tasks-axi show` output (plus stderr) from the backlog root,
-# with `--file` only for the markdown backend; the exit status is tasks-axi's.
+# with `--file` only for the markdown backend. Addressing or backend-resolution
+# errors return before tasks-axi runs; otherwise its exit status is preserved.
 # Extra flags (such as --full) are passed through.
 fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
-  local data=$1 id=$2 file root
+  local data=$1 id=$2 file root backend
   shift 2
   file=$(fm_backlog_file "$data") || return 1
   root=$(fm_backlog_root "$data") || return 1
-  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+  backend=$(fm_tasks_axi_backend "$root") || return 2
+  if [ "$backend" = markdown ]; then
     (cd "$root" 2>/dev/null && fm_tasks_axi show "$id" "$@" --file "$file" 2>&1)
   else
     (cd "$root" 2>/dev/null && fm_tasks_axi show "$id" "$@" 2>&1)
@@ -302,11 +310,12 @@ fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
 }
 
 fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
-  local data=$1 file root
+  local data=$1 file root backend
   shift
   file=$(fm_backlog_file "$data") || return 1
   root=$(fm_backlog_root "$data") || return 1
-  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+  backend=$(fm_tasks_axi_backend "$root") || return 2
+  if [ "$backend" = markdown ]; then
     (cd "$root" 2>/dev/null && tasks-axi list "$@" --file "$file" 2>&1)
   else
     (cd "$root" 2>/dev/null && tasks-axi list "$@" 2>&1)
@@ -314,7 +323,7 @@ fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
 }
 
 fm_backlog_row_probe() {  # <data-dir> <id>
-  local data authorized_data=$1 file id=$2 out state held blocked hold_kind command_status root
+  local data authorized_data=$1 file id=$2 out state held blocked hold_kind command_status root backend
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
@@ -329,7 +338,11 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
     return 1
   }
-  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
+    FM_BACKLOG_ROW_ERROR=$backend
+    return 2
+  }
+  if [ "$backend" = markdown ]; then
     file=$(fm_backlog_file "$data") || {
       FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
       return 1
@@ -379,7 +392,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
 # other configured backend is addressed by the root's own tasks-axi
 # configuration, so passing the markdown-era path would write the wrong store.
 fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
-  local data authorized_data=$1 file verb=$2 id=$3 out command_status root
+  local data authorized_data=$1 file verb=$2 id=$3 out command_status root backend
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
@@ -387,7 +400,11 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   shift 3
   FM_BACKLOG_TRANSITION_ERROR=
   root=$(fm_backlog_root "$data") || return 1
-  if [ "$(fm_tasks_axi_backend "$root")" != markdown ]; then
+  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
+    FM_BACKLOG_TRANSITION_ERROR=$backend
+    return 2
+  }
+  if [ "$backend" != markdown ]; then
     out=$(cd "$root" 2>/dev/null && fm_tasks_axi "$verb" "$id" "$@" 2>&1)
     command_status=$?
   else
@@ -419,17 +436,26 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   fm_backlog_mutate "$data" "done" "$id" "$@"
 }
 
+fm_backlog_row_artifact_supported() {
+  local id=$1 flag=${2:-} value=${3:-}
+  case "$flag" in
+    --pr) return 0 ;;
+    --report) [ "$value" = "data/$id/report.md" ] ;;
+    *) return 1 ;;
+  esac
+}
+
 # Keep a captain-held row open across the removal of the work record that
 # discovered it: record the finished work's deliverable as one line at the end
-# of the task body (a line already present is left alone) and return the row to
-# Queued, the conventional post-cleanup shape for an open captain call.
+# of the task body (a line already present is left alone), preserve supported
+# artifacts on the row, and return it to Queued, the conventional post-cleanup
+# shape for an open captain call.
 # bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
-# fields; only bin/fm-captain-hold.sh answer closes the call. The links are
-# written into the body rather than through `tasks-axi update --report`,
-# because that flag rewrites the title of a row that is not Done.
+# fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
   local arg deliverable='' line body new_body tmp
+  local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
@@ -438,8 +464,16 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   FM_BACKLOG_TRANSITION_ERROR=
   for arg in "$@"; do
     case "$previous_arg" in
-      --report) deliverable="${deliverable:+$deliverable; }report $arg" ;;
-      --pr) deliverable="${deliverable:+$deliverable; }PR $arg" ;;
+      --report)
+        deliverable="${deliverable:+$deliverable; }report $arg"
+        if fm_backlog_row_artifact_supported "$id" --report "$arg"; then
+          row_args=(--report "$arg")
+        fi
+        ;;
+      --pr)
+        deliverable="${deliverable:+$deliverable; }PR $arg"
+        row_args=(--pr "$arg")
+        ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
     esac
     previous_arg=$arg
@@ -487,6 +521,9 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         rm -f -- "$tmp"
         ;;
     esac
+  fi
+  if [ "${#row_args[@]}" -gt 0 ]; then
+    fm_backlog_mutate "$authorized_data" update "$id" "${row_args[@]}" || return 1
   fi
   fm_backlog_mutate "$authorized_data" reopen "$id"
 }
@@ -618,6 +655,24 @@ fm_backlog_meta_spawn_gen() {
       ;;
   esac
   FM_BACKLOG_META_SPAWN_GEN=$value
+}
+
+# The same incarnation, read for a caller that only needs to notice a CHANGE.
+# A record predating the field carries no incarnation to compare, so it yields
+# an empty value and proceeds instead of refusing; comparing that empty value
+# across a wait still catches a record that gained, lost, or altered one. An
+# ambiguous or unreadable field is still an error, because a record that cannot
+# name one exact incarnation cannot be compared at all.
+fm_backlog_meta_spawn_gen_optional() {  # <meta> <state>
+  local meta=$1 state=$2 count
+  FM_BACKLOG_META_SPAWN_GEN=
+  fm_backlog_record_present "$meta" "task record" "$state" || return 1
+  count=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { count++ } END { print count + 0 }' "$meta" 2>/dev/null) || {
+    FM_BACKLOG_TRANSITION_ERROR="unreadable spawn generation in task record $meta"
+    return 1
+  }
+  [ "$count" -ne 0 ] || return 0
+  fm_backlog_meta_spawn_gen "$meta" "$state"
 }
 
 fm_backlog_row_dispatchable() {

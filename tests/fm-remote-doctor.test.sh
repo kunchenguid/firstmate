@@ -2,9 +2,13 @@
 # tests/fm-remote-doctor.test.sh - the remote second-mate readiness gate.
 #
 # Drives the real bin/fm-remote-doctor.sh against a controlled account fixture:
-# a private HOME, a fake launchctl backed by state files, a fake herdr CLI, and
-# a fake uname that selects the platform under test. Nothing here touches the
-# runner's own launch agents, login session, or herdr server.
+# a private HOME, a fake launchctl backed by state files, a fake herdr CLI, a
+# fake lsof that names a real holder process as the fm-remote socket owner, and
+# a fake uname that selects the platform under test. The holders are real
+# non-platform processes (jq blocked on a fifo) whose environment carries the
+# birth markers bin/fm-remote-herdr-owner-lib.sh reads, so the Aqua-versus-SSH
+# verdict is exercised for real. Nothing here touches the runner's own launch
+# agents, login session, or herdr server.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -20,7 +24,9 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 JOB_LABEL=dev.firstmate.remote-job
 CASE_N=0
 DOCTOR_WORKER_PID=
-trap 'if [ -n "$DOCTOR_WORKER_PID" ]; then kill "$DOCTOR_WORKER_PID" 2>/dev/null || true; fi; fm_test_cleanup || true' EXIT
+HOLDER_PIDS=()
+trap 'if [ -n "$DOCTOR_WORKER_PID" ]; then kill "$DOCTOR_WORKER_PID" 2>/dev/null || true; fi; if [ "${#HOLDER_PIDS[@]}" -gt 0 ]; then kill "${HOLDER_PIDS[@]}" 2>/dev/null || true; fi; fm_test_cleanup || true' EXIT
+GUARD="$ROOT/bin/fm-remote-herdr-guard.sh"
 
 # A fixture must be able to present a host with NO herdr, so the doctor never
 # sees the runner's own PATH. Only the two required tools are re-exposed, by
@@ -30,6 +36,30 @@ mkdir -p "$TOOLS"
 ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
 BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# Real socket-owner holders for the Darwin birth check: jq blocked on a fifo
+# this test keeps open, with exactly the marker environment each birth needs.
+JQ=$(command -v jq)
+HOLDER_FD=5
+hold() { # <marker-env...> -> HOLDER_PID
+  local fifo="$TMP_ROOT/holder-$HOLDER_FD.fifo"
+  mkfifo "$fifo"
+  env -i "$@" "$JQ" . "$fifo" &
+  HOLDER_PID=$!
+  HOLDER_PIDS+=("$HOLDER_PID")
+  eval "exec ${HOLDER_FD}>\"\$fifo\""
+  HOLDER_FD=$((HOLDER_FD + 1))
+}
+hold XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote
+AQUA_HOLDER_PID=$HOLDER_PID
+hold XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote
+BACKGROUND_HOLDER_PID=$HOLDER_PID
+hold XPC_SERVICE_NAME=0
+XPC_ZERO_HOLDER_PID=$HOLDER_PID
+hold FM_REMOTE_JOB_ACTIVE=1
+WORKER_HOLDER_PID=$HOLDER_PID
+hold SSH_CONNECTION='100.102.217.78 51234 100.100.1.2 22' SSH_CLIENT='100.102.217.78 51234 22'
+SSH_HOLDER_PID=$HOLDER_PID
 
 # new_case <Darwin|Linux> [with-herdr] [gui] [login-shell]
 # Builds one isolated account fixture and points the module-level CASE_*
@@ -80,6 +110,10 @@ loaded="$FM_FAKE_STATE/loaded-$label"
 case "${1:-}" in
   print)
     case "$domain" in
+      user/*/*)
+        [ -f "$FM_FAKE_STATE/user-loaded-$label" ] || exit 113
+        cat "$FM_FAKE_STATE/user-loaded-$label"
+        ;;
       */dev.firstmate.herdr.fm-remote)
         [ -f "$loaded" ] || exit 113
         cat "$loaded"
@@ -127,13 +161,19 @@ arguments = {
 	$FM_FAKE_LOGIN_SHELL
 	-l
 	-c
-	exec '$FM_FAKE_HERDR_BIN' server --session 'fm-remote'
+	exec '$FM_FAKE_GUARD' '$FM_FAKE_HERDR_BIN' 'fm-remote'
 }
 stdout path = $FM_FAKE_LAUNCH_AGENT_LOG
 stderr path = $FM_FAKE_LAUNCH_AGENT_LOG
-properties = keepalive | runatload | inferred program
+semaphores = {
+	successful exit => 0
+}
+properties = runatload | inferred program
 EOF
-        [ -f "$FM_FAKE_STATE/bootstrap-does-not-start" ] || printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
+        if [ ! -f "$FM_FAKE_STATE/bootstrap-does-not-start" ]; then
+          printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
+          printf '%s\n' "$FM_FAKE_AQUA_PID" > "$FM_FAKE_STATE/socket-owner"
+        fi
         ;;
     esac
     exit 0
@@ -143,6 +183,9 @@ EOF
     case "$label" in
       dev.firstmate.remote-job) : ;;
       *)
+        # The real job execs the guard, which stops a foreign server and
+        # becomes the Aqua-born owner; the fixture models that outcome.
+        printf '%s\n' "$FM_FAKE_AQUA_PID" > "$FM_FAKE_STATE/socket-owner"
         if [ -f "$FM_FAKE_STATE/kickstart-delay" ]; then
           cp "$FM_FAKE_STATE/kickstart-delay" "$FM_FAKE_STATE/herdr-delay"
         else
@@ -167,6 +210,17 @@ exit 0
 SH
     chmod +x "$CASE_BIN/$forbidden"
   done
+
+  # The socket owner the birth check sees: the pid in socket-owner, or the
+  # Aqua holder when a case never chose one.
+  cat > "$CASE_BIN/lsof" <<'SH'
+#!/usr/bin/env bash
+pid=$(cat "$FM_FAKE_STATE/socket-owner" 2>/dev/null || printf '%s' "$FM_FAKE_AQUA_PID")
+[ -n "$pid" ] || exit 0
+printf 'p%s\n' "$pid"
+printf 'n%s\n' "$FM_FAKE_HERDR_SOCKET"
+SH
+  chmod +x "$CASE_BIN/lsof"
 
   cat > "$CASE_BIN/dscl" <<'SH'
 #!/usr/bin/env bash
@@ -206,7 +260,7 @@ case "${1:-} ${2:-}" in
         running=true
       fi
     fi
-    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s}}\n' "$running"
+    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s,"socket":"%s"}}\n' "$running" "$FM_FAKE_HERDR_SOCKET"
     ;;
   "server "*|"server ")
     printf 'true\n' > "$FM_FAKE_HERDR_RUNNING"
@@ -253,6 +307,9 @@ doctor() {
     FM_FAKE_FORBIDDEN_LOG="$CASE_FORBIDDEN_LOG" \
     FM_FAKE_HERDR_RUNNING="$CASE_HERDR_RUNNING" \
     FM_FAKE_HERDR_BIN="$CASE_BIN/herdr" \
+    FM_FAKE_HERDR_SOCKET="$CASE_STATE/herdr.sock" \
+    FM_FAKE_GUARD="$GUARD" \
+    FM_FAKE_AQUA_PID="$AQUA_HOLDER_PID" \
     FM_FAKE_PLIST="$CASE_PLIST" \
     FM_FAKE_JOB_PLIST="$CASE_JOB_PLIST" \
     FM_FAKE_JOB_WORKER="$ROOT/bin/fm-remote-job-worker.sh" \
@@ -271,8 +328,9 @@ doctor() {
   set -e
 }
 
-write_loaded_contract() { # <herdr-path> [properties]
-  local herdr_bin=$1 properties=${2:-'keepalive | runatload | inferred program'}
+write_loaded_contract() { # <herdr-path> [properties] [exec-command]
+  local herdr_bin=$1 properties=${2:-'runatload | inferred program'} exec_cmd
+  exec_cmd=${3:-"exec '$GUARD' '$herdr_bin' 'fm-remote'"}
   cat > "$CASE_STATE/loaded-$LABEL" <<EOF
 path = $CASE_PLIST
 program = $CASE_LOGIN_SHELL
@@ -280,10 +338,13 @@ arguments = {
 	$CASE_LOGIN_SHELL
 	-l
 	-c
-	exec '$herdr_bin' server --session 'fm-remote'
+	$exec_cmd
 }
 stdout path = $CASE_HOME/Library/Logs/$LABEL.log
 stderr path = $CASE_HOME/Library/Logs/$LABEL.log
+semaphores = {
+	successful exit => 0
+}
 properties = $properties
 EOF
 }
@@ -310,14 +371,16 @@ assert_herdr_launch_agent_contract() { # <plist> <herdr-bin> [login-shell]
   [ "$argv0" = "$expected_shell" ] || fail "ProgramArguments[0] is $argv0, not the resolved login shell $expected_shell"
   [ "$argv1" = -l ] || fail "ProgramArguments[1] is $argv1, not -l"
   [ "$argv2" = -c ] || fail "ProgramArguments[2] is $argv2, not -c"
-  [ "$cmd" = "exec '$herdr_bin' server --session 'fm-remote'" ] \
-    || fail "ProgramArguments[3] is not exec of $herdr_bin for session fm-remote: $cmd"
+  [ "$cmd" = "exec '$GUARD' '$herdr_bin' 'fm-remote'" ] \
+    || fail "ProgramArguments[3] is not exec of the guard with $herdr_bin for session fm-remote: $cmd"
   [ "$(printf '%s' "$json" | jq -r '.LimitLoadToSessionType')" = Aqua ] \
     || fail "LimitLoadToSessionType is not Aqua"
   [ "$(printf '%s' "$json" | jq -r '.RunAtLoad')" = true ] \
     || fail "RunAtLoad is not true"
-  [ "$(printf '%s' "$json" | jq -r '.KeepAlive')" = true ] \
-    || fail "KeepAlive is not true"
+  [ "$(printf '%s' "$json" | jq -r '.KeepAlive.SuccessfulExit')" = false ] \
+    || fail "KeepAlive is not {SuccessfulExit=false}: $(printf '%s' "$json" | jq -c '.KeepAlive')"
+  [ "$(printf '%s' "$json" | jq -r '.ThrottleInterval')" = 10 ] \
+    || fail "ThrottleInterval is not 10"
   [ "$(printf '%s' "$json" | jq -r '.Label')" = "$LABEL" ] \
     || fail "Label is not $LABEL"
 }
@@ -444,7 +507,7 @@ cat > "$CASE_PLIST" <<XML
 </dict>
 </plist>
 XML
-write_loaded_contract /obsolete/bin/herdr 'runatload | inferred program'
+write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred program' "exec '/obsolete/bin/herdr' server --session 'fm-remote'"
 printf 'true\n' > "$CASE_HERDR_RUNNING"
 doctor
 expect_code 1 "$DOCTOR_RC" "a stale launch-agent contract was reported ready"
@@ -480,7 +543,7 @@ cat > "$CASE_PLIST" <<XML
 </dict>
 </plist>
 XML
-write_loaded_contract /obsolete/bin/herdr 'runatload | inferred program'
+write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred program' "exec '/obsolete/bin/herdr' server --session 'fm-remote'"
 printf 'true\n' > "$CASE_HERDR_RUNNING"
 touch "$CASE_STATE/bootout-fail"
 doctor --fix
@@ -545,6 +608,72 @@ assert_contains "$DOCTOR_OUT" 'fix herdr-server=applied:' "delayed launchd start
 assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "delayed launchd startup was not confirmed"
 assert_absent "$CASE_STATE/herdr-delay" "the readiness poll stopped before the delayed server became reachable"
 pass "launchd failures are reported and delayed server readiness is awaited"
+
+# --- a running session served outside the Aqua login session is not ready ---
+
+new_case Darwin with-herdr gui
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the Aqua-owner fixture could not be initialized"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $AQUA_HOLDER_PID, launchd)" \
+  "a launchd-born owner was not reported with its pid and birth"
+
+printf '%s\n' "$BACKGROUND_HOLDER_PID" > "$CASE_STATE/socket-owner"
+printf 'background job\n' > "$CASE_STATE/user-loaded-$LABEL"
+doctor
+expect_code 1 "$DOCTOR_RC" "a label loaded in the user domain was reported Aqua-born"
+assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $BACKGROUND_HOLDER_PID born outside the Aqua login session (unknown)" \
+  "the user-domain owner was not tagged fixable"
+rm -f "$CASE_STATE/user-loaded-$LABEL"
+
+printf '%s\n' "$XPC_ZERO_HOLDER_PID" > "$CASE_STATE/socket-owner"
+doctor
+expect_code 1 "$DOCTOR_RC" "an XPC_SERVICE_NAME=0 owner was reported Aqua-born"
+assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $XPC_ZERO_HOLDER_PID born outside the Aqua login session (unknown)" \
+  "the inherited XPC marker was not tagged fixable"
+
+printf '%s\n' "$WORKER_HOLDER_PID" > "$CASE_STATE/socket-owner"
+doctor
+expect_code 0 "$DOCTOR_RC" "the gui-only remote-job worker owner was not reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $WORKER_HOLDER_PID, worker)" \
+  "the gui-only worker was not recognized"
+
+printf '%s\n' "$SSH_HOLDER_PID" > "$CASE_STATE/socket-owner"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor
+expect_code 1 "$DOCTOR_RC" "a session served by an SSH-born server was reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $SSH_HOLDER_PID born outside the Aqua login session (ssh)" \
+  "an SSH-born owner was not tagged fixable with its pid and birth"
+assert_contains "$DOCTOR_OUT" 'cannot reach the login keychain' "the consequence of the foreign birth was not named"
+assert_contains "$DOCTOR_OUT" 'action: herdr-server:' "the foreign-birth gap came with no operator action"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "a healthy loaded contract was blamed for the foreign server"
+[ ! -s "$CASE_LAUNCHCTL_LOG" ] || assert_not_contains "$(cat "$CASE_LAUNCHCTL_LOG")" kickstart \
+  "a read-only doctor run restarted the launch agent"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not hand the session back to the launch agent"
+assert_contains "$DOCTOR_OUT" 'fix herdr-server=applied:' "--fix did not report the takeover through the launch agent"
+assert_grep "kickstart -k gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" "the takeover did not go through launchd"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $AQUA_HOLDER_PID, launchd)" \
+  "the launch-agent-owned server was not confirmed after the takeover"
+assert_no_dangerous_calls "the takeover reached for auto-login, FileVault, or the keychain"
+
+# A RunAtLoad job also runs at bootstrap; hold that back so the takeover
+# depends on the kickstart that is about to fail.
+printf '%s\n' "$SSH_HOLDER_PID" > "$CASE_STATE/socket-owner"
+touch "$CASE_STATE/kickstart-fail" "$CASE_STATE/bootstrap-does-not-start"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a failed takeover was reported ready"
+assert_contains "$DOCTOR_OUT" 'fix herdr-server=failed: launchctl kickstart' "the failed takeover was not reported"
+assert_contains "$DOCTOR_OUT" "check herdr-server=fixable: session fm-remote is served by pid $SSH_HOLDER_PID" \
+  "a still-foreign server was reported ready after a failed takeover"
+rm -f "$CASE_STATE/kickstart-fail" "$CASE_STATE/bootstrap-does-not-start"
+
+rm -f "$CASE_STATE/socket-owner"
+: > "$CASE_STATE/socket-owner"
+doctor
+expect_code 1 "$DOCTOR_RC" "a session with no provable owner was reported ready"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=fixable: session fm-remote is running but no herdr process can be shown to own its socket' \
+  "an unprovable owner was not tagged fixable"
+pass "a session served outside the Aqua login session is fixable and --fix retakes it through launchd"
 
 # --- no GUI login session: every dependent gap stays human -------------------
 
