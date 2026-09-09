@@ -178,7 +178,7 @@ fm_backlog_data_relative() {  # <data-dir>
 }
 
 fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
-  local config=$1 data authorized_data=$2 kind=$3 file root
+  local config=$1 data authorized_data=$2 kind=$3 file root backend
   FM_BACKLOG_TRANSITION_SKIP=
   if [ "$kind" = secondmate ]; then
     FM_BACKLOG_TRANSITION_SKIP="secondmates are not backlog items"
@@ -193,7 +193,11 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
     return 2
   fi
   root=$(fm_backlog_root "$data") || return 2
-  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
+    FM_BACKLOG_TRANSITION_ERROR=$backend
+    return 2
+  }
+  if [ "$backend" = markdown ]; then
     file=$(fm_backlog_file "$data")
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then
       FM_BACKLOG_TRANSITION_SKIP="this home keeps no backlog at $file"
@@ -291,11 +295,12 @@ fm_tasks_axi() {
 # with `--file` only for the markdown backend; the exit status is tasks-axi's.
 # Extra flags (such as --full) are passed through.
 fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
-  local data=$1 id=$2 file root
+  local data=$1 id=$2 file root backend
   shift 2
   file=$(fm_backlog_file "$data") || return 1
   root=$(fm_backlog_root "$data") || return 1
-  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+  backend=$(fm_tasks_axi_backend "$root") || return 2
+  if [ "$backend" = markdown ]; then
     (cd "$root" 2>/dev/null && fm_tasks_axi show "$id" "$@" --file "$file" 2>&1)
   else
     (cd "$root" 2>/dev/null && fm_tasks_axi show "$id" "$@" 2>&1)
@@ -303,11 +308,12 @@ fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
 }
 
 fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
-  local data=$1 file root
+  local data=$1 file root backend
   shift
   file=$(fm_backlog_file "$data") || return 1
   root=$(fm_backlog_root "$data") || return 1
-  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+  backend=$(fm_tasks_axi_backend "$root") || return 2
+  if [ "$backend" = markdown ]; then
     (cd "$root" 2>/dev/null && tasks-axi list "$@" --file "$file" 2>&1)
   else
     (cd "$root" 2>/dev/null && tasks-axi list "$@" 2>&1)
@@ -315,7 +321,7 @@ fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
 }
 
 fm_backlog_row_probe() {  # <data-dir> <id>
-  local data authorized_data=$1 file id=$2 out state held blocked hold_kind command_status root
+  local data authorized_data=$1 file id=$2 out state held blocked hold_kind command_status root backend
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
@@ -330,7 +336,11 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
     return 1
   }
-  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
+    FM_BACKLOG_ROW_ERROR=$backend
+    return 2
+  }
+  if [ "$backend" = markdown ]; then
     file=$(fm_backlog_file "$data") || {
       FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
       return 1
@@ -380,7 +390,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
 # other configured backend is addressed by the root's own tasks-axi
 # configuration, so passing the markdown-era path would write the wrong store.
 fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
-  local data authorized_data=$1 file verb=$2 id=$3 out command_status root
+  local data authorized_data=$1 file verb=$2 id=$3 out command_status root backend
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
@@ -388,7 +398,11 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   shift 3
   FM_BACKLOG_TRANSITION_ERROR=
   root=$(fm_backlog_root "$data") || return 1
-  if [ "$(fm_tasks_axi_backend "$root")" != markdown ]; then
+  backend=$(fm_tasks_axi_backend "$root" 2>&1) || {
+    FM_BACKLOG_TRANSITION_ERROR=$backend
+    return 2
+  }
+  if [ "$backend" != markdown ]; then
     out=$(cd "$root" 2>/dev/null && fm_tasks_axi "$verb" "$id" "$@" 2>&1)
     command_status=$?
   else
