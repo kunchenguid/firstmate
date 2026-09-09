@@ -34,13 +34,14 @@
 #                     the same harness - pool machinery and other homes'
 #                     sessions - which are neither listed nor claimed.
 #                     lock_owner is the honest answer to "which background
-#                     session drives this home": "unique" when exactly one
-#                     session owns the recorded lock, "single" when only one
-#                     session exists, "ambiguous" when the lock names a shared
-#                     harness daemon that parents several sessions and no single
-#                     one can be attributed, "stale" when the recorded pid is not
-#                     a live harness process, "absent" when no lock is recorded,
-#                     and "not_checked" when the ancestry could not be resolved.
+#                     session drives this home": "single" when exactly one
+#                     session under the recorded lock's harness works in this
+#                     home, "ambiguous" when several do and no single one can be
+#                     attributed, "none" when the lock's harness is alive but
+#                     none of its sessions works in this home, "stale" when the
+#                     recorded pid is not a live harness process, "absent" when
+#                     no lock is recorded, and "not_checked" when the ancestry
+#                     could not be resolved.
 #   sources[]         {name, ok, reason} - one per collector, so an unreadable
 #                     source is disclosed instead of silently reported as zero.
 #
@@ -782,7 +783,7 @@ fi
 # bounded, because a session start pays for every line it prints.
 printf '%s\n' "$JSON" | jq -r --argjson cap 8 '
   def row_label($r):
-    if $r.kind == "harness-session" then "background session (\($r.label))"
+    if $r.kind == "harness-session" then "background session \($r.id)"
     elif $r.kind == "worker" then "worker \($r.id)"
     elif $r.kind == "review" then "review page \($r.label)"
     else "service \($r.label // $r.id)" end;

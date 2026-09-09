@@ -176,7 +176,7 @@ render_once() {
            dim("no background session is working in this home")
          elif $h.lock_owner == "absent" then
            dim("no session is currently driving this home")
-         elif $h.lock_owner == "single" or $h.lock_owner == "unique" then
+         elif $h.lock_owner == "single" then
            dim("one background session drives this home")
          else
            dim("background sessions: \($h.lock_owner)")

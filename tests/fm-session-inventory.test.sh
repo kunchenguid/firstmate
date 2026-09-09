@@ -462,6 +462,40 @@ test_stale_rows_carry_their_exact_close_command() {
   pass "inventory: stale rows carry their age and their exact close command"
 }
 
+# The unasked line is the only place a background session is named without the
+# captain asking for it, so it has to name the one thing that identifies it: its
+# pid, which is also what the close command below it kills.
+test_stale_session_line_names_the_pid() {
+  local home spec daemon out
+  home=$(make_home stale-session-line)
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  spec="$home/children"
+  printf '%s|sess-a --session-id aaaa --agent claude --permission-mode bypassPermissions\n' \
+    "$home" > "$spec"
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
+  printf '%s\n' "$daemon" > "$home/state/.lock"
+
+  # A fixture session is seconds old, so the threshold comes down to it instead.
+  out=$(FM_SESSION_STALE_DAYS=0 run_inventory "$home" --stale-lines) \
+    || fail "--stale-lines failed with a live background session"
+
+  local pid
+  pid=$(FM_SESSION_STALE_DAYS=0 run_inventory "$home" --json \
+    | jq -r '.rows[] | select(.kind == "harness-session") | .id')
+  [ -n "$pid" ] || fail "the fixture session was not listed as this home's"
+  assert_contains "$out" "SESSIONS_STALE: background session $pid" \
+    "the unasked line must name the session by the pid its close command kills"
+  assert_contains "$out" "close: kill $pid" \
+    "the unasked line must carry the exact close command for that pid"
+  assert_not_contains "$out" "background session (" \
+    "the unasked line must not pad the session name with a parenthetical that names nothing"
+
+  kill_spawned
+  pass "inventory: the unasked line names an overdue background session by its pid"
+}
+
 test_row_without_a_safe_close_stays_out_of_the_unasked_line() {
   local home json out
   home=$(make_home manual-close)
@@ -795,6 +829,7 @@ test_contradictory_argv_does_not_decide_the_role
 test_stale_lock_pid_is_not_attributed
 test_nothing_old_prints_nothing_at_session_start
 test_stale_rows_carry_their_exact_close_command
+test_stale_session_line_names_the_pid
 test_worker_age_is_running_time_not_task_age
 test_worker_with_no_live_process_is_aged_by_its_task
 test_row_without_a_safe_close_stays_out_of_the_unasked_line
