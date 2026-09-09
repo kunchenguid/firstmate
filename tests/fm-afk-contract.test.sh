@@ -395,6 +395,43 @@ test_validation_rejects_blank_decoded_clause_fields() {
   pass "validation and archive refuse blank decoded clause fields"
 }
 
+test_validation_rejects_blank_stop_and_refused_text() {
+  local kind home record out rc
+  for kind in stop refused-text; do
+    home=$(make_home "blank-$kind")
+    if [ "$kind" = stop ]; then
+      contract "$home" propose --action merge --object 'task a PR' --when 'checks green' --stop 'captain returns' >/dev/null || fail "stop proposal failed"
+    else
+      contract "$home" propose --action merge --object 'task a PR' >/dev/null 2>&1 || true
+    fi
+    contract "$home" confirm >/dev/null || fail "$kind confirmation failed"
+    record="$home/state/.afk-contract"
+    if [ "$kind" = stop ]; then
+      sed 's/^    stop: e:.*/    stop: e:/' "$record" > "$home/damaged"
+    else
+      sed 's/^    text: e:.*/    text: e:/' "$record" > "$home/damaged"
+    fi
+    mv "$home/damaged" "$record"
+    set +e
+    out=$(contract "$home" validate 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "validation accepted blank $kind data"
+    if [ "$kind" = stop ]; then
+      assert_contains "$out" 'malformed clauses row 1: missing or invalid stop' "validation did not name the blank stop"
+    else
+      assert_contains "$out" 'malformed refused row 1: missing or invalid text' "validation did not name the blank refused text"
+    fi
+    set +e
+    contract "$home" archive >/dev/null 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "archive accepted blank $kind data"
+    [ -f "$record" ] || fail "archive moved the record with blank $kind data"
+  done
+  pass "validation and archive refuse blank stop and refused text"
+}
+
 test_validation_rejects_damaged_words_blocks() {
   local mode home record out rc
   for mode in unindented empty; do
@@ -490,6 +527,7 @@ test_failed_replacement_keeps_the_standing_record
 test_failed_final_replacement_rolls_back_the_superseded_archive
 test_validation_rejects_incomplete_clause_rows
 test_validation_rejects_blank_decoded_clause_fields
+test_validation_rejects_blank_stop_and_refused_text
 test_validation_rejects_damaged_words_blocks
 test_archive_moves_the_record_aside_and_is_idempotent
 test_inputs_are_validated

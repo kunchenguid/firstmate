@@ -440,7 +440,7 @@ fm_afk_contract_read_list() {  # <path> <section>
 # schema.
 fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
   local path=$1 require_confirmed=$2 version entered entered_epoch expected reach announced spend words_header confirmed
-  local clause_rows clause id object when decoded
+  local clause_rows refused_rows clause refused id object when stop text decoded
   [ -f "$path" ] || return 1
   version=$(fm_afk_contract_read_field "$path" version)
   [ "$version" = "$FM_AFK_CONTRACT_VERSION" ] || {
@@ -477,6 +477,7 @@ fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
     id=$(printf '%s' "$clause" | cut -f1)
     object=$(printf '%s' "$clause" | cut -f3)
     when=$(printf '%s' "$clause" | cut -f4)
+    stop=$(printf '%s' "$clause" | cut -f5)
     decoded=$(fm_afk_contract_unescape "$object"; printf x)
     decoded=${decoded%x}
     if fm_afk_contract_blank "$decoded"; then
@@ -489,12 +490,33 @@ fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
       fm_afk_contract_log "record $path has malformed clauses row $id: missing or invalid when"
       return 1
     fi
+    if [ "$stop" != - ]; then
+      decoded=$(fm_afk_contract_unescape "$stop"; printf x)
+      decoded=${decoded%x}
+      if fm_afk_contract_blank "$decoded"; then
+        fm_afk_contract_log "record $path has malformed clauses row $id: missing or invalid stop"
+        return 1
+      fi
+    fi
   done <<EOF
 $clause_rows
 EOF
-  if ! fm_afk_contract_read_list "$path" refused >/dev/null; then
+  if ! refused_rows=$(fm_afk_contract_read_list "$path" refused); then
     return 1
   fi
+  while IFS= read -r refused; do
+    [ -n "$refused" ] || continue
+    id=$(printf '%s' "$refused" | cut -f1)
+    text=$(printf '%s' "$refused" | cut -f2)
+    decoded=$(fm_afk_contract_unescape "$text"; printf x)
+    decoded=${decoded%x}
+    if fm_afk_contract_blank "$decoded"; then
+      fm_afk_contract_log "record $path has malformed refused row $id: missing or invalid text"
+      return 1
+    fi
+  done <<EOF
+$refused_rows
+EOF
 }
 
 # --- rendering --------------------------------------------------------------

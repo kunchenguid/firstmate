@@ -355,7 +355,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
 
   # 1. health, first, always.
   printf 'Supervisor health:\n'
-  awk -F '\t' '$1 == "evidence" && ($2 == "health" || ($2 == "lifecycle" && ($3 ~ /^outcome store unreadable/ || $3 ~ /^status file unreadable:/ || $3 ~ /^away-posture record unreadable:/ || $3 ~ /^archived away-posture record/ || $3 ~ /^superseded away-posture record/))) { print "  - " $3 }' "$evidence"
+  awk -F '\t' '$1 == "evidence" && ($2 == "health" || ($2 == "lifecycle" && ($3 ~ /^outcome store unreadable/ || $3 ~ /^status file unreadable:/ || $3 ~ /^away-posture record (unreadable|missing):/ || $3 ~ /^archived away-posture record/ || $3 ~ /^superseded away-posture record/))) { print "  - " $3 }' "$evidence"
 
   # 2. the mandate.
   printf 'Mandate clauses:\n'
@@ -456,7 +456,7 @@ EOF
 
 return_reconcile() {
   local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since contract_since superseded_record retained_record
-  local archived_contract
+  local archived_contract tag kind text retained_live
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
   drain_err=$(mktemp "$STATE/.afk-return-drain.XXXXXX") || { rm -f "$evidence" "$blockers"; return 1; }
@@ -467,6 +467,33 @@ return_reconcile() {
   # Health is read before the shutdown below so the shutdown cannot read as a gap;
   # a repeated begin/check keeps the first snapshot.
   grep -q "^evidence$(printf '\t')health$(printf '\t')" "$evidence" 2>/dev/null || health_snapshot "$evidence"
+
+  while IFS="$(printf '\t')" read -r tag kind text; do
+    [ "$tag" = evidence ] && [ "$kind" = lifecycle ] || continue
+    case "$text" in
+      'away-posture record unreadable: '*'; catch-up stays gated')
+        retained_live=${text#away-posture record unreadable: }
+        retained_live=${retained_live%; catch-up stays gated} ;;
+      'away-posture record missing: '*'; catch-up stays gated')
+        retained_live=${text#away-posture record missing: }
+        retained_live=${retained_live%; catch-up stays gated} ;;
+      *) continue ;;
+    esac
+    if [ ! -f "$retained_live" ]; then
+      remove_evidence lifecycle "away-posture record unreadable: $retained_live; catch-up stays gated" "$evidence" || lifecycle_ok=0
+      append_evidence lifecycle "away-posture record missing: $retained_live; catch-up stays gated" "$evidence"
+      lifecycle_ok=0
+    elif ! fm_afk_contract_validate "$retained_live" 1; then
+      remove_evidence lifecycle "away-posture record missing: $retained_live; catch-up stays gated" "$evidence" || lifecycle_ok=0
+      append_evidence lifecycle "away-posture record unreadable: $retained_live; catch-up stays gated" "$evidence"
+      lifecycle_ok=0
+    else
+      remove_evidence lifecycle "away-posture record missing: $retained_live; catch-up stays gated" "$evidence" || lifecycle_ok=0
+      remove_evidence lifecycle "away-posture record unreadable: $retained_live; catch-up stays gated" "$evidence" || lifecycle_ok=0
+    fi
+  done <<EOF
+$(cat "$evidence")
+EOF
 
   if [ -e "$STATE/.afk" ] || [ -e "$STATE/.afk-daemon-terminal" ] || fm_afk_contract_present "$STATE"; then
     if ! "$SCRIPT_DIR/fm-afk-launch.sh" stop; then
@@ -526,7 +553,9 @@ return_reconcile() {
         remove_evidence lifecycle "superseded away-posture record unreadable: $retained_record; catch-up stays gated" "$evidence" || lifecycle_ok=0
         remove_superseded_record "$retained_record" "$evidence" || lifecycle_ok=0
       fi
-    done < "$evidence"
+    done <<EOF
+$(cat "$evidence")
+EOF
 
     for superseded_record in "$(fm_afk_contract_archive_dir "$STATE")/$contract_since-superseded-"*.afk-contract; do
       [ -f "$superseded_record" ] || continue

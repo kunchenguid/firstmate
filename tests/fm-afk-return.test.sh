@@ -441,6 +441,42 @@ test_malformed_posture_record_keeps_catchup_gated() {
   pass "a malformed posture record stays live and gates return catch-up"
 }
 
+test_missing_epoch_record_stays_required_after_disappearing() {
+  local dir out rc gate record backup
+  dir="$TMP_ROOT/missing-epoch-posture-record"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  record="$dir/home/state/.afk-contract"
+  backup="$dir/valid-record.backup"
+  contract_in "$dir" propose --words 'captain words survive' >/dev/null || fail "could not propose the posture record"
+  contract_in "$dir" confirm >/dev/null || fail "could not confirm the posture record"
+  cp "$record" "$backup"
+  grep -v '^entered_epoch: ' "$record" > "$dir/damaged-record"
+  mv "$dir/damaged-record" "$record"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a malformed record without an epoch should retain catch-up (rc=$rc): $out"
+  [ -f "$gate" ] || fail "the malformed record without an epoch did not retain the gate"
+  assert_contains "$out" "away-posture record unreadable: $record; catch-up stays gated" "begin did not retain the unreadable record path"
+  rm "$record"
+  set +e
+  out=$(run_return "$dir" check)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "deleting the malformed epochless record cleared catch-up (rc=$rc): $out"
+  assert_contains "$out" "away-posture record missing: $record; catch-up stays gated" "check did not name the missing retained record"
+  [ -f "$gate" ] || fail "the missing retained record did not preserve the gate"
+  cp "$backup" "$record"
+  out=$(run_return "$dir" check) || fail "check did not clear after the retained record was restored valid: $out"
+  assert_contains "$out" 'catch-up clear' "the restored valid record did not clear catch-up"
+  [ ! -e "$gate" ] || fail "the restored valid record left the gate behind"
+  pass "an epochless malformed record remains required until restored valid"
+}
+
 test_unreadable_outcome_store_keeps_catchup_gated() {
   local dir out rc gate
   dir="$TMP_ROOT/unreadable-outcome-store"
@@ -659,6 +695,7 @@ test_missing_final_archive_keeps_retained_contract_gated
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated
+test_missing_epoch_record_stays_required_after_disappearing
 test_unreadable_outcome_store_keeps_catchup_gated
 test_failed_held_listing_keeps_catchup_gated
 test_unreadable_status_file_keeps_catchup_gated
