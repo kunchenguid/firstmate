@@ -445,6 +445,80 @@ Observed output:
 fm-claude-stop-autoarm: ok
 ```
 
+### Non-empty Stop-hook blocks on a mode-reverting filesystem, 2026-09-09
+
+The rule that no blocking exit of either Claude Stop hook may be empty, owned by [`../turnend-guard.md`](../turnend-guard.md#harness-integrations), was validated on 2026-09-09 against the real condition that produced the incident rather than a simulated one, on WSL2 (Linux 6.6.87.2-microsoft-standard-WSL2).
+The filesystem is real; the harness is not, so this is not a live-Claude pass: the tracked hook scripts run hermetically under the suite's fake `claude` parent, as they do in every other case of these two suites.
+
+Host condition that made the case eligible: `/mnt/c` reverts `chmod` while still executing what it stores, and the Linux-disk `$TMPDIR` holds restricted modes, so both the mode-incapable case and its mode-capable control ran instead of skipping.
+
+```text
+### mode-incapable root: /mnt/c/fm-autoarm-modeless.h55IZr
+### state dir mode after chmod 700: 777
+### file mode after chmod 600: 777
+### control state dir mode after chmod 700: 700
+```
+
+Both suites ran to completion with the host-dependent cases live:
+
+```sh
+tests/fm-claude-stop-autoarm.test.sh
+tests/fm-turnend-guard.test.sh
+```
+
+Observed output:
+
+```text
+ok - auto-arm: a state directory that cannot hold restricted modes never blocks a turn with empty output
+ok - auto-arm: a home whose state dir can hold restricted modes keeps its silent and actionable paths unchanged
+ok - fm-turnend-guard --claude: an unrecordable episode reset blocks with a named cause, never in silence
+```
+
+The original failure was reproduced first on that same mount, by copying the pre-fix `bin/fm-claude-stop-autoarm.sh` from base `55d4069` into the fixture and firing it three times.
+The tracked suite asserts rather than prints, so the transcripts below came from a throwaway driver that reused the suite's own fixture helpers and the real hook; it is not a tracked entry point.
+
+```text
+### PRE-FIX hook (base 55d4069) on the same mode-reverting mount
+### firing 1: exit=2 output_bytes=305
+### firing 2: exit=2 output_bytes=0
+### firing 3: exit=2 output_bytes=0
+### epoch: epoch=3 owner_pid=3998062 outcome=failed-suppressed updated_at=1788979736
+```
+
+That is the incident exactly: the turn is held closed, the epoch records `failed-suppressed`, and after the one notice the operator is shown nothing at all.
+
+Operator-visible text the current hook prints on the same fixture:
+
+```text
+### ---- firing 1 ----
+### exit=2
+firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after 2 bounded attempts, and no live watcher with a fresh beacon was verified.
+fm-pr-check-migrate: cannot publish /mnt/c/fm-autoarm-modeless.h55IZr/home/state/pr-check.tmp: mode 777, expected 600
+Episode state is recorded in /mnt/c/fm-autoarm-modeless.h55IZr/home/state/.claude-autoarm-epoch.
+Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.
+### ---- firing 2 ----
+### exit=2
+firstmate watcher auto-arm STILL FAILING - this turn is held open for another Stop-owned retry. The full notice for this failure episode was already delivered, so only the current cause is repeated here.
+fm-pr-check-migrate: cannot publish /mnt/c/fm-autoarm-modeless.h55IZr/home/state/pr-check.tmp: mode 777, expected 600
+Episode state is recorded in /mnt/c/fm-autoarm-modeless.h55IZr/home/state/.claude-autoarm-epoch (outcome=failed-suppressed). Investigate the automatic Stop hook and watcher startup; do not launch a manual background arm.
+```
+
+Firing 3 repeated firing 2 verbatim.
+The refusal line is the helper's own untyped text, which the arm relays and the pre-fix prefix-only filter dropped entirely; the full notice still lands once per episode while every later block names the current cause and the ledger to read.
+
+Mode-capable control on the Linux disk, same hook, state dir holding `700`:
+
+```text
+### healthy verified close: exit=0 output_bytes=0
+### actionable wake: exit=2
+firstmate watcher wake - one supervision event needs a handling turn now.
+stale: fixture-win actionable
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+```
+
+The healthy close stays byte-for-byte silent and the actionable rewake banner is unchanged, so a home whose state directory can hold restricted modes sees no behaviour change.
+Strict mode enforcement itself is untouched here; the arm still refuses to publish an artifact that cannot hold `600`, and only the diagnosability of the resulting block changed.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
