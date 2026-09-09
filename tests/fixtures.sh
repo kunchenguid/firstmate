@@ -282,8 +282,9 @@ fm_test_run_spawn() {
   # the store as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so a value inherited from the
   # developer's shell would beat the throwaway HOME and the sandbox would not
   # hold, while an empty value falls through to it. Empty rather than a path
-  # because bin/fm-spawn.sh prefixes the launch only when the value is non-empty,
-  # so every launch-shape assertion in the suite keeps reading the same command.
+  # because bin/fm-spawn.sh forwards the resolved DEFAULT store as no prefix at
+  # all, so every launch-shape assertion in the suite keeps reading the same
+  # command.
   # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
   local spawn_home=$home/user-home
   mkdir -p "$spawn_home"

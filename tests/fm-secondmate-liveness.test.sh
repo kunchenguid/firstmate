@@ -293,6 +293,12 @@ case "${1:-}" in
       *) [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1; exit 0 ;;
     esac
     ;;
+  send-keys)
+    # Opt-in only: the launch bytes are noise to every other assertion on the
+    # call log, and one test needs them.
+    [ -z "${FM_TEST_SEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_SEND_LOG"
+    exit 0
+    ;;
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
     [ "${1:-}" = kill-window ] && : > "${FM_TMUX_CALL_LOG}.killed"
@@ -368,6 +374,38 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead secondmate should actually be relaunched"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+}
+
+# A respawn is a FRESH spawn, so bin/fm-spawn.sh takes the claude account from
+# its environment; only the sweep can supply this secondmate's own. Without
+# that, a claude secondmate dispatched to one account silently moves to
+# firstmate's on the next sweep, into a store its home never accepted the trust
+# dialog in. The ambient account here is deliberately a DIFFERENT one, so
+# neither assertion can pass by the two agreeing.
+test_sweep_respawn_keeps_the_secondmate_recorded_claude_account() {
+  local w fb tmuxfb log sendlog out recorded ambient
+  w=$(new_world sweep-account)
+  printf '%s\n' claude > "$w/home/config/secondmate-harness"
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  recorded="$w/account-recorded"; ambient="$w/account-ambient"
+  mkdir -p "$recorded" "$ambient"
+  printf 'claude_config_dir=%s\n' "$recorded" >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  sendlog="$w/send.log"; : > "$sendlog"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" \
+    FM_TEST_SEND_LOG="$sendlog" CLAUDE_CONFIG_DIR="$ambient")
+
+  assert_contains "$(cat "$log")" "new-window" \
+    "the confirmed-dead secondmate should have been respawned: $out"
+  assert_grep "CLAUDE_CONFIG_DIR='$recorded'" "$sendlog" \
+    "the respawned worker was not pointed at the account its own record names"
+  assert_no_grep "$ambient" "$sendlog" \
+    "the respawn moved the secondmate onto firstmate's own account"
+  [ "$(sed -n 's/^claude_config_dir=//p' "$w/home/state/sm1.meta")" = "$recorded" ] \
+    || fail "the respawn rewrote the record with another account: $(cat "$w/home/state/sm1.meta")"
+  pass "sweep: a respawned claude secondmate keeps the account its record names"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -545,6 +583,7 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_respawn_keeps_the_secondmate_recorded_claude_account
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

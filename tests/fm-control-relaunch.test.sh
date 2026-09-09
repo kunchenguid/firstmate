@@ -949,10 +949,13 @@ test_spawn_relaunch_reuses_the_recorded_claude_account() {
   pass "fm-spawn --relaunch: the recorded claude account survives, for both the launch and the trust record"
 }
 
-# An unset account is the default single-store install, so a task recorded
-# before this field existed relaunches on the default store rather than
-# inheriting whatever account firstmate happens to be running under.
-test_spawn_relaunch_without_a_recorded_account_ignores_the_ambient_one() {
+# Every claude spawn records its resolved account, so a record with no account
+# is one written before that field existed - and its worker was running under
+# firstmate's own account. Such a relaunch inherits the ambient account, exactly
+# as it did before the field existed, and records it so the next one need not
+# infer anything. The ambient account is deliberately not the default store, so
+# a relaunch that ignored it would move the task off the account it ran on.
+test_spawn_relaunch_without_a_recorded_account_inherits_the_ambient_one() {
   local dir out ambient
   dir=$(new_case noaccount rl44)
   add_ship_task "$dir" rl44 claude
@@ -962,13 +965,15 @@ test_spawn_relaunch_without_a_recorded_account_ignores_the_ambient_one() {
 
   out=$(FM_TEST_CLAUDE_CONFIG_DIR="$ambient" run_spawn "$dir" rl44 --relaunch)
   assert_contains "$out" "spawned rl44 harness=claude" "the relaunch should have succeeded"$'\n'"$out"
-  [ -z "$(meta_field "$dir" rl44 claude_config_dir)" ] \
-    || fail "the relaunch invented an account record from the ambient environment"
-  assert_no_grep 'CLAUDE_CONFIG_DIR=' "$dir/fake/literal" \
-    "the replacement launch carried firstmate's own account"
-  [ ! -e "$ambient/.claude.json" ] \
-    || fail "the relaunch wrote a trust record into firstmate's own account"
-  pass "fm-spawn --relaunch: an unrecorded account stays the default store, never the ambient one"
+  [ "$(meta_field "$dir" rl44 claude_config_dir)" = "$ambient" ] \
+    || fail "the migrated record did not name the account the replacement launched against: $(meta_field "$dir" rl44 claude_config_dir)"
+  assert_grep "CLAUDE_CONFIG_DIR='$ambient'" "$dir/fake/literal" \
+    "a task recorded before the account field existed was moved off the account it was running on"
+  # The half that wedges a worker: the store the replacement reads is the store
+  # its worktree was trusted in.
+  assert_grep "$dir/wt" "$ambient/.claude.json" \
+    "the replacement's worktree was not trusted in the account it will read"
+  pass "fm-spawn --relaunch: a record from before the account field existed inherits and records the ambient account"
 }
 
 # A relative recorded account resolves against firstmate's cwd here but against
@@ -1660,7 +1665,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_spawn_relaunch_reuses_the_recorded_claude_account
-test_spawn_relaunch_without_a_recorded_account_ignores_the_ambient_one
+test_spawn_relaunch_without_a_recorded_account_inherits_the_ambient_one
 test_spawn_relaunch_refuses_a_relative_recorded_claude_account
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch

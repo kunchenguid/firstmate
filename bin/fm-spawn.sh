@@ -47,8 +47,10 @@
 #   the caller passes, so a contradicting one is worth reporting; the account
 #   instead arrives in the ambient environment, which firstmate always has set to
 #   its OWN account, so an ambient value during a relaunch cannot be read as an
-#   intentional override and is ignored rather than refused. Moving a task to
-#   another account is a fresh dispatch decision.
+#   intentional override and is ignored rather than refused. A record carrying no
+#   account at all is one written before the field existed, and only that case
+#   inherits the ambient one. Moving a task to another account is a fresh
+#   dispatch decision.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -304,11 +306,14 @@
 # entry lands in that account's own store. A set value is written to the task
 # record as claude_config_dir=<absolute path>, and --relaunch reuses the recorded
 # value for both the trust registration and the launch instead of inheriting
-# firstmate's own environment. Only a set account is recorded, so an absent
-# claude_config_dir= keeps meaning the default single-store ~/.claude and every
-# record written before this field existed stays valid. A relative value is
-# refused rather than resolved, from the environment and from the record alike,
-# because the two sides would otherwise name different stores.
+# firstmate's own environment. Every claude spawn records a resolved account,
+# the default single-store install included, where the resolved value is HOME
+# itself (bin/fm-claude-trust.sh resolves the unset default the same way). So an
+# absent claude_config_dir= carries exactly one meaning - a record written before
+# this field existed - and such a relaunch inherits the ambient account, which is
+# where that task's worker was already running. A relative value is refused
+# rather than resolved, from the environment and from the record alike, because
+# the two sides would otherwise name different stores.
 # claude* is the AUTHORITATIVE harness pattern for all three account sites - the
 # resolution, the trust registration, and the launch prefix - and it is the same
 # pattern the per-task busy-state wiring already arms on, because a task launched
@@ -1686,24 +1691,39 @@ fi
 CLAUDE_ACCOUNT_DIR=
 case "$HARNESS" in
   claude*)
-    if [ "$RELAUNCH" -eq 1 ]; then
-      CLAUDE_ACCOUNT_DIR=$(fm_meta_get "$RELAUNCH_META" claude_config_dir)
-    else
-      CLAUDE_ACCOUNT_DIR=${CLAUDE_CONFIG_DIR:-}
-    fi
     # A relative value resolves against this process's cwd but is read by the
     # worker's own pane, so the two sides can name different stores. Refuse it
     # rather than resolve it, for the same reason bin/fm-claude-trust.sh does.
-    case $CLAUDE_ACCOUNT_DIR in
-      ''|/*) ;;
-      *)
-        if [ "$RELAUNCH" -eq 1 ]; then
+    # Each source is judged where it is taken, so the refusal names the side the
+    # operator has to correct.
+    if [ "$RELAUNCH" -eq 1 ]; then
+      CLAUDE_ACCOUNT_DIR=$(fm_meta_get "$RELAUNCH_META" claude_config_dir)
+      case $CLAUDE_ACCOUNT_DIR in
+        ''|/*) ;;
+        *)
           echo "error: task $ID's recorded claude account directory '$CLAUDE_ACCOUNT_DIR' is a relative path, so the store the replacement worker reads cannot be guaranteed to be the one its worktree was trusted in; correct claude_config_dir= in the task record to an absolute path" >&2
-        else
-          echo "error: CLAUDE_CONFIG_DIR '$CLAUDE_ACCOUNT_DIR' is a relative path, so the store the worker reads cannot be guaranteed to be the one written here; set it to an absolute path" >&2
-        fi
-        exit 1 ;;
-    esac
+          exit 1 ;;
+      esac
+    fi
+    # An absent record field is a record written before this field existed, not
+    # a task on the default store: every claude spawn records its resolved
+    # account, so the default store arrives as an explicit path. Such a legacy
+    # task's worker was running under firstmate's own account, so inherit the
+    # ambient one, which is exactly what its relaunch did before the field
+    # existed. A fresh spawn takes the ambient account for the same reason its
+    # first dispatch always did.
+    if [ -z "$CLAUDE_ACCOUNT_DIR" ]; then
+      case ${CLAUDE_CONFIG_DIR:-} in
+        ''|/*) ;;
+        *)
+          echo "error: CLAUDE_CONFIG_DIR '$CLAUDE_CONFIG_DIR' is a relative path, so the store the worker reads cannot be guaranteed to be the one written here; set it to an absolute path" >&2
+          exit 1 ;;
+      esac
+      # The unset default resolves to HOME the way bin/fm-claude-trust.sh
+      # resolves it, so the recorded value always names the store the worker
+      # actually reads rather than the absence of a choice.
+      CLAUDE_ACCOUNT_DIR=${CLAUDE_CONFIG_DIR:-${HOME:-}}
+    fi
     ;;
 esac
 
@@ -3688,9 +3708,8 @@ preserve_relaunch_meta() {
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   # claude_config_dir= records which claude account this task's worker was
   # launched against, so --relaunch reuses it instead of inheriting firstmate's
-  # own. Written only for a non-default (set) account, on the same condition as
-  # the launch prefix further down, so the default single-store path's meta stays
-  # byte-identical and an absent line keeps meaning the default ~/.claude store.
+  # own. Written for every claude task, the default store included, so an absent
+  # line means one thing only: a record written before this field existed.
   [ -z "$CLAUDE_ACCOUNT_DIR" ] || echo "claude_config_dir=$CLAUDE_ACCOUNT_DIR"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
@@ -3856,16 +3875,21 @@ esac
 # back to the default ~/.claude store even when firstmate itself runs under a
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
 # Forward this task's resolved store onto the claude launch so the crewmate uses
-# the same credential/config its worktree was trusted in. Only when set; an unset
-# value is the single-store default and needs no prefix. CLAUDE_ACCOUNT_DIR, not
+# the same credential/config its worktree was trusted in. CLAUDE_ACCOUNT_DIR, not
 # the ambient variable: on a relaunch the account comes from the task's own
 # record rather than from firstmate's own process.
+# The resolved DEFAULT store is forwarded as no prefix at all, which is what the
+# worker's own pane already resolves it to. Naming it explicitly would move the
+# whole config directory - settings.json, plugins - out of $HOME/.claude while
+# leaving the store itself at $HOME/.claude.json, so the prefix would change more
+# than the account it is here to select.
 # The pattern is claude*, matching the resolution and the trust registration
 # (header above owns why it must stay that way).
 case "$HARNESS" in
   claude*)
-    [ -z "$CLAUDE_ACCOUNT_DIR" ] \
-      || LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_ACCOUNT_DIR") $LAUNCH"
+    if [ -n "$CLAUDE_ACCOUNT_DIR" ] && [ "$CLAUDE_ACCOUNT_DIR" != "${HOME:-}" ]; then
+      LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_ACCOUNT_DIR") $LAUNCH"
+    fi
     ;;
 esac
 if [ "$KIND" = secondmate ]; then

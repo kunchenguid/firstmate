@@ -709,6 +709,24 @@ secondmate_liveness_one_timed() {  # <meta> <id> <label>
   fm_timing_record secondmate liveness "$__fm_timing_stamp" "$label"
 }
 
+# Respawn one secondmate from its own record. A respawn is a FRESH spawn, not a
+# --relaunch, so bin/fm-spawn.sh takes the claude account from its environment
+# rather than from the task record; this process's own CLAUDE_CONFIG_DIR names
+# FIRSTMATE's account. Supply the secondmate's recorded account here, exactly as
+# its first dispatch supplied one, so a sweep cannot silently move a claude
+# secondmate onto firstmate's account, where its home never accepted the trust
+# dialog. A record with no account is one written before that field existed:
+# leave the environment alone so the respawn inherits what it inherited before.
+secondmate_respawn() {  # <meta> <id>
+  local meta=$1 id=$2 account
+  account=$(fm_meta_get "$meta" claude_config_dir)
+  if [ -n "$account" ]; then
+    CLAUDE_CONFIG_DIR="$account" FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1
+  else
+    FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1
+  fi
+}
+
 # One secondmate's liveness check. Split out of the sweep so each is individually
 # timed; every `return` here was a `continue` in the loop and means exactly the
 # same thing - move on to the next secondmate. Respawned ids are recorded through
@@ -773,7 +791,7 @@ secondmate_liveness_one() {  # <meta> <id>
         ;;
       dead|missing)
         cause="remote endpoint $agent_state on its configured host"
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+        if out=$(secondmate_respawn "$meta" "$id"); then
           secondmate_note_respawned "$id"
           report_relaunch "$id" "$cause" "host=$remote_host"
         else
@@ -810,7 +828,7 @@ secondmate_liveness_one() {  # <meta> <id>
       else
         cause="recorded endpoint confidently missing"
       fi
-      if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+      if out=$(secondmate_respawn "$meta" "$id"); then
         secondmate_note_respawned "$id"
         report_relaunch "$id" "$cause" "backend=$backend"
       else

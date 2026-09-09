@@ -470,26 +470,37 @@ test_claude_spawn_records_the_account_it_launched_against() {
   pass "fm-spawn.sh: a claude spawn records the account it launched against"
 }
 
-# An absent account is the default single-store install, so the default path's
-# record must stay exactly as it was before this field existed.
-test_default_account_spawn_records_no_account_field() {
-  local case_dir home proj wt fakebin out meta
+# The default single-store install is an account like any other, so its record
+# names the store the spawn resolved - HOME, as bin/fm-claude-trust.sh resolves
+# it. That is what lets a later relaunch tell the default store apart from a
+# record written before this field existed. The launch still carries no prefix:
+# the worker's own pane resolves the default to the same store, and naming it
+# would move settings.json and plugins out of $HOME/.claude as well.
+test_default_account_spawn_records_the_resolved_default_store() {
+  local case_dir home proj wt fakebin launch_log out meta
   case_dir="$TMP_ROOT/default-account"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
+  launch_log="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
   fm_test_spawn_home "$home" claude
   fm_git_worktree "$proj" "$wt" wt-default
   fm_test_spawn_brief "$home" defaultspawn
-  out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" defaultspawn "$proj" claude \
+  out=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" defaultspawn "$proj" claude \
     --mode no-mistakes --yolo off)
   expect_code 0 $? "the default-account claude spawn must succeed: $out"
   meta="$home/state/defaultspawn.meta"
   assert_present "$meta" "the spawn published no task record"
-  meta_has_key "$meta" claude_config_dir \
-    && fail "the default single-store path wrote an account field: $(cat "$meta")"
-  pass "fm-spawn.sh: a default-account claude spawn writes no account field"
+  [ "$(sed -n 's/^claude_config_dir=//p' "$meta")" = "$home/user-home" ] \
+    || fail "the default-store record did not name the store the spawn resolved: $(cat "$meta")"
+  assert_trusted "$home/user-home/.claude.json" "$wt" \
+    "the default-account spawn did not trust its worktree in the resolved default store"
+  assert_present "$launch_log" "the default-account spawn sent no launch command"
+  grep -Fq 'CLAUDE_CONFIG_DIR=' "$launch_log" \
+    && fail "the default store was named on the launch, which moves the whole config directory out of the default one: $(cat "$launch_log")"
+  pass "fm-spawn.sh: a default-account claude spawn records the resolved default store and launches with no prefix"
 }
 
 # The account is claude-specific because the forwarding is. No other adapter
@@ -579,7 +590,7 @@ test_missing_node_is_refused
 test_scope_refusal_stays_fail_closed_without_node
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
 test_claude_spawn_records_the_account_it_launched_against
-test_default_account_spawn_records_no_account_field
+test_default_account_spawn_records_the_resolved_default_store
 test_non_claude_spawn_records_no_account_field
 test_claude_prefixed_harness_trusts_and_launches_the_same_account
 test_refused_spawn_leaves_no_task_state
