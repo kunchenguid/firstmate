@@ -24,6 +24,15 @@ These are argument and routing checks, not evidence of account eligibility, clas
 Before relying on unattended operation, run an authenticated disposable task through the intended primary and worker harness, verify tests and status delivery, then verify that a denied operation is surfaced without falling back to bypass.
 The operator contract is in [configuration](../configuration.md#worker-permission-mode-configcrew-permissions); the executable launch owner is `bin/fm-spawn.sh`.
 
+## Remote-less local-only dispatch
+
+`tests/fm-spawn-pool-base-freshen.test.sh` drives the real spawn entry point with real disposable Git repositories and fake terminal endpoints.
+It covers remote-less local `main` and `master` advancing beyond a stale pool, selection independent of the primary's feature branch, and preservation of the no-remote configuration.
+Refusal cases cover dirty files, clean unlanded commits, unknown local defaults, unrelated checkouts, PR delivery without origin, a non-origin remote, and an unreachable origin even with local-only delivery.
+The same suite exercises existing remote default refresh and submodule safeguards.
+These checks establish launch preparation and metadata publication, not authenticated worker execution or supervision; a real disposable worker remains the end-to-end acceptance test.
+The operator boundary is in [configuration](../configuration.md#remote-less-local-projects).
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

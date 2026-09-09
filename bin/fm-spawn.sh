@@ -142,6 +142,11 @@
 #   git worktree root distinct from the primary project checkout.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
+#   An explicit local-only ship task in a project with no remotes instead uses
+#   local main (or master), without fetching or trusting the primary's HEAD.
+#   That path requires a same-repository worktree with no commits outside the
+#   local default's history; dirty, divergent, or unknown-default bases refuse.
+#   Any configured remote retains the origin refresh requirement, even local-only.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
@@ -1989,23 +1994,46 @@ EOF
 }
 
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  local worktree=$1 default target expected actual status remotes local_base=0
+  local project_common worktree_common reset_mode=--hard
+  remotes=$(git -C "$PROJ_ABS_REAL" remote) || {
+    echo "error: could not inspect project remotes before refreshing '$worktree'" >&2
     return 1
   }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  if [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ -z "$remotes" ]; then
+    local_base=1
+    project_common=$(git -C "$PROJ_ABS_REAL" rev-parse --path-format=absolute --git-common-dir) || return 1
+    worktree_common=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir) || return 1
+    project_common=$(cd "$project_common" && pwd -P) || return 1
+    worktree_common=$(cd "$worktree_common" && pwd -P) || return 1
+    if [ "$project_common" != "$worktree_common" ]; then
+      echo "error: pooled worktree '$worktree' does not belong to project '$PROJ_ABS_REAL'; refusing local base refresh" >&2
+      return 1
+    fi
+    default=$(local_default_branch "$PROJ_ABS_REAL") || {
+      echo "error: could not determine a local default branch (main or master) for '$PROJ_ABS_REAL'; refusing to guess a task base" >&2
+      return 1
+    }
+    target="refs/heads/$default"
+    reset_mode=--keep
+  else
+    if ! git -C "$worktree" fetch --quiet origin; then
+      echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -2023,7 +2051,11 @@ freshen_spawn_worktree_base() {  # <worktree>
     fi
     return 1
   fi
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+  if [ "$local_base" -eq 1 ] && ! git -C "$worktree" merge-base --is-ancestor HEAD "$expected"; then
+    echo "error: pooled worktree '$worktree' has commits not contained in '$target'; refusing to discard unlanded local work" >&2
+    return 1
+  fi
+  if ! git -C "$worktree" reset "$reset_mode" "$expected" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi

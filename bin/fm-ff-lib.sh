@@ -43,12 +43,18 @@ first_line() {
 }
 
 default_branch() {
-  local dir=$1 ref branch
+  local dir=$1 ref
   ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"
     return 0
   fi
+  local_default_branch "$dir"
+}
+
+# Resolve conventional local defaults without trusting a stale origin/HEAD.
+local_default_branch() {
+  local dir=$1 branch
   for branch in main master; do
     if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
       echo "$branch"

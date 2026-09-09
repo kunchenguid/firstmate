@@ -25,6 +25,16 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Remote-less local projects
+
+A ship task explicitly dispatched as `local-only` can run in a project with no Git remotes; no bare origin or GitHub repository is needed.
+Its worker starts from the committed local `main` branch, or `master` when `main` is absent, in an isolated worktree.
+Other local default-branch names currently require an implementation change rather than guessing from the primary checkout's current branch.
+Dirty worktrees and commits outside the local default's history block dispatch without discarding work.
+Any configured remote retains the normal origin refresh requirement; an unreachable origin never silently becomes an offline launch.
+This exception is for ship tasks, not scouts or PR delivery, and does not grant merge permission.
+`bin/fm-spawn.sh` owns the exact base-refresh checks.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.

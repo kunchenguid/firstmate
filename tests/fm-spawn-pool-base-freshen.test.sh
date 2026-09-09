@@ -144,7 +144,7 @@ test_direct_pr_and_scout_refresh_before_launch() {
       out=$(run_spawn "$id" --mode direct-PR --yolo off)
     fi
     status=$?
-    expect_code 0 "$status" "$contract spawn should refresh a stale pooled worktree"
+    expect_code 0 "$status" "$contract spawn should refresh a stale pooled worktree: $out"
     current=$(git -C "$POOL_DIR" rev-parse origin/main)
     [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
       || fail "$contract spawn did not start at current origin/main"
@@ -423,6 +423,114 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+make_local_case() {
+  local name=$1 id=$2 default=${3:-main} case_dir home project pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+  git init --quiet -b "$default" "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+  printf 'local default tip\n' > "$project/advanced-main.txt"
+  git -C "$project" add advanced-main.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
+}
+
+test_remote_less_local_base() {
+  local default id out status expected primary
+  for default in main master; do
+    id="pool-local-$default-r1"
+    read_case_record "$(make_local_case "local-$default" "$id" "$default")"
+    expected=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+    # The primary's current feature branch is not the local default branch.
+    git -C "$PROJECT_DIR" checkout --quiet -b unrelated-feature
+    printf 'not the task base\n' > "$PROJECT_DIR/feature.txt"
+    git -C "$PROJECT_DIR" add feature.txt
+    git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm feature
+    primary=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+    out=$(run_spawn "$id" --mode local-only --yolo off)
+    status=$?
+    expect_code 0 "$status" "remote-less local-only spawn should succeed: $out"
+    assert_contains "$out" "spawned $id" "local spawn did not finish"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$expected" ] || fail "local spawn chose the wrong base"
+    [ "$(git -C "$PROJECT_DIR" rev-parse HEAD)" = "$primary" ] || fail "local spawn moved the primary"
+    [ -z "$(git -C "$PROJECT_DIR" remote)" ] || fail "local spawn created a remote"
+    [ -f "$HOME_DIR/state/$id.meta" ] || fail "local spawn did not publish metadata"
+  done
+  pass "remote-less local-only spawns use local main/master, not the primary's feature branch"
+}
+
+test_local_base_refusals() {
+  local scenario id out status before expected mode
+  for scenario in dirty unlanded unknown-default direct-pr other-remote unrelated-pool; do
+    id="pool-local-$scenario-r1"
+    read_case_record "$(make_local_case "local-$scenario" "$id")"
+    mode=local-only
+    case "$scenario" in
+      dirty)
+        printf 'keep edits\n' >> "$POOL_DIR/README.md"
+        printf 'keep untracked\n' > "$POOL_DIR/notes.txt"
+        expected='refusing to discard uncommitted work' ;;
+      unlanded)
+        git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit --allow-empty -qm unlanded
+        expected='commits not contained in' ;;
+      unknown-default)
+        git -C "$PROJECT_DIR" branch -m trunk
+        expected='could not determine a local default branch' ;;
+      direct-pr)
+        mode=direct-PR
+        expected='could not fetch origin' ;;
+      other-remote)
+        git -C "$PROJECT_DIR" remote add upstream "file://$CASE_DIR/missing.git"
+        expected='could not fetch origin' ;;
+      unrelated-pool)
+        git clone --quiet --no-local "$PROJECT_DIR" "$CASE_DIR/unrelated"
+        git -C "$CASE_DIR/unrelated" remote remove origin
+        POOL_DIR="$CASE_DIR/unrelated"
+        expected='does not belong to project' ;;
+    esac
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+    out=$(run_spawn "$id" --mode "$mode" --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] || fail "local spawn accepted $scenario"
+    assert_contains "$out" "$expected" "wrong $scenario refusal: $out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "$scenario refusal moved HEAD"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$scenario refusal published metadata"
+    if [ "$scenario" = dirty ]; then
+      assert_grep 'keep edits' "$POOL_DIR/README.md" "local spawn discarded edits"
+      assert_grep 'keep untracked' "$POOL_DIR/notes.txt" "local spawn discarded untracked work"
+    fi
+  done
+  pass "local refresh preserves dirty/unlanded work and refuses unknown defaults, PR delivery, other remotes, and unrelated checkouts"
+}
+
+test_local_delivery_broken_origin_still_refuses() {
+  local id out status before
+  id='pool-local-broken-origin-r1'
+  read_case_record "$(make_case local-broken-origin "$id")"
+  git -C "$PROJECT_DIR" remote set-url origin "file://$CASE_DIR/missing.git"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local delivery silently ignored a broken origin"
+  assert_contains "$out" 'could not fetch origin' "local delivery did not report broken origin"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "broken origin refusal changed the base"
+  pass "local-only delivery never falls back around a configured broken origin"
+}
+
+test_remote_less_local_base
+test_local_base_refusals
+test_local_delivery_broken_origin_still_refuses
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
