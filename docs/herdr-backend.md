@@ -327,6 +327,19 @@ Its before/after tripwire requires the live default-session snapshot to remain b
 The helper's header and `--help` own exact commands.
 Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never duplicate the destructive policy.
 
+## Windows (MSYS) hosts
+
+Firstmate supports a herdr home on Windows under Git Bash (MSYS), where three platform facts shape behavior.
+MSYS `ps` cannot see native Windows processes, MSYS fork children carry a stale Win32 parent pid, and MSYS emulates `ln -s` as a copy unless a winsymlinks mode is configured.
+The firstmate-side consequences are handled in code: the session-lock identity walk uses the hybrid `/proc`-then-CIM enumeration in `bin/fm-windows-process-lib.sh`, the lock claim verifies the copy form by pid content, and socket paths, worker pane environments, and worktree discovery are normalized or sourced from treehouse instead of the pane's cwd fields.
+zai, the herdr-fork primary engine (a node bundle run as `zai-cli`), is a verified PRIMARY session identity on Windows; supervision there uses the generic unknown-harness contract because zai has no verified wake adapter of its own.
+
+Operator-facing facts that code cannot absorb:
+
+- The herdr server's own environment seeds every worker pane. A server started before a tool install keeps the old PATH forever, so restart the herdr server after installing tools, or rely on firstmate passing the session's own PATH to each spawned pane (the code default).
+- `jq`, `treehouse`, and `no-mistakes` publish no MSYS installers. Install their Windows assets manually from the vendors' GitHub releases into a directory on PATH; `bin/fm-bootstrap.sh install` covers only the npm-distributed tools.
+- Worker-pane liveness and cwd discovery go through PowerShell CIM queries, which cost one to two seconds per call; timing-sensitive checks are correspondingly slower than on macOS or Linux.
+
 ## Active limits
 
 - Presentation ordering needs protocol 16 and Python and is best-effort only.

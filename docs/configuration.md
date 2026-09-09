@@ -344,6 +344,17 @@ Its `remove` action excises only the marker-delimited Firstmate region and remov
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
+### Opening a home on a Windows/zai host
+
+A primary whose engine is the zai engine (the herdr-fork wrapper's `zai-cli` node bundle) is a verified primary session identity, so the fleet lock, harness detection, and supervision work there with no extra configuration once the repo is on a commit carrying the Windows fixes (session identity, herdr socket/PATH/worktree handling, and the CIM retry - all on main since 2026-09-10).
+Supervision for a zai primary uses the generic unknown-harness contract: drain, handle, and keep one bounded foreground `bin/fm-watch.sh` cycle while work is under way.
+Per-home facts that never travel with the repo and must be established once per home:
+
+- The crewmate harness: `config/crew-harness` should name a verified adapter with working credentials (`pi`, `claude`, `codex`, ...), because `zai` itself has no worker launch template. When every verified adapter lacks credentials, spawn accepts a raw launch command - `fm-spawn.sh <id> <project> --scout --harness "zai \"$(cat <brief>)\""` - which runs the same zai engine as the worker.
+- Projects: `data/projects.md`, `data/backlog.md`, and `config/` are local and gitignored; register each project again in the new home, choosing `local-only` for repositories with no remote.
+- Tools: the npm-distributed set installs through `bin/fm-bootstrap.sh install`; `jq`, `treehouse`, and `no-mistakes` need their vendors' Windows assets placed on PATH manually, and a herdr server restarted after tool installs so worker panes inherit the new PATH.
+- Windows host facts and their handling are owned by [`herdr-backend.md`](herdr-backend.md#windows-msys-hosts).
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
