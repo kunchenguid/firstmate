@@ -178,9 +178,7 @@ fm_procevent_owner_lease_seconds() {
   printf '%s\n' "$value"
 }
 
-# How often a runner's guard re-reads that lease. One watcher cycle at the
-# default poll interval, so the guard costs about as much as the cycle that
-# refreshes what it reads.
+# Detection-interval semantics: docs/configuration.md, Process-to-event sources.
 FM_PROCEVENT_OWNER_CHECK_DEFAULT_SECONDS=15
 FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS=1
 FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS=3600

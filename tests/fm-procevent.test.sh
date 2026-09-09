@@ -2428,10 +2428,8 @@ PROOF_DETECT_BOUND=$((PROOF_LEASE_BOUND + PROOF_CHECK_SECONDS))
 # case whose stub exits on that signal uses PROOF_PROMPT_STOP instead.
 PROOF_STOP_CEILING=4
 PROOF_PROMPT_STOP=1
-# Additive scheduling slack, never multiplicative. It absorbs a loaded host, not
-# a slower guard: widening it past half a check interval would let a guard that
-# spent a whole interval between its two reads hide inside it, which is the
-# regression these deadlines exist to catch.
+# Additive scheduling slack shared by cleanup and timing cases. The strict
+# timing case below owns and enforces its relation to BOUND_CHECK_SECONDS.
 PROOF_LOAD_SLACK=2
 
 orphan_pe() {  # <home> <command...>
@@ -2745,10 +2743,8 @@ GUARD_CHILD=$(cat "$TMP_ROOT/proof-guard.child")
 # child ignores the ordinary signal; that is what separates its allowance from
 # the ordinary-stop case above.
 #
-# A flat 60 seconds here would pass a guard that took 55, so it could not go red
-# for the reason it names. The slack is additive and stays under half a check
-# interval for the same reason: it must never be widened to make a slow guard
-# pass, because that converts this assertion back into the decoration it was.
+# This case bounds cleanup completion; the strict timing case below owns the
+# phase and slack requirements that distinguish one check interval from two.
 guard_bound=$((PROOF_DETECT_BOUND + PROOF_STOP_CEILING))
 deadline=$((SECONDS + guard_bound + PROOF_LOAD_SLACK))
 guard_started=$SECONDS
@@ -2770,7 +2766,7 @@ pass "an expired runner's guard escalates past a signal-proof child"
 # a later change can quietly double.
 #
 # The bound: the lease term, plus ONE check interval. The guard still refuses to
-# act on a single failed read - the case after this one is what defends that -
+# act on a single failed read - the debounce case below is what defends that -
 # but its two confirming reads are spaced half an interval apart, so the pair
 # fits inside the one interval budgeted here. A guard that put a whole interval
 # between them would spend two, and this deadline is sized to catch exactly that.
@@ -2966,8 +2962,7 @@ pass "a zero-prefixed decimal interval starts its listener and halves as decimal
 # The bound above was tightened by moving the guard's two reads closer together,
 # NOT by dropping the second one. This is what that second read is for, asserted
 # separately so the two cannot be traded for each other by accident: against a
-# home that is still alive, one failed read must reset the count, not stop the
-# runner.
+# home that is still alive, an isolated failed read must not stop the runner.
 #
 # The failure is injected where the real path actually reads. ONE lease read
 # fails, exactly once, identified by the lease-age program's own text so no
