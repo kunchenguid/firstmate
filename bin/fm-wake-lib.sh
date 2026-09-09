@@ -932,7 +932,6 @@ fm_lock_try_acquire() {
     rc=$?
   fi
   [ "$rc" -eq 1 ] || return 1
-  [ -e "$lockdir" ] || [ -L "$lockdir" ] || return 1
 
   fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
