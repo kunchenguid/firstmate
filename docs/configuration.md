@@ -229,6 +229,13 @@ Fleet-local operational facts and gotchas live locally in `data/learnings.md`; i
 The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
 There is no shared learnings file by captain decision.
 
+## Time tracking (config/time-tracking-*, data/time-tracking/)
+
+`bin/fm-time.sh` proposes candidate work windows from this home's own durable evidence, records nothing until the captain approves or corrects each one, and reports a month-end breakdown of hours by project and task with after-hours called out separately.
+It is a standalone command the captain runs directly; nothing in Firstmate's own operating loop invokes it.
+All of its records live locally under this home's gitignored `data/time-tracking/`, and its optional tuning knobs live under gitignored `config/time-tracking-*` files.
+The script's own header and `bin/fm-time.sh --help` are the single owner of exact evidence sources, storage format, and configuration keys.
+
 ## Startup memory budget (config/startup-memory-budget)
 
 `config/startup-memory-budget` is the primary-authoritative per-home allowance for the startup prompt-memory surface: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md` together.
