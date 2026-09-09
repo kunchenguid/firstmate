@@ -417,6 +417,27 @@ test_return_brief_keeps_refresh_history() {
   pass "a refreshed posture keeps its original window, superseded mandate, and earlier outcomes"
 }
 
+test_failed_held_listing_is_not_reported_as_empty() {
+  local dir out waiting
+  dir="$TMP_ROOT/held-list-failure"
+  install_runner "$dir"
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'synthetic held backlog failure\n' >&2
+exit 1
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$dir/bin/fm-afk-return.sh" begin 2>&1) || fail "held-list failure should still render a return brief: $out"
+  waiting=$(printf '%s\n' "$out" | awk '/^Waiting on you:/{show=1} /^Tried and failed, or could not be fixed:/{show=0} show')
+  assert_contains "$waiting" 'held listing unavailable: synthetic held backlog failure' "the failed held listing was not disclosed"
+  assert_not_contains "$waiting" '(nothing)' "an unavailable held set was also reported as empty"
+  pass "an unavailable held listing is never presented as empty"
+}
+
 test_return_guard_refuses_while_the_record_exists() {
   local dir out rc
   dir="$TMP_ROOT/guard-record"
@@ -477,6 +498,7 @@ test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_keeps_refresh_history
+test_failed_held_listing_is_not_reported_as_empty
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag

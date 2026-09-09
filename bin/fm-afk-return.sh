@@ -331,6 +331,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
     fi
   else
     held_err=$(printf '%s' "$held" | head -1 | clean_field)
+    count=$((count + 1))
     printf '  held listing unavailable: %s\n' "$held_err"
   fi
   for meta in "$STATE"/*.meta; do

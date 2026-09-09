@@ -68,6 +68,11 @@ test_fields_refuse_each_missing_part_by_name() {
   compile_refusal 'object - the never-set refuses it' 'never-set: credential punctuation' --action answer --object 'task q credentials/keys' --when 'prompt starts'
   compile_refusal 'object - the never-set refuses it' 'never-set: attended compound' --action answer --object 'task q attended-prompt' --when 'prompt starts'
   compile_refusal 'object - the never-set refuses it' 'never-set: payment prefix' --action answer --object 'task q payments' --when 'prompt starts'
+  compile_refusal 'object - the never-set refuses it' 'never-set: one-time code' --action answer --object 'task q one-time-code prompt' --when 'it appears'
+  compile_refusal 'object - the never-set refuses it' 'never-set: verification code' --action answer --object 'task q verification/code prompt' --when 'it appears'
+  compile_refusal 'object - the never-set refuses it' 'never-set: API key' --action answer --object 'task q api-key prompt' --when 'it appears'
+  compile_refusal 'object - the never-set refuses it' 'never-set: TOTP prefix' --action answer --object 'task q TOTP-entry prompt' --when 'it appears'
+  compile_refusal 'object - the never-set refuses it' 'never-set: token prefix' --action answer --object 'task q tokenize prompt' --when 'it appears'
   compile_refusal 'object - the never-set refuses it' 'never-set: in the precondition' --action merge --object 'task x PR' --when 'after the Login/2FA prompt clears'
   compile_refusal 'object - the never-set refuses it' 'never-set: in the stop' --action merge --object 'task x PR' --when 'checks green' --stop 'if a PASSWORD is asked'
   pass "every malformed clause is refused with its missing part named, and the never-set holds across punctuation and compounds"
@@ -94,6 +99,8 @@ test_fields_record_the_captain_wording_verbatim() {
     --action merge --object 'task x PR' --when 'looks red enough, honestly'
   compile_accept '1. dispatch these queued items when the windows lane is green' 'dispatch' \
     --action dispatch --object 'these queued items' --when 'the windows lane is green'
+  compile_accept '1. answer task legally-unrelated prompt when it appears' 'unrelated legal stem' \
+    --action answer --object 'task legally-unrelated prompt' --when 'it appears'
   pass "clause fields are recorded verbatim, and no static parser judges the wording"
 }
 
@@ -145,6 +152,22 @@ test_readback_renders_words_verbatim_and_both_lists() {
   # The verbatim words survive the record byte for byte, trailing newline included.
   [ "$(contract "$home" words --proposal; printf x)" = "$(cat "$words"; printf x)" ] || fail "the proposal did not keep the words verbatim"
   pass "the read-back renders the words verbatim beside the accepted and refused lists"
+}
+
+test_words_preserve_final_newline_shape() {
+  local home without with
+  home=$(make_home words-newline-shape)
+  without="$home/without.txt"
+  with="$home/with.txt"
+  printf 'merge when green' > "$without"
+  printf 'merge when green\n' > "$with"
+  contract "$home" propose --words-file "$without" >/dev/null || fail "proposal without a final newline failed"
+  [ "$(contract "$home" words --proposal; printf x)" = "$(cat "$without"; printf x)" ] \
+    || fail "words without a final newline did not round-trip byte-exact"
+  contract "$home" propose --words-file "$with" >/dev/null || fail "proposal with a final newline failed"
+  [ "$(contract "$home" words --proposal; printf x)" = "$(cat "$with"; printf x)" ] \
+    || fail "words with a final newline did not round-trip byte-exact"
+  pass "words preserve whether the final newline is present"
 }
 
 test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
@@ -289,6 +312,7 @@ test_fields_refuse_each_missing_part_by_name
 test_fields_record_the_captain_wording_verbatim
 test_clause_ids_are_input_ordinals_across_accepted_and_refused
 test_readback_renders_words_verbatim_and_both_lists
+test_words_preserve_final_newline_shape
 test_propose_confirm_writes_the_record_and_announces_hold_for_return
 test_confirm_requires_readback_and_refresh_is_a_no_op
 test_confirming_a_new_proposal_archives_the_standing_record

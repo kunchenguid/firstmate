@@ -23,11 +23,10 @@
 #   spend_max_concurrent_workers: <n>
 #   confirmed: <UTC ISO 8601>
 #   confirmed_epoch: <seconds>
-#   words: |                       the captain's words, verbatim, never edited,
+#   words: | or |-                 the captain's words, verbatim, never edited,
 #     <line>                       one record line per input line (or `words: -`
-#     ...                          when /afk carried no words); the block's
-#                                  final newline is the line shape, so words
-#                                  given without one read back with one
+#     ...                          when /afk carried no words); `|` retains a
+#                                  final newline and `|-` records its absence
 #   clauses:                       accepted clauses, recorded from the fields given
 #     - id: <input ordinal>
 #       action: <verb>
@@ -172,11 +171,28 @@ fm_afk_contract_never_set_hit() {  # <text...>
     *" log in "*) printf 'log in'; return 0 ;;
     *" sign in "*) printf 'sign in'; return 0 ;;
     *" attended prompt"*) printf 'attended prompt'; return 0 ;;
+    *" one time code "*) printf 'one time code'; return 0 ;;
+    *" one time password "*) printf 'one time password'; return 0 ;;
+    *" one time passcode "*) printf 'one time passcode'; return 0 ;;
+    *" verification code "*) printf 'verification code'; return 0 ;;
+    *" security code "*) printf 'security code'; return 0 ;;
+    *" auth code "*) printf 'auth code'; return 0 ;;
+    *" authentication code "*) printf 'authentication code'; return 0 ;;
+    *" recovery code "*) printf 'recovery code'; return 0 ;;
+    *" backup code "*) printf 'backup code'; return 0 ;;
+    *" api key "*) printf 'api key'; return 0 ;;
+    *" access token "*) printf 'access token'; return 0 ;;
+    *" secret key "*) printf 'secret key'; return 0 ;;
+    *" private key "*) printf 'private key'; return 0 ;;
+    *" passphrase "*) printf 'passphrase'; return 0 ;;
   esac
   read -r -a tokens <<< "$normalized"
   for word in "${tokens[@]}"; do
     case "$word" in
-      credential*|password*|passcode*|login*|signin*|2fa*|otp*|mfa*|legal*|financial*|payment*|invoice*)
+      credential*|password*|passcode*|login*|signin*|2fa*|mfa*|financial*|payment*|invoice*|otp*|totp*|hotp*|token*|secret*|passphrase*|pin*|apikey*)
+        printf '%s' "$word"
+        return 0 ;;
+      legal)
         printf '%s' "$word"
         return 0 ;;
     esac
@@ -263,12 +279,11 @@ fm_afk_contract_render_body() {  # <entered-iso> <entered-epoch>
   printf 'reach_announced: %s\n' "$FM_AFK_CONTRACT_REACH_ANNOUNCED"
   printf 'spend_max_concurrent_workers: %s\n' "${SPEND:-$FM_AFK_CONTRACT_SPEND_DEFAULT}"
   if [ -n "$WORDS" ]; then
-    # The block stores one record line per words line; a single final newline
-    # is the line shape itself, so words that end in one keep exactly it and
-    # words given without one gain it. Every other byte is kept as given.
-    local words_body=$WORDS
-    case "$words_body" in *$'\n') words_body=${words_body%$'\n'} ;; esac
-    printf 'words: |\n'
+    local words_body=$WORDS words_indicator='|-'
+    case "$words_body" in
+      *$'\n') words_indicator='|'; words_body=${words_body%$'\n'} ;;
+    esac
+    printf 'words: %s\n' "$words_indicator"
     printf '%s\n' "$words_body" | sed 's/^/  /'
   else
     printf 'words: -\n'
@@ -302,11 +317,17 @@ fm_afk_contract_read_words() {  # <path>
   local path=$1
   [ -f "$path" ] || return 1
   awk '
-    /^words: \|$/ { inwords = 1; next }
+    /^words: \|$/ { inwords = 1; keep_final = 1; next }
+    /^words: \|-$/ { inwords = 1; keep_final = 0; next }
     /^words: -$/ { exit }
-    inwords && /^  / { print substr($0, 3); next }
-    inwords && /^$/ { print ""; next }
+    inwords && /^  / { lines[++count] = substr($0, 3); next }
     inwords { exit }
+    END {
+      for (i = 1; i <= count; i++) {
+        printf "%s", lines[i]
+        if (i < count || keep_final) printf "\n"
+      }
+    }
   ' "$path"
 }
 
