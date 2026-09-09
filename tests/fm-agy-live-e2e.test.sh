@@ -4,8 +4,8 @@
 #
 # Every Agy-facing check in the adapter reads something the vendor renders or
 # emits: the workspace-trust dialog, the separated composer, the `esc to cancel`
-# busy footer, the Stop hook payload, the Escape interrupt banner, and the
-# /exit resume line. Per .agents/skills/firstmate-coding-guidelines those are
+# busy footer, the Stop hook payload, the ANTIGRAVITY_AGENT marker in tool
+# children, the Escape interrupt banner, and the /exit resume line. Per .agents/skills/firstmate-coding-guidelines those are
 # proven here against the REAL binary through the real control plane: one
 # fm-spawn into a throwaway Firstmate home with its own treehouse pool on a
 # private tmux socket, then fm-crew-state, fm-send, fm-control interrupt and
@@ -160,9 +160,9 @@ tmux new-session -d -s firstmate -x 200 -y 50 -c "$LAB" || fail "could not start
 FM_HOME="$LAB" "$ROOT/bin/fm-brief.sh" "$TASK" agyprobe --scout >/dev/null 2>&1 \
   || fail "could not scaffold the Agy probe brief"
 BRIEF="$LAB/data/$TASK/brief.md"
-awk -v task='Live adapter probe. Run exactly this shell command in your current working directory: printf ok > .fm-agy-live-probe
+awk -v task="Live adapter probe. Run exactly this shell command in your current working directory, as one command line: printf ok > .fm-agy-live-probe; '$ROOT/bin/fm-harness.sh' > .fm-agy-live-harness; printf '%s' \"\${ANTIGRAVITY_AGENT:-unset}\" > .fm-agy-live-marker
 Then reply with exactly the single line AGY_LIVE_OK and stop.
-Do not write a report, do not append to the status file, and do not run any other command.' \
+Do not write a report, do not append to the status file, and do not run any other command." \
   -v spec='None beyond the captain'"'"'s intent above: the probe is the whole task.' \
   '$0 == "{TASK}" { print task; next } $0 == "{FIRSTMATE_SPEC}" { print spec; next } { print }' \
   "$BRIEF" > "$BRIEF.tmp" && mv "$BRIEF.tmp" "$BRIEF"
@@ -274,6 +274,12 @@ wait_marker || fail "agy $VERSION: the task Stop hook never touched state/$TASK.
 [ -f "$WT/.fm-agy-live-probe" ] \
   || fail "agy $VERSION: the brief's shell command did not run unattended under --dangerously-skip-permissions"
 pane | grep -q 'AGY_LIVE_OK' || fail "agy $VERSION: the brief turn did not reply AGY_LIVE_OK"
+DETECTED=$(cat "$WT/.fm-agy-live-harness" 2>/dev/null || true)
+TOOL_MARKER=$(cat "$WT/.fm-agy-live-marker" 2>/dev/null || true)
+[ "$DETECTED" = agy ] \
+  || fail "agy $VERSION: bin/fm-harness.sh run from inside a real Agy tool call detected '${DETECTED:-nothing}', not agy (marker in the tool child: '${TOOL_MARKER:-unset}')"
+note "harness detection from inside the Agy tool call: fm-harness.sh printed '$DETECTED' with ANTIGRAVITY_AGENT='$TOOL_MARKER'"
+pass "agy $VERSION: a tool child carries ANTIGRAVITY_AGENT and bin/fm-harness.sh detects agy from inside the live session"
 payload_count() { jq -s 'length' "$PAYLOADS" 2>/dev/null || printf 0; }
 [ "$(payload_count)" -ge 1 ] \
   || fail "agy $VERSION: the project-owned .agents Stop hook did not fire beside the task hook in .agent, so customization roots no longer merge"

@@ -19,7 +19,8 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 ```
 
 The first command needs a signed-in `agy` plus `tmux`, `jq`, `treehouse`, and `git`, spends four short turns on the cheapest listed Flash tier (`FM_AGY_LIVE_MODEL` overrides it), and finished in about three minutes on 2026-09-09.
-It drives the real `bin/fm-spawn.sh`, `bin/fm-crew-state.sh`, `bin/fm-send.sh`, `bin/fm-control.sh`, and `bin/fm-teardown.sh` against the installed binary and prints every capture quoted below as `#` notes beside its `ok` lines.
+It drives the real `bin/fm-spawn.sh`, `bin/fm-crew-state.sh`, `bin/fm-send.sh`, `bin/fm-control.sh`, and `bin/fm-teardown.sh` against the installed binary, has the worker run `bin/fm-harness.sh` from inside a real Agy tool call, and prints every capture quoted below as `#` notes beside its `ok` lines.
+The guard is the adapter's only live evidence; the refusals of foreign, mismatched, or malformed Stop payloads and the omission of unsupported effort levels have no live surface and are portable-suite facts (`tests/fm-agy-harness.test.sh`), reported as such rather than as live results.
 The second command spends no tokens and refreshes the liveness row in [`runtime-backends.md`](runtime-backends.md).
 Both fail naming the Agy version rather than skipping when the binary is installed and the guard is requested.
 
@@ -99,6 +100,11 @@ The hook-ordering evidence is from 1.1.8: the Agy log for a fresh `--prompt-inte
 A bare launch followed by trust acceptance loaded the hook before any turn.
 `fm-spawn.sh` therefore launches Agy bare, handles only the exact verified trust surface, waits for the structural empty composer, then sends the absolute brief pointer.
 On 1.1.28 that order produced a brief turn whose task Stop hook touched the turn-end marker, so the bare-launch design still delivers the first turn to a loaded hook.
+
+## Detection from inside a session
+
+The brief turn's tool call ran `bin/fm-harness.sh` and captured `ANTIGRAVITY_AGENT` from inside the live 1.1.28 session: the script printed `agy` and the tool child carried `ANTIGRAVITY_AGENT=1`, so the marker precedence in `bin/fm-harness.sh` and the `env -u ANTIGRAVITY_AGENT` clearing at every other adapter's launch boundary rest on a marker the current release still sets.
+The parent TUI's exact `agy` process name is the drift guard's evidence in [`runtime-backends.md`](runtime-backends.md).
 
 ## Stop hook, coexisting roots, and continuation
 
