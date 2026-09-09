@@ -942,6 +942,66 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   pass "SIGSTOP distinguishes live PID from stale beacon and termination records the exit class"
 }
 
+# A zombie "owner" pid is exactly the lock/lease wedge this regression guards
+# against: kill -0 alone reports a zombie as alive because the kernel keeps
+# its slot reserved until the parent reaps it, and that parent here is a real
+# process (not the test runner) that deliberately never calls wait() on it.
+test_fm_pid_alive_treats_zombie_as_dead() {
+  local dir state holder_out holder_pid child_pid i state_field
+  dir=$(make_case pid-alive-zombie)
+  state="$dir/state"
+  holder_out="$dir/holder.out"
+
+  bash -c 'sleep 0.2 & child=$!; printf "%s\n" "$child"; sleep 30' > "$holder_out" &
+  holder_pid=$!
+
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_out" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  child_pid=$(head -n 1 "$holder_out" 2>/dev/null)
+  case "$child_pid" in
+    ''|*[!0-9]*)
+      kill "$holder_pid" 2>/dev/null || true
+      wait "$holder_pid" 2>/dev/null || true
+      fail "zombie fixture did not report a child pid"
+      ;;
+  esac
+
+  i=0
+  state_field=
+  while [ "$i" -lt 100 ]; do
+    state_field=$(ps -p "$child_pid" -o stat= 2>/dev/null | tr -d '[:space:]')
+    case "$state_field" in
+      Z*) break ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  case "$state_field" in
+    Z*) ;;
+    *)
+      kill "$holder_pid" 2>/dev/null || true
+      wait "$holder_pid" 2>/dev/null || true
+      fail "zombie fixture child never reached zombie state (stat='$state_field')"
+      ;;
+  esac
+
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_alive "$2"' _ "$LIB" "$child_pid"; then
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+    fail "fm_pid_alive treated a zombie process as alive"
+  fi
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_alive "$2"' _ "$LIB" "$holder_pid" \
+    || { kill "$holder_pid" 2>/dev/null || true; wait "$holder_pid" 2>/dev/null || true; \
+         fail "fm_pid_alive treated a genuinely live process as dead"; }
+
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  pass "fm_pid_alive treats a zombie process as dead and a genuinely live process as alive"
+}
+
 test_pid_identity_is_locale_invariant() {
   # The portable fallback records its process identity under one locale, then
   # arm/guard/turn-end re-read it under the machine's ambient locale. ps's lstart
@@ -1131,3 +1191,4 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_fm_pid_alive_treats_zombie_as_dead
