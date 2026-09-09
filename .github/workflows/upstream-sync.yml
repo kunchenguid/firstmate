@@ -1,0 +1,92 @@
+name: Sync fork with upstream
+
+# Keep morecoffeyplease/firstmate's main branch current with
+# kunchenguid/firstmate, without rewriting history when the branches diverge.
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+# A sync must finish before another run can inspect or update the same refs.
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Check out main and its history
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fast-forward main or prepare an upstream sync pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git remote add upstream https://github.com/kunchenguid/firstmate
+          git fetch upstream main:refs/remotes/upstream/main
+
+          # Upstream is already contained in main, so there is nothing to do.
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "main is already up to date with upstream/main."
+            exit 0
+          fi
+
+          # This is the only safe automatic case: main has no commits that
+          # upstream/main does not already contain.
+          if git merge-base --is-ancestor HEAD upstream/main; then
+            git merge --ff-only upstream/main
+            git push origin HEAD:main
+            echo "Fast-forwarded main to upstream/main."
+            exit 0
+          fi
+
+          # The histories diverged.  Attempt the merge so that a true content
+          # conflict is distinguished from an unexpected Git failure.  The
+          # attempt is then aborted because main must never receive a merge
+          # commit from this workflow.
+          merge_note="Upstream and main have diverged; the merge needs review."
+          if git merge --no-commit --no-ff upstream/main; then
+            git merge --abort
+            merge_note="Upstream and main have diverged; Git can merge them, but this PR requires review before updating main."
+          else
+            if [[ -z "$(git diff --name-only --diff-filter=U)" ]]; then
+              echo "git merge failed without reporting merge conflicts." >&2
+              exit 1
+            fi
+            git merge --abort
+            merge_note="Upstream and main have diverged and Git reported merge conflicts. Resolve the conflicts in this PR before merging."
+          fi
+
+          # A branch at upstream/main gives GitHub the exact upstream delta to
+          # review. Refresh its remote-tracking ref first so the lease rejects
+          # any concurrent unexpected update.
+          if [[ -n "$(git ls-remote --heads origin refs/heads/upstream-sync)" ]]; then
+            git fetch origin refs/heads/upstream-sync:refs/remotes/origin/upstream-sync
+          fi
+          git switch --create upstream-sync upstream/main
+          git push --force-with-lease=refs/heads/upstream-sync origin upstream-sync
+
+          # Reuse an existing PR for this head and base rather than creating
+          # a duplicate on every scheduled run.
+          if [[ "$(gh pr list --base main --head upstream-sync --state open --json number --jq 'length')" != "0" ]]; then
+            echo "An upstream-sync pull request is already open."
+            exit 0
+          fi
+
+          gh pr create \
+            --base main \
+            --head upstream-sync \
+            --title "chore: sync with upstream main" \
+            --body "$merge_note"
