@@ -715,8 +715,8 @@ secondmate_liveness_one_timed() {  # <meta> <id> <label>
 # FIRSTMATE's account. Supply the secondmate's recorded account here, exactly as
 # its first dispatch supplied one, so a sweep cannot silently move a claude
 # secondmate onto firstmate's account, where its home never accepted the trust
-# dialog. A record with no account is one written before that field existed:
-# leave the environment alone so the respawn inherits what it inherited before.
+# dialog. A record with no account names none to restore, so leave the
+# environment alone and let the respawn resolve it as the first dispatch did.
 secondmate_respawn() {  # <meta> <id>
   local meta=$1 id=$2 account
   account=$(fm_meta_get "$meta" claude_config_dir)

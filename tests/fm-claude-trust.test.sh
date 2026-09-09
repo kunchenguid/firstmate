@@ -470,13 +470,12 @@ test_claude_spawn_records_the_account_it_launched_against() {
   pass "fm-spawn.sh: a claude spawn records the account it launched against"
 }
 
-# The default single-store install is an account like any other, so its record
-# names the store the spawn resolved - HOME, as bin/fm-claude-trust.sh resolves
-# it. That is what lets a later relaunch tell the default store apart from a
-# record written before this field existed. The launch still carries no prefix:
-# the worker's own pane resolves the default to the same store, and naming it
-# would move settings.json and plugins out of $HOME/.claude as well.
-test_default_account_spawn_records_the_resolved_default_store() {
+# Only a caller-chosen account is recorded, so the default single-store install
+# writes no account field at all, and its record stays exactly as it was before
+# this field existed. Both consumers read that absence the same way: the trust
+# entry lands in the store bin/fm-claude-trust.sh resolves from HOME, and the
+# launch carries no prefix, which is what the worker's own pane resolves to.
+test_default_account_spawn_records_no_account_field() {
   local case_dir home proj wt fakebin launch_log out meta
   case_dir="$TMP_ROOT/default-account"
   home="$case_dir/home"
@@ -493,14 +492,14 @@ test_default_account_spawn_records_the_resolved_default_store() {
   expect_code 0 $? "the default-account claude spawn must succeed: $out"
   meta="$home/state/defaultspawn.meta"
   assert_present "$meta" "the spawn published no task record"
-  [ "$(sed -n 's/^claude_config_dir=//p' "$meta")" = "$home/user-home" ] \
-    || fail "the default-store record did not name the store the spawn resolved: $(cat "$meta")"
+  meta_has_key "$meta" claude_config_dir \
+    && fail "the default single-store path wrote an account field: $(cat "$meta")"
   assert_trusted "$home/user-home/.claude.json" "$wt" \
-    "the default-account spawn did not trust its worktree in the resolved default store"
+    "the default-account spawn did not trust its worktree in the default store"
   assert_present "$launch_log" "the default-account spawn sent no launch command"
   grep -Fq 'CLAUDE_CONFIG_DIR=' "$launch_log" \
-    && fail "the default store was named on the launch, which moves the whole config directory out of the default one: $(cat "$launch_log")"
-  pass "fm-spawn.sh: a default-account claude spawn records the resolved default store and launches with no prefix"
+    && fail "the default-store launch carried an account prefix: $(cat "$launch_log")"
+  pass "fm-spawn.sh: a default-account claude spawn writes no account field and launches with no prefix"
 }
 
 # The account is claude-specific because the forwarding is. No other adapter
@@ -590,7 +589,7 @@ test_missing_node_is_refused
 test_scope_refusal_stays_fail_closed_without_node
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
 test_claude_spawn_records_the_account_it_launched_against
-test_default_account_spawn_records_the_resolved_default_store
+test_default_account_spawn_records_no_account_field
 test_non_claude_spawn_records_no_account_field
 test_claude_prefixed_harness_trusts_and_launches_the_same_account
 test_refused_spawn_leaves_no_task_state
