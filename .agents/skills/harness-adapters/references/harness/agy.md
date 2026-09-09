@@ -26,7 +26,8 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 `../../../../../bin/fm-spawn.sh` installs a firstmate-owned `fm-busy-state` hook into the worktree's `.agents/hooks.json` with `PreInvocation` opening the minted busy generation and `PostInvocation`/`Stop` closing it, and `../../../../../bin/fm-teardown.sh` retires it.
 This wiring belongs only to the canonical exact `agy` adapter template, which receives busy-state wiring, the turn-end hook, and trusted busy state together.
 A raw agy-shaped launch is an unverified escape hatch: it receives no busy-state wiring or turn-end hook and therefore has no trusted busy state.
-The install is create-or-merge because that path may be the project's own committed file: a missing file is created and removed at teardown, while an existing file is byte-backed-up to `state/<id>.agy-hooks-backup` and restored byte-exact, so a tracked project file is never deleted and never blocks teardown's dirty check.
+Installation refuses tracked `.agents/hooks.json` files because generated commands could enter project commits.
+For untracked files, `bin/fm-agy-lib.sh` owns installation and retirement while preserving project keys.
 `../../../../../bin/fm-agy-lib.sh` owns both directions, and the duplicate idle from the two closers is idempotent and deliberately not de-duplicated.
 Each hook command prints the empty JSON object agy's hook contract requires and tolerates a refused event, so a stale-generation writer can never break agy's own lifecycle.
 

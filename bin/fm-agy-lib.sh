@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
 # fm-agy-lib.sh - the ONE executable owner of Antigravity CLI per-task wiring.
 #
-# agy discovers lifecycle hooks from the workspace customization root only:
-# `.agents/hooks.json` at the project root (verified, agy 1.1.28: PreInvocation,
-# PostInvocation, and Stop handlers placed there fired for a real turn). That
-# path may be the PROJECT's own committed file, so install never blindly
-# overwrites it: a missing file is created and retired by removal, while an
-# existing file is byte-backed-up and merged on our own named key only, then
-# restored byte-exact at teardown. `exclude_path` in bin/fm-spawn.sh keeps the
-# created file out of git's view; a merged-into tracked file is restored before
-# teardown's dirty check, so it never blocks a return or leaks into a commit.
+# agy discovers lifecycle hooks from `.agents/hooks.json` at the workspace root.
+# Tracked hooks are refused because Git excludes cannot protect tracked content.
+# Existing untracked hooks are backed up and merged under the adapter-owned key.
+# Removal restores that key while preserving changes to other project keys.
 #
 # Sourcing: set -u safe; no side effects on source.
 FM_AGY_HOOKS_KEY=fm-busy-state
@@ -38,7 +33,7 @@ fm_agy_hooks_backup_path() {  # <state-dir> <id>
 # existing file is not JSON this can merge into.
 fm_agy_hooks_install() {
   local wt=$1 state=$2 id=$3 gen=$4 turnend=$5 fm_root=$6
-  local hooks mode_path writer pre post stop payload tmp
+  local hooks mode_path writer pre post stop payload tmp suffix
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] && [ -n "$gen" ] \
     && [ -n "$turnend" ] && [ -n "$fm_root" ] || return 1
   command -v jq >/dev/null 2>&1 || {
@@ -47,6 +42,10 @@ fm_agy_hooks_install() {
   }
   hooks=$(fm_agy_hooks_path "$wt")
   mode_path=$(fm_agy_hooks_mode_path "$state" "$id")
+  if git -C "$wt" ls-files --error-unmatch -- .agents/hooks.json >/dev/null 2>&1; then
+    echo "error: tracked .agents/hooks.json cannot safely carry generated Antigravity hooks" >&2
+    return 1
+  fi
   mkdir -p "$(dirname "$hooks")" "$state" 2>/dev/null || return 1
   writer="$(fm_agy_shquote "$fm_root/bin/fm-busy-event.sh") apply $(fm_agy_shquote "$state") $(fm_agy_shquote "$id")"
   suffix="--gen $(fm_agy_shquote "$gen") --source agy-hook"
@@ -97,13 +96,9 @@ fm_agy_drop_key() {  # <hooks>
 }
 
 # fm_agy_hooks_remove <worktree> <state-dir> <id>
-# Retires exactly what install did: a created file is removed (or reduced to
-# our-key removal when the worker grew other keys), a merged file is restored
-# byte-exact from backup. Missing records degrade to our-key removal, never to
-# deleting a file this did not create.
 fm_agy_hooks_remove() {
   local wt=$1 state=$2 id=$3
-  local hooks mode_path backup mode
+  local hooks mode_path backup mode tmp
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   hooks=$(fm_agy_hooks_path "$wt")
   mode_path=$(fm_agy_hooks_mode_path "$state" "$id")
@@ -112,10 +107,17 @@ fm_agy_hooks_remove() {
   [ -f "$mode_path" ] && mode=$(cat "$mode_path" 2>/dev/null || true)
   case "$mode" in
     merged)
-      if [ -f "$backup" ]; then
-        cat "$backup" > "$hooks" || return 1
-      else
-        fm_agy_drop_key "$hooks" || return 1
+      [ -f "$backup" ] || return 1
+      if [ -f "$hooks" ]; then
+        tmp="$hooks.tmp.$$"
+        jq --slurpfile original "$backup" '
+          del(.["fm-busy-state"]) +
+          ($original[0] | with_entries(select(.key == "fm-busy-state")))
+        ' "$hooks" > "$tmp" || { rm -f "$tmp"; return 1; }
+        if [ "$(jq -S . "$tmp")" = "$(jq -S . "$backup")" ]; then
+          cp -p "$backup" "$tmp" || { rm -f "$tmp"; return 1; }
+        fi
+        mv -f "$tmp" "$hooks" || { rm -f "$tmp"; return 1; }
       fi
       ;;
     created)
@@ -128,7 +130,7 @@ fm_agy_hooks_remove() {
       fi
       ;;
     *)
-      fm_agy_drop_key "$hooks" || return 1
+      return 0
       ;;
   esac
   rm -f "$mode_path" "$backup"

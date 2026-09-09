@@ -84,6 +84,15 @@ STORE_DIR="$HOME/.gemini/antigravity-cli"
 STORE="$STORE_DIR/settings.json"
 mkdir -p "$STORE_DIR" 2>/dev/null || true
 [ -d "$STORE_DIR" ] || refuse "Antigravity config directory '$STORE_DIR' does not exist and could not be created"
+LOCK="$STORE_DIR/.fm-trust.lock"
+lock_attempt=0
+until mkdir "$LOCK" 2>/dev/null; do
+  lock_attempt=$((lock_attempt + 1))
+  [ "$lock_attempt" -lt 100 ] || refuse "timed out waiting for '$LOCK'"
+  sleep 0.1
+done
+trap 'rmdir "$LOCK"' EXIT
+trap 'exit 1' HUP INT TERM
 if [ -e "$STORE" ]; then
   [ -f "$STORE" ] || refuse "'$STORE' is not a regular file"
   [ -O "$STORE" ] || refuse "'$STORE' is not owned by this user"

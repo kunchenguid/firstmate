@@ -330,6 +330,59 @@ test_agy_busy_source_and_delivery_regex_isolated() {
   pass "busy contract: agy trusts only its hook writer and its delivery token stays harness-scoped"
 }
 
+test_agy_tracked_hooks_refused() {
+  local rec id=agy-tracked-z9 original out
+  rec=$(make_spawn_case tracked "$id")
+  read_case_record "$rec"
+  mkdir -p "$WT_DIR/.agents"
+  original='{"project":{},"fm-busy-state":{"Stop":[]}}'
+  printf '%s\n' "$original" > "$WT_DIR/.agents/hooks.json"
+  git -C "$WT_DIR" add .agents/hooks.json
+  if out=$(fm_agy_hooks_install "$WT_DIR" "$HOME_DIR/state" "$id" gen \
+    "$HOME_DIR/state/$id.turn-ended" "$ROOT" 2>&1); then
+    fail "tracked hooks installation succeeded"
+  fi
+  [ "$(cat "$WT_DIR/.agents/hooks.json")" = "$original" ] || fail "tracked hooks changed"
+  assert_absent "$HOME_DIR/state/$id.agy-hooks-mode" "refusal recorded an installation"
+  pass "agy refuses tracked hooks before mutation"
+}
+
+test_agy_merge_retains_worker_edits() {
+  local dir="$TMP_ROOT/worker-edits" hooks
+  mkdir -p "$dir/wt/.agents" "$dir/state"
+  hooks="$dir/wt/.agents/hooks.json"
+  printf '%s\n' '{"project":1,"fm-busy-state":{"Stop":[]}}' > "$hooks"
+  fm_agy_hooks_install "$dir/wt" "$dir/state" edit gen "$dir/state/end" "$ROOT" || fail "install failed"
+  jq '.project = 2 | .added = true' "$hooks" > "$dir/edited"
+  mv "$dir/edited" "$hooks"
+  fm_agy_hooks_remove "$dir/wt" "$dir/state" edit || fail "remove failed"
+  jq -e '. == {"project":2,"added":true,"fm-busy-state":{"Stop":[]}}' "$hooks" >/dev/null || fail "worker edits or original key lost"
+  fm_agy_hooks_remove "$dir/wt" "$dir/state" edit || fail "repeat remove failed"
+  jq -e '."fm-busy-state" == {"Stop":[]}' "$hooks" >/dev/null || fail "repeat removal lost project key"
+  pass "agy removal preserves worker edits and original project key"
+}
+
+test_agy_concurrent_trust() {
+  local rec id=agy-parallel-z10 n pid
+  local -a pids=()
+  rec=$(make_spawn_case parallel "$id")
+  read_case_record "$rec"
+  for n in 1 2 3 4 5 6 7 8; do
+    git -C "$PROJ_DIR" worktree add -q -b "parallel-$n" "$CASE_DIR/wt-$n" || fail "worktree creation failed"
+    HOME="$HOME_DIR/user-home" "$ROOT/bin/fm-agy-trust.sh" "$CASE_DIR/wt-$n" "$PROJ_DIR" > "$CASE_DIR/trust-$n.log" 2>&1 &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" || fail "concurrent trust writer failed"
+  done
+  jq -e '.trustedWorkspaces | length == 8' "$HOME_DIR/user-home/.gemini/antigravity-cli/settings.json" >/dev/null || fail "concurrent trust lost entries"
+  pass "agy concurrent trust retains every workspace"
+}
+
+test_agy_tracked_hooks_refused
+test_agy_merge_retains_worker_edits
+test_agy_concurrent_trust
+
 test_agy_launch_carries_brief_with_native_model_effort
 test_agy_effort_xhigh_is_recorded_but_omitted
 test_agy_hooks_semantic_lifecycle

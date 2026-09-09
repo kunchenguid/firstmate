@@ -1077,18 +1077,19 @@ clear_relaunch_harness_wiring() {
   if [ -n "$auth_path" ]; then
     rm -f -- "$auth_path" || return 1
   fi
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    rm -f -- "$path" || return 1
-  done <<EOF
-$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
-EOF
   # agy's worktree hooks are never in that table (the file may be the
   # project's own), so a relaunch away from agy - or onto it - retires them
   # through the lib instead. A same-harness relaunch re-arms fresh below.
   if [ "$harness" = agy ]; then
     fm_agy_hooks_remove "$wt" "$state" "$id" || return 1
   fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rm -f -- "$path" || return 1
+  done <<EOF
+$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
+EOF
+
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -1834,7 +1835,7 @@ resolve_rovo_binary() {
 }
 
 resolve_agy_binary() {
-  local candidate dir fallback
+  local candidate dir
   candidate=$(command -v agy 2>/dev/null || true)
   if [ -n "$candidate" ] && [ -x "$candidate" ]; then
     case "$candidate" in
@@ -1848,12 +1849,7 @@ resolve_agy_binary() {
         ;;
     esac
   fi
-  fallback="${HOME:-}/.local/bin/agy"
-  if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
-    printf '%s\n' "$fallback"
-    return 0
-  fi
-  echo "error: agy executable not found; searched PATH for 'agy' and fallback '$fallback'" >&2
+  echo "error: agy executable not found; searched PATH for 'agy'" >&2
   return 1
 }
 
@@ -3377,8 +3373,7 @@ EOF
       # this plane's own interrupt-idle record instead of by a hook.
       # The hooks live in the worktree's .agents/hooks.json because that is
       # the only per-task customization root agy discovers; bin/fm-agy-lib.sh
-      # owns the create-or-merge install and the byte-exact restore, since
-      # that path may be the project's own committed file. Every hook command
+      # owns installation and retirement. Every hook command
       # tolerates a refused event (|| true) so a stale-gen writer can never
       # break agy's own lifecycle, and each prints the empty JSON object
       # agy's hook contract requires on stdout.

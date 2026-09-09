@@ -7,7 +7,7 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.1.28` (brief asked for 1.1.27; the installed binary reported 1.1.28) |
+| Version | `agy 1.1.28` |
 | Verified | 2026-09-09 |
 | Platform | Linux x86_64 (CachyOS, kernel 7.2.3-1-cachyos) |
 
