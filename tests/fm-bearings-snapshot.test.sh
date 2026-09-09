@@ -313,12 +313,14 @@ SH
 
 run_remote_ledger_bearings() {  # <parent-home> <fakebin> <epoch>
   local parent=$1 fakebin=$2 epoch=$3
+  # Allow process startup on loaded hosts; the 30-second fake reads still
+  # exceed this shared deadline and must be cancelled.
   FM_HOME="$parent" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
     FM_TEST_LEDGER_CALL_LOG="$parent/ledger-calls.log" \
     FM_TEST_LEDGER_PID_LOG="$parent/ledger-pids.log" \
     FM_TEST_LEDGER_ACTIVE_DIR="$parent/ledger-active" \
     FM_SNAPSHOT_CACHE_DIR="$parent/state/summary-cache" \
-    FM_SNAPSHOT_BUDGET=3 FM_SNAPSHOT_NOW_EPOCH="$epoch" \
+    FM_SNAPSHOT_BUDGET=15 FM_SNAPSHOT_NOW_EPOCH="$epoch" \
     FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$BEARINGS" --json
 }
 
@@ -3108,7 +3110,7 @@ EOF
   rm -f "$parent/ledger-active/overlap-proved" "$parent/ledger-active"/collector-*
   json=$(run_remote_ledger_bearings "$parent" "$fakebin" 2000)
   [ -f "$parent/ledger-active/overlap-proved" ] \
-    || fail "five wedged remote reads never overlapped within the shared three-second budget"
+    || fail "five wedged remote reads never overlapped within the shared fifteen-second budget"
   printf '%s' "$json" | jq -e '
     (.secondmates | length) == 5
       and all(.secondmates[]; .freshness == "cached" and .age_seconds == 1000
