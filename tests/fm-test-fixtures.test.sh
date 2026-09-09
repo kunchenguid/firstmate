@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Behavior tests for tests/fixtures.sh fake-toolchain and spawn-world builders.
+# Behavior tests for tests/lib.sh primitives and tests/fixtures.sh builders.
 #
-# These cases drive the builders as a test would: they write stubs into a
-# fakebin and exec those stubs. Assertions are on the binaries' observable
-# output, exit status, and files they create - never on fixtures.sh source
-# text. Migrated spawn suites cover fm_test_run_spawn through the real
-# fm-spawn.sh; this file pins the stubs those suites now share.
+# Cases call shared primitives directly or write stubs into a fakebin and exec
+# them as a test would. Assertions are on observable output, exit status, and
+# filesystem effects - never on helper source text. Migrated spawn suites cover
+# fm_test_run_spawn through the real fm-spawn.sh; this file pins the shared
+# primitives and stubs those suites use.
 set -u
 
 # shellcheck source=tests/fixtures.sh
