@@ -165,12 +165,7 @@ fm_tasks_axi_backend_resolve() {  # <tasks-axi-working-directory>
 }
 
 fm_tasks_axi_backend() {  # <tasks-axi-working-directory>
-  local backend
-  if backend=$(fm_tasks_axi_backend_resolve "$1" 2>/dev/null); then
-    printf '%s\n' "$backend"
-  else
-    printf '%s\n' markdown
-  fi
+  fm_tasks_axi_backend_resolve "$1"
 }
 
 fm_backlog_backend_value() {

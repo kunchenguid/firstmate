@@ -591,6 +591,61 @@ run_bootstrap() {  # <case-dir>
 
 # --- dispatch ---------------------------------------------------------------
 
+test_backend_resolution_preserves_config_errors() {
+  local case_dir project_config user_config config resolver out rc probe
+  case_dir="$TMP_ROOT/backend-resolution-errors"
+  project_config="$case_dir/home/.tasks.toml"
+  user_config="$case_dir/user-home/.tasks-axi/config.toml"
+  mkdir -p "$case_dir/home" "$case_dir/user-home/.tasks-axi"
+  probe='. "$1/bin/fm-tasks-axi-lib.sh"; "$2" "$3"'
+  printf '%s\n' 'backend = "beads"' > "$user_config"
+  printf '%s\n' 'backend = "markdown"' > "$project_config"
+  for config in "$project_config" "$user_config"; do
+    chmod 000 "$config"
+    [ ! -r "$config" ] || fail "the backend configuration fixture is still readable"
+    for resolver in fm_tasks_axi_backend fm_tasks_axi_backend_resolve; do
+      rc=0
+      out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" bash -c "$probe" _ \
+        "$ROOT" "$resolver" "$case_dir/home" 2>"$case_dir/stderr") || rc=$?
+      [ "$rc" -eq 2 ] || fail "$resolver concealed an unreadable configuration: $config (exit $rc)"
+      [ -z "$out" ] || fail "$resolver returned a backend for an unreadable configuration: $out"
+      assert_grep "tasks-axi backend configuration cannot be read at $config" "$case_dir/stderr" \
+        "$resolver did not identify the unreadable configuration"
+    done
+    chmod 600 "$config"
+    rm "$config"
+  done
+  pass "backend resolution preserves unreadable configuration errors for every caller"
+}
+
+test_backend_resolution_preserves_precedence_and_defaults() {
+  local case_dir resolver out probe
+  case_dir="$TMP_ROOT/backend-resolution-precedence"
+  mkdir -p "$case_dir/home" "$case_dir/user-home/.tasks-axi"
+  probe='. "$1/bin/fm-tasks-axi-lib.sh"; "$2" "$3"'
+  for resolver in fm_tasks_axi_backend fm_tasks_axi_backend_resolve; do
+    out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" bash -c "$probe" _ \
+      "$ROOT" "$resolver" "$case_dir/home") || fail "$resolver rejected absent configuration"
+    [ "$out" = markdown ] || fail "$resolver changed the unconfigured default"
+    printf '%s\n' 'backend = "beads"' > "$case_dir/user-home/.tasks-axi/config.toml"
+    out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" bash -c "$probe" _ \
+      "$ROOT" "$resolver" "$case_dir/home") || fail "$resolver rejected readable user configuration"
+    [ "$out" = beads ] || fail "$resolver ignored the user backend"
+    chmod 000 "$case_dir/user-home/.tasks-axi/config.toml"
+    printf '%s\n' 'backend = "markdown"' > "$case_dir/home/.tasks.toml"
+    out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" bash -c "$probe" _ \
+      "$ROOT" "$resolver" "$case_dir/home") || fail "$resolver read a lower-priority user configuration"
+    [ "$out" = markdown ] || fail "$resolver ignored the project backend"
+    chmod 000 "$case_dir/home/.tasks.toml"
+    out=$(env TASKS_AXI_BACKEND=beads HOME="$case_dir/user-home" bash -c "$probe" _ \
+      "$ROOT" "$resolver" "$case_dir/home") || fail "$resolver read configuration despite an environment override"
+    [ "$out" = beads ] || fail "$resolver ignored the environment backend"
+    chmod 600 "$case_dir/home/.tasks.toml" "$case_dir/user-home/.tasks-axi/config.toml"
+    rm "$case_dir/home/.tasks.toml" "$case_dir/user-home/.tasks-axi/config.toml"
+  done
+  pass "backend resolution preserves environment, project, user, and default precedence"
+}
+
 test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   local case_dir id out
   id=atomic-dispatch-b1
@@ -2617,6 +2672,8 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
   pass "dispatching a persistent secondmate needs no backlog item"
 }
 
+test_backend_resolution_preserves_config_errors
+test_backend_resolution_preserves_precedence_and_defaults
 test_dispatch_moves_the_item_in_flight_in_the_same_run
 test_dispatch_omits_the_file_for_a_beads_show
 test_completion_omits_the_file_for_a_beads_done
