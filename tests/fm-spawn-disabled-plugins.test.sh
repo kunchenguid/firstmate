@@ -99,9 +99,9 @@ unit_empty_file_emits_base_json() {
 # ---------------------------------------------------------------------------
 unit_lint() {
   local out
-  out=$("$ROOT/bin/fm-lint.sh" "$ROOT/bin/fm-spawn.sh" 2>&1) \
-    || { fail "fm-spawn.sh is not lint-clean: $out"; return; }
-  pass "bin/fm-spawn.sh is lint-clean"
+  out=$("$ROOT/bin/fm-lint.sh" "$ROOT/bin/fm-spawn.sh" "$ROOT/bin/fm-spawn-settings-lib.sh" "$ROOT/tests/fm-spawn-disabled-plugins.test.sh" 2>&1) \
+    || { fail "lint check failed: $out"; return; }
+  pass "bin/fm-spawn.sh, bin/fm-spawn-settings-lib.sh, tests/fm-spawn-disabled-plugins.test.sh are lint-clean"
 }
 
 unit_absent_file_emits_base_json
