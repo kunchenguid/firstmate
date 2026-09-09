@@ -29,7 +29,6 @@ contract() {  # <home> <args...>
 compile_refusal() {
   local expected=$1 label=$2 home out rc
   shift 2
-  [ "$expected" != 'object - the never-set refuses it' ] || expected='object - coarse best-effort never-set flag matched'
   home=$(make_home "refuse-$RANDOM-$$")
   set +e
   out=$(contract "$home" compile "$@" 2>&1)
@@ -53,32 +52,71 @@ compile_accept() {
   assert_contains "$out" "$expected" "$label: the accepted clause was not read back as given"
 }
 
-# The structural check names missing fields, and the coarse best-effort
-# never-set flag covers its listed obvious spellings without claiming authority.
-test_fields_and_best_effort_never_set_flag() {
+# compile_flagged <concept> <label> <field flags...>: the clause is recorded
+# (exit 0, listed as accepted) and carries the best-effort never-set flag.
+compile_flagged() {
+  local concept=$1 label=$2 home out rc
+  shift 2
+  home=$(make_home "flag-$RANDOM-$$")
+  set +e
+  out=$(contract "$home" propose "$@" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "$label: a flagged clause must still be recorded (exit 0), got $rc: $out"
+  assert_contains "$out" "flagged: names '$concept', a never-set concept that is never pre-authorizable; recorded, judged at execution" "$label: the read-back did not show the flag"
+  assert_not_contains "$out" 'refused: missing object' "$label: a never-set match must flag, never refuse"
+  [ "$(contract "$home" flags --proposal | cut -f2)" = "$concept" ] || fail "$label: flags did not name the concept: $(contract "$home" flags --proposal)"
+}
+
+# compile_unflagged <label> <field flags...>: an ordinary name is neither
+# refused nor flagged.
+compile_unflagged() {
+  local label=$1 home out rc
+  shift
+  home=$(make_home "plain-$RANDOM-$$")
+  set +e
+  out=$(contract "$home" propose "$@" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "$label: an ordinary clause was refused: $out"
+  assert_not_contains "$out" 'flagged:' "$label: an ordinary name was flagged"
+  [ -z "$(contract "$home" flags --proposal)" ] || fail "$label: flags listed an ordinary clause"
+}
+
+# The structural check refuses only a missing field or an unlisted verb, and
+# names the missing part every time.
+test_fields_refuse_each_missing_part_by_name() {
   compile_refusal "action - 'fix' is not a mandate verb" 'unknown verb' --action fix --object 'whatever breaks' --when 'it breaks'
   compile_refusal 'action - the clause names no action' 'empty verb' --action '' --object 'task x PR' --when 'checks green'
   compile_refusal 'object - the clause names no thing to act on' 'no object' --action merge --when 'checks green'
   compile_refusal 'object - the clause names no thing to act on' 'blank object' --action merge --object '   ' --when 'checks green'
   compile_refusal 'when - the clause states no precondition' 'no when' --action merge --object 'task x PR'
   compile_refusal 'when - the clause states no precondition' 'blank when' --action merge --object 'task x PR' --when ' '
-  compile_refusal 'object - the never-set refuses it' 'never-set: credentials' --action answer --object 'the credential prompt on task q' --when asked
-  compile_refusal 'object - the never-set refuses it' 'never-set: legal' --action answer --object 'the legal acceptance on task q' --when asked
-  compile_refusal 'object - the never-set refuses it' 'never-set: attended prompt' --action answer --object 'the attended prompt on task q' --when asked
-  compile_refusal 'object - the never-set refuses it' 'never-set: credential compound' --action answer --object 'task q credential-prompt' --when 'prompt starts'
-  compile_refusal 'object - the never-set refuses it' 'never-set: credential punctuation' --action answer --object 'task q credentials/keys' --when 'prompt starts'
-  compile_refusal 'object - the never-set refuses it' 'never-set: attended compound' --action answer --object 'task q attended-prompt' --when 'prompt starts'
-  compile_refusal 'object - the never-set refuses it' 'never-set: payment prefix' --action answer --object 'task q payments' --when 'prompt starts'
-  compile_refusal 'object - the never-set refuses it' 'never-set: one-time code' --action answer --object 'task q one-time-code prompt' --when 'it appears'
-  compile_refusal 'object - the never-set refuses it' 'never-set: plural one-time codes' --action answer --object 'task q one-time-codes prompt' --when 'it appears'
-  compile_refusal 'object - the never-set refuses it' 'never-set: plural verification codes' --action answer --object 'task q verification-codes prompt' --when 'it appears'
-  compile_refusal 'object - the never-set refuses it' 'never-set: plural API keys' --action answer --object 'task q api-keys prompt' --when 'it appears'
-  compile_refusal 'object - the never-set refuses it' 'never-set: inflected attended prompts' --action answer --object 'task q attended-prompts' --when 'it appears'
-  compile_refusal 'object - the never-set refuses it' 'never-set: TOTP prefix' --action answer --object 'task q TOTP-entry prompt' --when 'it appears'
-  compile_refusal 'object - the never-set refuses it' 'never-set: token prefix' --action answer --object 'task q tokenize prompt' --when 'it appears'
-  compile_refusal 'object - the never-set refuses it' 'never-set: in the precondition' --action merge --object 'task x PR' --when 'after the Login/2FA prompt clears'
-  compile_refusal 'object - the never-set refuses it' 'never-set: in the stop' --action merge --object 'task x PR' --when 'checks green' --stop 'if a PASSWORD is asked'
-  pass "structural refusals name their part and the best-effort never-set flag covers listed spellings"
+  pass "structural refusals name their missing part"
+}
+
+# The never-set is a coarse best-effort flag: a listed concept, exact or plainly
+# inflected, across punctuation boundaries, flags the clause without refusing it;
+# an unrelated name never matches; joined compounds are a documented miss.
+test_never_set_flags_without_refusing_and_never_over_matches() {
+  compile_flagged credential 'credentials' --action answer --object 'the credential prompt on task q' --when asked
+  compile_flagged legal 'legal' --action answer --object 'the legal acceptance on task q' --when asked
+  compile_flagged 'attended prompt' 'attended prompt' --action answer --object 'the attended prompt on task q' --when asked
+  compile_flagged credential 'credential compound' --action answer --object 'task q credential-prompt' --when 'prompt starts'
+  compile_flagged credential 'credential plural with punctuation' --action answer --object 'task q credentials/keys' --when 'prompt starts'
+  compile_flagged 'attended prompt' 'attended plural compound' --action answer --object 'task q attended-prompts' --when 'it appears'
+  compile_flagged payment 'payment plural' --action answer --object 'task q payments' --when 'prompt starts'
+  compile_flagged 'one time code' 'one-time code' --action answer --object 'task q one-time-code prompt' --when 'it appears'
+  compile_flagged 'one time code' 'one-time codes plural' --action answer --object 'task q one-time-codes prompt' --when 'it appears'
+  compile_flagged 'api key' 'api keys plural' --action answer --object 'task q api-keys prompt' --when 'it appears'
+  compile_flagged login 'in the precondition' --action merge --object 'task x PR' --when 'after the Login/2FA prompt clears'
+  compile_flagged password 'in the stop' --action merge --object 'task x PR' --when 'checks green' --stop 'if a PASSWORD is asked'
+  compile_unflagged 'ping-service is not pin' --action merge --object 'task ping-service PR' --when 'checks green'
+  compile_unflagged 'tokenize-worker is not token' --action rerun --object 'task tokenize-worker' --when 'after clause 1'
+  compile_unflagged 'pinned is not pin' --action merge --object 'task pinned-deps PR' --when 'checks green'
+  compile_unflagged 'legally is not legal' --action rerun --object 'task legally-named' --when 'after clause 1'
+  compile_unflagged 'joined compound is a documented miss' --action answer --object 'task q oneTimeCode prompt' --when 'it appears'
+  pass "the never-set flags listed concepts and their inflections without refusing, and never fires on unrelated names"
 }
 
 # No parser reads the object or precondition: any text the captain gives is
@@ -212,7 +250,7 @@ test_propose_confirm_writes_the_record_and_announces_hold_for_return() {
   contract "$home" present || fail "present did not see the confirmed record"
   assert_contains "$out" 'Away posture confirmed at ' 'announcement opens with the confirmation time'
   assert_contains "$out" 'hold-for-return only. No phone channel is configured; anything that needs you waits for your return.' 'announcement says hold-for-return only, aloud'
-  assert_contains "$out" '1 mandate clause(s) recorded and 1 refused; recorded clauses are held for the return brief and are not executed by this release; forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.' 'announcement counts clauses and states the hard authority invariant'
+  assert_contains "$out" '1 mandate clause(s) recorded, 1 refused, and 0 flagged as naming a never-set concept; recorded clauses are held for the return brief and are not executed by this release; forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.' 'announcement counts clauses and states the hard authority invariant'
   assert_contains "$out" 'Expected return: not given. Spend cap: 4 concurrent workers.' 'announcement carries the defaults'
   [ "$(contract "$home" announce)" = "$out" ] || fail "announce did not reproduce the confirmation announcement"
   [ "$(contract "$home" field version)" = 1 ] || fail "record version is not 1"
@@ -334,7 +372,8 @@ test_inputs_are_validated() {
   pass "malformed inputs and foreign record versions are refused rather than guessed"
 }
 
-test_fields_and_best_effort_never_set_flag
+test_fields_refuse_each_missing_part_by_name
+test_never_set_flags_without_refusing_and_never_over_matches
 test_fields_record_the_captain_wording_verbatim
 test_clause_fields_round_trip_reversible_whitespace
 test_clause_ids_are_input_ordinals_across_accepted_and_refused

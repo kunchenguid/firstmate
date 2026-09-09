@@ -22,7 +22,7 @@ Hold-for-return is the default and the only reach profile this release records: 
    The words are recorded verbatim; the clauses are your reading of them as explicit fields `bin/fm-afk-contract.sh` records: an action from its fixed verb list, the object in the captain's words, and the stated precondition in the captain's words, plus an optional stop.
    Read `bin/fm-afk-contract.sh --help` for the field flags, verb list, and coarse best-effort never-set flag rather than memorizing them.
    No static parser reads the object or precondition text, by the captain's mandate: you supply the fields, the script records them verbatim, checks structural presence and the verb list, and may flag obvious never-set concepts without treating that best-effort scan as authoritative.
-   The flag can miss spellings, including joined compounds such as `oneTimeCode`, and authoritative never-set, forbidden-action, and precondition judgment belongs to the supervision session at execution time in phase 4.
+   A flagged clause is still recorded, never refused, and the read-back and return brief show the flag; the flag can miss spellings, including joined compounds such as `oneTimeCode`, never fires on unrelated names such as `ping-service`, and authoritative never-set, forbidden-action, and precondition judgment belongs to the supervision session at execution time in phase 4.
    Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.
    Write only clauses the words actually support; a wish with no object or no stated precondition is not a clause.
    Plain `/afk` with no words has no clauses.

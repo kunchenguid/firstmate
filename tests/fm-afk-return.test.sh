@@ -573,12 +573,44 @@ test_return_brief_without_a_record_reports_the_legacy_flag() {
 }
 
 
+
+test_unreadable_superseded_archive_keeps_return_gated() {
+  local dir out rc epoch archive
+  dir="$TMP_ROOT/superseded-unreadable"
+  install_runner "$dir"
+  contract_in "$dir" propose --words 'first mandate' \
+    --action merge --object 'task first PR' --when 'checks green' >/dev/null 2>&1 || fail "could not propose the first mandate"
+  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the first mandate"
+  epoch=$(contract_in "$dir" field entered_epoch)
+  contract_in "$dir" propose --words 'replacement mandate' \
+    --action wake-me --object 'task second' --when 'at 2026-09-08T08:00Z' >/dev/null 2>&1 || fail "could not propose the replacement mandate"
+  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the replacement mandate"
+  archive=""
+  for archive in "$dir/home/state/afk-contracts/$epoch-superseded-"*.afk-contract; do break; done
+  [ -f "$archive" ] || fail "no superseded archive was written"
+  printf 'version: 1\n' > "$archive"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "an unreadable superseded archive must keep catch-up gated (rc=$rc): $out"
+  assert_contains "$out" 'superseded away-posture record unreadable' "the gate did not name the unreadable superseded archive"
+  [ -e "$dir/home/state/.afk-return-catchup" ] || fail "the gate was not retained"
+  rm -f "$archive"
+  out=$(run_return "$dir" check) || fail "check did not clear once the unreadable archive was removed: $out"
+  assert_contains "$out" 'catch-up clear' "check did not clear the gate"
+  pass "an unreadable superseded mandate keeps catch-up gated instead of being skipped"
+}
+
 test_return_gate_orders_catchup_before_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain
 test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown
+test_unreadable_superseded_archive_keeps_return_gated
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated

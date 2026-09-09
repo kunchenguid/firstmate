@@ -281,7 +281,7 @@ MANDATE_COUNT=0
 HELD_READ_FAILED=0
 HELD_READ_PATH=
 render_mandate_record() {  # <record> [superseded-time]
-  local record=$1 superseded=${2:-} id action object when stop text missing suffix="" words
+  local record=$1 superseded=${2:-} id action object when stop text missing suffix="" words flag
   [ -z "$superseded" ] || suffix=" - superseded at $superseded"
   while IFS="$(printf '\t')" read -r id action object when stop; do
     [ -n "$id" ] || continue
@@ -294,6 +294,8 @@ render_mandate_record() {  # <record> [superseded-time]
       printf ' stop '
       fm_afk_contract_unescape "$stop"
     fi
+    flag=$("$CONTRACT" flags --path "$record" | awk -F '\t' -v id="$id" '$1 == id { print $2 }')
+    [ -z "$flag" ] || printf " - flagged: names '%s', a never-set concept that is never pre-authorizable" "$flag"
     printf '%s - recorded, not executed by this release\n' "$suffix"
   done <<EOF
 $("$CONTRACT" clauses --path "$record")
@@ -332,7 +334,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
 
   # 1. health, first, always.
   printf 'Supervisor health:\n'
-  awk -F '\t' '$1 == "evidence" && ($2 == "health" || ($2 == "lifecycle" && ($3 ~ /^outcome store unreadable/ || $3 ~ /^status file unreadable:/))) { print "  - " $3 }' "$evidence"
+  awk -F '\t' '$1 == "evidence" && ($2 == "health" || ($2 == "lifecycle" && ($3 ~ /^outcome store unreadable/ || $3 ~ /^status file unreadable:/ || $3 ~ /^superseded away-posture record unreadable:/))) { print "  - " $3 }' "$evidence"
 
   # 2. the mandate.
   printf 'Mandate clauses:\n'
@@ -432,7 +434,7 @@ EOF
 }
 
 return_reconcile() {
-  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since
+  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since superseded_bad superseded_record
   local had_contract=0 archived_contract
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
@@ -483,6 +485,21 @@ return_reconcile() {
       else
         remove_evidence_prefix lifecycle 'away-posture record unreadable:' "$evidence" || lifecycle_ok=0
         remove_evidence_prefix lifecycle 'archived away-posture record unreadable' "$evidence" || lifecycle_ok=0
+      fi
+      # Every superseded mandate of this session is rendered into the brief, so
+      # an unreadable one keeps catch-up gated rather than being skipped.
+      superseded_bad=0
+      for superseded_record in "$(fm_afk_contract_archive_dir "$STATE")/$since-superseded-"*.afk-contract; do
+        [ -f "$superseded_record" ] || continue
+        if ! fm_afk_contract_validate "$superseded_record" 1; then
+          append_evidence lifecycle "superseded away-posture record unreadable: $superseded_record; catch-up stays gated" "$evidence"
+          superseded_bad=1
+        fi
+      done
+      if [ "$superseded_bad" -eq 1 ]; then
+        lifecycle_ok=0
+      else
+        remove_evidence_prefix lifecycle 'superseded away-posture record unreadable:' "$evidence" || lifecycle_ok=0
       fi
     fi
   fi

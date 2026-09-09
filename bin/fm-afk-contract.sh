@@ -33,6 +33,7 @@
 #       object: e:<reversible escaped text>
 #       when: e:<reversible escaped precondition>
 #       stop: e:<reversible escaped text> | -
+#       flag: <never-set concept the best-effort scan matched> | -
 #   refused:                       clauses missing a part, with the part named
 #     - id: <input ordinal>
 #       text: e:<the fields as given, reversibly escaped>
@@ -58,10 +59,16 @@
 # precondition holds is the supervision session's judgment at execution time
 # in a later phase. The structural check asserts only that the action, object,
 # and precondition fields are present, and that the action is a listed verb.
-# THE NEVER-SET SCAN is only a coarse best-effort structural flag, never the
-# authoritative gate: it can miss spellings, with joined compounds such as
-# oneTimeCode a known limitation. Authoritative never-set and forbidden-action
-# enforcement is the supervision session's judgment at execution time in phase 4.
+# THE NEVER-SET SCAN is only a coarse best-effort structural FLAG, never a
+# refusal and never the authoritative gate: a clause whose fields mention a
+# listed never-set concept is still recorded, with `flag:` naming the concept
+# so the read-back and the return brief show it. The scan matches a listed term
+# exactly or with a plain inflection (s, es, d, ed, ing, er, ers) at
+# punctuation-delimited token boundaries, so an unrelated name such as
+# ping-service or tokenize-worker is never flagged, and it can miss spellings,
+# with joined compounds such as oneTimeCode a known limitation. Authoritative
+# never-set and forbidden-action enforcement is the supervision session's
+# judgment at execution time in phase 4.
 # A clause missing a required field is refused with that field named, recorded
 # under refused:, read back beside the accepted list, and never executes. Ids
 # are the input ordinals across accepted and refused clauses.
@@ -96,6 +103,8 @@
 #   fm-afk-contract.sh field <name> [--proposal]
 #   fm-afk-contract.sh words [--proposal | --path <record>]
 #   fm-afk-contract.sh clauses [--proposal | --path <record>]   TSV: id action object when stop
+#   fm-afk-contract.sh flags [--proposal | --path <record>]     TSV: id concept (flagged clauses only)
+#   fm-afk-contract.sh validate [--proposal | --path <record>]  exit 0 when the record is readable and, for a record, confirmed
 #     Backslashes and control whitespace in TSV fields use reversible escapes
 #     (`\\`, `\t`, `\r`, and `\n`) so every record remains one row per clause;
 #     a literal `-` is `\x2d` to distinguish it from the empty-stop marker.
@@ -198,7 +207,7 @@ fm_afk_contract_never_set_hit() {  # <text...>
       matched=1
       for ((j = 0; j < ${#stems[@]}; j++)); do
         case "${tokens[$((i + j))]}" in
-          "${stems[$j]}"*) ;;
+          "${stems[$j]}"|"${stems[$j]}s"|"${stems[$j]}es"|"${stems[$j]}d"|"${stems[$j]}ed"|"${stems[$j]}ing"|"${stems[$j]}er"|"${stems[$j]}ers") ;;
           *) matched=0; break ;;
         esac
       done
@@ -215,16 +224,12 @@ fm_afk_contract_never_set_hit() {  # <text...>
 # C_MISSING names the missing field and the reason. The fields are never parsed:
 # presence, the listed verb, and the coarse best-effort flag are the whole check.
 fm_afk_contract_clause_check() {  # <action> <object> <when> <stop>
-  local hit
   C_ACTION=$(fm_afk_contract_action "$1")
   C_OBJECT=$2
   C_WHEN=$3
   C_STOP=$4
   C_MISSING=
-  if hit=$(fm_afk_contract_never_set_hit "$C_ACTION" "$C_OBJECT" "$C_WHEN" "$C_STOP"); then
-    C_MISSING="object - coarse best-effort never-set flag matched '$hit'; the flag can miss spellings such as joined oneTimeCode and is not authoritative; phase-4 supervision judgment enforces forbidden actions"
-    return 1
-  fi
+  C_FLAG=$(fm_afk_contract_never_set_hit "$C_ACTION" "$C_OBJECT" "$C_WHEN" "$C_STOP") || C_FLAG=
   if [ -z "$C_ACTION" ]; then
     C_MISSING='action - the clause names no action'
     return 1
@@ -274,9 +279,14 @@ fm_afk_contract_render_body() {  # <entered-iso> <entered-epoch>
       accepted_block="$accepted_block$(printf '  - id: %s\n    action: %s\n    object: e:%s\n    when: e:%s\n' \
         "$ordinal" "$C_ACTION" "$(fm_afk_contract_escape "$C_OBJECT")" "$(fm_afk_contract_escape "$C_WHEN")"
       if [ -n "$C_STOP" ]; then
-        printf '    stop: e:%s' "$(fm_afk_contract_escape "$C_STOP")"
+        printf '    stop: e:%s\n' "$(fm_afk_contract_escape "$C_STOP")"
       else
-        printf '    stop: -'
+        printf '    stop: -\n'
+      fi
+      if [ -n "$C_FLAG" ]; then
+        printf '    flag: %s' "$C_FLAG"
+      else
+        printf '    flag: -'
       fi)
 "
     else
@@ -352,13 +362,15 @@ fm_afk_contract_read_words() {  # <path>
 fm_afk_contract_read_list() {  # <path> <section>
   local path=$1 section=$2
   [ -f "$path" ] || return 1
-  awk -v section="$section" '
+  awk -v want="$section" '
     function flush() {
       if (id == "") return
-      if (section == "clauses") printf "%s\t%s\t%s\t%s\t%s\n", id, action, object, when, stop
+      if (want == "clauses") printf "%s\t%s\t%s\t%s\t%s\n", id, action, object, when, stop
+      else if (want == "flags") { if (flag != "" && flag != "-") printf "%s\t%s\n", id, flag }
       else printf "%s\t%s\t%s\n", id, text, missing
-      id = ""; action = ""; object = ""; when = ""; stop = ""; text = ""; missing = ""
+      id = ""; action = ""; object = ""; when = ""; stop = ""; text = ""; missing = ""; flag = ""
     }
+    BEGIN { section = (want == "flags") ? "clauses" : want }
     $0 == section ":" { insection = 1; next }
     insection && /^[^ ]/ { flush(); exit }
     insection && /^  - id: / { flush(); id = substr($0, 9); next }
@@ -367,6 +379,7 @@ fm_afk_contract_read_list() {  # <path> <section>
     insection && /^    when: e:/ { when = substr($0, 13); next }
     insection && /^    stop: e:/ { stop = substr($0, 13); next }
     insection && /^    stop: -$/ { stop = "-"; next }
+    insection && /^    flag: / { flag = substr($0, 11); next }
     insection && /^    text: e:/ { text = substr($0, 13); next }
     insection && /^    missing: / { missing = substr($0, 14); next }
     END { flush() }
@@ -414,7 +427,7 @@ fm_afk_contract_validate() {  # <path> <require-confirmed 0|1>
 # --- rendering --------------------------------------------------------------
 
 fm_afk_contract_render_readback() {  # <path> <title>
-  local path=$1 title=$2 words line count id action object when stop text missing expected spend
+  local path=$1 title=$2 words line count id action object when stop text missing expected spend flag
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
   printf '%s\n' "$title"
@@ -444,6 +457,8 @@ fm_afk_contract_render_readback() {  # <path> <title>
       printf ' stop '
       fm_afk_contract_unescape "$stop"
     fi
+    flag=$(fm_afk_contract_read_list "$path" flags | awk -F '\t' -v id="$id" '$1 == id { print $2 }')
+    [ -z "$flag" ] || printf " - flagged: names '%s', a never-set concept that is never pre-authorizable; recorded, judged at execution" "$flag"
     printf '\n'
   done <<EOF
 $(fm_afk_contract_read_list "$path" clauses)
@@ -467,14 +482,15 @@ EOF
 }
 
 fm_afk_contract_render_announcement() {  # <path>
-  local path=$1 accepted refused expected clause_text
+  local path=$1 accepted refused flagged expected clause_text
   accepted=$(fm_afk_contract_read_list "$path" clauses | grep -c . || true)
   refused=$(fm_afk_contract_read_list "$path" refused | grep -c . || true)
+  flagged=$(fm_afk_contract_read_list "$path" flags | grep -c . || true)
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   if [ "$accepted" -eq 0 ] && [ "$refused" -eq 0 ]; then
     clause_text='No mandate clauses recorded. Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.'
   else
-    clause_text="$accepted mandate clause(s) recorded and $refused refused; recorded clauses are held for the return brief and are not executed by this release; forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself."
+    clause_text="$accepted mandate clause(s) recorded, $refused refused, and $flagged flagged as naming a never-set concept; recorded clauses are held for the return brief and are not executed by this release; forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself."
   fi
   printf 'Away posture confirmed at %s: hold-for-return only. %s %s Expected return: %s. Spend cap: %s concurrent workers.\n' \
     "$(fm_afk_contract_read_field "$path" confirmed)" \
@@ -586,7 +602,7 @@ fm_afk_contract_archive_target() {  # <record> [superseded-stamp]
 }
 
 fm_afk_contract_cmd_confirm() {
-  local record proposal body confirmed confirmed_epoch archived staged session_entered session_entered_epoch
+  local record proposal body confirmed confirmed_epoch archived archived_tmp staged session_entered session_entered_epoch
   record=$(fm_afk_contract_path)
   proposal=$(fm_afk_contract_proposal_path)
   confirmed=$(fm_afk_contract_now_iso)
@@ -623,7 +639,13 @@ fm_afk_contract_cmd_confirm() {
   fm_afk_contract_validate "$staged" 1 || { rm -f "$staged"; return 1; }
   if [ -f "$record" ]; then
     archived=$(fm_afk_contract_archive_target "$record" "$confirmed_epoch") || { rm -f "$staged"; return 1; }
-    cp -p "$record" "$archived" || { rm -f "$staged"; return 1; }
+    # Copy into a temporary name first and rename atomically, so a failed copy
+    # never leaves a partial archive at a glob-visible name.
+    archived_tmp=$(mktemp "$(dirname "$archived")/.afk-contract.archiving.XXXXXX") || { rm -f "$staged"; return 1; }
+    if ! cp -p "$record" "$archived_tmp" || ! mv "$archived_tmp" "$archived"; then
+      rm -f "$staged" "$archived_tmp"
+      return 1
+    fi
   fi
   mv "$staged" "$record" || { rm -f "$staged"; return 1; }
   if [ -n "${archived:-}" ]; then
@@ -692,6 +714,16 @@ fm_afk_contract_main() {
     clauses)
       path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
       fm_afk_contract_read_list "$path" clauses ;;
+    flags)
+      path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
+      fm_afk_contract_read_list "$path" flags ;;
+    validate)
+      path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
+      if [ "$path" = "$(fm_afk_contract_proposal_path)" ]; then
+        fm_afk_contract_validate "$path" 0
+      else
+        fm_afk_contract_validate "$path" 1
+      fi ;;
     refused)
       path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
       fm_afk_contract_read_list "$path" refused ;;
