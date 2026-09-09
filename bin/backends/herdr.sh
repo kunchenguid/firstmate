@@ -433,8 +433,9 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
 # proves compatible and retrying the command on it once. The choice is scoped
 # to that session and exported as FM_BACKEND_HERDR_BIN so children inherit it.
 # A later mismatch forces reselection, while another session starts from the
-# PATH-first client. An unknown verdict (a client that reports no protocol at
-# all) always keeps the PATH-first client.
+# PATH-first client. An unknown verdict (status supplies neither
+# .server.compatible nor both client and server protocols) always keeps the
+# PATH-first client.
 fm_backend_herdr_bin() {
   printf '%s' "${FM_BACKEND_HERDR_BIN:-herdr}"
 }
