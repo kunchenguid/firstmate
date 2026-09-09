@@ -19,7 +19,6 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGY_BIN=$(command -v agy 2>/dev/null || true)
-[ -x "${AGY_BIN:-}" ] || AGY_BIN="$HOME/.local/bin/agy"
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2

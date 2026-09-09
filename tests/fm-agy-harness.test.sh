@@ -379,6 +379,48 @@ test_agy_concurrent_trust() {
   pass "agy concurrent trust retains every workspace"
 }
 
+test_agy_refused_teardown_preserves_wiring() {
+  local rec id=agy-refuse-z11 mode out rc hooks state
+  for mode in created merged; do
+    rec=$(make_spawn_case "refuse-$mode" "$id")
+    read_case_record "$rec"
+    state="$HOME_DIR/state"
+    hooks="$WT_DIR/.agents/hooks.json"
+    mkdir -p "$WT_DIR/.agents"
+    if [ "$mode" = merged ]; then
+      printf '%s\n' '{"project":{},"fm-busy-state":{"Stop":[]}}' > "$hooks"
+    fi
+    fm_agy_hooks_install "$WT_DIR" "$state" "$id" gen "$state/$id.turn-ended" "$ROOT" || fail "install failed"
+    cp "$hooks" "$CASE_DIR/hooks-before"
+    cp "$state/$id.agy-hooks-mode" "$CASE_DIR/mode-before"
+    if [ "$mode" = merged ]; then
+      cp "$state/$id.agy-hooks-backup" "$CASE_DIR/backup-before"
+    fi
+    printf '%s\n' '.agents/hooks.json' >> "$PROJ_DIR/.git/info/exclude"
+    git -C "$WT_DIR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m unlanded
+    fm_write_meta "$state/$id.meta" "window=firstmate:fm-$id" \
+      "endpoint_task_id=$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+      'kind=ship' 'mode=local-only' 'harness=agy' 'spawn_gen=gen'
+    fm_fake_exit0 "$FAKEBIN_DIR" no-mistakes gh gh-axi
+    rc=0
+    out=$(FM_HOME="$HOME_DIR" HOME="$HOME_DIR/user-home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      FM_CONFIG_OVERRIDE="$HOME_DIR/config" PATH="$FAKEBIN_DIR:$PATH" \
+      "$ROOT/bin/fm-teardown.sh" "$id" 2>&1) || rc=$?
+    expect_code 1 "$rc" "unlanded teardown should refuse: $out"
+    assert_contains "$out" 'not yet merged' "teardown did not reach the landed-work refusal"
+    cmp -s "$hooks" "$CASE_DIR/hooks-before" || fail "refusal changed hooks"
+    cmp -s "$state/$id.agy-hooks-mode" "$CASE_DIR/mode-before" || fail "refusal changed mode record"
+    if [ "$mode" = merged ]; then
+      cmp -s "$state/$id.agy-hooks-backup" "$CASE_DIR/backup-before" || fail "refusal changed backup"
+    fi
+    assert_present "$state/$id.meta" "refusal removed the task"
+  done
+  pass "agy refused teardown preserves created and merged hook wiring"
+}
+
+test_agy_refused_teardown_preserves_wiring
+
 test_agy_tracked_hooks_refused
 test_agy_merge_retains_worker_edits
 test_agy_concurrent_trust

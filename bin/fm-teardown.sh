@@ -3066,10 +3066,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ -f "$STATE/$ID.agy-hooks-mode" ]; then
-  fm_agy_hooks_remove "$WT" "$STATE" "$ID" || exit 1
-fi
-
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
