@@ -930,6 +930,72 @@ test_empty_scout_refuses_hidden_submodule_edits() {
   pass "EMPTY refuses hidden submodule edits and allows a clean submodule"
 }
 
+test_empty_scout_refuses_hidden_nested_submodule_material() {
+  local case_dir rc material path
+  case_dir=$(make_case empty-scout-nested-submodule)
+  write_sparse_recovery_meta "$case_dir" task-x1 no-mistakes scout "$case_dir/wt"
+  git init -q "$case_dir/inner-origin"
+  printf 'preserved\n' > "$case_dir/inner-origin/work.txt"
+  printf 'scratch.tmp\n' > "$case_dir/inner-origin/.gitignore"
+  git -C "$case_dir/inner-origin" add work.txt .gitignore
+  git -C "$case_dir/inner-origin" commit -qm 'inner baseline'
+  git init -q "$case_dir/outer-origin"
+  git -C "$case_dir/outer-origin" -c protocol.file.allow=always submodule add -q \
+    "$case_dir/inner-origin" inner
+  git -C "$case_dir/outer-origin" commit -qm 'outer baseline'
+  git -C "$case_dir/wt" -c protocol.file.allow=always submodule add -q \
+    "$case_dir/outer-origin" module
+  git -C "$case_dir/wt" -c protocol.file.allow=always submodule update --init --recursive -q
+  git -C "$case_dir/wt" commit -qm 'add preserved nested submodules'
+  git -C "$case_dir/wt" push -q origin HEAD:main
+  git -C "$case_dir/wt/module" config submodule.inner.ignore all
+
+  for material in tracked untracked ignored; do
+    case "$material" in
+      tracked) path=work.txt ;;
+      untracked) path=new.txt ;;
+      ignored) path=scratch.tmp ;;
+    esac
+    printf 'unpreserved nested material\n' >> "$case_dir/wt/module/inner/$path"
+    [ -z "$(git -C "$case_dir/wt" status --porcelain --ignored --untracked-files=all --ignore-submodules=none)" ] \
+      || fail "empty-scout-nested-submodule: fixture did not hide $material material"
+    [ -n "$(git -C "$case_dir/wt/module/inner" status --porcelain --ignored --untracked-files=all --ignore-submodules=none)" ] \
+      || fail "empty-scout-nested-submodule: fixture has no detectable $material material"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/$material.stdout" 2> "$case_dir/$material.stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "empty-scout-nested-submodule: hidden $material material must refuse cleanup"
+    assert_grep 'cleanup classification REFUSED' "$case_dir/$material.stderr" \
+      "empty-scout-nested-submodule: $material refusal did not identify its category"
+    assert_grep 'isolated scout copy contains tracked, untracked, or ignored material' "$case_dir/$material.stderr" \
+      "empty-scout-nested-submodule: $material refusal did not identify the dirty copy"
+    assert_present "$case_dir/state/task-x1.meta" \
+      "empty-scout-nested-submodule: $material refusal erased the recovery record"
+    assert_grep 'unpreserved nested material' "$case_dir/wt/module/inner/$path" \
+      "empty-scout-nested-submodule: $material refusal lost the nested material"
+    if [ "$material" = tracked ]; then
+      git -C "$case_dir/wt/module/inner" checkout -- "$path"
+    else
+      rm "$case_dir/wt/module/inner/$path"
+    fi
+  done
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/clean.stdout" 2> "$case_dir/clean.stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "empty-scout-nested-submodule: clean nested submodules should allow cleanup"
+  assert_grep 'Cleanup classification: EMPTY' "$case_dir/clean.stdout" \
+    "empty-scout-nested-submodule: clean nested copy did not classify EMPTY"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "empty-scout-nested-submodule: clean copy retained its recovery record"
+  pass "EMPTY recursively refuses hidden nested material and allows clean submodules"
+}
+
 test_empty_scout_closes_backlog_without_report() {
   local case_dir rc
   case_dir=$(make_case empty-scout-backlog)
@@ -4051,6 +4117,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_empty_pi_compaction_scout_allows
 test_empty_scout_refuses_hidden_submodule_edits
+test_empty_scout_refuses_hidden_nested_submodule_material
 test_empty_scout_closes_backlog_without_report
 test_empty_portfolio_scout_allows_when_behind_upstream
 test_reports_pr43_sparse_record_allows_only_api_confirmed_merge
