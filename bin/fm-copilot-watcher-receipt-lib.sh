@@ -97,7 +97,7 @@ fm_copilot_watch_receipt_publish() {
 
 fm_copilot_watch_receipt_validate_claimed() {
   local claimed=$1 root_real=$2 home_real=$3 state_real=$4
-  local state_device max_age size line key value schema= completed_at= receipt_root= receipt_home=
+  local state_device max_age size line key value schema='' completed_at='' receipt_root='' receipt_home=''
   local seen_schema=0 seen_completed=0 seen_root=0 seen_home=0 age
   [ -f "$claimed" ] && [ ! -L "$claimed" ] || return 1
   [ "$(fm_copilot_watch_receipt_mode "$claimed")" = 600 ] || return 1
