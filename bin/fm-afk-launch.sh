@@ -34,7 +34,11 @@
 # from its OWN inherited env (discover_supervisor_target). Running it in a
 # separate terminal would make it discover its OWN pane, so this captures the
 # captain pane FIRST (from the pane this script runs in) and passes it in as
-# FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
+# FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly. The captain pane's
+# HARNESS travels the same way, as FM_SUPERVISOR_HARNESS: the daemon in its own
+# terminal is a child of the terminal server, so its own ancestry cannot answer
+# which harness renders the pane whose composer it must prove empty before it
+# types an escalation into it.
 #
 # Usage:
 #   fm-afk-launch.sh propose [--words-file <path> | --words <text>]
@@ -69,7 +73,8 @@
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
 # placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
-# override the captured captain pane/backend (an isolated lab pane in tests).
+# override the captured captain pane/backend (an isolated lab pane in tests),
+# and FM_SUPERVISOR_HARNESS carries that pane's harness to the daemon.
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -494,8 +499,8 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     IFS=$'\t' read -r wsid pane <<< "$recovered"
   fi
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_SUPERVISOR_HARNESS=%q %q' \
+    "$FM_HOME" "$captain_target" "$captain_backend" "$(fm_afk_launch_primary_harness)" "$entry")
   if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
     fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
     fm_afk_launch_close_terminal herdr "$session:$pane"
@@ -521,8 +526,8 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   nonce="$$-${RANDOM:-0}-$(date '+%s')"
   session="fm-afk-daemon-$hash-$nonce"
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_SUPERVISOR_HARNESS=%q %q' \
+    "$FM_HOME" "$captain_target" "$captain_backend" "$(fm_afk_launch_primary_harness)" "$entry")
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1

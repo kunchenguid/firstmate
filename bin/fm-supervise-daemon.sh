@@ -78,6 +78,16 @@
 #                                   tmux target or a herdr "<session>:<pane-id>"
 #                                   target; which one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
+#          FM_SUPERVISOR_HARNESS    harness rendering the supervisor pane
+#                                   (override; forwarded by bin/fm-afk-launch.sh
+#                                   from inside the captain pane, because a
+#                                   daemon launched into its own terminal is a
+#                                   child of the terminal server and cannot read
+#                                   that pane's harness from its own ancestry).
+#                                   Absent, the daemon detects its own harness,
+#                                   which is correct only on the harness-native
+#                                   launch paths. Scopes the composer proofs
+#                                   run against that pane before injection.
 #          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr;
 #                                   override; otherwise auto-discovered the same
 #                                   way bin/fm-backend.sh's fm_backend_detect
@@ -1590,15 +1600,17 @@ fm_super_main() {
   local BACKEND="$FM_SUPERVISOR_BACKEND"
 
   # --- scope harness-specific composer proofs to the supervisor pane's own
-  # harness. The daemon is launched from the primary's process tree in the
-  # harness-native paths, so its own detected harness IS the supervisor pane's
-  # harness; the launch paths without inherited markers resolve to unknown and
-  # simply skip harness-scoped structural checks (fail-safe deferral).
-  # Detection always runs rather than deferring to an inherited value, because
-  # every OTHER reader of this contract resolves the harness of the exact pane
-  # it is about to read; an ambient value reaching this process came from some
-  # other pane's operation and would claim a different harness's structure.
-  FM_COMPOSER_HARNESS=$("$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null) || FM_COMPOSER_HARNESS=""
+  # harness (discover_supervisor_harness, bin/fm-supervisor-target-lib.sh).
+  # FM_SUPERVISOR_HARNESS, captured in the captain pane and forwarded by
+  # bin/fm-afk-launch.sh with the target and backend, wins; without it the
+  # daemon falls back to its own ancestry, which IS the supervisor pane's
+  # harness on the harness-native launch paths and resolves to unknown
+  # otherwise, simply skipping harness-scoped structural checks (fail-safe
+  # deferral). An ambient FM_COMPOSER_HARNESS is never trusted here: every
+  # reader of that contract declares the harness of the exact pane it is about
+  # to read, so a value arriving from some other pane's operation would claim a
+  # different harness's structure.
+  FM_COMPOSER_HARNESS=$(discover_supervisor_harness) || FM_COMPOSER_HARNESS=""
   export FM_COMPOSER_HARNESS
 
   # --- refuse an unsupported supervisor backend loudly, before ever trying a

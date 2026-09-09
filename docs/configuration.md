@@ -173,6 +173,9 @@ Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1`
 That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
+`FM_SUPERVISOR_HARNESS` is the third axis of the same pane: it names the harness rendering it, which scopes the structural composer proofs the daemon runs before typing an escalation into that pane.
+`bin/fm-afk-launch.sh` captures it inside the captain pane and forwards it with the target and backend, because a daemon launched into its own terminal is a child of the terminal server and cannot read the captain pane's harness from its own ancestry.
+Without it the daemon detects its own harness, which is the same pane's harness only on the harness-native launch paths, and an unresolved harness simply skips the harness-scoped checks and defers.
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
@@ -1007,6 +1010,7 @@ FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
 FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected
+FM_SUPERVISOR_HARNESS=             # optional supervisor pane harness override; forwarded by bin/fm-afk-launch.sh from inside the captain pane, otherwise the daemon detects its own
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables

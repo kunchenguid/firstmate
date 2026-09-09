@@ -2711,6 +2711,57 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+# The supervisor pane's harness is only knowable inside that pane. On the
+# script-owned away launch (agy, codex, opencode, omp, kimi, cursor) the daemon
+# is a child of the terminal server, so bin/fm-afk-launch.sh forwards it as
+# FM_SUPERVISOR_HARNESS. Without that declaration an Agy composer classifies
+# `unknown` and every escalation defers forever; with it the real classifier
+# reads the same pane `empty` and the injection is confirmed.
+agy_supervisor_capture() {
+  printf '%s\n' \
+    'Antigravity CLI' \
+    '────────────────────────────────────────────────────────────────' \
+    '>' \
+    '────────────────────────────────────────────────────────────────' \
+    '? for shortcuts                              Gemini 3.6 Flash · low'
+}
+
+run_agy_supervisor_inject() {  # <case-name> <declared-harness>
+  local dir state capture sent
+  dir=$(make_supercase "$1")
+  state="$dir/state"; capture="$dir/pane.txt"; sent="$dir/sent.txt"
+  afk_enter "$state"
+  agy_supervisor_capture > "$capture"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_SENT="$sent" \
+      FM_FAKE_TMUX_CURSOR_Y=2 FM_COMPOSER_HARNESS="$2" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      inject_msg "away escalation digest" "$state"
+  )
+}
+
+test_supervisor_harness_prefers_the_forwarded_pane_value() {
+  local out own
+  out=$(FM_SUPERVISOR_HARNESS=agy discover_supervisor_harness)
+  [ "$out" = agy ] || fail "the forwarded supervisor-pane harness was not preferred: $out"
+  own=$("$ROOT/bin/fm-harness.sh" 2>/dev/null || printf '')
+  out=$(FM_SUPERVISOR_HARNESS='' discover_supervisor_harness || printf '')
+  [ "$out" = "$own" ] \
+    || fail "without a forwarded value the daemon no longer falls back to its own ancestry ($out vs $own)"
+  pass "discover_supervisor_harness: forwarded captain-pane harness wins, own ancestry remains the fallback"
+}
+
+test_away_injection_into_an_agy_supervisor_pane_is_confirmed() {
+  if run_agy_supervisor_inject inject-agy-undeclared ''; then
+    fail "an undeclared supervisor harness let the injector type into an unproven composer"
+  fi
+  run_agy_supervisor_inject inject-agy-declared agy \
+    || fail "an Agy supervisor pane with the forwarded harness still deferred instead of confirming the injection"
+  pass "away-mode injection into an Agy supervisor pane is confirmed once the pane's harness is declared"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -2828,6 +2879,8 @@ test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_watch_child_does_not_inherit_the_supervisor_composer_harness
+test_supervisor_harness_prefers_the_forwarded_pane_value
+test_away_injection_into_an_agy_supervisor_pane_is_confirmed
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers

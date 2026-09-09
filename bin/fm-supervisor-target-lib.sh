@@ -14,6 +14,8 @@
 # in bin/fm-supervise-daemon.sh, so its unit tests (tests/fm-daemon.test.sh)
 # keep exercising the same names after the daemon sources this file.
 
+_FM_SUPERVISOR_TARGET_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_SUPERVISOR_TARGET_LIB_DIR="."
+
 # Default supervisor pane target/backend when nothing is configured or detected.
 # "firstmate:0" is a tmux session:window name, so the bare fallback (nothing
 # configured, nothing detected) assumes tmux - matching the daemon's pre-herdr
@@ -75,4 +77,28 @@ discover_supervisor_backend() {
   fi
   printf '%s' "$FM_SUPERVISOR_BACKEND_DEFAULT"
   return 1
+}
+
+# discover_supervisor_harness: resolve the HARNESS that renders the supervisor
+# pane, for the harness-scoped composer proofs the away-mode injector runs
+# against that pane before typing into it. Priority:
+#   1. FM_SUPERVISOR_HARNESS env - captured INSIDE the captain pane by
+#      bin/fm-afk-launch.sh and forwarded beside FM_SUPERVISOR_TARGET and
+#      FM_SUPERVISOR_BACKEND. A daemon started by that launcher is a child of
+#      the terminal server rather than of the captain pane, so its own ancestry
+#      structurally cannot answer which harness renders the pane it reads.
+#   2. bin/fm-harness.sh over this process's own ancestry - correct on the
+#      harness-native launch paths, where the daemon does run inside the
+#      primary's process tree.
+# Prints nothing and returns 1 when neither resolves, so the caller declares no
+# harness at all and every harness-scoped structural check is skipped.
+discover_supervisor_harness() {
+  local detected
+  if [ -n "${FM_SUPERVISOR_HARNESS:-}" ]; then
+    printf '%s' "$FM_SUPERVISOR_HARNESS"
+    return 0
+  fi
+  detected=$("$_FM_SUPERVISOR_TARGET_LIB_DIR/fm-harness.sh" 2>/dev/null) || return 1
+  [ -n "$detected" ] || return 1
+  printf '%s' "$detected"
 }
