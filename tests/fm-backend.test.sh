@@ -811,11 +811,28 @@ SH
   printf '%s\n' "$fb"
 }
 
-run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> -- <spawn args...>
-  local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 proj=$7; shift 7
+# A private FM_HOME for one case, with its state/ directory already created.
+#
+# fm-spawn.sh resolves FM_HOME from FM_ROOT_OVERRIDE when FM_HOME is unset, so a
+# case that overrides only STATE/DATA/CONFIG still leaves FM_HOME on this
+# repository checkout. The shared Treehouse project lock is deliberately
+# anchored in the ROOT home's state/ directory (fm_treehouse_project_lock_path
+# in bin/fm-wake-lib.sh), which it requires but never creates - and the
+# checkout's state/ is gitignored, so whether it exists depends on which
+# unrelated test script wrote into the working copy first. A case that borrows
+# the checkout therefore reports on its neighbours instead of its subject. Every
+# case that drives fm-spawn.sh here owns a home of its own instead.
+make_case_home() {  # <label> -> echoes a private FM_HOME whose state/ exists
+  local home="$TMP_ROOT/case-home-$1"
+  mkdir -p "$home/state"
+  printf '%s\n' "$home"
+}
+
+run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <home> <proj> -- <spawn args...>
+  local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 home=$7 proj=$8; shift 8
   [ "${1:-}" = -- ] && shift
   : > "$log"
-  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" FM_HOME="$home" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TMUX_LOG="$log" \
@@ -882,7 +899,7 @@ SH
 }
 
 run_spawn_symlink_case() {  # <label> <physical|logical>
-  local label=$1 first_reply=$2 real_root link_root proj wt id fb data state config log out rc proj_phys initial_path
+  local label=$1 first_reply=$2 real_root link_root proj wt id fb data state config home log out rc proj_phys initial_path
   real_root="$TMP_ROOT/symlink-real-$label"; link_root="$TMP_ROOT/symlink-link-$label"
   mkdir -p "$real_root"
   ln -s "$real_root" "$link_root"
@@ -907,9 +924,10 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/symlink-state-$label"; config="$TMP_ROOT/symlink-config-$label"
   mkdir -p "$state" "$config"
+  home=$(make_case_home "symlink-$label")
   log="$TMP_ROOT/symlink-spawn-$label.log"
 
-  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$home" "$proj" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
   rc=$?
   expect_code 0 "$rc" "fm-spawn.sh should succeed for a project reached through a symlinked prefix when the backend reports $first_reply cwd"$'\n'"$out"
   assert_contains "$out" "worktree=$wt" \
@@ -1059,7 +1077,7 @@ test_spawn_refuses_unknown_fm_backend_env() {
 }
 
 test_spawn_default_backend_writes_no_meta_field() {
-  local proj wt data id state config out
+  local proj wt data id state config home out
   proj="$TMP_ROOT/nobackend-project"; wt="$TMP_ROOT/nobackend-wt"; data="$TMP_ROOT/nobackend-data"
   id="nobackendz3"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1068,8 +1086,9 @@ test_spawn_default_backend_writes_no_meta_field() {
   mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
   mkdir -p "$state" "$config"
+  home=$(make_case_home "nobackend")
 
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
@@ -1082,7 +1101,7 @@ test_spawn_default_backend_writes_no_meta_field() {
 }
 
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
-  local proj wt data id state config out fb
+  local proj wt data id state config home out fb
   proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
   id="explicitbackendz4"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1090,10 +1109,11 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
   mkdir -p "$state" "$config"
+  home=$(make_case_home "explicit-backend")
 
   # HERDR_ENV=1 is present (as if firstmate itself were running under herdr),
   # but an explicit --backend tmux flag must still win outright.
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
@@ -1106,7 +1126,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
 }
 
 test_spawn_autodetect_nesting_resolves_tmux_silently() {
-  local proj wt data id state config out fb
+  local proj wt data id state config home out fb
   proj="$TMP_ROOT/nest-project"; wt="$TMP_ROOT/nest-wt"; data="$TMP_ROOT/nest-data"
   id="nestbackendz5"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1114,13 +1134,14 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"
   mkdir -p "$state" "$config"
+  home=$(make_case_home "nest")
 
   # No --backend, no FM_BACKEND, no config/backend: nothing is explicitly
   # configured, so auto-detect runs. $TMUX and HERDR_ENV=1 are both present
   # (tmux nested inside a herdr pane) - the full fm-spawn.sh pipeline, not just
   # fm_backend_name, must resolve this to tmux and stay completely silent about
   # it (today's default path, byte-identical).
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/nest.log" \
