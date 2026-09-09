@@ -10,6 +10,8 @@ When this session owns supervision and away mode is not active:
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end re-arms automatically when supervision is still needed.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records, the drain's `OPEN DECISIONS` and `UNREAD STATUS` entries, or a real watcher reason line.
 4. On the one `Stop hook feedback` automatic-mechanism failure notice (`firstmate watcher auto-arm FAILED ...`), drain, inspect the automatic mechanism failure, and do not turn the notice into a repeating manual-arm loop.
+   Later blocked turns in the same failure episode repeat only the current cause (`firstmate watcher auto-arm STILL FAILING ...`) instead of the full notice, and are handled the same way.
+   A `HELD THIS TURN OPEN` block from either Stop hook means supervision is verified healthy and only the failure-episode reset write refused, so read the lock and markers that message names: one occurrence is usually benign contention that clears on the next turn, while repetition means the state directory itself is refusing those writes.
 5. If the Stop hook does not claim the home or reports an exhausted failure, inspect its registration and watcher startup path before ending blind.
    Keep the Stop-owned automatic mechanism as the only Claude arm owner.
 6. Treat `watcher: started ...` and `watcher: attached ...` inside automatic arm output as proof that one live cycle exists.
