@@ -2369,10 +2369,17 @@ chmod +x "$QUIET_STUB"
 
 # Short enough to observe, and driven through the same environment a real home
 # uses, so the bound under test is the shipped one rather than a test-only path.
+# One source of truth for the shortened lease and check these fixtures run under,
+# so a case that derives a deadline from the guard's documented bound cannot
+# silently diverge from the settings the guard is actually given.
+PROOF_LEASE_SECONDS=2
+PROOF_CHECK_SECONDS=1
+
 orphan_pe() {  # <home> <command...>
   local home=$1
   shift
-  FM_PROCEVENT_OWNER_LEASE_SECONDS=2 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+  FM_PROCEVENT_OWNER_LEASE_SECONDS="$PROOF_LEASE_SECONDS" \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS="$PROOF_CHECK_SECONDS" \
     FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" "$@"
 }
 
@@ -2662,10 +2669,22 @@ GUARD_PID=$(cat "$HPGUARD/state/procevent/proof-guard-src.runner")
 GUARD_CHILD=$(cat "$TMP_ROOT/proof-guard.child")
 
 # Nothing refreshes this home's lease from here on, which is the whole input.
-deadline=$((SECONDS + 60))
+#
+# The deadline is DERIVED from the bound this case exists to defend, not a flat
+# wall-clock number. The documented bound is the lease, plus the two consecutive
+# failed checks the guard debounces on, plus the stop's own grace - its ordinary
+# signal window and then its forced one, two seconds each. A flat 60 seconds here
+# would pass a guard that took 55, so it could not go red for the reason it
+# names; the point of this case is the bound, so the bound is what it measures.
+# The doubling is a load allowance and nothing more: it must never be widened to
+# make a slow guard pass, because that converts this assertion back into the
+# decoration it was.
+guard_bound=$((PROOF_LEASE_SECONDS + 2 * PROOF_CHECK_SECONDS + 4))
+deadline=$((SECONDS + 2 * guard_bound))
+guard_started=$SECONDS
 while kill -0 -"$GUARD_PID" 2>/dev/null; do
   [ "$SECONDS" -lt "$deadline" ] \
-    || fail "the guard left a signal-proof listener's process group running"
+    || fail "the guard exceeded its bound: still holding the group after $((SECONDS - guard_started))s, against a documented bound of ${guard_bound}s"
   sleep 0.5
 done
 wait_gone "$GUARD_CHILD" \
