@@ -20,9 +20,15 @@ Claude gates a folder it has never seen behind an interactive workspace-trust di
 A ship or scout spawn therefore pre-registers the worktree before launch, and the dialog does not appear.
 `../../../bin/fm-claude-trust.sh` records `hasTrustDialogAccepted` for that worktree path in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`, and `../../../bin/fm-spawn.sh` refuses the spawn when the write fails rather than launching a worker that would wedge.
 
+That store belongs to one logged-in account, so the entry must land in the account the worker itself will run in.
+A caller routes a worker to one of several accounts by setting `CLAUDE_CONFIG_DIR` for the spawn.
+`../../../bin/fm-spawn.sh` records that account in `state/<id>.meta` as `claude_config_dir=` and uses that one value for the launch and, on a ship or scout spawn, for the trust write; its header owns the resolution and the refusals.
+A relaunch or a startup respawn takes the account from that record rather than from firstmate's own environment, so a replacement worker cannot land in an account that never accepted the dialog.
+An absent `claude_config_dir=` is the default single store, and no flag moves a task to another account: that is a fresh dispatch decision.
+
 Never try to answer the trust dialog with a key.
 Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and the observed rendering starts on `No, exit`, which means a sent Enter ends the session instead of accepting.
-A visible trust dialog means pre-registration did not take effect, so inspect the store and the spawn's error output rather than sending keys.
+A visible trust dialog means pre-registration did not take effect, so inspect the store of the account the record names and the spawn's error output rather than sending keys.
 
 The once-per-machine bypass-permissions confirmation is a separate dialog, scoped to the machine rather than the path, and pre-registration does not address it.
 Never send Enter to that one either: it was observed rendering in the same shape as the trust dialog, with the selection on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so Enter ends the session rather than accepting.

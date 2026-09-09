@@ -219,6 +219,8 @@ bin/fm-spawn.sh <id> --secondmate
 ```
 
 Use the recorded `home=` in meta.
+For a claude secondmate, also carry its recorded `claude_config_dir=` as `CLAUDE_CONFIG_DIR` on that command.
+A fresh spawn reads the account from the environment, and firstmate's own environment names firstmate's account, which may never have accepted this home's trust dialog ([`harness-adapters`](../harness-adapters/references/harness/claude.md)).
 If meta is missing but `data/secondmates.md` still registers the secondmate, respawn from the registry entry and its persistent home.
 For a remote route, the same command probes and relaunches only on the configured host.
 An SSH transport failure or unreadable remote endpoint remains unknown and must be reconciled on that host; never launch a local replacement.

@@ -26,6 +26,7 @@ A Claude secondmate is deliberately not pre-registered, because `../../../bin/fm
 That kind guard is the whole exclusion, because a treehouse-leased secondmate home is itself a linked worktree that the scope test would accept, and only a plain-clone home would be refused as a primary checkout.
 The consequence is that a claude secondmate whose home Claude has never trusted meets the workspace-trust dialog itself, and firstmate cannot answer it any more than it can for a crewmate.
 This is rarely seen because a secondmate home is persistent and reused, so its trust decision is made once and survives, unlike a per-task worktree that is new every time.
+That decision lives in one account's store, so a respawn reuses the account recorded for the task rather than firstmate's own ([`../harness/claude.md`](../harness/claude.md)).
 
 Use the tool's exact skill form, or natural language only when no separate command is verified or the form remains uncertain.
 A successful send or key return is not proof of submission; require the tool-specific postcondition.
