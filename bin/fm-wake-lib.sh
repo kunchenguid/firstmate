@@ -503,6 +503,7 @@ fm_lock_claim() {
   return 0
 }
 
+# Return 2 for owner creation/preparation failures; 1 permits contention recovery.
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
@@ -614,31 +615,17 @@ _fm_recovery_marker_write_locked() {
   fi
 }
 
-# Seconds a recovery-marker transition may wait for the marker lock before it
-# refuses instead of blocking. Empty - the default - keeps the ordinary
-# unbounded wait every mutation-critical caller relies on, so no existing caller
-# changes behavior. A caller whose whole job is to STOP sets it for its own
-# call: bin/fm-watch.sh's EXIT trap, where blocking on this lock turns "the
-# watcher stops" into "the watcher never stops" and makes a supervisor's signal
-# a no-op. On the deadline the transition returns 124 with FM_LOCK_HELD_PID
-# naming whoever still holds the lock.
+# Internal timeout in seconds for the shutdown-reachable transitions below.
+# Empty keeps ordinary recovery-marker operations on their blocking path;
+# watcher_cleanup in bin/fm-watch.sh supplies its deadline and clears it after use.
+# On timeout, return 124 with FM_LOCK_HELD_PID identifying a holder when known.
 FM_RECOVERY_MARKER_LOCK_TIMEOUT=
 
-# The one place a recovery-marker transition takes the marker lock, so a bound
-# cannot be added to one acquisition and silently missed by the other.
-#
-# The bound is a deadline around the ORDINARY acquire, deliberately NOT
-# fm_lock_acquire_wait_bounded. That helper delegates acquisition to a child
-# process, and from that child the caller's OWN abandoned hold is
-# indistinguishable from a live foreign holder - so it cannot acquire a lock the
-# caller itself already holds. The exit path is exactly that case: a signal can
-# land inside a recovery-marker critical section and the EXIT trap then re-enters
-# it, which is why fm_lock_try_acquire carries an in-process self-held reclaim.
-# Measured: routing shutdown through the helper left the singleton lock behind
-# where the plain wait released it. Keeping fm_lock_try_acquire keeps that
-# reclaim, the stale-owner recovery, and every other acquisition rule identical;
-# the only added outcome is 124 on the deadline, with FM_LOCK_HELD_PID naming
-# whoever still holds it.
+# Both cleanup transitions must use this acquisition path to share the deadline.
+# Keep acquisition in the exiting process: fm_lock_acquire_wait_bounded delegates
+# to a child, which cannot reclaim a hold abandoned by the caller's interrupted
+# critical section. fm_lock_try_acquire preserves that self-held reclaim and
+# stale-owner recovery while returning to the deadline check after failures.
 _fm_recovery_marker_lock_acquire() {  # <lockdir>
   local started
   if [ -z "$FM_RECOVERY_MARKER_LOCK_TIMEOUT" ]; then
@@ -931,6 +918,9 @@ fm_lock_try_acquire() {
   else
     rc=$?
   fi
+  # Resource failures must return without recursive stealing. Contention can
+  # leave lockdir absent after a .steal-blocked claim; keep that path eligible
+  # to recover an abandoned stealer.
   [ "$rc" -eq 1 ] || return 1
 
   fm_current_pid current || return 1
