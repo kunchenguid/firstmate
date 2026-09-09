@@ -20,11 +20,9 @@
 # never this.
 #
 # Usage:
-#   fm-project-local.sh path <project>
 #   fm-project-local.sh list <project>
 #   fm-project-local.sh add <project> <file-or-dir> [--as <relative-path>]
 #   fm-project-local.sh remove <project> <relative-path>
-#   fm-project-local.sh manifest <project>
 #   fm-project-local.sh sync <project>
 #   fm-project-local.sh stage <project> <worktree>
 #
@@ -33,7 +31,8 @@
 # directory; the captain's live checkout is never written, staged, or cleaned.
 # That checkout is shared rather than still - he works in it while firstmate has
 # work going - so sync reports when the folder was being written while the copy
-# was taken instead of presenting a possibly torn file as clean.
+# was taken instead of presenting a possibly torn file as clean, and says so
+# separately when that could not be determined at all.
 #
 # `stage` is the spawn-time step, called by bin/fm-spawn.sh once a task copy is
 # known to be isolated. It is idempotent and self-cleaning: a pool slot reused by
@@ -116,6 +115,20 @@ refuse_symlinks() {  # <dir>
 
 canonical_home() {  # <project>
   "$SCRIPT_DIR/fm-project-memory.sh" home "$1"
+}
+
+# Only `activity`'s own "active" answer counts as someone working in the home;
+# a failed check is reported as exactly that, never as activity observed.
+HOME_ACTIVE=0
+HOME_ACTIVITY_UNKNOWN=0
+note_home_activity() {  # <home-dir>
+  local rc=0
+  "$SCRIPT_DIR/fm-project-memory.sh" activity --home "$1" >/dev/null 2>&1 || rc=$?
+  case $rc in
+    0) ;;
+    3) HOME_ACTIVE=1 ;;
+    *) HOME_ACTIVITY_UNKNOWN=1 ;;
+  esac
 }
 
 # --- staging ----------------------------------------------------------------
@@ -219,18 +232,6 @@ CMD=$1
 shift
 
 case "$CMD" in
-  path)
-    NAME=${1:-}
-    [ -n "$NAME" ] || die "usage: path <project>"
-    require_project "$NAME"
-    material_dir "$NAME"
-    ;;
-  manifest)
-    NAME=${1:-}
-    [ -n "$NAME" ] || die "usage: manifest <project>"
-    require_project "$NAME"
-    printf '%s/manifest\n' "$(store_dir "$NAME")"
-    ;;
   list)
     NAME=${1:-}
     [ -n "$NAME" ] || die "usage: list <project>"
@@ -306,8 +307,7 @@ case "$CMD" in
     # the sync - the store is a private cache and a re-run is free - but it must
     # never be silent either, because a truncated file that reaches every worker
     # is far worse than one that arrives late.
-    ACTIVE=0
-    "$SCRIPT_DIR/fm-project-memory.sh" activity --home "$HOME_DIR" >/dev/null 2>&1 || ACTIVE=1
+    note_home_activity "$HOME_DIR"
     MATERIAL=$(material_dir "$NAME")
     mkdir -p "$MATERIAL"
     COPIED=0
@@ -341,10 +341,12 @@ case "$CMD" in
       COPIED=$((COPIED + 1))
     done <"$MANIFEST"
     refuse_symlinks "$MATERIAL"
-    "$SCRIPT_DIR/fm-project-memory.sh" activity --home "$HOME_DIR" >/dev/null 2>&1 || ACTIVE=1
+    note_home_activity "$HOME_DIR"
     printf 'synced: %s from %s (%s paths copied, %s absent)\n' "$NAME" "$HOME_DIR" "$COPIED" "$MISSING"
-    if [ "$ACTIVE" -eq 1 ]; then
+    if [ "$HOME_ACTIVE" -eq 1 ]; then
       printf 'warning: %s was being worked in while this copy was taken, so a file may have been caught mid-write; re-run sync once it is quiet if anything looks truncated\n' "$HOME_DIR" >&2
+    elif [ "$HOME_ACTIVITY_UNKNOWN" -eq 1 ]; then
+      printf 'warning: could not determine whether %s was in use while this copy was taken (the activity check failed); check it with `fm-project-memory.sh activity --home %s` and re-run sync if anything looks truncated\n' "$HOME_DIR" "$HOME_DIR" >&2
     fi
     ;;
   stage)

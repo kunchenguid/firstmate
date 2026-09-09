@@ -2376,9 +2376,23 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   # canonical knowledge home, which is the recorded source checkout for a
   # project whose home is a local directory rather than its repository. A
   # project with no catalog contributes nothing and costs nothing.
+  #
+  # When that home is not the project directory this task was cut from, the
+  # worker's copy carries a stale mirror of the catalog and the repository is
+  # not where the project's knowledge lands. The digest then names the catalog
+  # by its absolute path, and the launch brief gains a section that overrides
+  # the scaffold's promote-through-delivery-path instruction: the worker never
+  # writes into the captain's live folder, it puts what it learned in its
+  # report, and firstmate carries that into the catalog under approval.
   SPAWN_RECIPE_DIGEST=
+  SPAWN_RECIPE_LIVE_HOME=
   if SPAWN_RECIPE_HOME=$("$FM_ROOT/bin/fm-project-memory.sh" home "$(basename "$PROJ_ABS")" --clone "$PROJ_ABS" 2>/dev/null); then
-    SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" 2>/dev/null || true)
+    if [ "$(cd "$SPAWN_RECIPE_HOME" && pwd -P)" != "$(cd "$PROJ_ABS" && pwd -P)" ]; then
+      SPAWN_RECIPE_LIVE_HOME=$SPAWN_RECIPE_HOME
+      SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" --absolute 2>/dev/null || true)
+    else
+      SPAWN_RECIPE_DIGEST=$("$FM_ROOT/bin/fm-project-recipes.sh" digest "$SPAWN_RECIPE_HOME" 2>/dev/null || true)
+    fi
   fi
 
   # Use the existing launch-brief overlay for every worker kind, including
@@ -2392,6 +2406,9 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       fm_brief_worker_role &&
       if [ -n "$SPAWN_RECIPE_DIGEST" ]; then
         printf '\n%s\n' "$SPAWN_RECIPE_DIGEST"
+      fi &&
+      if [ -n "$SPAWN_RECIPE_LIVE_HOME" ]; then
+        fm_brief_live_home_overlay "$SPAWN_RECIPE_LIVE_HOME" "$FM_ROOT"
       fi &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"

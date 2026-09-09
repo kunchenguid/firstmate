@@ -162,6 +162,30 @@ The Definition of done's rule that `--intent` must be self-sufficient still gove
 EOF
 }
 
+# A project whose knowledge home is a live local folder rather than the
+# repository this copy was cut from. bin/fm-spawn.sh emits this after the
+# capability digest whenever bin/fm-project-memory.sh resolves the home to a
+# directory other than the project directory. It supersedes the scaffold's
+# project-memory section on the two points that section gets wrong there: the
+# catalog to read is the one in that folder, not the copy's stale mirror, and
+# nothing durable is promoted into the repository through the delivery path. The
+# worker is never granted a write into the captain's folder; what it learned
+# travels in its report and firstmate carries it into the catalog under approval.
+fm_brief_live_home_overlay() {  # <home-dir> <fm-root>
+  local home=$1 root=$2
+  cat <<EOF
+
+# Project memory - this project's home is a live local folder
+This section supersedes the Project memory section above wherever the two disagree.
+This project's knowledge home is \`$home\`, a folder the captain works in himself; the repository this copy was taken from is a mirror, not where the project's knowledge lands.
+Its recipe catalog is \`$home/.agents/recipes.md\`. The \`.agents/recipes.md\` in this copy is a stale mirror of it: never read it as current and never edit it as the catalog.
+You have no write access to that folder. Do not write anything under \`$home\`, and do not run \`$root/bin/fm-project-recipes.sh init\` there or in this copy.
+Do not promote recipes or other durable project knowledge into the repository through this task's delivery path.
+Instead, put every recipe you learned or found wrong in your report, in the recipe shape \`$root/bin/fm-project-recipes.sh --help\` describes, naming the existing entry it corrects or replaces when there is one; firstmate carries it into the catalog under the captain's approval.
+Durable project knowledge that is not a recipe goes in the report the same way.
+EOF
+}
+
 # Accept the current two-subsection contract only when both bodies have content;
 # briefs predating that contract remain valid when their # Task body has content.
 fm_brief_task_content_valid() {  # <file>

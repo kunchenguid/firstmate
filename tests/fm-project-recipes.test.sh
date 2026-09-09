@@ -67,6 +67,60 @@ test_init_creates_the_catalog_and_points_agents_md_at_it() {
   pass "fm-project-recipes.sh: init creates the catalog once and points AGENTS.md at it"
 }
 
+# The captain asked for the pointer "dentro de su respectivo claude.md": a
+# project that keeps its own words in CLAUDE.md gets the pointer there, in
+# place, and never has that file renamed out from under him.
+test_init_points_an_existing_claude_md_without_renaming_it() {
+  local world out
+  world=$(make_project claudeonly)
+  printf '# AutoEvals\n\nTwenty kilobytes of the captain'"'"'s own operating context.\n' >"$world/project/CLAUDE.md"
+  out=$(recipes_cmd "$world/home" init "$world/project") || fail "init failed on a project that keeps a real CLAUDE.md: $out"
+  assert_present "$world/project/.agents/recipes.md" "init did not create the catalog"
+  assert_absent "$world/project/AGENTS.md" "init imposed an AGENTS.md on a project that keeps its memory in CLAUDE.md"
+  assert_grep "Twenty kilobytes of the captain's own operating context" "$world/project/CLAUDE.md" \
+    "init lost the captain's own CLAUDE.md content"
+  assert_grep ".agents/recipes.md" "$world/project/CLAUDE.md" "CLAUDE.md does not point at the catalog"
+  out=$(recipes_cmd "$world/home" init "$world/project") || fail "second init failed: $out"
+  [ "$(grep -c '\.agents/recipes\.md' "$world/project/CLAUDE.md")" = 1 ] ||
+    fail "init added a second pointer to CLAUDE.md"
+  pass "fm-project-recipes.sh: init points an existing CLAUDE.md at the catalog without renaming it"
+}
+
+# AutoEvals today: AGENTS.md and CLAUDE.md coexist as distinct real files. The
+# catalog is the product there, so init must succeed and leave both files as
+# they are apart from the one pointer line in AGENTS.md.
+test_init_succeeds_when_agents_and_claude_are_both_real_files() {
+  local world out claude_before
+  world=$(make_project bothreal)
+  printf '# Agent memory\n\nWritten by an earlier worker.\n' >"$world/project/AGENTS.md"
+  printf '# Operating context\n\nThe captain'"'"'s own words, not a pointer.\n' >"$world/project/CLAUDE.md"
+  claude_before=$(cat "$world/project/CLAUDE.md")
+  out=$(recipes_cmd "$world/home" init "$world/project") || fail "init died on a project holding both AGENTS.md and CLAUDE.md: $out"
+  assert_present "$world/project/.agents/recipes.md" "init did not create the catalog"
+  assert_grep ".agents/recipes.md" "$world/project/AGENTS.md" "AGENTS.md does not point at the catalog"
+  assert_grep "Written by an earlier worker" "$world/project/AGENTS.md" "init lost the existing AGENTS.md content"
+  [ "$(cat "$world/project/CLAUDE.md")" = "$claude_before" ] ||
+    fail "init touched CLAUDE.md on a project that also keeps AGENTS.md"
+  pass "fm-project-recipes.sh: init succeeds when AGENTS.md and CLAUDE.md are both real files"
+}
+
+test_digest_names_the_catalog_by_absolute_path_on_request() {
+  local world out home
+  world=$(make_project absolute)
+  mkdir -p "$world/project/.agents"
+  printf '# Agent recipes\n' >"$world/project/.agents/recipes.md"
+  write_recipe "$world/project/.agents/recipes.md" "First capability" "$(today)"
+  write_recipe "$world/project/.agents/recipes.md" "Second capability" "$(today)"
+  home=$(cd "$world/project" && pwd -P)
+  out=$(recipes_cmd "$world/home" digest "$world/project" --absolute --budget 40) || fail "digest failed: $out"
+  assert_contains "$out" "is in \`$home/.agents/recipes.md\`" "the digest did not name the catalog by its absolute path"
+  assert_contains "$out" "read \`$home/.agents/recipes.md\` for the rest" \
+    "the omission note did not name the catalog by its absolute path"
+  out=$(recipes_cmd "$world/home" digest "$world/project") || fail "digest failed: $out"
+  assert_contains "$out" "is in \`.agents/recipes.md\`" "the plain digest stopped naming the catalog relatively"
+  pass "fm-project-recipes.sh: digest names the catalog by absolute path on request"
+}
+
 test_digest_carries_when_and_ask_but_not_the_rest() {
   local world out
   world=$(make_project digest)
@@ -182,6 +236,9 @@ test_check_reports_a_catalog_that_outgrew_its_budget() {
 }
 
 test_init_creates_the_catalog_and_points_agents_md_at_it
+test_init_points_an_existing_claude_md_without_renaming_it
+test_init_succeeds_when_agents_and_claude_are_both_real_files
+test_digest_names_the_catalog_by_absolute_path_on_request
 test_digest_carries_when_and_ask_but_not_the_rest
 test_digest_is_bounded_and_says_what_it_left_out
 test_a_configured_budget_is_read_from_the_home

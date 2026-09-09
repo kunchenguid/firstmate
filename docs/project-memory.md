@@ -75,10 +75,12 @@ Some material must never enter a project's history: a collaborator's repository 
 
 ```sh
 bin/fm-project-local.sh add <project> /path/to/file
-bin/fm-project-local.sh manifest <project>     # paths to pull from the project's home
-bin/fm-project-local.sh sync <project>         # pull them, reading that home only
+bin/fm-project-local.sh sync <project>         # pull the manifest's paths, reading that home only
 bin/fm-project-local.sh list <project>
 ```
+
+`sync` reads its paths, one per line, from `data/project-local/<project>/manifest`.
+It says when the home was being worked in while the copy was taken, and says separately when that could not be determined, so a possibly torn file is never presented as clean.
 
 Every spawn stages the store into the task copy at `.fm-local/` before the worker starts.
 Staging adds that path to the repository's exclude file and then **verifies that git reports nothing under it**; if git can still see the material, the staged copy is removed and the spawn is refused, because a worker cannot be told not to commit something git is offering it.
@@ -92,8 +94,9 @@ For a project whose home is a local checkout, this is the main path rather than 
 A project can stop being software and become a toolbox whose only user is an agent - diagnose an assistant bug, audit a conversation corpus, change a prompt, run a realistic test.
 For a project like that the operational recipes are the product, and they usually survive only inside one long conversation.
 
-`bin/fm-project-recipes.sh` gives every project a catalog of those capabilities at `<project home>/.agents/recipes.md`, pointed at from the project's own `AGENTS.md`.
+`bin/fm-project-recipes.sh` gives every project a catalog of those capabilities at `<project home>/.agents/recipes.md`, pointed at from the agent memory file the project already keeps: its `AGENTS.md`, or its `CLAUDE.md` when that is what the project has.
 It lives with the project on purpose, so it serves the captain's individual sessions exactly as much as a dispatched worker; it is not a firstmate-private channel.
+Creating it never renames or reconciles the project's memory files; a project that keeps both `AGENTS.md` and `CLAUDE.md` as distinct real files is left exactly as it is, apart from the one pointer line.
 
 ```sh
 bin/fm-project-recipes.sh init <project-home>     # the only subcommand that writes
@@ -103,6 +106,10 @@ bin/fm-project-recipes.sh check <project-home>
 
 Each entry names when the capability applies, the exact way it is asked for, what comes back, and its sharp edges, and carries the date it was last verified against the real project.
 Every spawn renders `digest` into the launch brief, so a worker reads what this project can do and how it is invoked before it touches anything, the same way firstmate reads its own session-start digest.
+
+When the project's home is a live local folder, the digest names the catalog there by its absolute path, so a worker never mistakes the stale mirror in its own copy for the real one, and the launch brief says plainly that the folder is not the worker's to write and the repository is not where the knowledge lands.
+A recipe such a worker learns or finds wrong travels back in its report, in the catalog's own entry shape, and firstmate carries it into the catalog under the captain's approval; the copy's delivery path is never the route for it.
+For an ordinary project whose home is its repository, a recipe is promoted through the task's delivery path like any other project knowledge.
 
 The digest is bounded by `config/project-recipe-budget` (absent means the default in the script's header), using the same conservative local token estimate as firstmate's own startup memory.
 When the catalog outgrows the budget that is the signal to consolidate, not to raise the ceiling; without a ceiling this recreates the original problem inverted, as a wall of text.

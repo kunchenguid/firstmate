@@ -22,7 +22,7 @@
 #   fm-project-memory.sh source get <project>
 #   fm-project-memory.sh source clear <project>
 #   fm-project-memory.sh source list
-#   fm-project-memory.sh scan <project> [--source <path>] [--canonical repo|source] [--limit <n>]
+#   fm-project-memory.sh scan <project> [--limit <n>]
 #   fm-project-memory.sh scan --all [--limit <n>]
 #
 # Usage (continued):
@@ -432,9 +432,9 @@ report_activity() {  # <home> <window-seconds> [git-only]
 
 # --- scan -------------------------------------------------------------------
 
-scan_project() {  # <project> <source-or-empty> <limit> [canonical-override]
-  local project=$1 source=$2 limit=$3 canonical_override=${4:-}
-  local clone rc source_head clone_head source_branch
+scan_project() {  # <project> <limit>
+  local project=$1 limit=$2
+  local clone rc source source_head clone_head source_branch
   local tmp canonical=repo gap=0 context=0
   clone="$PROJECTS_DIR/$project"
 
@@ -448,21 +448,18 @@ scan_project() {  # <project> <source-or-empty> <limit> [canonical-override]
     clone_head=
   fi
 
-  if [ -z "$source" ]; then
-    if read_source_record "$project"; then
-      source=$SOURCE_RECORD_PATH
-      canonical=$SOURCE_RECORD_CANONICAL
-    else
-      rc=$?
-      if [ "$rc" -eq 2 ]; then
-        printf 'SOURCE: unreadable record\n'
-        printf 'VERDICT: unknown - the recorded source checkout could not be read\n'
-        return 0
-      fi
-      source=
+  if read_source_record "$project"; then
+    source=$SOURCE_RECORD_PATH
+    canonical=$SOURCE_RECORD_CANONICAL
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      printf 'SOURCE: unreadable record\n'
+      printf 'VERDICT: unknown - the recorded source checkout could not be read\n'
+      return 0
     fi
+    source=
   fi
-  [ -z "$canonical_override" ] || canonical=$canonical_override
   printf 'HOME_KIND: %s\n' "$canonical"
 
   if [ -z "$source" ]; then
@@ -876,24 +873,12 @@ case "$CMD" in
   scan)
     ALL=0
     NAME=
-    SOURCE_OVERRIDE=
-    CANONICAL_OVERRIDE=
     LIMIT=40
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --all)
           ALL=1
           shift
-          ;;
-        --source)
-          [ "$#" -gt 1 ] || die "--source requires a path"
-          SOURCE_OVERRIDE=$2
-          shift 2
-          ;;
-        --canonical)
-          [ "$#" -gt 1 ] || die "--canonical requires repo or source"
-          CANONICAL_OVERRIDE=$2
-          shift 2
           ;;
         --limit)
           [ "$#" -gt 1 ] || die "--limit requires a number"
@@ -914,30 +899,19 @@ case "$CMD" in
     [ "$LIMIT" -gt 0 ] || die "--limit requires a positive number"
     if [ "$ALL" -eq 1 ]; then
       [ -z "$NAME" ] || die "--all takes no project name"
-      [ -z "$SOURCE_OVERRIDE" ] || die "--source cannot be combined with --all"
       FIRST=1
       while IFS= read -r P; do
         valid_project_name "$P" || continue
         [ "$FIRST" -eq 1 ] || echo
         FIRST=0
-        scan_project "$P" "" "$LIMIT"
+        scan_project "$P" "$LIMIT"
       done < <(registry_projects)
       [ "$FIRST" -eq 0 ] || echo "no projects registered"
       exit 0
     fi
     [ -n "$NAME" ] || die "usage: scan <project> | scan --all"
     valid_project_name "$NAME" || die "invalid project name: $NAME"
-    if [ -n "$SOURCE_OVERRIDE" ]; then
-      case $SOURCE_OVERRIDE in
-        /*) ;;
-        *) die "--source must be an absolute path" ;;
-      esac
-    fi
-    case "$CANONICAL_OVERRIDE" in
-      '' | repo | source) ;;
-      *) die "--canonical must be repo or source" ;;
-    esac
-    scan_project "$NAME" "$SOURCE_OVERRIDE" "$LIMIT" "$CANONICAL_OVERRIDE"
+    scan_project "$NAME" "$LIMIT"
     ;;
   *)
     die "unknown command: $CMD (try --help)"

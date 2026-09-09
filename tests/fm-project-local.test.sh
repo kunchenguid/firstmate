@@ -64,6 +64,34 @@ test_sync_reports_a_home_that_was_being_worked_while_it_was_read() {
   pass "fm-project-local.sh: sync reports a home that was being worked while it was read"
 }
 
+# A failed activity check is not an observation. When the check itself cannot
+# run, sync says the answer is unknown rather than claiming it saw someone
+# working in the folder.
+test_sync_says_when_activity_could_not_be_determined() {
+  local world out
+  world=$(make_world undetermined)
+  mkdir -p "$world/home/config/project-sources" "$world/home/data/project-local/demo"
+  git_q init -q "$world/canonical"
+  printf 'x\n' >"$world/canonical/README.md"
+  git_q -C "$world/canonical" add README.md
+  git_q -C "$world/canonical" commit -qm initial
+  printf 'operational context\n' >"$world/canonical/CLAUDE.md"
+  FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/canonical" --canonical source >/dev/null ||
+    fail "source set failed"
+  printf 'CLAUDE.md\n' >"$world/home/data/project-local/demo/manifest"
+  age_tree "$world/canonical"
+
+  # The activity check needs a scratch file; a scratch directory that does not
+  # exist makes it fail outright without touching the sync's own copying.
+  out=$(FM_HOME="$world/home" TMPDIR="$world/no-such-dir" "$ROOT/bin/fm-project-local.sh" sync demo 2>&1) ||
+    fail "sync failed when the activity check could not run: $out"
+  assert_contains "$out" "synced:" "the sync did not complete"
+  assert_contains "$out" "could not determine whether" "a failed activity check was not reported as unknown"
+  assert_not_contains "$out" "was being worked in while this copy was taken" \
+    "a failed activity check was reported as activity observed"
+  pass "fm-project-local.sh: sync says when activity could not be determined"
+}
+
 test_staged_material_is_readable_and_cannot_be_committed() {
   local world out staged
   world=$(make_world stage)
@@ -217,3 +245,4 @@ test_staged_material_is_removed_and_refused_when_git_can_still_see_it
 test_a_reused_copy_never_keeps_the_previous_tasks_material
 test_stage_is_a_no_op_for_a_project_name_no_store_can_address
 test_sync_reports_a_home_that_was_being_worked_while_it_was_read
+test_sync_says_when_activity_could_not_be_determined

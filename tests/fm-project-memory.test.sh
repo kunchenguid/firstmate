@@ -45,6 +45,14 @@ run_scan() {  # <world> [extra args...]
   FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" scan demo "$@" 2>&1
 }
 
+# The recorded source checkout is the only thing a scan compares against.
+record_source() {  # <world> [source set options...]
+  local world=$1 out
+  shift
+  out=$(FM_HOME="$world/home" "$ROOT/bin/fm-project-memory.sh" source set demo "$world/source" "$@" 2>&1) ||
+    fail "source set failed: $out"
+}
+
 # Portable mtime, the same Linux/macOS split bin/fm-supervision-lib.sh handles.
 mtime_of() {  # <path>
   if [ "$(uname)" = Darwin ]; then
@@ -125,8 +133,9 @@ test_scan_never_writes_to_the_source_checkout() {
   mkdir -p "$world/source/scratchdir"
   printf 'x\n' >"$world/source/scratchdir/thing.txt"
   printf 'edited\n' >>"$world/source/README.md"
+  record_source "$world"
   before=$(fingerprint "$world/source")
-  out=$(run_scan "$world" --source "$world/source")
+  out=$(run_scan "$world")
   after=$(fingerprint "$world/source")
   [ "$before" = "$after" ] || fail "scan modified the source checkout"$'\n'"$out"
   assert_absent "$world/source/.git/index.lock" "scan left an index lock in the source checkout"
@@ -147,7 +156,8 @@ test_scan_reports_uncommitted_knowledge_and_excluded_agent_memory() {
   mkdir -p "$world/source/.claude" "$world/source/herramientas"
   printf '{}\n' >"$world/source/.claude/settings.json"
   printf 'tool\n' >"$world/source/herramientas/replay.py"
-  out=$(run_scan "$world" --source "$world/source")
+  record_source "$world"
+  out=$(run_scan "$world")
   assert_contains "$out" "AGENTS.md" "uncommitted AGENTS.md was not reported"
   assert_contains "$out" "docs/" "the uncommitted knowledge directory was not reported"
   assert_contains "$out" "CLAUDE.md (excluded by" "excluded agent memory was not reported"
@@ -166,7 +176,8 @@ test_scan_reports_a_clean_project_as_parity() {
   git_q -C "$world/source" add .gitignore
   git_q -C "$world/source" commit -qm ignore
   publish "$world"
-  out=$(run_scan "$world" --source "$world/source")
+  record_source "$world"
+  out=$(run_scan "$world")
   assert_contains "$out" "VERDICT: parity" "a project whose knowledge travelled did not read as parity"
   assert_contains "$out" "media/" "ignored working material was not listed for context"
   pass "fm-project-memory.sh: working material alone reads as parity, not as a gap"
@@ -178,7 +189,8 @@ test_scratch_is_counted_but_never_listed() {
   mkdir -p "$world/source/node_modules/pkg"
   printf 'x\n' >"$world/source/node_modules/pkg/index.js"
   printf 'noise\n' >"$world/source/run.log"
-  out=$(run_scan "$world" --source "$world/source")
+  record_source "$world"
+  out=$(run_scan "$world")
   assert_not_contains "$out" "run.log" "scratch was listed in the report"
   assert_contains "$out" "SCRATCH_IGNORED_FROM_REPORT: " "scratch was not counted"
   pass "fm-project-memory.sh: scratch is counted and never listed"
@@ -189,7 +201,8 @@ test_unpushed_commits_are_reported() {
   world=$(make_world unpushed)
   printf 'more\n' >>"$world/source/README.md"
   git_q -C "$world/source" commit -qam "local only work"
-  out=$(run_scan "$world" --source "$world/source")
+  record_source "$world"
+  out=$(run_scan "$world")
   assert_contains "$out" "UNPUSHED_COMMITS: 1" "a commit that reached no remote was not reported"
   assert_contains "$out" "local only work" "the unpushed commit subject was not listed"
   pass "fm-project-memory.sh: commits that reached no remote are reported"
@@ -199,7 +212,8 @@ test_source_canonical_divergence_is_not_reported_as_a_leak() {
   local world out
   world=$(make_world canonical)
   printf 'knowledge\n' >"$world/source/notes.md"
-  out=$(run_scan "$world" --source "$world/source" --canonical source)
+  record_source "$world" --canonical source
+  out=$(run_scan "$world")
   assert_contains "$out" "HOME_KIND: source" "the recorded knowledge home was not reported"
   assert_contains "$out" "VERDICT: source-canonical" "a source-canonical project read as an ordinary leak"
   assert_not_contains "$out" "VERDICT: divergent" "a source-canonical project was reported as divergent"
@@ -256,7 +270,8 @@ test_scan_is_bounded_by_limit() {
     printf 'note %s\n' "$i" >"$world/source/docs/note-$i.md"
     i=$((i + 1))
   done
-  out=$(run_scan "$world" --source "$world/source" --limit 3)
+  record_source "$world"
+  out=$(run_scan "$world" --limit 3)
   assert_contains "$out" "UNCOMMITTED_KNOWLEDGE: 12" "the complete count was not reported"
   assert_contains "$out" "... and 9 more" "the listing was not bounded by --limit"
   pass "fm-project-memory.sh: counts stay complete while listings stay bounded"

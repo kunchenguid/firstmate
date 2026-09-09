@@ -65,6 +65,8 @@ test_spawn_renders_the_project_capability_digest_into_the_launch_brief() {
   assert_grep "Find the production bug behind one conversation" "$brief" "the digest dropped the capability name"
   assert_grep "- ask: \`replay --lead <id>\`" "$brief" "the digest dropped how the capability is asked for"
   assert_no_grep "a sharp edge the digest leaves behind" "$brief" "the digest inlined the whole catalog"
+  assert_grep "is in \`.agents/recipes.md\`" "$brief" "a repo-canonical digest stopped naming the copy's own catalog"
+  assert_no_grep "home is a live local folder" "$brief" "a repo-canonical project received the live-home overlay"
   pass "fm-spawn.sh: the project's capability digest reaches the launch brief"
 }
 
@@ -85,6 +87,16 @@ test_spawn_reads_the_catalog_from_a_source_canonical_home() {
     "the digest did not come from the project's canonical home"
   assert_no_grep "A stale capability the clone still carries" "$brief" \
     "the digest came from the clone despite a canonical source checkout"
+  source=$(cd "$source" && pwd -P)
+  assert_grep "is in \`$source/.agents/recipes.md\`" "$brief" \
+    "the digest pointed the worker at its copy's stale catalog instead of the canonical one"
+  assert_grep "home is a live local folder" "$brief" "the launch brief does not say the project's home is a live folder"
+  assert_grep "Do not write anything under \`$source\`" "$brief" \
+    "the launch brief does not keep the worker out of the captain's live folder"
+  assert_grep "firstmate carries it into the catalog under the captain's approval" "$brief" \
+    "the launch brief does not route learned recipes back through the report"
+  assert_grep "Do not promote recipes or other durable project knowledge into the repository" "$brief" \
+    "the launch brief still sends knowledge through the delivery path into a repository that is not the home"
   pass "fm-spawn.sh: the capability digest comes from the project's canonical home"
 }
 

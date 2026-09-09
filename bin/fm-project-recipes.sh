@@ -10,22 +10,33 @@
 # `digest` is the bounded summary every worker reads before touching anything.
 #
 # The catalog lives WITH THE PROJECT at <project>/.agents/recipes.md, reachable
-# from the project's own AGENTS.md, so it serves the captain's individual
-# sessions exactly as much as a firstmate-dispatched worker. It is deliberately
-# not a firstmate-private channel. When a project's canonical home is a local
-# checkout rather than its repository, the catalog lives in that checkout;
-# bin/fm-project-memory.sh's `home` command is what resolves which directory
-# that is.
+# from the agent memory file the project already keeps - its AGENTS.md, or its
+# CLAUDE.md when that is what the project has - so it serves the captain's
+# individual sessions exactly as much as a firstmate-dispatched worker. It is
+# deliberately not a firstmate-private channel. When a project's canonical home
+# is a local checkout rather than its repository, the catalog lives in that
+# checkout; bin/fm-project-memory.sh's `home` command is what resolves which
+# directory that is.
 #
 # Usage:
 #   fm-project-recipes.sh init <project-dir>
-#   fm-project-recipes.sh digest <project-dir> [--budget <tokens>]
+#   fm-project-recipes.sh digest <project-dir> [--budget <tokens>] [--absolute]
 #   fm-project-recipes.sh check <project-dir> [--budget <tokens>]
 #
 # `init` is the only subcommand that writes, and it writes only into the
 # directory it is given. It refuses while a git operation is in flight there,
 # because that directory can be a live folder the captain is working in at the
-# same time. `digest` and `check` never write anything.
+# same time. It always creates the catalog, then adds one pointer line to the
+# memory file the project already has: AGENTS.md when there is one, otherwise
+# CLAUDE.md. It never renames, converts, or reconciles those files - a project
+# that keeps both as distinct real files is left exactly as it is - and it calls
+# bin/fm-ensure-agents-md.sh only when the project has neither. `digest` and
+# `check` never write anything.
+#
+# `digest --absolute` names the catalog by its absolute path instead of the
+# project-relative one, for a reader that works somewhere other than
+# <project-dir> - a worker in a task copy whose project's home is a live local
+# folder - so it never takes its own copy's stale catalog for the real one.
 #
 # Entry format - one capability per `##` section:
 #
@@ -254,12 +265,18 @@ DIR=${1:-}
 [ -n "$DIR" ] || die "usage: $CMD <project-dir>"
 shift
 BUDGET=
+ABSOLUTE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --budget)
       [ "$#" -gt 1 ] || die "--budget requires a token count"
       BUDGET=$2
       shift 2
+      ;;
+    --absolute)
+      [ "$CMD" = digest ] || die "--absolute applies only to digest"
+      ABSOLUTE=1
+      shift
       ;;
     *) die "unknown option: $1" ;;
   esac
@@ -275,6 +292,8 @@ fi
 
 DIR=$(resolve_dir "$DIR")
 RECIPES="$DIR/$RECIPES_REL"
+CATALOG_REF=$RECIPES_REL
+[ "$ABSOLUTE" -eq 0 ] || CATALOG_REF=$RECIPES
 
 case "$CMD" in
   init)
@@ -287,7 +306,6 @@ case "$CMD" in
     if ! "$SCRIPT_DIR/fm-project-memory.sh" activity --home "$DIR" --git-only >/dev/null 2>&1; then
       die "a git operation is in flight in $DIR; someone is working there right now. Wait for it to finish, or check with \`fm-project-memory.sh activity --home $DIR\`"
     fi
-    "$SCRIPT_DIR/fm-ensure-agents-md.sh" "$DIR" >/dev/null || die "could not establish AGENTS.md in $DIR"
     if [ -L "$RECIPES" ]; then
       die "$RECIPES is a symlink; expected a regular file"
     fi
@@ -301,16 +319,28 @@ case "$CMD" in
     else
       echo "unchanged: $RECIPES"
     fi
-    AGENTS="$DIR/AGENTS.md"
-    if [ -f "$AGENTS" ] && ! grep -qF "$RECIPES_REL" "$AGENTS"; then
-      if [ -n "$(tail -c 1 "$AGENTS")" ]; then
-        printf '\n' >>"$AGENTS"
+    # The pointer goes into whichever memory file the project already keeps.
+    # This directory can be the captain's own live folder, so the project's
+    # memory files are never renamed or reconciled here: a CLAUDE.md that holds
+    # his own words gets the pointer in place, and a project that keeps both
+    # files as distinct real files is left exactly as it is.
+    if [ -f "$DIR/AGENTS.md" ]; then
+      MEMORY="$DIR/AGENTS.md"
+    elif [ -f "$DIR/CLAUDE.md" ]; then
+      MEMORY="$DIR/CLAUDE.md"
+    else
+      "$SCRIPT_DIR/fm-ensure-agents-md.sh" "$DIR" >/dev/null || die "could not establish AGENTS.md in $DIR"
+      MEMORY="$DIR/AGENTS.md"
+    fi
+    if ! grep -qF "$RECIPES_REL" "$MEMORY"; then
+      if [ -n "$(tail -c 1 "$MEMORY")" ]; then
+        printf '\n' >>"$MEMORY"
       fi
       {
         printf '\n'
         pointer_line
-      } >>"$AGENTS"
-      echo "updated: added the recipe-catalog pointer to $AGENTS"
+      } >>"$MEMORY"
+      echo "updated: added the recipe-catalog pointer to $MEMORY"
     fi
     ;;
   digest)
@@ -358,12 +388,12 @@ $line"
     BODY=${OUT%FM_RECIPE_SHOWN=*}
     printf '# Project capabilities\n'
     # shellcheck disable=SC2016 # Markdown backticks in the digest text, not a command substitution.
-    printf 'What this project is known to do and how each capability is asked for. The full entry for any of them, with its preconditions and sharp edges, is in `%s`.\n\n' "$RECIPES_REL"
+    printf 'What this project is known to do and how each capability is asked for. The full entry for any of them, with its preconditions and sharp edges, is in `%s`.\n\n' "$CATALOG_REF"
     printf '%s' "$BODY"
     if [ "$SHOWN" -lt "$TOTAL" ]; then
       # shellcheck disable=SC2016 # Markdown backticks in the digest text, not a command substitution.
       printf '\n(%s of %s capabilities shown; the digest budget is %s estimated tokens - read `%s` for the rest.)\n' \
-        "$SHOWN" "$TOTAL" "$BUDGET" "$RECIPES_REL"
+        "$SHOWN" "$TOTAL" "$BUDGET" "$CATALOG_REF"
     fi
     ;;
   check)
