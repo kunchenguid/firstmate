@@ -71,7 +71,8 @@
 #
 # The report line is `gitlab-issue <n> new: <path>#<iid>(<label>) ...`, listing
 # the first MAX_LISTED pairs and counting the rest, capped to MAX_LINE characters.
-# A glab or jq failure, a malformed config, or a sweep that ran out of time prints
+# A glab or jq failure, a malformed config, a pending record that is not a plain
+# regular file, or a sweep that ran out of time prints
 # `gitlab-issue poll error: <reason>` at most once per FM_GITLAB_ISSUES_ERROR_SECS
 # (default 3600) for the same reason; a different reason is news and is printed
 # immediately. That is what keeps a broken token to one wake instead of one per
