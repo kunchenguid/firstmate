@@ -412,13 +412,14 @@ SH
 # spells that two incompatible ways. Probe them in this order: GNU date rejects
 # `-r <seconds>` (its -r takes a file), while BSD date rejects `-d` as an
 # illegal option, so whichever runs is the one that understood the request.
+# TZ is pinned to UTC for date and touch so repeated DST hours stay unambiguous.
 fm_touch_epoch() {
   local epoch=$1 stamp
   shift
-  stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S 2>/dev/null) \
-    || stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null) \
+  stamp=$(TZ=UTC0 date -d "@$epoch" +%Y%m%d%H%M.%S 2>/dev/null) \
+    || stamp=$(TZ=UTC0 date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null) \
     || fail "fm_touch_epoch: date(1) accepted neither -d @<epoch> nor -r <epoch>"
-  touch -t "$stamp" "$@" \
+  TZ=UTC0 touch -t "$stamp" "$@" \
     || fail "fm_touch_epoch: touch -t $stamp failed for $*"
 }
 
