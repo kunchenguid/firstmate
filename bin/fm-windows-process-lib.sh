@@ -67,34 +67,48 @@ fm_windows_ancestry_lines() {
     printf '%s\n' "${recs[$i]}"
   done
   anchor=${recs[$lastidx]%%"$us"*}
-  FM_LOCK_WINPID=$anchor "${FM_WINDOWS_ANCESTRY_PS:-powershell}" -NoProfile -NonInteractive -Command '
-    $all = @{}
-    Get-CimInstance Win32_Process | ForEach-Object { $all[[uint32]$_.ProcessId] = $_ }
-    $id = [uint32]$env:FM_LOCK_WINPID
-    $us = [string][char]31
-    for ($i = 0; $i -lt 16; $i++) {
-      $p = $all[$id]
-      if (-not $p) { break }
-      Write-Output (([string]$p.ProcessId) + $us + $p.Name + $us + $p.CommandLine)
-      $id = [uint32]$p.ParentProcessId
-      if (-not $id -or $id -eq 0) { break }
-    }
-  ' || return 1
+  # A CIM snapshot intermittently comes back empty under host load, which
+  # would strand a live session as unidentified (and the fleet lock as
+  # read-only); retry once before accepting the miss.
+  local out=''
+  for _ in 1 2; do
+    out=$(FM_LOCK_WINPID=$anchor "${FM_WINDOWS_ANCESTRY_PS:-powershell}" -NoProfile -NonInteractive -Command '
+      $all = @{}
+      Get-CimInstance Win32_Process | ForEach-Object { $all[[uint32]$_.ProcessId] = $_ }
+      $id = [uint32]$env:FM_LOCK_WINPID
+      $us = [string][char]31
+      for ($i = 0; $i -lt 16; $i++) {
+        $p = $all[$id]
+        if (-not $p) { break }
+        Write-Output (([string]$p.ProcessId) + $us + $p.Name + $us + $p.CommandLine)
+        $id = [uint32]$p.ParentProcessId
+        if (-not $id -or $id -eq 0) { break }
+      }
+    ' 2>/dev/null) && [ -n "$out" ] && break
+    out=''
+    sleep 0.3
+  done
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
 }
 
 # Print the identity line of one Windows pid, or return 1 when no live process
 # carries it. Same line format and test override as fm_windows_ancestry_lines;
 # CIM sees MSYS processes too, so a lock pid from either side of the hybrid
-# walk resolves here.
+# walk resolves here. Retried once for the same transient-empty reason.
 fm_windows_process_line() {  # <pid>
-  local pid=$1
+  local pid=$1 out
   case $pid in
     ''|*[!0-9]*) return 1 ;;
   esac
-  FM_LOCK_WINPID=$pid "${FM_WINDOWS_ANCESTRY_PS:-powershell}" -NoProfile -NonInteractive -Command '
-    $p = Get-CimInstance Win32_Process -Filter ("ProcessId = " + [uint32]$env:FM_LOCK_WINPID)
-    if (-not $p) { exit 1 }
-    $us = [string][char]31
-    Write-Output (([string]$p.ProcessId) + $us + $p.Name + $us + $p.CommandLine)
-  ' || return 1
+  for out in 1 2; do
+    out=$(FM_LOCK_WINPID=$pid "${FM_WINDOWS_ANCESTRY_PS:-powershell}" -NoProfile -NonInteractive -Command '
+      $p = Get-CimInstance Win32_Process -Filter ("ProcessId = " + [uint32]$env:FM_LOCK_WINPID)
+      if (-not $p) { exit 1 }
+      $us = [string][char]31
+      Write-Output (([string]$p.ProcessId) + $us + $p.Name + $us + $p.CommandLine)
+    ' 2>/dev/null) && [ -n "$out" ] && { printf '%s\n' "$out"; return 0; }
+    sleep 0.3
+  done
+  return 1
 }
