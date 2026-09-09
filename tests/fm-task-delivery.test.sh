@@ -21,6 +21,7 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
+MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
 # A home with one registered project, one project directory, and a fake tmux that
@@ -348,7 +349,7 @@ STUB
       "$mode: promoted worker was not told to verify its repository root"
     assert_grep "If either does not resolve to the worktree you were launched in, stop and escalate to firstmate" "$payload" \
       "$mode: promoted worker was not told to stop for any wrong worktree"
-    assert_grep "git checkout -b fm/$id" "$payload" \
+    assert_grep "git checkout -b fm/$id --" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
     assert_grep "## Captain's intent" "$payload" \
       "$mode: promoted worker did not receive the Captain's intent subsection"
@@ -395,6 +396,63 @@ STUB
   assert_no_grep "no-mistakes axi respond" "$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr" \
     "promoted direct-PR worker received the pipeline gate contract"
   pass "fm-promote: a promoted worker receives the same mode-specific delivery contract a briefed one does"
+}
+
+test_promotion_persists_the_selected_ship_branch() {
+  local home id meta instructions out
+  home="$TMP_ROOT/promote-branch/home"
+  id=promote-branch-e1
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/state"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+    || fail "branch-prefix promotion scout brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Promote the branch-prefix fixture." "Use the configured branch exactly."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --branch-prefix fix/) \
+    || fail "branch-prefix promotion should succeed"
+  instructions="$home/data/$id/ship-instructions.md"
+  assert_grep "branch=fix/$id" "$meta" \
+    "promotion did not persist the selected full ship branch"
+  assert_grep "git checkout -b fix/$id --" "$instructions" \
+    "promotion did not deliver the selected branch-creation command"
+  assert_grep "Ship branch: fix/$id" "$instructions" \
+    "promotion did not deliver the selected immutable branch contract"
+  assert_contains "$out" "promoted $id to ship" "branch-prefix promotion did not complete normally"
+  pass "fm-promote: a selected branch prefix reaches both worker instructions and durable task state"
+}
+
+test_local_merge_uses_the_recorded_ship_branch() {
+  local home proj id main fix out
+  home="$TMP_ROOT/local-merge-branch/home"
+  proj="$TMP_ROOT/local-merge-branch/proj"
+  id=local-merge-branch-e2
+  mkdir -p "$home/state" "$home/data" "$proj"
+  git -C "$proj" init -q || fail "could not initialize local-merge branch fixture"
+  git -C "$proj" config user.email test@example.com
+  git -C "$proj" config user.name test
+  printf 'base\n' > "$proj/base"
+  git -C "$proj" add base && git -C "$proj" commit -qm base \
+    || fail "could not commit local-merge branch fixture base"
+  main=$(git -C "$proj" branch --show-current)
+  git -C "$proj" checkout -qb "fix/$id" || fail "could not create recorded branch fixture"
+  printf 'change\n' > "$proj/change"
+  git -C "$proj" add change && git -C "$proj" commit -qm change \
+    || fail "could not commit recorded branch fixture"
+  fix=$(git -C "$proj" rev-parse HEAD)
+  git -C "$proj" checkout -q "$main" || fail "could not restore fixture default branch"
+  cat > "$home/data/projects.md" <<EOF
+- $(basename "$proj") [local-only branch=contrib/] - changed after task intake (added 2026-01-01)
+EOF
+  printf 'project=%s\nmode=local-only\nbranch=fix/%s\n' "$proj" "$id" > "$home/state/$id.meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id") \
+    || fail "local merge did not use the branch recorded at task intake: $out"
+  [ "$(git -C "$proj" rev-parse HEAD)" = "$fix" ] \
+    || fail "local merge did not fast-forward the default branch to the recorded ship branch"
+  assert_contains "$out" "merged fix/$id into local $main" \
+    "local merge did not report the immutable recorded branch"
+  pass "fm-merge-local: a registry change cannot redirect an in-flight local-only task"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the
@@ -844,6 +902,8 @@ test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
+test_promotion_persists_the_selected_ship_branch
+test_local_merge_uses_the_recorded_ship_branch
 test_project_mode_maps_the_conditional_policy
 test_project_mode_resolves_branch_prefix
 test_spawn_and_promote_require_filled_task_subsections

@@ -859,7 +859,7 @@ test_ship_branch_prefix_defaults_to_legacy_fm() {
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
     brief="$home/data/$id/brief.md"
     # shellcheck disable=SC2016  # literal backticks around the branch name must stay unexpanded
-    assert_grep "\`git checkout -b fm/$id\`" "$brief" \
+    assert_grep "\`git checkout -b fm/$id --\`" "$brief" \
       "$mode: omitting --branch-prefix must still create the legacy fm/<task-id> branch"
   done
   pass "fm-brief.sh: --branch-prefix omitted defaults every ship mode to fm/<task-id>"
@@ -877,7 +877,7 @@ test_ship_branch_prefix_override_is_consistent_across_modes() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --branch-prefix 'contrib/' >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   # shellcheck disable=SC2016
-  assert_grep "\`git checkout -b contrib/$id\`" "$brief" \
+  assert_grep "\`git checkout -b contrib/$id --\`" "$brief" \
     "no-mistakes: branch-creation command did not use the configured override"
   assert_no_grep "fm/$id" "$brief" \
     "no-mistakes: brief mixed the legacy fm/ prefix in with the configured override"
@@ -886,7 +886,7 @@ test_ship_branch_prefix_override_is_consistent_across_modes() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --branch-prefix 'contrib/' >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   # shellcheck disable=SC2016
-  assert_grep "\`git checkout -b contrib/$id\`" "$brief" \
+  assert_grep "\`git checkout -b contrib/$id --\`" "$brief" \
     "direct-PR: branch-creation command did not use the configured override"
   # shellcheck disable=SC2016
   assert_grep "push only your \`contrib/$id\` branch" "$brief" \
@@ -898,7 +898,7 @@ test_ship_branch_prefix_override_is_consistent_across_modes() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only --branch-prefix 'contrib/' >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   # shellcheck disable=SC2016
-  assert_grep "\`git checkout -b contrib/$id\`" "$brief" \
+  assert_grep "\`git checkout -b contrib/$id --\`" "$brief" \
     "local-only: branch-creation command did not use the configured override"
   # shellcheck disable=SC2016
   assert_grep "Work only on your \`contrib/$id\` branch" "$brief" \
@@ -924,7 +924,7 @@ test_ship_branch_prefix_empty_override_yields_bare_task_id() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only --branch-prefix '' >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   # shellcheck disable=SC2016
-  assert_grep "\`git checkout -b $id\`" "$brief" \
+  assert_grep "\`git checkout -b $id --\`" "$brief" \
     "an empty --branch-prefix must yield a bare <task-id> branch"
   assert_no_grep "checkout -b /$id" "$brief" \
     "an empty --branch-prefix produced a leading-slash branch name"
@@ -973,6 +973,28 @@ test_branch_prefix_value_is_validated() {
   assert_absent "$home/data/brief-branchval-g2/brief.md" "refused dash-leading --branch-prefix still wrote a brief"
 
   pass "fm-brief.sh: --branch-prefix value is validated against embedded spaces and a leading dash"
+}
+
+test_branch_prefix_command_is_shell_safe() {
+  local home id prefix marker brief command repo branch
+  home="$TMP_ROOT/branch-prefix-shell-safe-home"
+  marker="$TMP_ROOT/branch-prefix-shell-safe-marker"
+  id=brief-branch-safe-g3
+  prefix="\$(touch\${IFS}$marker)"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only --branch-prefix "$prefix" >/dev/null 2>&1 \
+    || fail "a ref-format-valid metacharacter prefix should scaffold safely"
+  brief="$home/data/$id/brief.md"
+  command=$(sed -n 's/^1\. First action: create your branch: `\(.*\)`$/\1/p' "$brief")
+  [ -n "$command" ] || fail "generated brief exposed no branch-creation command"
+  repo="$TMP_ROOT/branch-prefix-shell-safe-repo"
+  git init -q "$repo" || fail "could not initialize shell-safety fixture repository"
+  ( cd "$repo" && eval "$command" ) || fail "generated branch-creation command did not run"
+  assert_absent "$marker" "generated branch command executed the prefix's command substitution"
+  branch=$(git -C "$repo" branch --show-current)
+  [ "$branch" = "$prefix$id" ] \
+    || fail "generated branch command did not create the literal configured branch (got '$branch')"
+  pass "fm-brief.sh: ref-format-valid shell metacharacters stay literal in generated branch commands"
 }
 
 test_worker_role_scope() {
@@ -1025,3 +1047,4 @@ test_ship_branch_prefix_override_is_consistent_across_modes
 test_ship_branch_prefix_empty_override_yields_bare_task_id
 test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
+test_branch_prefix_command_is_shell_safe

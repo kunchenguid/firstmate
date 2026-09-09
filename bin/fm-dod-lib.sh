@@ -8,8 +8,8 @@
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] prints the
 # block on stdout with no trailing blank line. The optional branch argument is
 # the task's full ship-branch name (a project's registered prefix may replace the
-# legacy `fm/` one); it defaults to `fm/<task-id>` and only the local-only text
-# renders it. The caller validates the mode; an unknown
+# legacy `fm/` one); it defaults to `fm/<task-id>` and is the immutable task
+# branch rendered in every delivery contract. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
@@ -201,6 +201,7 @@ fm_dod_block() {  # <mode> <task-id> [branch]
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR
+Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
@@ -211,6 +212,7 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=local-only
+Ship branch: $branch
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
@@ -222,6 +224,7 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
+Ship branch: $branch
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
