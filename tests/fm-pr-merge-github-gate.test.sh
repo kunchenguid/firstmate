@@ -16,14 +16,20 @@ OTHER_HEAD=2222222222222222222222222222222222222222
 DEFAULT_REQUIRED_CHECKS=test,docker,review,security-review,test-integrity
 
 make_case() {
-  local name=$1 expected_head=${2:-$LIVE_HEAD} case_dir fakebin
+  local name=$1 expected_head=${2:-$LIVE_HEAD} worktree_mode=${3:-missing}
+  local case_dir fakebin worktree
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
+  worktree="$case_dir/missing-worktree"
   mkdir -p "$case_dir/home/state" "$fakebin"
+  if [ "$worktree_mode" = existing ]; then
+    worktree="$case_dir/worktree"
+    mkdir -p "$worktree"
+  fi
   # pr_head is the caller-recorded expectation that the live head must match.
   fm_write_meta "$case_dir/home/state/task-x1.meta" \
     "window=fm-task-x1" \
-    "worktree=$case_dir/missing-worktree" \
+    "worktree=$worktree" \
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes" \
@@ -87,20 +93,32 @@ SH
 
 write_pr() {
   local case_dir=$1 state=$2 mergeable_state=$3 head=$4
-  printf '{"number":9,"state":"%s","mergeable_state":"%s","head":{"sha":"%s"}}\n' \
-    "$state" "$mergeable_state" "$head" > "$case_dir/pull.json"
+  case "$mergeable_state" in
+    missing)
+      printf '{"number":9,"state":"%s","head":{"sha":"%s"}}\n' \
+        "$state" "$head" > "$case_dir/pull.json"
+      ;;
+    null)
+      printf '{"number":9,"state":"%s","mergeable_state":null,"head":{"sha":"%s"}}\n' \
+        "$state" "$head" > "$case_dir/pull.json"
+      ;;
+    *)
+      printf '{"number":9,"state":"%s","mergeable_state":"%s","head":{"sha":"%s"}}\n' \
+        "$state" "$mergeable_state" "$head" > "$case_dir/pull.json"
+      ;;
+  esac
 }
 
 write_checks() {
   local case_dir=$1 review_status=${2:-completed} review_conclusion=${3:-'"success"'}
-  local include_integrity=${4:-true} total_count=5
+  local include_integrity=${4:-true} review_head=${5:-$LIVE_HEAD} total_count=5
   [ "$include_integrity" = true ] || total_count=4
   {
     printf '{"total_count":%s,"check_runs":[\n' "$total_count"
     printf '%s\n' \
       "{\"name\":\"test\",\"head_sha\":\"$LIVE_HEAD\",\"status\":\"completed\",\"conclusion\":\"success\"}," \
       "{\"name\":\"docker\",\"head_sha\":\"$LIVE_HEAD\",\"status\":\"completed\",\"conclusion\":\"success\"}," \
-      "{\"name\":\"review\",\"head_sha\":\"$LIVE_HEAD\",\"status\":\"$review_status\",\"conclusion\":$review_conclusion}," \
+      "{\"name\":\"review\",\"head_sha\":\"$review_head\",\"status\":\"$review_status\",\"conclusion\":$review_conclusion}," \
       "{\"name\":\"security-review\",\"head_sha\":\"$LIVE_HEAD\",\"status\":\"completed\",\"conclusion\":\"success\"}"
     if [ "$include_integrity" = true ]; then
       printf ',{"name":"test-integrity","head_sha":"%s","status":"completed","conclusion":"success"}\n' \
@@ -183,8 +201,8 @@ test_clause_1_refuses_non_open_pull_request() {
 }
 
 test_clause_2_refuses_every_non_clean_mergeable_state() {
-  local mergeable_state case_dir rc
-  for mergeable_state in blocked dirty behind unknown; do
+  local mergeable_state reason_token case_dir rc
+  for mergeable_state in blocked dirty behind unknown unstable has_hooks missing null; do
     case_dir=$(make_case "mergeable-$mergeable_state")
     write_pr "$case_dir" open "$mergeable_state" "$LIVE_HEAD"
     write_checks "$case_dir"
@@ -193,10 +211,14 @@ test_clause_2_refuses_every_non_clean_mergeable_state() {
       > "$case_dir/stdout" 2> "$case_dir/stderr"
     rc=$?
 
+    reason_token=$mergeable_state
+    case "$mergeable_state" in
+      missing|null) reason_token=mergeable_state ;;
+    esac
     assert_refused "$case_dir" "$rc" \
-      "clause 2 mergeable-state-$mergeable_state" "$mergeable_state"
+      "clause 2 mergeable-state-$mergeable_state" "$reason_token"
   done
-  pass "clause 2: GitHub merge refuses blocked, dirty, behind, and unknown mergeable states"
+  pass "clause 2: GitHub merge allows only clean and refuses every other mergeable state"
 }
 
 test_clause_3_refuses_missing_configured_check() {
@@ -272,6 +294,23 @@ test_clause_3_refuses_unreadable_required_check_results() {
   pass "clause 3: unreadable required-check results fail closed"
 }
 
+test_clause_3_refuses_successful_check_at_a_different_head() {
+  local case_dir rc
+  case_dir=$(make_case required-check-wrong-head)
+  write_pr "$case_dir" open clean "$LIVE_HEAD"
+  write_checks "$case_dir" completed '"success"' true "$OTHER_HEAD"
+
+  run_merge "$case_dir" "$DEFAULT_REQUIRED_CHECKS" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+
+  assert_refused "$case_dir" "$rc" \
+    "clause 3 required-check-wrong-head" "review"
+  grep -F -- "$OTHER_HEAD" "$case_dir/stderr" >/dev/null \
+    || fail "clause 3 required-check-wrong-head: refusal did not name the check's stale head"
+  pass "clause 3: each successful required check must report the exact verified head"
+}
+
 test_clause_4_refuses_stale_expected_head() {
   local case_dir rc
   case_dir=$(make_case stale-expected-head "$OTHER_HEAD")
@@ -291,7 +330,9 @@ test_clause_4_refuses_stale_expected_head() {
 test_clause_5_refuses_caller_safety_overrides_before_forge_calls() {
   local name token case_dir rc
   while IFS= read -r name; do
-    case_dir=$(make_case "override-$name")
+    # An existing worktree makes fm-pr-check.sh's normal gh pr view observable,
+    # so a zero-call assertion proves rejection precedes metadata recording.
+    case_dir=$(make_case "override-$name" "$LIVE_HEAD" existing)
     write_pr "$case_dir" open clean "$LIVE_HEAD"
     write_checks "$case_dir"
 
@@ -379,6 +420,7 @@ test_clause_3_refuses_missing_configured_check
 test_clause_3_refuses_non_success_check_conclusions
 test_clause_3_required_check_list_is_configurable
 test_clause_3_refuses_unreadable_required_check_results
+test_clause_3_refuses_successful_check_at_a_different_head
 test_clause_4_refuses_stale_expected_head
 test_clause_5_refuses_caller_safety_overrides_before_forge_calls
 test_green_exact_head_proceeds_to_one_sha_bound_merge
