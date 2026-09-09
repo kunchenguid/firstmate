@@ -1530,12 +1530,9 @@ kill -0 "$noisy_child" 2>/dev/null && fail "TERM-resistant source child survived
 assert_absent "$staged" "retirement removes the tracked partial staging file"
 pass "live output stays bounded and retirement reaps the whole source group"
 
-# When the post-TERM cases fail they must say WHAT THEY SAW, not only that they
-# failed. This assertion has failed in CI and passed in every environment
-# available here, so the only instrument that reproduces it is the one we cannot
-# attach a debugger to. An assertion this change reworked which fails without
-# evidence is a defect in the change, not bad luck, so the evidence is collected
-# on the failure path only and costs nothing when the case passes.
+# When a fixture never records TERM, capture the claim, leader, group, and
+# retirement output to help distinguish a blocked stop from a refused signal.
+# Collect this evidence only on the failure path so passing cases stay quiet.
 post_term_evidence() {  # <case> <runner-pid> <claim> <signals> <started-epoch> <retire-output>
   local case=$1 runner=$2 claim=$3 signals=$4 started=$5 out=$6
   {
