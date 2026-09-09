@@ -412,29 +412,29 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
 
 # --- client selection --------------------------------------------------------
 #
-# Every session-scoped call runs the client fm_backend_herdr_bin names: by
-# default the first `herdr` on PATH, exactly as before. A host can carry more
-# than one herdr client (a self-updated copy in ~/.local/bin next to a
-# package-managed one), and the two PATH orders Firstmate runs under (an
-# interactive login shell, and the fixed remote-job PATH that puts ~/.local/bin
-# first - bin/fm-remote-job-lib.sh) can then resolve DIFFERENT binaries. A
-# client older than the running server is answered with error code
-# protocol_mismatch on every command (verified: herdr 0.8.2, protocol 20,
-# against a 0.9.0 server, protocol 22), which the read classifiers correctly
-# refuse to interpret - but that turned a live remote secondmate into
-# `unreadable`, severed every doorbell into it, and blocked the relaunch that
-# would have repaired it.
+# Every operation routed through fm_backend_herdr_cli starts with the first
+# `herdr` on PATH, or the client already selected for that exact session. A
+# host can carry more than one herdr client (a self-updated copy in
+# ~/.local/bin next to a package-managed one), and the two PATH orders
+# Firstmate runs under (an interactive login shell, and the fixed remote-job
+# PATH that puts ~/.local/bin first - bin/fm-remote-job-lib.sh) can then resolve
+# DIFFERENT binaries. A client older than the running server is answered with
+# error code protocol_mismatch on operational commands (verified: herdr 0.8.2,
+# protocol 20, against a 0.9.0 server, protocol 22), which the read classifiers
+# correctly refuse to interpret.
 #
-# Selection is reactive, never speculative: the happy path makes no extra
-# call on any host, and fakes that never emit protocol_mismatch never see it.
-# On that refusal fm_backend_herdr_cli asks fm_backend_herdr_client_select to
+# The CLI retry path is reactive, never speculative: its happy path makes no
+# extra call on any host, and fakes that never emit protocol_mismatch never see
+# it. On that refusal fm_backend_herdr_cli asks fm_backend_herdr_client_select to
 # read `status --json --session <s>` from the PATH-first client and, when a
 # running server reports it incompatible (.server.compatible when the client
 # emits it, equal .client/.server protocol otherwise), from each other
 # distinct herdr on PATH in order, adopting the first one that positively
-# proves compatible and retrying the command on it once. The choice is
-# exported as FM_BACKEND_HERDR_BIN so children inherit it. An unknown verdict
-# (a client that reports no protocol at all) always keeps the PATH-first client.
+# proves compatible and retrying the command on it once. The choice is scoped
+# to that session and exported as FM_BACKEND_HERDR_BIN so children inherit it.
+# A later mismatch forces reselection, while another session starts from the
+# PATH-first client. An unknown verdict (a client that reports no protocol at
+# all) always keeps the PATH-first client.
 fm_backend_herdr_bin() {
   printf '%s' "${FM_BACKEND_HERDR_BIN:-herdr}"
 }

@@ -35,10 +35,11 @@ Real harness credential tests remain opt-in rather than part of default CI.
 
 ## Client selection
 
-Every session-scoped call runs the first `herdr` on `PATH` unless the running server refuses that client.
-A host can carry more than one client, such as a self-updated copy in `~/.local/bin` beside a package-managed one, and a client older than the running server is answered with error code `protocol_mismatch` on every command.
-On that refusal the adapter reads `status --json --session <name>` from each distinct `herdr` on `PATH` in order, adopts the first one the running server reports compatible, retries the command on it once, and keeps using it for the rest of the process.
-Nothing is read on the happy path, a client that reports no protocol is never judged incompatible, and no other failure triggers a reselection.
+Each operation routed through the adapter's session-scoped CLI helper starts with the first `herdr` on `PATH` unless that session has already selected another client.
+A host can carry more than one client, such as a self-updated copy in `~/.local/bin` beside a package-managed one, and a client older than the running server can receive error code `protocol_mismatch` on operational commands.
+On that refusal the adapter reads `status --json --session <name>` from each distinct `herdr` on `PATH` in order, adopts the first one the running server reports compatible, and retries the command on it once.
+The choice is reused only for later calls to the same session; another session starts with the `PATH` default, and a later mismatch forces selection again so a changed server can return to that default.
+Ordinary adapter operations make no selection read on the happy path, a client that reports no protocol is never judged incompatible, and no other failure triggers a reselection.
 `fm-remote-doctor.sh` reports the client selected for the remote session.
 Removing or upgrading the shadowing client is the durable fix; `bin/backends/herdr.sh` "client selection" owns the mechanics.
 
