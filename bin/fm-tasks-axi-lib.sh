@@ -15,8 +15,14 @@
 # backlog mutations, but validated secondmate handoffs always use `tasks-axi mv`.
 # Absent or any other value keeps the default tasks-axi backend path, falling
 # back to manual mutation when the tool is not compatible.
-# fm_tasks_axi_backend mirrors tasks-axi's environment, project, home-config,
-# and default backend precedence for callers that need backend-specific flags.
+# fm_tasks_axi_backend_resolve owns backend precedence: TASKS_AXI_BACKEND when
+# set, then a backend in the working root's .tasks.toml, then one in
+# $HOME/.tasks-axi/config.toml, then markdown. Lower-priority sources are read
+# only when no earlier source supplies a backend; absent files keep that fallback.
+# A detected unreadable or nonregular configuration file, including a dangling
+# symlink, returns 2 with a path diagnostic on stderr and no backend on stdout.
+# fm_tasks_axi_backend delegates to that resolver and preserves its status;
+# callers must check it before selecting backend-specific flags or exemptions.
 #
 # This file is the single owner of FM_TASKS_AXI_MIN. bin/fm-bootstrap.sh turns a
 # failing check into the operator-facing MISSING diagnostic.

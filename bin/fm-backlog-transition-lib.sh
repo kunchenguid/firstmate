@@ -25,8 +25,9 @@
 # and homes whose configured backlog backend is manual. Markdown homes that
 # keep no backlog file at all are likewise exempt. Those return-1 exemptions
 # are never errors; a home on any other configured backend has no markdown
-# file requirement at all. An unresolvable configured data directory or
-# incompatible tasks-axi instead returns 2 so callers refuse before mutation.
+# file requirement at all. An unresolvable configured data directory, a backend
+# resolution error, or incompatible tasks-axi instead returns 2 so callers
+# refuse before mutation.
 #
 # ADDRESSING. The markdown backend owns the explicit `--file <data>/backlog.md`
 # on every mutation and row probe so the change lands in the home that owns
@@ -36,8 +37,8 @@
 # `.tasks.toml` supplies its backend, done_keep, and the archive path and
 # backend-owned state remains discoverable. The parent of the data directory
 # is the addressing root rather than FM_HOME, so a home whose data directory
-# is relocated keeps its backlog and its archive together. A root with no
-# `.tasks.toml` gets tasks-axi's built-in defaults.
+# is relocated keeps its backlog and its archive together.
+# bin/fm-tasks-axi-lib.sh owns backend precedence and configuration failures.
 #
 # CRASH RECOVERY. Only teardown needs a durable record: it removes the meta and
 # with it the completion links, so a process killed between the two halves would
@@ -292,7 +293,8 @@ fm_tasks_axi() {
 }
 
 # Print one row's `tasks-axi show` output (plus stderr) from the backlog root,
-# with `--file` only for the markdown backend; the exit status is tasks-axi's.
+# with `--file` only for the markdown backend. Addressing or backend-resolution
+# errors return before tasks-axi runs; otherwise its exit status is preserved.
 # Extra flags (such as --full) are passed through.
 fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
   local data=$1 id=$2 file root backend
