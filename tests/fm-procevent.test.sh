@@ -914,7 +914,8 @@ pass "Lavish classification staging stays bounded while nonmatches stream"
 HW="$TMP_ROOT/hw"; new_home "$HW"
 TRIGW="$TMP_ROOT/trigger-restart-cut"
 pe_register "$HW" lavish restart-cut-src -- "$BLOCKER" "$TRIGW" "restart cut payload" >/dev/null
-pe "$HW" reconcile >/dev/null
+pe "$HW" start restart-cut-src > "$TMP_ROOT/restart-cut-start.log" 2>&1 &
+restart_cut_start_pid=$!
 sleep 0.5
 : > "$TRIGW"
 wait_for "$HW/state/.wake-queue" || fail "the restart-cut source published no event"
@@ -927,7 +928,10 @@ assert_contains "$(wake_payloads "$HW")" "procevent lavish restart-cut-src 1" \
 # capture a fresh generation; retiring leaves only the durable inbox and wake
 # state under test, matching the exact restart cut - the source side is done,
 # only the handling side is still open.
-pe "$HW" retire restart-cut-src >/dev/null
+# Publication precedes runner exit; wait for completion before retiring.
+wait "$restart_cut_start_pid" || fail "the restart-cut source did not complete"
+pe "$HW" retire restart-cut-src >/dev/null \
+  || fail "the restart-cut registration was not retired"
 
 # Drain the wake without handling it: the end-user experience of a session
 # reading the wake queue at turn end without yet acting on this specific line.
@@ -1287,8 +1291,12 @@ awk -v identity="$sr4_identity" 'NR == 4 { print identity; next } { print }' \
   "$sr4_claim" > "$sr4_claim.tmp" && mv "$sr4_claim.tmp" "$sr4_claim"
 chmod 0600 "$sr4_claim"
 chmod 755 "$HSR4/state"
-: > "$SR4_TRIGGER"
-pe "$HSR4" retire reused-group-src >/dev/null
+# Keep the child blocked so retirement alone ends the restored generation;
+# releasing it races natural exit against the first signal's ownership check.
+pe "$HSR4" retire reused-group-src >/dev/null \
+  || fail "retirement failed after restoring the reused-group fixture's identity"
+kill -0 -"$sr4_leader" 2>/dev/null \
+  && fail "retirement left the restored reused-group fixture running"
 pass "a reused pid never makes its surviving process group reclaimable"
 
 HJ="$TMP_ROOT/hj"; new_home "$HJ"
