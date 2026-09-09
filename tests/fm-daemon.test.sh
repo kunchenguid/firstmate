@@ -2526,6 +2526,53 @@ test_primary_busy_guard_is_harness_scoped() {
   pass "primary busy guard isolates rendered signatures by detected harness"
 }
 
+test_watch_child_does_not_inherit_the_supervisor_composer_harness() {
+  local dir fakebin stage record f name deadline
+  dir=$(make_supercase watch-composer-scope)
+  fakebin="$dir/fakebin"
+  stage="$dir/bin"
+  record="$dir/watch-env"
+  mkdir -p "$stage"
+  # A staged daemon dir: every real bin entry, with only the watcher and the
+  # harness detector replaced, so the daemon under test is the real one.
+  for f in "$ROOT"/bin/*; do
+    name=$(basename "$f")
+    case "$name" in fm-watch.sh|fm-harness.sh) continue ;; esac
+    ln -s "$f" "$stage/$name"
+  done
+  # The daemon declares the harness of ITS OWN pane from this detector.
+  printf '%s\n' '#!/usr/bin/env bash' 'printf agy' > "$stage/fm-harness.sh"
+  # The watcher reads OTHER panes, so it must not carry that declaration.
+  cat > "$stage/fm-watch.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\${FM_COMPOSER_HARNESS-UNSET}" > "$record"
+sleep 30
+SH
+  chmod +x "$stage/fm-harness.sh" "$stage/fm-watch.sh"
+
+  env -u TMUX -u TMUX_PANE -u FM_COMPOSER_HARNESS \
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+    "$stage/fm-supervise-daemon.sh" >/dev/null 2>&1 &
+  local daemon_pid=$!
+  deadline=$(( $(date +%s) + 20 ))
+  while [ ! -s "$record" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+    kill -0 "$daemon_pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  kill -TERM "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  pkill -f "$stage/fm-watch.sh" 2>/dev/null || true
+
+  [ -s "$record" ] || fail "the daemon never launched its watcher child"
+  case "$(cat "$record")" in
+    agy) fail "the watch child inherited the supervisor pane's declared harness (agy); it reads other panes" ;;
+    ''|UNSET) ;;
+    *) fail "the watch child received an unexpected declared harness: $(cat "$record")" ;;
+  esac
+  pass "away-mode daemon does not leak its own declared composer harness into the watch child"
+}
+
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
   local dir fakebin capture
   dir=$(make_supercase busy-default-backend)
@@ -2780,6 +2827,7 @@ test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
+test_watch_child_does_not_inherit_the_supervisor_composer_harness
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers

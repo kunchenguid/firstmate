@@ -28,7 +28,7 @@ EXECUTION_NUM=$(printf '%s' "$PAYLOAD" | jq -er '
 [ "$EXECUTION_NUM" -eq 0 ] || exit 0
 
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-agy.XXXXXXXXXXXX") || exit 0
-printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" 2>"$ERR"
+printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" >/dev/null 2>"$ERR"
 RC=$?
 [ "$RC" -eq 2 ] || exit 0
 

@@ -491,6 +491,42 @@ test_agy_primary_guard_bounds_continuation() {
   pass "Agy primary Stop guard forces at most one same-session continuation"
 }
 
+test_agy_primary_guard_owns_the_hook_stdout() {
+  local dir out rc
+  dir="$TMP_ROOT/primary-guard-stdout"
+  mkdir -p "$dir"
+  cp "$ROOT/bin/fm-turnend-guard-agy.sh" "$dir/fm-turnend-guard-agy.sh"
+  # The shared guard's terminal attended fail-open writes a Claude-shaped
+  # object to stdout and exits 0; the Agy adapter reads only its status and
+  # stderr, and Agy parses this hook's stdout as one decision object.
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf %s\\n "{\"systemMessage\":\"FIRSTMATE SUPERVISION IS GENUINELY DOWN\"}"' \
+    'exit 0' > "$dir/fm-turnend-guard.sh"
+  chmod +x "$dir/fm-turnend-guard-agy.sh" "$dir/fm-turnend-guard.sh"
+  rc=0
+  out=$(printf '{"executionNum":0}\n' | PATH="$(dirname "$JQ_BIN"):$BASE_PATH" "$dir/fm-turnend-guard-agy.sh") || rc=$?
+  expect_code 0 "$rc" "the Agy Stop adapter must exit 0 when the shared guard fails open"
+  [ "$(printf '%s\n' "$out" | jq -s 'length')" = 1 ] \
+    || fail "the Agy Stop adapter emitted more than one JSON document: $out"
+  [ "$out" = '{}' ] \
+    || fail "a foreign object on the shared guard's stdout reached the Agy hook's stdout: $out"
+
+  # The same containment must not swallow the continue reason, which the
+  # adapter reads from the guard's STDERR.
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf %s\\n "{\"systemMessage\":\"noise\"}"' \
+    'echo "repair watcher" >&2' \
+    'exit 2' > "$dir/fm-turnend-guard.sh"
+  out=$(printf '{"executionNum":0}\n' | PATH="$(dirname "$JQ_BIN"):$BASE_PATH" "$dir/fm-turnend-guard-agy.sh")
+  [ "$(printf '%s\n' "$out" | jq -s 'length')" = 1 ] \
+    || fail "the Agy Stop adapter emitted more than one JSON document while blocking: $out"
+  [ "$(printf '%s' "$out" | jq -r '.decision')" = continue ] \
+    || fail "the Agy Stop adapter lost its continue decision: $out"
+  [ "$(printf '%s' "$out" | jq -r '.reason')" = 'repair watcher' ] \
+    || fail "the Agy Stop adapter lost the shared guard's stderr reason: $out"
+  pass "Agy primary Stop guard is the sole author of the hook's stdout"
+}
+
 test_agy_detection_uses_marker_and_ancestry() {
   local dir fakebin cfg detected
   detected=$(ANTIGRAVITY_AGENT=1 CLAUDECODE=1 "$ROOT/bin/fm-harness.sh")
@@ -740,6 +776,7 @@ test_agy_teardown_preserves_an_empty_borrowed_root
 test_agy_teardown_preserves_a_project_authored_hook_file
 test_agy_teardown_preserves_a_replaced_hook_retaining_the_token
 test_agy_primary_guard_bounds_continuation
+test_agy_primary_guard_owns_the_hook_stdout
 test_agy_detection_uses_marker_and_ancestry
 test_agy_session_lock_identity
 test_agy_tracked_seatbelts_allow_without_returning_an_object
