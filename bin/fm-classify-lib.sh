@@ -89,7 +89,15 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # (status_is_paused) rather than hardcoding the literal, so the vocabulary cannot
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
-FM_BEARINGS_AWAITING_NUDGE_DAYS=${FM_BEARINGS_AWAITING_NUDGE_DAYS:-7}
+# Delivered-row escalation is OFF unless the captain configures it. Unset means
+# a delivered row waiting on an outside merge never leaves the Delivered section
+# however long it waits; set it to a number of days to have a row that old rise
+# into Captain's Call as a nudge instead. There is deliberately no default age:
+# how long someone else's merge may take before it is worth chasing is a local
+# judgement, and guessing it for every home would put work in front of a captain
+# who never asked for it. This is the ONE definition; every consumer reads it
+# here rather than substituting a literal of its own.
+FM_BEARINGS_AWAITING_NUDGE_DAYS=${FM_BEARINGS_AWAITING_NUDGE_DAYS:-}
 
 # Bounded re-surface cadence for a declared external-wait pause.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it

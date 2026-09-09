@@ -365,6 +365,31 @@ test_the_needs_you_tile_is_never_split_or_filtered_by_owner() {
 
 # --- delivered, waiting on a maintainer ------------------------------------
 
+# The captain must be able to SEE that the exit rule is off. An unbounded wait
+# rendered with no sign of it looks exactly like a bounded one, and a delivered
+# box that silently never escalates is the polite graveyard this section was
+# built to avoid. So the sub-line says which regime is in force.
+test_the_delivered_box_says_when_no_exit_rule_is_in_force() {
+  local home out
+  home=$(make_home delivered-nothreshold-render)
+  out=$(render_payload "$home" '{"awaiting_nudge_days":null,"awaiting":[
+    {"id":"stuck","repo":"firstmate","owner":"(main)","what":"Very old delivery","age_days":400,
+     "pr_url":"https://github.com/o/r/pull/9"}
+  ]}')
+  printf '%s' "$out" | jq -e '
+    (.awaiting | length) == 1 and (.awaiting[0] | .age == "400d")
+      and (.awaitingSub == "no nudge threshold set - these rows will not escalate")
+  ' >/dev/null || fail "the delivered box did not say the exit rule is off: $out"
+
+  out=$(render_payload "$home" '{"awaiting_nudge_days":7,"awaiting":[
+    {"id":"young","repo":"firstmate","owner":"(main)","what":"Recent delivery","age_days":2,
+     "pr_url":"https://github.com/o/r/pull/9"}
+  ]}')
+  printf '%s' "$out" | jq -e '.awaitingSub == "nudge-worthy after 7 days"' >/dev/null \
+    || fail "the delivered box did not name the threshold in force: $out"
+  pass "the delivered box names the exit rule in force, including when there is none"
+}
+
 test_a_delivered_row_leads_with_its_age_and_its_request_link() {
   local home out
   home=$(make_home delivered-rows)
@@ -517,6 +542,7 @@ test_nudge_submissions_bypass_task_answer_intake
 test_a_tile_owned_by_one_home_still_names_it
 test_a_truncated_tile_says_its_breakdown_covers_only_the_shown_rows
 test_the_needs_you_tile_is_never_split_or_filtered_by_owner
+test_the_delivered_box_says_when_no_exit_rule_is_in_force
 test_a_delivered_row_leads_with_its_age_and_its_request_link
 test_delivered_work_is_no_longer_counted_as_underway
 test_an_empty_delivered_box_still_renders_its_state

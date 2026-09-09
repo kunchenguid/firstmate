@@ -5,7 +5,8 @@
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
 //   { stats:[{n,label,owners}], charted:[...], underway:[...], awaiting:[...],
-//     landed:[...], call:[{title,badges,link}], awaitingEmpty, empty, more, error }
+//     landed:[...], call:[{title,badges,link}], awaitingSub, awaitingEmpty,
+//     empty, more, error }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -182,6 +183,8 @@ process.stdout.write(
     awaiting: rowsOf("bb-awaiting"),
     landed: rowsOf("bb-landed"),
     call,
+    // the Delivered sub-line states the exit rule, including its absence
+    awaitingSub: (byId.get("bb-awaiting-sub") || new Node("div")).textContent,
     awaitingEmpty: emptyOf("bb-awaiting"),
     empty,
     more,

@@ -831,6 +831,30 @@ test_build_refuses_a_delivered_row_that_has_already_aged_out() {
   pass "build refuses to leave an aged delivery sitting in the delivered box"
 }
 
+# With the exit rule off the payload carries a null threshold. The board must
+# then accept a delivered row of ANY age, because there is no threshold to have
+# aged out of - while a threshold that is present but unusable (0) stays
+# refused, so "off" and "misconfigured" never look the same to the validator.
+test_build_accepts_any_delivered_age_when_no_threshold_is_set() {
+  local home data
+  home=$(make_home delivered-nothreshold-ok)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq '.awaiting_nudge_days = null
+      | .awaiting = [{"id":"a","repo":"sample","owner":"(main)","what":"Long wait","age_days":365,
+        "pr_url":"https://github.com/o/r/pull/1"}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null \
+    || fail "a delivered row was refused for age although no threshold is set"
+  extract_payload "$home/.lavish/bearings-board.html" \
+    | jq -e '.awaiting_nudge_days == null and (.awaiting | length) == 1
+        and (.awaiting[0].age_days == 365)' >/dev/null \
+    || fail "the built board lost the unbounded delivered row or its null threshold"
+  refuse_mutation delivered-nothreshold '.awaiting_nudge_days = 0' \
+    "a payload whose nudge threshold is present but unusable"
+  pass "with no threshold set a delivered row is accepted at any age, and 0 is still refused"
+}
+
 test_build_accepts_a_delivered_row_and_a_nudge_card() {
   local home data
   home=$(make_home delivered-accepted)
@@ -909,6 +933,7 @@ test_build_refuses_a_nondecision_reconcile_value
 test_build_requires_ownership_on_every_fleet_row
 test_build_requires_a_delivered_row_to_carry_its_link_and_its_age
 test_build_refuses_a_delivered_row_that_has_already_aged_out
+test_build_accepts_any_delivered_age_when_no_threshold_is_set
 test_build_accepts_a_delivered_row_and_a_nudge_card
 test_build_requires_a_nudge_card_to_carry_its_link_and_its_age
 test_nudges_use_request_identity_independent_of_task_ids

@@ -718,9 +718,12 @@ __FM_BEARINGS_BOARD_DATA__
   });
 
   /* Delivered: nothing progresses here and nothing is the captain's to answer
-     yet, so the wait is the whole content of a row. A row that has waited past
-     awaiting_nudge_days is not in this list at all - it is a Captain's Call
-     nudge card by then, and the payload validator refuses it here. */
+     yet, so the wait is the whole content of a row. When a threshold is set, a
+     row that has waited past awaiting_nudge_days is not in this list at all -
+     it is a Captain's Call nudge card by then, and the payload validator
+     refuses it here. When awaiting_nudge_days is null the escalation is off, no
+     row leaves this section however long it waits, and the sub-line says so
+     rather than letting an unbounded wait look like a bounded one. */
   var aw = document.getElementById("bb-awaiting");
   if (!data.awaiting.length) {
     aw.appendChild(el("div", "bb-empty", "Nothing is waiting on a merge we do not control."));
@@ -739,7 +742,10 @@ __FM_BEARINGS_BOARD_DATA__
       aw.appendChild(row);
     });
   document.getElementById("bb-awaiting-sub").textContent =
-    data.awaiting.length ? "nudge-worthy after " + data.awaiting_nudge_days + " days" : "";
+    !data.awaiting.length ? ""
+      : data.awaiting_nudge_days
+        ? "nudge-worthy after " + data.awaiting_nudge_days + " days"
+        : "no nudge threshold set - these rows will not escalate";
 
   /* Charted Next + dispatch picker */
   var ch = document.getElementById("bb-charted");

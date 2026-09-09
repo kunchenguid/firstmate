@@ -79,9 +79,11 @@
 #
 # Qualifying rows leave in_flight and gates, so the same work is counted once.
 # age_days is the whole-day wait from pr.merge_poll.armed_epoch, whose record
-# binding is owned by bin/fm-fleet-snapshot.sh. At or past
-# FM_BEARINGS_AWAITING_NUDGE_DAYS, a row remains in snapshot.awaiting with nudge
-# true; .agents/skills/bearings/SKILL.md owns its placement in Captain's Call.
+# binding is owned by bin/fm-fleet-snapshot.sh. The escalation is OPT-IN and off
+# unless FM_BEARINGS_AWAITING_NUDGE_DAYS is set: with it unset, awaiting_nudge_days
+# is null and no row is ever marked nudge, however long it waits. With it set, a
+# row at or past that age remains in snapshot.awaiting with nudge true;
+# .agents/skills/bearings/SKILL.md owns its placement in Captain's Call.
 # Home summaries retain every delivery identity, timestamp, and request link.
 # Bearings computes current age, including from cached ledgers, before sorting
 # overdue then oldest rows and applying FM_BEARINGS_AWAITING (default 20).
@@ -181,7 +183,12 @@ validate_bound FM_BEARINGS_LANDED "$FM_BEARINGS_LANDED"
 validate_bound FM_BEARINGS_LANDED_PER_HOME "$FM_BEARINGS_LANDED_PER_HOME"
 validate_bound FM_BEARINGS_IN_FLIGHT "$FM_BEARINGS_IN_FLIGHT"
 validate_bound FM_BEARINGS_AWAITING "$FM_BEARINGS_AWAITING"
-validate_bound FM_BEARINGS_AWAITING_NUDGE_DAYS "$FM_BEARINGS_AWAITING_NUDGE_DAYS"
+# The nudge threshold is the one OPTIONAL bound: empty means the delivered-row
+# escalation is off, so it is validated only when the captain has set it.
+case "$FM_BEARINGS_AWAITING_NUDGE_DAYS" in
+  '') ;;
+  *[!0-9]*|0) echo "fm-bearings-snapshot: FM_BEARINGS_AWAITING_NUDGE_DAYS must be a positive integer when set" >&2; exit 2 ;;
+esac
 validate_bound FM_BEARINGS_DECISIONS "$FM_BEARINGS_DECISIONS"
 validate_bound FM_BEARINGS_SECONDMATES "$FM_BEARINGS_SECONDMATES"
 validate_bound FM_BEARINGS_GATES "$FM_BEARINGS_GATES"
@@ -233,8 +240,10 @@ awaiting holds work that shipped and now waits on a merge we do not control: the
   lookup, or an unreadable endpoint never qualifies. No captain action may be
   outstanding, so a qualifying row is neither in_flight nor a gate.
   age_days is that wait in whole days, preserved when the same
-  PR is re-recorded, and nudge marks a row at or past awaiting_nudge_days
-  (FM_BEARINGS_AWAITING_NUDGE_DAYS), which belongs in Captain's Call instead.
+  PR is re-recorded. nudge marks a row at or past awaiting_nudge_days, which
+  belongs in Captain's Call instead; it is off unless
+  FM_BEARINGS_AWAITING_NUDGE_DAYS is set, and awaiting_nudge_days is then null
+  and no row ever nudges.
   See bin/fm-bearings-snapshot.sh's header for delivery retention and bounds.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight, --all-awaiting,
   --all-decisions (all open decisions and captain holds in the bounded snapshot),
@@ -430,7 +439,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson landed_per_home_n "$FM_BEARINGS_LANDED_PER_HOME" \
   --argjson in_flight_n "$FM_BEARINGS_IN_FLIGHT" \
   --argjson awaiting_n "$FM_BEARINGS_AWAITING" \
-  --argjson nudge_days "$FM_BEARINGS_AWAITING_NUDGE_DAYS" \
+  --argjson nudge_days "${FM_BEARINGS_AWAITING_NUDGE_DAYS:-null}" \
   --argjson now_epoch "$NOW_EPOCH" \
   --argjson decisions_n "$FM_BEARINGS_DECISIONS" \
   --argjson secondmates_n "$FM_BEARINGS_SECONDMATES" \
@@ -508,6 +517,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   def delivered_age($now; $epoch):
     if $epoch == null or $now == 0 then null
     else (($now - $epoch) / 86400 | floor | if . < 0 then 0 else . end) end;
+  # THE EXIT RULE, and it is OFF unless configured. A null threshold means the
+  # captain has not asked for delivered rows to be escalated at all, so no row
+  # ever nudges however long it waits. The null test is not decoration: jq sorts
+  # null below every number, so a bare age >= threshold would report EVERY row
+  # as nudge-worthy the moment the threshold is absent, which is the exact
+  # opposite of off. tests/fm-bearings-snapshot.test.sh pins that.
+  def is_nudge($age; $threshold):
+    $threshold != null and $age != null and $age >= $threshold;
   # THE DELIVERY RECORD. Firstmate arms this watch only after a PR-ready signal
   # from the worker, so an armed watch with a recorded URL is what "we shipped
   # it" looks like in structure instead of in a title.
@@ -604,7 +621,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           owner:"(main)",
           pr_url:.pr.url,
           age_days:$age,
-          nudge:($age != null and $age >= $nudge_days)} ]
+          nudge:(is_nudge($age; $nudge_days))} ]
      + [ $secondmate_views[] as $m
          | $m.awaiting_merge[]?
          | (delivered_age($now_epoch; .delivered_epoch)) as $age
@@ -614,7 +631,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             owner:$m.id,
             pr_url:.pr_url,
             age_days:$age,
-            nudge:($age != null and $age >= $nudge_days)} ]
+            nudge:(is_nudge($age; $nudge_days))} ]
      # Overdue first, then longest wait: the cap must never be what drops the
      # one row that has aged out of this bucket and into the captain call.
      | sort_by([(if .nudge then 0 else 1 end), -(.age_days // 0), .id])) as $awaiting_all

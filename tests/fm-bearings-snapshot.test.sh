@@ -214,7 +214,9 @@ run() {  # <home> <fakebin> <args...>
     *" --all-landed "*) PATH="$fakebin:$PATH" FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 refresh_local_secondmate_ledgers "$home" ;;
     *) PATH="$fakebin:$PATH" refresh_local_secondmate_ledgers "$home" ;;
   esac
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    FM_BEARINGS_AWAITING_NUDGE_DAYS="${FM_TEST_NUDGE_DAYS:-${FM_BEARINGS_AWAITING_NUDGE_DAYS:-}}" \
+    NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
 
 run_captain() {  # <home> <fakebin> <command args...>
@@ -3438,6 +3440,7 @@ run_at() {  # <home> <fakebin> <epoch> <args...>
   now=$(date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
     || date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ) || fail "invalid fixture time"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW="$now" \
+    FM_BEARINGS_AWAITING_NUDGE_DAYS="${FM_TEST_NUDGE_DAYS:-${FM_BEARINGS_AWAITING_NUDGE_DAYS:-}}" \
     NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
 
@@ -3489,6 +3492,9 @@ test_an_underway_row_carries_its_owner_and_its_recorded_request() {
 # fall back into the delivered box on a later read.
 test_the_delivered_exit_rule_fires_at_its_threshold_and_never_reverses() {
   local pair home fakebin out later
+  # The exit rule is opt-in, so this case turns it on; the off case is its own
+  # test below. Dynamic scope means run_at sees it and it cannot leak.
+  local FM_TEST_NUDGE_DAYS=7
   pair=$(delivered_home delivered-exit $((BEARINGS_FIXTURE_EPOCH - 7 * 86400)))
   home=${pair%%:*}; fakebin=${pair#*:}
   out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
@@ -3509,6 +3515,67 @@ test_the_delivered_exit_rule_fires_at_its_threshold_and_never_reverses() {
     ' >/dev/null || fail "a crossed delivery fell back below the threshold after $later days: $out"
   done
   pass "the delivered exit rule fires at its named threshold and is one-way"
+}
+
+# The exit rule ships OFF. With no threshold configured a delivered row must
+# stay delivered however long it waits, and nothing may reach Captain's Call on
+# age alone. This also pins the null trap that makes the off case dangerous to
+# implement: jq sorts null below every number, so an unguarded
+# `age >= threshold` reports EVERY row as nudge-worthy exactly when the
+# threshold is absent - turning "off" into "always on" for the one section the
+# captain is meant to be able to trust.
+test_the_delivered_exit_rule_is_off_until_a_threshold_is_set() {
+  local pair home fakebin out later
+  pair=$(delivered_home delivered-optin $((BEARINGS_FIXTURE_EPOCH - 7 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .awaiting_nudge_days == null
+      and (.awaiting[0] | .age_days == 7 and .nudge == false)
+      and ([.awaiting[] | select(.nudge)] | length) == 0
+  ' >/dev/null || fail "an unset threshold did not leave the exit rule off: $out"
+
+  # Ages far past any plausible threshold must still not escalate.
+  for later in 30 365 4000; do
+    out=$(run_at "$home" "$fakebin" $((BEARINGS_FIXTURE_EPOCH + later * 86400)) --json) \
+      || fail "the snapshot failed"
+    printf '%s' "$out" | jq -e --argjson d "$later" '
+      .awaiting_nudge_days == null
+        and (.awaiting[0] | .age_days == (7 + $d) and .nudge == false)
+    ' >/dev/null || fail "a delivery escalated after $later days with no threshold set: $out"
+  done
+  pass "with no threshold configured no delivered row ever escalates, at any age"
+}
+
+# Setting the threshold turns the same rule on, so the off state is a
+# configuration choice rather than a missing capability.
+test_setting_a_threshold_turns_the_delivered_exit_rule_on() {
+  local pair home fakebin out
+  local FM_TEST_NUDGE_DAYS=5
+  pair=$(delivered_home delivered-optin-on $((BEARINGS_FIXTURE_EPOCH - 7 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  out=$(run_at "$home" "$fakebin" "$BEARINGS_FIXTURE_EPOCH" --json) || fail "the snapshot failed"
+  printf '%s' "$out" | jq -e '
+    .awaiting_nudge_days == 5 and (.awaiting[0] | .age_days == 7 and .nudge == true)
+  ' >/dev/null || fail "setting the threshold did not turn the exit rule on: $out"
+  pass "setting a threshold turns the delivered exit rule on at that age"
+}
+
+# A threshold the captain sets must still be a positive integer; an empty value
+# is off, but a malformed one is a mistake and must be refused rather than
+# silently read as off.
+test_a_malformed_threshold_is_refused_rather_than_read_as_off() {
+  local pair home fakebin bad status
+  pair=$(delivered_home delivered-optin-bad $((BEARINGS_FIXTURE_EPOCH - 7 * 86400)))
+  home=${pair%%:*}; fakebin=${pair#*:}
+  for bad in 0 -1 seven 3.5; do
+    status=0
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+      FM_BEARINGS_AWAITING_NUDGE_DAYS="$bad" NET_LOG="$home/net.log" \
+      "$BEARINGS" --json >/dev/null 2>&1 || status=$?
+    [ "$status" -eq 2 ] || fail "a threshold of '$bad' was not refused (exit $status)"
+  done
+  pass "a malformed nudge threshold is refused rather than silently treated as off"
 }
 
 test_the_nudge_threshold_is_one_named_constant() {
@@ -3585,6 +3652,8 @@ EOF
 
 test_a_request_waiting_on_the_captain_never_lands_in_the_waiting_state() {
   local pair home fakebin out
+  # The exit rule is opt-in, so a test that asserts a nudge configures it.
+  local FM_TEST_NUDGE_DAYS=7
   pair=$(delivered_home captain-owed $((BEARINGS_FIXTURE_EPOCH - 30 * 86400)))
   home=${pair%%:*}; fakebin=${pair#*:}
   # Same delivery as the plain case, except the captain owes an answer on it.
@@ -3655,6 +3724,7 @@ test_an_overdue_delivery_survives_the_awaiting_bound() {
     $((BEARINGS_FIXTURE_EPOCH - 40 * 86400))
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
     FM_BEARINGS_AWAITING=2 \
+    FM_BEARINGS_AWAITING_NUDGE_DAYS=7 \
     NET_LOG="$home/net.log" "$BEARINGS" --json) || fail "the snapshot failed"
   printf '%s' "$out" | jq -e '
     (.awaiting | length) == 2
@@ -3668,6 +3738,9 @@ test_delivered_work_leaves_underway_for_its_own_bucket
 test_an_armed_merge_watch_does_not_move_work_that_is_still_running
 test_an_underway_row_carries_its_owner_and_its_recorded_request
 test_the_delivered_exit_rule_fires_at_its_threshold_and_never_reverses
+test_the_delivered_exit_rule_is_off_until_a_threshold_is_set
+test_setting_a_threshold_turns_the_delivered_exit_rule_on
+test_a_malformed_threshold_is_refused_rather_than_read_as_off
 test_the_nudge_threshold_is_one_named_constant
 test_a_secondmate_child_is_told_apart_from_main_work_in_the_same_repo
 
@@ -3710,6 +3783,8 @@ EOF
 
 test_configured_wait_declarations_reach_both_delivery_projections() {
   local home parent fakebin id window out ledger
+  # The exit rule is opt-in, so a test that asserts a nudge configures it.
+  local FM_TEST_NUDGE_DAYS=7
   home=$(make_home configured-wait)
   make_valid_secondmate_home configured-mate "$home"
   fakebin=$(make_fakebin "$home")
@@ -4044,7 +4119,8 @@ test_overdue_deliveries_survive_ledger_and_presentation_bounds() {
       $((BEARINGS_FIXTURE_EPOCH - age * 86400))
   done
   printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
-  out=$(FM_BEARINGS_AWAITING=2 run "$home" "$fakebin" --json) || fail "overdue main snapshot failed"
+  out=$(FM_BEARINGS_AWAITING=2 FM_BEARINGS_AWAITING_NUDGE_DAYS=7 \
+    run "$home" "$fakebin" --json) || fail "overdue main snapshot failed"
   printf '%s' "$out" | jq -e '
     [.awaiting[].id] == ["overdue-1", "overdue-2", "overdue-3", "overdue-4"]
       and all(.awaiting[]; .nudge and .age_days == 8)
@@ -4197,7 +4273,8 @@ test_cached_deliveries_age_before_the_consuming_bound() {
     out=$(PATH="$fakebin:$PATH" FM_HOME="$parent" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$sshbin/fake-ssh" \
       FM_TEST_LEDGER_CALL_LOG="$parent/ledger-calls.log" FM_SNAPSHOT_CACHE_DIR="$parent/state/summary-cache" \
       FM_SNAPSHOT_BUDGET=3 FM_SNAPSHOT_NOW="$now" FM_SNAPSHOT_NOW_EPOCH="$epoch" \
-      FM_BEARINGS_NOW="$now" FM_BEARINGS_AWAITING=2 "$BEARINGS" --json) || fail "$phase delivery snapshot failed"
+      FM_BEARINGS_NOW="$now" FM_BEARINGS_AWAITING=2 FM_BEARINGS_AWAITING_NUDGE_DAYS=7 \
+      "$BEARINGS" --json) || fail "$phase delivery snapshot failed"
     printf '%s' "$out" | jq -e --arg phase "$phase" '
       .secondmates[0].freshness == $phase
         and (if $phase == "fresh" then

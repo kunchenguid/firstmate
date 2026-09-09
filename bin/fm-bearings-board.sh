@@ -80,13 +80,19 @@
 # recorded `pr_url`; an `awaiting` row must, since a delivered row nobody can
 # open is not actionable at all.
 #
-# THE EXIT RULE IS ENFORCED HERE, NOT REMEMBERED. `awaiting` holds work that
-# shipped and now waits on a maintainer, and `awaiting_nudge_days` is the
-# snapshot's own threshold carried verbatim. A row that has already reached it
-# is refused: past that wait it is the captain's to nudge and belongs in
-# Captain's Call as a `nudge` card, so the delivered box cannot become a
-# graveyard for the rows that most need him. The skill's fresh-snapshot rule
-# governs later reclassification if the task's wait or current state changes.
+# THE EXIT RULE IS ENFORCED HERE, NOT REMEMBERED, WHEN IT IS TURNED ON.
+# `awaiting` holds work that shipped and now waits on a maintainer, and
+# `awaiting_nudge_days` is the snapshot's own threshold carried verbatim. A row
+# that has already reached it is refused: past that wait it is the captain's to
+# nudge and belongs in Captain's Call as a `nudge` card, so the delivered box
+# cannot become a graveyard for the rows that most need him. The skill's
+# fresh-snapshot rule governs later reclassification if the task's wait or
+# current state changes.
+# The threshold is OPTIONAL and absent by default, in which case
+# `awaiting_nudge_days` is null, no row is refused for age, and no nudge card is
+# produced. That is a deliberate cost, stated so nobody has to rediscover it:
+# with the escalation off, a delivered row can wait indefinitely with only its
+# age to show for it. Set FM_BEARINGS_AWAITING_NUDGE_DAYS to switch it on.
 #
 # Every Underway row likewise carries a non-empty `name`: the durable task name
 # when known, otherwise its durable identifier.
@@ -201,7 +207,7 @@ validate_payload() {  # <data.json>
       and (.pr_url | nonempty_string)
       and optional_https_url("pr_url")
       and (.age_days | nonneg_int)
-      and (.age_days < $nudge_days);
+      and ($nudge_days == null or .age_days < $nudge_days);
     def landed_item:
       type == "object" and repo_marker and (.id | nonempty_string)
       and (.what | nonempty_string) and (.owner | nonempty_string)
@@ -226,7 +232,8 @@ validate_payload() {  # <data.json>
     and (.awaiting | type == "array")
     and (.landed | type == "array")
     and (.charted | type == "array")
-    and (.awaiting_nudge_days | type == "number" and . >= 1 and (floor == .))
+    and (.awaiting_nudge_days == null
+      or (.awaiting_nudge_days | type == "number" and . >= 1 and (floor == .)))
     and ((has("charted_more") | not)
       or ((.charted_more | type == "number") and (.charted_more >= 0) and (.charted_more | floor == .)))
     and ((has("charted_warning_more") | not)
