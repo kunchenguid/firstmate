@@ -76,6 +76,8 @@ fm_control_harness_supported() {  # <harness>
 # `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
 # `omp` is exact because an `omp*` prefix would claim unrelated commands, and an
 # unrecognized value returns nonzero rather than being guessed into a family.
+# `hermes` and `antigravity` are exact for the same reason: the recorded value is
+# the adapter name the worker bridge was launched with, never a command basename.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
     hermes|antigravity) printf '%s' "$1" ;;
@@ -95,8 +97,9 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse, gemini, and rovo are
-# crewmate/scout adapters only: none has a primary supervision protocol,
+# Which task kinds an adapter is verified to run. muse, gemini, rovo, hermes,
+# and antigravity are crewmate/scout adapters only: none has a primary
+# supervision protocol,
 # and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has

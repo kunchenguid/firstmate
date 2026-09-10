@@ -212,14 +212,17 @@ def main():
                 error_file.seek(0)
                 raw_output = output_file.read(PROTOCOL_LIMIT + 1)
                 raw_errors = error_file.read(PROTOCOL_LIMIT + 1)
-                overflow = len(raw_output) > PROTOCOL_LIMIT or len(raw_errors) > PROTOCOL_LIMIT
+                output_overflow = len(raw_output) > PROTOCOL_LIMIT
+                error_overflow = len(raw_errors) > PROTOCOL_LIMIT
                 output = raw_output[:PROTOCOL_LIMIT].decode(errors='replace')
                 errors = raw_errors[:PROTOCOL_LIMIT].decode(errors='replace')
                 if errors:
                     print(errors, flush=True)
-                if overflow:
+                if error_overflow:
+                    print('CLI diagnostics exceeded the 1 MiB protocol limit and were truncated', flush=True)
+                if output_overflow:
                     print('CLI output exceeded the 1 MiB protocol limit', flush=True)
-                success = process.returncode == 0 and not overflow
+                success = process.returncode == 0 and not output_overflow
                 if args.harness == 'hermes':
                     success = success and bool(re.search(r'^session_id: \S+$', errors, re.M)) and bool(output.strip())
                 if args.harness == 'antigravity' and success:
