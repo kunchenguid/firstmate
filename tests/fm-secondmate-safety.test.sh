@@ -6,12 +6,8 @@
 # operator flow lives in fm-secondmate-lifecycle-e2e.test.sh; this file keeps the
 # destructive-invariant coverage that an e2e run cannot deterministically reach.
 #
-# Origin secrecy is part of that: bin/fm-project-origin-lib.sh deliberately
-# accepts a user:pass@host authority, so every seeding error an operator can
-# reach by misconfiguring an origin is driven here with a credential-bearing
-# origin and asserted not to repeat it. That covers both seeding entry points -
-# the local bin/fm-home-seed.sh and the remote bin/fm-remote-home-seed.sh - since
-# the invariant belongs to the pair, not to one script.
+# docs/remote-secondmates.md#provision-a-route owns the origin-diagnostic
+# safety contract and its scope; the credential fixtures below exercise it.
 set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
