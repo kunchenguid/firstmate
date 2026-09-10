@@ -133,7 +133,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -281,6 +281,7 @@
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
+#     __AGYBIN__    resolved, agy-verified executable for an agy launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -288,7 +289,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse and gemini are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, and agy are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -296,6 +297,9 @@
 # only after a TUI readiness gate, then a delivery-confirmation gate - the same
 # launch-then-send shape as kimi. Its busy state is a screen-scrape fallback like
 # grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
+# agy installs no hook either - it exposes no hook surface at all - so it
+# carries no busy-source wiring and no turn-end hook. Its busy state is a
+# screen-scrape fallback like grok and rovo, and it is crewmate/scout only.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -1389,7 +1393,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1467,6 +1471,25 @@ omp_model_validate() {  # <omp-bin> <model>
   return 1
 }
 
+# agy pre-launch model validation. `agy models` (agy 1.2.0) prints one model per
+# line as "<id>\t<label>" for the account's catalog only; model ids are bare
+# (gemini-3.8-flash-high), never provider-prefixed. A requested model absent
+# from a reachable listing is concrete unsupported evidence and refuses the
+# spawn, so a stale id (the unlisted bare gemini-3.8-flash) fails loudly here
+# instead of wedging a worker pane. An unreachable listing establishes nothing
+# (harness-adapters model-and-effort.md) and launches unvalidated.
+agy_model_validate() {  # <agy-bin> <model>
+  local bin=$1 model=$2 listing
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  listing=$("$bin" models 2>/dev/null) || return 0
+  [ -n "$listing" ] || return 0
+  if printf '%s\n' "$listing" | awk '{print $1}' | grep -qxF -- "$model"; then
+    return 0
+  fi
+  echo "error: agy model '$model' is not listed by 'agy models'; choose a listed id or omit --model" >&2
+  return 1
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
@@ -1540,6 +1563,28 @@ launch_template() {
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
+    # agy (Antigravity CLI): --prompt-interactive "<brief>" starts the supervised
+    # interactive session and auto-submits it, so the brief rides the launch
+    # command (verified: a multi-line brief submitted itself with no extra Enter,
+    # agy 1.2.0). --model takes the bare catalog id from `agy models`
+    # (gemini-3.8-flash-high, never the unlisted bare gemini-3.8-flash).
+    # --effort takes low|medium|high. --dangerously-skip-permissions
+    # auto-approves every tool call, which an unattended crewmate needs.
+    # Every task worktree is a fresh path, so agy shows a folder-trust dialog
+    # ("Do you trust the contents of this project?"). Supervised Herdr runs
+    # completed their initial turns with the dialog still up, while isolated
+    # runs elsewhere waited for it; the mechanism is unproven, so answer the
+    # safe default ("Yes, I trust this folder") with a single Enter at
+    # inspection in all cases, then inspect again. Answering
+    # persists the worktree to the captain's own
+    # ~/.gemini/antigravity-cli/settings.json trustedWorkspaces, which firstmate
+    # never writes directly. The foreign primary markers are cleared for the same
+    # reason cursor clears them: agy publishes no marker of its own and does not
+    # clear an inherited CLAUDECODE (verified in the /proc environ of a live 1.2.0
+    # TUI), so bin/fm-harness.sh must not read an agy worker as its launcher.
+    # agy exposes no hook surface, so busy state is a rendered-tail fallback
+    # (bin/fm-busy-lib.sh) and nothing is armed below.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
     # session. --always-approve auto-approves every tool execution (verified: the
     # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -1691,7 +1736,7 @@ case "$ARG3" in
     ;;
 esac
 
-# muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -1701,7 +1746,9 @@ esac
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
 # secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ]; }; then
+# agy has none either: it exposes no hook surface for primary supervision and
+# docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -1755,6 +1802,12 @@ case "$HARNESS" in
       exit 1
     }
     ;;
+  agy)
+    AGY_BIN=$(resolve_pi_executable agy) || {
+      echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
+      exit 1
+    }
+    ;;
 esac
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -1789,6 +1842,9 @@ if [ "$EFFORT" = ultra ]; then
 fi
 if [ "$HARNESS" = omp ]; then
   omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
+fi
+if [ "$HARNESS" = agy ]; then
+  agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
 fi
 
 secondmate_registry_value() {
@@ -1902,7 +1958,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1932,6 +1988,13 @@ effort_flag_for_harness() {
       # than passing a known-bad value.
       case "$effort" in
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    agy)
+      # agy 1.2.0 --effort accepts exactly low|medium|high, so xhigh and max are
+      # omitted rather than passed as known-bad values (record-and-omit).
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     pi|pi-signed)
@@ -3891,10 +3954,11 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
   omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
+  agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo|agy)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac
