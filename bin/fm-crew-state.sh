@@ -661,8 +661,8 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merge unconfirmed; check forge" ;;
+        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks passed: PR state unconfirmed; check forge" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
