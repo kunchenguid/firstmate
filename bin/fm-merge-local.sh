@@ -164,7 +164,7 @@ case "$hold_status" in
 esac
 merge_status=0
 if [ "$cur" = "$TARGET" ]; then
-  git -C "$PROJ" merge --ff-only "$BRANCH_REF" >/dev/null || merge_status=$?
+  git -C "$PROJ" merge --ff-only "$branch_sha" >/dev/null || merge_status=$?
 else
   target_worktree=$(git -C "$PROJ" for-each-ref --format='%(worktreepath)' "$TARGET_REF")
   if [ -n "$target_worktree" ]; then

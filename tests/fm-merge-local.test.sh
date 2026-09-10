@@ -74,7 +74,7 @@ test_last_recorded_crew_branch_wins() {
   git -C "$project" checkout -q main
   commit_on "$project" feature/last last.txt
   git -C "$project" checkout -q main
-  printf '%s\n' 'Crew branch: branch=feature/first' 'Crew branch: branch=feature/last' \
+  printf '%s\n' '# Definition of done' 'Crew branch: branch=feature/first' 'Crew branch: branch=feature/last' \
     > "$case_dir/home/data/$id/brief.md"
   run_merge "$case_dir" "$id" >/dev/null \
     || fail "merge-local refused the last recorded crew branch"
