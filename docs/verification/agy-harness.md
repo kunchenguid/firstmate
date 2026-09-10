@@ -262,6 +262,12 @@ esc to cancel                                                  Gemini 3.8 Flash 
 Both shapes are unchanged from 1.1.8 apart from the model label, so the shared separated-composer proof classified the idle pane `empty` and the bottom-row `esc to cancel` fallback classified the running turn busy.
 Transient status rows (`Generating...`, `Loading...`, `Running...`) remain 1.1.8 observations.
 
+A third composer shape was driven live on 2026-09-09 and is recorded here in prose because no pane transcript of it was kept.
+While the composer holds an unsubmitted draft, Agy drops the `? for shortcuts` hint and leaves only the right-aligned model label on the footer row, with the typed text on the `>` row between the same two separators.
+`tests/fm-agy-live-e2e.test.sh` proves it against the real binary: it types a draft, waits for the draft to render in full, and requires the classifier to read `pending`.
+That shape is why the separated-composer proof accepts a bare model-label row as a footer at all, because requiring a hint read a real pending composer as `unknown`, and `unknown` is the verdict `fm_task_inbox_ring` types its doorbell into.
+Every footer observed on 1.1.28 is the bottom-most nonblank row of its capture, so a bare label row claims the footer only in that position.
+
 Agy 1.1.27 rendered a one-time feedback survey in place of the composer after a turn on 2026-09-08:
 
 ```text
