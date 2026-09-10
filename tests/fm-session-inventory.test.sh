@@ -967,6 +967,229 @@ EOF
   pass "inventory: no cross-home network read, and an unread remote home says so"
 }
 
+# A home reached through a symlink is the ordinary case on macOS, where TMPDIR
+# itself is one (/var -> /private/var). The kernel reports every process working
+# directory with the symlinks already resolved, so a home compared in its
+# logical form matches none of its own running processes: the sessions would be
+# counted as belonging elsewhere and the overview would report zero while four
+# are running - silently, with every source still reported ok. Both sides have
+# to be physical, so this drives the command through the symlink and demands the
+# same answer the real path gives.
+test_a_home_reached_through_a_symlink_still_finds_what_runs_in_it() {
+  local home link spec daemon json worktree
+  home=$(make_home symlinked)
+  link="$TMP_ROOT/symlinked-link"
+  rm -f "$link"
+  ln -s "$home" "$link" || fail "could not build the symlinked home fixture"
+
+  # The worker's recorded worktree is a SYMLINKED path too, while the process
+  # running in it reports the real one - the same split, one level down. It sits
+  # outside the home, like a real worktree, so it stays a worker question rather
+  # than becoming a second session working inside this home.
+  worktree="$TMP_ROOT/symlinked-worktree-link"
+  mkdir -p "$TMP_ROOT/symlinked-worktree"
+  rm -f "$worktree"
+  ln -s "$TMP_ROOT/symlinked-worktree" "$worktree" \
+    || fail "could not build the symlinked worktree fixture"
+  fm_write_meta "$home/state/ship-task.meta" \
+    "window=firstmate:fm-ship-task" \
+    "worktree=$worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=off"
+  printf -- '- [ ] ship-task - Ship Task (repo: alpha) (kind: ship) (since %s)\n' \
+    "$(date_days_ago 30)" >> "$home/data/backlog.md.inflight"
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+
+  spec="$home/children"
+  cat > "$spec" <<EOF
+$home|sess-a --session-id aaaa --agent claude
+$TMP_ROOT/symlinked-worktree|work-a --session-id bbbb --agent claude
+EOF
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
+  printf '%s\n' "$daemon" > "$home/state/.lock"
+
+  json=$(run_inventory "$link" --json) || fail "inventory failed for a symlinked home"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')" = single ] \
+    || fail "a session working in a symlinked home must still be attributed to it, got '$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')'"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')" = 1 ] \
+    || fail "a symlinked home reported none of its own live sessions"
+
+  # A worker with a live process in its worktree is aged by that process, not by
+  # the month-old task date - which is only true if the worktree matched too.
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "ship-task") | .age_source')" = process \
+    ] || fail "a worktree reached through a symlink did not match its own running process"
+
+  kill_spawned
+  pass "inventory: a home reached through a symlink still finds the sessions and workers running in it"
+}
+
+# The bootstrap runs inside the lock-owning session, whose working directory is
+# this home by construction, so the captain's own session is always one of the
+# rows. Handing him `kill <pid>` for the conversation he is having is worse than
+# telling him nothing at all, so that one row is marked and carries no command.
+test_the_session_running_the_command_is_never_offered_for_closing() {
+  local home runner json pid self rendered
+  home=$(make_home own-session)
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+
+  # A real harness-named ancestor of the command, working in this home: exactly
+  # the shape a session-start bootstrap has. The trailing `:` keeps bash from
+  # collapsing itself into the command it runs, which would replace the harness
+  # process this fixture exists to be.
+  runner="$TMP_ROOT/own-session-runner.sh"
+  cat > "$runner" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+"$@"
+:
+SH
+  chmod +x "$runner"
+
+  # <mode...>: run the given command from inside that session, in this home.
+  run_from_own_session() {
+    (cd "$home" && FM_HOME="$home" FM_SESSION_INVENTORY_NOW_EPOCH="$NOW_EPOCH" \
+      PATH="$FAKEBIN:$PATH" "$FAKE_CLAUDE" "$runner" "$@")
+  }
+
+  json=$(run_from_own_session "$INVENTORY" --json) \
+    || fail "inventory failed when run from inside a live session"
+
+  pid=$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "harness-session") | .id')
+  [ -n "$pid" ] || fail "the session running the command was not listed at all"
+  self=$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "harness-session")
+    | "\(.self) \(.close) \(.close_safety)"')
+  [ "$self" = "true null manual" ] \
+    || fail "the session running the command must be marked as such and carry no close command, got '$self'"
+
+  # The unasked session-start line must not offer it either, at any age.
+  local out
+  out=$(FM_SESSION_STALE_DAYS=0 run_from_own_session "$INVENTORY" --stale-lines) \
+    || fail "--stale-lines failed when run from inside a live session"
+  assert_not_contains "$out" "kill" \
+    "the unasked line must never hand the captain a kill for his own session"
+
+  # Each run is its own session, so the pid above belongs to the run above; what
+  # must hold for every run is the marking and the absent kill.
+  rendered=$(COLUMNS=100 run_from_own_session "$VIEW" --color never) \
+    || fail "the view failed when run from inside a live session"
+  assert_contains "$rendered" "live session (yours)" \
+    "the view must mark the session the captain is reading it from"
+  assert_not_contains "$rendered" "kill " \
+    "the view must not put the captain's own session in the To close block"
+
+  pass "inventory: the session running the command is marked and never offered as one to close"
+}
+
+# The Lavish listing is machine-wide by intent - the captain works across many
+# projects and asked to see all of those pages. An unasked session-start line is
+# a different budget: every home on the machine would otherwise print the same
+# review lines at every start. The main home says them; a secondmate home leaves
+# them to it, and the pages themselves stay in --json for both.
+test_a_secondmate_home_leaves_the_unasked_review_lines_to_the_main_home() {
+  local main mate artifact out
+  main=$(make_home review-main)
+  mate=$(make_home review-mate)
+  finish_backlog "$main"
+  finish_backlog "$mate"
+  printf 'mate-one\n' > "$mate/.fm-secondmate-home"
+
+  artifact="$TMP_ROOT/elsewhere-project/plan.html"
+  mkdir -p "$(dirname "$artifact")"
+  printf '<html></html>\n' > "$artifact"
+  touch -t "$(date -u -r "$((NOW_EPOCH - 30 * DAY))" +%Y%m%d%H%M 2>/dev/null \
+    || date -u -d "@$((NOW_EPOCH - 30 * DAY))" +%Y%m%d%H%M)" "$artifact"
+  write_lavish_stub "$FAKEBIN" "$artifact" open 0
+
+  out=$(run_inventory "$main" --stale-lines) || fail "--stale-lines failed for the main home"
+  assert_contains "$out" "review page plan.html" \
+    "the main home must still name an overdue review page unasked"
+
+  out=$(run_inventory "$mate" --stale-lines) || fail "--stale-lines failed for a secondmate home"
+  assert_not_contains "$out" "plan.html" \
+    "a secondmate home must not repeat the machine-wide review pages the main home already names"
+
+  # The pages themselves are not scoped away: both homes still list them.
+  [ "$(run_inventory "$mate" --json | jq -r '[.rows[] | select(.kind == "review")] | length')" = 1 ] \
+    || fail "a secondmate home must still SHOW the machine-wide review pages"
+
+  pass "inventory: the unasked review lines come from the main home, while every home still lists the pages"
+}
+
+# Every close command is printed to be pasted exactly as shown. A listener id
+# comes from a state/procevent/<id>.runner filename rather than from a validated
+# registration, so it gets the same quoting the worker and review commands do.
+test_a_listener_close_command_survives_an_id_that_needs_quoting() {
+  local home stage json close out
+  home=$(make_home listener-quoting)
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  mkdir -p "$home/state/procevent"
+  printf '%s\n' "$$" > "$home/state/procevent/odd id.runner"
+
+  json=$(run_inventory "$home" --json) || fail "inventory failed for a listener id with a space"
+  close=$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "listener-odd id") | .close')
+  [ -n "$close" ] && [ "$close" != null ] || fail "the listener row carried no close command"
+
+  stage="$TMP_ROOT/listener-stage"
+  mkdir -p "$stage/bin"
+  cat > "$stage/bin/fm-procevent.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'argc=%s\narg1=%s\narg2=%s\n' "$#" "${1:-}" "${2:-}"
+SH
+  chmod +x "$stage/bin/fm-procevent.sh"
+
+  out=$(cd "$stage" && bash -c "$close") \
+    || fail "the printed listener close command must run as a single command"
+  assert_contains "$out" "argc=2" \
+    "a listener id with a space must reach fm-procevent.sh as one argument, not two"
+  assert_contains "$out" "arg2=odd id" "the listener id must arrive unaltered"
+
+  pass "inventory: a listener close command stays pasteable when its id needs quoting"
+}
+
+# The overview redraws on a timer and sits on the blocking session-start path,
+# so a pass must write nothing at all. The one state file a classification pass
+# would otherwise touch is muse's memo of the session log it resolved, which it
+# rewrites and clears concurrently with the watcher that owns it.
+# bin/fm-busy-lib.sh owns the read-only rule; this pins that the overview
+# actually reaches it through the snapshot underneath.
+test_inventory_does_not_rewrite_the_busy_classifier_cache() {
+  local home cache
+  home=$(make_home busy-cache)
+  write_worker "$home" muse-task 1
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  # The worker's recorded harness is what selects the classifier path.
+  fm_write_meta "$home/state/muse-task.meta" \
+    "window=firstmate:fm-muse-task" \
+    "worktree=$home/projects/muse-task-worktree" \
+    "project=alpha" \
+    "harness=muse" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=off"
+  mkdir -p "$home/muse-sessions"
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=one\n' \
+    "$home/muse-sessions" "$home/projects/muse-task-worktree" \
+    > "$home/state/muse-task.muse-session"
+  cache="$home/state/muse-task.muse-session-current"
+  printf 'binding_id=retired\nsession_log=%s\n' "$home/gone.jsonl" > "$cache"
+
+  run_inventory "$home" --json >/dev/null || fail "inventory failed for a muse worker"
+
+  [ -f "$cache" ] || fail "the overview removed a state file the watcher owns"
+  assert_contains "$(cat "$cache")" "binding_id=retired" \
+    "the overview rewrote a state file it is only supposed to read"
+
+  pass "inventory: a pass writes nothing, the busy classifier's own cache included"
+}
+
 test_inventory_closes_nothing_it_reports() {
   local home spec daemon children pid pool
   home=$(make_home read-only)
@@ -1021,4 +1244,9 @@ test_unreadable_source_is_disclosed_not_counted_as_zero
 test_view_is_readable_narrow_and_without_colour
 test_view_refuses_a_cadence_below_the_floor
 test_inventory_makes_no_cross_home_network_read
+test_a_home_reached_through_a_symlink_still_finds_what_runs_in_it
+test_the_session_running_the_command_is_never_offered_for_closing
+test_a_secondmate_home_leaves_the_unasked_review_lines_to_the_main_home
+test_a_listener_close_command_survives_an_id_that_needs_quoting
+test_inventory_does_not_rewrite_the_busy_classifier_cache
 test_inventory_closes_nothing_it_reports

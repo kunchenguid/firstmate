@@ -14,6 +14,13 @@
 # that caused real damage - two concurrent harness background sessions under one
 # shared harness daemon, each believing it owned this home.
 #
+# SCOPE, HONESTLY. Workers, services, and harness sessions are scoped to this
+# home. Review pages are NOT: Lavish keeps one machine-wide list, and showing
+# all of it here is deliberate - the captain works across many projects and
+# asked for exactly that. Only the unasked --stale-lines output narrows, and
+# only so that every home on the machine does not repeat the same review lines;
+# the note on that mode at the end of this file gives the reasoning.
+#
 # ONE TRUTH, NOT A SECOND ONE. Worker rows are derived from
 # bin/fm-fleet-snapshot.sh --json, which stays the single owner of fleet state;
 # this script adds only what that snapshot does not model (Lavish review pages,
@@ -68,6 +75,10 @@
 #                 reported, so a running worker shows its running time and the
 #                 age of its task side by side.
 #   held          true when the captain is deliberately holding this work.
+#   self          true for the one row that IS the process running this command:
+#                 the harness session the captain is talking to. It carries no
+#                 close command, because an overview that offers to end the
+#                 conversation it is being read in is worse than no overview.
 #   notify        true when the row is stale, has a close command, and is not
 #                 held. A row with no single safe close command is not something
 #                 a human can act on by age, so long-lived shared infrastructure
@@ -98,10 +109,13 @@
 #
 # NO NETWORK, NO WRITES. The fleet snapshot underneath is run with
 # FM_SNAPSHOT_LOCAL_ONLY=1, which is what makes the read-only promise above
-# true: cross-home secondmate ledgers are the snapshot's only network path and
-# its only state write, this overview uses none of that data, and this command
-# sits both on the blocking session-start path and in a pane that redraws on a
-# timer - neither may leave the machine or touch a state record.
+# true. That flag closes both of the snapshot's write paths: cross-home
+# secondmate ledgers (its only network read and its only cache refresh), and the
+# per-task busy classifier's own memo of muse's resolved session log, which it
+# runs read-only through FM_BUSY_READ_ONLY. This overview uses no cross-home
+# data at all, and it sits both on the blocking session-start path and in a pane
+# that redraws on a timer - neither may leave the machine, and neither may
+# rewrite a state file underneath the watcher that owns it.
 #
 # Bounds. FM_SESSION_INVENTORY_FLEET_TIMEOUT (default 20s) bounds the fleet
 # snapshot and FM_SESSION_INVENTORY_LAVISH_TIMEOUT (default 8s) bounds the Lavish
@@ -112,6 +126,24 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+
+# EVERY DIRECTORY COMPARED AGAINST A PROCESS IS PHYSICAL, ON BOTH SIDES. The
+# kernel reports a process working directory with every symlink already
+# resolved - /private/var rather than /var on macOS, and any symlinked component
+# of a home anywhere. A home or worktree left in its logical form therefore
+# matches no running process at all: every session would be counted as belonging
+# elsewhere, lock_owner would read "none", and the source would still be
+# reported ok. That is the silent form of the exact failure this command exists
+# to make loud, so both sides are resolved here, once, rather than at any single
+# comparison.
+physical_path() {  # <path>
+  local phys=''
+  [ -n "$1" ] || return 1
+  phys=$(CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P)
+  printf '%s\n' "${phys:-$1}"
+}
+FM_ROOT=$(physical_path "$FM_ROOT")
+FM_HOME=$(physical_path "$FM_HOME")
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-session-lock-lib.sh
@@ -144,13 +176,19 @@ usage() {
 usage: fm-session-inventory.sh --json
        fm-session-inventory.sh --stale-lines
 
-Print what is running for this firstmate home: workers, open Lavish review
-pages, background services, and concurrent harness background sessions.
+Print what is running: this home's workers, its background services, and the
+harness background sessions working in it, plus every open Lavish review page.
+Review pages are MACHINE-WIDE and deliberately so - Lavish keeps one list for
+every project on this machine, and seeing all of them in one place is the point.
+Everything else is scoped to this home.
 
 --json         the stable machine-readable contract (schema fm-session-inventory.v1).
 --stale-lines  one short line per row at or over the stale threshold, and
                nothing at all when none is. This is what the session-start
-               bootstrap surfaces unasked.
+               bootstrap surfaces unasked. Because the review pages are
+               machine-wide, only the main home names them here; a secondmate
+               home leaves them to it rather than every home on the machine
+               repeating the same lines at every session start.
 
 Read-only: it never closes, kills, or signals anything it reports.
 EOF
@@ -194,10 +232,11 @@ shell_quote() {  # <value>
 }
 
 # One row per line. Empty field = null in JSON. The trailing `held` column is 1
-# for work the captain is deliberately holding.
-emit_row() {  # kind id label belongs_to detail pid age_seconds age_source close close_safety close_note [held] [task_age_seconds]
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12:-0}" "${13:-}" >> "$ROWS"
+# for work the captain is deliberately holding, and the `self` column is 1 for
+# the one row that IS the process running this command.
+emit_row() {  # kind id label belongs_to detail pid age_seconds age_source close close_safety close_note [held] [task_age_seconds] [self]
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12:-0}" "${13:-}" "${14:-0}" >> "$ROWS"
 }
 
 # --- the one process-table read ----------------------------------------------
@@ -334,15 +373,21 @@ WORKER_PROCS="$WORK/worker-procs.tsv"
 : > "$WORKER_PROCS"
 collect_worker_processes() {  # <worktree>...
   local pid cwd age dir saved keep
+  local -a dirs=()
   [ "$#" -gt 0 ] || return 0
   [ -s "$PSTABLE" ] || return 0
+  # Physical on both sides, for the reason physical_path states: a worktree
+  # reached through a symlink would match none of its own running processes.
+  for dir in "$@"; do
+    dirs+=("$(physical_path "$dir")")
+  done
   saved=$CWDMAP
   CWDMAP="$WORK/worker-cwd.tsv"
   if read_all_cwds; then
     while IFS=$'\t' read -r pid cwd; do
       [ -n "$pid" ] && [ -n "$cwd" ] || continue
       keep=0
-      for dir in "$@"; do
+      for dir in "${dirs[@]}"; do
         if path_within "$cwd" "$dir"; then keep=1; break; fi
       done
       [ "$keep" = 1 ] || continue
@@ -359,8 +404,9 @@ collect_worker_processes() {  # <worktree>...
 # because a worker's own process tree can be several harness processes deep, and
 # the outermost one is the incarnation that has actually been up the whole time.
 worker_runtime_seconds() {  # <worktree>
-  local dir=$1 best='' pid age cwd
-  [ -n "$dir" ] || return 1
+  local dir best='' pid age cwd
+  [ -n "$1" ] || return 1
+  dir=$(physical_path "$1")
   while IFS=$'\t' read -r pid age cwd; do
     [ -n "$pid" ] || continue
     path_within "$cwd" "$dir" || continue
@@ -490,7 +536,9 @@ close_prefix() {
 }
 
 # --- 2. open Lavish review pages ---------------------------------------------
-# The bare `lavish-axi` listing is the authoritative set of OPEN review pages.
+# The bare `lavish-axi` listing is the authoritative set of OPEN review pages,
+# and it is MACHINE-WIDE: Lavish serves one list for every project on this
+# machine, so these rows are not scoped to this home and are not meant to be.
 # Age comes from the poll process actually serving that page when one is
 # running, and from the artifact's own mtime otherwise.
 collect_reviews() {
@@ -590,7 +638,7 @@ collect_services() {
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     ps_alive "$pid" || continue
     service_row "listener-$id" "waiting on $id" "$FM_HOME" "$pid" \
-      "$(close_prefix)bin/fm-procevent.sh retire $id" safe \
+      "$(close_prefix)bin/fm-procevent.sh retire $(shell_quote "$id")" safe \
       'retiring it stops the wait; it never touches worker code'
   done
 
@@ -668,8 +716,36 @@ HARNESS_LOCK_PID=
 HARNESS_LOCK_OWNER=not_checked
 HARNESS_OTHER=0
 
+# The session asking the question is one of the sessions in this home, and
+# handing the captain a `kill` for the conversation he is having is worse than
+# telling him nothing. bin/fm-session-lock-lib.sh already owns "which harness
+# pids am I running inside", so that answer is reused rather than re-derived:
+# every pid in this process's own contiguous harness ancestry is self. The row
+# still appears - a session working here is a fact of the overview - but it is
+# marked as the captain's own and carries no close command, which is what keeps
+# it out of both the "To close" block and the unasked session-start line.
+SELF_HARNESS_PIDS=
+resolve_self_harness_pids() {
+  local pid pids
+  [ -z "$SELF_HARNESS_PIDS" ] || return 0
+  SELF_HARNESS_PIDS=' '
+  pids=$(fm_harness_ancestry_pids 2>/dev/null) || return 0
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    SELF_HARNESS_PIDS="$SELF_HARNESS_PIDS$pid "
+  done <<EOF
+$pids
+EOF
+}
+is_self_harness_pid() {  # <pid>
+  case "$SELF_HARNESS_PIDS" in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
 collect_harness_sessions() {
-  local lock_pid root pid cwd age close safety cnote
+  local lock_pid root pid cwd age close safety cnote self
   local -a candidates=() mine=()
   lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$lock_pid" in ''|*[!0-9]*) lock_pid='' ;; esac
@@ -722,14 +798,24 @@ collect_harness_sessions() {
     *) HARNESS_LOCK_OWNER=ambiguous ;;
   esac
 
+  [ "${#mine[@]}" -eq 0 ] || resolve_self_harness_pids
+
   for pid in ${mine[@]+"${mine[@]}"}; do
     age=$(ps_field "$pid" 2)
-    close="kill $pid"
-    safety=confirm
-    cnote='a live session: closing it can lose an unfinished turn'
+    if is_self_harness_pid "$pid"; then
+      self=1
+      close=''
+      safety=manual
+      cnote='this is the session you are talking to right now; end it yourself when you are done with it'
+    else
+      self=0
+      close="kill $pid"
+      safety=confirm
+      cnote='a live session: closing it can lose an unfinished turn'
+    fi
     emit_row harness-session "$pid" session "harness $root" \
-      "drives this home: $(if [ "$HARNESS_LOCK_OWNER" = ambiguous ]; then printf ambiguous; else printf yes; fi)" \
-      "$pid" "$age" process "$close" "$safety" "$cnote"
+      "drives this home: $(if [ "$HARNESS_LOCK_OWNER" = ambiguous ]; then printf ambiguous; else printf yes; fi)$(if [ "$self" = 1 ]; then printf '; this is your own session'; fi)" \
+      "$pid" "$age" process "$close" "$safety" "$cnote" 0 '' "$self"
   done
 }
 
@@ -767,7 +853,8 @@ JSON=$(
          close_safety: (.[9] // "manual"),
          close_note: (.[10] | blank_null),
          held: (.[11] == "1"),
-         task_age_seconds: (.[12] | as_num)}
+         task_age_seconds: (.[12] | as_num),
+         self: (.[13] == "1")}
         | .task_age_days = (if .task_age_seconds == null then null
                             else (.task_age_seconds / 86400 | floor) end)
         | .age_days = (if .age_seconds == null then null else (.age_seconds / 86400 | floor) end)
@@ -817,7 +904,17 @@ fi
 
 # --stale-lines: nothing at all when nothing is old. One short line each,
 # bounded, because a session start pays for every line it prints.
-printf '%s\n' "$JSON" | jq -r --argjson cap 8 '
+#
+# REVIEW PAGES ARE SAID ONCE PER MACHINE, NOT ONCE PER HOME. The Lavish listing
+# is machine-wide by intent - the captain works across more than twenty projects
+# and asked to see all of those pages - but an unasked line is a different
+# budget: every firstmate home on the machine would otherwise print the same
+# review lines at every session start. The main home says them; a secondmate
+# home leaves them to it. The pages themselves stay in --json for every home,
+# and in the view, unchanged.
+REVIEW_LINES=1
+[ ! -e "$FM_HOME/.fm-secondmate-home" ] || REVIEW_LINES=0
+printf '%s\n' "$JSON" | jq -r --argjson cap 8 --argjson reviews "$REVIEW_LINES" '
   def row_label($r):
     if $r.kind == "harness-session" then "background session \($r.id)"
     elif $r.kind == "worker" then "worker \($r.id)"
@@ -825,7 +922,8 @@ printf '%s\n' "$JSON" | jq -r --argjson cap 8 '
     else "service \($r.label // $r.id)" end;
   # Oldest first across every kind, so the cap below can only ever drop the
   # least overdue lines.
-  [.rows[] | select(.notify)] | sort_by(-(.age_seconds // 0)) as $stale
+  [.rows[] | select(.notify) | select($reviews == 1 or .kind != "review")]
+  | sort_by(-(.age_seconds // 0)) as $stale
   | if ($stale | length) == 0 then empty
     else
       ($stale[:$cap][] |

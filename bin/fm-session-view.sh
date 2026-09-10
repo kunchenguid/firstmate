@@ -40,10 +40,12 @@ usage() {
 usage: fm-session-view.sh [--watch] [--interval <seconds>] [--stale-only]
        fm-session-view.sh --json
 
-Show everything running for this firstmate home in one overview: workers, open
-Lavish review pages, background services, and concurrent harness background
-sessions. Anything at or over the stale threshold (3 days, see
-FM_SESSION_STALE_DAYS) is marked with a leading "!".
+Show everything running in one overview: this home's workers, its background
+services, and the concurrent harness background sessions working in it, plus
+every open Lavish review page on this machine (that listing is machine-wide, not
+scoped to one home). Anything at or over the stale threshold (3 days, see
+FM_SESSION_STALE_DAYS) is marked with a leading "!". The background session you
+are reading this from is marked "(yours)" and is never offered as one to close.
 
 --watch          redraw in place forever; for a pane you leave open.
 --interval N     seconds between redraws with --watch (default 60, minimum 15).
@@ -143,7 +145,8 @@ render_once() {
       else "\((($secs // 0) / 60) | floor)m" end;
     def age_text: age_of(.age_seconds; .age_days);
     def what:
-      if .kind == "harness-session" then "\(.id) live session"
+      if .kind == "harness-session" then
+        "\(.id) live session" + (if .self then " (yours)" else "" end)
       elif .kind == "worker" then "\(.id) (\(.label // "task")\(if .held then ", held" else "" end))"
       else (.label // .id) end;
     def task_age_text:

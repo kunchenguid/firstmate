@@ -257,16 +257,20 @@ The skill text owns the marker spelling, the tick order, and the reinforcement r
 
 ## Running-session overview (bin/fm-session-view.sh)
 
-`bin/fm-session-view.sh` shows everything running for one home in a single list: workers, open Lavish review pages, the background services that keep the fleet moving, and the harness background sessions under a shared harness daemon.
+`bin/fm-session-view.sh` shows everything running in a single list: one home's workers, its background services, the harness background sessions under a shared harness daemon, and every open Lavish review page.
+Workers, services, and sessions are scoped to the home; the review pages are not, because Lavish keeps one machine-wide list and seeing all of it in one place is the point.
 It renders `bin/fm-session-inventory.sh --json`, which is the structured owner of that inventory; both are read-only and neither ever closes, kills, or signals anything it reports.
 Close commands are printed for you to run - one for every row that has one, whatever its age - and a row that could lose work in progress says so on the line below its command.
 The stale threshold below governs the `!` marks and the unasked session-start lines, not what you are offered a way to close.
+The one row that never carries a close command is the background session you are reading the overview from: it is marked `(yours)` and is yours to end, not something the overview offers to kill for you.
 
 Anything at or over the stale threshold is marked with a leading `!`.
 The age it is measured against is how long a worker has been RUNNING whenever a live process is working in its own local copy, and the age of the work itself when nothing is running, so abandoned work still holding a local copy is surfaced rather than hidden.
 A worker's task age is also shown in its own column when the pane is wide enough.
 `FM_SESSION_STALE_DAYS` sets that threshold and defaults to 3 days.
 The same threshold drives the unasked `SESSIONS_STALE:` lines a session start prints through [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh); set `FM_BOOTSTRAP_STALE_SESSIONS=0` to opt a home out of those lines.
+Because the review pages are machine-wide, only the main home names them on those unasked lines; a secondmate home leaves them to it rather than every home on the machine repeating the same lines at every session start.
+The pages themselves stay in the view and in `--json` for every home.
 
 For a pane you leave open, `--watch` redraws in place:
 

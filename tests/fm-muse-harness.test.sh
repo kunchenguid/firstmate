@@ -756,6 +756,51 @@ EOF
   pass "the Muse session cache avoids rescans and refreshes safely across incarnations"
 }
 
+# The muse pull source is the one classifier path that writes anything: it
+# memoises the log it resolved, and clears that memo when it no longer matches.
+# A caller that must not write state - the running-session overview, which sits
+# on the blocking session-start path and in a pane that redraws every minute -
+# reaches this through the fleet snapshot's local-only mode. It must get the
+# same verdict, leave no memo behind, and not clear the one the watcher owns.
+test_read_only_classification_writes_and_clears_nothing() {
+  local dir state id root cache verdict
+  dir="$TMP_ROOT/read-only-cache"
+  state="$dir/state"
+  root="$dir/sessions"
+  id=readonlytask
+  cache="$state/$id.muse-session-current"
+  mkdir -p "$state"
+
+  write_session_log "$root" 2026 08 05 only "$dir/ws" >/dev/null <<EOF
+$(muse_log_run_started only-run)
+EOF
+  printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=read-only-one\n' \
+    "$root" "$dir/ws" > "$state/$id.muse-session"
+
+  verdict=$(FM_BUSY_READ_ONLY=1 classify_muse "$state" "$id")
+  [ "$verdict" = "busy muse-session-log" ] \
+    || fail "a read-only classification changed the verdict: got '$verdict'"
+  assert_absent "$cache" "a read-only classification wrote the resolved-session memo"
+
+  # Same inputs with writes allowed: the memo is exactly what read-only skipped,
+  # so the case above is not passing because nothing resolved.
+  verdict=$(classify_muse "$state" "$id")
+  [ "$verdict" = "busy muse-session-log" ] \
+    || fail "an ordinary classification changed the verdict: got '$verdict'"
+  assert_present "$cache" "an ordinary classification stopped writing the resolved-session memo"
+
+  # A memo that no longer matches belongs to whoever wrote it; a read-only pass
+  # resolves around it rather than deleting it underneath that writer.
+  printf 'binding_id=retired\nsession_log=%s\n' "$dir/gone.jsonl" > "$cache"
+  verdict=$(FM_BUSY_READ_ONLY=1 classify_muse "$state" "$id")
+  [ "$verdict" = "busy muse-session-log" ] \
+    || fail "a read-only classification could not resolve past a stale memo: got '$verdict'"
+  assert_contains "$(cat "$cache")" "binding_id=retired" \
+    "a read-only classification cleared a state file it does not own"
+
+  pass "read-only classification yields the same verdict and touches no state file"
+}
+
 test_cached_session_revalidates_after_namespace_change() {
   local dir state id root second_log verdict today year month day
   dir="$TMP_ROOT/cache-ambiguity"
@@ -961,6 +1006,7 @@ test_binding_selects_the_matching_main_log
 test_workspace_binding_treats_glob_characters_literally
 test_binding_excludes_preexisting_log_when_mtimes_tie
 test_session_log_cache_reuses_and_refreshes_binding
+test_read_only_classification_writes_and_clears_nothing
 test_cached_session_revalidates_after_namespace_change
 test_subagent_logs_are_excluded
 test_missing_and_unreadable_bindings_are_unknown_never_idle

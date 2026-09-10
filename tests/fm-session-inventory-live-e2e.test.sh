@@ -20,9 +20,13 @@
 #
 # Two independent checks run here, and each fails naming the harness and its
 # version:
-#   1. Every installed harness is launched bare, as a real process, working in a
-#      scratch home. It must be reported as a live session OF THAT HOME. A real
-#      session reading as absent is the dangerous direction of the error.
+#   1. Every installed harness that bin/fm-session-lock-lib.sh recognises is
+#      launched bare, as a real process, working in a scratch home. It must be
+#      reported as a live session OF THAT HOME. A real session reading as absent
+#      is the dangerous direction of the error. A harness that owner does not
+#      recognise is noted and skipped instead: the overview cannot scope what is
+#      not a harness to it, and reporting that as drift here would blame this
+#      component for a shortfall in another one.
 #   2. If this machine has a real home whose recorded lock names a live harness,
 #      every harness process under it must be accounted for - either as a
 #      session of that home or as belonging elsewhere - with none unexplained.
@@ -134,6 +138,7 @@ harness_processes_under() {  # <root-pid>
 
 CHECKED=0
 SKIPPED=
+UNRECOGNISED=
 
 # Mirror bin/fm-spawn.sh's own resolution order so this guard covers the same
 # binary firstmate would actually launch. Kimi and cursor are routinely absent
@@ -156,10 +161,25 @@ resolve_harness_binary() {  # <harness>
   return 1
 }
 
-for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
+for harness in claude codex opencode pi pi-signed omp grok kimi cursor rovo muse; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its role is unverified here"
+    continue
+  fi
+
+  # WHAT THIS GUARD IS FOR is the working-directory rule in the overview, not
+  # the harness-identity table underneath it. Whether a process counts as a
+  # harness at all is bin/fm-session-lock-lib.sh's decision, and it does not
+  # cover every harness firstmate can spawn (muse and rovo are not in its
+  # tables today). Launching one of those here would fail as "HARNESS IDENTITY
+  # DRIFT" every run on a machine that has it installed - reporting a known,
+  # separate shortfall in another component as fresh drift in this one. So the
+  # owner is asked directly, and a harness it does not claim is noted and
+  # skipped before it costs a process.
+  if ! fm_harness_process_matches "$bin_path" "$bin_path"; then
+    UNRECOGNISED="$UNRECOGNISED $harness"
+    note "skip: $harness is installed, but bin/fm-session-lock-lib.sh does not recognise it as a harness, so the overview cannot scope it and this guard has nothing to check (a gap in that owner, not drift here)"
     continue
   fi
 
@@ -218,6 +238,9 @@ done
 
 if [ -n "$SKIPPED" ]; then
   note "unverified on this machine (not installed):$SKIPPED"
+fi
+if [ -n "$UNRECOGNISED" ]; then
+  note "unverified here (installed, but not a harness to bin/fm-session-lock-lib.sh):$UNRECOGNISED"
 fi
 
 # --- 2. every harness process under a real home's lock must be accounted for --
