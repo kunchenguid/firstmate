@@ -188,7 +188,9 @@ fm_watcher_healthy() {
 #   autoarm     Claude's Stop-hook auto-arm and Cursor's stop-hook park: the
 #               watcher is armed at each turn end and exits on its wake, so it
 #               runs only BETWEEN turns. Mid-turn a fresh beacon with no live
-#               watcher process is the healthy state.
+#               watcher process is healthy, and a stale beacon is still healthy
+#               while a Claude auto-arm generation explains the gap
+#               (fm_autoarm_midturn_healthy).
 #   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
 #               continuity. It tears the watcher down on every actionable wake and
 #               spawns the replacement itself, so a genuinely unheld singleton lock
@@ -336,7 +338,11 @@ fm_afk_daemon_owns_supervision() {
 #                              stale-beacon - the beacon is stale beyond grace or
 #                                             absent (a genuine supervision lapse)
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
-# because the watcher only runs between turns; only a stale beacon is a lapse.
+# because the watcher only runs between turns. A stale or absent beacon is still
+# healthy while fm_autoarm_midturn_healthy proves a Claude auto-arm generation
+# explains the gap (open arming claim, or a rewake handling turn with no
+# exhausted-failure marker and a live session lock), because turn-end re-arms.
+# Without that proof a stale or absent beacon is a genuine lapse.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
 # genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
 # session provably owns continuity (fm_extension_owns_supervision: the Pi or the
@@ -366,7 +372,9 @@ fm_watcher_supervision_verdict() {
   esac
   model=$(fm_supervision_model)
   if [ "$model" = autoarm ]; then
-    [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true
+    if [ "$fresh" = true ] || fm_autoarm_midturn_healthy "$state" "$grace"; then
+      FM_WATCHER_VERDICT_OK=true
+    fi
     return 0
   fi
   if fm_watcher_healthy "$state" "$watch" "$grace" "$home"; then
@@ -1375,6 +1383,36 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
     return 1
   fi
   return 0
+}
+
+# True when a stale mid-turn beacon is explained by a healthy Claude Stop
+# auto-arm generation, so the pull guard must not cry supervision-off.
+# The watcher runs only between turns; turn-end re-arms.
+#
+# Healthy means any of:
+#   - an OPEN generation claim (fm_autoarm_claim_open): arming is in progress
+#     and not stuck
+#   - outcome=rewake, no exhausted-failure marker
+#     (state/.claude-autoarm-failure-notified or
+#     state/.claude-autoarm-failure-alarmed), and a live pid in state/.lock,
+#     proving a session is still in the handling turn that rewake started
+#
+# A missing generation, a failed or exhausted episode, a stuck arming claim,
+# or a dead session lock all fail it, so a genuine lapse stays loud.
+# Cursor autoarm homes have no Claude epoch ledger and fail this, keeping
+# their existing fresh-beacon-only pull-guard contract.
+# This predicate is deliberately not a freshness check on the rewake epoch:
+# a legitimate handling turn can outrun grace, which is the false alarm this
+# exists to stop.
+fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock_pid
+  [ -e "$state/.claude-autoarm-failure-notified" ] && return 1
+  [ -e "$state/.claude-autoarm-failure-alarmed" ] && return 1
+  fm_autoarm_claim_open "$state" "$grace" && return 0
+  fm_autoarm_ledger_read "$state" || return 1
+  [ "$FM_AUTOARM_OUTCOME" = rewake ] || return 1
+  lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  fm_pid_alive "$lock_pid"
 }
 
 # Atomically publish this process as the owner of generation N+1, under one
