@@ -621,7 +621,7 @@ test_resolved_dirty_absent_worker_is_hold_for_captain() {
   before_dirty=$(git -C "$MAIN/projects/$id" status --porcelain)
   : > "$WORLD/crew-state.log"
   for i in 1 2 3; do
-    FM_FAKE_CAPTAIN_HELD_TASKS="$id" FM_FAKE_CREW_STATE=done \
+    FM_FAKE_CAPTAIN_HELD_TASKS="$id" FM_FAKE_CREW_STATE='done' \
       FM_FAKE_CREW_STATE_LOG="$WORLD/crew-state.log" run_reconcile "$MAIN" --startup
   done
   [ ! -s "$WORLD/crew-state.log" ] || fail "HOLD_FOR_CAPTAIN dirty task reached endpoint/current-state classification"
@@ -649,7 +649,7 @@ test_clean_local_only_absent_worker_is_hold_for_captain() {
   before_head=$(git -C "$MAIN/projects/$id" rev-parse HEAD)
   : > "$WORLD/crew-state.log"
   for i in 1 2 3; do
-    FM_FAKE_CAPTAIN_HELD_TASKS="$id" FM_FAKE_CREW_STATE=done \
+    FM_FAKE_CAPTAIN_HELD_TASKS="$id" FM_FAKE_CREW_STATE='done' \
       FM_FAKE_CREW_STATE_LOG="$WORLD/crew-state.log" run_reconcile "$MAIN" --startup
   done
   [ ! -s "$WORLD/crew-state.log" ] || fail "clean HOLD_FOR_CAPTAIN task reached endpoint/current-state classification"
