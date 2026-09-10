@@ -156,19 +156,19 @@ test_tmux_classifies_cursor_pane_without_inferring_dead() {
   tree="$TMP_ROOT/tree5"; bin=$(make_cursor_tree "$tree")
   # shellcheck source=bin/backends/tmux.sh
   ( FM_BACKEND_LIB_DIR="$ROOT/bin"; . "$ROOT/bin/backends/tmux.sh"
-    [ "$(fm_backend_tmux_classify_process_name node "$bin/cursor-agent")" = agent ] \
+    [ "$(fm_agent_process_classify_name node "$bin/cursor-agent")" = agent ] \
       || fail "a cursor pane reported as node must classify agent"
-    [ "$(fm_backend_tmux_classify_process_name '' "$bin/cursor-agent")" = agent ] \
+    [ "$(fm_agent_process_classify_name '' "$bin/cursor-agent")" = agent ] \
       || fail "the argv[0]-only call must classify a cursor pane agent"
     # The safety half: an unrelated node is `other`, and the callers turn
     # `other` into `ambiguous`, never `dead`.
-    [ "$(fm_backend_tmux_classify_process_name node /usr/bin/node)" = other ] \
+    [ "$(fm_agent_process_classify_name node /usr/bin/node)" = other ] \
       || fail "an unrelated node must stay 'other', never agent"
-    [ "$(fm_backend_tmux_classify_process_name agent /usr/local/bin/agent)" = other ] \
+    [ "$(fm_agent_process_classify_name agent /usr/local/bin/agent)" = other ] \
       || fail "an unrelated agent must stay 'other', never agent"
     # Neighbours must not regress.
-    [ "$(fm_backend_tmux_classify_process_name claude '')" = agent ] || fail "claude regressed"
-    [ "$(fm_backend_tmux_classify_process_name zsh '')" = shell ] || fail "zsh regressed"
+    [ "$(fm_agent_process_classify_name claude '')" = agent ] || fail "claude regressed"
+    [ "$(fm_agent_process_classify_name zsh '')" = shell ] || fail "zsh regressed"
   ) || exit 1
   pass "tmux liveness: a cursor pane is agent; an unrelated node/agent is other, never dead"
 }

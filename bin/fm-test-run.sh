@@ -339,6 +339,7 @@ family_for_basename() {
     fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
+    fm-herdr-pi-stale-registration-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|fm-omp-primary-live-e2e.test.sh|\
@@ -1309,7 +1310,7 @@ families_for_changed_path() {
       # runner's logic is right, not that the suite it drives still runs.
       printf '%s\n' pure-contract-unit
       ;;
-    bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
+    bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh|tests/herdr-client-pair-fixture.sh)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
@@ -1334,6 +1335,13 @@ families_for_changed_path() {
     bin/fm-backend.sh|bin/fm-backend-hometag-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-agent-process-lib.sh)
+      # The shared harness-process classifier feeds both the tmux and Herdr
+      # liveness verdicts, so a change to it is proven by both backends' suites.
+      printf '%s\n' backend-dispatch
+      printf '%s\n' real-herdr-gated
+      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
