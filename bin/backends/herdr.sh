@@ -2085,7 +2085,12 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #                shell sits under the pane's top shell.
 #   other      - the foreground group holds something that is neither: a tool
 #                the agent is running in its own process group, a pager, a
-#                stranger's process. Not a shell-only pane.
+#                stranger's process. Not a shell-only pane. An idle shell
+#                transiently hosts prompt helpers such as starship in its
+#                foreground group (the same shape the idle-shell proof settles
+#                on), so this verdict alone is resampled for the same bounded
+#                settle window and the first agent or shell reading wins; only
+#                an exhausted window keeps `other`.
 #   unreadable - process-info failed, described a different pane, named no
 #                shell pid, listed no foreground process, or the process table
 #                could not be read or does not contain the shell pid.
@@ -2096,6 +2101,21 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 # `.cmdline` the full command line, so Pi is identified by argv[0] exactly as
 # the tmux probe identifies it from `ps`.
 fm_backend_herdr_pane_process_state() {  # <session> <pane_id>
+  local attempt=0 max_attempts=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-10} verdict
+  while :; do
+    verdict=$(fm_backend_herdr_pane_process_state_sample "$1" "$2")
+    [ "$verdict" = other ] || break
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || break
+    sleep 0.1
+  done
+  printf '%s' "$verdict"
+}
+
+# fm_backend_herdr_pane_process_state_sample: one instantaneous observation
+# for fm_backend_herdr_pane_process_state, which owns the verdict contract and
+# the settle retry.
+fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
   local session=$1 pane_id=$2 info shell_pid count i pid name argv0 args verdict
   local others=0 ps_bin rows
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) \

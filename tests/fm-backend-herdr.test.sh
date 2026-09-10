@@ -504,11 +504,65 @@ test_registered_agent_with_a_non_shell_foreground_process_stays_alive() {
   local out
   # A registered agent running a foreground tool in its own process group is
   # not a shell-only pane, so the registration keeps its authority.
-  out=$(stale_registration_case live-tool working \
+  out=$(FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 stale_registration_case live-tool working \
     '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4250,"foreground_processes":[{"pid":4250,"name":"git","argv0":"git","argv":["git","status"],"cmdline":"git status"}]}}}')
   [ "$out" = "live alive refused" ] \
     || fail "a registered agent with a non-shell foreground process must stay live/alive, got '$out'"
   pass "herdr stale registration: only a shell-only pane demotes a registration"
+}
+
+# settle_registration_case: one pane classification over a scripted sequence
+# of `pane process-info` samples, so the settle window's resampling is
+# observable in the fake CLI's call log.
+settle_registration_case() {  # <dir-suffix> <polls> <process-info-body>...
+  local dir="$TMP_ROOT/settle-reg-$1" polls=$2 resp log fb n
+  shift 2
+  mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  n=3
+  for body in "$@"; do
+    printf '%s\n' "$body" > "$resp/$n.out"
+    n=$((n + 1))
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="$polls" \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      printf "%s %s" "$(fm_backend_herdr_pane_agent_state fmtest w1:p2)" "$(grep -c "process-info" "$1")"' "$ROOT" "$log"
+}
+
+prompt_helper_process_info() {  # <shell-pid>
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":99998,"name":"starship","argv":["/usr/local/bin/starship","prompt","--continuation"]},{"pid":%s,"name":"zsh","argv0":"zsh","argv":["-zsh"],"cmdline":"-zsh"}]}}}' "$1" "$1" "$1"
+}
+
+test_transient_prompt_helper_settles_into_stale_agent() {
+  local sleep_bin shell_pid out
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  "$sleep_bin" 300 &
+  shell_pid=$!
+  # Sample 1: the shell is redrawing its prompt with starship beside it (the
+  # real 0.7.5 shape); sample 2: the helper is gone and the shell is alone.
+  out=$(settle_registration_case helper-settles 3 \
+    "$(prompt_helper_process_info "$shell_pid")" "$(shell_only_process_info "$shell_pid")")
+  kill "$shell_pid" 2>/dev/null || true
+  [ "$out" = "stale-agent 2" ] \
+    || fail "a transient prompt helper followed by a shell-only sample must settle into stale-agent after exactly two samples, got '$out'"
+  pass "herdr stale registration: a transient prompt helper settles into stale-agent instead of reading live"
+}
+
+test_exhausted_settle_window_keeps_a_non_shell_foreground_live() {
+  local sleep_bin shell_pid out
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  "$sleep_bin" 300 &
+  shell_pid=$!
+  out=$(settle_registration_case helper-persists 2 \
+    "$(prompt_helper_process_info "$shell_pid")" "$(prompt_helper_process_info "$shell_pid")" \
+    "$(shell_only_process_info "$shell_pid")")
+  kill "$shell_pid" 2>/dev/null || true
+  [ "$out" = "live 2" ] \
+    || fail "a foreground that never settles within the bound must stay live after exactly the bounded sample count, got '$out'"
+  pass "herdr stale registration: an exhausted settle window still reads a non-shell foreground as live"
 }
 
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive() {
@@ -5094,6 +5148,8 @@ test_stale_registration_over_a_shell_only_pane_is_agent_free
 test_stale_registration_ignores_status_and_reads_the_process
 test_registered_agent_with_a_live_foreground_process_stays_alive
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive
+test_transient_prompt_helper_settles_into_stale_agent
+test_exhausted_settle_window_keeps_a_non_shell_foreground_live
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive
 test_registered_agent_with_an_unreadable_process_view_is_unknown
 test_projection_reclaim_rollback_refuses_a_stale_registration
