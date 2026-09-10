@@ -957,7 +957,7 @@ fm_backend_herdr_foreground_client_present() {  # <session>
   reason=$(printf '%s' "$out" | jq -r '.result.reason // empty' 2>/dev/null) || return 2
   case "$reason" in
     no_foreground_client) return 1 ;;
-    cleared|set) return 0 ;;
+    cleared) return 0 ;;
     *) return 2 ;;
   esac
 }
@@ -1000,15 +1000,6 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     echo "warning: herdr presentation cleanup received an ambiguous exact-pane response; refusing focus-unsafe pane close" >&2
     return 1
   fi
-  if [ "$target_tab" = "$active_tab" ]; then
-    fm_backend_herdr_foreground_client_present "$session" || foreground_rc=$?
-    if [ "$foreground_rc" -eq 1 ]; then
-      skip_restore=1
-    else
-      echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
-      return 1
-    fi
-  fi
   if [ -n "$required_agent_state" ]; then
     state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
     FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
@@ -1017,7 +1008,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   plan=plain
   plan_shell_pid=
   plan_move_record=
-  if [ -n "$target_ws" ]; then
+  if [ -n "$target_ws" ] && [ "$target_tab" != "$active_tab" ]; then
     plan=$(fm_backend_herdr_emptying_close_plan "$session" "$pane_id" "$target_ws" "$target_tab" "${before%%$'\t'*}")
     case "$plan" in
       moved$'\t'*)
@@ -1035,6 +1026,14 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
         ;;
     esac
   fi
+  if [ "$target_tab" = "$active_tab" ]; then
+    fm_backend_herdr_foreground_client_present "$session" || foreground_rc=$?
+    if [ "$foreground_rc" -ne 1 ]; then
+      echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
+      return 1
+    fi
+    skip_restore=1
+  fi
   if [ "$plan" = death ]; then
     if fm_backend_herdr_death_close_pane "$session" "$pane_id" "$plan_shell_pid"; then
       close_status=0
@@ -1043,10 +1042,15 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     else
       close_status=1
     fi
-  elif fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
-    close_status=0
   else
-    close_status=1
+    # For an active-tab target Herdr has no atomic client-aware close, so the
+    # immediately preceding checkpoint only bounds the probe-to-close attach
+    # race; a durable atomic close remains deferred until Herdr exposes one.
+    if fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
+      close_status=0
+    else
+      close_status=1
+    fi
   fi
   if [ "$close_status" -eq 0 ] && [ -n "$plan_move_record" ]; then
     workspace_presence=$(fm_backend_herdr_workspace_presence_state "$session" "$target_ws")
@@ -2263,7 +2267,7 @@ EOF
 # A missing, failed, or malformed create response stays ambiguous and grants no
 # cleanup authority.
 fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-label>
-  local cwd=$1 workspace_label=$2 task_label=$3 session out tabs panes tab_count pane_count focus_before foreground_rc active_tab
+  local cwd=$1 workspace_label=$2 task_label=$3 session out tabs panes tab_count pane_count focus_before active_tab
   FM_BACKEND_HERDR_PROJECTION_SESSION=""
   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=""
   FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=""
@@ -2340,16 +2344,7 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     return 1
   fi
   active_tab=${focus_before#*$'\t'}
-  if [ "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" = "$active_tab" ]; then
-    foreground_rc=0
-    fm_backend_herdr_foreground_client_present "$session" || foreground_rc=$?
-    if [ "$foreground_rc" -ne 1 ]; then
-      fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "seeded-tab prune" || {
-        echo "error: herdr presentation seeded-tab prune did not preserve exact active focus; leaving its journal quarantined" >&2
-        return 1
-      }
-    fi
-  else
+  if [ "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" != "$active_tab" ]; then
     fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "seeded-tab prune" || {
       echo "error: herdr presentation seeded-tab prune did not preserve exact active focus; leaving its journal quarantined" >&2
       return 1

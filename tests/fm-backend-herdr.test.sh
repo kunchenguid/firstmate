@@ -1684,8 +1684,8 @@ test_projection_close_allows_stale_active_tab_without_foreground_client() {
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t2","focused":true}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
   printf '%s\n' '{"result":{"changed":false,"reason":"no_foreground_client","type":"client_window_title"}}' > "$resp/4.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","workspace_id":"w9"},{"tab_id":"w9:t2","workspace_id":"w9"}]}}' > "$resp/5.out"
-  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/7.out"
+  : > "$resp/5.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
@@ -1756,6 +1756,43 @@ test_projection_close_rechecks_required_agent_state_at_boundary() {
   assert_not_contains "$(cat "$log")" "pane close" \
     "required close-boundary agent state still closed a live pane"
   pass "herdr presentation reclaim: live agent state at the close boundary refuses mutation"
+}
+
+test_projection_close_rechecks_foreground_client_after_agent_validation() {
+  local dir events attached out status
+  dir="$TMP_ROOT/projection-close-foreground-boundary"; mkdir -p "$dir"
+  events="$dir/events"; attached="$dir/attached"; : > "$events"
+  out=$(ROOT="$ROOT" EVENTS="$events" ATTACHED="$attached" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() { printf "w9\tw9:t2"; }
+    fm_backend_herdr_pane_agent_state() {
+      printf "agent\n" >> "$EVENTS"
+      : > "$ATTACHED"
+      printf no-agent
+    }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\",\"workspace_id\":\"w9\"}}}\n" ;;
+        "terminal title")
+          printf "foreground\n" >> "$EVENTS"
+          if [ -e "$ATTACHED" ]; then
+            printf "{\"result\":{\"reason\":\"cleared\"}}\n"
+          else
+            printf "{\"result\":{\"reason\":\"no_foreground_client\"}}\n"
+          fi
+          ;;
+        "pane close") printf "close\n" >> "$EVENTS" ;;
+      esac
+    }
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 no-agent
+  ' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a client attaching during agent validation must defer the active-tab close"
+  [ "$(cat "$events")" = $'agent\nforeground' ] \
+    || fail "foreground attachment was not checked immediately after agent validation: $(cat "$events")"
+  assert_contains "$out" "target is the captain's active tab" \
+    "fresh foreground-client refusal did not explain the active-tab boundary"
+  pass "herdr presentation focus: active-tab attachment is rechecked after agent validation"
 }
 
 # --- emptying-close focus-safe removal (Herdr 0.7.5 #1621 mitigation) ------
@@ -4817,6 +4854,7 @@ test_projection_close_refuses_active_tab
 test_projection_close_allows_stale_active_tab_without_foreground_client
 test_projection_close_reports_focus_restore_failure
 test_projection_close_rechecks_required_agent_state_at_boundary
+test_projection_close_rechecks_foreground_client_after_agent_validation
 test_projection_close_emptying_after_focus_uses_pane_death_without_move
 test_projection_close_emptying_before_focus_repositions_then_uses_pane_death
 test_projection_close_emptying_before_last_focus_needs_no_move
