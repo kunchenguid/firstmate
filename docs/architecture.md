@@ -96,7 +96,7 @@ The snapshot's explicit `--read-only` mode keeps live reads and valid existing-c
 The script header owns the exact JSON schema.
 
 `bin/fm-project-status.sh --json <project>` projects `fm-project-status.v1` from one no-write, conversation-free fleet snapshot and never collects fleet state independently.
-It resolves an exact ASCII case-insensitive project name across the snapshot's main registry names, structured backlog repo fields, and secondmate project declarations, and it refuses unknown, fuzzy, or multiply owned matches.
+It resolves an exact ASCII case-insensitive project name across the snapshot's main registry names and secondmate project declarations, and it refuses unknown, fuzzy, or multiply owned matches; backlog repo identity only filters records after ownership is established.
 The projection caps active work, captain calls, queued work, recent deliveries, warnings and omissions, source bytes, final JSON bytes, and subprocess duration; its header owns the exact bounds and output contract.
 For a secondmate-owned project, the selected `secondmate_current` structured-home record is the only current-state authority.
 The backward-compatible home-summary schema carries a nullable project identity on active, decision, hold, queued, and landed rows, plus project-scoped `invalidities[]` alongside the legacy aggregate invalidity; project status filters collections and current-state invalidities to the exact matched project and discloses rather than attributes data from older producers whose identity is unavailable.

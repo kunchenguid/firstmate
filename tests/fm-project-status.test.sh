@@ -41,7 +41,8 @@ write_projection_fixture() {  # <file>
        {structured:true,id:"alpha-call",title:"Choose alpha route",repo:"AlphaProject",kind:"captain",state:"queued",captain_actionable:true,hold_reason:"choose route",hold_bucket:"live"},
        {structured:true,id:"alpha-next",title:"Queue alpha",repo:"AlphaProject",kind:"ship",state:"queued",captain_actionable:false,unresolved_blocker_ids:["alpha-active"]},
        {structured:true,id:"alpha-done",title:"Alpha delivered",repo:"AlphaProject",kind:"ship",state:"done",captain_actionable:false,completion:{verb:"merged",date:"2026-09-09"},pr_url:"https://example.test/pull/1"},
-       {structured:true,id:"beta-orphan",title:"Beta orphan",repo:"BetaProject",kind:"ship",state:"in_flight",requires_child_metadata:true,captain_actionable:false}
+       {structured:true,id:"beta-orphan",title:"Beta orphan",repo:"BetaProject",kind:"ship",state:"in_flight",requires_child_metadata:true,captain_actionable:false},
+       {structured:true,id:"stale-row",title:"Stale deregistered project",repo:"StaleProject",kind:"ship",state:"queued",captain_actionable:false}
      ]},
      main_inventory:{valid:true,reason:null,orphan_in_flight:[],unstructured_current_count:0},
      tasks:[
@@ -159,6 +160,11 @@ test_projection_resolution_and_authority() {
   out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" "$runner" --json Missing)
   printf '%s' "$out" | jq -e '.match.status == "unknown"' >/dev/null \
     || fail "unknown project result was not explicit: $out"
+  out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" "$runner" --json StaleProject)
+  printf '%s' "$out" | jq -e '
+    .match.status == "unknown" and .current.reason_code == "project_not_found"
+      and .queued == []
+  ' >/dev/null || fail "deregistered backlog repo became project authority: $out"
   pass "project status resolves exact local and secondmate owners without trusting parent history"
 }
 

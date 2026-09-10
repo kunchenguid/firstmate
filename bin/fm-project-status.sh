@@ -7,7 +7,7 @@
 # fm-project-status.v1 object no larger than 64 KiB. It never collects fleet
 # state independently.
 # Project lookup is exact, ASCII case-insensitive, and unique across the main
-# project registry, structured backlog repo fields, and secondmate_projects.
+# project registry and secondmate_projects.
 # Parent status events and terminal or conversation text are never current-state
 # authority. A secondmate-owned project uses only its secondmate_current record
 # and filters every collection by project identity. Unidentifiable rows are
@@ -136,9 +136,6 @@ jq -n --arg query "$QUERY" --slurpfile snapshot "$SOURCE_JSON" '
       | .omitted = $omitted[:(10 - ($kept_warnings | length))];
   ([ $s.project_registry.records[]? | select((.name | type) == "string" and .name != "")
        | {name:.name,source:"main-registry",owner:{kind:"main",id:null}}
-     ]
-   + [ $s.backlog.records[]? | select(.structured == true and (.repo | type) == "string" and .repo != "")
-       | {name:.repo,source:"backlog",owner:{kind:"main",id:null}}
      ]
    + [ $s.tasks[]? | select(.kind == "secondmate") as $mate
        | $mate.secondmate_projects[]?
