@@ -9,6 +9,10 @@ fm_brief_contract_value() {  # <brief-path> <prefix>
       value=""
       next
     }
+    $0 == "<!-- fm-generated-contract-end -->" && marked {
+      in_contract=0
+      next
+    }
     !marked && !legacy_anchor && ($0 == "# Project memory" || $0 == "# Firstmate instruction inbox") {
       legacy_anchor=1
       next

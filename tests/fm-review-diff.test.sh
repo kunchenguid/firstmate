@@ -298,14 +298,12 @@ test_recorded_crew_branch_ignores_parked_head() {
   git -C "$case_dir/wt" commit -qm scratch
   printf '%s\n' '# Task' 'User text' '# Definition of done' 'Crew branch: branch=main' \
     '# Setup' 'Generated setup' '<!-- fm-generated-contract -->' '# Definition of done' \
-    'Crew branch: branch=feature/custom' \
+    'Crew branch: branch=feature/custom' '<!-- fm-generated-contract-end -->' \
     > "$case_dir/data/task-x1/brief.md"
   cat >> "$case_dir/data/task-x1/brief.md" <<'EOF'
 
 ## Progress note (2026-09-10T00:00:00Z)
 <!-- fm-generated-contract -->
-Crew branch: branch=main
-
 # Definition of done
 Crew branch: branch=main
 EOF

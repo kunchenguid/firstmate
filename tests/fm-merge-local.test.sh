@@ -46,7 +46,7 @@ test_recorded_custom_branch_merges() {
   git -C "$project" checkout -q main
   printf '%s\n' '# Task' 'User text' '# Definition of done' 'Crew branch: branch=main' \
     '# Setup' 'Generated setup' '<!-- fm-generated-contract -->' '# Definition of done' \
-    'Crew branch: branch=feature/custom' \
+    'Crew branch: branch=feature/custom' '<!-- fm-generated-contract-end -->' \
     > "$case_dir/home/data/$id/brief.md"
   run_merge "$case_dir" "$id" >/dev/null \
     || fail "merge-local refused the recorded custom crew branch"
