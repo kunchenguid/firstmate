@@ -195,7 +195,7 @@ EOF
 # one of these DOD blocks, since a broken heredoc corrupts or empties the
 # generated brief content, not just the script's own syntax.
 test_ship_modes_generate_clean_briefs() {
-  local home id mode brief status
+  local home id mode brief status headings
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
@@ -207,6 +207,25 @@ test_ship_modes_generate_clean_briefs() {
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
+    if [ "$mode" = local-only ]; then
+      assert_no_grep '# PR body' "$brief" "$mode received a PR body contract"
+    else
+      assert_grep '# PR body' "$brief" "$mode omitted the PR body contract"
+      # shellcheck disable=SC2016  # Match literal Markdown backticks in the generated contract.
+      headings=$(sed -n 's/^- `\(## [^`]*\)` -.*/\1/p' "$brief")
+      [ "$headings" = '## Intent
+## What Changed
+## Choices made where the spec was silent
+## Risk Assessment
+## Testing' ] || fail "$mode PR headings are missing, duplicated, or out of order"
+      assert_grep 'never hand-write or edit them' "$brief" "$mode lost the tool-owned metadata boundary"
+      if [ "$mode" = no-mistakes ]; then
+        assert_grep 'gh-axi pr edit <number> --body-file <path>' "$brief" "no-mistakes omitted the post-open body edit"
+        assert_grep 'attestation comment byte-identically' "$brief" "no-mistakes lost byte-preservation"
+      else
+        assert_no_grep 'After the pipeline opens the PR' "$brief" "direct-PR received pipeline-only instructions"
+      fi
+    fi
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
@@ -258,6 +277,7 @@ test_ship_mode_is_explicit_not_registry() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "explicit no-mistakes brief on a direct-PR project should scaffold"
   brief="$home/data/brief-explicit-a5/brief.md"
+  assert_grep "# PR body" "$brief" "no-mistakes ship omitted the PR body contract"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
   assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
@@ -501,6 +521,11 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
+    if [ "$kind" = scout ]; then
+      assert_no_grep '# PR body' "$brief" "scout received a PR body contract"
+    else
+      assert_grep '# PR body' "$brief" "ship omitted the PR body contract"
+    fi
     assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
       "$kind brief silently omitted the Herdr declaration"
     assert_grep "regenerate the brief with \`--herdr-lab\` before dispatch" "$brief" \
@@ -530,6 +555,11 @@ test_documented_global_replace_leaves_the_herdr_gate_intact() {
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
+    if [ "$kind" = scout ]; then
+      assert_no_grep '# PR body' "$brief" "scout received a PR body contract"
+    else
+      assert_grep '# PR body' "$brief" "ship omitted the PR body contract"
+    fi
     assert_present "$brief" "$kind brief was not scaffolded"
     count=$(grep -c -F '{TASK}' "$brief")
     [ "$count" = 1 ] \
@@ -564,6 +594,7 @@ test_secondmate_no_projects_charter() {
     "$ROOT/bin/fm-brief.sh" fdev --secondmate --no-projects >/dev/null 2>&1; status=$?
   expect_code 0 "$status" "--no-projects secondmate brief should exit 0"
   brief="$home/data/fdev/brief.md"
+  assert_no_grep '# PR body' "$brief" "secondmate received a PR body contract"
   assert_present "$brief" "project-less charter was not scaffolded"
   assert_grep "# Project clones" "$brief" "project-less charter dropped the Project clones heading"
   assert_grep "None. This is a project-less domain" "$brief" \
@@ -836,6 +867,7 @@ test_scout_and_secondmate_scaffold() {
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
     || fail "fm-brief.sh secondmate scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-sm-q6/brief.md"
+  assert_no_grep '# PR body' "$brief" "project-bearing secondmate received a PR body contract"
   assert_present "$brief" "secondmate charter was not scaffolded"
   assert_grep "persistent second mate" "$brief" \
     "secondmate charter must declare its role"
