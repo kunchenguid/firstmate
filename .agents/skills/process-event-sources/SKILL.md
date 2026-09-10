@@ -34,7 +34,9 @@ bin/fm-procevent-lavish.sh arm <artifact.html>
 Registering a source is not the same fact as listening to it: arming records the source, and a separate runner still has to pick it up.
 After arming by hand, confirm `bin/fm-procevent.sh list` reports that source as `live`, and run `bin/fm-procevent.sh reconcile` when it does not.
 Reconcile reports every source it could not start as `failed=` and exits non-zero, so a source that cannot be started says so instead of looking armed.
-A source `list` reports as `orphaned` is one reconcile will not relaunch, because something may still be polling it; reconcile wakes you once about it, and `bin/fm-procevent.sh start <source-id>` is what takes it back once you have checked nothing is.
+A source `list` reports as `orphaned` is one reconcile will not relaunch, because something may still be polling it; reconcile wakes you once about it, and that wake's payload says which of two recoveries applies.
+If the claim's recorded pid is alive under a different identity, `bin/fm-procevent.sh start <source-id>` takes the source back once you have checked nothing is still polling it.
+If the runner itself died and its process group survives, `start` reports `already owned` and takes nothing back: verify whether the dead runner's polling child is still attached to the source, and once that group is empty the next reconcile reclaims the source on its own. Nothing signals that group automatically.
 
 When a source carries captain answers to captain-held tasks, bind it BEFORE arming it, so it can never produce an answer that has nowhere to go:
 

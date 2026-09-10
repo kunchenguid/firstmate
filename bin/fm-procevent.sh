@@ -58,9 +58,13 @@
 #            (FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS; docs/configuration.md).
 #            A source whose claim nothing may automatically displace is not
 #            relaunched at all; it is counted `uncertain` and announced once per
-#            stranded claim generation as a durable `check` wake naming the
-#            `start` command that clears it, because the supervision cycle
-#            discards this command's own output and exit status.
+#            stranded claim generation as a durable `check` wake, because the
+#            supervision cycle discards this command's own output and exit
+#            status. The wake names what clears that strand: the `start`
+#            command for a reused pid whose group survives, or the check a
+#            human makes for a group that lost its leader, which `start`
+#            reports as owned and which the next cycle reclaims on its own
+#            once that group is empty.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -1216,27 +1220,45 @@ detach_runner() {  # <source-id>
 # The supervision cycle runs this command with its output and its exit status
 # both discarded, so a strand that only shows up in `list` as `orphaned` and in
 # this command's `uncertain=` count reaches nobody. A durable `check` wake does
-# reach firstmate through the ordinary queue, and it carries the one command
-# that clears the strand so acting on it needs no hunt.
+# reach firstmate through the ordinary queue, and it carries what clears the
+# strand so acting on it needs no hunt. The caller supplies that part, because
+# the two strand shapes clear differently and naming the wrong recovery would
+# send someone to a command that reports `already owned` and changes nothing.
 #
 # The marker records the claim generation that was reported, so the same strand
 # never wakes twice while a genuinely new claim still does - an alarm that
 # repeats every supervision cycle is as unusable as one nobody gets. It is
 # written before the wake and removed again if the wake does not land, so a
 # failed announcement retries instead of being silently marked as delivered.
-report_stranded_source() {  # <source-id> <claim-token>
-  local id=$1 token=$2 marker previous
+report_stranded_source() {  # <source-id> <claim-token> <why-and-recovery>
+  local id=$1 token=$2 detail=$3 marker previous
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ -n "$detail" ] || return 1
   marker=$(stranded_file "$id")
   previous=$(cat -- "$marker" 2>/dev/null || true)
   [ "$previous" != "$token" ] || return 1
   (umask 077; printf '%s\n' "$token" > "$marker") || return 1
   if ! fm_wake_append check "procevent:$id:stranded:$token" \
-    "check: process-event source $id is registered but nothing can arm it: its claim names a dead runner whose process group still has members, so reconcile preserves that claim and starts no replacement. Check that nothing is still polling the source, then reclaim it with: bin/fm-procevent.sh start $id"; then
+    "check: process-event source $id is registered but nothing can arm it: $detail"; then
     rm -f -- "$marker"
     return 1
   fi
   return 0
+}
+
+# The reused-pid strand: the recorded pid is alive under a different identity
+# while the runner's process group still has members. The claim path does not
+# consult the process group, so a deliberate `start` is what reclaims this.
+stranded_reused_pid_detail() {  # <source-id>
+  printf '%s' "its claim names a dead runner whose process group still has members, so reconcile preserves that claim and starts no replacement. Check that nothing is still polling the source, then reclaim it with: bin/fm-procevent.sh start $1"
+}
+
+# The leaderless strand: the runner leader is gone and its group still has
+# members. `start` reports this as owned and reclaims nothing, and nothing
+# automatic signals that group, so the only honest recovery to name is the
+# check a human makes; an empty group reads as gone on the next cycle.
+stranded_leaderless_detail() {  # <source-id>
+  printf '%s' "its runner died and its polling child may still be attached to the source's session, so reconcile preserves that claim and starts no replacement, and nothing automatic will touch that group. Verify whether anything is still polling $1; once that process group is empty, the next reconcile reclaims the source on its own."
 }
 
 cmd_reconcile() {
@@ -1312,7 +1334,8 @@ cmd_reconcile() {
           # so report the strand durably rather than leaving it to whoever
           # happens to run this command.
           uncertain=$((uncertain + 1))
-          report_stranded_source "$id" "$FM_PROCEVENT_CLAIM_TOKEN" || true
+          report_stranded_source "$id" "$FM_PROCEVENT_CLAIM_TOKEN" \
+            "$(stranded_reused_pid_detail "$id")" || true
         elif [ "$claim_state" -eq 1 ]; then
           if ! cleanup_extension_registration_invocations_locked "$id"; then
             uncertain=$((uncertain + 1))
@@ -1351,7 +1374,12 @@ cmd_reconcile() {
         elif [ "$claim_state" -eq 3 ]; then
           # A leaderless group's generation is ambiguous under PID/PGID reuse,
           # so preserve its claim without signalling or starting a replacement.
+          # This is the ordinary crash shape, and `start` cannot clear it
+          # either, so it is announced the same way as the reused-pid strand
+          # above but naming what a human should check rather than a command.
           uncertain=$((uncertain + 1))
+          report_stranded_source "$id" "$FM_PROCEVENT_CLAIM_TOKEN" \
+            "$(stranded_leaderless_detail "$id")" || true
         elif [ "$claim_state" -eq 2 ]; then
           uncertain=$((uncertain + 1))
         fi
@@ -1395,7 +1423,12 @@ confirm_launched_runners() {  # <source-id><TAB><registration-identity><TAB><lau
   # A zero-padded window is a valid value to its validator, which reads base 10;
   # reading it as octal here would silently shorten the window or abort this
   # subshell under `set -u` and report every launch as failed.
-  deadline=$((SECONDS + 10#$window))
+  # SECONDS is an integer clock that can tick at any moment after this
+  # assignment, so a deadline of exactly SECONDS + window waits anywhere in
+  # [window - 1, window] and a healthy launch could be reported failed for
+  # losing a second it was promised. The extra second bounds the wait to
+  # [window, window + 1] instead: never less than configured.
+  deadline=$((SECONDS + 10#$window + 1))
   while :; do
     remaining=()
     for entry in "${pending[@]+"${pending[@]}"}"; do

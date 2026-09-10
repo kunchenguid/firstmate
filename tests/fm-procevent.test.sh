@@ -1158,6 +1158,42 @@ assert_contains "$orphan_out" "started=0" \
 [ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 1 ] \
   || fail "reconcile started a source beside an ambiguous leaderless group"
 assert_absent "$ORPHAN_OVERLAP" "no replacement source starts while the leaderless group remains"
+# This is the ordinary crash shape, and it is refused permanently: `orphaned`
+# in a listing and `uncertain=1` in output the supervision cycle discards
+# reach nobody, so the strand has to announce itself durably, exactly once,
+# under a key the watcher can tell apart from a captured result.
+orphan_token=$(sed -n '3p' "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim")
+[ -n "$orphan_token" ] || fail "could not read the leaderless claim's token"
+[ "$(stranded_wake_count "$HG" orphan-src)" = 1 ] \
+  || fail "reconcile stranded a leaderless source without announcing it: $orphan_out"
+[ "$(stranded_wake_keys "$HG" orphan-src)" = "procevent:orphan-src:stranded:$orphan_token" ] \
+  || fail "the stranded wake is not keyed by source and claim generation: $(stranded_wake_keys "$HG" orphan-src)"
+orphan_wake=$(stranded_wake_payloads "$HG" orphan-src)
+assert_contains "$orphan_wake" "orphan-src" \
+  "the leaderless stranded wake does not name the source it is about: $orphan_wake"
+assert_contains "$orphan_wake" "polling" \
+  "the leaderless stranded wake does not say what a human should check: $orphan_wake"
+# `start` reports this claim as owned and reclaims nothing, so a wake that
+# named it as the clearing command would send someone to a no-op.
+case "$orphan_wake" in
+  *"start orphan-src"*) fail "the leaderless stranded wake names start as clearing it: $orphan_wake" ;;
+esac
+orphan_start=$(pe "$HG" start orphan-src 2>&1)
+assert_contains "$orphan_start" "already owned" \
+  "start displaced a leaderless group's claim: $orphan_start"
+[ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 1 ] \
+  || fail "start ran the source beside an ambiguous leaderless group"
+orphan_again=$(pe "$HG" reconcile)
+assert_contains "$orphan_again" "started=0" \
+  "the second cycle replaced an ambiguous leaderless generation: $orphan_again"
+assert_contains "$orphan_again" "uncertain=1" \
+  "the second cycle stopped reporting the claim it could not settle: $orphan_again"
+[ "$(stranded_wake_count "$HG" orphan-src)" = 1 ] \
+  || fail "reconcile re-announced the same leaderless strand: $orphan_again"
+[ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 1 ] \
+  || fail "the second cycle started a source beside an ambiguous leaderless group"
+kill -0 -"$orphan_leader" 2>/dev/null \
+  || fail "announcing the strand signalled the leaderless process group"
 kill -KILL -"$orphan_leader" 2>/dev/null || true
 for _ in $(seq 1 50); do kill -0 -"$orphan_leader" 2>/dev/null || break; sleep 0.1; done
 kill -0 -"$orphan_leader" 2>/dev/null && fail "could not clean up the leaderless fixture group"
@@ -1316,6 +1352,10 @@ sr4_owner=$(pe "$HSR4" list | awk '$1 == "reused-group-src" { print $3 }')
 # once, and say which command clears it.
 [ "$(stranded_wake_count "$HSR4" reused-group-src)" = 1 ] \
   || fail "reconcile stranded a source without announcing it: $sr4_out"
+# The key carries the source and its claim generation in a shape the watcher
+# can tell apart from a captured result, so the strand is never headlined as one.
+[ "$(stranded_wake_keys "$HSR4" reused-group-src)" = "procevent:reused-group-src:stranded:$(sed -n '3p' "$sr4_claim")" ] \
+  || fail "the stranded wake is not keyed by source and claim generation: $(stranded_wake_keys "$HSR4" reused-group-src)"
 sr4_wake=$(stranded_wake_payloads "$HSR4" reused-group-src)
 assert_contains "$sr4_wake" "reused-group-src" \
   "the stranded wake does not name the source it is about: $sr4_wake"

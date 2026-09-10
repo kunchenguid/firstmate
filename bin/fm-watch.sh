@@ -76,6 +76,13 @@
 #                          and has not been surfaced yet; reported once per
 #                          captured generation, never again while that record
 #                          stays queued and never once it is acknowledged
+#   check: process-event source stranded: <keys>
+#                          a registered process-to-event source has a claim
+#                          reconcile will not displace and nothing collecting
+#                          for it (bin/fm-procevent.sh reconcile queues it
+#                          once per stranded claim generation); the queued
+#                          payload names what clears it. Joined to the line
+#                          above with `;` when both kinds surface in one cycle
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -1401,7 +1408,7 @@ procevent_surface_after_output() {
 }
 
 procevent_surface_queued() {
-  local key reason
+  local key reason captured="" stranded=""
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
@@ -1409,12 +1416,24 @@ procevent_surface_queued() {
     case "$key" in procevent:*) ;; *) continue ;; esac
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
+    # A stranded source is the opposite of a captured result: nothing is
+    # collecting for it. Headlining it as a capture would present the strand
+    # as healthy, which is the shape of defect this wake exists to surface.
+    case "$key" in
+      procevent:*:stranded:*) stranded="$stranded $key" ;;
+      *) captured="$captured $key" ;;
+    esac
   done < <(fm_wake_queued_keys_locked check)
   if [ -z "$PROCEVENT_SURFACED" ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
   fi
-  reason="check: process-event result captured:$PROCEVENT_SURFACED"
+  reason="check:"
+  [ -z "$captured" ] || reason="$reason process-event result captured:$captured"
+  if [ -n "$stranded" ]; then
+    [ -z "$captured" ] || reason="$reason;"
+    reason="$reason process-event source stranded:$stranded"
+  fi
   # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
   FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output
   wake "$reason"
