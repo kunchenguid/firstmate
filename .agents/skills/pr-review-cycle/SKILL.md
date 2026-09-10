@@ -42,9 +42,24 @@ gh-axi api "/repos/$OWNER/$REPO/pulls/$PR/reviews" --paginate --full
 gh-axi api "/repos/$OWNER/$REPO/pulls/$PR/comments" --paginate --full
 gh-axi api "/repos/$OWNER/$REPO/commits/$REVIEW_HEAD/check-runs?per_page=100" --paginate --full
 gh-axi api "/repos/$OWNER/$REPO/commits/$REVIEW_HEAD/statuses?per_page=100" --paginate --full
-gh-axi api POST graphql --paginate --full --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { reviewThreads(first: 100, after: \$endCursor) { nodes { id isResolved isOutdated comments(first: 100) { nodes { databaseId url path line body author { login } createdAt } } } pageInfo { hasNextPage endCursor } } } } }"
+gh-axi api POST graphql --paginate --full --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { reviewThreads(first: 100, after: \$endCursor) { nodes { id isResolved isOutdated comments(first: 1) { nodes { databaseId url } } } pageInfo { hasNextPage endCursor } } } } }"
 ```
 
+Inventory the checks that should exist before judging the observed rollup.
+
+```sh
+gh-axi api "/repos/$OWNER/$REPO/branches/$BASE_REF/protection/required_status_checks" --full
+gh-axi api "/repos/$OWNER/$REPO/rules/branches/$BASE_REF" --full
+rg -n --hidden 'pull_request|pull_request_target|workflow_run|paths:|paths-ignore:|if:' .github/workflows
+```
+
+Use branch protection, applicable rules, workflow triggers, and recent comparable PR runs to name every expected context.
+Treat an unreadable protection or ruleset source as an evidence gap unless another authoritative source establishes the complete expected set.
+An expected workflow that never creates a context because of path, actor, fork, event, or conditional logic is missing validation, not a clean or skipped check.
+
+Treat the paginated REST inline-comment response as the complete comment body source.
+Group it into threads by each comment's `id` and `in_reply_to_id`, then associate each group with the GraphQL thread through its first comment's `databaseId`.
+This join keeps a thread with more than 100 replies complete without relying on a nested unpaginated GraphQL connection.
 Do not treat an outdated thread as resolved.
 Classify every unresolved thread as valid, already fixed, or declined.
 Fix valid findings, reply with the commit or concrete correction, and resolve the thread only after the fix is present on the PR head.
@@ -158,6 +173,7 @@ Fetch the PR again and verify all of the following against one unchanged head:
 - The current base repository and ref equal `BASE_REPO` and `BASE_REF`; after fetching its current tip, `git merge-base <current-base-tip> "$REVIEW_HEAD"` still equals `MERGE_BASE`.
 - The pull request is open, non-draft, and `MERGEABLE`, its active `reviewDecision` has no change request, and every required approval is present.
 - `statusCheckRollup` and `gh-axi pr checks` show every current CI context and no pending, skipped-without-explanation, cancelled, or failing required work.
+- Every context expected from branch protection, applicable rules, and workflow-trigger analysis exists on `REVIEW_HEAD`; no required workflow is silently absent.
 - The paginated GraphQL query reports zero unresolved review threads.
 - When CodeRabbit is configured, its latest summary covers the exact head and is clean, or an explicit rate-limit reply is recorded and the exact-head Codex fallback is clean.
 - When the Claude Review Bot is configured, its latest checklist covers the exact head and its final verdict is clean.

@@ -71,8 +71,8 @@ rg -n --hidden --glob '!.git/**' --glob '!vendor/**' --glob '!node_modules/**' -
 An empty source-usage result is a fact to report, not permission to skip upstream and security checks.
 
 Inventory every old-to-new package delta introduced by the lockfile change, including transitive packages.
-For every runtime-relevant delta, repeat the upstream comparison, locally used-surface search, advisory check, and risk-amplifier classification below.
-Record development-only transitive deltas and the evidence that they cannot enter build, release, test infrastructure, or runtime paths.
+For every build-, release-, test-infrastructure-, or runtime-relevant delta, repeat the upstream comparison, locally used-surface search, advisory check, and risk-amplifier classification below.
+Record exempt development-only transitive deltas and the evidence that they cannot enter any build, release, test-infrastructure, generated-output, or runtime path.
 An unexplained transitive delta makes the bump non-routine.
 
 ## Compare upstream changes to local usage
@@ -144,7 +144,7 @@ A hand-verified bump may skip the independent Codex scout only when all of these
 - The repository diff is exclusively one dependency-version change represented by its manifest pin, its mechanically generated lockfile, or both, plus any automation metadata.
 - Deterministic regeneration or frozen-lock validation succeeds with no unexplained manifest or lockfile diff.
 - The bump is not in any risk-amplifier class above.
-- Every direct and runtime-relevant transitive delta has been inventoried, and its upstream compare does not touch any locally used symbol, signature, default, or transitive behavior.
+- Every direct and build-, release-, test-infrastructure-, or runtime-relevant transitive delta has been inventoried, and its upstream compare does not touch any locally used symbol, signature, default, or transitive behavior.
 - No relevant security advisory or unresolved evidence gap exists.
 - CI covers the affected install, build, test, and runtime surface without an unexplained bot-only skip.
 
