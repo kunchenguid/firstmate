@@ -178,7 +178,7 @@ Fetch the PR again and verify all of the following against one unchanged head:
 - When CodeRabbit is configured, its latest summary covers the exact head and is clean, or an explicit rate-limit reply is recorded and the exact-head Codex fallback is clean.
 - When the Claude Review Bot is configured, its latest checklist covers the exact head and its final verdict is clean.
 - Every other configured automated reviewer has a current clean result for the exact head or a documented integration-specific fallback authorized by its owning contract.
-- The independent Codex report covers the exact head and ends `Verdict: ready`.
+- The independent Codex report covers the exact head and ends `Verdict: ready`, unless `dependency-bump-triage` proves and records its narrow scout exception for this head.
 - Every valid finding was fixed and every declined finding has a visible reason before its thread was resolved.
 
 Use this query to bind the check rollup to the current commit rather than trusting a worker's copied terminal output:
