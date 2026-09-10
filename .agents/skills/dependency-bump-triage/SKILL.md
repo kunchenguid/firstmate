@@ -34,6 +34,16 @@ Confirm from the full diff that the change contains only dependency manifest pin
 Generated lockfile transitive changes must be explainable by the selected package version.
 Any source, build logic, test logic, workflow behavior, vendored implementation, install script, patch file, or unrelated dependency change makes the PR non-routine and requires the normal `pr-review-cycle`.
 
+In an isolated clean checkout at `REVIEW_HEAD`, run the project's documented lockfile regeneration or frozen-lock validation with the repository's pinned package-manager version.
+After regeneration, require no unexplained change in the manifest and lockfile surface.
+
+```sh
+<project lockfile regeneration or frozen-lock command>
+git diff --exit-code -- <dependency manifests and lockfiles>
+```
+
+If the project has no deterministic regeneration or frozen-lock validation path, record that evidence gap and do not use the independent-review exception.
+
 Record the package, ecosystem, exact old version, exact new version, and upstream source repository.
 Do not infer those values from the PR title when the manifest or lockfile disagrees.
 Verify that the author is the repository's configured Dependabot or Renovate bot, that GitHub reports its actor type as `Bot`, and that the head branch matches that automation's configured namespace.
@@ -41,11 +51,12 @@ Route a human author, an unrecognized bot, or an identity mismatch through the f
 
 ## Find the project's actual dependency surface
 
-Search the whole project for the package name before excluding generated dependency files.
+Read the dependency metadata or lockfile entry for its exported module names, executables, plugin identifiers, and configuration names.
+Search the whole project for the package name and each of those literal identifiers before excluding generated dependency files.
 
 ```sh
-PACKAGE=<package-name>
-rg -n --hidden --glob '!.git/**' --glob '!vendor/**' --glob '!node_modules/**' --glob '!dist/**' --glob '!build/**' "$PACKAGE" .
+IDENTIFIER=<package-name-export-module-binary-or-plugin-identifier>
+rg -n -F --hidden --glob '!.git/**' --glob '!vendor/**' --glob '!node_modules/**' --glob '!dist/**' --glob '!build/**' "$IDENTIFIER" .
 ```
 
 Read every import, require, include, feature flag, command invocation, configuration key, type reference, and wrapper found by that search.
@@ -58,6 +69,11 @@ rg -n --hidden --glob '!.git/**' --glob '!vendor/**' --glob '!node_modules/**' -
 ```
 
 An empty source-usage result is a fact to report, not permission to skip upstream and security checks.
+
+Inventory every old-to-new package delta introduced by the lockfile change, including transitive packages.
+For every runtime-relevant delta, repeat the upstream comparison, locally used-surface search, advisory check, and risk-amplifier classification below.
+Record development-only transitive deltas and the evidence that they cannot enter build, release, test infrastructure, or runtime paths.
+An unexplained transitive delta makes the bump non-routine.
 
 ## Compare upstream changes to local usage
 
@@ -87,7 +103,7 @@ git -C "$UPSTREAM_CHECKOUT" diff "$OLD_VERSION" "$NEW_VERSION" -- <every-file-th
 
 ## Check advisories and risk amplifiers
 
-Inspect both the target repository's Dependabot alerts and the upstream repository's published advisories when access permits.
+Inspect the target repository's Dependabot alerts, the upstream repository's published advisories, and an authoritative ecosystem or cross-ecosystem advisory source for both exact versions when access permits.
 
 ```sh
 gh-axi api "/repos/$OWNER/$REPO/dependabot/alerts?state=open&per_page=100" --paginate --full
@@ -95,6 +111,7 @@ gh-axi api "/repos/$UPSTREAM_OWNER/$UPSTREAM_REPO/security-advisories?per_page=1
 ```
 
 Record an authorization failure as an evidence gap rather than claiming there are no advisories.
+Record unavailable ecosystem advisory coverage the same way and do not use the independent-review exception.
 Read the bump PR body, release notes, changelog, and upstream compare for security fixes or newly disclosed vulnerabilities affecting either version.
 
 Never rubber-stamp any of these cases:
@@ -125,8 +142,9 @@ Run or request the smallest missing targeted validation when the skipped coverag
 A hand-verified bump may skip the independent Codex scout only when all of these are true:
 
 - The repository diff is exclusively one dependency-version change represented by its manifest pin, its mechanically generated lockfile, or both, plus any automation metadata.
+- Deterministic regeneration or frozen-lock validation succeeds with no unexplained manifest or lockfile diff.
 - The bump is not in any risk-amplifier class above.
-- The upstream compare does not touch any locally used symbol, signature, default, or transitive behavior.
+- Every direct and runtime-relevant transitive delta has been inventoried, and its upstream compare does not touch any locally used symbol, signature, default, or transitive behavior.
 - No relevant security advisory or unresolved evidence gap exists.
 - CI covers the affected install, build, test, and runtime surface without an unexplained bot-only skip.
 
@@ -143,9 +161,11 @@ PR: <full URL>
 Head: <full SHA>
 Bump: <package> <old version> -> <new version> (<ecosystem>)
 Repository diff: <exactly which manifest, lockfile, or other files changed>
-Local use: <every imported symbol or executable surface, or none>
-Upstream impact: <whether changed upstream files touch local use and how>
-Security: <relevant advisories or explicit evidence gap>
+Lock validation: <exact regeneration or frozen-lock command and clean-diff result>
+Dependency deltas: <direct and transitive old-to-new inventory>
+Local use: <every package, module, binary, plugin identifier, imported symbol, or executable surface, or none>
+Upstream impact: <whether changed upstream files for each relevant delta touch local use and how>
+Security: <repository, upstream, and ecosystem advisory evidence or explicit gap>
 CI: <all checks and any bot-only skipped coverage>
 Review path: <hand-verified exception or full pr-review-cycle>
 Verdict: routine | targeted review required | needs fixes

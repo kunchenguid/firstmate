@@ -26,8 +26,9 @@ PR=<number>
 gh-axi api "/repos/$OWNER/$REPO/pulls/$PR" --jq '{url:.html_url,draft,headRef:.head.ref,headRepo:.head.repo.full_name,headCloneUrl:.head.repo.clone_url,headSha:.head.sha,baseRef:.base.ref,baseRepo:.base.repo.full_name,baseCloneUrl:.base.repo.clone_url,baseSha:.base.sha}'
 ```
 
-Use the returned head SHA as `REVIEW_HEAD` and the returned current base-branch tip as `BASE_SHA`.
-Every review result, check result, and ready claim is stale if the PR head no longer equals `REVIEW_HEAD`.
+Use the returned head SHA as `REVIEW_HEAD` and the returned current base repository, ref, and tip as `BASE_REPO`, `BASE_REF`, and `BASE_SHA`.
+Record the computed merge base as `MERGE_BASE` when preparing the independent review.
+Every review result, check result, and ready claim is stale if the PR head, base target, or merge base no longer equals the recorded identity.
 
 ## Read the complete review surface
 
@@ -154,6 +155,7 @@ Never accept a worker's `done:` or ready claim without a fresh firstmate-side re
 Fetch the PR again and verify all of the following against one unchanged head:
 
 - The current full head SHA equals the SHA the worker reported.
+- The current base repository and ref equal `BASE_REPO` and `BASE_REF`; after fetching its current tip, `git merge-base <current-base-tip> "$REVIEW_HEAD"` still equals `MERGE_BASE`.
 - The pull request is open, non-draft, and `MERGEABLE`, its active `reviewDecision` has no change request, and every required approval is present.
 - `statusCheckRollup` and `gh-axi pr checks` show every current CI context and no pending, skipped-without-explanation, cancelled, or failing required work.
 - The paginated GraphQL query reports zero unresolved review threads.
@@ -166,10 +168,10 @@ Fetch the PR again and verify all of the following against one unchanged head:
 Use this query to bind the check rollup to the current commit rather than trusting a worker's copied terminal output:
 
 ```sh
-gh-axi api POST graphql --paginate --full --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { state isDraft mergeable reviewDecision headRefOid commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100, after: \$endCursor) { nodes { __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } pageInfo { hasNextPage endCursor } } } } } } } } }"
+gh-axi api POST graphql --paginate --full --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { state isDraft mergeable reviewDecision headRefOid baseRefName baseRefOid baseRepository { nameWithOwner url } commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100, after: \$endCursor) { nodes { __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } pageInfo { hasNextPage endCursor } } } } } } } } }"
 ```
 
 Require every page when the context query reports `pageInfo.hasNextPage: true`.
-If the head changes during verification, discard the partial result and restart the cycle at the new head.
+If the head, base target, or merge base changes during verification, discard the partial result and restart the cycle at the new identity.
 The PR is ready only when all items are clean at the same exact head.
 Follow `AGENTS.md` section 7 after readiness is established; this skill grants no merge authority.
