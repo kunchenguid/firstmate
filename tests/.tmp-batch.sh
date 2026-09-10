@@ -21,7 +21,6 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
-REAL_CHMOD=$(command -v chmod)
 # The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
 # deliberately restricted, so a case that needs jq exposes this one rather than
 # depending on the host keeping jq in one of those four directories.
@@ -1160,6 +1159,7 @@ test_postrename_poll_validation_revokes_and_retries() {
       fi
       # Drop the cache entry the simulated probe above just wrote before any
       # further real (non-fakebin) use of this same device below.
+      # shellcheck disable=SC2034 # Read by fm_pr_device_mode_capable in the sourced fm-pr-lib.sh.
       FM_PR_MODE_CAPABLE_CACHE=
       fm_pr_poll_cleanup
       assert_no_final_poll "$state"
@@ -2294,4 +2294,9 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_mode_capable_device_enforces_exact_bits
+test_mode_inert_device_skips_bit_check_but_keeps_other_invariants
+test_poll_prepare_and_publish_succeed_on_simulated_mode_inert_device
+test_live_artifact_single_link_and_privacy_validation
+test_poll_publication_refuses_unsafe_destinations
 test_postrename_poll_validation_revokes_and_retries
