@@ -17,6 +17,8 @@ type LockOwnership =
   | { kind: "missing" }
   | { kind: "other" };
 
+let guardGeneration = 0;
+
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -450,6 +452,7 @@ async function claimSessionstartMessage(
   if (generation.sessionId && currentSessionId && generation.sessionId !== currentSessionId) {
     return undefined;
   }
+  markLoaded();
   generation.delivered = true;
   return sessionstartMessage(generation, result);
 }
@@ -549,6 +552,8 @@ export default function (pi: ExtensionAPI) {
   registerSessionstartExitListener();
 
   pi.on?.("session_start", (event, ctx) => {
+    guardGeneration += 1;
+    guardFollowupActive = false;
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const source = reason === "startup"
       ? startupRebuildSource(ctx) ?? "startup"
@@ -586,6 +591,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on?.("session_shutdown", async () => {
+    guardGeneration += 1;
     const generation = sessionstartGeneration;
     try {
       if (generation) await stopSessionstartGeneration(generation);
@@ -687,7 +693,31 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const result = await runGuard();
+    const owner = guardGeneration;
+    let result = await runGuard();
+    if (owner !== guardGeneration) return;
+    if (result.code === 2) {
+      // The watcher owns the handshake and its existing readiness budget.
+      // Loaded markers or a fresh beacon alone never satisfy this guard.
+      const observation: { settled?: Promise<boolean>; timeoutMs?: number } = {};
+      pi.events?.emit("fm-watch:observe-continuity", observation);
+      const { settled, timeoutMs } = observation;
+      if (settled && typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        await new Promise<void>((resolveWait) => {
+          const timer = setTimeout(resolveWait, timeoutMs);
+          void settled.then(() => {
+            clearTimeout(timer);
+            resolveWait();
+          }, () => {
+            clearTimeout(timer);
+            resolveWait();
+          });
+        });
+        if (owner !== guardGeneration) return;
+        result = await runGuard();
+      }
+    }
+    if (owner !== guardGeneration) return;
     if (result.code !== 2) return;
 
     guardFollowupActive = true;

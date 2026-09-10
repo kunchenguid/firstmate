@@ -100,6 +100,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-branch-outcome-lib.sh
+. "$SCRIPT_DIR/fm-branch-outcome-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
@@ -497,6 +499,7 @@ report_child() { # <id>
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
   local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local endpoint ident spawn
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -524,6 +527,18 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
+  # A durable branch outcome is not enough: only the same incarnation's exact
+  # status coverage, already shown and processed, satisfies main's obligation.
+  # Release the outcome lock before any queue operation; meta is already held.
+  if [ -z "$self" ]; then
+    endpoint=$(_fm_status_file_size "$status") || endpoint=0
+    ident=$(_fm_open_decisions_file_ident "$status") || ident=-
+    spawn=$(branch_outcome_spawn_gen "$meta")
+    if status_snapshot_latest_event "$status" "$endpoint" "$ident" \
+      && branch_outcome_delivery_covers "$id" "$spawn" "$endpoint" "$ident"; then
+      return 0
+    fi
+  fi
   pr=$(pr_for_task "$meta")
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that

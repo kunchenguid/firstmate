@@ -4479,3 +4479,103 @@ test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
+
+test_pi_guard_observes_current_restoration_and_exact_marker_owner() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-continuity-guard-root"
+  home="$TMP_ROOT/pi-continuity-guard-home"
+  mkdir -p "$repo/bin" "$home/state"
+  install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$repo/.pi/extensions/lib/"
+  cat > "$repo/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+while [ ! -f "$FM_HOME/allow-startup" ]; do sleep 0.02; done
+printf '%s\n' "$FM_TEST_OWNER" > "$FM_HOME/state/.lock"
+printf 'fixture startup digest\n'
+SH
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+[ -f "$FM_HOME/healthy" ] && exit 0
+while [ -f "$FM_HOME/block-guard" ]; do sleep 0.02; done
+echo 'no strict health proof' >&2
+exit 2
+SH
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_HOME/arms"
+trap 'exit 0' TERM INT
+while [ ! -f "$FM_HOME/allow-ready" ]; do sleep 0.02; done
+touch "$FM_HOME/healthy"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/"*.sh
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_PI_ARM_READY_TIMEOUT_MS=2000 node --input-type=module 2>&1 <<'JS'
+import assert from 'node:assert/strict';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+const home = process.env.FM_HOME;
+const root = process.env.FM_ROOT_OVERRIDE;
+const handlers = new Map(), events = new Map(), commands = new Map();
+const prompts = [];
+const pi = {
+  on(name, fn) { handlers.set(name, [...(handlers.get(name) || []), fn]); },
+  events: {
+    on(name, fn) { events.set(name, [...(events.get(name) || []), fn]); return () => {}; },
+    emit(name, data) { for (const fn of events.get(name) || []) fn(data); },
+  },
+  registerCommand(name, value) { commands.set(name, value); }, registerTool() {},
+  sendMessage() {}, sendUserMessage: async (message) => { prompts.push(message); },
+};
+const emit = async (name, event = {}, ctx = {}) => {
+  for (const fn of handlers.get(name) || []) await fn(event, ctx);
+};
+const load = async (file) => (await import(pathToFileURL(root + '/.pi/extensions/' + file))).default(pi);
+await load('fm-primary-turnend-guard.ts');
+await load('fm-primary-pi-watch.ts');
+process.env.FM_TEST_OWNER = String(process.pid);
+const ctx = { sessionManager: { getSessionId: () => 'test-session' } };
+await emit('session_start', { reason: 'startup' }, ctx);
+writeFileSync(home + '/allow-startup', 'go');
+await emit('before_agent_start', {}, ctx);
+assert.equal(readFileSync(home + '/state/.pi-turnend-extension-loaded', 'utf8').trim().split('\n')[1], String(process.pid));
+await emit('agent_settled');
+assert.equal(prompts.length, 1, 'no initial arm must remain a real alarm');
+await emit('agent_settled'); // settle the injected handling turn
+prompts.length = 0;
+await commands.get('fm-watch-arm-pi').handler('', { ui: { notify() {} } });
+const marker = readFileSync(home + '/state/.pi-watch-extension-loaded', 'utf8');
+const child = spawnSync(process.execPath, ['--input-type=module', '-e',
+  "const pi={on(){},registerCommand(){},registerTool(){},events:{on(){},emit(){}}}; for(const f of ['fm-primary-pi-watch.ts','fm-primary-turnend-guard.ts']) (await import(process.env.FM_ROOT_OVERRIDE+'/.pi/extensions/'+f)).default(pi);"
+], { encoding: 'utf8' });
+assert.equal(child.status, 0, child.stderr);
+assert.equal(readFileSync(home + '/state/.pi-watch-extension-loaded', 'utf8'), marker, 'descendant must not attest parent code');
+assert.equal(readFileSync(home + '/state/.pi-turnend-extension-loaded', 'utf8').trim().split('\n')[1], String(process.pid));
+const pending = emit('agent_settled');
+await new Promise(resolve => setTimeout(resolve, 80));
+assert.equal(prompts.length, 0, 'guard did not await the existing restoration');
+writeFileSync(home + '/allow-ready', 'go');
+await pending;
+assert.equal(prompts.length, 0);
+assert.equal(readFileSync(home + '/arms', 'utf8').trim().split('\n').length, 1, 'observation must never arm');
+unlinkSync(home + '/healthy');
+await emit('agent_settled');
+assert.equal(prompts.length, 1, 'owned ready child is not strict health proof');
+await emit('agent_settled');
+writeFileSync(home + '/block-guard', 'wait');
+const retiring = emit('agent_settled');
+await new Promise(resolve => setTimeout(resolve, 80));
+await emit('session_shutdown', { reason: 'quit' });
+unlinkSync(home + '/block-guard');
+await retiring;
+assert.equal(prompts.length, 1, 'retired guard must not inject into a replacement session');
+JS
+  )
+  status=$?
+  expect_code 0 "$status" "Pi guard must observe bounded restoration, preserve strict failures, and reject descendant marker writers"
+  [ -z "$out" ] || fail "Pi continuity/marker regression printed output: $out"
+  pass 'Pi cold-start markers belong to the exact owner; guard awaits existing readiness without arming and retains strict failure detection'
+}
+test_pi_guard_observes_current_restoration_and_exact_marker_owner

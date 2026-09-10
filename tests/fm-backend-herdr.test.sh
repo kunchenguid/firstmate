@@ -314,8 +314,10 @@ test_version_check_refuses_old_protocol() {
 test_version_check_refuses_missing_herdr() {
   local dir out status
   dir="$TMP_ROOT/version-missing"; mkdir -p "$dir/empty-fakebin"
-  out=$( PATH="$dir/empty-fakebin:/usr/bin:/bin" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
+  # /usr/bin may itself contain Herdr on packaged Linux installations.
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"
+    command() { if [ "${1:-}" = -v ] && [ "${2:-}" = herdr ]; then return 1; fi; builtin command "$@"; }
+    fm_backend_herdr_version_check' "$ROOT" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "version_check should refuse when herdr is not installed"
   assert_contains "$out" "not installed" "version_check did not report herdr as missing"

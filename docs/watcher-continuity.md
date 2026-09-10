@@ -201,6 +201,10 @@ The Claude hook's detached handling successor is launched by the hook itself, wh
 
 The turn-end guard remains the final backstop rather than the normal continuity mechanism.
 In its `--claude` mode it cooperates with the auto-arm.
+Pi's final guard also observes a restoration already owned by the current watcher generation before repeating its strict process/identity/beacon check.
+The read-only handshake in `.pi/extensions/fm-primary-pi-watch.ts` shares the existing readiness budget; it never starts an arm or extends the beacon grace.
+No first arm, exhausted restoration, lost ownership and expired observation still leave the strict guard in force, and session replacement cancels the old guard's delivery.
+Pi extension build markers are never written by a descendant that only inherits the lock, and the lock owner rewrites its turn-end marker once its cold-start lock acquisition lands; a descendant cannot attest which code its parent loaded.
 
 ## Recovery episode acknowledgement
 
