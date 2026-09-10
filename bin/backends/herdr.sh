@@ -2045,11 +2045,50 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   esac
 }
 
+# fm_backend_herdr_server_running_state: whether the named session has a running
+# server, as running|stopped|unknown, read from `status --json`'s own tri-state
+# `.server.running`. `status` is the one command that answers with a
+# running=false BODY instead of refusing, so it works on exactly the sessions
+# whose operational calls cannot be reached at all.
+#
+# The verdict rests on that field rather than on the `server_not_running` error
+# code an operational call happens to return, because the field is version
+# stable across the supported range while the code is not (verified on 0.8.2
+# protocol 20 and 0.9.0 protocol 22 - docs/verification/runtime-backends.md).
+fm_backend_herdr_server_running_state() {  # <session>
+  local session=$1 status
+  command -v jq >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  printf '%s' "$status" | jq -r '
+    if .server.running == true then "running"
+    elif .server.running == false then "stopped"
+    else "unknown"
+    end
+  ' 2>/dev/null || printf 'unknown'
+}
+
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
 # a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
 # unexpected or failed API read is `unreadable`.
+#
+# One exception to that last case, and it is deliberately made HERE rather than
+# in the husk classifier: a read can fail because the recorded session's server
+# is not running at all, which is authoritative absence for every pane in that
+# session rather than an ambiguous answer about one of them. Treating it as
+# `unreadable` stranded tasks with no sanctioned recovery (issue #4091), so a
+# positively stopped server reads `missing` instead.
+#
+# Only this recovery-grade read is widened. fm_backend_herdr_pane_agent_state
+# and the presence classifier under it stay strict, so husk detection, duplicate
+# prevention, rollback, and teardown - which can DESTROY things - keep refusing
+# on exactly the reads they refused on before. A server that is running, or
+# whose state cannot itself be read, still yields `unreadable` here too: absence
+# is claimed only from positive evidence of it.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
@@ -2057,7 +2096,12 @@ fm_backend_herdr_agent_state() {  # <target>
     dead) printf 'missing' ;;
     no-agent) printf 'dead' ;;
     live) printf 'alive' ;;
-    *) printf 'unreadable' ;;
+    *)
+      case "$(fm_backend_herdr_server_running_state "$FM_BACKEND_HERDR_SESSION")" in
+        stopped) printf 'missing' ;;
+        *) printf 'unreadable' ;;
+      esac
+      ;;
   esac
 }
 
