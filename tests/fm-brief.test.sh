@@ -243,6 +243,8 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
       "$mode existing-PR brief did not record the canonical PR URL"
     assert_grep "gh-axi pr checkout 2460" "$brief" \
       "$mode existing-PR brief did not resolve the forge-reported PR head"
+    assert_grep "git check-ref-format --branch \"\$PR_BRANCH\"" "$brief" \
+      "$mode existing-PR brief did not reject a non-porcelain PR head branch"
     assert_grep "git fetch origin \"+refs/heads/\$PR_BRANCH:refs/remotes/origin/\$PR_BRANCH\"" "$brief" \
       "$mode existing-PR brief did not update the remote-tracking head from origin"
     assert_grep "git clone --quiet --no-checkout --filter=blob:none" "$brief" \
@@ -259,6 +261,8 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
       "$mode existing-PR brief did not reject a fork-hosted head"
     assert_grep "git remote get-url --push --all origin" "$brief" \
       "$mode existing-PR brief did not validate origin's effective push target"
+    [ "$(grep -Fc 'git remote get-url --push --all origin' "$brief")" -ge 2 ] \
+      || fail "$mode existing-PR brief did not revalidate origin's push target at delivery"
     assert_grep "origin must have exactly one push URL" "$brief" \
       "$mode existing-PR brief did not refuse additional origin push destinations"
     assert_grep "gh-axi pr list --state open" "$brief" \
@@ -617,6 +621,8 @@ malformed existing PR URL|brief-refused-b8 some-proj --mode direct-PR --existing
 base branch without existing PR no-mistakes|brief-refused-b9 some-proj --mode no-mistakes --base-branch release/2.x|--base-branch applies only to an existing-PR no-mistakes brief
 base branch on existing PR direct-PR|brief-refused-b10 some-proj --mode direct-PR --existing-pr https://github.com/o/r/pull/1 --base-branch main|--base-branch applies only to an existing-PR no-mistakes brief
 reflog shorthand as existing PR base|brief-refused-b11 some-proj --mode no-mistakes --existing-pr https://github.com/o/r/pull/1 --base-branch @{-1}|--base-branch is not a valid git branch name
+option-like existing PR head|brief-refused-b12 some-proj --mode direct-PR --existing-pr https://github.com/o/r/pull/1 --branch=-foo|--branch is not a valid git branch name
+option-like existing PR base|brief-refused-b13 some-proj --mode no-mistakes --existing-pr https://github.com/o/r/pull/1 --base-branch=-foo|--base-branch is not a valid git branch name
 ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }

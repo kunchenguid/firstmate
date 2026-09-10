@@ -224,20 +224,22 @@ elif [ "$BRANCH_SET" -eq 1 ]; then
 fi
 
 if [ "$BRANCH_SET" -eq 1 ]; then
-  git check-ref-format "refs/heads/$BRANCH" >/dev/null 2>&1 || {
+  if ! git check-ref-format "refs/heads/$BRANCH" >/dev/null 2>&1 \
+    || ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
     echo "error: --branch is not a valid git branch name: $BRANCH" >&2
     exit 1
-  }
+  fi
 fi
 if [ "$BASE_BRANCH_SET" -eq 1 ]; then
   [ "$EXISTING_PR_SET" -eq 1 ] && [ "$MODE" = no-mistakes ] || {
     echo "error: --base-branch applies only to an existing-PR no-mistakes brief" >&2
     exit 1
   }
-  git check-ref-format "refs/heads/$BASE_BRANCH" >/dev/null 2>&1 || {
+  if ! git check-ref-format "refs/heads/$BASE_BRANCH" >/dev/null 2>&1 \
+    || ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
     echo "error: --base-branch is not a valid git branch name: $BASE_BRANCH" >&2
     exit 1
-  }
+  fi
 elif [ "$EXISTING_PR_SET" -eq 1 ] && [ "$MODE" = no-mistakes ]; then
   BASE_BRANCH='{EXISTING_PR_BASE_BRANCH}'
 fi
@@ -273,11 +275,10 @@ if [ "$EXISTING_PR_SET" -eq 1 ]; then
   EXPECTED_ORIGIN_QUOTED=$(shell_quote "$EXPECTED_ORIGIN")
   EXPECTED_PR_RECORD_QUOTED=$(shell_quote ",\"$EXISTING_PR\"")
   EXISTING_PR_BRANCH_FILE=$(shell_quote "$DATA/$ID/existing-pr-branch")
+  BRANCH_ASSERT="; git check-ref-format --branch \"\$PR_BRANCH\" >/dev/null 2>&1 || { echo 'error: forge returned an invalid PR head branch' >&2; exit 1; }"
   if [ "$BRANCH_SET" -eq 1 ]; then
     EXPECTED_BRANCH_QUOTED=$(shell_quote "$BRANCH")
-    BRANCH_ASSERT="; [ \"\$PR_BRANCH\" = $EXPECTED_BRANCH_QUOTED ] || { echo 'error: forge-reported PR head branch does not match --branch' >&2; exit 1; }"
-  else
-    BRANCH_ASSERT=
+    BRANCH_ASSERT="$BRANCH_ASSERT; [ \"\$PR_BRANCH\" = $EXPECTED_BRANCH_QUOTED ] || { echo 'error: forge-reported PR head branch does not match --branch' >&2; exit 1; }"
   fi
   if [ "$MODE" = no-mistakes ]; then
     BASE_BRANCH_QUOTED=$(shell_quote "$BASE_BRANCH")
@@ -532,10 +533,10 @@ if [ "$EXISTING_PR_SET" -eq 1 ]; then
   if [ "$MODE" = no-mistakes ]; then
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`. If its configured push target is not this exact origin repository and recorded PR head branch, append \`blocked: no-mistakes is not configured for the existing PR head branch\` and stop."
-    RULE1="1. Commit only on the checked-out existing PR branch. Immediately before starting /no-mistakes, verify the branch, upstream, open PR, and live base with \`EXPECTED_PR_BRANCH=\$(cat $EXISTING_PR_BRANCH_FILE); [ \"\$(git branch --show-current)\" = \"\$EXPECTED_PR_BRANCH\" ] && [ \"\$(git config --get \"branch.\$EXPECTED_PR_BRANCH.remote\")\" = origin ] && gh-axi pr list --state open --base $BASE_BRANCH_QUOTED --head \"\$EXPECTED_PR_BRANCH\" --limit 100 --fields url | grep -Fq $EXPECTED_PR_RECORD_QUOTED\`; if any check fails, stop and report the delivery mismatch. Never push directly: no-mistakes alone owns the push to that branch. Never force-push, never open a second PR, and never merge the existing PR."
+    RULE1="1. Commit only on the checked-out existing PR branch. Immediately before starting /no-mistakes, verify the branch, upstream, origin push URL, open PR, and live base with \`fm_pr_normalize_origin() { printf '%s\\n' \"\$1\" | sed -E -e 's#^git@github\\.com:#https://github.com/#' -e 's#^ssh://git@github\\.com/#https://github.com/#' -e 's#^git://github\\.com/#https://github.com/#' -e 's#/*\$##' -e 's#\\.git\$##' | tr '[:upper:]' '[:lower:]'; }; EXPECTED_PR_BRANCH=\$(cat $EXISTING_PR_BRANCH_FILE); [ \"\$(git branch --show-current)\" = \"\$EXPECTED_PR_BRANCH\" ] && [ \"\$(git config --get \"branch.\$EXPECTED_PR_BRANCH.remote\")\" = origin ] && [ \"\$(fm_pr_normalize_origin \"\$(git remote get-url --push --all origin)\")\" = $EXPECTED_ORIGIN_QUOTED ] && gh-axi pr list --state open --base $BASE_BRANCH_QUOTED --head \"\$EXPECTED_PR_BRANCH\" --limit 100 --fields url | grep -Fq $EXPECTED_PR_RECORD_QUOTED\`; if any check fails, stop and report the delivery mismatch. Never push directly: no-mistakes alone owns the push to that branch. Never force-push, never open a second PR, and never merge the existing PR."
   else
     SETUP2=""
-    RULE1="1. Commit on the checked-out existing PR branch and push only to that recorded origin branch with \`EXPECTED_PR_BRANCH=\$(cat $EXISTING_PR_BRANCH_FILE); [ \"\$(git branch --show-current)\" = \"\$EXPECTED_PR_BRANCH\" ] && [ \"\$(git config --get \"branch.\$EXPECTED_PR_BRANCH.remote\")\" = origin ] && gh-axi pr list --state open --head \"\$EXPECTED_PR_BRANCH\" --limit 100 --fields url | grep -Fq $EXPECTED_PR_RECORD_QUOTED || { echo 'error: current branch no longer identifies the open existing PR head' >&2; exit 1; }; git push origin \"HEAD:\$EXPECTED_PR_BRANCH\"\`. Never force-push, never open a second PR, and never merge the existing PR."
+    RULE1="1. Commit on the checked-out existing PR branch and push only to that recorded origin branch with \`fm_pr_normalize_origin() { printf '%s\\n' \"\$1\" | sed -E -e 's#^git@github\\.com:#https://github.com/#' -e 's#^ssh://git@github\\.com/#https://github.com/#' -e 's#^git://github\\.com/#https://github.com/#' -e 's#/*\$##' -e 's#\\.git\$##' | tr '[:upper:]' '[:lower:]'; }; EXPECTED_PR_BRANCH=\$(cat $EXISTING_PR_BRANCH_FILE); [ \"\$(git branch --show-current)\" = \"\$EXPECTED_PR_BRANCH\" ] && [ \"\$(git config --get \"branch.\$EXPECTED_PR_BRANCH.remote\")\" = origin ] && [ \"\$(fm_pr_normalize_origin \"\$(git remote get-url --push --all origin)\")\" = $EXPECTED_ORIGIN_QUOTED ] && gh-axi pr list --state open --head \"\$EXPECTED_PR_BRANCH\" --limit 100 --fields url | grep -Fq $EXPECTED_PR_RECORD_QUOTED || { echo 'error: current delivery state no longer identifies the writable open existing PR head' >&2; exit 1; }; git push origin \"HEAD:\$EXPECTED_PR_BRANCH\"\`. Never force-push, never open a second PR, and never merge the existing PR."
   fi
   RULE2="2. Stay inside this worktree; outside it, write only the status file and the Firstmate-owned branch-identity artifact at $EXISTING_PR_BRANCH_FILE."
 else
