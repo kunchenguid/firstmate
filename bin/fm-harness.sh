@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|agy|muse|rovo|omp|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -78,6 +78,20 @@ detect_own() {
   # the same ordering hazard cursor documents above (see issue #3517). bin/fm-spawn.sh
   # additionally clears foreign markers at rovo's launch boundary as defense in depth.
   [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && { echo rovo; return; }
+  # agy (Antigravity CLI) sets ANTIGRAVITY_LS_VERSION=cli-<version>,
+  # ANTIGRAVITY_PROJECT_ID, ANTIGRAVITY_TRAJECTORY_ID, ANTIGRAVITY_LS_ADDRESS,
+  # ANTIGRAVITY_SOURCE_METADATA, and JETSKI_APP_DATA_DIR=antigravity-cli on its
+  # tool subprocesses (verified live, agy 1.2.0). JETSKI_APP_DATA_DIR is the one
+  # tested because it separates the CLI from the Antigravity IDE, which keeps its
+  # own state under ~/.gemini/antigravity rather than ~/.gemini/antigravity-cli.
+  # Whether agy scrubs an inherited CLAUDECODE was NOT verified, so this is
+  # ordered before the CLAUDECODE line for the same reason cursor, gemini, and
+  # rovo are: agy's own marker is unambiguous WHEN PRESENT, so testing it first
+  # is correct either way, and bin/fm-spawn.sh clears the foreign markers at
+  # agy's launch boundary as defense in depth. agy does NOT set GEMINI_CLI
+  # (verified in that same process environment), so it cannot be misread as the
+  # separate Google Gemini CLI adapter despite sharing the ~/.gemini config root.
+  [ "${JETSKI_APP_DATA_DIR:-}" = "antigravity-cli" ] && { echo agy; return; }
   [ "${ROVODEV_CLI:-}" = "1" ] && { echo rovo; return; }
   # omp (Oh My Pi) publishes NO harness-identity marker of its own: verified on
   # omp 18.1.11 that PI_CODING_AGENT is absent from the binary and that the
@@ -150,6 +164,11 @@ detect_own() {
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
       rovo) echo rovo; return ;;
+      # agy is a single Go binary whose process name is exactly `agy` (verified
+      # live, agy 1.2.0: tmux reported `agy` as the pane command). Anchored,
+      # never *agy*, so unrelated commands such as legacy or agyrate cannot be
+      # misread as this harness.
+      agy) echo agy; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
       # name carries the version and CHANGES on every auto-update. Match the stable

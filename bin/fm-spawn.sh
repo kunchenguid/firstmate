@@ -123,7 +123,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|agy|muse|rovo|omp)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -243,10 +243,17 @@
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
-#   Claude and Codex launches read config/crew-permissions: absent or auto uses
-#   Claude's --permission-mode auto / Codex's --approve-for-me (workspace-write
-#   with automatic review); manual uses Claude manual / Codex on-request with
-#   human review. Empty, unreadable, or unknown settings refuse the launch.
+#   Claude, Codex, and agy launches read config/crew-permissions: absent or auto
+#   uses Claude's --permission-mode auto / Codex's --approve-for-me
+#   (workspace-write with automatic review); manual uses Claude manual / Codex
+#   on-request with human review. agy has no reviewed-auto mode of its own, so
+#   auto selects --mode accept-edits, which auto-approves file edits inside the
+#   granted directories but STILL prompts for every shell command, and manual
+#   leaves agy's default review mode where edits prompt too. agy's blanket
+#   --dangerously-skip-permissions is emitted by neither setting and is never a
+#   fallback, so an agy worker parks at a visible in-pane approval prompt rather
+#   than widening its own permissions.
+#   Empty, unreadable, or unknown settings refuse the launch.
 #   This applies to ship, scout, and secondmate launches, not an already-running
 #   primary, other harnesses, or the explicit raw-command escape hatch.
 #   There is no fallback to permission or sandbox bypass on failure or denial.
@@ -256,6 +263,7 @@
 #   Git protected paths and network requests still follow the harness's review.
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __PERMISSIONDIRS__ additional quoted state and task-data directory flags
+#     __AGYBIN__   quoted absolute agy executable resolved from PATH
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -282,6 +290,15 @@
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse and gemini are crewmate/scout only and are refused for --secondmate.
+# agy installs no hook either, and unlike muse it has no substitute signal wired:
+# its hook surface loads and lists entries as enabled but never executes them
+# (verified agy 1.2.0), so agy tasks carry no turn-end file and no semantic busy
+# record, and their state is read from the runtime backend's own agent-state
+# classifier. agy is crewmate/scout only and is refused for --secondmate. Every
+# agy launch must carry --add-dir for the task worktree, and every agy grant must
+# be a physically resolved path: without the grant agy silently writes into its
+# own scratch directory instead of the task's local copy, and with an unresolved
+# one it treats its own worktree as non-workspace access and parks on a prompt.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -1338,7 +1355,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|agy|muse|rovo|omp)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1421,7 +1438,7 @@ omp_model_validate() {  # <omp-bin> <model>
 launch_template() {
   local harness=$1 kind=${2:-ship} permission_mode=auto permission_flags
   case "$harness" in
-    claude|codex)
+    claude|codex|agy)
       if [ -e "$CONFIG/crew-permissions" ] || [ -L "$CONFIG/crew-permissions" ]; then
         if [ ! -f "$CONFIG/crew-permissions" ] || [ ! -r "$CONFIG/crew-permissions" ]; then
           echo "error: config/crew-permissions must be a readable file containing auto or manual" >&2
@@ -1434,6 +1451,19 @@ launch_template() {
         claude:manual) permission_flags='--permission-mode manual' ;;
         codex:auto) permission_flags='--approve-for-me' ;;
         codex:manual) permission_flags='--sandbox workspace-write --ask-for-approval on-request -c approvals_reviewer=user' ;;
+        # agy has no reviewed-auto mode. Its only blanket option is
+        # --dangerously-skip-permissions, which auto stays deliberately clear
+        # of: auto selects --mode accept-edits, verified on agy 1.2.0 to
+        # auto-approve file edits inside the granted directories while STILL
+        # prompting for every shell command (a `date` call was denied under
+        # accept-edits). manual omits --mode entirely, leaving agy's default
+        # review mode where edits prompt too. Neither path can reach
+        # --dangerously-skip-permissions, and there is no fallback onto it when
+        # an approval prompt parks the worker; the pane stall is the visible,
+        # supervisable outcome. .agents/skills/harness-adapters/references/harness/agy.md
+        # owns the operating consequences.
+        agy:auto) permission_flags='--mode accept-edits' ;;
+        agy:manual) permission_flags= ;;
         *)
           echo "error: invalid config/crew-permissions (expected auto or manual); refusing launch" >&2
           return 1
@@ -1563,6 +1593,32 @@ launch_template() {
     # Its turn-end and busy-state signals do NOT ride the launch command:
     # they are project hooks written into the worktree below.
     gemini) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # agy (Antigravity CLI). -i runs the positional prompt and then KEEPS the
+    # interactive session, which is the supervised crewmate pane shape; -p is a
+    # one-shot headless run and is never used here.
+    #
+    # The worktree grant is MANDATORY, not a convenience. Verified on agy 1.2.0:
+    # with the pane cwd already inside the worktree but no --add-dir, a file
+    # write silently landed in agy's own scratch directory
+    # (~/.gemini/antigravity-cli/scratch) while the model reported success, so a
+    # worker without it would look productive and change nothing in the task's
+    # local copy. __PERMISSIONDIRS__ carries all three grants - the task
+    # worktree, this home's state directory, and the brief's directory - because
+    # each has to be a PHYSICALLY RESOLVED path; see the substitution below.
+    #
+    # The approval posture is $permission_flags above; agy installs no turn-end
+    # hook because it has none that works (see the header and the harness
+    # reference), so nothing here arms one.
+    #
+    # Foreign primary markers are cleared for the same reason as muse and omp:
+    # agy publishes its own JETSKI_APP_DATA_DIR/ANTIGRAVITY_* markers, but an
+    # inherited CLAUDECODE from a claude primary would otherwise outrank them in
+    # a process that only reads the environment.
+    agy)
+      printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS __AGYBIN__ '
+      printf '%s' "$permission_flags"
+      printf '%s' ' __MODELFLAG____EFFORTFLAG____PERMISSIONDIRS__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1658,7 +1714,7 @@ case "$ARG3" in
     ;;
 esac
 
-# muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -1667,8 +1723,13 @@ esac
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ]; }; then
+# secondmate whose supervision cycle could never be armed. agy has none either,
+# and it is the strongest case of the three: its hook surface loads and reports
+# entries as enabled but never executes them (verified on agy 1.2.0 - a Stop
+# hook did not fire on completed turns and a PreToolUse hook did not fire on a
+# tool that actually ran), so there is no turn-end signal a primary supervision
+# cycle could be built on at all.
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -1860,6 +1921,29 @@ muse_worker_meta_api_key_present() {
   return 1
 }
 
+# agy ships as a single self-updating binary. It is resolved to an absolute
+# path once here so the pane launches the same executable this spawn checked,
+# and a missing install refuses BEFORE any endpoint or worktree exists rather
+# than leaving a pane at a "command not found" shell.
+resolve_agy_binary() {
+  local candidate dir
+  candidate=$(command -v agy 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "error: agy executable not found on PATH; install the Antigravity CLI or select a different verified harness" >&2
+  return 1
+}
+
 muse_credential_present() {
   local auth=$1
   [ -s "$auth" ] || muse_worker_meta_api_key_present
@@ -1869,7 +1953,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|agy|muse|rovo|omp)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1933,6 +2017,31 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
+    agy)
+      # agy 1.2.0 --effort accepts only low|medium|high and REFUSES anything
+      # else ("invalid --effort \"xhigh\" (valid: low, medium, high)"), so the
+      # two levels above its ceiling are capped onto high rather than omitted:
+      # references/common/model-and-effort.md asks an adapter that lacks xhigh
+      # to cap at its highest supported non-max level instead of silently
+      # dropping the intent. The requested level stays recorded in task metadata
+      # either way.
+      #
+      # agy publishes effort TWICE: as a suffix inside model ids (`agy models`
+      # lists gemini-3.8-flash-high, -medium, -low) and as this separate flag.
+      # Passing both is a launch-refusing conflict, verified on agy 1.2.0:
+      # `--model gemini-3.8-flash-high --effort low` exits with "--model
+      # gemini-3.8-flash-high conflicts with --effort=low". The unsuffixed base
+      # id is accepted and composes with --effort (`--model gemini-3.8-flash
+      # --effort high` ran clean), so when the selected model already carries a
+      # level, the model id wins and no effort flag is emitted.
+      case "$model" in
+        *-low|*-medium|*-high) return 0 ;;
+      esac
+      case "$effort" in
+        low|medium) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+        high|xhigh|max) printf -- '--effort %s ' "$(shell_quote high)" ;;
+      esac
+      ;;
     # rovo has no --effort flag on `run`; its effort mapping rides
     # --config-override, but that flag is single-value (see
     # rovo_config_override_flag below) so it is built there, merged with the
@@ -1946,6 +2055,12 @@ effort_flag_for_harness() {
     # effort flag.
   esac
 }
+
+case "$LAUNCH" in
+  *__AGYBIN__*)
+    AGY_BIN=$(resolve_agy_binary) || exit 1
+    ;;
+esac
 
 case "$LAUNCH" in
   *__MUSEBIN__*)
@@ -3824,6 +3939,7 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
   omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
+  agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
@@ -3831,9 +3947,22 @@ case "$HARNESS" in
     permission_dirs="--add-dir $(shell_quote "$STATE_REAL") --add-dir $(shell_quote "$(cd "$(dirname "$BRIEF")" && pwd -P)") "
     LAUNCH=${LAUNCH//__PERMISSIONDIRS__/$permission_dirs}
     ;;
+  agy)
+    # agy resolves a path physically before testing it against the granted
+    # workspace, so every grant must be handed over already resolved. Verified
+    # on agy 1.2.0: granting an unresolved path whose parent is a symlink (the
+    # /var -> /private/var case every mktemp -d lab hits) made agy treat a write
+    # inside its OWN worktree as non-workspace access and park on an "Allow
+    # creation of this file? Reason: outside workspace" prompt. The worktree is
+    # granted here rather than through __WORKTREE__ so it is resolved the same
+    # way as the other two, and so cursor's --workspace and omp's --cwd keep
+    # taking the recorded path unchanged.
+    permission_dirs="--add-dir $(shell_quote "$(cd "$WT" && pwd -P)") --add-dir $(shell_quote "$STATE_REAL") --add-dir $(shell_quote "$(cd "$(dirname "$BRIEF")" && pwd -P)") "
+    LAUNCH=${LAUNCH//__PERMISSIONDIRS__/$permission_dirs}
+    ;;
 esac
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|agy|muse|rovo)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac

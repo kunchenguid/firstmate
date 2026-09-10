@@ -311,7 +311,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 ## Worker permission mode (config/crew-permissions)
 
-Claude and Codex workers use reviewed execution rather than permission bypass by default.
+Claude, Codex, and agy workers use reviewed execution rather than permission bypass by default.
 An optional home-local `config/crew-permissions` selects `auto` (the default) or `manual`; `bin/fm-spawn.sh --help` owns exact launch flags, validation, directory grants, and exclusions.
 The setting is read for each new launch or relaunch, including a secondmate agent launched by this home; it does not change already-running agents or the primary's permission mode.
 This file is not inherited into secondmate homes: their own workers use their home's setting or the same safe default.
@@ -319,6 +319,8 @@ No global agent settings or hooks are installed by selecting a mode.
 Other harness adapters and explicit raw launch commands retain their existing permission behavior.
 
 Auto requests Claude's classifier-backed permission mode and Codex's automatic approval reviewer with workspace-write sandboxing.
+agy has no reviewed-auto mode of its own, so Auto selects its accept-edits mode, which approves file edits inside the granted directories while still asking for every shell command; its blanket bypass is never selected by either setting.
+An agy worker therefore pauses for approval more often than a Claude or Codex worker, including for the shell command that appends its own status lines, and that pause is a visible prompt in its window rather than a silent stop.
 Availability depends on the installed CLI, account, and managed policy; an unsupported or denied request must be reported, never retried with bypass permissions.
 Manual keeps approval prompts available for human review, so an unattended task may wait for intervention.
 Both modes preserve the separate project delivery and merge-approval rules.

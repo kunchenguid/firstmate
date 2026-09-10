@@ -247,10 +247,10 @@ fi
 [ "$err" = "error: unknown harness: bogus" ] || fail "unknown harness returned: $err"
 ok "unknown harness fails closed"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate agy:default 2>&1); then
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate nosuchharness:default 2>&1); then
   fail "trailing unsupported harness was hidden by an earlier selection"
 fi
-[ "$err" = "error: unknown harness: agy" ] || fail "trailing unsupported harness returned: $err"
+[ "$err" = "error: unknown harness: nosuchharness" ] || fail "trailing unsupported harness returned: $err"
 
 if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate 'claude:' 2>&1); then
   fail "trailing empty model was hidden by an earlier selection"
@@ -551,10 +551,10 @@ fi
 [ "$out" = "none" ] || fail "exhausted Meta quota returned: $out"
 ok "Muse uses Meta quota"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:default 2>&1); then
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate nosuchharness:default 2>&1); then
   fail "unsupported harness unexpectedly dispatched"
 fi
-[ "$err" = "error: unknown harness: agy" ] || fail "unsupported harness returned: $err"
+[ "$err" = "error: unknown harness: nosuchharness" ] || fail "unsupported harness returned: $err"
 ok "unsupported harness is rejected"
 
 jq '.providers += [.providers[] | select(.provider == "claude")]' "$LAB/captured.json" > "$DUPLICATE"

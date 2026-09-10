@@ -391,6 +391,142 @@ Two findings from the run shaped the shipped behavior: an OpenCode vendor update
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
+## agy (Antigravity CLI)
+
+The agy crewmate adapter was verified on 2026-09-10 with agy 1.2.0 on macOS 25.6.0, tmux 3.6a.
+Every check ran in throwaway scratch workspaces and one disposable pooled worktree against the real CLI, with the operator's global agy configuration read but never written; the two probe files this record describes were removed and the operator's `settings.json` was restored to its prior contents.
+agy self-updated from 1.1.25 to 1.1.28 to 1.2.0 during verification, so re-run the live guard after any upgrade before trusting these facts.
+
+### accept-edits covers file edits, not shell commands
+
+This is the decision `config/crew-permissions=auto` rests on.
+The same mode, same granted directory, two tool classes:
+
+```sh
+agy --mode accept-edits --add-dir "$WS" -p 'Using your file writing tool, create flagcheck.txt containing FLAGS_OK. Then reply DONE.'
+agy --mode accept-edits --add-dir "$WS" -p 'Run the shell command: date. Then reply with its output.'
+```
+
+```text
+DONE
+FLAGS_OK
+
+jetski: no output produced - a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. command(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.
+```
+
+Interactively the second case renders an answerable prompt instead of denying:
+
+```text
+Requesting permission for:
+   date
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'date'
+  3. Yes, and always allow for commands that start with 'date' (Persist to settings.json)
+  4. No, cancel
+```
+
+### The worktree grant, and why it must be resolved
+
+Without `--add-dir`, a write reported success and landed outside the workspace:
+
+```sh
+cd "$WS" && agy -p 'Create a file named probeB.txt containing BRAVO. Then reply DONE.'
+```
+
+```text
+DONE
+```
+
+```text
+Created file file:///Users/lucas/.gemini/antigravity-cli/scratch/probeB.txt with requested content.
+```
+
+With an unresolved grant whose parent is a symlink (`/var` -> `/private/var`), agy resolved the path itself and treated its own workspace as foreign:
+
+```text
+Reason: outside workspace
+Allow creation of this file?
+> 1. Yes, allow creation
+  2. Yes, and always allow non-workspace access
+  3. No, deny creation
+```
+
+A resolved grant produces neither prompt, and also suppresses the workspace-trust dialog whose acceptance appends the path to the operator's global `trustedWorkspaces`.
+
+### Hooks load but never execute
+
+`~/.gemini/config/hooks.json` carrying `Stop` and `PreToolUse` entries was listed as enabled:
+
+```sh
+agy -p '/hooks'
+```
+
+```text
+hooks	enabled	PreToolUse	-	command	touch /Users/lucas/.agy-lab-k4/GLOBAL_PRETOOL_FIRED
+hooks	enabled	Stop	-	command
+```
+
+Neither marker file existed after a completed headless turn, a completed interactive turn, or an interactive turn in which a `Bash(ls)` tool call actually ran.
+A workspace-local `<workspace>/.agents/hooks.json` was never listed at all, with the workspace trusted.
+This is the evidence behind agy carrying no turn-end signal and being refused for secondmate work.
+
+### Model ids and --effort conflict
+
+```sh
+agy --model gemini-3.8-flash-high --effort low -p 'reply with exactly: OK'
+agy --model gemini-3.8-flash --effort high -p 'reply with exactly: OK'
+agy --effort xhigh -p 'reply with exactly: OK'
+```
+
+```text
+error: invalid model selection (--model "gemini-3.8-flash-high" --effort "low"): --model gemini-3.8-flash-high conflicts with --effort=low
+OK
+error: invalid model selection (--model "" --effort "xhigh"): invalid --effort "xhigh" (valid: low, medium, high)
+```
+
+### End-to-end supervised task
+
+One scout was dispatched through the real entry point onto a disposable pooled worktree:
+
+```text
+spawned agy-e2e-probe-z1 harness=agy kind=scout window=firstmate:fm-agy-e2e-probe-z1 worktree=/Users/lucas/.treehouse/demo-974108/1/demo
+```
+
+The worker read its brief, read a file in the worktree without prompting, accepted a steer through the durable steering inbox, wrote its report, and appended its own `done:` status line.
+Its footer carried the resolved profile, `accept-edits · Gemini 3.8 Flash · medium`.
+It requested approval twice, for the heredoc it chose to write the report with and for the `echo ... >>` status append, and a denial of an unrelated out-of-workspace read printed `User declined the tool call` without wedging the session.
+A feedback survey (`How's the CLI experience so far?`) interrupted the task and waited for a keypress; agy exposes no launch flag for it.
+
+Lifecycle control through the real control plane:
+
+```text
+interrupt-delivered agy-e2e-probe-z1 harness=agy backend=tmux verified=agent-alive cancel=unconfirmed
+stopped agy-e2e-probe-z1 harness=agy backend=tmux endpoint=firstmate:fm-agy-e2e-probe-z1 worktree=/Users/lucas/.treehouse/demo-974108/1/demo
+```
+
+Before `agy` was added to the tmux process-name classifier, that same interrupt refused with `endpoint reads 'ambiguous' rather than a positively classified state`, which is why the classifier entry is required rather than cosmetic for this adapter.
+
+`tests/fm-agy-harness.test.sh` is the portable regression.
+`FM_AGY_SIGNALS_LIVE=1 tests/fm-agy-signals-live-e2e.test.sh` is the command that refreshes the version-scoped facts above against the installed binary.
+
+### Delivery busy footer
+
+Verified on 2026-09-10 with agy 1.2.0 through a private tmux session on macOS.
+The live guard exercises `fm_busy_lines_match` against the running and idle footers, both with an explicit `agy` harness and with the harness-less submit fallback:
+
+```sh
+FM_AGY_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
+```
+
+```text
+ok - agy 1.2.0: explicit and harness-less delivery matchers read idle
+ok - agy 1.2.0: explicit and harness-less delivery matchers read busy
+# all fm-agy-signals live checks passed (agy 1.2.0)
+```
+
+`tests/fm-tmux-submit-busy.test.sh` covers harness isolation and the idle-to-busy submit path with an unreadable composer, including already-busy and failed-capture baselines that must remain unconfirmed.
+
 ## Gemini
 
 The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.

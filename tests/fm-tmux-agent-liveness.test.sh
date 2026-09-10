@@ -65,6 +65,11 @@ ln -s "$SLEEP_BIN" "$LAB/bin/comp"
 # back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
 # signal, and `muse` alone is a common English fragment that must not widen into
 # a substring match. The last two names are the decoys that would be misread.
+# agy (Antigravity CLI) is a single binary whose live process name is the bare
+# word `agy`; the two decoys are the substrings an unanchored glob would misread.
+ln -s "$SLEEP_BIN" "$LAB/bin/agy"
+ln -s "$SLEEP_BIN" "$LAB/bin/legacy"
+ln -s "$SLEEP_BIN" "$LAB/bin/agyrate"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
 ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
 ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
@@ -193,6 +198,25 @@ for decoy in ompd comp; do
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
+
+# --- agy's bare binary name -------------------------------------------------
+# agy installs no per-task busy wiring, so this classifier is the ONLY state
+# source for an agy task: a misclassification here does not merely look untidy,
+# it makes every control verb refuse on an 'ambiguous' endpoint, which is
+# exactly how the gap was found. The decoys prove the anchored name never
+# widens into a substring match.
+
+new_window agy "$LAB/bin/agy" 900
+wait_for_state "$SESSION:agy" alive \
+  || fail "agy's bare binary name must classify alive"
+pass "tmux liveness: agy's bare binary name classifies alive"
+
+for decoy in legacy agyrate; do
+  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  wait_for_state "$SESSION:decoy-$decoy" ambiguous \
+    || fail "'$decoy' merely contains 'agy' and must not classify as a live agent pane"
+done
+pass "tmux liveness: unrelated agy-containing command names stay ambiguous"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that
