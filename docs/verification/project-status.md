@@ -11,7 +11,7 @@ Command: `bash tests/fm-project-status.test.sh`.
 
 The fixture invokes the project-status executable through a sibling fake snapshot producer for deterministic resolution and failure boundaries, then invokes the real fleet snapshot against isolated local and remote-home records for its project-status source behavior.
 The remote cache case uses a valid pre-existing `fm-secondmate-home-summary.v1` record and a failing SSH transport, proving that the no-write path can select the cache without changing its digest.
-The no-cache case proves that the same mode neither creates its configured cache directory nor invokes a terminal backend or consumes parent status events, while retaining attributable structured current-run state.
+The no-cache case proves that the same mode neither creates its configured cache directory nor invokes a terminal backend, CI-log reader, or parent status event, while retaining attributable structured current-run fields.
 
 ## Exact output
 
@@ -30,4 +30,4 @@ All fm-project-status tests passed.
 - Partial DofuMax behavior with unknown current state, two reliable queued items, and two reliable recent deliveries.
 - Five active items, five captain calls, five queued items, three recent deliveries, ten combined warnings and omissions, 64 KiB JSON limits, and an eight-second subprocess deadline.
 - Explicit unavailable results for malformed schema, oversized output, subprocess failure, and timeout.
-- Existing-cache reads with byte-identical cache content, no cache-directory creation, no terminal or parent-event observation, and attributable structured current-run state under `--project-status-source`.
+- Existing-cache reads with byte-identical cache content, no cache-directory creation, no terminal, CI-log, or parent-event observation, and attributable structured current-run state under `--project-status-source`.

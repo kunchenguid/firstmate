@@ -266,13 +266,16 @@ if [ "${1:-} ${2:-}" = "axi status" ]; then
 run:
   id: "01PROJECTSTATUS"
   branch: ${FM_FAKE_RUN_BRANCH:?}
-  status: running
+  status: ${FM_FAKE_RUN_STATUS:-running}
   head: "${FM_FAKE_RUN_HEAD:?}"
   pr: ""
   findings: none
   steps[1]{step,status,findings,duration_ms}:
     review,running,0,0
 EOF
+elif [ "${1:-} ${2:-}" = "axi logs" ]; then
+  printf '%s\n' "axi logs invoked" >> "${OBSERVATION_LOG:?}"
+  printf '%s\n' "checks passed from prose that must not alter state"
 fi
 exit 0
 SH
@@ -320,7 +323,7 @@ EOF
     "kind=ship" "project=$run_repo" "worktree=$run_repo" \
     "window=firstmate:fm-run-work" "harness=claude" "mode=no-mistakes"
   rm -f "$observation_log"
-  out=$(PATH="$fakebin:$PATH" OBSERVATION_LOG="$observation_log" FM_FAKE_RUN_BRANCH="$run_branch" FM_FAKE_RUN_HEAD="$run_head" \
+  out=$(PATH="$fakebin:$PATH" OBSERVATION_LOG="$observation_log" FM_FAKE_RUN_BRANCH="$run_branch" FM_FAKE_RUN_HEAD="$run_head" FM_FAKE_RUN_STATUS=ci \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
     FM_SNAPSHOT_CACHE_DIR="$home/state/never-create" "$SNAPSHOT" --json --project-status-source) \
     || fail "project-status snapshot source failed without an existing cache"

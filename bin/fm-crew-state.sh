@@ -619,6 +619,49 @@ fi
 # --- run-step authoritative path -------------------------------------------
 
 if [ "$HAVE_RUN" = 1 ]; then
+  if [ "${FM_CREW_STATE_STRUCTURED_ONLY:-0}" = 1 ]; then
+    RUN_STATE=working
+    RUN_DETAIL=""
+    if [ "$RUN_SOURCE" = coarse ]; then
+      case "$COARSE_STATUS" in
+        running) RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
+        completed) RUN_STATE=done; RUN_DETAIL="run completed" ;;
+        failed) RUN_STATE=failed; RUN_DETAIL="run failed" ;;
+        cancelled) RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+        *) RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
+      esac
+    else
+      status=$(strip_quotes "$(nm_field status)")
+      outcome=$(strip_quotes "$(nm_field outcome)")
+      awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
+      gate_status=$(nm_gate_status)
+      has_gate=0
+      nm_has_gate && has_gate=1
+      if [ -n "$outcome" ]; then
+        case "$outcome" in
+          passed) RUN_STATE=done; RUN_DETAIL="run passed" ;;
+          checks-passed) RUN_STATE=done; RUN_DETAIL="checks green" ;;
+          failed) RUN_STATE=failed; RUN_DETAIL="run failed" ;;
+          cancelled) RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+          *) RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
+        esac
+      elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
+        RUN_STATE=parked
+        RUN_DETAIL="parked at structured run gate"
+      else
+        case "$status" in
+          ci|running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
+          completed) RUN_STATE=done; RUN_DETAIL="run completed" ;;
+          failed) RUN_STATE=failed; RUN_DETAIL="run failed" ;;
+          cancelled) RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+          "") RUN_STATE=unknown; RUN_DETAIL="run status unavailable" ;;
+          *) RUN_STATE=unknown; RUN_DETAIL="run status unsupported ($status)" ;;
+        esac
+      fi
+    fi
+    emit "$RUN_STATE" run-step "$RUN_DETAIL"
+  fi
+
   RUN_STATE=working
   RUN_DETAIL=""
   CI_STEP_STATUS=""
