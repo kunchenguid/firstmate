@@ -80,7 +80,8 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 
 The current table is generated from the runner's retained maxima, which now cover every script in the lane.
 It was validated against a held-out run rather than fitted to the runs that produced it: [run 34447627189](https://github.com/kunchenguid/firstmate/actions/runs/34447627189) contributed nothing to the table, and scoring this partition against its real per-script durations puts its five shards at 13.58 to 16.95 minutes, a worst shard of 56.5% of the 30-minute job cap.
-Under the previous hints the same held-out run spanned 13.24 to 21.93 minutes.
+Under the previous hints at base commit `b1ad702fafdd03d94e5ce47cd4ba86e589ad33d6`, the same held-out run spanned 13.21 to 21.91 minutes.
+Across the five source runs and this held-out run, the worst shard occupies 69.9 to 80.5% of the job cap under that baseline and 56.5 to 61.9% under the refreshed hints.
 
 The single longest script, `tests/fm-watch-triage.test.sh` at 592748 ms, is the floor for any shard count.
 At 9.88 min it is 10.3% of the whole lane, so no shard count can bring a shard below it.
