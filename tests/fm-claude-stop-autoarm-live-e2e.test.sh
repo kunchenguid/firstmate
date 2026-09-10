@@ -80,8 +80,9 @@ printf '9999999\n' > "$HOME_DIR/state/.lock"
 # Pre-wedge the auto-arm claim mutex with the 2026-08-17 frozen-ledger shape:
 # a role-less hold whose recorded holder died mid-hold and whose pid a live
 # unrelated process now answers to. The first live firing must reclaim it
-# through the identity-hardened steal or every later assertion below fails
-# with a frozen ledger.
+# through the start-time-hardened steal - the hold records both the holder's
+# identity and its start time, and holder liveness reads the start time - or
+# every later assertion below fails with a frozen ledger.
 sleep 600 &
 WEDGE_PID=$!
 WEDGE_IDENTITY=$(bash -c '. "$1"; fm_pid_identity "$$"' _ "$ROOT/bin/fm-wake-lib.sh") \

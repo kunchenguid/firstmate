@@ -102,12 +102,12 @@
 #      with no verified failure episode terminal_fail_open refuses and
 #      block_stop runs, so a watcher that can never be armed keeps blocking on
 #      every later stop, past the 8-consecutive-block override. Two things
-#      narrow the budget further, and this is the single place that owns the
-#      caveat: budget_account_current_epoch advances the count only when the
-#      ledger's epoch differs from the one already recorded, so a slot is spent
-#      per auto-arm GENERATION rather than per stop, and a generation that
-#      never advances - the hook disabled, or the script erroring before its
-#      first ledger write - never advances the count at all.
+#      narrow the budget further: budget_account_current_epoch advances the
+#      count only when the ledger's epoch differs from the one already
+#      recorded, so a slot is spent per auto-arm GENERATION rather than per
+#      stop, and a generation that never advances - the hook disabled, or the
+#      script erroring before its first ledger write - never advances the count
+#      at all. docs/turnend-guard.md owns that caveat.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -767,8 +767,9 @@ test_abandoned_owner_claim_is_reclaimed_and_rearms() {
 # whose recorded pid a live unrelated process later reuses. Every firing then
 # fails fm_autoarm_claim_next's lock acquisition and exits 0 silently, so the
 # ledger freezes at the previous terminal outcome while the guard blocks every
-# turn end. The identity-hardened steal must reclaim it and re-arm, without
-# ever signalling the reused pid.
+# turn end. The start-time-hardened steal must reclaim it and re-arm, without
+# ever signalling the reused pid: the hold records both facts, but holder
+# liveness reads the start time, so the reused pid is seen for what it is.
 test_wedged_roleless_claim_mutex_reused_pid_rearms() {
   local dir out status reused reused_identity recorded reused_start recorded_start
   dir=$(make_primary_dir "$TMP_ROOT/wedged-roleless-mutex")
