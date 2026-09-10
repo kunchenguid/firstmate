@@ -175,7 +175,12 @@ test_agy_busy_signature_is_harness_scoped() {
 # and yields no composer reading. The rendered-footer fallback is then the only
 # evidence the pane is mid-turn, and the watcher acts on exactly one verdict:
 # busy. Anything else falls through to the doorbell.
-test_watcher_leaves_a_raw_launched_agy_pane_alone_mid_turn() (
+test_watcher_leaves_a_raw_launched_agy_pane_alone_mid_turn() {
+  # The assertions run in a subshell so sourcing bin/fm-watch.sh cannot pollute
+  # the suite shell. `fail` is `exit 1`, which inside `( )` ends only the
+  # subshell, so the subshell's status is checked here: without that check this
+  # guard could report success but never fail, whatever the watcher did.
+  (
   local state="$TMP_ROOT/agy-watch-state"
   mkdir -p "$state"
   printf 'window=fake\nharness=agy-nightly\n' > "$state/agy-watch.meta"
@@ -199,8 +204,9 @@ esc to cancel' \
 esc to cancel'; then
     fail "Agy's footer classified a recorded Claude task busy"
   fi
+  ) || exit 1
   pass "the watcher holds a mid-turn raw-launched Agy pane instead of ringing it"
-)
+}
 
 test_plain_backends_share_agy_composer_contract() {
   local state
