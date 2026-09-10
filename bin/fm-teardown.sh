@@ -229,9 +229,10 @@
 #     ownership by hand costs a forensic session. bin/fm-e2e-stack.sh owns the
 #     record format, the four ownership gates, and the removal; this teardown
 #     only invokes its `down`, and only for THIS task's own record. It runs
-#     here rather than later because both the record it reads
-#     (state/<id>.e2e-stack) and the standalone fallback copy a worker may have
-#     written under the per-task tasktmp are removed further down. Best effort: a
+#     here rather than later because `down`'s own `-f` arguments come from the
+#     record's compose_file entries, and the generated override file among
+#     them lives under the per-task tasktmp, which is removed further down;
+#     `docker compose -f` refuses a path that is already gone. Best effort: a
 #     stopped docker daemon, an absent record, or a gate that cannot be proved
 #     leaves the stack in place and says so, and never blocks this teardown -
 #     the stack is reported by the next session start instead.
