@@ -62,7 +62,7 @@ Tracked files hold shared instructions and tooling.
 `config/` holds this home's local operating choices, and `.env` holds its optional Relay and mail credentials.
 `projects/` contains clones that are read-only to firstmate except under hard rule 1's concrete captain-approved project operation exception.
 
-Records under `state/` belong to the scripts that write them; never hand-edit or hand-delete them, apart from the custom check section 7 has you author yourself.
+Records under `state/` belong to the scripts that write them; never hand-delete them, and never hand-edit them apart from the custom check section 7 has you author yourself.
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
 Treat `data/captain.md` as the domain-local record of captain preferences, optional `data/captain-shared.md` as the main-authoritative shared captain-preference file for secondmate inheritance, and `data/learnings.md` as curated home-local knowledge, regardless of harness memory.
 
@@ -209,7 +209,7 @@ When the configured tasks-axi backlog gate applies, the spawn itself moves the w
 After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
-Steer a worker with ordinary text through fail-closed `fm-send`, which turns the message into a durable record in the task's steering inbox and leaves the watcher to re-ring an unacknowledged message and escalate a stuck one (`bin/fm-send.sh` and `bin/fm-task-inbox-lib.sh` own the mechanics, carve-outs, and remote transport).
+Steer a worker with ordinary text through fail-closed `fm-send`, which turns the message into a durable record in the task's steering inbox and leaves the watcher to re-ring an unacknowledged local message and escalate a stuck one (`bin/fm-send.sh` and `bin/fm-task-inbox-lib.sh` own the mechanics, carve-outs, and remote transport).
 After an unconfirmed remote delivery, resend only with the exact command `fm-send` printed, because it preserves the request body the remote enqueue deduplicates on.
 When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--resolve-key` so the answer itself closes that decision record at answer time, identically for local and remote workers.
 `fm-send` is the data plane for text the worker should read; never use its key or text paths for interrupt, exit, or other lifecycle control, because routing-marked lifecycle text becomes chat the worker reasons about instead of executing.
@@ -296,7 +296,7 @@ Promotion itself writes that worker's ship instructions, including the scratch-s
 
 Fleet supervision is an always-loaded operational contract; `docs/architecture.md`, `docs/turnend-guard.md`, the emitted session-start block, and script help own mechanisms and harness-specific recipes.
 
-Keep exactly one live supervision cycle using the emitted protocol for this primary harness whenever work is under way, or whenever this home has an armed Relay poll, a registered process-event source, or a registered custom check, each of which requires that same live cycle with no fleet work.
+Keep exactly one live supervision cycle using the emitted protocol for this primary harness whenever work is under way, or whenever this home has an armed Relay poll, a registered process-event source, or a registered check, each of which requires that same live cycle with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
 No turn ends blind while work is under way, including turns described as holding or waiting.
@@ -351,7 +351,7 @@ The skill owns the daemon procedure; these safety facts remain inline:
 **Talk in outcomes, not mechanics.**
 Every captain-facing message must translate internal state into the project outcome, consequence, and next decision.
 Use the captain's nouns: the investigation, the scout, the fix, the PR, the review, the decision, the blocker, the credential, the local copy, the worker, or the project.
-Never expose firstmate's internal vocabulary, including every term the rewrite table below names plus startup machinery, locks, polling, task ids, promotion, context budgets, delivery-mode names, autonomy flags, and status prefixes.
+Never expose firstmate's internal vocabulary, including every internal term the rewrite table below rewrites plus startup machinery, locks, polling, task ids, promotion, context budgets, delivery-mode names, autonomy flags, and status prefixes.
 Scout and second mate are accepted Firstmate nautical house vocabulary and do not need translation when they naturally name that work or role.
 When evidence uses an internal label, rewrite it before sending:
 
