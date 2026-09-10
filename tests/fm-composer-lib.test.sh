@@ -390,6 +390,19 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_bare_row_lone_separator_without_identity_stays_unknown() {
+  # A bare agent-glyph composer row with an unrelated, unpaired 8+-wide solid
+  # rule rendered below it (a TUI divider, not a pi separator pair) must keep
+  # degrading to unknown on every backend that cannot probe identity - zellij,
+  # cmux, and orca all pass identity=0. Only an identity-capable backend
+  # (herdr, tmux) may defer the ambiguity to a live identity probe; identity=0
+  # must reject the bare row exactly as it does for every other selected kind.
+  local screen=$'❯\n\ntranscript filler\n────────────────────────'
+  assert_screen "bare row + lone separator on zellij (no identity)" unknown "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "bare row + lone separator on plain backend" unknown "$CAPS_PLAIN" "$screen"
+  pass "matrix: a lone Pi-style separator below a bare composer row stays unknown without identity capability"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding the "Ask anything..." hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -682,6 +695,7 @@ test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_pi_separated_needs_identity
+test_matrix_bare_row_lone_separator_without_identity_stays_unknown
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

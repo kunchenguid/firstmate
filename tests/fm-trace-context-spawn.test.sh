@@ -124,7 +124,7 @@ run_spawn() {
   # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
   # without it this suite would write the developer's real ~/.claude.json.
   mkdir -p "$home/user-home"
-  env -u FM_TRACE_CONTEXT \
+  env -u FM_TRACE_CONTEXT -u PI_CODING_AGENT \
     FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -387,7 +387,7 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
   printf 'charter\n' > "$sm/data/charter.md"
   fake=$(make_spawn_fakebin "$base/fake")
 
-  out=$(env -u FM_TRACE_CONTEXT \
+  out=$(env -u FM_TRACE_CONTEXT -u PI_CODING_AGENT \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \

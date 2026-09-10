@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|gemini|muse|rovo|omp|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -91,8 +91,41 @@ detect_own() {
   # as omp, while the same variable leaking from an omp secondmate into that
   # home's claude worker (whose ancestry holds no omp) changes nothing. The
   # anchored ancestry arm below covers a plain hand-started `omp` by itself.
-  if [ "${FM_OMP_HARNESS:-}" = omp ] && ancestry_names_omp; then
+  if [ "${FM_OMP_HARNESS:-}" = omp ] && ancestry_names omp; then
     echo omp
+    return
+  fi
+  # prime-agent and Pi export the same PI_CODING_AGENT marker, so only the
+  # Firstmate-OWNED launch marker FM_PI_HARNESS=prime-agent splits the two,
+  # exactly as FM_PI_HARNESS=pi-signed splits the signed wrapper below. Prime
+  # Agent's own PRIME_AGENT_CODING_AGENT_DIR and PRIME_AGENT_INTERNAL_DAEMON_WORKER
+  # are deliberately NOT read here: they are session-wide inherited values, so a
+  # claude pane opened by hand inside a Prime Agent session - or one started from
+  # a multiplexer server that stored that environment, the hazard the muse note
+  # below forbids ignoring - carries them while being claude, and an unmarked
+  # Prime Agent session is Pi-family either way. bin/fm-spawn.sh establishes the
+  # marker at every prime-agent worker launch boundary, so a firstmate-launched
+  # worker is identified; ambient auto-detection of a Prime Agent PRIMARY lands
+  # with the supervision slices that give that value a supervision model.
+  # The marker is tested BEFORE the CLAUDECODE fast path and the unmarked Pi
+  # result below, for cursor's reason above: Prime Agent does not clear an
+  # inherited CLAUDECODE, so a resident Prime Agent worker under a claude
+  # supervisor carries both. Because the marker can itself leak into a claude
+  # pane of the same session, it is a PRECEDENCE override rather than evidence
+  # whenever CLAUDECODE=1 is present, exactly as FM_OMP_HARNESS is for omp
+  # above: it wins only when a real prime-agent process is in the ancestry.
+  # It sits BELOW gemini, rovo, and omp
+  # deliberately: those harnesses do not scrub the environment they inherit
+  # either, so a gemini/rovo/omp session started by hand inside a Prime Agent
+  # session carries the Pi-family and PRIME_AGENT_* markers too, and their own
+  # verified identity must keep winning. grok is deliberately NOT lifted with
+  # them: GROK_AGENT is tested after the unmarked Pi arm below already, so grok
+  # inside any Pi-family session has always resolved to that family, and
+  # reordering it is a separate change.
+  if [ "${PI_CODING_AGENT:-}" = "true" ] \
+    && [ "${FM_PI_HARNESS:-}" = prime-agent ] \
+    && { [ "${CLAUDECODE:-}" != "1" ] || ancestry_names prime-agent; }; then
+    echo prime-agent
     return
   fi
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
@@ -190,14 +223,14 @@ detect_own() {
   echo unknown
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
-# same anchored match as the ancestry walk in detect_own, kept separate so the
-# marker precedence above can demand real process evidence.
-ancestry_names_omp() {
-  local pid=$$ comm
+# True when a process named exactly <name> sits within eight parents of this
+# one. The same anchored match as the ancestry walk in detect_own, kept separate
+# so the marker precedence above can demand real process evidence.
+ancestry_names() {  # <exact process name>
+  local want=$1 pid=$$ comm
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    [ "$(basename -- "$comm")" = omp ] && return 0
+    [ "$(basename -- "$comm")" = "$want" ] && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done

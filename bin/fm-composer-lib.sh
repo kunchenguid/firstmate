@@ -33,8 +33,11 @@
 #               composer. Without it, the bottom-most shape wins.
 #   identity=1  a native agent identity/state probe exists (herdr `agent get`;
 #               the tmux pi foreground-process probe). Identity is what makes
-#               Pi's blank separated composer provable; with identity=0 that
-#               shape stays `unknown`.
+#               Pi's blank separated composer and prime-agent's shell-style
+#               composer provable; with identity=0 those shapes stay `unknown`.
+#   prime=1     the adapter has independently proven that the live foreground
+#               process is prime-agent. This is an additional capability fact,
+#               never inferred from rendered text or native identity.
 #   rows=<n>    the capture's bounded row count (informational).
 #
 # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
@@ -67,6 +70,10 @@
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
+#   prime      - prime-agent: a bare `>` row, admitted only when the adapter's
+#                kernel-level foreground-process capability says prime-agent
+#                and native identity also reports prime-agent. The shell-style
+#                glyph is otherwise always the dead-shell shape.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -198,8 +205,11 @@ fm_composer_normalize_trim_var() {  # <varname>
 # codes are processed left to right within a sequence, so "ESC[0;2m" reads as dim.
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
 # runs alike pass through or drop intact without locale-dependent classes.
-fm_composer_strip_ghost() {
-  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" '
+# _FM_COMPOSER_SGR_AWK_FUNCS: the ONE definition of "read an SGR introducer's
+# code and skip its colour payload" (38/48/58, both the `;` and the ITU `:`
+# form). Shared verbatim by fm_composer_strip_ghost and
+# fm_composer_row_is_prime_agent_surface so this parsing exists exactly once.
+_FM_COMPOSER_SGR_AWK_FUNCS='
     function sgr_code(v, b) {
       b = v
       sub(/:.*/, "", b)
@@ -216,6 +226,11 @@ fm_composer_strip_ghost() {
       if (code == "2") return p + 4
       return p + 1
     }
+'
+
+fm_composer_strip_ghost() {
+  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" '
+    '"$_FM_COMPOSER_SGR_AWK_FUNCS"'
     # fg38_is_dark: 1 when the SGR 38 foreground starting at param p is a
     # TRUECOLOR (38;2 / 38:2) whose luminance is below lumamax; 0 otherwise
     # (a 38;5 palette colour, a bright truecolor, or a malformed run).
@@ -500,6 +515,89 @@ fm_composer_idle_matches() {
   esac
 }
 
+# prime-agent's composer container (verified 2026-08-08, Prime Agent 0.7.1).
+# It draws no border at all: its editor renders a full-width BACKGROUND SURFACE
+# (theme `userMessageBg`, emitted as a truecolor or 256-colour SGR background
+# introducer `48;2`/`48;5`, colon form included) and puts its own `> ` prompt
+# prefix on the first surface row. Under the bare-glyph safety rule above that
+# idle composer would read `unknown` forever, so `fm-send` could never prove a
+# steer landed. The background surface IS the composer container here, the same
+# role a box border plays for claude and a separator pair plays for Pi under
+# herdr, so recognizing it structurally lets the caller pass bordered=1 without
+# weakening the rule: the dead shell this owner exists to protect against paints
+# no background run, so a bare `>` left behind after the agent exits still reads
+# `unknown`.
+# The 48 has to be read as a PARAMETER, never as a substring: a foreground run
+# carries arbitrary colour components, so `38;2;48;120;200` and
+# `38;2;200;48;10` both contain a 48 that introduces nothing. The walk below
+# therefore skips an introducer's payload (38/48/58, both the `;` and the ITU
+# `:` form) exactly the way fm_composer_strip_ghost's skip_color_payload does,
+# and only a 48 standing in a real parameter position counts. Without that, a
+# dead shell whose prompt is merely coloured would be promoted to a composer
+# container and read `empty` - the precise verdict fm_pane_input_pending and
+# fm_tmux_submit_enter_core accept as proof a pane is safe to type into.
+# A basic 40-47 background is deliberately NOT matched: prime-agent's theme
+# emits the truecolor or 256-colour form, and keeping the promotion as narrow as
+# the verified evidence means an unrecognized surface degrades to `unknown`,
+# which is the safe direction.
+# The background must also still be OPEN at the glyph, because the verified
+# shape is a `> ` prompt drawn ON the surface. Accepting one anywhere on the row
+# would promote the opposite arrangement - a foreground-coloured shell prompt
+# followed by background-filled padding - and accepting one that a later SGR 0
+# or SGR 49 already closed would promote a shell prompt that merely painted a
+# coloured segment earlier on the line. Both are dead shells, not composers, so
+# the walk carries the background state rather than stopping at the first 48.
+# fm_composer_prime_agent_idle_re: the five rotating start hints prime-agent
+# draws into an otherwise-empty composer (`START_HINTS`, dark truecolor
+# 38;2;113;113;122, luminance ~114). The shared ghost stripper already drops
+# them on an ANSI-capable capture, so this is the theme-independent backstop and
+# the only signal a plain-screen capture has.
+fm_composer_prime_agent_idle_re() {
+  printf '%s' '^Try "(refactor|fix bugs in|add tests for|explain how|improve performance in) @<filepath>( works)?"$'
+}
+
+fm_composer_row_is_prime_agent_surface() {  # <raw-styled-row> <plain-trimmed-row>
+  local raw=$1 plain=$2
+  case "$plain" in '>'|'> '*) ;; *) return 1 ;; esac
+  raw=${raw%%>*}
+  printf '%s\n' "$raw" | LC_ALL=C awk '
+    '"$_FM_COMPOSER_SGR_AWK_FUNCS"'
+    {
+      line = $0; n = length(line); i = 1; open = 0
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (c == "\033") {            # ESC: consume a CSI ... final-byte sequence
+          j = i + 1
+          if (substr(line, j, 1) == "[") {
+            j++; params = ""
+            while (j <= n) {
+              cc = substr(line, j, 1)
+              if (cc ~ /[@-~]/) break
+              params = params cc; j++
+            }
+            if (j <= n && substr(line, j, 1) == "m") {   # SGR: track background state
+              if (params == "") params = "0"
+              k = split(params, a, ";")
+              for (p = 1; p <= k; p++) {
+                v = a[p]; code = sgr_code(v)
+                if (code == "38" || code == "48" || code == "58") {
+                  if (code == "48") open = 1
+                  p = skip_color_payload(a, p, k)
+                } else if (code == "0" || code == "49") open = 0
+              }
+            }
+            if (j <= n) { i = j + 1; continue }
+          }
+          i = i + 1; continue          # lone/other ESC: drop the ESC byte only
+        }
+        i++
+      }
+      exit (open == 1) ? 0 : 1
+    }
+  '
+}
+
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, an identity-proven separated composer, or
@@ -623,9 +721,9 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
-_fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
-  local pane=$1 cy=${2:-}
-  local line indent left_stripped trimmed kind family side_family
+_fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [styled-screen]
+  local pane=$1 cy=${2:-} raw_pane=${3:-$1}
+  local line raw_line indent left_stripped trimmed kind family side_family
   local top_inner top_spaces='' geometry_check=0 geometry_ambiguous=0
   local content_inner content_spaces bottom_inner bottom_spaces glyph
   local current_indent='' current_family='' row=0 top=-1 valid=0 content_rows=0
@@ -639,6 +737,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_CURSOR_EDGE=0
   FM_COMPOSER_SCAN_BARE_ROW=-1
   FM_COMPOSER_SCAN_SHELL_ROW=-1
+  FM_COMPOSER_SCAN_PRIME_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_START=-1
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
   FM_COMPOSER_SCAN_PI_PAIR_FOUND=0
@@ -698,10 +797,14 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         ;;
       *) leftbar_start=-1 ;;
     esac
-    # Bare agent-glyph rows: the glyph itself is the container proof. Bare
-    # shell glyphs are deliberately not candidates (dead-shell rule). Keep
-    # lower shell prompts as staleness evidence for cursorless selection.
-    if [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
+    # Prime Agent's `>` row is a candidate only when the styled row proves its
+    # full-width background surface is open at the glyph. Do not add `>` to the
+    # generic shell glyph list: a plain shell prompt remains staleness evidence.
+    raw_line=$(_fm_composer_screen_row "$row" "$raw_pane")
+    if [ "${FM_COMPOSER_CAP_PRIME:-0}" = 1 ] \
+       && fm_composer_row_is_prime_agent_surface "$raw_line" "$trimmed"; then
+      FM_COMPOSER_SCAN_PRIME_ROW=$row
+    elif [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_SHELL_ROW=$row
     elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_BARE_ROW=$row
@@ -921,6 +1024,15 @@ _fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
 # and separated shapes: pending beats empty, an unreadable row is unknown, and
 # geometry ambiguity turns pending into pending-unproven and empty into
 # unknown (an ambiguous container is not positive proof).
+_fm_composer_classify_prime_row() {  # <screen> <styled> <row>
+  local screen=$1 styled=$2 row=$3 raw content plain idle_re
+  raw=$(_fm_composer_screen_row "$row" "$screen")
+  content=$(_fm_composer_row_content "$raw" "$styled")
+  plain=$(_fm_composer_row_content "$raw" 0)
+  idle_re=$(fm_composer_prime_agent_idle_re)
+  fm_composer_classify_content 1 "$content" "$idle_re" insensitive "$plain" 1 "$styled"
+}
+
 _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <last-row>
   local screen=$1 styled=$2 ambiguous=$3 first=$4 last=$5
   local row raw content plain state unknown_seen=0
@@ -1074,6 +1186,7 @@ _fm_composer_select_cursorless() {
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
   FM_COMPOSER_SELECTED_AMBIG=0
+  FM_COMPOSER_NEEDS_LONE_RULE_IDENTITY=0
   if [ "$FM_COMPOSER_SCAN_BOX_BOTTOM" -ge 0 ]; then
     generic=$FM_COMPOSER_SCAN_BOX_BOTTOM
     FM_COMPOSER_SELECTED_KIND=box
@@ -1093,6 +1206,13 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_LEFTBAR_START
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_LEFTBAR_END
   fi
+  if [ "$FM_COMPOSER_SCAN_PRIME_ROW" -gt "$generic" ]; then
+    generic=$FM_COMPOSER_SCAN_PRIME_ROW
+    FM_COMPOSER_SELECTED_KIND=prime
+    FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_PRIME_ROW
+    FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_PRIME_ROW
+    FM_COMPOSER_SELECTED_AMBIG=0
+  fi
   if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
@@ -1107,8 +1227,12 @@ _fm_composer_select_cursorless() {
   fi
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
      && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
-    FM_COMPOSER_SELECTED_KIND=
-    return 1
+    if [ "${FM_COMPOSER_CAP_IDENTITY:-0}" = 1 ] && [ "$generic" -ge 0 ]; then
+      FM_COMPOSER_NEEDS_LONE_RULE_IDENTITY=1
+    else
+      FM_COMPOSER_SELECTED_KIND=
+      return 1
+    fi
   fi
   if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
@@ -1154,17 +1278,21 @@ _fm_composer_select_cursorless() {
 }
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
-  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
+  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1 idle_re
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
+  idle_re=${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}
+  FM_COMPOSER_CAP_PRIME=0
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
+    [ "$kv" = prime=1 ] && FM_COMPOSER_CAP_PRIME=1
   done <<EOF
 $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
-  _fm_composer_scan_screen "$plain" '' 1
+  _fm_composer_scan_screen "$plain" '' "$screen"
   _fm_composer_select_cursorless "$plain" || return 1
+  [ "$FM_COMPOSER_SELECTED_KIND" = prime ] && idle_re=$(fm_composer_prime_agent_idle_re)
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
@@ -1174,6 +1302,15 @@ EOF
       bare)
         if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
            && fm_composer_leading_agent_glyph_var glyph "$content"; then
+          content=${content#*"$glyph"}
+        fi
+        ;;
+      prime)
+        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
+           && fm_composer_leading_prompt_glyph_var glyph "$content"; then
+          prompt_row=$row
+          prompt_is_shell=1
+          placeholder_position=1
           content=${content#*"$glyph"}
         fi
         ;;
@@ -1216,7 +1353,7 @@ EOF
        || { { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
               || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ]; }; } \
             && [ "$placeholder_position" = 1 ] \
-            && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; } \
+            && fm_composer_idle_matches "$content" "$idle_re" insensitive; } \
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
             && [ "$row" -eq "$FM_COMPOSER_SELECTED_LAST" ] \
             && fm_composer_idle_matches "$content" "$footer_re" sensitive; }; then
@@ -1231,12 +1368,15 @@ EOF
 
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
-  local styled=0 cursor=0 has_identity=0 kv plain
+  local styled=0 cursor=0 has_identity=0 prime_cap=0 kv plain
+  FM_COMPOSER_CAP_IDENTITY=0
+  FM_COMPOSER_CAP_PRIME=0
   while IFS= read -r kv; do
     case "$kv" in
       styled=1) styled=1 ;;
       cursor=1) cursor=1 ;;
-      identity=1) has_identity=1 ;;
+      identity=1) has_identity=1; FM_COMPOSER_CAP_IDENTITY=1 ;;
+      prime=1) prime_cap=1; FM_COMPOSER_CAP_PRIME=1 ;;
     esac
   done <<EOF
 $caps
@@ -1246,7 +1386,7 @@ EOF
     case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
-  _fm_composer_scan_screen "$plain" "$cy"
+  _fm_composer_scan_screen "$plain" "$cy" "$screen"
   if [ -n "$cy" ]; then
     # Cursor mode (tmux): the shape CONTAINING the cursor is the composer.
     if [ "$FM_COMPOSER_SCAN_UNSAFE" = 1 ]; then
@@ -1308,7 +1448,38 @@ EOF
     printf 'unknown'
     return 0
   fi
+  if [ "$FM_COMPOSER_NEEDS_LONE_RULE_IDENTITY" = 1 ]; then
+    local lone_agent
+    if [ "$has_identity" != 1 ]; then
+      printf 'unknown'
+      return 0
+    fi
+    if [ -z "$identity" ]; then
+      printf 'need-identity'
+      return 0
+    fi
+    if [ "$identity" = probe-absent ]; then
+      printf 'unknown'
+      return 0
+    fi
+    lone_agent=${identity%%$'\t'*}
+    if [ "$lone_agent" = pi ]; then
+      printf 'unknown'
+      return 0
+    fi
+  fi
   case "$FM_COMPOSER_SELECTED_KIND" in
+    prime)
+      if [ "$prime_cap" != 1 ] || [ "$has_identity" != 1 ]; then
+        printf 'unknown'
+      elif [ -z "$identity" ]; then
+        printf 'need-identity'
+      elif [ "$identity" = probe-absent ] || [ "${identity%%$'\t'*}" != prime-agent ]; then
+        printf 'unknown'
+      else
+        _fm_composer_classify_prime_row "$screen" "$styled" "$FM_COMPOSER_SELECTED_FIRST"
+      fi
+      ;;
     pi)
       _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
       ;;
