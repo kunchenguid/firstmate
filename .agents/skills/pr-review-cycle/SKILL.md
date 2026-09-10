@@ -3,7 +3,7 @@ name: pr-review-cycle
 description: >-
   Agent-only procedure for taking any pull request from review intake to independently verified clean.
   Load before reviewing, fixing, or declaring a PR ready, and before accepting a worker's PR-ready or done claim.
-  Owns exact-head adversarial Codex review briefs, CI and bot review inspection, review-thread disposition, existing-PR fix briefs, and final independent verification.
+  Owns exact-head adversarial Codex review briefs, CI and configured-reviewer inspection, review-thread disposition, existing-PR fix briefs, and final independent verification.
 user-invocable: false
 metadata:
   internal: true
@@ -22,6 +22,9 @@ In that case, run only the read-only inspection and report findings; enter the m
 ## Pin the review target
 
 Set the repository and pull request explicitly, then record the current head before reviewing anything.
+The command blocks in this skill are the concrete GitHub implementation.
+For another supported forge, use its native CLI and API to collect the equivalent immutable head, base, checks, conversations, reviews, inline comments, discussion threads, and reviewer rerun evidence.
+The evidence requirements and completion gates do not change by forge; report a gap when the forge cannot supply one rather than skipping it or forcing a GitHub command onto that pull request.
 
 ```sh
 OWNER=<owner>
@@ -80,37 +83,36 @@ gh-axi api POST graphql --field query='mutation($thread: ID!) { resolveReviewThr
 
 Count unresolved nodes across every complete response page.
 If the GraphQL result reports `pageInfo.hasNextPage: true`, the `--paginate --full` command must return the later pages before the enumeration is complete.
+On another forge, enumerate and resolve its equivalent discussion-thread collection through the native API, including every pagination page.
 
-## Interpret automated reviewers
+## Interpret configured reviewers
 
-First identify which automated reviewers are configured from the repository workflows, app configuration, and recent PR check or comment history.
-Require a current result only from configured integrations, and record an unconfigured integration as not applicable with the evidence used to determine that status.
+First identify every human and automated reviewer the project configures or requests from repository workflows, app configuration, review requests, ownership rules, branch rules, and recent comparable PR history.
+For each configured reviewer, determine where it reports findings and verdicts, whether and how that evidence binds to a commit, what causes it to skip or defer, and how the project requests a rerun or renewed approval.
+Require a current result only from configured reviewers, and record an unconfigured integration as not applicable with the evidence used to determine that status.
 The absence of an expected configured reviewer is not a clean result.
-
-CodeRabbit's clean result is a summary issue comment, not a GitHub review object.
-Read the latest CodeRabbit summary in full and verify that the commit range named in that comment ends at `REVIEW_HEAD` before accepting its clean verdict.
-CodeRabbit skips draft PRs, so a draft-skip message is not a review result.
-Make the PR ready through the authorized workflow and request or await review before claiming clean.
-CodeRabbit reports rate limiting in a reply comment.
-When that explicit rate-limit reply applies to `REVIEW_HEAD`, record the comment URL and use the independent Codex adversarial review as the fallback required by the captain's directive instead of waiting indefinitely or inventing a CodeRabbit verdict.
-
-The Claude Review Bot from `anthropics/claude-code-action` posts a checklist comment after each push.
-Read the latest checklist comment in full, treat its last section as the verdict, and verify that it belongs to `REVIEW_HEAD` or to the review run triggered by that push.
-An older clean checklist cannot cover a newer head.
-
-After each push, wait for the push-triggered CI.
-When the Claude Review Bot is configured, also wait for its new checklist.
-When CodeRabbit is configured, request a fresh pass if one did not start automatically.
-
-```sh
-gh-axi pr comment "$PR" -R "$OWNER/$REPO" --body '@coderabbitai review'
-```
-
-Do not repeatedly summon CodeRabbit after its explicit rate-limit reply.
-If a configured Claude workflow does not run on the new head, inspect its workflow trigger and report the missing review instead of treating the old checklist as current.
-
+Read all findings even when an earlier summary or review submission says the review is clean.
 Identify automated comments by their author and content together because app login display names can change.
-Read all findings even when an earlier summary says the review is clean.
+
+After each push, capture the new `REVIEW_HEAD`, wait for push-triggered CI, and rerun, re-request, or refresh every configured reviewer through the project's own mechanism.
+Do not accept an older verdict for a newer head.
+If a configured reviewer does not run, inspect its trigger, eligibility, and explicit skip or deferral messages.
+Report missing review coverage instead of treating silence, a skip, or an unrelated old result as clean.
+Use a fallback only when the project's or captain's governing contract explicitly authorizes one for that reviewer and record the evidence that activated it.
+
+### Worked examples for common bot reviewers
+
+These examples describe one project's reviewer setup and are not requirements for projects that do not configure these integrations.
+
+- CodeRabbit's clean verdict can appear as a summary issue comment rather than a GitHub review object.
+  Read its latest summary in full and verify that the commit range named in the comment ends at `REVIEW_HEAD`.
+  A draft-skip message is not a review result; make the PR ready through the authorized workflow before requesting or awaiting its review.
+  CodeRabbit reports rate limiting in a reply comment.
+  When that explicit reply applies to `REVIEW_HEAD`, record its URL and use the independent adversarial review only when the governing directive authorizes that fallback.
+  Request a fresh pass after a push with `gh-axi pr comment "$PR" -R "$OWNER/$REPO" --body '@coderabbitai review'` when it does not start automatically, but do not repeatedly summon it after an explicit rate-limit reply.
+- The Claude review action from `anthropics/claude-code-action` can post a checklist comment after each push.
+  Read the latest checklist in full, treat its last section as the verdict, and verify that it belongs to `REVIEW_HEAD` or to the review run triggered by that push.
+  If the configured workflow does not run on the new head, inspect its workflow trigger and report the missing review instead of treating an older checklist as current.
 
 ## Independent Codex adversarial review
 
@@ -164,8 +166,8 @@ Read every CI result, review, issue comment, inline comment, and review thread.
 Fix valid findings with focused tests, reply to each thread with the fix evidence, and resolve it only after the fix is pushed.
 For every declined finding, reply with the concrete reason and resolve the thread.
 Commit and push only to the existing PR branch.
-After every push, capture the new exact head and rerun the independent Codex adversarial review plus every configured automated reviewer.
-Repeat until the exact head has all CI checks green, no actionable independent Codex or configured automated-reviewer findings, and zero unresolved review threads.
+After every push, capture the new exact head and rerun the independent Codex adversarial review plus every configured human or automated reviewer through the project's review mechanism.
+Repeat until the exact head has all CI checks green, no actionable independent Codex or configured-reviewer findings, and zero unresolved review threads.
 Do not merge.
 Report the full PR URL, final head SHA, check rollup, reviewer verdict evidence, and unresolved-thread count.
 ```
@@ -180,10 +182,10 @@ Fetch the PR again and verify all of the following against one unchanged head:
 - The pull request is open, non-draft, and `MERGEABLE`, its active `reviewDecision` has no change request, and every required approval is present.
 - `statusCheckRollup` and `gh-axi pr checks` show every current CI context and no pending, skipped-without-explanation, cancelled, or failing required work.
 - Every context expected from branch protection, applicable rules, and workflow-trigger analysis exists on `REVIEW_HEAD`; no required workflow is silently absent.
-- The paginated GraphQL query reports zero unresolved review threads.
-- When CodeRabbit is configured, its latest summary covers the exact head and is clean, or an explicit rate-limit reply is recorded and the exact-head Codex fallback is clean.
-- When the Claude Review Bot is configured, its latest checklist covers the exact head and its final verdict is clean.
-- Every other configured automated reviewer has a current clean result for the exact head or a documented integration-specific fallback authorized by its owning contract.
+- The forge's complete paginated thread or discussion query reports zero unresolved review threads.
+- Every configured automated reviewer that emits a head-bound verdict has a current clean result covering the exact head, or a documented reviewer-specific fallback explicitly authorized by its governing contract is satisfied for that head.
+- Every requested human review and every other reviewer surface has been inspected, all findings have a recorded disposition, and any approval or renewed-approval rule the project applies to the current head is satisfied.
+- The latest reviewer comments and verdict surfaces have been read in full, and none contains an actionable finding that is absent from the thread count.
 - The independent Codex report covers the exact head and ends `Verdict: ready`, unless `dependency-bump-triage` proves and records its narrow scout exception for this head.
 - Every valid finding was fixed and every declined finding has a visible reason before its thread was resolved.
 
