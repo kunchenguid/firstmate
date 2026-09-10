@@ -72,6 +72,23 @@ stranded_wake_payloads() {  # <home> <source-id>
     '$3 == "check" && index($4, "procevent:" id ":stranded:") == 1 { print $5 }' \
     "$1/state/.wake-queue"
 }
+# The same rows for a launch reconcile could not confirm, keyed by that source
+# and the registration identity the launch ran under.
+launch_failed_wake_keys() {  # <home> <source-id>
+  [ -e "$1/state/.wake-queue" ] || return 0
+  awk -F '\t' -v id="$2" \
+    '$3 == "check" && index($4, "procevent:" id ":launch-failed:") == 1 { print $4 }' \
+    "$1/state/.wake-queue"
+}
+launch_failed_wake_count() {  # <home> <source-id>
+  launch_failed_wake_keys "$1" "$2" | grep -c . || true
+}
+launch_failed_wake_payloads() {  # <home> <source-id>
+  [ -e "$1/state/.wake-queue" ] || return 0
+  awk -F '\t' -v id="$2" \
+    '$3 == "check" && index($4, "procevent:" id ":launch-failed:") == 1 { print $5 }' \
+    "$1/state/.wake-queue"
+}
 
 first_result() {  # <home> <source-id>: print the first captured result, if any
   local g
@@ -1370,6 +1387,29 @@ assert_contains "$sr4_again" "uncertain=1" \
   || fail "reconcile re-announced the same stranded generation: $sr4_again"
 [ "$(wc -l < "$SR4_LOG" | tr -d ' ')" = 1 ] \
   || fail "the second cycle started a replacement beside a reused pid's live group: $sr4_again"
+# The wake names `start` as the recovery, so run it against the state it will
+# actually meet. The earlier end-to-end demonstration of that command used an
+# UNDRIFTED fixture and therefore proved only the easy case; on this one the
+# state root has drifted, so the dead generation's reservation records cannot
+# be tidied, and the claim path waives that tidy-up only for a generation
+# proven gone - which a surviving group is not. `start` must refuse here, keep
+# the claim, and start no second source beside the live group, and the wake
+# must have said so rather than promising a reclaim.
+assert_contains "$sr4_wake" "cannot claim source" \
+  "the stranded wake promises an unconditional reclaim: $sr4_wake"
+set +e
+sr4_start=$(pe "$HSR4" start reused-group-src 2>&1)
+sr4_start_rc=$?
+set -e
+[ "$sr4_start_rc" -ne 0 ] \
+  || fail "start reported success against a claim it could not tidy: $sr4_start"
+assert_contains "$sr4_start" "cannot claim source" \
+  "start did not refuse by name on the drifted reused-pid fixture: $sr4_start"
+[ "$(sed -n '2p' "$sr4_claim")" = "$sr4_leader" ] \
+  || fail "a refused start replaced the reused-pid generation's claim"
+sleep 0.3
+[ "$(wc -l < "$SR4_LOG" | tr -d ' ')" = 1 ] \
+  || fail "a refused start ran a second source beside a reused pid's live group: $(cat "$SR4_LOG")"
 set +e
 sr4_retire=$(pe "$HSR4" retire reused-group-src 2>&1)
 sr4_rc=$?
@@ -1389,6 +1429,115 @@ pe "$HSR4" retire reused-group-src >/dev/null \
 kill -0 -"$sr4_leader" 2>/dev/null \
   && fail "retirement left the restored reused-group fixture running"
 pass "a reused pid never makes its surviving process group reclaimable"
+
+# --- the easy case the wake promises: an undrifted reused-pid claim ----------
+# Same strand, no state-root drift: the dead generation's reservation records
+# can be tidied, so the attached `start` the wake names takes the claim and
+# runs the source. The claim path does not consult the process group; that is
+# the documented asymmetry between reconcile and a deliberate start.
+HSR5="$TMP_ROOT/hsr5"; new_home "$HSR5"
+SR5_TRIGGER="$TMP_ROOT/reused-plain-trigger"
+SR5_LOG="$TMP_ROOT/reused-plain-executions"
+pe_register "$HSR5" lavish reused-plain-src -- "$RACE_BLOCKER" "$SR5_LOG" "$SR5_TRIGGER" >/dev/null
+pe "$HSR5" reconcile >/dev/null
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/reused-plain-src.claim" \
+  || fail "undrifted reused-pid fixture never claimed its source"
+wait_for "$SR5_LOG" || fail "undrifted reused-pid fixture source never started"
+sr5_claim="$FM_PROCEVENT_CLAIM_ROOT/reused-plain-src.claim"
+sr5_leader=$(sed -n '2p' "$sr5_claim")
+awk 'NR == 4 { print "different-live-process-identity"; next } { print }' \
+  "$sr5_claim" > "$sr5_claim.tmp" && mv "$sr5_claim.tmp" "$sr5_claim"
+chmod 0600 "$sr5_claim"
+sr5_out=$(pe "$HSR5" reconcile)
+assert_contains "$sr5_out" "uncertain=1" \
+  "reconcile did not strand the undrifted reused-pid claim: $sr5_out"
+[ "$(stranded_wake_count "$HSR5" reused-plain-src)" = 1 ] \
+  || fail "the undrifted strand was not announced: $sr5_out"
+pe "$HSR5" start reused-plain-src > "$TMP_ROOT/reused-plain-start.out" 2>&1 &
+sr5_start_pid=$!
+wait_for_lines "$SR5_LOG" 2 \
+  || fail "start did not reclaim the undrifted reused-pid claim: $(cat "$TMP_ROOT/reused-plain-start.out")"
+[ "$(sed -n '2p' "$sr5_claim")" != "$sr5_leader" ] \
+  || fail "start ran the source without taking the claim from the dead generation"
+: > "$SR5_TRIGGER"
+wait "$sr5_start_pid" \
+  || fail "start failed after reclaiming the undrifted claim: $(cat "$TMP_ROOT/reused-plain-start.out")"
+assert_contains "$(cat "$TMP_ROOT/reused-plain-start.out")" "captured:" \
+  "the reclaiming start did not capture the source's result"
+for _ in $(seq 1 50); do kill -0 -"$sr5_leader" 2>/dev/null || break; sleep 0.1; done
+pe "$HSR5" retire reused-plain-src >/dev/null 2>&1 || true
+pass "start reclaims a reused-pid claim whose leftovers can still be tidied"
+
+# --- a launch that cannot confirm is announced once per failure episode ------
+# `bin/fm-watch.sh` discards reconcile's `failed=` count and exit status, so a
+# runner that dies before claiming - for any cause, not only the claim wedge -
+# would be relaunched and reported failed every cycle with nobody told: armed
+# in appearance, a dead drop in fact. The episode is keyed by the registration
+# identity the launch ran under and ends when a launch of that source confirms,
+# so the registration below is damaged and repaired IN PLACE to keep that
+# identity fixed across the whole sequence. The wake changes nothing about the
+# launch: every failing cycle below still relaunches and still reports failed.
+HEP="$TMP_ROOT/hep"; new_home "$HEP"
+EP_SOURCE_CMD="$TMP_ROOT/episode-source.sh"
+cat > "$EP_SOURCE_CMD" <<'SH'
+#!/usr/bin/env bash
+printf 'episode result\n'
+SH
+chmod +x "$EP_SOURCE_CMD"
+pe_register "$HEP" lavish episode-src -- "$EP_SOURCE_CMD" >/dev/null
+EP_SOURCE="$HEP/state/procevent/episode-src.source"
+cp "$EP_SOURCE" "$TMP_ROOT/episode-good.source"
+awk '/^argv:$/ { print; exit } { print }' "$EP_SOURCE" > "$TMP_ROOT/episode-bad.source" \
+  || fail "could not prepare the damaged episode registration"
+ep_damage() { cat "$TMP_ROOT/episode-bad.source" > "$EP_SOURCE"; }
+ep_repair() { cat "$TMP_ROOT/episode-good.source" > "$EP_SOURCE"; }
+ep_reconcile() {  # <expected-fragment> <expected-exit-nonzero:0|1> <msg>; sets ep_out
+  local rc=0
+  ep_out=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=2 pe "$HEP" reconcile) || rc=$?
+  assert_contains "$ep_out" "$1" "$3: $ep_out"
+  if [ "$2" -eq 1 ]; then
+    [ "$rc" -ne 0 ] || fail "$3 (reconcile exited 0): $ep_out"
+  else
+    [ "$rc" -eq 0 ] || fail "$3 (reconcile exited $rc): $ep_out"
+  fi
+}
+ep_damage
+ep_reconcile "failed=1" 1 "a runner that died before claiming was not reported failed"
+[ "$(launch_failed_wake_count "$HEP" episode-src)" = 1 ] \
+  || fail "a launch that could not confirm was not announced: $ep_out"
+ep_key=$(launch_failed_wake_keys "$HEP" episode-src)
+[[ "$ep_key" =~ ^procevent:episode-src:launch-failed:[0-9]+-[0-9]+$ ]] \
+  || fail "the launch-failed wake is not keyed by source and registration identity: $ep_key"
+ep_wake=$(launch_failed_wake_payloads "$HEP" episode-src)
+assert_contains "$ep_wake" "episode-src" \
+  "the launch-failed wake does not name the source it is about: $ep_wake"
+assert_contains "$ep_wake" "start episode-src is not what fixes this" \
+  "the launch-failed wake does not say the runner never claimed: $ep_wake"
+assert_contains "$ep_wake" "adapter binary" \
+  "the launch-failed wake does not name what to check: $ep_wake"
+ep_reconcile "failed=1" 1 "the second cycle stopped relaunching a source that cannot start"
+[ "$(launch_failed_wake_count "$HEP" episode-src)" = 1 ] \
+  || fail "the same failure episode was announced twice: $ep_out"
+ep_repair
+ep_reconcile "started=1" 0 "a repaired source did not confirm"
+assert_contains "$ep_out" "failed=0" "a repaired source was still reported failed: $ep_out"
+[ "$(launch_failed_wake_count "$HEP" episode-src)" = 1 ] \
+  || fail "a confirmed launch produced a launch-failed wake: $ep_out"
+for _ in $(seq 1 100); do
+  [ -e "$FM_PROCEVENT_CLAIM_ROOT/episode-src.claim" ] || break
+  sleep 0.1
+done
+[ ! -e "$FM_PROCEVENT_CLAIM_ROOT/episode-src.claim" ] \
+  || fail "the confirmed episode runner never released its claim"
+ep_damage
+ep_reconcile "failed=1" 1 "a source that failed again after recovering was not reported failed"
+[ "$(launch_failed_wake_count "$HEP" episode-src)" = 2 ] \
+  || fail "a new failure episode after a confirmed launch was not announced: $ep_out"
+[ "$(launch_failed_wake_keys "$HEP" episode-src | sort -u | wc -l | tr -d ' ')" = 1 ] \
+  || fail "the second episode ran under a different registration identity: $(launch_failed_wake_keys "$HEP" episode-src)"
+ep_repair
+pe "$HEP" retire episode-src >/dev/null 2>&1 || true
+pass "a launch that cannot confirm is announced once per failure episode"
 
 # --- reconcile reports only launches it actually confirmed -------------------
 # The reported incident. A review board the captain had answered sat collecting

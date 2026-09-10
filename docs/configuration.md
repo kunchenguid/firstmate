@@ -836,7 +836,8 @@ This proof belongs only to that stop's own escalation and cannot authorize anoth
 A stale claim whose process group still has members is one `reconcile` never displaces, and the two shapes it comes in recover differently.
 `reconcile` preserves such a claim without signalling the ambiguous group or starting a replacement: the group check probes the runner's own process group, which contains its polling source child, so surviving members can mean that child is still attached to the session the source collects from, and a replacement would put a second destructive poller on it.
 `list` reports both shapes as `orphaned`.
-When the recorded pid is alive under a different identity while the group still has members, the claim boundary itself does not consult the process group, so `bin/fm-procevent.sh start <source-id>` reclaims that claim; that hand-run command is the recovery path, taken by someone who has checked that nothing is still polling the source.
+When the recorded pid is alive under a different identity while the group still has members, the claim boundary itself does not consult the process group, so `bin/fm-procevent.sh start <source-id>` reclaims that claim provided the dead generation's reservation records can still be tidied, and otherwise refuses with `cannot claim source`; that tidy-up is waived only for a generation proven gone, which this one is not.
+That hand-run command is the recovery path, taken by someone who has checked that nothing is still polling the source.
 That asymmetry between the automatic path and the deliberate one is the design rather than an inconsistency, and it is not a claim-level invariant: nothing below `reconcile` enforces it.
 When the leader itself is gone and its group still has members - the leader died to anything other than the stop's own signal - `start` does not reclaim the claim either: it reports `already owned` and changes nothing, and `retire`, `reconcile`, `sweep-home`, and the guard all refuse the surviving group permanently, so the source stops listening.
 Recovery there is a human verifying whether the dead runner's polling child is still attached to the source; once that process group is empty the generation reads as gone and the next `reconcile` reclaims the source on its own.
@@ -894,8 +895,11 @@ Keep this window well below `FM_POLL`.
 Raising the confirm window lengthens every supervision cycle and delays wake delivery by up to that much.
 
 A source that can never start is reported as `failed=` with a non-zero exit on every `reconcile`, rather than counted as `started` and retried silently as though it were healthy, so a wedged source stays visible instead of presenting as armed.
-That count reaches whoever runs the command, because `bin/fm-watch.sh` discards `reconcile`'s output and exit status.
-A source stranded on a claim nothing may automatically displace does not depend on anyone running the command: `reconcile` publishes a durable `check` wake for it once per stranded claim generation, as described above, and `bin/fm-watch.sh` surfaces that wake under `process-event source stranded` rather than as a captured result.
+That count reaches only whoever runs the command, because `bin/fm-watch.sh` discards `reconcile`'s output and exit status, so an unconfirmed launch is also announced through the wake queue: `reconcile` publishes a durable `check` wake (`procevent:<id>:launch-failed:<registration-identity>`) once per failure episode, and later cycles stay silent for that episode until a launch of that source confirms, after which a fresh failure announces again.
+The announcement changes nothing about the launch: `reconcile` keeps relaunching the source every cycle exactly as before, and nothing is retried differently, throttled, or recovered from that signal.
+The wake says what is true for that shape - the runner never claimed, so `start` is not what fixes it; the attached `bin/fm-procevent.sh start <source-id>` reproduces the failure with the runner's refusal on stderr, where the detached launch discards it - and names the source command and adapter binary the registration names as what to check.
+A source stranded on a claim nothing may automatically displace is announced the same way, once per stranded claim generation, as described above.
+`bin/fm-watch.sh` surfaces both under their own headlines - `process-event source stranded` and `process-event source failed to start` - rather than as a captured result.
 
 A value this command cannot use is refused by name before anything is launched, the same way `FM_PROCEVENT_LAUNCH_FLOOR_SECONDS` and `FM_PROCEVENT_MAX_OUTPUT_BYTES` are refused, so a mistyped window can never present as a fleet of sources that cannot start.
 
