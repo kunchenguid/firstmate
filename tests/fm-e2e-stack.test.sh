@@ -209,13 +209,39 @@ test_record_accepts_the_sanitized_project_name_derived_from_a_mixed_case_dotted_
   record_stack "$c" 'T1.abc' fm-T1.abc-revcaf >/dev/null 2>&1 || code=$?
   expect_code 1 "$code" "record accepted a project name carrying the task id's raw uppercase/dot"
 
-  # The skill's TASK_SLUG rule (lowercase, non-[a-z0-9-] -> '-') turns that
+  # The skill's TASK_SLUG rule (lowercase, non-[a-z0-9-] -> '-', then a crc32
+  # disambiguator appended because sanitizing this id is lossy) turns that
   # same task id into a project name the script accepts.
-  record_stack "$c" 'T1.abc' fm-t1-abc-revcaf >/dev/null \
+  record_stack "$c" 'T1.abc' fm-t1-abc-30143a-revcaf >/dev/null \
     || fail "record refused the sanitized project name the skill derives from a mixed-case dotted task id"
-  assert_contains "$(run_e2e "$c" read 'T1.abc')" 'project=fm-t1-abc-revcaf' \
+  assert_contains "$(run_e2e "$c" read 'T1.abc')" 'project=fm-t1-abc-30143a-revcaf' \
     "record did not keep the sanitized project name"
   pass "a task id with an uppercase letter and a dot sanitizes into a project name the script accepts"
+}
+
+test_record_disambiguates_distinct_task_ids_that_sanitize_to_one_slug() {
+  local c
+  c=$(make_case record-task-id-collision)
+
+  # pr.123 and pr-123 are two distinct, individually valid raw task ids
+  # (fm_pr_task_id_valid accepts both '.' and '-') that both sanitize to the
+  # same base slug "pr-123" once '.' becomes '-'. Undisambiguated they would
+  # derive one identical PROJECT, and a second task's `up` could silently
+  # land inside the first task's still-live compose project. (Chosen to
+  # differ by punctuation rather than letter case, since macOS's default
+  # case-insensitive filesystem would otherwise collide the two tasks'
+  # *.e2e-stack record files themselves, a separate concern from the
+  # docker-project-name collision this test targets.)
+  record_stack "$c" 'pr.123' fm-pr-123-0e167d-revcaf --worktree "$c/wt-dot" >/dev/null \
+    || fail "record refused the disambiguated project name derived from pr.123"
+  record_stack "$c" 'pr-123' fm-pr-123-revcaf --worktree "$c/wt-hyphen" >/dev/null \
+    || fail "record refused the unsuffixed project name derived from the already-clean pr-123"
+
+  run_e2e "$c" gate 'pr.123' >/dev/null 2>&1 \
+    || fail "gate refused pr.123's record once pr-123's record also existed: their derived projects collided"
+  run_e2e "$c" gate 'pr-123' >/dev/null 2>&1 \
+    || fail "gate refused pr-123's record once pr.123's record also existed: their derived projects collided"
+  pass "distinct raw task ids that sanitize to one slug derive different, individually valid project names"
 }
 
 test_record_refuses_an_external_volume_that_is_shared_local_data() {
@@ -438,6 +464,7 @@ test_clear_is_idempotent() {
 test_record_round_trips_and_replaces_a_reprovisioned_project
 test_record_refuses_a_project_cleanup_could_not_safely_own
 test_record_accepts_the_sanitized_project_name_derived_from_a_mixed_case_dotted_task_id
+test_record_disambiguates_distinct_task_ids_that_sanitize_to_one_slug
 test_record_refuses_an_external_volume_that_is_shared_local_data
 test_gate_refuses_a_project_another_task_record_claims
 test_gate_refuses_when_labels_and_the_record_disagree

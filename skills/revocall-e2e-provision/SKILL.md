@@ -48,7 +48,10 @@ Derive everything from the task id, once, and use it consistently.
 
 ```
 TASK      = $FM_TASK_ID, or --task
-TASK_SLUG = TASK, lowercased, with every character outside [a-z0-9-] replaced by a hyphen
+TASK_SLUG = TASK, lowercased, with every character outside [a-z0-9-] replaced by a hyphen;
+            if that differs from TASK, append -<h>, where <h> is the first 6 hex digits of
+            crc32(TASK) zero-padded to 8 digits (the same hash step 2 derives the port offset
+            from); an already-clean TASK is left unsuffixed
 STACK     = the profile's short name (revcaf, aih, revocall)
 PROJECT   = fm-<TASK_SLUG>-<STACK>
 CONTAINER = <PROJECT>-<service>
@@ -58,6 +61,8 @@ VOLUMES   = <PROJECT>_<volume>, or revocall-infra_<volume>-data-<TASK> for the d
 
 Sanitize before deriving PROJECT.
 `--task`/`FM_TASK_ID` is validated only against the loose `[A-Za-z0-9._-]+` charset, but `bin/fm-e2e-stack.sh`'s `project_name_valid()` accepts only lowercase `[a-z0-9][a-z0-9_-]*`; an uppercase letter or a dot in TASK would otherwise mint a PROJECT the script refuses outright, and standalone mode has no equivalent check before `docker compose up`.
+Plain lowercase-and-hyphenate is lossy on its own: `PR-123` and `pr-123` are two distinct, individually valid raw ids that would otherwise collapse onto one PROJECT, and nothing refuses that at provisioning time — gate 3 only refuses to *tear down* an ambiguous claim, at `gate`/`down` time, so a second `up` could silently land inside the first task's still-live containers.
+The crc32 suffix on any TASK that sanitizing actually changes makes that collision structurally unreachable without a uniqueness registry or any cross-task state; a TASK that is already clean, which is the lowercase-hyphenated form `tasks-axi` mints, is left unsuffixed, so the common case stays exactly as readable in `docker ps` as before.
 TASK_SLUG is what PROJECT, CONTAINER, and the compose-internal NETWORK/VOLUMES are built from.
 TASK itself stays raw everywhere ownership must trace back to the exact id `record`/`down` were given: the `ai.revolab.fm.task` label, the deploy stack's external-volume suffix (gate 4 checks that the volume name contains the raw id), and the task's own `/tmp/fm-<task>` root.
 
@@ -83,11 +88,12 @@ Carry both; neither replaces the other.
 
 1. **Preflight.**
    Confirm `docker info` answers and `docker compose version` is 2.20 or newer, because the override file below needs the `!override` tag.
-   Resolve the task id, stop if neither `FM_TASK_ID` nor `--task` supplies one, then derive `TASK_SLUG` from it (see Identity scheme) once, for every docker name below.
+   Resolve the task id, and stop if neither `FM_TASK_ID` nor `--task` supplies one.
    Read the profile row from `references/profiles.md` and confirm every file it names exists in the checkout.
 
 2. **Derive ports.**
    Take `k` as `1 + (crc32(<task id>) mod 20)` and use `k * 300` as the offset, which is the multiples-of-300 convention `RevoCall/deploy/SLOTS.md` records as verified safe.
+   Derive `TASK_SLUG` from that same `crc32(<task id>)` now too (see Identity scheme), once, for every docker name below.
    For the RevoCall deploy stack, do not compute the ports yourself: run `deploy/gen-slot-env.sh --slot <short-slug> --offset <k*300>` and use its output verbatim.
    That generator already emits every `PORT_*`, `LK_UDP_RANGE`, `VOL_SUFFIX`, `NET_NAME`, `IMG_SUFFIX`, and `COMPOSE_PROJECT_NAME`, and it already refuses an unsafe offset before bring-up.
    Its `--slot` argument must match `^[a-z0-9]+$`, so pass a sanitized short slug rather than a hyphenated task id.
