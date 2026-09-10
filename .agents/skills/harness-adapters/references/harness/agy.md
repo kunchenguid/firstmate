@@ -33,7 +33,8 @@ Delivery is confirmed by the task turn-end marker, or by the echoed pointer text
 Spawn removes any `state/<id>.turn-ended` marker left by a previous incarnation right before the pointer is submitted, so a relaunch can only credit a marker written by this incarnation's hook.
 The idle-composer branch is load-bearing: secondmate spawns create no task-local turn-end hook, and a brief turn that starts and finishes between two polls leaves no busy footer to observe (`agy_wait_for_delivery` in `../../../bin/fm-spawn.sh`, regression `../../../tests/fm-agy-harness.test.sh`).
 Tmux, Herdr, Orca, and cmux route their composer decisions through the shared separated-composer structure.
-Zellij has no cursor or ANSI composer primitive and retains its existing pane-diff submission proof, so a named Agy composer branch is not applicable there.
+Zellij declares `styled=1` with `cursor=0`, so it does expose an ANSI composer primitive and lacks only the cursor, which the shared structure treats as optional.
+Orca and cmux declare `styled=0` with `cursor=0` and were routed through the shared structure anyway, so capability is not the reason: the Agy composer branch was simply not added to the zellij adapter here.
 
 ## Detection
 

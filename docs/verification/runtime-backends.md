@@ -222,7 +222,7 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 
 The Agy composer review covered all five backends.
 Tmux, Herdr, Orca, and cmux use the shared complete separator-container proof.
-Zellij retains its screen-diff submit acknowledgement because its adapter exposes no cursor or ANSI composer primitive.
+Zellij is the one backend whose adapter did not get the Agy composer branch in this change, and its capabilities are not the reason: it declares `styled=1` with `cursor=0`, while Orca and cmux declare `styled=0` with `cursor=0` and were wired to the shared proof regardless.
 `tests/fm-agy-harness.test.sh` executes the shared and backend-specific interfaces, while [`agy-harness.md`](agy-harness.md) owns the live captures.
 
 ### Cleanup endpoint identity

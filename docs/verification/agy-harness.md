@@ -310,8 +310,8 @@ On 1.1.28 an `fm-send` steer produced the durable inbox record and doorbell, the
 Tmux uses the shared separated-composer classifier, the Agy-only `esc to cancel` busy fallback, and `agy` foreground process liveness.
 The separated-composer classifier is harness-scoped through `FM_COMPOSER_HARNESS`, mirroring the busy-signature rule: `fm-send` and `fm-control` declare the target task's recorded harness resolved to its verified adapter family, `fm-spawn` declares every launch's harness only after the backend container exists so the value never becomes a tmux server's ambient environment, and the away-mode daemon always re-detects its own pane's harness instead of trusting an inherited value, so another harness's rule/quote/rule transcript tail is never claimed as an Agy composer.
 Herdr prefers native agent state when available and otherwise uses the same harness-scoped busy fallback and separated-composer classifier.
-Zellij retains its existing screen-diff submission proof because it exposes no cursor or ANSI composer primitive.
-Orca and cmux use the shared separated-composer classifier over their plain screen captures.
+Zellij did not get an Agy composer branch in this change, and capability is not the reason: its adapter captures with `dump-screen --ansi` and declares `styled=1` with `cursor=0`, so the only primitive it lacks is the cursor, which the separated-composer structure treats as optional.
+Orca and cmux use the shared separated-composer classifier over their plain screen captures, and they declare `styled=0` with `cursor=0`, so they lack both primitives and were wired to it anyway.
 Away-mode primary injection currently supports tmux and Herdr, so a separate Agy primary-injection path is not applicable to Zellij, Orca, or cmux.
 No Herdr lifecycle command was run in either pass.
 
