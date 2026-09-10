@@ -670,6 +670,7 @@ run_pr_merge() {
   FM_TEST_CASE_DIR="$case_dir" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_REAL_MV="$REAL_MV" \
+  HOME="${FM_TEST_USER_HOME:-$case_dir/user-home}" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
   PATH="$case_dir/policybin:$case_dir/fakebin:$PATH" \
@@ -4804,8 +4805,8 @@ test_absent_backlog_still_merges() {
   expect_code 0 "$rc" "absent-backlog-merges: a home with no backlog must still merge"
   assert_no_grep 'held for the captain' "$case_dir/stderr" \
     "absent-backlog-merges: an absent backlog was read as a captain hold"
-  grep -qxF 'pr merge 61 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    || fail "absent-backlog-merges: the merge was not attempted"
+  assert_merge_call "$case_dir" 61 example/repo \
+    "absent-backlog-merges: the merge did not reach the head-bound seam"
   pass "fm-pr-merge proceeds when the home carries no backlog at all"
 }
 
@@ -4926,10 +4927,8 @@ test_absent_user_backend_config_directory_and_backlog_still_merge() {
   set -e
 
   expect_code 0 "$rc" "absent-user-backend-config-directory-and-backlog-merges: sound defaults and no backlog must permit merging"
-  [ "$(grep -c '^pr merge ' "$case_dir/gh-axi.log")" -eq 1 ] \
-    || fail "absent-user-backend-config-directory-and-backlog-merges: the forge must merge exactly once"
-  grep -qxF 'pr merge 67 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    || fail "absent-user-backend-config-directory-and-backlog-merges: the expected merge was not attempted"
+  assert_merge_call "$case_dir" 67 example/repo \
+    "absent-user-backend-config-directory-and-backlog-merges: the merge did not reach the head-bound seam"
   pass "fm-pr-merge proceeds once when its user configuration directory and backlog are genuinely absent"
 }
 
@@ -4953,8 +4952,8 @@ test_backend_override_bypasses_unreadable_user_config() {
   chmod 644 "$user_config"
 
   expect_code 0 "$rc" "backend-override-bypasses-unreadable-user-config: an explicit backend must bypass config"
-  grep -qxF 'pr merge 65 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    || fail "backend-override-bypasses-unreadable-user-config: the merge was not attempted"
+  assert_merge_call "$case_dir" 65 example/repo \
+    "backend-override-bypasses-unreadable-user-config: the merge did not reach the head-bound seam"
   pass "fm-pr-merge honors a backend override over an unreadable user configuration"
 }
 
@@ -5040,3 +5039,10 @@ test_github_refuses_a_merge_flag_it_cannot_bind
 test_github_delete_branch_runs_only_after_a_proved_merge
 test_github_refuses_every_deferred_merge_spelling
 test_github_refuses_two_different_merge_methods
+test_absent_backlog_still_merges
+test_unreadable_backlog_refuses_the_merge
+test_unreadable_backend_config_refuses_the_merge
+test_unreadable_user_backend_config_refuses_the_merge
+test_untraversable_user_backend_config_directory_refuses_the_merge
+test_absent_user_backend_config_directory_and_backlog_still_merge
+test_backend_override_bypasses_unreadable_user_config
