@@ -86,9 +86,14 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 | imbalance | | 31 ms |
 
 The current table is generated from the runner's retained maxima, which now cover every script in the lane.
-Those weights are deliberately conservative, so a healthy run comes in under them.
+Those weights are conservative only relative to the runs they were measured from: each is that script's slowest observed duration across those four runs, so a shard's predicted total covers any of them.
+It does not bound a slower runner.
+In the first real CI run on this table the worst shard measured 20.78 min against 18.11 min of assignment weight, so a shard can and does exceed its predicted weight.
 The table was validated against a held-out run rather than fitted to the runs that produced it: rebuilding the hints from the four runs above and scoring that partition against [run 34447627189](https://github.com/kunchenguid/firstmate/actions/runs/34447627189), which contributed nothing to the table, puts its worst shard at 16.99 min against 18.11 min of assignment weight, with the five shards spanning 14.47 to 16.99 min.
 The same held-out run under the previous hints spanned 13.24 to 21.93 min.
+That replay is a prediction, not a bound: it reuses one run's per-script durations and so cannot model another run's runner-speed spread.
+The first real CI run on the refreshed table, [run 34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299), came in higher at 13.51 to 20.78 min.
+Prefer a figure measured by an actual run over a replayed one whenever both are available.
 
 The single longest script, `tests/fm-watch-triage.test.sh` at 592748 ms, is the floor for any shard count.
 At 9.88 min it is 10.9% of the whole lane, so no shard count can bring a shard below it.
@@ -148,14 +153,17 @@ The margin the bound leaves, in minutes:
 
 | | minutes | share of the 30-minute cap |
 |---|---:|---:|
-| worst shard on the held-out run, current hints | 16.99 | 56.6% |
+| worst shard measured by CI on the refreshed hints ([run 34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299)) | 20.78 | 68.4% |
 | guard fails above | 21.60 | 72% |
 | job is cancelled at | 30.00 | 100% |
 
-That leaves **4.61 minutes of growth** between a healthy lane and the guard's failure threshold, and a further 8.4 minutes between that threshold and a cancellation.
+That leaves roughly **1.1 minutes of growth** between the lane as measured and the guard's failure threshold, and a further 8.4 minutes between that threshold and a cancellation.
+Read that first number as small on purpose rather than as slack: this bound is an early warning, so the guard is expected to fire on modest drift, and a firing means refresh the hints or repack the lane rather than raise the bound.
+An earlier revision of this section put that margin at 4.61 minutes; that came from the held-out replay above rather than from a run, and the measured figure supersedes it.
 The numerator is the suite's wall clock while `timeout-minutes` bounds the whole job, so the share understates the job by whatever the surrounding steps cost.
-That bias is measured, not assumed: across the 30 `tests-portable-serial` jobs of those runs, non-suite time ranged from 15 to 35 seconds, at most 1.9% of the cap, which does not consume the margin above.
-Re-derive these numbers from fresh artifacts if the job gains or loses steps, or if the lane's variance changes.
+That bias is measured, not assumed: across the 30 `tests-portable-serial` jobs of those runs, non-suite time ranged from 15 to 35 seconds, at most 1.9% of the cap.
+Against a margin this size that bias is a material fraction of it rather than negligible, which is a further reason to treat a firing as a signal to re-measure.
+Re-derive every number in this section from the most recent green CI run whenever the job gains or loses steps, the lane's variance changes, or the hints are refreshed.
 
 ### What it reports
 
