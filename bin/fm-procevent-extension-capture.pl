@@ -1,7 +1,7 @@
 use strict;
 use warnings;
 use Cwd qw(getcwd);
-use Fcntl qw(O_CREAT O_EXCL O_NOFOLLOW O_RDONLY O_RDWR);
+use Fcntl qw(O_CREAT O_EXCL O_NOFOLLOW O_RDONLY O_RDWR O_WRONLY);
 use JSON::PP qw(encode_json);
 use POSIX qw(dup2);
 
@@ -92,8 +92,12 @@ if (@ARGV && $ARGV[0] eq 'handoff') {
 my ($registry_fd, $inbox_fd, $reservation_fd, $id, $adapter, $extension_id, $extension_version, $capability_version,
     $package_digest, $binding_digest, $claim_token, $runner_name, $output_name,
     $runner_pid, $claim_identity, $limit, @command) = @ARGV;
+my $launch_ready_name;
+$launch_ready_name = shift @command if @command && $command[0] ne "--";
 die "missing command\n" unless @command && shift(@command) eq "--";
 die "invalid limit\n" unless defined $limit && $limit =~ /\A\d+\z/;
+die "invalid launch boundary\n" if defined($launch_ready_name)
+  && $launch_ready_name !~ /\A\.[A-Za-z0-9._-]{1,384}\.launch-ready\z/;
 our ($registry_dir, $registry, $reservation_dir, $reservation_root, $sequence);
 
 sub fail { die "capture failed: $_[0]\n"; }
@@ -180,6 +184,14 @@ my $runner = open_new($runner_name);
 write_all($runner, "$runner_pid\n");
 close($runner) or fail("cannot close runner record");
 my $stage = open_new($output_name);
+my $launch_ready;
+if (defined $launch_ready_name) {
+  sysopen($launch_ready, $launch_ready_name, O_WRONLY | O_NOFOLLOW)
+    or fail("cannot open launch boundary");
+  my @launch_ready_stat = stat($launch_ready);
+  fail("unsafe launch boundary") unless @launch_ready_stat && -f _ && $launch_ready_stat[4] == $<
+    && ($launch_ready_stat[2] & 07777) == 0600 && $launch_ready_stat[3] == 1;
+}
 pipe(my $reader, my $writer) or fail("cannot create output pipe");
 my $child = fork();
 defined $child or fail("cannot fork adapter");
@@ -191,6 +203,10 @@ if ($child == 0) {
   exit 127;
 }
 close($writer);
+if (defined $launch_ready) {
+  write_all($launch_ready, "ready\n");
+  close($launch_ready) or fail("cannot close launch boundary");
+}
 my ($written, $truncated) = (0, 0);
 while (1) {
   my $read = sysread($reader, my $buffer, 65536);

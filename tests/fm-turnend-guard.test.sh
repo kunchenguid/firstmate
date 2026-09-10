@@ -2003,7 +2003,7 @@ test_hook_away_daemon_allows_beacon_within_poll_derived_grace() {
   # grace (max(300, FM_POLL + 60) = 660 at FM_POLL=600) - a live daemon that
   # simply has not finished restarting its watcher yet.
   beat=$(( $(date +%s) - 400 ))
-  touch -d "@$beat" "$dir/state/.last-watcher-beat"
+  fm_touch_epoch "$beat" "$dir/state/.last-watcher-beat"
   out=$(FM_GUARD_GRACE='' FM_POLL=600 run_hook "$dir" false); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
@@ -2036,7 +2036,7 @@ test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace() {
   # 700s exceeds even the wider poll-derived grace (660 at FM_POLL=600), so a
   # live daemon that has genuinely stopped restarting its watcher still blocks.
   beat=$(( $(date +%s) - 700 ))
-  touch -d "@$beat" "$dir/state/.last-watcher-beat"
+  fm_touch_epoch "$beat" "$dir/state/.last-watcher-beat"
   out=$(FM_GUARD_GRACE='' FM_POLL=600 run_hook "$dir" false); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
@@ -2060,7 +2060,7 @@ test_hook_no_afk_ignores_poll_derived_grace() {
   # accept, but away mode is off here, so the strict watcher predicate and its
   # flat default govern instead - old behavior, unaffected by FM_POLL.
   beat=$(( $(date +%s) - 400 ))
-  touch -d "@$beat" "$dir/state/.last-watcher-beat"
+  fm_touch_epoch "$beat" "$dir/state/.last-watcher-beat"
   out=$(FM_GUARD_GRACE='' FM_POLL=600 run_hook "$dir" false); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true

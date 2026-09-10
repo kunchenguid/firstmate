@@ -188,7 +188,9 @@ fm_watcher_healthy() {
 #   autoarm     Claude's Stop-hook auto-arm and Cursor's stop-hook park: the
 #               watcher is armed at each turn end and exits on its wake, so it
 #               runs only BETWEEN turns. Mid-turn a fresh beacon with no live
-#               watcher process is the healthy state.
+#               watcher process is healthy, and a stale beacon is still healthy
+#               while a Claude auto-arm generation explains the gap
+#               (fm_autoarm_midturn_healthy).
 #   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
 #               continuity. It tears the watcher down on every actionable wake and
 #               spawns the replacement itself, so a genuinely unheld singleton lock
@@ -336,7 +338,11 @@ fm_afk_daemon_owns_supervision() {
 #                              stale-beacon - the beacon is stale beyond grace or
 #                                             absent (a genuine supervision lapse)
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
-# because the watcher only runs between turns; only a stale beacon is a lapse.
+# because the watcher only runs between turns. A stale beacon is still healthy
+# while fm_autoarm_midturn_healthy proves a Claude auto-arm generation
+# explains the gap (a rewake bound to the current recovery generation and
+# live session lock), because turn-end re-arms.
+# Without that proof a stale or absent beacon is a genuine lapse.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
 # genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
 # session provably owns continuity (fm_extension_owns_supervision: the Pi or the
@@ -366,7 +372,9 @@ fm_watcher_supervision_verdict() {
   esac
   model=$(fm_supervision_model)
   if [ "$model" = autoarm ]; then
-    [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true
+    if [ "$fresh" = true ] || fm_autoarm_midturn_healthy "$state" "$grace"; then
+      FM_WATCHER_VERDICT_OK=true
+    fi
     return 0
   fi
   if fm_watcher_healthy "$state" "$watch" "$grace" "$home"; then
@@ -1245,9 +1253,11 @@ fm_failure_episode_reset() {
 # state/.claude-autoarm-epoch, whose monotonic epoch sequence IS the claim
 # generation. This is an optimistic, generation-based single-flight design:
 #
-#   - The CURRENT claim is the ledger's latest entry: line 1 is the classic
-#     "epoch=N owner_pid=P outcome=O updated_at=T" record, and line 2 is the
-#     claiming process's pid-identity, the same identity every other
+#   - The CURRENT claim is the ledger's latest entry: line 1 begins with the
+#     "epoch=N owner_pid=P outcome=O updated_at=T" record. A "rewake" outcome
+#     also records "session_pid=S recovery_generation=G", binding that
+#     handling turn to its live session-lock owner and watcher recovery episode.
+#     Line 2 is the claiming process's pid-identity, the same identity every other
 #     supervision lock in this repo records (fm_pid_identity above). The
 #     identity is MANDATORY: a claimant that cannot record it does not claim
 #     (continuity falls to the synchronous guard), and the identity is read
@@ -1328,7 +1338,8 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
 }
 
 # Parse the current ledger claim. Sets FM_AUTOARM_GEN, FM_AUTOARM_OWNER,
-# FM_AUTOARM_OUTCOME, and FM_AUTOARM_IDENTITY (line 2 of the entry, and ONLY
+# FM_AUTOARM_OUTCOME, FM_AUTOARM_SESSION, FM_AUTOARM_RECOVERY, and
+# FM_AUTOARM_IDENTITY (line 2 of the entry, and ONLY
 # line 2 - identity is never substituted from a lock, so a transient
 # micro-mutex hold or a reused pid can never authenticate a stale entry).
 fm_autoarm_ledger_read() {  # <state-dir>
@@ -1337,10 +1348,14 @@ fm_autoarm_ledger_read() {  # <state-dir>
   FM_AUTOARM_GEN=
   FM_AUTOARM_OWNER=
   FM_AUTOARM_OUTCOME=
+  FM_AUTOARM_SESSION=
+  FM_AUTOARM_RECOVERY=
   FM_AUTOARM_IDENTITY=
   FM_AUTOARM_GEN=$(_fm_autoarm_epoch_field "$epoch" epoch) || return 1
   FM_AUTOARM_OWNER=$(_fm_autoarm_epoch_field "$epoch" owner_pid) || return 1
   FM_AUTOARM_OUTCOME=$(_fm_autoarm_epoch_field "$epoch" outcome) || return 1
+  FM_AUTOARM_SESSION=$(_fm_autoarm_epoch_field "$epoch" session_pid 2>/dev/null || true)
+  FM_AUTOARM_RECOVERY=$(_fm_autoarm_epoch_field "$epoch" recovery_generation 2>/dev/null || true)
   case "$FM_AUTOARM_GEN" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -1375,6 +1390,40 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
     return 1
   fi
   return 0
+}
+
+# True when a stale mid-turn beacon is explained by a healthy Claude Stop
+# auto-arm generation, so the pull guard must not cry supervision-off.
+# The watcher runs only between turns; turn-end re-arms.
+#
+# Healthy means outcome=rewake with no exhausted-failure marker, bound to the
+# current session-lock pid and current watcher recovery generation. The rewake
+# ledger must also be at least as new as the last watcher beacon: a later beacon
+# proves another between-turns watcher cycle has begun, so the rewake belongs to
+# an earlier handling turn.
+#
+# A missing generation, a failed or exhausted episode, an open arming claim, a
+# changed or dead session lock, a moved recovery generation, or an absent/later
+# beacon all fail it, so a genuine lapse stays loud. Cursor autoarm homes have no
+# Claude epoch ledger and fail this, keeping their existing fresh-beacon-only
+# pull-guard contract. The rewake and beacon may both be older than grace: a
+# legitimate handling turn can outrun grace, which is the false alarm this
+# exists to stop.
+fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
+  local state=$1 lock_pid recovery epoch_mtime beacon_mtime
+  [ -e "$state/.claude-autoarm-failure-notified" ] && return 1
+  [ -e "$state/.claude-autoarm-failure-alarmed" ] && return 1
+  fm_autoarm_ledger_read "$state" || return 1
+  [ "$FM_AUTOARM_OUTCOME" = rewake ] || return 1
+  lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+  [ -n "$FM_AUTOARM_SESSION" ] && [ "$FM_AUTOARM_SESSION" = "$lock_pid" ] || return 1
+  fm_pid_alive "$lock_pid" || return 1
+  fm_recovery_marker_read "$state/.watcher-down" || return 1
+  recovery=${FM_RECOVERY_MARKER_TOKEN##*:}
+  [ -n "$FM_AUTOARM_RECOVERY" ] && [ "$FM_AUTOARM_RECOVERY" = "$recovery" ] || return 1
+  epoch_mtime=$(fm_path_mtime "$state/.claude-autoarm-epoch") || return 1
+  beacon_mtime=$(fm_path_mtime "$state/.last-watcher-beat") || return 1
+  [ "$epoch_mtime" -ge "$beacon_mtime" ]
 }
 
 # Atomically publish this process as the owner of generation N+1, under one
@@ -1425,8 +1474,8 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
 # ordering could permanently suppress a notice whose ledger write never won.
 # Returns 0 committed, 2 refused (superseded or required-marker failure), and 1
 # unable (bounded contention or ledger-write failure).
-fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
-  local state=$1 gen=$2 outcome=$3 marker=${4:-} lock epoch pid identity tmp i
+fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session-pid] [recovery-generation]
+  local state=$1 gen=$2 outcome=$3 marker=${4:-} session=${5:-} recovery=${6:-} lock epoch pid identity tmp i
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   pid=${BASHPID:-$$}
@@ -1444,8 +1493,11 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
   identity=$FM_AUTOARM_IDENTITY
   tmp="$epoch.tmp.$pid"
   if ! {
-      printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
+      printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s' \
         "$gen" "$pid" "$outcome" "$(date +%s)"
+      [ -z "$session" ] || printf ' session_pid=%s' "$session"
+      [ -z "$recovery" ] || printf ' recovery_generation=%s' "$recovery"
+      printf '\n'
       [ -z "$identity" ] || printf '%s\n' "$identity"
     } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
@@ -1614,6 +1666,20 @@ fm_wake_clean_field() {
 }
 
 fm_wake_append() {
+  local status=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_wake_append_locked "$@" || status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+# fm_wake_append_locked <kind> <key> <payload>
+# Locked core of fm_wake_append: appends the wake row under an already-held
+# FM_WAKE_QUEUE_LOCK. Callers that must commit another durable record atomically
+# with the append (holding this lock excludes the drain's acknowledgement, which
+# deletes consumed rows under the same lock) acquire the lock once, run this and
+# their own write, then release.
+fm_wake_append_locked() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   local recovery_marker
   case "$kind" in
@@ -1628,7 +1694,6 @@ fm_wake_append() {
   recovery_marker="$STATE/.watcher-down"
   status=0
 
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
@@ -1641,7 +1706,6 @@ fm_wake_append() {
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 
