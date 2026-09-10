@@ -582,6 +582,7 @@ The check only notices and records; classifying, labelling, and answering the is
 
 This section is the single owner of the canonical schema.
 `bin/fm-gitlab-issues.sh` owns the poll mechanics, the report line, the seen and pending records, and the poll-error cadence.
+[`docs/gitlab-issue-intake.md`](gitlab-issue-intake.md) is the operating guide for the human side of that flow: the bot account and its login, the group-level `fm::` labels, which of them a human sets, and who merges and closes.
 
 ```json
 {
