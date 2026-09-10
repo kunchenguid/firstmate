@@ -26,7 +26,7 @@ OWNER=<owner>
 REPO=<repo>
 PR=<number>
 gh-axi api "/repos/$OWNER/$REPO/pulls/$PR" --jq '{url:.html_url,author:.user.login,authorType:.user.type,authorAssociation:.author_association,draft,headRef:.head.ref,headSha:.head.sha,baseRef:.base.ref}'
-gh-axi api "/repos/$OWNER/$REPO/pulls/$PR/files?per_page=100" --paginate --jq '.[] | [.filename,.status,.additions,.deletions] | @tsv'
+gh-axi api "/repos/$OWNER/$REPO/pulls/$PR/files?per_page=100" --paginate --full --jq '.[] | [.filename,.status,.additions,.deletions] | @tsv'
 gh-axi pr diff "$PR" -R "$OWNER/$REPO" --full
 ```
 
@@ -68,13 +68,22 @@ UPSTREAM_OWNER=<upstream-owner>
 UPSTREAM_REPO=<upstream-repo>
 OLD_VERSION=<old-tag-or-sha>
 NEW_VERSION=<new-tag-or-sha>
-gh-axi api "/repos/$UPSTREAM_OWNER/$UPSTREAM_REPO/compare/$OLD_VERSION...$NEW_VERSION" --full --jq '{status,ahead_by,behind_by,total_commits,commits:[.commits[] | {sha:.sha,message:.commit.message}],files:[.files[] | {filename,status,additions,deletions,patch}]}'
+gh-axi api "/repos/$UPSTREAM_OWNER/$UPSTREAM_REPO/compare/$OLD_VERSION...$NEW_VERSION" --full --jq '{status,ahead_by,behind_by,total_commits,returned_commits:(.commits|length),returned_files:(.files|length),commits:[.commits[] | {sha:.sha,message:.commit.message}],files:[.files[] | {filename,status,additions,deletions,patch}]}'
 ```
 
 Verify tag naming in the upstream repository when the package uses prefixes such as `v`, package-scoped tags, or monorepo release tags.
 Inspect every changed upstream file that defines, exports, documents, tests, or calls a symbol or executable surface used by the project.
 Check signatures, defaults, return types, error behavior, feature gates, platform support, and transitive native or protocol changes rather than relying on release-note labels.
 If GitHub truncates a patch or the compare response, fetch the named file or commit diff separately before deciding.
+If `returned_commits` is smaller than `total_commits`, or `returned_files` reaches GitHub's 300-file compare cap, the API response is not a complete change inventory.
+In that case, use an isolated upstream checkout with both exact tags fetched and inspect the complete local comparison before deciding.
+
+```sh
+UPSTREAM_CHECKOUT=<isolated-upstream-checkout>
+git -C "$UPSTREAM_CHECKOUT" fetch --tags origin
+git -C "$UPSTREAM_CHECKOUT" diff --name-status "$OLD_VERSION" "$NEW_VERSION"
+git -C "$UPSTREAM_CHECKOUT" diff "$OLD_VERSION" "$NEW_VERSION" -- <every-file-that-touches-a-locally-used-symbol>
+```
 
 ## Check advisories and risk amplifiers
 

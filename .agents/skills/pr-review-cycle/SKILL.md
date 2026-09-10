@@ -77,14 +77,16 @@ The Claude Review Bot from `anthropics/claude-code-action` posts a checklist com
 Read the latest checklist comment in full, treat its last section as the verdict, and verify that it belongs to `REVIEW_HEAD` or to the review run triggered by that push.
 An older clean checklist cannot cover a newer head.
 
-After each push, wait for the push-triggered CI and Claude checklist and request a fresh CodeRabbit pass when it did not start automatically.
+After each push, wait for the push-triggered CI.
+When the Claude Review Bot is configured, also wait for its new checklist.
+When CodeRabbit is configured, request a fresh pass if one did not start automatically.
 
 ```sh
 gh-axi pr comment "$PR" -R "$OWNER/$REPO" --body '@coderabbitai review'
 ```
 
 Do not repeatedly summon CodeRabbit after its explicit rate-limit reply.
-If the Claude workflow does not run on the new head, inspect its workflow trigger and report the missing review instead of treating the old checklist as current.
+If a configured Claude workflow does not run on the new head, inspect its workflow trigger and report the missing review instead of treating the old checklist as current.
 
 Identify automated comments by their author and content together because app login display names can change.
 Read all findings even when an earlier summary says the review is clean.
@@ -94,6 +96,7 @@ Read all findings even when an earlier summary says the review is clean.
 Run a fresh local Codex review against the exact checked-out PR head after the implementation is committed.
 The reviewer must not be the worker that authored or fixed the change.
 Detach or use a disposable worktree at `REVIEW_HEAD`, verify `git rev-parse HEAD` equals it, and run Codex read-only against the PR base.
+The narrow scout omission for a hand-verified dependency bump is owned only by `dependency-bump-triage`; every other part of this cycle still applies.
 
 ```sh
 test "$(git rev-parse HEAD)" = "$REVIEW_HEAD"
@@ -105,7 +108,7 @@ The brief itself supplies `BASE_SHA` and `REVIEW_HEAD` because the installed Cod
 Use this brief verbatim after filling in the placeholders:
 
 ```text
-Review pull request <full URL> adversarially at exact head <full SHA> against base <base ref>.
+Review pull request <full URL> adversarially at exact head <full SHA> against base <full base SHA from BASE_SHA>.
 Do not modify files.
 Read the complete diff and the surrounding implementation, tests, contracts, and relevant history.
 Focus on correctness, regressions, unsafe state transitions, concurrency or recovery gaps, security boundaries, compatibility, and missing user-visible behavior.
@@ -153,7 +156,7 @@ Fetch the PR again and verify all of the following against one unchanged head:
 Use this query to bind the check rollup to the current commit rather than trusting a worker's copied terminal output:
 
 ```sh
-gh-axi api POST graphql --paginate --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { headRefOid commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100, after: \$endCursor) { nodes { __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } pageInfo { hasNextPage endCursor } } } } } } } } }"
+gh-axi api POST graphql --paginate --full --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { headRefOid commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100, after: \$endCursor) { nodes { __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } pageInfo { hasNextPage endCursor } } } } } } } } }"
 ```
 
 Require every page when the context query reports `pageInfo.hasNextPage: true`.
