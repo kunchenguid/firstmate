@@ -197,6 +197,27 @@ test_record_refuses_a_project_cleanup_could_not_safely_own() {
   pass "record refuses every stack whose ownership cleanup could not later prove"
 }
 
+test_record_accepts_the_sanitized_project_name_derived_from_a_mixed_case_dotted_task_id() {
+  local c code
+  c=$(make_case record-task-id-charset)
+
+  # SKILL.md derives PROJECT from the task id. A caller-supplied --task value
+  # (validated only by the looser [A-Za-z0-9._-]+ charset) can carry an
+  # uppercase letter or a dot; used unsanitized in PROJECT it is refused here,
+  # same as any other char outside docker's own [a-z0-9][a-z0-9_-]* charset.
+  code=0
+  record_stack "$c" 'T1.abc' fm-T1.abc-revcaf >/dev/null 2>&1 || code=$?
+  expect_code 1 "$code" "record accepted a project name carrying the task id's raw uppercase/dot"
+
+  # The skill's TASK_SLUG rule (lowercase, non-[a-z0-9-] -> '-') turns that
+  # same task id into a project name the script accepts.
+  record_stack "$c" 'T1.abc' fm-t1-abc-revcaf >/dev/null \
+    || fail "record refused the sanitized project name the skill derives from a mixed-case dotted task id"
+  assert_contains "$(run_e2e "$c" read 'T1.abc')" 'project=fm-t1-abc-revcaf' \
+    "record did not keep the sanitized project name"
+  pass "a task id with an uppercase letter and a dot sanitizes into a project name the script accepts"
+}
+
 test_record_refuses_an_external_volume_that_is_shared_local_data() {
   local c code out
   c=$(make_case record-external-volume)
@@ -416,6 +437,7 @@ test_clear_is_idempotent() {
 
 test_record_round_trips_and_replaces_a_reprovisioned_project
 test_record_refuses_a_project_cleanup_could_not_safely_own
+test_record_accepts_the_sanitized_project_name_derived_from_a_mixed_case_dotted_task_id
 test_record_refuses_an_external_volume_that_is_shared_local_data
 test_gate_refuses_a_project_another_task_record_claims
 test_gate_refuses_when_labels_and_the_record_disagree

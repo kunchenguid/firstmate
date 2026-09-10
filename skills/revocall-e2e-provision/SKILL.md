@@ -48,12 +48,18 @@ Derive everything from the task id, once, and use it consistently.
 
 ```
 TASK      = $FM_TASK_ID, or --task
+TASK_SLUG = TASK, lowercased, with every character outside [a-z0-9-] replaced by a hyphen
 STACK     = the profile's short name (revcaf, aih, revocall)
-PROJECT   = fm-<TASK>-<STACK>
+PROJECT   = fm-<TASK_SLUG>-<STACK>
 CONTAINER = <PROJECT>-<service>
 NETWORK   = <PROJECT>_default, or NET_NAME=<PROJECT> for the RevoCall deploy stack
 VOLUMES   = <PROJECT>_<volume>, or revocall-infra_<volume>-data-<TASK> for the deploy stack's external volumes
 ```
+
+Sanitize before deriving PROJECT.
+`--task`/`FM_TASK_ID` is validated only against the loose `[A-Za-z0-9._-]+` charset, but `bin/fm-e2e-stack.sh`'s `project_name_valid()` accepts only lowercase `[a-z0-9][a-z0-9_-]*`; an uppercase letter or a dot in TASK would otherwise mint a PROJECT the script refuses outright, and standalone mode has no equivalent check before `docker compose up`.
+TASK_SLUG is what PROJECT, CONTAINER, and the compose-internal NETWORK/VOLUMES are built from.
+TASK itself stays raw everywhere ownership must trace back to the exact id `record`/`down` were given: the `ai.revolab.fm.task` label, the deploy stack's external-volume suffix (gate 4 checks that the volume name contains the raw id), and the task's own `/tmp/fm-<task>` root.
 
 The `fm-` prefix is load-bearing, not cosmetic.
 Cleanup will only remove a project whose name starts with it, which is what makes it impossible to remove a stack a person or another tool started.
@@ -62,7 +68,7 @@ Attach all six labels to every service:
 
 | Label | Value |
 |---|---|
-| `ai.revolab.fm.task` | the task id |
+| `ai.revolab.fm.task` | the raw task id (TASK, not TASK_SLUG) |
 | `ai.revolab.fm.stack` | the profile's short name |
 | `ai.revolab.fm.repo` | the repo name |
 | `ai.revolab.fm.scenario` | the scenario name |
@@ -77,7 +83,7 @@ Carry both; neither replaces the other.
 
 1. **Preflight.**
    Confirm `docker info` answers and `docker compose version` is 2.20 or newer, because the override file below needs the `!override` tag.
-   Resolve the task id, and stop if neither `FM_TASK_ID` nor `--task` supplies one.
+   Resolve the task id, stop if neither `FM_TASK_ID` nor `--task` supplies one, then derive `TASK_SLUG` from it (see Identity scheme) once, for every docker name below.
    Read the profile row from `references/profiles.md` and confirm every file it names exists in the checkout.
 
 2. **Derive ports.**
@@ -99,7 +105,7 @@ Carry both; neither replaces the other.
    ```yaml
    services:
      db:
-       container_name: fm-<task>-<stack>-db
+       container_name: fm-<task-slug>-<stack>-db
        ports: !override
          - "<derived>:5432"
        labels:
@@ -136,7 +142,7 @@ Carry both; neither replaces the other.
 
    ```bash
    bin/fm-e2e-stack.sh record <task> \
-     --project fm-<task>-<stack> --stack <profile> --repo <repo> \
+     --project fm-<task-slug>-<stack> --stack <profile> --repo <repo> \
      --scenario <scenario> --worktree "$PWD" \
      --compose-file <base compose>... --compose-file <override> \
      --service <name>... --port PORT_POSTGRES=<n>... \
@@ -149,7 +155,7 @@ Carry both; neither replaces the other.
 7. **Bring up only the services the scenario needs.**
 
    ```bash
-   docker compose -p fm-<task>-<stack> \
+   docker compose -p fm-<task-slug>-<stack> \
      -f <base compose> [-f <more base compose>] -f <override> \
      up -d <service>...
    ```
@@ -163,7 +169,7 @@ Carry both; neither replaces the other.
    Then confirm the only clients on the scenario database are your own:
 
    ```bash
-   docker exec -i fm-<task>-<stack>-db psql -U <user> -d postgres \
+   docker exec -i fm-<task-slug>-<stack>-db psql -U <user> -d postgres \
      -tAc "select pid, datname, client_addr, backend_start from pg_stat_activity where backend_type='client backend'"
    ```
 
@@ -189,7 +195,7 @@ Seed in three layers, and apply only as many as the scenario needs.
    A single SQL file under `scenarios/<repo>/<scenario>.sql`, applied through the running container:
 
    ```bash
-   docker exec -i fm-<task>-<stack>-db psql -U <user> -d <db> -v ON_ERROR_STOP=1 -q \
+   docker exec -i fm-<task-slug>-<stack>-db psql -U <user> -d <db> -v ON_ERROR_STOP=1 -q \
      < scenarios/<repo>/<scenario>.sql
    ```
 
