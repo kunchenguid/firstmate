@@ -1,0 +1,21 @@
+{
+  "phase": "ci",
+  "status": "blocked",
+  "check": "PR must be raised via no-mistakes",
+  "pr_number": 3659,
+  "pr_head_sha": "b9bf49aa845ace07cbf0b3a09abdf5cab596df41",
+  "attestation_head_sha": "67fd5c62ed3c66daf20d3b4d732a7a8185276415",
+  "diagnosis": "The supplied CI log and a read-only GitHub API query both show a stale PR-body attestation. The shared verifier correctly rejects it. The workflow already subscribes to edited events.",
+  "verification": {
+    "command": "bash tests/fm-no-mistakes-required.test.sh",
+    "exit_code": 0,
+    "passed": [
+      "Matching head with completed required steps is accepted",
+      "Mismatched head is rejected and both SHAs are reported",
+      "Missing attestation head is rejected"
+    ]
+  },
+  "source_changes": [],
+  "required_executor_action": "Publish the pipeline-generated attestation for the final validated PR head through the already active outer run, then verify the resulting compliance check.",
+  "limitation": "No repository source change can correct the live PR-body attestation. This phase cannot publish PR metadata or control the pipeline. The requested check-fixing file change was not achievable within the authorized phase; only this diagnostic artifact was written."
+}
