@@ -53,6 +53,26 @@ pe_register() {  # <home> <adapter> <source-id> -- <argv>...
 new_home() { mkdir -p "$1/state"; }
 wake_payloads() { awk -F '\t' '{print $5}' "$1/state/.wake-queue" 2>/dev/null; }
 
+# The wake queue is a durable tab-separated record firstmate consumes:
+# <epoch> <sequence> <kind> <key> <payload>. These read the rows reconcile
+# publishes for a source it stranded, keyed by that source and its claim
+# generation.
+stranded_wake_keys() {  # <home> <source-id>
+  [ -e "$1/state/.wake-queue" ] || return 0
+  awk -F '\t' -v id="$2" \
+    '$3 == "check" && index($4, "procevent:" id ":stranded:") == 1 { print $4 }' \
+    "$1/state/.wake-queue"
+}
+stranded_wake_count() {  # <home> <source-id>
+  stranded_wake_keys "$1" "$2" | grep -c . || true
+}
+stranded_wake_payloads() {  # <home> <source-id>
+  [ -e "$1/state/.wake-queue" ] || return 0
+  awk -F '\t' -v id="$2" \
+    '$3 == "check" && index($4, "procevent:" id ":stranded:") == 1 { print $5 }' \
+    "$1/state/.wake-queue"
+}
+
 first_result() {  # <home> <source-id>: print the first captured result, if any
   local g
   for g in "$1/state/procevent-inbox/$2".*.result; do
@@ -1291,6 +1311,25 @@ assert_contains "$sr4_out" "uncertain=1" \
 sr4_owner=$(pe "$HSR4" list | awk '$1 == "reused-group-src" { print $3 }')
 [ "$sr4_owner" = orphaned ] \
   || fail "a source no caller can claim is listed as '$sr4_owner'"
+# `orphaned` in a listing and `uncertain=1` in output the supervision cycle
+# discards reach nobody. The strand has to announce itself durably, exactly
+# once, and say which command clears it.
+[ "$(stranded_wake_count "$HSR4" reused-group-src)" = 1 ] \
+  || fail "reconcile stranded a source without announcing it: $sr4_out"
+sr4_wake=$(stranded_wake_payloads "$HSR4" reused-group-src)
+assert_contains "$sr4_wake" "reused-group-src" \
+  "the stranded wake does not name the source it is about: $sr4_wake"
+assert_contains "$sr4_wake" "bin/fm-procevent.sh start reused-group-src" \
+  "the stranded wake does not name the command that clears it: $sr4_wake"
+# A wake nobody can silence is as unusable as one nobody gets: the same stranded
+# generation must not re-announce on every supervision cycle.
+sr4_again=$(pe "$HSR4" reconcile)
+assert_contains "$sr4_again" "uncertain=1" \
+  "the second cycle stopped reporting the claim it could not settle: $sr4_again"
+[ "$(stranded_wake_count "$HSR4" reused-group-src)" = 1 ] \
+  || fail "reconcile re-announced the same stranded generation: $sr4_again"
+[ "$(wc -l < "$SR4_LOG" | tr -d ' ')" = 1 ] \
+  || fail "the second cycle started a replacement beside a reused pid's live group: $sr4_again"
 set +e
 sr4_retire=$(pe "$HSR4" retire reused-group-src 2>&1)
 sr4_rc=$?
@@ -1415,6 +1454,39 @@ assert_contains "$zp_out" "failed=0" \
 : > "$ZP_TRIGGER"
 pe "$HZP" retire zeropad-src >/dev/null 2>&1 || true
 pass "a zero-padded launch confirm window is honored as base 10"
+
+# --- an unusable confirm window is refused by name --------------------------
+# A window this command cannot use makes every launch unconfirmable. Reported
+# from inside the confirmation it comes out as a fleet of healthy runners that
+# all "could not start", blaming the sources instead of the typo. Every other
+# tunable on this path - the launch floor, the output bound - refuses a bad
+# value by name before anything runs, and so does this one.
+HIW="$TMP_ROOT/hiw"; new_home "$HIW"
+IW_TRIGGER="$TMP_ROOT/invalid-window-trigger"
+pe_register "$HIW" lavish invalid-window-src -- "$BLOCKER" "$IW_TRIGGER" "window" >/dev/null
+for iw_value in 5s 0 700; do
+  iw_rc=0
+  iw_out=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS="$iw_value" pe "$HIW" reconcile 2>&1) || iw_rc=$?
+  [ "$iw_rc" -ne 0 ] \
+    || fail "reconcile accepted the unusable confirm window '$iw_value': $iw_out"
+  assert_contains "$iw_out" "FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS" \
+    "the unusable confirm window '$iw_value' was not named by what refused it: $iw_out"
+  case "$iw_out" in
+    *failed=*) fail "the unusable confirm window '$iw_value' was blamed on the sources: $iw_out" ;;
+  esac
+  [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/invalid-window-src.claim" ] \
+    || fail "reconcile launched a runner before refusing the confirm window '$iw_value'"
+done
+# The refusal costs the source nothing: it still arms on the next run with a
+# usable value.
+iw_ok=$(pe "$HIW" reconcile)
+assert_contains "$iw_ok" "started=1" \
+  "the source did not arm once its confirm window was usable: $iw_ok"
+assert_contains "$iw_ok" "failed=0" \
+  "the source was reported as failed once its confirm window was usable: $iw_ok"
+: > "$IW_TRIGGER"
+pe "$HIW" retire invalid-window-src >/dev/null 2>&1 || true
+pass "an unusable launch confirm window is refused by name instead of blamed on the sources"
 
 # --- a dead generation's untidyable leftovers never wedge ownership ----------
 # The same wedge as the state-root case above, reached through the sibling

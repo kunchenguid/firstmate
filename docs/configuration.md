@@ -833,9 +833,13 @@ A live identity-matched owner is never displaced, and release removes only the e
 Every stop proves ownership before its first signal: the live runner's recorded process identity must match and it must still lead its process group.
 Once that stop has proved ownership and sent TERM, its own escalation to KILL checks only whether the proved group still has members; it does not re-read the leader's identity or group membership, which can change or become unreadable as TERM ends the leader.
 This proof belongs only to that stop's own escalation and cannot authorize another caller that encounters an unproved group.
-A claim counts as reclaimable only when its owner is stale and an independent process-group check finds no members; a crashed leader or reused pid whose process group still has members cannot relax ownership cleanup, so reconcile preserves the claim without signalling the ambiguous group or starting a replacement.
-If the leader dies to anything other than the stop's own signal, `retire`, `reconcile`, `sweep-home`, and the guard all refuse its surviving group permanently, and the source silently stops listening.
+The automatic path and the deliberate one differ on a stale claim whose process group still has members, and that asymmetry is the design rather than an inconsistency.
+`reconcile` preserves such a claim without signalling the ambiguous group or starting a replacement: the group check probes the runner's own process group, which contains its polling source child, so surviving members can mean that child is still attached to the session the source collects from, and a replacement would put a second destructive poller on it.
+The claim boundary itself does not consult the process group, so `bin/fm-procevent.sh start <source-id>` still reclaims a claim whose recorded pid is alive under a different identity; that hand-run command is the recovery path, taken by someone who has checked that nothing is still polling the source.
+Do not read the automatic refusal as a claim-level invariant: nothing below `reconcile` enforces it.
+If the leader dies to anything other than the stop's own signal, `retire`, `reconcile`, `sweep-home`, and the guard all refuse its surviving group permanently, and the source stops listening until that deliberate `start` reclaims it.
 Whether that group may ever be signalled remains an open decision; the repaired guard does not close this gap.
+The source no longer stops listening quietly: the first `reconcile` that strands a claim generation publishes a durable `check` wake naming the source and the `start` command that clears it, and later cycles stay silent for that same generation while a genuinely new stranded claim announces again.
 Reclaiming a generation that IS gone is not gated on tidying anything that generation left behind: its capture-reservation records, its staging file, or the registry directory a claim recorded for them.
 Every one of those is keyed by claim token and every replacement claims a fresh one, so a leftover that can no longer be located or removed - a state-root identity a claim recorded before its home was re-created, or a recorded registry directory that no longer resolves to a directory - is stale bytes rather than an ownership hazard.
 Making any of them a precondition is what leaves a provably dead runner owning its source permanently, because none of those conditions clears on its own.
@@ -888,7 +892,10 @@ Keep this window well below `FM_POLL`.
 Raising the confirm window lengthens every supervision cycle and delays wake delivery by up to that much.
 
 A source that can never start is reported as `failed=` with a non-zero exit on every `reconcile`, rather than counted as `started` and retried silently as though it were healthy, so a wedged source stays visible instead of presenting as armed.
-The report reaches an operator who runs the command: `bin/fm-watch.sh` discards `reconcile`'s output and exit status, so the supervision cycle itself does not yet surface a persistent arming failure.
+That count reaches whoever runs the command, because `bin/fm-watch.sh` discards `reconcile`'s output and exit status.
+A source stranded on a claim nothing may automatically displace does not depend on anyone running the command: `reconcile` publishes a durable `check` wake for it once per stranded claim generation, as described above.
+
+A value this command cannot use is refused by name before anything is launched, the same way `FM_PROCEVENT_LAUNCH_FLOOR_SECONDS` and `FM_PROCEVENT_MAX_OUTPUT_BYTES` are refused, so a mistyped window can never present as a fleet of sources that cannot start.
 
 `FM_PROCEVENT_MAX_OUTPUT_BYTES` (default 1048576) bounds a single captured result while the source runs; oversized output is drained but truncated with a stderr notice rather than staged or published whole or dropped.
 

@@ -56,6 +56,11 @@
 #            otherwise, and any failure also makes this command exit non-zero.
 #            One bounded window covers a whole cycle's launches
 #            (FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS; docs/configuration.md).
+#            A source whose claim nothing may automatically displace is not
+#            relaunched at all; it is counted `uncertain` and announced once per
+#            stranded claim generation as a durable `check` wake naming the
+#            `start` command that clears it, because the supervision cycle
+#            discards this command's own output and exit status.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -355,6 +360,7 @@ adapter_self_announcing() {  # <adapter>
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
+stranded_file() { printf '%s/.%s.stranded\n' "$REG" "$1"; }
 
 # Let the source's own adapter apply and acknowledge one captured result. See
 # the header for why this exists and what each exit means. An already
@@ -1204,10 +1210,44 @@ detach_runner() {  # <source-id>
   isolate_runner detach "$1"
 }
 
+# Announce a source whose claim no unattended caller may displace, once per
+# stranded claim generation.
+#
+# The supervision cycle runs this command with its output and its exit status
+# both discarded, so a strand that only shows up in `list` as `orphaned` and in
+# this command's `uncertain=` count reaches nobody. A durable `check` wake does
+# reach firstmate through the ordinary queue, and it carries the one command
+# that clears the strand so acting on it needs no hunt.
+#
+# The marker records the claim generation that was reported, so the same strand
+# never wakes twice while a genuinely new claim still does - an alarm that
+# repeats every supervision cycle is as unusable as one nobody gets. It is
+# written before the wake and removed again if the wake does not land, so a
+# failed announcement retries instead of being silently marked as delivered.
+report_stranded_source() {  # <source-id> <claim-token>
+  local id=$1 token=$2 marker previous
+  case "$token" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  marker=$(stranded_file "$id")
+  previous=$(cat -- "$marker" 2>/dev/null || true)
+  [ "$previous" != "$token" ] || return 1
+  (umask 077; printf '%s\n' "$token" > "$marker") || return 1
+  if ! fm_wake_append check "procevent:$id:stranded:$token" \
+    "check: process-event source $id is registered but nothing can arm it: its claim names a dead runner whose process group still has members, so reconcile preserves that claim and starts no replacement. Check that nothing is still polling the source, then reclaim it with: bin/fm-procevent.sh start $id"; then
+    rm -f -- "$marker"
+    return 1
+  fi
+  return 0
+}
+
 cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state
   local launch_identity launch_stamp launch_mark
   local -a launched=()
+  # Rejected before anything is launched, and by name. A window this command
+  # cannot use makes every launch unconfirmable, so validating it later would
+  # report a fleet of perfectly healthy runners as `failed=` and blame nothing.
+  fm_procevent_launch_confirm_seconds >/dev/null \
+    || die "FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS"
   owner_lease_refresh
   published=$(publish_pending)
 
@@ -1262,16 +1302,17 @@ cmd_reconcile() {
       if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
         fm_procevent_claim_state_locked "$id"
         claim_state=$?
-        if [ "$claim_state" -eq 1 ] \
-          && [ -e "$(fm_procevent_claim_path "$id")" ] \
-          && ! fm_procevent_claim_generation_gone_locked; then
-          # A stale claim whose process group still has members. Ownership
-          # cannot move here by design, so a replacement could only die on the
-          # claim it cannot take - once per cycle, forever, for a source that
-          # will never come back on its own. Preserve the claim and say the
-          # cycle could not settle it, which is what this command already
-          # promises for the leaderless variant below.
+        if [ "$claim_state" -eq 1 ] && fm_procevent_claim_undisplaceable_locked "$id"; then
+          # A stale claim whose process group still has members, which can mean
+          # the dead runner's polling child is still on the source's session
+          # (fm_procevent_claim_undisplaceable_locked owns that reasoning).
+          # Preserve the claim, start nothing, and say the cycle could not
+          # settle it, which is what this command already promises for the
+          # leaderless variant below. Only a deliberate `start` reclaims here,
+          # so report the strand durably rather than leaving it to whoever
+          # happens to run this command.
           uncertain=$((uncertain + 1))
+          report_stranded_source "$id" "$FM_PROCEVENT_CLAIM_TOKEN" || true
         elif [ "$claim_state" -eq 1 ]; then
           if ! cleanup_extension_registration_invocations_locked "$id"; then
             uncertain=$((uncertain + 1))
@@ -1590,6 +1631,7 @@ cmd_retire() {
   fi
   rm -f -- "$(source_file "$id")"
   rm -f -- "$(runner_file "$id")"
+  rm -f -- "$(stranded_file "$id")"
   fm_procevent_source_lock_release "$id"
   # A retired source produces no further answer, so drop any decision binding it
   # carried. Generic and idempotent: the binding owner is asked to forget this
@@ -1777,8 +1819,7 @@ cmd_list() {
       0) owner=live ;;
       1)
         owner=none
-        if [ -e "$(fm_procevent_claim_path "$id")" ] \
-          && ! fm_procevent_claim_generation_gone_locked; then
+        if fm_procevent_claim_undisplaceable_locked "$id"; then
           owner=orphaned
         fi
         ;;

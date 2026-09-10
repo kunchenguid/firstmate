@@ -632,6 +632,29 @@ fm_procevent_claim_generation_gone_locked() {
     && ! fm_procevent_group_alive "${FM_PROCEVENT_CLAIM_PID:-}"
 }
 
+# fm_procevent_claim_undisplaceable_locked <source-id>
+# The single owner of "this stale claim is one no unattended caller may
+# displace". True when a claim record is still present for the source and its
+# generation is NOT provably gone. Call it only where
+# fm_procevent_claim_state_locked has just returned 1, so the FM_PROCEVENT_CLAIM_*
+# globals below describe this source: that same return also covers a source with
+# no claim record at all, which leaves those globals holding whatever the
+# previous load put there, so the record check has to travel with the generation
+# check rather than being left to each caller.
+#
+# What the surviving process group means is why this refuses rather than
+# relaunches. fm_procevent_group_alive probes the runner's OWN process group,
+# and the runner leads that group with its polling source child inside it, so
+# "the group still has members" can mean that child is still attached to the
+# session the source collects from. Starting a replacement there puts a second
+# destructive poller on one session, which drains and loses what the source was
+# collecting. A source that needs a human beats a source that silently eats what
+# it was supposed to deliver.
+fm_procevent_claim_undisplaceable_locked() {  # <source-id>
+  [ -e "$(fm_procevent_claim_path "$1")" ] || return 1
+  ! fm_procevent_claim_generation_gone_locked
+}
+
 # Capture-reservation cleanup for a claim being reclaimed.
 #
 # Reservation records are keyed by CLAIM TOKEN, and every replacement claims a
