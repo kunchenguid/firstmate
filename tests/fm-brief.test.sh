@@ -247,8 +247,12 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
       "$mode existing-PR brief did not update the remote-tracking head from origin"
     assert_grep "git clone --quiet --no-checkout --filter=blob:none" "$brief" \
       "$mode existing-PR brief did not isolate forge head resolution"
-    assert_grep "git checkout --ignore-other-worktrees \"\$PR_BRANCH\"" "$brief" \
-      "$mode existing-PR brief did not support an existing linked-worktree branch"
+    assert_grep "git checkout \"\$PR_BRANCH\"" "$brief" \
+      "$mode existing-PR brief did not use Git's linked-worktree-safe checkout"
+    assert_no_grep "--ignore-other-worktrees" "$brief" \
+      "$mode existing-PR brief bypassed Git's linked-worktree safety"
+    assert_grep "git config \"branch.\$PR_BRANCH.remote\" origin" "$brief" \
+      "$mode existing-PR brief did not repair the local branch upstream"
     assert_grep "[ \"\$PR_BRANCH\" = 'bookie/existing-head' ]" "$brief" \
       "$mode existing-PR brief did not assert the caller-supplied head branch"
     assert_grep "config --get \"branch.\$PR_BRANCH.remote\"" "$brief" \
@@ -292,7 +296,7 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
 }
 
 test_existing_pr_setup_checks_out_a_new_origin_branch() {
-  local root remote source work holder home brief setup_command setup_out source_head fakebin real_git default_brief default_command default_out
+  local root remote source work holder home brief setup_command setup_out source_head fakebin real_git reuse_brief reuse_command reuse_out held_brief held_command held_out default_brief default_command default_out
   root="$TMP_ROOT/existing-pr-checkout"
   remote="$root/remote.git"
   source="$root/source"
@@ -318,11 +322,6 @@ test_existing_pr_setup_checks_out_a_new_origin_branch() {
     || fail "could not clone existing-PR checkout fixture"
   git -C "$work" remote set-url origin https://github.com/kunchenguid/firstmate
   git -C "$work" config url."$remote".insteadOf https://github.com/kunchenguid/firstmate
-  git -C "$work" fetch origin '+refs/heads/existing/head:refs/remotes/origin/existing/head' >/dev/null 2>&1
-  git -C "$work" branch existing/head origin/existing/head >/dev/null 2>&1
-  holder="$root/holder"
-  git -C "$work" worktree add "$holder" existing/head >/dev/null 2>&1 \
-    || fail "could not put the existing PR branch in a linked worktree"
   fakebin="$root/bin"
   mkdir -p "$fakebin"
   real_git=$(command -v git)
@@ -362,11 +361,41 @@ EOF
   setup_command=$(sed -n 's/^1\. First action:.*: `\(.*\)`\.$/\1/p' "$brief")
   [ -n "$setup_command" ] || fail "could not read the generated existing-PR setup command"
   setup_out=$(cd "$work" && FM_TEST_PR_REMOTE="$remote" PATH="$fakebin:$PATH" eval "$setup_command" 2>&1) \
-    || fail "generated existing-PR setup could not check out a branch held by another worktree: $setup_out"
+    || fail "generated existing-PR setup could not check out a previously unknown origin branch: $setup_out"
   [ "$(git -C "$work" branch --show-current)" = existing/head ] \
     || fail "generated existing-PR setup checked out the wrong local branch"
   [ "$(git -C "$work" rev-parse HEAD)" = "$source_head" ] \
     || fail "generated existing-PR setup did not check out the current origin head"
+  git -C "$work" switch main >/dev/null 2>&1
+  git -C "$work" config --unset-all branch.existing/head.remote
+  git -C "$work" config --unset-all branch.existing/head.merge
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" checkout-reuse firstmate --mode direct-PR \
+    --existing-pr https://github.com/kunchenguid/firstmate/pull/2460 \
+    --branch existing/head >/dev/null 2>&1
+  reuse_brief="$home/data/checkout-reuse/brief.md"
+  # shellcheck disable=SC2016 # The sed expression is a literal parser for the generated Markdown command.
+  reuse_command=$(sed -n 's/^1\. First action:.*: `\(.*\)`\.$/\1/p' "$reuse_brief")
+  reuse_out=$(cd "$work" && FM_TEST_PR_REMOTE="$remote" PATH="$fakebin:$PATH" eval "$reuse_command" 2>&1) \
+    || fail "generated existing-PR setup could not reuse a synchronized local branch: $reuse_out"
+  [ "$(git -C "$work" config --get branch.existing/head.remote)" = origin ] \
+    || fail "generated existing-PR setup did not repair the local branch upstream"
+
+  git -C "$work" switch main >/dev/null 2>&1
+  holder="$root/holder"
+  git -C "$work" worktree add "$holder" existing/head >/dev/null 2>&1 \
+    || fail "could not put the existing PR branch in a linked worktree"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" checkout-held firstmate --mode direct-PR \
+    --existing-pr https://github.com/kunchenguid/firstmate/pull/2460 \
+    --branch existing/head >/dev/null 2>&1
+  held_brief="$home/data/checkout-held/brief.md"
+  # shellcheck disable=SC2016 # The sed expression is a literal parser for the generated Markdown command.
+  held_command=$(sed -n 's/^1\. First action:.*: `\(.*\)`\.$/\1/p' "$held_brief")
+  if held_out=$(cd "$work" && FM_TEST_PR_REMOTE="$remote" PATH="$fakebin:$PATH" eval "$held_command" 2>&1); then
+    fail "generated existing-PR setup bypassed Git's linked-worktree guard"
+  fi
+  assert_contains "$held_out" "already used by worktree" \
+    "generated existing-PR setup did not preserve Git's linked-worktree refusal"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" checkout-default firstmate --mode direct-PR \
     --existing-pr https://github.com/kunchenguid/firstmate/pull/2460 \
@@ -380,7 +409,7 @@ EOF
   fi
   assert_contains "$default_out" "existing PR head is the origin default branch" \
     "generated existing-PR setup did not explain its default-branch refusal"
-  pass "fm-brief.sh: existing-PR setup handles linked worktrees and refuses the default branch"
+  pass "fm-brief.sh: existing-PR setup repairs upstreams and preserves branch safety guards"
 }
 
 test_existing_pr_base_validation_is_scoped_to_delivery_metadata() {
