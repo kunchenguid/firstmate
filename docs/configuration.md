@@ -177,10 +177,13 @@ Multiple Firstmate homes holding clones of one project therefore share Treehouse
 Give each affected home its own root so its acquired worktrees are linked to that home's clone and pass the existing isolation fence.
 Do not weaken `fm-claude-trust.sh` or `fm-spawn.sh`'s worktree-isolation check to admit another home's checkout.
 
-`FM_TREEHOUSE_ROOT` wins when non-empty; otherwise the first non-blank, non-comment line of `config/treehouse-root` is used.
+`FM_TREEHOUSE_ROOT` wins when non-empty; otherwise the first non-blank, non-comment line of `config/treehouse-root`, with leading and trailing whitespace removed, is used.
 A present file naming no root is refused, so emptying a configured file cannot silently return the home to the shared default pool.
 The root must be absolute because Treehouse resolves a relative `--root` from the repository root, which would place the pool inside project storage and recreate the cross-home collision.
-A root that resolves inside the effective projects directory or the spawning checkout is refused, including when an existing symlinked ancestor points there.
+The root must not contain a dollar character because Treehouse expands dollar variables in its `--root` value.
+The root must not contain a `..` path component because cancellation across a missing directory can expose a symlink only when Treehouse later creates the path.
+A root that resolves inside the effective projects directory or the spawning checkout is refused, with filesystem-identity checks preventing case-insensitive aliases from bypassing containment.
+Resolution repeatedly normalizes the path and resolves its existing symlinked ancestors until the result stabilizes, with cycles and the bounded non-convergent case refused.
 
 `config/treehouse-root` is local and gitignored.
 It is not inherited by secondmate homes because each secondmate holds its own project clones and needs its own pool decision.
@@ -944,6 +947,7 @@ FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
+FM_TREEHOUSE_ROOT=      # optional per-home Treehouse pool root override; see "Treehouse pool root"
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)

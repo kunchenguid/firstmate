@@ -175,7 +175,7 @@ test_symlinked_ancestor_into_project_storage_is_refused() {
   link="$CASE_DIR/pools-link"
   mkdir -p "$target"
   ln -s "$target" "$link"
-  root="$link/../nested-pool"
+  root="$link/nested-pool"
   printf '%s\n' "$root" > "$HOME_DIR/config/treehouse-root"
 
   out=$(run_worker_spawn "$id")
@@ -184,7 +184,124 @@ test_symlinked_ancestor_into_project_storage_is_refused() {
   assert_contains "$out" "inside project storage" \
     "symlinked-ancestor refusal did not name the protected boundary"
   [ ! -s "$COMMAND_LOG" ] || fail "symlinked-root refusal sent a pane command"
-  pass "a symlinked ancestor and parent traversal cannot route the Treehouse root into project storage"
+  pass "a symlinked ancestor cannot route the Treehouse root into project storage"
+}
+
+test_case_insensitive_project_storage_spelling_is_refused() {
+  local rec id out status root
+  id=treehouse-root-casefold-c1
+  rec=$(make_case casefold)
+  read_case "$rec"
+  if [ ! -d "$HOME_DIR/PROJECTS" ]; then
+    echo "skip: fixture filesystem is case-sensitive"
+    return 0
+  fi
+  root="$HOME_DIR/PROJECTS/casefold-pool"
+  printf '%s\n' "$root" > "$HOME_DIR/config/treehouse-root"
+
+  out=$(run_worker_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "case-insensitive spelling bypassed project-storage containment"
+  assert_contains "$out" "inside project storage" \
+    "case-insensitive containment refusal did not name project storage"
+  [ ! -s "$COMMAND_LOG" ] || fail "case-insensitive containment refusal sent a pane command"
+  pass "filesystem identity catches case-insensitive project-storage spelling"
+}
+
+test_dollar_character_is_refused_before_treehouse_expands_it() {
+  local rec id out status root
+  id=treehouse-root-dollar-c2
+  rec=$(make_case dollar)
+  read_case "$rec"
+  root="$CASE_DIR/\$HOME/pool"
+  printf '%s\n' "$root" > "$HOME_DIR/config/treehouse-root"
+
+  out=$(run_worker_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a Treehouse root containing a dollar character was accepted"
+  assert_contains "$out" "must not contain a '$' character" \
+    "dollar-character refusal did not name Treehouse's later expansion"
+  [ ! -s "$COMMAND_LOG" ] || fail "dollar-character refusal sent a pane command"
+  pass "a dollar character is refused before Treehouse can expand the root"
+}
+
+test_config_line_trims_leading_and_trailing_whitespace() {
+  local rec id out status root
+  id=treehouse-root-trim-c3
+  rec=$(make_case trim)
+  read_case "$rec"
+  root="$CASE_DIR/trimmed-pool"
+  printf '   %s   \n' "$root" > "$HOME_DIR/config/treehouse-root"
+
+  out=$(run_worker_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "whitespace-padded configured worker spawn should succeed"
+  assert_contains "$out" "spawned $id" \
+    "whitespace-padded configured worker spawn did not report success"
+  assert_only_treehouse_command "treehouse get --root '$root'"
+  pass "config/treehouse-root trims leading and trailing whitespace"
+}
+
+test_missing_parent_dotdot_hidden_symlink_reproduction_is_refused() {
+  local rec id out status existing link root
+  id=treehouse-root-hidden-checkout-b1
+  rec=$(make_case hidden-checkout)
+  read_case "$rec"
+  existing="$CASE_DIR/existing"
+  link="$existing/symlink"
+  mkdir -p "$existing"
+  ln -s "$PROJECT_DIR" "$link"
+  root="$existing/missing/../symlink/pool"
+  printf '%s\n' "$root" > "$HOME_DIR/config/treehouse-root"
+
+  out=$(run_worker_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "the missing-parent dot-dot symlink bypass was accepted"
+  assert_contains "$out" "must not contain a '..' path component" \
+    "the exact bypass did not reach the dot-dot refusal"
+  [ ! -s "$COMMAND_LOG" ] || fail "the exact bypass sent a pane command"
+  pass "the missing-parent dot-dot symlink bypass is refused before acquisition"
+}
+
+test_normalization_reveals_project_storage_symlink() {
+  local rec id out status existing target link projects_override root
+  id=treehouse-root-converge-b2
+  rec=$(make_case converge)
+  read_case "$rec"
+  existing="$CASE_DIR/existing"
+  target="$CASE_DIR/project-storage"
+  link="$existing/symlink"
+  mkdir -p "$existing" "$target"
+  ln -s "$target" "$link"
+  projects_override="$existing/missing/../symlink"
+  root="$target/pool"
+  printf '%s\n' "$root" > "$HOME_DIR/config/treehouse-root"
+
+  out=$(FM_TEST_PROJECTS_OVERRIDE="$projects_override" run_worker_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a root inside project storage hidden until normalization was accepted"
+  assert_contains "$out" "inside project storage" \
+    "convergent resolution did not expose the project-storage boundary"
+  [ ! -s "$COMMAND_LOG" ] || fail "normalization-hidden boundary sent a pane command"
+  pass "convergent resolution exposes a symlinked project-storage boundary after normalization"
+}
+
+test_dotdot_component_is_refused_even_when_destination_is_safe() {
+  local rec id out status root
+  id=treehouse-root-dotdot-b3
+  rec=$(make_case dotdot)
+  read_case "$rec"
+  mkdir -p "$CASE_DIR/ordinary"
+  root="$CASE_DIR/ordinary/../safe-pool"
+  printf '%s\n' "$root" > "$HOME_DIR/config/treehouse-root"
+
+  out=$(run_worker_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a Treehouse root containing a dot-dot component was accepted"
+  assert_contains "$out" "must not contain a '..' path component" \
+    "dot-dot refusal did not name the forbidden component"
+  [ ! -s "$COMMAND_LOG" ] || fail "dot-dot refusal sent a pane command"
+  pass "every configured Treehouse root containing a dot-dot component is refused"
 }
 
 test_secondmate_launch_clears_environment_root() {
@@ -222,6 +339,12 @@ test_present_file_without_root_is_refused
 test_project_storage_roots_are_refused
 test_spawning_checkout_roots_are_refused
 test_symlinked_ancestor_into_project_storage_is_refused
+test_config_line_trims_leading_and_trailing_whitespace
+test_dollar_character_is_refused_before_treehouse_expands_it
+test_case_insensitive_project_storage_spelling_is_refused
+test_missing_parent_dotdot_hidden_symlink_reproduction_is_refused
+test_normalization_reveals_project_storage_symlink
+test_dotdot_component_is_refused_even_when_destination_is_safe
 test_secondmate_launch_clears_environment_root
 
 echo "# all fm-spawn-treehouse-root tests passed"

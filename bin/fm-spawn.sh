@@ -72,13 +72,18 @@
 #   callers must surface it instead of silently retrying another backend.
 #   A ship/scout Treehouse pool root resolves from FM_TREEHOUSE_ROOT, else the
 #   first non-blank, non-comment line of config/treehouse-root under the effective
-#   home. A configured value must be absolute and must not resolve inside the
-#   effective projects directory or spawning checkout, including through a
-#   symlinked ancestor. A present file naming no root refuses. When no root is
-#   configured, spawn sends the existing bare `treehouse get` command unchanged;
-#   otherwise it sends `treehouse get --root <shell-quoted-root>`. Secondmate
-#   launches clear FM_TREEHOUSE_ROOT so the secondmate's own config decides the
-#   pool for its workers. docs/configuration.md "Treehouse pool root" owns use.
+#   home, with surrounding whitespace removed from the file value. A configured
+#   value must be absolute, contain neither a dollar character nor a `..`
+#   component, and must not resolve inside the effective projects directory or
+#   spawning checkout. Existing symlinked ancestors are resolved repeatedly
+#   after path normalization until stable; cycles and the bounded non-convergent
+#   case refuse. Containment compares filesystem identity as well as path
+#   spelling so case-insensitive aliases cannot bypass it. A present file naming
+#   no root refuses. When no root is configured, spawn sends the existing bare
+#   `treehouse get` command unchanged; otherwise it sends
+#   `treehouse get --root <shell-quoted-root>`. Secondmate launches clear
+#   FM_TREEHOUSE_ROOT so the secondmate's own config decides the pool for its workers.
+#   docs/configuration.md "Treehouse pool root" owns use.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -2050,7 +2055,7 @@ absolute_path_spelling() {  # <path>
   esac
 }
 
-resolve_path_through_existing_ancestor() {  # <absolute-path>
+resolve_path_once_through_existing_ancestor() {  # <absolute-path>
   local path=$1 probe suffix base parent resolved combined
   probe=$path
   suffix=
@@ -2078,8 +2083,59 @@ resolve_path_through_existing_ancestor() {  # <absolute-path>
   normalize_absolute_path "$combined"
 }
 
+resolve_path_through_existing_ancestor() {  # <absolute-path>
+  local current next seen iteration max_iterations
+  current=$1
+  seen=$'\n'"$current"$'\n'
+  max_iterations=16
+  iteration=1
+  while [ "$iteration" -le "$max_iterations" ]; do
+    next=$(resolve_path_once_through_existing_ancestor "$current") || return 1
+    if [ "$next" = "$current" ]; then
+      printf '%s\n' "$next"
+      return 0
+    fi
+    case "$seen" in
+      *$'\n'"$next"$'\n'*)
+        echo "error: Treehouse pool path resolution entered a cycle at $next" >&2
+        return 1
+        ;;
+    esac
+    seen="$seen$next"$'\n'
+    current=$next
+    iteration=$((iteration + 1))
+  done
+  echo "error: Treehouse pool path resolution did not converge after $max_iterations iterations" >&2
+  return 1
+}
+
 path_is_within_or_equal() {  # <boundary> <path>
   [ "$1" = "$2" ] || path_is_ancestor_of "$1" "$2"
+}
+
+path_is_within_or_equal_by_filesystem() {  # <boundary> <path>
+  local boundary=$1 probe=$2 parent
+  [ -d "$boundary" ] || return 1
+  while [ ! -d "$probe" ]; do
+    [ "$probe" != / ] || return 1
+    parent=${probe%/*}
+    [ -n "$parent" ] || parent=/
+    [ "$parent" != "$probe" ] || return 1
+    probe=$parent
+  done
+  probe=$(CDPATH='' cd -P -- "$probe" 2>/dev/null && pwd -P) || return 1
+  while :; do
+    [ "$probe" -ef "$boundary" ] && return 0
+    [ "$probe" != / ] || return 1
+    parent=${probe%/*}
+    [ -n "$parent" ] || parent=/
+    probe=$parent
+  done
+}
+
+path_is_within_or_equal_guarded() {  # <boundary> <path>
+  path_is_within_or_equal "$1" "$2" ||
+    path_is_within_or_equal_by_filesystem "$1" "$2"
 }
 
 resolve_spawn_treehouse_root() {
@@ -2102,11 +2158,11 @@ resolve_spawn_treehouse_root() {
         return 1
       fi
       while IFS= read -r line || [ -n "$line" ]; do
-        trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//')
+        trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
         case "$trimmed" in
           ''|'#'*) continue ;;
         esac
-        SPAWN_TREEHOUSE_ROOT=$line
+        SPAWN_TREEHOUSE_ROOT=$trimmed
         break
       done < "$CONFIG/treehouse-root"
       if [ -z "$SPAWN_TREEHOUSE_ROOT" ]; then
@@ -2129,6 +2185,18 @@ resolve_spawn_treehouse_root() {
       return 1
       ;;
   esac
+  case "$SPAWN_TREEHOUSE_ROOT" in
+    *'$'*)
+      echo "error: $source must not contain a '\$' character because Treehouse expands dollar variables in --root" >&2
+      return 1
+      ;;
+  esac
+  case "/${SPAWN_TREEHOUSE_ROOT#/}/" in
+    */../*)
+      echo "error: $source must not contain a '..' path component" >&2
+      return 1
+      ;;
+  esac
 
   root_logical=$(normalize_absolute_path "$SPAWN_TREEHOUSE_ROOT") || return 1
   root_physical=$(resolve_path_through_existing_ancestor "$SPAWN_TREEHOUSE_ROOT") || return 1
@@ -2140,13 +2208,13 @@ resolve_spawn_treehouse_root() {
   project_physical=$(resolve_path_through_existing_ancestor "$project_absolute") || return 1
   for candidate in "$root_logical" "$root_physical"; do
     for boundary in "$projects_logical" "$projects_physical"; do
-      if path_is_within_or_equal "$boundary" "$candidate"; then
+      if path_is_within_or_equal_guarded "$boundary" "$candidate"; then
         echo "error: $source resolves inside project storage ($PROJECTS); refusing Treehouse pool creation there" >&2
         return 1
       fi
     done
     for boundary in "$project_logical" "$project_physical"; do
-      if path_is_within_or_equal "$boundary" "$candidate"; then
+      if path_is_within_or_equal_guarded "$boundary" "$candidate"; then
         echo "error: $source resolves inside the spawning checkout ($PROJ_ABS); refusing Treehouse pool creation there" >&2
         return 1
       fi
