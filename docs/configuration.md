@@ -166,6 +166,26 @@ The caller-facing label remains `fm-<id>`, but the actual cmux workspace title i
 Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.md#current-operation-and-safety), never enumerate-and-close every workspace.
 `config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 
+## Treehouse pool root (config/treehouse-root / FM_TREEHOUSE_ROOT)
+
+The optional Treehouse pool root controls which pool supplies isolated worktrees for this home's ship and scout spawns.
+With neither setting, `fm-spawn.sh` sends the existing bare `treehouse get` command and Treehouse uses its own default root.
+Changing an existing home's root can strand its earlier pool, so the setting is opt-in.
+
+Treehouse names a pool from the project's remote URL rather than the clone that requests a worktree.
+Multiple Firstmate homes holding clones of one project therefore share Treehouse's default pool even though its worktrees stay linked to the clone that created them.
+Give each affected home its own root so its acquired worktrees are linked to that home's clone and pass the existing isolation fence.
+Do not weaken `fm-claude-trust.sh` or `fm-spawn.sh`'s worktree-isolation check to admit another home's checkout.
+
+`FM_TREEHOUSE_ROOT` wins when non-empty; otherwise the first non-blank, non-comment line of `config/treehouse-root` is used.
+A present file naming no root is refused, so emptying a configured file cannot silently return the home to the shared default pool.
+The root must be absolute because Treehouse resolves a relative `--root` from the repository root, which would place the pool inside project storage and recreate the cross-home collision.
+A root that resolves inside the effective projects directory or the spawning checkout is refused, including when an existing symlinked ancestor points there.
+
+`config/treehouse-root` is local and gitignored.
+It is not inherited by secondmate homes because each secondmate holds its own project clones and needs its own pool decision.
+A secondmate launch clears an ambient `FM_TREEHOUSE_ROOT`, so the secondmate's own `config/treehouse-root` remains authoritative for its workers.
+
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.

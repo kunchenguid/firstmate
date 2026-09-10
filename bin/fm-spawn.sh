@@ -70,6 +70,15 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   A ship/scout Treehouse pool root resolves from FM_TREEHOUSE_ROOT, else the
+#   first non-blank, non-comment line of config/treehouse-root under the effective
+#   home. A configured value must be absolute and must not resolve inside the
+#   effective projects directory or spawning checkout, including through a
+#   symlinked ancestor. A present file naming no root refuses. When no root is
+#   configured, spawn sends the existing bare `treehouse get` command unchanged;
+#   otherwise it sends `treehouse get --root <shell-quoted-root>`. Secondmate
+#   launches clear FM_TREEHOUSE_ROOT so the secondmate's own config decides the
+#   pool for its workers. docs/configuration.md "Treehouse pool root" owns use.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -2015,6 +2024,136 @@ path_is_ancestor_of() {
   return 1
 }
 
+normalize_absolute_path() {  # <absolute-path>
+  printf '%s\n' "$1" | awk -F/ '
+    {
+      depth = 0
+      for (i = 1; i <= NF; i++) {
+        if ($i == "" || $i == ".") continue
+        if ($i == "..") {
+          if (depth > 0) depth--
+          continue
+        }
+        part[++depth] = $i
+      }
+      printf "/"
+      for (i = 1; i <= depth; i++) printf "%s%s", (i == 1 ? "" : "/"), part[i]
+      printf "\n"
+    }
+  '
+}
+
+absolute_path_spelling() {  # <path>
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$(pwd -P)" "$1" ;;
+  esac
+}
+
+resolve_path_through_existing_ancestor() {  # <absolute-path>
+  local path=$1 probe suffix base parent resolved combined
+  probe=$path
+  suffix=
+  while [ ! -e "$probe" ] && [ ! -L "$probe" ]; do
+    [ "$probe" != / ] || break
+    base=${probe##*/}
+    suffix="/$base$suffix"
+    parent=${probe%/*}
+    [ -n "$parent" ] || parent=/
+    probe=$parent
+  done
+  if [ ! -d "$probe" ]; then
+    echo "error: Treehouse pool root cannot resolve through existing ancestor $probe" >&2
+    return 1
+  fi
+  resolved=$(CDPATH='' cd -P -- "$probe" 2>/dev/null && pwd -P) || {
+    echo "error: Treehouse pool root ancestor cannot be resolved: $probe" >&2
+    return 1
+  }
+  if [ "$resolved" = / ]; then
+    combined="/${suffix#/}"
+  else
+    combined="$resolved$suffix"
+  fi
+  normalize_absolute_path "$combined"
+}
+
+path_is_within_or_equal() {  # <boundary> <path>
+  [ "$1" = "$2" ] || path_is_ancestor_of "$1" "$2"
+}
+
+resolve_spawn_treehouse_root() {
+  local present line trimmed source raw_bytes root_logical root_physical
+  local projects_absolute projects_logical projects_physical
+  local project_absolute project_logical project_physical
+  local candidate boundary
+  SPAWN_TREEHOUSE_ROOT=
+  source=
+  if [ -n "${FM_TREEHOUSE_ROOT:-}" ]; then
+    SPAWN_TREEHOUSE_ROOT=$FM_TREEHOUSE_ROOT
+    source=FM_TREEHOUSE_ROOT
+  else
+    if ! present=$(fm_config_source_present "$CONFIG/treehouse-root"); then
+      return 1
+    fi
+    if [ "$present" = 1 ]; then
+      if [ ! -f "$CONFIG/treehouse-root" ] || [ ! -r "$CONFIG/treehouse-root" ]; then
+        echo "error: config/treehouse-root must be a readable regular file" >&2
+        return 1
+      fi
+      while IFS= read -r line || [ -n "$line" ]; do
+        trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//')
+        case "$trimmed" in
+          ''|'#'*) continue ;;
+        esac
+        SPAWN_TREEHOUSE_ROOT=$line
+        break
+      done < "$CONFIG/treehouse-root"
+      if [ -z "$SPAWN_TREEHOUSE_ROOT" ]; then
+        echo "error: config/treehouse-root is present but names no root; remove the file to use Treehouse's default" >&2
+        return 1
+      fi
+      source=config/treehouse-root
+    fi
+  fi
+  [ -n "$SPAWN_TREEHOUSE_ROOT" ] || return 0
+  raw_bytes=$(fm_backlog_bytes_of_string "$SPAWN_TREEHOUSE_ROOT") || return 1
+  if ! fm_backlog_control_bytes_valid 0 "$raw_bytes"; then
+    echo "error: $source contains an invalid control byte" >&2
+    return 1
+  fi
+  case "$SPAWN_TREEHOUSE_ROOT" in
+    /*) ;;
+    *)
+      echo "error: $source must be an absolute path; Treehouse resolves a relative --root from the repository root" >&2
+      return 1
+      ;;
+  esac
+
+  root_logical=$(normalize_absolute_path "$SPAWN_TREEHOUSE_ROOT") || return 1
+  root_physical=$(resolve_path_through_existing_ancestor "$SPAWN_TREEHOUSE_ROOT") || return 1
+  projects_absolute=$(absolute_path_spelling "$PROJECTS") || return 1
+  projects_logical=$(normalize_absolute_path "$projects_absolute") || return 1
+  projects_physical=$(resolve_path_through_existing_ancestor "$projects_absolute") || return 1
+  project_absolute=$(absolute_path_spelling "$PROJ_ABS") || return 1
+  project_logical=$(normalize_absolute_path "$project_absolute") || return 1
+  project_physical=$(resolve_path_through_existing_ancestor "$project_absolute") || return 1
+  for candidate in "$root_logical" "$root_physical"; do
+    for boundary in "$projects_logical" "$projects_physical"; do
+      if path_is_within_or_equal "$boundary" "$candidate"; then
+        echo "error: $source resolves inside project storage ($PROJECTS); refusing Treehouse pool creation there" >&2
+        return 1
+      fi
+    done
+    for boundary in "$project_logical" "$project_physical"; do
+      if path_is_within_or_equal "$boundary" "$candidate"; then
+        echo "error: $source resolves inside the spawning checkout ($PROJ_ABS); refusing Treehouse pool creation there" >&2
+        return 1
+      fi
+    done
+  done
+}
+
 validate_firstmate_home_for_spawn() {
   local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
   abs_home=$(resolved_existing_dir "$home") || return 1
@@ -2179,6 +2318,11 @@ else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  resolve_spawn_treehouse_root || exit 1
+else
+  SPAWN_TREEHOUSE_ROOT=
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
@@ -3044,7 +3188,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if [ -n "$SPAWN_TREEHOUSE_ROOT" ]; then
+    spawn_send_text_line "$WT_TARGET" "treehouse get --root $(shell_quote "$SPAWN_TREEHOUSE_ROOT")"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -3812,7 +3960,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_TREEHOUSE_ROOT= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
