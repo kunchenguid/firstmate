@@ -140,7 +140,8 @@ if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
 fi
 
 # Clean fast-forward only: TARGET must be an ancestor of BRANCH.
-if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "$BRANCH_REF"; then
+branch_sha=$(git -C "$PROJ" rev-parse "$BRANCH_REF")
+if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "$branch_sha"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $TARGET (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $TARGET, then retry." >&2
   exit 1
@@ -172,7 +173,7 @@ else
   fi
   # Stay on the default checkout and fast-forward the named base in place.
   git -C "$PROJ" update-ref -m "fm-merge-local: fast-forward $TARGET to $BRANCH" \
-    "$TARGET_REF" "$(git -C "$PROJ" rev-parse "$BRANCH_REF")" "$(git -C "$PROJ" rev-parse "$TARGET_REF")" || merge_status=$?
+    "$TARGET_REF" "$branch_sha" "$(git -C "$PROJ" rev-parse "$TARGET_REF")" || merge_status=$?
 fi
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
