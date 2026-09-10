@@ -653,6 +653,44 @@ test_positive_recovery_budget_contention_preserves_episode() {
   pass "auto-arm: budget contention preserves the episode and forces a reset retry"
 }
 
+test_reset_contention_without_an_episode_names_no_failure() {
+  local dir out status pid identity holder
+  dir=$(make_primary_dir "$TMP_ROOT/no-episode-contention")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" benign-live
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the no-episode contention watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  # A perfectly healthy home carrying no failure marker of any kind: the reset
+  # every healthy cycle takes loses the lock race against the turn-end guard on
+  # this same Stop event. The turn is still held, but nothing failed.
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.turnend-claude-blocks.lock"
+  printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a busy episode-reset lock must still hold the turn open"
+  [ -n "$out" ] || fail "no-episode contention blocked the turn with empty output"
+  assert_contains "$out" "HELD THIS TURN OPEN" "the block did not name why the turn is held"
+  assert_contains "$out" "no failure episode is open" \
+    "the block did not say that nothing had failed"
+  assert_contains "$out" ".turnend-claude-blocks.lock" \
+    "the block did not name the lock that actually refused"
+  assert_not_contains "$out" "recovery is not yet provably closed" \
+    "the block claimed a recovery this home never needed"
+  assert_not_contains "$out" "automatic supervision mechanism is broken" \
+    "no-episode contention escalated to the full failure notice: $out"
+  assert_absent "$dir/state/.turnend-claude-blocks" "no-episode contention invented a block budget"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "no-episode contention invented a failure notice"
+  pass "auto-arm: reset contention with no open episode blocks without inventing a failure"
+}
+
 test_owner_mutex_contention_preserves_failure_episode_reset() {
   local dir out hook_pid status watcher watcher_id holder i
   dir=$(make_primary_dir "$TMP_ROOT/reset-owner-contention")
@@ -1540,6 +1578,7 @@ test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
+test_reset_contention_without_an_episode_names_no_failure
 test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight
 test_arms_for_registered_custom_check_without_inflight

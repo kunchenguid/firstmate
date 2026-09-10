@@ -81,6 +81,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
+BUDGET_FILE="$STATE/.turnend-claude-blocks"
+BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
@@ -319,11 +321,21 @@ if [ "$HEALTHY" -eq 1 ]; then
   ALARMED=0
   [ -e "$FAILURE_ALARM" ] && ALARMED=1
   if [ "$ALARMED" -eq 0 ] && fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+    PENDING=$ALARMED
+    for marker in "$BUDGET_FILE" "$FAILURE_NOTICE"; do
+      [ -e "$marker" ] || continue
+      PENDING=1
+      break
+    done
     {
-      printf 'firstmate watcher auto-arm HELD THIS TURN OPEN - a live watcher with a fresh beacon was verified, but the failure-episode reset for this home could not be recorded, so recovery is not yet provably closed.\n'
+      if [ "$PENDING" -eq 1 ]; then
+        printf 'firstmate watcher auto-arm HELD THIS TURN OPEN - a live watcher with a fresh beacon was verified, but the failure-episode reset for this home could not be recorded, so recovery is not yet provably closed.\n'
+      else
+        printf 'firstmate watcher auto-arm HELD THIS TURN OPEN - a live watcher with a fresh beacon was verified and no failure episode is open, but the reset that records that could not be taken. With none of those markers present the lock is the only thing left that can refuse, so the usual cause is benign contention: the turn-end guard on this same Stop event holding it for its own reset, which clears on the next turn.\n'
+      fi
       printf 'The arm is not the cause here: the bookkeeping write refused. Read %s (outcome=failed-suppressed), the three markers it clears (%s, %s, %s), and the lock serializing them (%s): a busy lock, or any of those three existing as a directory, refuses it. If this repeats, the state directory itself is refusing the write.\n' \
-        "$STATE/.claude-autoarm-epoch" "$STATE/.turnend-claude-blocks" "$FAILURE_NOTICE" "$FAILURE_ALARM" \
-        "$STATE/.turnend-claude-blocks.lock"
+        "$STATE/.claude-autoarm-epoch" "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM" \
+        "$BUDGET_LOCK"
     } >&2
   fi
   if autoarm_commit failed-suppressed; then
