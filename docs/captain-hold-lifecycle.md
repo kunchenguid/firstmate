@@ -146,8 +146,8 @@ Three accepted limits remain deliberate:
 
 Re-holding through the wrapper with `--until` remains the durable fix rather than relying on the projection safety net.
 [`bin/fm-landed-lib.sh`](../bin/fm-landed-lib.sh) owns Recently Landed's shared selection and artifact-display compatibility rules.
-A local-only landing's note is written by `tasks-axi done --note` as the last of the row's indented body lines rather than into the row title, using the explicit `local-landing:<branch>` marker with exact `local main` compatibility; the snapshot accepts that final line only for a completed row without a captain resolution record and publishes accepted notes.
-A body that carries a captain resolution record is the captain's own prose and is never mined for a landing note, so a decision worded `local main` or `local-landing:develop` does not become a delivery artifact.
+A local-only landing's note is written by `tasks-axi done --note` as the last of the row's indented body lines rather than into the row title, using the explicit `local-landing:<branch>` marker with exact `local main` compatibility; the snapshot gives a completed row's final explicit marker precedence over any earlier captain resolution record and publishes the accepted note.
+A body that carries a captain resolution record is the captain's own prose and is never mined for a landing note, so a decision worded `local main` does not become a delivery artifact; the exact legacy `local main` fallback remains guarded by that boundary.
 The projection remains read-only and uses the canonical snapshot's structured fields, including the machine-written hold-set timestamp.
 
 The window between a merge landing and cleanup is an accepted structural residual rather than an oversight.
