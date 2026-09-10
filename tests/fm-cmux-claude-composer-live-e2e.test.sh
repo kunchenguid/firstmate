@@ -94,7 +94,7 @@ for _ in $(seq 1 30); do
   grep -q '^done: received ALBATROSS' "$STATUS" 2>/dev/null && break
   sleep 2
 done
-grep -q '^resolved \[key=probe-decision\]: answered: ALBATROSS' "$STATUS" \
+grep -Eq '^resolved \[key=probe-decision\]( \[at=[0-9]+\])?: answered: ALBATROSS' "$STATUS" \
   || fail "confirmed cmux delivery did not close the keyed decision"
 grep -q '^done: received ALBATROSS' "$STATUS" \
   || fail "the real Claude worker did not complete after the confirmed steer"
