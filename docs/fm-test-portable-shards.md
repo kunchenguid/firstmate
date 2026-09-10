@@ -71,7 +71,7 @@ Hints only affect balance: the coverage guard keeps the partition complete and d
 Balance is still worth keeping current, because drifted hints let one shard carry far more than another shard's real work and reach the job cap while another runner sits idle.
 That is not hypothetical, and it has now happened three times.
 By 2026-09-01 the lane had grown from 116 to 139 scripts and from ~42 to ~63 minutes, 17 scripts were still unmeasured, and several hints were low by 2-5x, so shard 3 of 4 ran 17-20 minutes against its 20-minute cap while shard 1 ran 11.5 minutes and run [33574154856](https://github.com/kunchenguid/firstmate/actions/runs/33574154856) timed out seconds after a passing test.
-The 2026-09-01 remedy refreshed the hints and moved to five shards, and the lane was cancelling again within a day.
+The 2026-09-01 remedy refreshed the hints and moved to five shards, and the lane was cancelled again on 2026-09-08.
 The remedy after that raised the cap from 20 to 30 minutes and refreshed the hints again, and on 2026-09-10 `Behavior portable serial 1` was still [cancelled at 30 min 15 s](https://github.com/kunchenguid/firstmate/actions/runs/34439141091/job/102750305543) with no hang: the shard was passing tests three seconds before the cancellation and simply ran out of budget.
 Refreshing the hints repairs the balance but does not keep it repaired, which is why the shard balance guard below measures how close each shard actually runs to its cap rather than only whether its hints exist.
 Refresh the hints whenever the serial lane gains scripts, rather than waiting for a guard to trip.
@@ -99,13 +99,15 @@ Refresh the CI-derived hints by downloading the per-shard timing artifacts from 
 for run in <run-id> <run-id> <run-id>; do
   gh run download "$run" -R kunchenguid/firstmate --pattern 'fm-test-timing-portable-serial-*' -D "/tmp/fm-serial/$run"
 done
-jq -r '.scripts[] | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*/*.json \
+jq -r '.scripts[] | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*/*/*.json \
   | awk -F'\t' '$2 > m[$1] { m[$1] = $2 } END { for (p in m) print p, m[p] }' \
   | LC_ALL=C sort
 bin/fm-test-run.sh --check-coverage
 bin/fm-test-run.sh --check-shard-balance /tmp/fm-serial/<run-id>/*/*.json
 ```
 
+Run the balance check separately for each run.
+Refreshing hints changes the diagnosis of existing artifacts, not their recorded shard wall times.
 A timed-out shard uploads no artifact, so pick runs where every serial shard is green or the lane's slowest scripts go unmeasured in exactly the shard that needs them most.
 Measure native-Windows-only scripts through the focused Git Bash runner and retain that `duration_ms` separately, because the portable CI shards skip them.
 
@@ -114,7 +116,7 @@ Measure native-Windows-only scripts through the focused Git Bash runner and reta
 `bin/fm-test-run.sh --check-coverage` verifies that both parallel lanes partition the proven-isolated set.
 It also verifies that the parallel lanes, portable serial lane, and real-Herdr family are disjoint and cover every `tests/*.test.sh` script.
 It separately verifies that the portable serial CI shards are non-empty, disjoint, and together equal the portable serial lane.
-It reports the unmeasured serial share as `serial_unhinted=` and refuses when that share exceeds `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`, so the shards stay balanced on evidence rather than on the default weight.
+It reports the unmeasured serial share as `serial_unhinted=` and refuses when that share exceeds `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`, limiting reliance on the default weight.
 
 ## Shard balance guard
 
@@ -122,9 +124,11 @@ It reports the unmeasured serial share as `serial_unhinted=` and refuses when th
 A hint table can be fully populated, predict a perfectly even split, and still leave one shard running to its cap while another idles, which is how the 2026-09-10 cancellation happened with the coverage guard green.
 `bin/fm-test-run.sh --check-shard-balance <serial-lane.json>...` closes that gap against the timing artifacts the serial lanes already upload on every run.
 Each artifact names the lane it ran as and every script it ran, so a shard is checked against its own recorded work rather than against a re-derived assignment.
+The command expects numbered portable serial artifacts from one run.
+Malformed or foreign timing artifacts raise unhandled errors rather than being skipped; neither the CI glob nor the invocation above supplies them.
 
 It checks one property, the one actually being protected: how close a shard runs to the cap that would cancel it.
-A shard whose recorded wall time exceeds `PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT` of the job cap fails; anything under it passes.
+A shard whose recorded wall time exceeds `PORTABLE_SERIAL_MAX_SHARD_BUDGET_PERCENT` of the job cap fails; a shard at or below it passes.
 The duration is the shard's own recorded wall time (`summary.duration_ms` in its artifact) rather than the sum of its scripts.
 
 ### Where the threshold comes from
@@ -148,7 +152,7 @@ The margin the bound leaves, in minutes:
 | guard fails above | 21.60 | 72% |
 | job is cancelled at | 30.00 | 100% |
 
-That leaves **4.61 minutes of growth** between a healthy lane and the first warning, and a further 8.4 minutes between the warning and a cancellation.
+That leaves **4.61 minutes of growth** between a healthy lane and the guard's failure threshold, and a further 8.4 minutes between that threshold and a cancellation.
 The numerator is the suite's wall clock while `timeout-minutes` bounds the whole job, so the share understates the job by whatever the surrounding steps cost.
 That bias is measured, not assumed: across the 30 `tests-portable-serial` jobs of those runs, non-suite time ranged from 15 to 35 seconds, at most 1.9% of the cap, which does not consume the margin above.
 Re-derive these numbers from fresh artifacts if the job gains or loses steps, or if the lane's variance changes.
@@ -158,10 +162,11 @@ Re-derive these numbers from fresh artifacts if the job gains or loses steps, or
 The failure names the scripts furthest over their hints, so it says what to re-measure rather than only that a shard is slow.
 The hint table feeds that list and nothing else here: it does not decide pass or fail, and the coverage guard's `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT` still owns hints that are missing.
 
-`PORTABLE_SERIAL_JOB_TIMEOUT_MINUTES` is the single owner of the cap the share is taken against.
+The `tests-portable-serial` job's `timeout-minutes` in `.github/workflows/ci.yml` owns the job cap; `PORTABLE_SERIAL_JOB_TIMEOUT_MINUTES` records that cap for the guard.
 `tests/fm-test-run.test.sh` parses the `tests-portable-serial` job's real `timeout-minutes` out of `.github/workflows/ci.yml` and compares it against the cap the guard reports, so the cap cannot move in one place only.
 The `tests-timing-aggregate` job runs the check after building the aggregate summary.
 A cancelled shard uploads no artifact, so the check reports how many of the shards its artifacts declare could actually be read and leaves the rest unchecked rather than guessing.
+When no serial artifacts are available, CI warns and leaves shard balance unchecked.
 
 ## Timing artifacts
 
@@ -179,7 +184,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 | Lane | Bound | Rationale |
 |---|---|---|
 | portable parallel 1/2 | job `timeout-minutes: 10` | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial 1-5 | job `timeout-minutes: 30` | Each balanced shard carries about 18.11 minutes of conservative assignment weight and measured 14.47 to 16.99 minutes on a held-out run, so the 30-minute cap remains a hang tripwire while leaving margin for job setup and runner-speed spread. The shard balance guard checks that margin on every run and fails above 21.6 minutes. |
+| portable serial 1-5 | job `timeout-minutes: 30` | See the [shard balance guard](#shard-balance-guard) for the measured margin and failure threshold. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finished around 7 minutes before this lane gained `fm-backend-herdr-focus-flash-e2e`, which measures about 2 minutes against a real lab locally, so the step bound is still the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. Refresh this figure from the lane's uploaded timing artifact. |
 
 Timeouts are hang tripwires rather than expected healthy durations.
