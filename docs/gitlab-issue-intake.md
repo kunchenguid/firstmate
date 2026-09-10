@@ -164,7 +164,8 @@ Nếu bạn thấy một issue im lặng nhiều giờ, đó là bình thường
 
 **Comment phân loại và kế hoạch.**
 Đăng một lần khi nhận việc.
-Nó nêu loại issue (`bug`, `feature`, `chore`, `docs`, `question`), cỡ (`S`, `M`, `L`), làm theo hướng `ship` (ra merge request) hay `scout` (chỉ điều tra), mức kiểm định (delivery mode) sẽ áp dụng là một trong `no-mistakes`, `no-mistakes-prod-only` hoặc `direct-PR`, kèm một checklist các việc con.
+Nó nêu loại issue (`bug`, `feature`, `chore`, `docs`, `question`), cỡ (`S`, `M`, `L`), làm theo hướng `ship` (ra merge request) hay `scout` (chỉ điều tra), mức kiểm định (delivery mode) sẽ áp dụng là `no-mistakes` hoặc `direct-PR`, kèm một checklist các việc con.
+Với project được đăng ký ở mức `no-mistakes-prod-only`, first mate phân loại bề mặt của từng việc, nên comment nêu giá trị đã phân loại chứ không nêu tên mức đăng ký.
 Mỗi việc con được chia nhỏ để làm trong khoảng 2 đến 5 phút và ra một merge request nhỏ, đủ để bạn đọc hết trong một lượt review.
 
 Comment này không bị thay bằng comment mới khi có tiến triển: first mate sửa tại chỗ chính comment đó.
