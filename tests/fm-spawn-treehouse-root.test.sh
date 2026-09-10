@@ -208,6 +208,98 @@ test_case_insensitive_project_storage_spelling_is_refused() {
   pass "filesystem identity catches case-insensitive project-storage spelling"
 }
 
+test_missing_project_storage_boundary_is_refused() {
+  local rec id out status root
+  id=treehouse-root-missing-projects-d1
+  rec=$(make_case missing-projects)
+  read_case "$rec"
+  rmdir "$HOME_DIR/projects"
+  root="$HOME_DIR/PROJECTS/pool"
+  printf '%s\n' "$root" > "$HOME_DIR/config/treehouse-root"
+
+  out=$(run_worker_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "an absent project-storage boundary was treated as proof of non-containment"
+  assert_contains "$out" "cannot prove" \
+    "absent-boundary refusal did not explain that containment was undecidable"
+  [ ! -s "$COMMAND_LOG" ] || fail "absent-boundary refusal sent a pane command"
+  pass "an absent project-storage boundary fails closed"
+}
+
+test_filesystem_root_spellings_are_refused() {
+  local shape name rec id out status link root
+  link="$TMP_ROOT/root-link"
+  ln -s / "$link"
+  for shape in slash dot separators symlink; do
+    case "$shape" in
+      slash) root=/ ;;
+      dot) root=/./ ;;
+      separators) root=//// ;;
+      symlink) root=$link ;;
+    esac
+    name="filesystem-root-$shape"
+    id="treehouse-root-$shape-d2"
+    rec=$(make_case "$name")
+    read_case "$rec"
+    printf '%s\n' "$root" > "$HOME_DIR/config/treehouse-root"
+
+    out=$(run_worker_spawn "$id")
+    status=$?
+    [ "$status" -ne 0 ] || fail "filesystem-root spelling '$root' was accepted"
+    assert_contains "$out" "resolves to the filesystem root" \
+      "filesystem-root refusal did not name the forbidden destination for '$root'"
+    [ ! -s "$COMMAND_LOG" ] || fail "filesystem-root refusal sent a pane command for '$root'"
+  done
+  pass "literal, normalized, repeated-separator, and symlink spellings of the filesystem root are refused"
+}
+
+test_trailing_newline_resolution_does_not_invent_cycle() {
+  local rec id out status root
+  id=treehouse-root-newline-cycle-d3
+  rec=$(make_case newline-cycle)
+  read_case "$rec"
+  mkdir "$CASE_DIR/A"$'\n' "$CASE_DIR/B"$'\n'
+  ln -s "$CASE_DIR/B"$'\n' "$CASE_DIR/A"
+  ln -s "$CASE_DIR/A"$'\n' "$CASE_DIR/B"
+  root="$CASE_DIR/A"
+  printf '%s\n' "$root" > "$HOME_DIR/config/treehouse-root"
+
+  out=$(run_worker_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a valid symlink to a trailing-newline directory should not invent a cycle"
+  assert_contains "$out" "spawned $id" \
+    "trailing-newline cycle regression did not report a successful spawn"
+  assert_only_treehouse_command "treehouse get --root '$root'"
+  pass "byte-preserving resolution does not invent a cycle from trailing-newline names"
+}
+
+test_trailing_newline_resolution_does_not_exhaust_bound() {
+  local rec id out status root i
+  id=treehouse-root-newline-bound-d4
+  rec=$(make_case newline-bound)
+  read_case "$rec"
+  i=0
+  while [ "$i" -le 17 ]; do
+    mkdir "$CASE_DIR/D$i"$'\n'
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -le 16 ]; do
+    ln -s "$CASE_DIR/D$((i + 1))"$'\n' "$CASE_DIR/D$i"
+    i=$((i + 1))
+  done
+  root="$CASE_DIR/D0"
+  printf '%s\n' "$root" > "$HOME_DIR/config/treehouse-root"
+
+  out=$(run_worker_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a valid symlink to a trailing-newline directory should not exhaust convergence"
+  assert_contains "$out" "spawned $id" \
+    "trailing-newline bound regression did not report a successful spawn"
+  assert_only_treehouse_command "treehouse get --root '$root'"
+  pass "byte-preserving resolution does not exhaust the bound on trailing-newline names"
+}
+
 test_dollar_character_is_refused_before_treehouse_expands_it() {
   local rec id out status root
   id=treehouse-root-dollar-c2
@@ -342,6 +434,10 @@ test_symlinked_ancestor_into_project_storage_is_refused
 test_config_line_trims_leading_and_trailing_whitespace
 test_dollar_character_is_refused_before_treehouse_expands_it
 test_case_insensitive_project_storage_spelling_is_refused
+test_missing_project_storage_boundary_is_refused
+test_filesystem_root_spellings_are_refused
+test_trailing_newline_resolution_does_not_invent_cycle
+test_trailing_newline_resolution_does_not_exhaust_bound
 test_missing_parent_dotdot_hidden_symlink_reproduction_is_refused
 test_normalization_reveals_project_storage_symlink
 test_dotdot_component_is_refused_even_when_destination_is_safe

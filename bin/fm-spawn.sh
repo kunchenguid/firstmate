@@ -75,12 +75,14 @@
 #   home, with surrounding whitespace removed from the file value. A configured
 #   value must be absolute, contain neither a dollar character nor a `..`
 #   component, and must not resolve inside the effective projects directory or
-#   spawning checkout. Existing symlinked ancestors are resolved repeatedly
-#   after path normalization until stable; cycles and the bounded non-convergent
+#   spawning checkout or resolve to the filesystem root. Existing symlinked
+#   ancestors are resolved repeatedly after path normalization until stable,
+#   preserving trailing newline bytes; cycles and the bounded non-convergent
 #   case refuse. Containment compares filesystem identity as well as path
-#   spelling so case-insensitive aliases cannot bypass it. A present file naming
-#   no root refuses. When no root is configured, spawn sends the existing bare
-#   `treehouse get` command unchanged; otherwise it sends
+#   spelling so case-insensitive aliases cannot bypass it, and refuses when a
+#   protected boundary or the identity comparison is unavailable. A present
+#   file naming no root refuses. When no root is configured, spawn sends the
+#   existing bare `treehouse get` command unchanged; otherwise it sends
 #   `treehouse get --root <shell-quoted-root>`. Secondmate launches clear
 #   FM_TREEHOUSE_ROOT so the secondmate's own config decides the pool for its workers.
 #   docs/configuration.md "Treehouse pool root" owns use.
@@ -2030,29 +2032,52 @@ path_is_ancestor_of() {
 }
 
 normalize_absolute_path() {  # <absolute-path>
-  printf '%s\n' "$1" | awk -F/ '
-    {
-      depth = 0
-      for (i = 1; i <= NF; i++) {
-        if ($i == "" || $i == ".") continue
-        if ($i == "..") {
-          if (depth > 0) depth--
-          continue
-        }
-        part[++depth] = $i
-      }
-      printf "/"
-      for (i = 1; i <= depth; i++) printf "%s%s", (i == 1 ? "" : "/"), part[i]
-      printf "\n"
-    }
-  '
+  local remaining component normalized final_component
+  remaining=${1#/}
+  normalized=
+  final_component=0
+  while [ "$final_component" -eq 0 ]; do
+    case "$remaining" in
+      */*)
+        component=${remaining%%/*}
+        remaining=${remaining#*/}
+        ;;
+      *)
+        component=$remaining
+        remaining=
+        final_component=1
+        ;;
+    esac
+    case "$component" in
+      ''|.) ;;
+      ..)
+        if [ -n "$normalized" ]; then
+          normalized=${normalized%/*}
+        fi
+        ;;
+      *) normalized="$normalized/$component" ;;
+    esac
+  done
+  [ -n "$normalized" ] || normalized=/
+  NORMALIZED_ABSOLUTE_PATH=$normalized
 }
 
 absolute_path_spelling() {  # <path>
   case "$1" in
-    /*) printf '%s\n' "$1" ;;
-    *) printf '%s/%s\n' "$(pwd -P)" "$1" ;;
+    /*) ABSOLUTE_PATH_SPELLING=$1 ;;
+    *) ABSOLUTE_PATH_SPELLING="$(pwd -P)/$1" ;;
   esac
+}
+
+physical_existing_dir() {  # <existing-directory>
+  local path=$1 record
+  record=$(CDPATH='' cd -P -- "$path" 2>/dev/null && pwd -P && printf '\001') || return 1
+  case "$record" in
+    *$'\n\001') ;;
+    *) return 1 ;;
+  esac
+  record=${record%$'\001'}
+  PHYSICAL_EXISTING_DIR=${record%$'\n'}
 }
 
 resolve_path_once_through_existing_ancestor() {  # <absolute-path>
@@ -2071,37 +2096,42 @@ resolve_path_once_through_existing_ancestor() {  # <absolute-path>
     echo "error: Treehouse pool root cannot resolve through existing ancestor $probe" >&2
     return 1
   fi
-  resolved=$(CDPATH='' cd -P -- "$probe" 2>/dev/null && pwd -P) || {
+  physical_existing_dir "$probe" || {
     echo "error: Treehouse pool root ancestor cannot be resolved: $probe" >&2
     return 1
   }
+  resolved=$PHYSICAL_EXISTING_DIR
   if [ "$resolved" = / ]; then
     combined="/${suffix#/}"
   else
     combined="$resolved$suffix"
   fi
-  normalize_absolute_path "$combined"
+  normalize_absolute_path "$combined" || return 1
+  RESOLVED_PATH_ONCE=$NORMALIZED_ABSOLUTE_PATH
 }
 
 resolve_path_through_existing_ancestor() {  # <absolute-path>
-  local current next seen iteration max_iterations
+  local current current_key next next_key seen iteration max_iterations
   current=$1
-  seen=$'\n'"$current"$'\n'
+  current_key=$(printf '%s' "$current" | od -An -tx1 | tr -d '[:space:]') || return 1
+  seen=$'\n'"$current_key"$'\n'
   max_iterations=16
   iteration=1
   while [ "$iteration" -le "$max_iterations" ]; do
-    next=$(resolve_path_once_through_existing_ancestor "$current") || return 1
+    resolve_path_once_through_existing_ancestor "$current" || return 1
+    next=$RESOLVED_PATH_ONCE
     if [ "$next" = "$current" ]; then
-      printf '%s\n' "$next"
+      RESOLVED_PATH=$next
       return 0
     fi
+    next_key=$(printf '%s' "$next" | od -An -tx1 | tr -d '[:space:]') || return 1
     case "$seen" in
-      *$'\n'"$next"$'\n'*)
+      *$'\n'"$next_key"$'\n'*)
         echo "error: Treehouse pool path resolution entered a cycle at $next" >&2
         return 1
         ;;
     esac
-    seen="$seen$next"$'\n'
+    seen="$seen$next_key"$'\n'
     current=$next
     iteration=$((iteration + 1))
   done
@@ -2113,36 +2143,37 @@ path_is_within_or_equal() {  # <boundary> <path>
   [ "$1" = "$2" ] || path_is_ancestor_of "$1" "$2"
 }
 
-path_is_within_or_equal_by_filesystem() {  # <boundary> <path>
+path_containment_status() {  # <boundary> <path>; 0=within, 1=outside, 2=unknown
   local boundary=$1 probe=$2 parent
-  [ -d "$boundary" ] || return 1
+  [ -d "$boundary" ] || return 2
+  path_is_within_or_equal "$boundary" "$probe" && return 0
   while [ ! -d "$probe" ]; do
-    [ "$probe" != / ] || return 1
+    if [ -e "$probe" ] || [ -L "$probe" ]; then
+      return 2
+    fi
+    [ "$probe" != / ] || return 2
     parent=${probe%/*}
     [ -n "$parent" ] || parent=/
-    [ "$parent" != "$probe" ] || return 1
+    [ "$parent" != "$probe" ] || return 2
     probe=$parent
   done
-  probe=$(CDPATH='' cd -P -- "$probe" 2>/dev/null && pwd -P) || return 1
+  physical_existing_dir "$probe" || return 2
+  probe=$PHYSICAL_EXISTING_DIR
   while :; do
     [ "$probe" -ef "$boundary" ] && return 0
+    [ -d "$probe" ] && [ -d "$boundary" ] || return 2
     [ "$probe" != / ] || return 1
     parent=${probe%/*}
     [ -n "$parent" ] || parent=/
     probe=$parent
   done
-}
-
-path_is_within_or_equal_guarded() {  # <boundary> <path>
-  path_is_within_or_equal "$1" "$2" ||
-    path_is_within_or_equal_by_filesystem "$1" "$2"
 }
 
 resolve_spawn_treehouse_root() {
   local present line trimmed source raw_bytes root_logical root_physical
   local projects_absolute projects_logical projects_physical
   local project_absolute project_logical project_physical
-  local candidate boundary
+  local candidate boundary containment_status
   SPAWN_TREEHOUSE_ROOT=
   source=
   if [ -n "${FM_TREEHOUSE_ROOT:-}" ]; then
@@ -2198,26 +2229,62 @@ resolve_spawn_treehouse_root() {
       ;;
   esac
 
-  root_logical=$(normalize_absolute_path "$SPAWN_TREEHOUSE_ROOT") || return 1
-  root_physical=$(resolve_path_through_existing_ancestor "$SPAWN_TREEHOUSE_ROOT") || return 1
-  projects_absolute=$(absolute_path_spelling "$PROJECTS") || return 1
-  projects_logical=$(normalize_absolute_path "$projects_absolute") || return 1
-  projects_physical=$(resolve_path_through_existing_ancestor "$projects_absolute") || return 1
-  project_absolute=$(absolute_path_spelling "$PROJ_ABS") || return 1
-  project_logical=$(normalize_absolute_path "$project_absolute") || return 1
-  project_physical=$(resolve_path_through_existing_ancestor "$project_absolute") || return 1
+  normalize_absolute_path "$SPAWN_TREEHOUSE_ROOT" || return 1
+  root_logical=$NORMALIZED_ABSOLUTE_PATH
+  resolve_path_through_existing_ancestor "$SPAWN_TREEHOUSE_ROOT" || return 1
+  root_physical=$RESOLVED_PATH
+  if [ "$root_logical" = / ] || [ "$root_physical" = / ]; then
+    echo "error: $source resolves to the filesystem root; refusing Treehouse pool creation there" >&2
+    return 1
+  fi
+  absolute_path_spelling "$PROJECTS" || return 1
+  projects_absolute=$ABSOLUTE_PATH_SPELLING
+  normalize_absolute_path "$projects_absolute" || return 1
+  projects_logical=$NORMALIZED_ABSOLUTE_PATH
+  resolve_path_through_existing_ancestor "$projects_absolute" || return 1
+  projects_physical=$RESOLVED_PATH
+  absolute_path_spelling "$PROJ_ABS" || return 1
+  project_absolute=$ABSOLUTE_PATH_SPELLING
+  normalize_absolute_path "$project_absolute" || return 1
+  project_logical=$NORMALIZED_ABSOLUTE_PATH
+  resolve_path_through_existing_ancestor "$project_absolute" || return 1
+  project_physical=$RESOLVED_PATH
   for candidate in "$root_logical" "$root_physical"; do
     for boundary in "$projects_logical" "$projects_physical"; do
-      if path_is_within_or_equal_guarded "$boundary" "$candidate"; then
-        echo "error: $source resolves inside project storage ($PROJECTS); refusing Treehouse pool creation there" >&2
-        return 1
+      if path_containment_status "$boundary" "$candidate"; then
+        containment_status=0
+      else
+        containment_status=$?
       fi
+      case "$containment_status" in
+        0)
+          echo "error: $source resolves inside project storage ($PROJECTS); refusing Treehouse pool creation there" >&2
+          return 1
+          ;;
+        1) ;;
+        *)
+          echo "error: cannot prove $source is outside project storage ($PROJECTS); protected boundary or filesystem identity is unavailable" >&2
+          return 1
+          ;;
+      esac
     done
     for boundary in "$project_logical" "$project_physical"; do
-      if path_is_within_or_equal_guarded "$boundary" "$candidate"; then
-        echo "error: $source resolves inside the spawning checkout ($PROJ_ABS); refusing Treehouse pool creation there" >&2
-        return 1
+      if path_containment_status "$boundary" "$candidate"; then
+        containment_status=0
+      else
+        containment_status=$?
       fi
+      case "$containment_status" in
+        0)
+          echo "error: $source resolves inside the spawning checkout ($PROJ_ABS); refusing Treehouse pool creation there" >&2
+          return 1
+          ;;
+        1) ;;
+        *)
+          echo "error: cannot prove $source is outside the spawning checkout ($PROJ_ABS); protected boundary or filesystem identity is unavailable" >&2
+          return 1
+          ;;
+      esac
     done
   done
 }

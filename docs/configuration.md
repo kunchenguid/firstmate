@@ -182,8 +182,10 @@ A present file naming no root is refused, so emptying a configured file cannot s
 The root must be absolute because Treehouse resolves a relative `--root` from the repository root, which would place the pool inside project storage and recreate the cross-home collision.
 The root must not contain a dollar character because Treehouse expands dollar variables in its `--root` value.
 The root must not contain a `..` path component because cancellation across a missing directory can expose a symlink only when Treehouse later creates the path.
+The root must not resolve to the filesystem root, including through dot, repeated-separator, or symlink spellings.
 A root that resolves inside the effective projects directory or the spawning checkout is refused, with filesystem-identity checks preventing case-insensitive aliases from bypassing containment.
-Resolution repeatedly normalizes the path and resolves its existing symlinked ancestors until the result stabilizes, with cycles and the bounded non-convergent case refused.
+Containment fails closed when a protected boundary does not exist or filesystem identity cannot be decided.
+Resolution preserves pathname bytes while repeatedly normalizing the path and resolving its existing symlinked ancestors until the result stabilizes, with cycles and the bounded non-convergent case refused.
 
 `config/treehouse-root` is local and gitignored.
 It is not inherited by secondmate homes because each secondmate holds its own project clones and needs its own pool decision.
