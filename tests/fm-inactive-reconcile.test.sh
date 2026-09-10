@@ -41,6 +41,7 @@ set -u
 [ "$#" -eq 2 ] || exit 2
 [ "${1:-}" = open ] || exit 1
 id=${2:-}
+[ -z "${FM_FAKE_CAPTAIN_HOLD_LOG:-}" ] || printf '%s\n' "$id" >> "$FM_FAKE_CAPTAIN_HOLD_LOG"
 case ",${FM_FAKE_CAPTAIN_HELD_TASKS:-}," in
   *,"$id",*) printf 'captain-hold:%s:test-incarnation\n' "$id" ;;
   *) exit 1 ;;
@@ -684,7 +685,12 @@ test_nonterminal_and_captain_held_states_do_not_report() {
   make_world captain-held; write_child "$MAIN" child 'captain-held: awaiting captain'
   FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "captain-held item was reconciled"
-  pass "nonterminal and captain-held workers remain outside inactive terminal reporting"
+  make_world recent; write_child "$MAIN" child 'working: still active'
+  touch "$MAIN/state/child.meta" "$MAIN/state/child.status" "$MAIN/state/child.turn-ended"
+  : > "$WORLD/captain-hold.log"
+  FM_FAKE_CAPTAIN_HOLD_LOG="$WORLD/captain-hold.log" FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ ! -s "$WORLD/captain-hold.log" ] || fail "recently active item reached captain-hold lookup"
+  pass "nonterminal, recent, and captain-held workers remain outside inactive terminal reporting"
 }
 
 # The actual watcher poll invokes the helper, while an idle secondmate remains

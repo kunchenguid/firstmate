@@ -491,6 +491,12 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   turn="$STATE/$id.turn-ended"
   last=$(last_status_line "$status")
   status_line_verb "$last" | grep -Fx captain-held >/dev/null 2>&1 && return 0
+  # A ledger that states its own outcome is the ledger-first path's to deliver.
+  if [ -n "$self" ] && child_terminal_ledger_line "$status" >/dev/null; then
+    return 0
+  fi
+  age=$(last_activity_age "$meta" "$status" "$turn")
+  [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
   if task_is_hold_for_captain "$id"; then
     # Preserve the task record, endpoint evidence, worktree contents, branch,
     # and existing captain hold exactly as found. The ordinary captain-hold
@@ -498,12 +504,6 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     # here would only repeat that same request and invite unsafe recovery.
     return 0
   fi
-  # A ledger that states its own outcome is the ledger-first path's to deliver.
-  if [ -n "$self" ] && child_terminal_ledger_line "$status" >/dev/null; then
-    return 0
-  fi
-  age=$(last_activity_age "$meta" "$status" "$turn")
-  [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
