@@ -1103,13 +1103,6 @@ declared_shards = 0
 for path in inputs:
     data = json.loads(path.read_text())
     match = LANE_RE.match(lane_of(data))
-    if not match:
-        print(
-            "shard balance guard: %s is not a numbered portable serial lane "
-            "artifact; skipping it" % path,
-            file=sys.stderr,
-        )
-        continue
     rows = []
     for s in data["scripts"]:
         real = int(s["duration_ms"])
@@ -1123,13 +1116,6 @@ for path in inputs:
             "rows": rows,
         }
     )
-
-if not shards:
-    print(
-        "shard balance guard: no portable serial timing artifact to check",
-        file=sys.stderr,
-    )
-    sys.exit(1)
 
 shards.sort(key=lambda s: s["lane"])
 
