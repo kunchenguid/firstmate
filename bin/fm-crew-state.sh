@@ -625,7 +625,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ "$RUN_SOURCE" = coarse ]; then
       case "$COARSE_STATUS" in
         running) RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-        completed) RUN_STATE=done; RUN_DETAIL="run completed" ;;
+        completed) RUN_STATE="done"; RUN_DETAIL="run completed" ;;
         failed) RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled) RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *) RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
@@ -639,8 +639,8 @@ if [ "$HAVE_RUN" = 1 ]; then
       nm_has_gate && has_gate=1
       if [ -n "$outcome" ]; then
         case "$outcome" in
-          passed) RUN_STATE=done; RUN_DETAIL="run passed" ;;
-          checks-passed) RUN_STATE=done; RUN_DETAIL="checks green" ;;
+          passed) RUN_STATE="done"; RUN_DETAIL="run passed" ;;
+          checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green" ;;
           failed) RUN_STATE=failed; RUN_DETAIL="run failed" ;;
           cancelled) RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
           *) RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
@@ -651,7 +651,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       else
         case "$status" in
           ci|running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-          completed) RUN_STATE=done; RUN_DETAIL="run completed" ;;
+          completed) RUN_STATE="done"; RUN_DETAIL="run completed" ;;
           failed) RUN_STATE=failed; RUN_DETAIL="run failed" ;;
           cancelled) RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
           "") RUN_STATE=unknown; RUN_DETAIL="run status unavailable" ;;
