@@ -178,9 +178,7 @@ fm_procevent_owner_lease_seconds() {
   printf '%s\n' "$value"
 }
 
-# How often a runner's guard re-reads that lease. One watcher cycle at the
-# default poll interval, so the guard costs about as much as the cycle that
-# refreshes what it reads.
+# Detection-interval semantics: docs/configuration.md, Process-to-event sources.
 FM_PROCEVENT_OWNER_CHECK_DEFAULT_SECONDS=15
 FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS=1
 FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS=3600
@@ -319,6 +317,18 @@ fm_procevent_source_lock_acquire() {
   (umask 077; mkdir -p "$root") || return 1
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
   fm_lock_acquire_wait "$(fm_procevent_source_lock_path "$id")"
+}
+
+# fm_procevent_source_lock_try_acquire <source-id>
+# Non-blocking acquisition for release_start_claim in bin/fm-procevent.sh;
+# that caller owns the exit-cleanup lock-order invariant.
+fm_procevent_source_lock_try_acquire() {
+  local id=$1 root
+  fm_procevent_source_id_valid "$id" || return 1
+  root=$(fm_procevent_claim_root)
+  (umask 077; mkdir -p "$root") || return 1
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  fm_lock_try_acquire "$(fm_procevent_source_lock_path "$id")"
 }
 
 fm_procevent_source_lock_release() {
