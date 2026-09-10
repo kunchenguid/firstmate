@@ -2171,37 +2171,57 @@ test_hook_claude_mode_last_resort_arm_stands_down_for_afk() {
   pass "fm-turnend-guard --claude: the last-resort arm stands down while away mode owns the watcher"
 }
 
-# The last-resort arm cannot be an unbounded block path. bin/fm-watch.sh queues
-# and exits on an actionable wake, so against a persistently wedged auto-arm the
-# watcher is gone again at every turn end; unaccounted, the guard would arm and
-# block every single turn, straight past Claude Code's hard 8-consecutive-block
-# override, which force-ends the turn with no attended alarm ever raised.
+# The block budget bounds BLOCKING, never ARMING. bin/fm-watch.sh queues and
+# exits on an actionable wake, so against a persistently wedged auto-arm the
+# watcher is gone again at every turn end, and a guard that stopped arming once
+# the budget ran out would leave the fleet silently unsupervised from that stop
+# on. Blocking is the part that needs a ceiling, because blocking past Claude
+# Code's hard 8-consecutive-block override force-ends the turn with no attended
+# alarm ever raised. This case walks both sides of that line: the blocks stop,
+# the arms do not.
 #
 # What this case does NOT cover, named here rather than left implied: the
 # frozen-epoch path. This fixture never creates state/.claude-autoarm-epoch, so
 # current_epoch is empty, budget_account_current_epoch takes its incrementing
-# branch on every run, and the bound engages. An auto-arm that leaves a ledger
-# at epoch=N and then stops firing entirely keeps current_epoch frozen at N, the
-# count never advances, and this assertion would hold while the guard re-armed
-# forever. A test that cannot fail on the case it appears to cover is a trap, so
-# the gap is stated instead of implied; closing the bound there is separate work.
-test_hook_claude_mode_last_resort_arm_spends_the_block_budget() {
+# branch on every run, and the budget is reached at all. An auto-arm that leaves
+# a ledger at epoch=N and then stops firing entirely keeps current_epoch frozen
+# at N, so the count never advances and the guard keeps blocking instead of
+# crossing into the allow. A test that cannot fail on the case it appears to
+# cover is a trap, so the gap is stated instead of implied; closing the count's
+# per-generation limit is separate work.
+test_hook_claude_mode_spent_budget_stops_blocking_but_never_stops_arming() {
   local dir out status i pid waited
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-last-resort-bounded")
   : > "$dir/state/task1.meta"
   touch -t 202001010000 "$dir/state/.last-watcher-beat"
   write_watcher_fixture "$dir"
   i=1
-  while [ "$i" -le 2 ]; do
+  while [ "$i" -le 4 ]; do
     out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 FM_CLAUDE_TURNEND_BLOCK_BUDGET=2 \
       run_hook_claude "$dir" false); status=$?
-    expect_code 2 "$status" "restored-cycle block $i must still yield one handling turn"
     assert_contains "$out" "SUPERVISION RESTORED BY THE TURN-END GUARD" \
-      "restored-cycle block $i lost its banner"
+      "stop $i did not restore the cycle"
+    if [ "$i" -le 2 ]; then
+      expect_code 2 "$status" "restored-cycle block $i must still yield one handling turn"
+      assert_not_contains "$out" "TURN ALLOWED" \
+        "stop $i allowed the turn while the block budget still had a slot"
+    else
+      # Stop 3 onward: the budget is spent, so the guard must stop blocking and
+      # must NOT stop arming. The restored watcher queues every actionable wake
+      # durably, so allowing here loses nothing.
+      expect_code 0 "$status" "stop $i must be allowed once the block budget is spent"
+      assert_contains "$out" "TURN ALLOWED" \
+        "the spent-budget allow went out without saying the turn was allowed"
+      assert_contains "$out" "systemMessage" \
+        "the spent-budget allow spoke only on stderr, which an allowed stop does not deliver"
+      assert_not_contains "$out" "TURN WOULD END BLIND" \
+        "the guard blocked again after its block budget was spent"
+    fi
     pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
     case "$pid" in
-      ''|*[!0-9]*) fail "restored-cycle block $i left no watcher lock behind" ;;
+      ''|*[!0-9]*) fail "stop $i left no live watcher lock behind" ;;
     esac
+    kill -0 "$pid" 2>/dev/null || fail "stop $i did not leave a live watcher running"
     # The restored watcher closes on the next actionable wake and the wedged
     # auto-arm never re-arms it, so the following turn end is blind again.
     kill_fixture_watcher "$dir"
@@ -2214,25 +2234,16 @@ test_hook_claude_mode_last_resort_arm_spends_the_block_budget() {
     rm -f "$dir/state/.watch.lock"
     i=$((i + 1))
   done
-  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 FM_CLAUDE_TURNEND_BLOCK_BUDGET=2 \
-    run_hook_claude "$dir" false); status=$?
-  kill_fixture_watcher "$dir"
-  expect_code 2 "$status" "a blind stop with a spent budget must still be refused"
-  assert_not_contains "$out" "SUPERVISION RESTORED BY THE TURN-END GUARD" \
-    "the guard armed and blocked again after spending its whole block budget"
-  assert_contains "$out" "TURN WOULD END BLIND" \
-    "the spent-budget stop lost the blind-turn banner"
-  assert_absent "$dir/state/.watch.lock" \
-    "the guard spawned another watcher after spending its whole block budget"
-  pass "fm-turnend-guard --claude: repeated last-resort arms spend the same bounded block budget"
+  pass "fm-turnend-guard --claude: a spent block budget stops the blocking and never stops the arming"
 }
 
-# Standing down once the budget is spent is what makes the episode's single
-# attended fail-open reachable at all: an arm that blocked every turn - and
-# reset the failure episode each time it did - would keep the verified
-# alarm permanently out of reach while the session blocked forever.
-test_hook_claude_mode_spent_budget_reaches_the_attended_fail_open() {
-  local dir out status
+# Recovery outranks the attended alarm. A spent budget over a verified failure
+# episode used to stand the arm down and fire the episode's one fail-open; when
+# a live cycle can actually be restored, supervision is not down, so the guard
+# restores it, allows the stop, and leaves that alarm unspent for a lapse it
+# cannot repair.
+test_hook_claude_mode_spent_budget_restores_the_cycle_before_alarming() {
+  local dir out status pid
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-last-resort-failopen")
   : > "$dir/state/task1.meta"
   touch -t 202001010000 "$dir/state/.last-watcher-beat"
@@ -2240,15 +2251,21 @@ test_hook_claude_mode_spent_budget_reaches_the_attended_fail_open() {
   seed_claude_failure "$dir"
   seed_claude_budget "$dir" 3
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
   kill_fixture_watcher "$dir"
-  expect_code 0 "$status" "a verified failure episode with a spent budget must reach the attended fail-open"
-  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' \
-    "the spent-budget stop never raised the episode's attended alarm"
-  assert_present "$dir/state/.claude-autoarm-failure-alarmed" \
-    "the spent-budget fail-open did not consume the episode alarm"
-  assert_absent "$dir/state/.watch.lock" \
-    "the guard armed again instead of standing down for the attended fail-open"
-  pass "fm-turnend-guard --claude: a spent last-resort budget stands down to the attended fail-open"
+  expect_code 0 "$status" "a restored cycle with a spent budget must allow the stop"
+  assert_contains "$out" "SUPERVISION RESTORED BY THE TURN-END GUARD" \
+    "a verified failure episode suppressed the last-resort arm"
+  assert_contains "$out" "TURN ALLOWED" \
+    "the spent-budget stop blocked instead of allowing after restoring the cycle"
+  assert_not_contains "$out" "FIRSTMATE SUPERVISION IS GENUINELY DOWN" \
+    "the guard alarmed that supervision was down in the same breath as restoring it"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" \
+    "a restored cycle consumed the episode's one attended alarm"
+  case "$pid" in
+    ''|*[!0-9]*) fail "the restored cycle left no watcher lock behind" ;;
+  esac
+  pass "fm-turnend-guard --claude: a restorable cycle is restored rather than alarmed over"
 }
 
 test_predicate_healthy_no_inflight
@@ -2341,5 +2358,5 @@ test_hook_no_afk_ignores_poll_derived_grace
 test_hook_claude_mode_last_resort_arm_restores_cycle
 test_hook_claude_mode_last_resort_arm_failure_still_blocks
 test_hook_claude_mode_last_resort_arm_stands_down_for_afk
-test_hook_claude_mode_last_resort_arm_spends_the_block_budget
-test_hook_claude_mode_spent_budget_reaches_the_attended_fail_open
+test_hook_claude_mode_spent_budget_stops_blocking_but_never_stops_arming
+test_hook_claude_mode_spent_budget_restores_the_cycle_before_alarming
