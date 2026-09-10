@@ -62,7 +62,7 @@ Tracked files hold shared instructions and tooling.
 `config/` holds this home's local operating choices, and `.env` holds its optional Relay and mail credentials.
 `projects/` contains clones that are read-only to firstmate except under hard rule 1's concrete captain-approved project operation exception.
 
-Records under `state/` belong to the scripts that write them; never hand-edit or hand-delete them.
+Records under `state/` belong to the scripts that write them; never hand-edit or hand-delete them, apart from the custom check section 7 has you author yourself.
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
 Treat `data/captain.md` as the domain-local record of captain preferences, optional `data/captain-shared.md` as the main-authoritative shared captain-preference file for secondmate inheritance, and `data/learnings.md` as curated home-local knowledge, regardless of harness memory.
 
@@ -77,7 +77,7 @@ Run-tier harness surfaces run this command for you at session open while the res
 Read the complete digest once and trust it as this turn's startup and recovery input.
 If the harness shows only a preview and persists the full output to a file, read that file before acting.
 Do not separately re-read the context, backlog, metadata, or bulk status inputs it just printed unless a source was reported absent or corrupt, older history is specifically needed, or a targeted workflow must inspect before writing.
-An `ABSENT` marker means the source does not exist, never an empty-but-present file, and that absence is meaningful: absent captain preferences mean the firstmate repo's built-in defaults, absent registries mean no shared captain preferences and no registered secondmates, and an absent or stale project registry must be rebuilt from the clones under `projects/` before dispatch.
+An `ABSENT` marker means the source does not exist, never an empty-but-present file, and that absence is meaningful: absent captain preferences mean the firstmate repo's built-in defaults, an absent shared-captain, secondmate, or learnings file means none exist, and an absent or stale project registry must be rebuilt from the clones under `projects/` before dispatch.
 
 If the session lock cannot be acquired and verified, report its exact diagnostic and remain read-only; another active session is only one possible cause.
 A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
