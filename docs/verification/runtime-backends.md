@@ -1801,3 +1801,24 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Antigravity (agy)
+
+agy runs crewmate and scout work only; the adapter tool record at `.agents/skills/harness-adapters/references/harness/agy.md` owns the facts.
+The evidence below was produced on 2026-09-10 against Antigravity CLI 1.2.0 on Linux through the Herdr backend inside a named lab session, with the `gemini-3.8-flash-low` model at effort `low`.
+
+The refresh command after any agy upgrade is the live guard:
+
+```sh
+FM_AGY_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
+```
+
+It drove one trivial supervised scout end to end: canonical `bin/fm-spawn.sh` launch (`--dangerously-skip-permissions --prompt-interactive`), folder-trust dialog accepted with Enter, the worker's own `bin/fm-harness.sh` read printed `agy` from inside the session, and the settled composer, typed input, `interrupt`, `exit`, and `relaunch` all behaved as the tool record states.
+
+Two composer facts from that run are load-bearing for the shipped classifier:
+
+- The settled composer of a `--prompt-interactive` launch keeps agy's mode placeholder (`Accept-edits mode: ...`) rendered in palette colour `38;5;8`, which the shared ghost stripper keeps, so without agy's own ghost strip that settled composer reads `pending` forever and every steering doorbell would be skipped as unsubmitted input.
+- Typed input renders bold and removes the `? for shortcuts` hint from the footer, leaving `accept-edits · <model> · <effort>`, which is why the agy verdict accepts that footer form too.
+
+`tests/fm-agy-harness.test.sh` pins both shapes plus the identity, container, and footer refusals portably in both the pair path and the bare-row-inside-pair overlap path.
+Busy state stays `unknown agy-unverified` (`bin/fm-busy-lib.sh`) because no semantic source is verified; the rendered `esc to cancel` footer outlives an interrupted turn and is deliberately not trusted.
