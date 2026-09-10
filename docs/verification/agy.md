@@ -39,7 +39,7 @@ The brief submitted itself with no extra Enter, the turn ran, and the reply rend
 A second launch into the same directory answered a fresh prompt the same way, so the shape is repeatable, not a first-run accident.
 The footer rendered `Gemini 3.8 Flash · low`, proving both flags were accepted together.
 
-## Trust dialog: safe default, answered at inspection
+## Trust dialog: answered by the spawn, then gated on a busy turn
 
 A first launch in a fresh worktree shows this dialog:
 
@@ -55,13 +55,17 @@ Antigravity CLI requires permission to read, edit, and execute files here.
 > Yes, I trust this folder
   No, exit
 ```
+`agy --help` (1.2.0) lists no trust flag, pre-registration command, or add-dir style grant, so there is no pre-launch way to suppress it, and firstmate does not pre-write the captain's settings file.
 Two supervised Herdr runs in treehouse worktrees completed file-writing turns while the dialog was still unanswered at observation time (worker file and `done:` status line both verified on disk before Enter was ever sent to those panes).
 Isolated runs in untrusted `/tmp` directories never reached the workspace until Enter: the turn spun through exploratory tool calls in agy's own scratch directory instead, and only the queued prompt ran after the answer.
+One run left unanswered for several minutes wrote its file to agy's scratch directory instead of the workspace once finally answered.
 The mechanism behind the difference was not established; path, backend, and latency were all varied across runs without isolating a single cause.
-The operating rule does not depend on it: answer the dialog with a single Enter at inspection in all cases, verify the turn through artifacts and the registry rather than the dialog, and never steer into an unanswered dialog.
-Answer promptly: one run left unanswered for several minutes wrote its file to agy's scratch directory instead of the workspace once finally answered, so a long-stalled untrusted pane that misdirects should be relaunched rather than steered.
+The spawn therefore does not depend on it: `bin/fm-spawn.sh` runs a post-launch readiness gate (`agy_wait_for_working`) in the rovo/kimi launch-then-confirm shape.
+It polls the pane capture, answers the dialog with a single Enter the first time the `Do you trust the contents of this project?` text renders, and reports success only once `fm_busy_classify` returns a busy verdict for the pane (Herdr's native `working` status or the pinned `esc to cancel` status row).
+When neither the dialog nor a busy turn appears within the window, or the answered dialog never turns busy, the spawn fails, records `failed:` in the task status, and closes the endpoint so no orphan worker survives outside task control.
+A reused path shows no dialog and passes the gate on the busy verdict alone with no extra Enter.
 Answering appended the worktree to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`, which firstmate never writes.
-Reused paths show no dialog.
+`tests/fm-agy-harness.test.sh` drives a fake pane through launch, dialog, and busy row, pinning the single Enter, the busy-before-success order, the no-dialog reused path, and the fail-and-close path.
 
 ## Model and effort
 
@@ -76,12 +80,13 @@ gemini-3.8-flash-low	Gemini 3.8 Flash (Low)
 
 `agy --help` documents `--effort` as `low|medium|high` and `--model` as the model for the session.
 The bare `gemini-3.8-flash` id from this home's previous config is not listed; only the suffixed `-high`, `-medium`, and `-low` variants are.
-`bin/fm-spawn.sh`'s `agy_model_validate` refuses a requested id a reachable `agy models` listing omits, and launches unvalidated when the listing is unreachable.
+`bin/fm-spawn.sh`'s `agy_model_validate` refuses a requested id a reachable `agy models` listing omits, and launches unvalidated with a stderr notice when the listing is unreachable.
+The listing is a remote fetch (`Fetching available models...`), so the probe runs with stdin detached under the shared hard bound from `bin/fm-timeout-lib.sh` (15 seconds by default, `FM_AGY_MODELS_TIMEOUT`); a stalled fetch or a sign-in prompt is cut off and falls through to the unvalidated launch instead of blocking the spawn before any pane exists.
 Print mode (`agy -p "Reply with exactly: AGY_PRINT_PROBE_OK" --model gemini-3.8-flash-low`) returned the exact reply with exit 0 in about 8 seconds, proving the credential path without a pane.
 
-## Busy state: two rendered signals, unknown on absence
+## Busy state: the pinned status row, unknown on absence
 
-Mid-turn the pane rendered both signals at once:
+Mid-turn the pane rendered the status row and a spinner line at once:
 
 ```
 ⣯  Generating...
@@ -98,8 +103,11 @@ The completed turn showed the reply, then the idle composer:
 ? for shortcuts                                                         Gemini 3.8 Flash · low
 ```
 
-`fm_busy_agy_tail_busy` matches `esc to cancel` or `Generating...`, so losing either signal keeps the busy verdict.
-`fm_busy_classify` reports `unknown agy-regex` when neither matches, because a long turn can scroll the marker out of the captured tail.
+`fm_busy_agy_tail_busy` and the delivery guard in `bin/fm-composer-lib.sh` match the `esc to cancel` token alone: the TUI pins that status row to the bottom of the pane for the whole turn, and the idle row replaces it with `? for shortcuts`.
+The `Generating...` spinner word is deliberately not a signal: it is a free-floating output line, so ordinary worker output such as `Generating report...` would otherwise classify an idle worker as busy or acknowledge a submit that did not land.
+No busy phase without the status row was observed live; every captured mid-turn frame carried it.
+`fm_busy_classify` reports `unknown agy-regex` when the token is absent, because a long turn can scroll the marker out of the captured tail.
+The signature is hardcoded with no environment override, so a stray variable can never change worker-state classification.
 Herdr's own registry agreed throughout: `agent get` reported `agent_status=working` mid-turn and `idle` after, so on Herdr the native verdict carries busy with no new code.
 
 ## Interrupt and exit
@@ -149,7 +157,7 @@ No primary or secondmate behavior was built or tested, and none is claimed.
 
 ## Refreshing this record
 
-Run the portable suite and the live guard after any agy upgrade, because the process name, marker set, trust dialog, and rendered busy/interrupt text are all vendor-controlled surfaces:
+Run the portable suite and the live guard after any agy upgrade, because the process name, marker set, trust dialog text, and rendered busy/interrupt text are all vendor-controlled surfaces that the spawn gate and the busy fallback match verbatim:
 
 ```
 bin/fm-test-run.sh tests/fm-agy-harness.test.sh

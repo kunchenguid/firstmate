@@ -9,9 +9,9 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Fact | Value |
 |---|---|
 | Binary | Absolute `agy` from `PATH`, refused if absent; a Go-compiled single binary, so the live process name is exactly `agy` with `argv[0]=agy`. |
-| Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. |
+| Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn then answers the folder-trust dialog and waits for a busy turn before reporting success. |
 | Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
-| Rendered tail | Busy status row carries `esc to cancel` on the left, and a `Generating...` word sits beside the braille spinner; the idle row shows `? for shortcuts` instead. |
+| Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
 | Turn end | No turn-end hook or notification touch exists; completion arrives through the worker status protocol and, on Herdr, the native return to `idle`. |
 | Exit | `/quit`, one Enter; the process exits. |
 | Interrupt | Single `Escape`, which prints the Interrupted row and leaves an idle composer with no repollution, so no clear key follows. |
@@ -19,14 +19,16 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Autonomy | `--dangerously-skip-permissions` auto-approves tool calls for the run. |
 | Marker | None; a live TUI carries no `AGY_*` or `ANTIGRAVITY_*` variable. |
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
-| Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. |
+| Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
 | Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
 | Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
 
 ## Trust, and where the decision persists
 
 Every task worktree is a path agy has never seen, so the launch stops on `Do you trust the contents of this project?` with the safe choice `Yes, I trust this folder` preselected.
-Supervised Herdr runs completed their initial turns with the dialog still up, while isolated runs elsewhere waited for it; the mechanism is unproven, so answer it with a single Enter at inspection in all cases, then inspect again, and never steer into an unanswered dialog; delivery success alone is not proof.
+An unanswered dialog sends the turn into agy's scratch directory instead of the worktree, so `../../../../../bin/fm-spawn.sh` owns the answer: its post-launch readiness gate answers the dialog with a single Enter the first time it renders, then requires a busy verdict (Herdr's native `working` status or the pinned `esc to cancel` row) before the spawn reports success.
+A dialog that never turns busy fails the spawn, records the failure in the task status, and closes the endpoint; a reused path shows no dialog and passes on the busy verdict alone.
+Never steer into a pane still showing the dialog; a spawn that reported success has already cleared it.
 Accepting appends the worktree to `trustedWorkspaces` in the captain's own `~/.gemini/antigravity-cli/settings.json`, so firstmate never writes that file and the decision survives for reused paths.
 There is no launch flag that suppresses the dialog, and it must not be bypassed by pre-writing the captain's settings.
 
@@ -44,7 +46,7 @@ agy is deliberately absent from the session-lock name vocabulary in `../../../..
 ## Worker busy state and turn end
 
 `../../../../../bin/fm-spawn.sh` arms no busy generation for agy and writes no sidecar, exactly because no writer could ever clear a seeded record.
-`fm_busy_agy_tail_busy` matches either busy token so no single vendor string is load-bearing, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when neither matches, because a long turn can scroll the marker out of the captured tail.
+`fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
 Teardown removes nothing agy-specific because the spawn leaves nothing behind.
 
 ## Primary integration

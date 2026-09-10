@@ -298,8 +298,11 @@
 # launch-then-send shape as kimi. Its busy state is a screen-scrape fallback like
 # grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
 # agy installs no hook either - it exposes no hook surface at all - so it
-# carries no busy-source wiring and no turn-end hook. Its busy state is a
-# screen-scrape fallback like grok and rovo, and it is crewmate/scout only.
+# carries no busy-source wiring and no turn-end hook. Its brief rides the launch
+# command, but a fresh worktree parks it on a folder-trust dialog, so the spawn
+# answers that dialog and waits for a busy turn before reporting success (the
+# rovo/kimi launch-then-confirm shape). Its busy state is a screen-scrape
+# fallback like grok and rovo, and it is crewmate/scout only.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -485,6 +488,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1476,13 +1481,24 @@ omp_model_validate() {  # <omp-bin> <model>
 # (gemini-3.8-flash-high), never provider-prefixed. A requested model absent
 # from a reachable listing is concrete unsupported evidence and refuses the
 # spawn, so a stale id (the unlisted bare gemini-3.8-flash) fails loudly here
-# instead of wedging a worker pane. An unreachable listing establishes nothing
-# (harness-adapters model-and-effort.md) and launches unvalidated.
+# instead of wedging a worker pane. The listing is a remote fetch that needs
+# network and a signed-in account, so the probe runs under the shared hard
+# bound (bin/fm-timeout-lib.sh) with stdin detached: a stalled fetch or a
+# sign-in prompt can never block the spawn before any pane exists. An
+# unreachable listing establishes nothing (harness-adapters
+# model-and-effort.md) and launches unvalidated with a notice.
 agy_model_validate() {  # <agy-bin> <model>
-  local bin=$1 model=$2 listing
+  local bin=$1 model=$2 listing rc=0 bound=${FM_AGY_MODELS_TIMEOUT:-15}
   [ -n "$model" ] && [ "$model" != default ] || return 0
-  listing=$("$bin" models 2>/dev/null) || return 0
-  [ -n "$listing" ] || return 0
+  listing=$(fm_run_timed "$bound" "$bin" models 2>/dev/null < /dev/null) || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$listing" ]; then
+    if [ "$rc" -eq 124 ]; then
+      echo "notice: 'agy models' did not answer within ${bound}s; launching with --model '$model' unvalidated" >&2
+    else
+      echo "notice: 'agy models' listing is unreachable (exit $rc); launching with --model '$model' unvalidated" >&2
+    fi
+    return 0
+  fi
   if printf '%s\n' "$listing" | awk '{print $1}' | grep -qxF -- "$model"; then
     return 0
   fi
@@ -1571,11 +1587,12 @@ launch_template() {
     # --effort takes low|medium|high. --dangerously-skip-permissions
     # auto-approves every tool call, which an unattended crewmate needs.
     # Every task worktree is a fresh path, so agy shows a folder-trust dialog
-    # ("Do you trust the contents of this project?"). Supervised Herdr runs
-    # completed their initial turns with the dialog still up, while isolated
-    # runs elsewhere waited for it; the mechanism is unproven, so answer the
-    # safe default ("Yes, I trust this folder") with a single Enter at
-    # inspection in all cases, then inspect again. Answering
+    # ("Do you trust the contents of this project?") and no launch flag
+    # suppresses it (agy 1.2.0 --help lists none). Left unanswered, the turn
+    # runs in agy's own scratch directory instead of the worktree, so the
+    # post-launch gate below (agy_wait_for_working) answers the preselected
+    # safe default ("Yes, I trust this folder") with a single Enter and then
+    # requires the busy signature before the spawn reports success. Answering
     # persists the worktree to the captain's own
     # ~/.gemini/antigravity-cli/settings.json trustedWorkspaces, which firstmate
     # never writes directly. The foreign primary markers are cleared for the same
@@ -3161,6 +3178,58 @@ rovo_endpoint_cleanup() {
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
 }
 
+# agy carries its brief on the launch command, so it needs no delivery gate,
+# but every fresh worktree parks the TUI on the folder-trust dialog and an
+# unanswered dialog sends the turn into agy's scratch directory instead of the
+# worktree. This is the rovo/kimi launch-then-confirm shape with the confirm
+# half pointed at the trust dialog: answer it once with the preselected safe
+# default, then require positive proof that the brief is being processed in
+# the workspace - the same verdict the supervisor reads (Herdr's native
+# working state or the pinned `esc to cancel` status row through
+# fm_busy_classify) - before the spawn reports success. A reused path shows no
+# dialog and passes straight through on the busy verdict.
+AGY_TRUST_DIALOG='Do you trust the contents of this project?'
+AGY_TRUST_ANSWERED=0
+
+agy_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+agy_pane_shows_trust_dialog() {  # <plain-pane-capture>
+  printf '%s\n' "$1" | grep -Fq "$AGY_TRUST_DIALOG"
+}
+
+agy_pane_is_working() {  # <plain-pane-capture>
+  case "$(fm_busy_classify "$BACKEND" "$T" agy "$ID" "$STATE" "$1")" in
+    busy*) return 0 ;;
+  esac
+  return 1
+}
+
+agy_wait_for_working() {
+  local pane i=0 max=${FM_AGY_READY_POLLS:-60} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(agy_capture)
+    if agy_pane_shows_trust_dialog "$pane"; then
+      if [ "$AGY_TRUST_ANSWERED" -eq 0 ]; then
+        spawn_send_key "$T" Enter
+        AGY_TRUST_ANSWERED=1
+      fi
+    elif agy_pane_is_working "$pane"; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+agy_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  rovo_endpoint_cleanup
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -4127,6 +4196,16 @@ if [ "$HARNESS" = rovo ]; then
   fi
   if ! rovo_wait_for_delivery; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = agy ]; then
+  if ! agy_wait_for_working; then
+    if [ "$AGY_TRUST_ANSWERED" -eq 1 ]; then
+      agy_spawn_fail "agy did not start processing its brief after the folder-trust dialog was answered in window $T"
+    else
+      agy_spawn_fail "agy did not show its folder-trust dialog or a busy turn in window $T"
+    fi
     exit 1
   fi
 fi

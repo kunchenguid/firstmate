@@ -11,10 +11,17 @@
 #      spawn clears it - the clearing is load-bearing, not cosmetic.
 #   3. The launch carries the brief via --prompt-interactive with --model,
 #      --effort, and --dangerously-skip-permissions; a requested model a
-#      reachable `agy models` omits refuses loudly instead of wedging a pane.
-#   4. agy is a crewmate/scout adapter only: a secondmate launch is refused,
+#      reachable `agy models` omits refuses loudly instead of wedging a pane,
+#      while a hung or unreachable listing is cut off and never blocks.
+#   4. A fresh worktree parks agy on its folder-trust dialog, so the spawn
+#      answers it exactly once and reports success only after the busy turn
+#      renders; an answered dialog that never turns busy fails the spawn and
+#      closes the endpoint instead of leaving an orphan worker.
+#   5. agy is a crewmate/scout adapter only: a secondmate launch is refused,
 #      and nothing is armed as busy wiring because no writer could clear it.
-#   5. Herdr's registry already tracks agy, so exit detection stays
+#   6. The busy signature is the pinned `esc to cancel` status row alone; the
+#      free-floating `Generating...` word must never read busy on its own.
+#   7. Herdr's registry already tracks agy, so exit detection stays
 #      registry-driven: a registered status (even done) is live, and no
 #      process-name shortcut may flip it to agent-free.
 set -u
@@ -115,16 +122,20 @@ test_agy_control_mechanics_are_the_verified_ones() {
   pass "fm-control-lib: agy mechanics are Escape once, no clear key, and /quit"
 }
 
-test_agy_busy_tail_matches_either_signal_alone() {
-  # Drive the two signals apart so the verdict cannot go quietly vacuous: each
-  # alone must carry busy, proving no single vendor string is load-bearing.
+test_agy_busy_tail_needs_the_pinned_status_row() {
   printf 'working\nesc to cancel\n' | fm_busy_agy_tail_busy \
-    || fail "the esc-to-cancel token alone must read busy"
+    || fail "the esc-to-cancel status row must read busy"
   printf 'working\n  Generating...\n' | fm_busy_agy_tail_busy \
-    || fail "the Generating word alone must read busy"
+    && fail "the free-floating Generating word alone must not read busy" || true
+  printf 'Generating report...\ndone\n? for shortcuts\n>\n' | fm_busy_agy_tail_busy \
+    && fail "echoed worker output naming Generating must not read busy" || true
   printf 'idle\n? for shortcuts\n>\n' | fm_busy_agy_tail_busy \
     && fail "an idle footer must not read busy" || true
-  pass "fm-busy-lib: either agy busy signal alone carries the verdict"
+  printf 'Generating report...\ndone\n? for shortcuts\n>\n' | fm_busy_lines_match agy \
+    && fail "the delivery guard must not acknowledge on echoed Generating output" || true
+  FM_BUSY_AGY_REGEX='idle' bash -c '. "$0/bin/fm-busy-lib.sh"; printf "idle\n" | fm_busy_agy_tail_busy' "$ROOT" \
+    && fail "an environment override must not change the agy busy signature" || true
+  pass "fm-busy-lib: only the pinned esc-to-cancel row carries the agy busy verdict"
 }
 
 test_agy_busy_signatures_are_harness_scoped() {
@@ -249,6 +260,12 @@ test_herdr_malformed_and_failed_reads_stay_unknown() {
   pass "herdr exit detection: malformed and failed reads stay unknown"
 }
 
+# The fake tmux renders an agy-shaped screen that advances through
+# launched -> trust dialog -> busy as the real spawn drives it, so the launch
+# command, the single Enter that answers the dialog, and the readiness gate are
+# exercised through their real code paths. FM_FAKE_AGY_TRUST=no models a reused
+# path (no dialog); FM_FAKE_AGY_ANSWER=stuck models a dialog whose answer never
+# turns into a busy turn.
 make_agy_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -256,6 +273,20 @@ make_agy_fakebin() {
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
+state=$(cat "$FM_FAKE_AGY_STATE" 2>/dev/null || true)
+fake_screen() {
+  case "$state" in
+    dialog)
+      printf 'Accessing workspace:\n\n%s\n\nDo you trust the contents of this project?\n\nAntigravity CLI requires permission to read, edit, and execute files here.\n\n> Yes, I trust this folder\n  No, exit\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    busy)
+      printf 'Generating...\n└ Tip: press f to see the full diff.\n\nesc to cancel                                Gemini 3.8 Flash · low\n'
+      ;;
+    *)
+      printf 'shell starting\n$ \n'
+      ;;
+  esac
+}
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
   *"#{cursor_y}"*) printf '1\n'; exit 0 ;;
@@ -273,13 +304,34 @@ case "${1:-}" in
     done
     if [ -n "$literal" ]; then
       case "$literal" in
-        *--prompt-interactive*) printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG" ;;
+        *--prompt-interactive*)
+          printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+          printf 'launched\n' > "$FM_FAKE_AGY_STATE"
+          ;;
       esac
       exit 0
     fi
+    case " $* " in
+      *' Enter '*)
+        case "$state" in
+          launched)
+            if [ "${FM_FAKE_AGY_TRUST:-yes}" = yes ]; then
+              printf 'dialog\n' > "$FM_FAKE_AGY_STATE"
+            else
+              printf 'busy\n' > "$FM_FAKE_AGY_STATE"
+            fi
+            ;;
+          dialog)
+            if [ "${FM_FAKE_AGY_ANSWER:-works}" = works ]; then
+              printf 'busy\n' > "$FM_FAKE_AGY_STATE"
+            fi
+            ;;
+        esac
+        ;;
+    esac
     exit 0
     ;;
-  capture-pane) printf 'shell starting\n$ \n'; exit 0 ;;
+  capture-pane) fake_screen; exit 0 ;;
 esac
 exit 0
 SH
@@ -289,6 +341,7 @@ SH
 set -u
 if [ "${1:-}" = models ]; then
   if [ "${FM_FAKE_AGY_MODELS_FAIL:-0}" = 1 ]; then exit 3; fi
+  if [ "${FM_FAKE_AGY_MODELS_HANG:-0}" = 1 ]; then cat > /dev/null; sleep 30; exit 0; fi
   printf 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n'
   printf 'gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n'
   printf 'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'
@@ -323,6 +376,7 @@ EOF
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
   : > "$case_dir/tmux-calls.log"
+  : > "$case_dir/agy.state"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
@@ -343,7 +397,12 @@ run_agy_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_AGY_STATE="$case_dir/agy.state" \
     FM_FAKE_AGY_MODELS_FAIL="${FM_FAKE_AGY_MODELS_FAIL:-0}" \
+    FM_FAKE_AGY_MODELS_HANG="${FM_FAKE_AGY_MODELS_HANG:-0}" \
+    FM_FAKE_AGY_TRUST="${FM_FAKE_AGY_TRUST:-yes}" \
+    FM_FAKE_AGY_ANSWER="${FM_FAKE_AGY_ANSWER:-works}" \
+    FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=1 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -414,7 +473,91 @@ test_agy_unreachable_listing_launches_unvalidated() {
     "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
   expect_code 0 "$rc" "an unreachable model listing must not block the spawn"
   [ -s "$CASE_DIR/launch.log" ] || fail "an unreachable listing produced no launch command"
+  assert_contains "$out" "listing is unreachable" "an unreachable listing launched without its notice"
   pass "fm-spawn: an unreachable agy listing establishes nothing and launches"
+}
+
+test_agy_hung_listing_is_cut_off_and_launches() {
+  local id rec out rc started elapsed
+  id="agy-hanglisting-z8-$$"
+  rec=$(make_agy_spawn_case hanglisting "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  started=$(date +%s)
+  out=$(FM_FAKE_AGY_MODELS_HANG=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 0 "$rc" "a hung model listing must not block the spawn"
+  [ "$elapsed" -lt 20 ] || fail "the model probe was not cut off by its bound (took ${elapsed}s)"
+  assert_contains "$out" "did not answer within 1s" "a hung listing launched without its timeout notice"
+  [ -s "$CASE_DIR/launch.log" ] || fail "a hung listing produced no launch command"
+  assert_contains "$(cat "$CASE_DIR/launch.log")" "--model 'gemini-3.8-flash-low'" \
+    "a hung listing dropped the requested model instead of launching it unvalidated"
+  pass "fm-spawn: a hung agy listing is cut off by the shared bound and launches unvalidated"
+}
+
+# Bare Enter key presses only: shell setup rides its Enter on the typed text
+# (`send-keys -t <target> export X=Y Enter`), while the launch submit and the
+# trust-dialog answer are lone key sends (`send-keys -t <target> Enter`).
+count_enter_sends() {  # <tmux-call-log>
+  grep -c '^send-keys -t [^ ]* Enter$' "$1" || true
+}
+
+test_agy_fresh_worktree_answers_the_trust_dialog_once_then_confirms_busy() {
+  local id rec out rc enters
+  id="agy-trust-z9-$$"
+  rec=$(make_agy_spawn_case trust "$id")
+  read_agy_spawn_record "$rec"
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "an agy spawn that answers its trust dialog should succeed"
+  assert_contains "$out" "spawned $id harness=agy" "agy spawn did not report success after the trust gate"
+  [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
+    || fail "the spawn reported success before the pane reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
+  enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
+  [ "$enters" -eq 2 ] \
+    || fail "expected exactly one launch Enter plus one trust-dialog Enter, got $enters Enter sends"
+  assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "a successful agy spawn must never tear down the endpoint it just launched"
+  pass "fm-spawn: agy answers the trust dialog once and reports success only on a busy turn"
+}
+
+test_agy_reused_path_passes_the_gate_without_a_dialog() {
+  local id rec out rc enters
+  id="agy-trusted-z10-$$"
+  rec=$(make_agy_spawn_case trusted "$id")
+  read_agy_spawn_record "$rec"
+  out=$(FM_FAKE_AGY_TRUST=no run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "an agy spawn on an already-trusted path should succeed"
+  enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
+  [ "$enters" -eq 1 ] \
+    || fail "a trusted path must receive only the launch Enter, got $enters Enter sends"
+  pass "fm-spawn: agy passes the readiness gate on a trusted path without a stray Enter"
+}
+
+test_agy_unanswered_dialog_fails_the_spawn_and_closes_the_endpoint() {
+  local id rec out rc enters
+  id="agy-stuck-z11-$$"
+  rec=$(make_agy_spawn_case stuck "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_ANSWER=stuck run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a dialog that never turns into a busy turn must fail the spawn"
+  assert_contains "$out" "did not start processing its brief after the folder-trust dialog was answered" \
+    "a stuck trust dialog failed without its concrete reason"
+  assert_not_contains "$out" "spawned $id" "a stuck trust dialog still reported a successful spawn"
+  enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
+  [ "$enters" -eq 2 ] \
+    || fail "the gate must answer the dialog exactly once and never hammer Enter, got $enters Enter sends"
+  assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "a failed agy readiness gate left its launched endpoint running"
+  assert_grep 'failed: agy did not start processing' "$HOME_DIR/state/$id.status" \
+    "a failed agy readiness gate did not record the failure in the task status"
+  pass "fm-spawn: an agy dialog that never turns busy fails the spawn and closes the endpoint"
 }
 
 test_agy_missing_binary_refuses_before_pane_creation() {
@@ -470,7 +613,7 @@ test_agy_ancestry_detects_the_native_command_name
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
 test_agy_control_mechanics_are_the_verified_ones
-test_agy_busy_tail_matches_either_signal_alone
+test_agy_busy_tail_needs_the_pinned_status_row
 test_agy_busy_signatures_are_harness_scoped
 test_agy_classify_reports_unknown_when_the_marker_scrolls_out
 test_agy_tmux_names_the_native_binary_an_agent
@@ -482,6 +625,10 @@ test_agy_launch_carries_the_brief_with_model_effort_and_autonomy
 test_agy_effort_xhigh_is_recorded_but_omitted
 test_agy_unlisted_model_refuses_before_pane_creation
 test_agy_unreachable_listing_launches_unvalidated
+test_agy_hung_listing_is_cut_off_and_launches
+test_agy_fresh_worktree_answers_the_trust_dialog_once_then_confirms_busy
+test_agy_reused_path_passes_the_gate_without_a_dialog
+test_agy_unanswered_dialog_fails_the_spawn_and_closes_the_endpoint
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
 test_agy_spawn_arms_no_busy_wiring
