@@ -350,15 +350,14 @@ _collapse_newlines() {  # <text>
 # field for "self" is informational (logged); for "escalate" it is the pre-read
 # summary firstmate would otherwise have to re-read.
 
-classify_signal() {  # <reason-after-colon> <state> [decision-owned]
-  local reason=$1 state=$2 owned=${3-} f last event record needs rest endpoint ident rc distilled="" rel="" seen_rel="" held="" task sig marker
+classify_signal() {  # <reason-after-colon> <state>
+  local reason=$1 state=$2 f last event record rest endpoint ident rc distilled="" rel="" seen_rel="" task sig marker
   for f in $reason; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || [ -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    record=''; needs=0
-    status_span_first_actionable_record "$f" \
-      "$(status_seen_offset "$state" "$task")" record needs
+    record=$(status_span_first_actionable_record "$f" \
+      "$(status_seen_offset "$state" "$task")")
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
@@ -384,7 +383,6 @@ classify_signal() {  # <reason-after-colon> <state> [decision-owned]
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
     distilled="${distilled}$(basename "$f"): ${last} | "
-    [ "$needs" = 1 ] && held=1
     # Nothing captain-relevant is left ahead of the recorded offset. When the log
     # nonetheless ends on a captain-relevant line, this signal is a re-notification
     # of something already escalated, not a routine one; position is the whole
@@ -395,8 +393,6 @@ classify_signal() {  # <reason-after-colon> <state> [decision-owned]
   distilled="${distilled% | }"
   if [ -n "$rel" ]; then
     printf 'escalate|%s' "$distilled"
-  elif [ -n "$owned" ] && [ -n "$held" ]; then
-    printf 'escalate|captain-held decision: %s' "$distilled"
   elif [ -n "$seen_rel" ]; then
     # Already escalated by the per-wake path or the catch-all scan; self-handle
     # to avoid a duplicate entry in the digest.
@@ -1340,7 +1336,7 @@ is_wake_reason() {  # <reason>
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last stale_detail
   local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest sig marker
-  local kind="" arg="" owned="" classification_failed=0 span_failure_repeat=0
+  local kind="" arg="" classification_failed=0 span_failure_repeat=0
   : > "$capture" || return 1
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -1351,10 +1347,10 @@ handle_wake() {  # <reason> <state>
     signal:*|needs-decision:*)
               kind=signal
               case "$reason" in
-                needs-decision:*) arg="${reason#needs-decision: }"; owned=1 ;;
+                needs-decision:*) arg="${reason#needs-decision: }" ;;
                 *) arg="${reason#signal: }" ;;
               esac
-              decision=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$arg" "$state" "$owned") ;;
+              decision=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
               task=$(window_to_task "$arg" "$state")
