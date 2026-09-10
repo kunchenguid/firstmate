@@ -1898,15 +1898,17 @@ resurface_after_downtime() {
     # fm_lock_try_acquire publishes the episode as part of stealing the watch
     # lock, before it sets FM_LOCK_RECOVERED_PID. Reading the token instead of
     # assuming it additionally covers a generation a drain has already moved to
-    # handling or acked while racing this watcher's first poll. Retirement is a
-    # separate best-effort step because only a downtime generation is this
-    # watcher's to retire; a handling one belongs to the drain. A failed
+    # handling or acked while racing this watcher's first poll. A downtime
+    # generation counts whether it is still pending or this poll's own arm check
+    # already marked it announced. Retirement is a separate best-effort step
+    # because only a downtime generation is this watcher's to retire; a handling
+    # one belongs to the drain. A failed
     # retirement is safe to ignore - it means a wake landed alongside this
     # decision, and the next poll's arm check sees that non-empty queue and
     # recovers it.
     fm_recovery_marker_snapshot "$WATCHER_DOWNTIME_MARKER" || true
     case "$FM_RECOVERY_MARKER_TOKEN" in
-      pending:downtime:*)
+      pending:downtime:*|announced:downtime:*)
         retire_empty_recovery_episode "${FM_RECOVERY_MARKER_TOKEN##*:}" || true
         ;;
     esac

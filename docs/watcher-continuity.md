@@ -41,7 +41,7 @@ A successor emits `check: rearm-resurface` for an accepted down stretch only whe
 Proving that none of them holds anything always means no wake, whatever the recovery marker says.
 Every ordinary route into recovery arrives on a published downtime generation, the watcher's own stale-lock reclaim included, because the watch-lock steal publishes the episode before it reports the reclaim.
 Reading the token rather than assuming it additionally keeps a successor silent on a generation a drain has already moved to handling or acked while racing that successor's first poll.
-Retiring the episode is a separate best-effort step on top of that silence, and it applies only to a published downtime generation, because a handling generation belongs to the drain.
+Retiring the episode is a separate best-effort step on top of that silence, and it applies only to a published downtime generation, still pending or already announced, because a handling generation belongs to the drain.
 A watcher close publishes downtime unconditionally, so without that test a torn-down fleet re-arms straight into another empty episode and every following arm delivers a recovery wake whose handling turn finds nothing.
 The watcher reads those three sources read-only and never advances the presentation cursor, and any failure to read one of them is treated as work present, because a redundant wake costs a turn while a suppressed one costs the work.
 The model no longer re-arms after ordinary wakes.
