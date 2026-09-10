@@ -15,6 +15,7 @@ Output that breaks the 1 MiB limit or the JSON result contract is also a failed 
 The opening brief is delivered in the canonical `launch-brief` envelope owned by `../../../bin/fm-operational-input.sh`, the same typed envelope every other adapter's launch command carries.
 The bridge owns the stable readline composer, generation-bound busy events, turn-end wake, cancellation, and process cleanup; native TUI glyphs and Herdr's idle observations are not semantic state sources.
 On Herdr, the bridge reports native working/idle state through a generation-scoped lifecycle source and releases that source on exit.
+A failed first report is fatal because an unregistered pane reads as a dead agent; once registration succeeds, a later publication failure only prints, so the semantic record and completion wake still land.
 Its `❯` prompt uses the existing bare-agent composer classifier.
 `../../../bin/fm-control-lib.sh` owns lifecycle keys and commands; `../../../bin/fm-spawn.sh` owns dispatch, model and effort flags, and secondmate refusal.
 The bridge creates a new private native conversation on deterministic relaunch; the durable brief and inbox remain the recovery authority.

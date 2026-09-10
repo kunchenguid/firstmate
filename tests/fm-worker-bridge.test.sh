@@ -13,7 +13,7 @@ with tempfile.TemporaryDirectory(prefix='fm-bridge-test-') as temp:
         binary.write_text('''#!/usr/bin/env python3
 import json, os, signal, subprocess, sys, time
 with open(os.environ['BRIDGE_CALLS'], 'a') as log: log.write(json.dumps(sys.argv) + '\\n')
-if os.environ.get('BRIDGE_HERDR_FAIL') and sys.argv[0].endswith('herdr'):
+if sys.argv[0].endswith('herdr') and os.environ.get('BRIDGE_HERDR_FAIL') in sys.argv:
     print('herdr refused the publication', file=sys.stderr); sys.exit(3)
 if os.environ.get('BRIDGE_CHILD_PID'):
     with open(os.environ['BRIDGE_CHILD_PID'], 'w') as marker: marker.write(str(os.getpid()))
@@ -182,11 +182,17 @@ print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','res
             status = subprocess.run(['ps','-p',str(orphan_pid),'-o','stat='],capture_output=True,text=True).stdout.strip()
             assert not status or status.startswith('Z'), 'interrupted drain left a live descendant: '+status
             (state/'probe.turn-ended').unlink()
-            unreported = subprocess.run(command + ['--backend','herdr'],input='/exit\n',capture_output=True,text=True,env=dict(herdr_env,BRIDGE_HERDR_FAIL='1'),timeout=20)
+            unreported = subprocess.run(command + ['--backend','herdr'],input='/exit\n',capture_output=True,text=True,env=dict(herdr_env,BRIDGE_HERDR_FAIL='idle'),timeout=20)
             assert unreported.returncode == 0, unreported.stderr
             assert 'BRIDGE_OK' in unreported.stdout, unreported.stdout
             assert 'Herdr lifecycle publication failed' in unreported.stdout, unreported.stdout
             assert 'state=idle' in (state/'probe.busy-state').read_text()
             assert (state/'probe.turn-ended').exists()
+            (state/'probe.turn-ended').unlink()
+            unregistered = subprocess.run(command + ['--backend','herdr'],input='/exit\n',capture_output=True,text=True,env=dict(herdr_env,BRIDGE_HERDR_FAIL='working'),timeout=20)
+            assert unregistered.returncode != 0, unregistered.stdout
+            assert 'Herdr agent registration failed' in unregistered.stderr, unregistered.stderr
+            assert 'BRIDGE_OK' not in unregistered.stdout, unregistered.stdout
+            assert not (state/'probe.turn-ended').exists()
     print('PASS: both bridges preserve session identity, turn state, failures, cancellation and exit')
 PY

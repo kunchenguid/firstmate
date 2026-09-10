@@ -60,8 +60,10 @@ def main():
         raise RuntimeError('Herdr bridge requires explicit HERDR_SESSION')
     herdr_source = 'firstmate:bridge:' + args.gen
     native_agent = 'agy' if args.harness == 'antigravity' else 'hermes'
+    herdr_registered = False
 
     def herdr_report(value=None):
+        nonlocal herdr_registered
         if not herdr_pane:
             return
         command = [env.get('HERDR_BIN_PATH') or 'herdr', 'pane',
@@ -76,9 +78,18 @@ def main():
         except (OSError, subprocess.SubprocessError) as error:
             failure = str(error)
         else:
-            failure = result.stderr if result.returncode else ''
-        if failure and value is not None:
-            print('Herdr lifecycle publication failed: ' + failure, flush=True)
+            failure = (result.stderr.strip() or 'herdr exited %d' % result.returncode
+                       ) if result.returncode else ''
+        if value is None:
+            return
+        if not failure:
+            herdr_registered = True
+            return
+        # An unregistered pane reads as a dead agent, so only publications made
+        # after a successful registration may be treated as best-effort.
+        if not herdr_registered:
+            raise RuntimeError('Herdr agent registration failed: ' + failure)
+        print('Herdr lifecycle publication failed: ' + failure, flush=True)
 
     atexit.register(herdr_report)
 

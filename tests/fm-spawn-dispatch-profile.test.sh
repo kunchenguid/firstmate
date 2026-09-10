@@ -1265,6 +1265,46 @@ PY
   done
 }
 
+test_worker_bridge_effort_vocabulary() {
+  local rec id out launch
+  id=bridge-hermes-max
+  rec=$(make_spawn_case "$id" hermes "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/hermes" <<'PY'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+pathlib.Path(os.environ['FM_BRIDGE_ARGV']).write_text(json.dumps(sys.argv[1:]))
+sys.stdin.read()
+print('session_id: fixture-session', file=sys.stderr)
+print('BRIDGE_SPAWN_OK')
+PY
+  chmod +x "$FAKEBIN_DIR/hermes"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness hermes --effort max --scout)
+  expect_code 0 "$?" "hermes max spawn failed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  out=$(printf '/exit\n' | FM_BRIDGE_ARGV="$CASE_DIR/hermes-max-argv.json" \
+    PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" 2>&1)
+  expect_code 0 "$?" "hermes max launch failed: $out"
+  python3 - "$CASE_DIR/hermes-max-argv.json" <<'PY'
+import json, pathlib, sys
+args = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert args[args.index('--reasoning') + 1] == 'max', args
+PY
+  expect_code 0 "$?" 'hermes did not receive the max reasoning level its CLI documents'
+  pass 'hermes propagates the max reasoning level its CLI documents'
+  id=bridge-antigravity-max
+  rec=$(make_spawn_case "$id" antigravity "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness antigravity --effort max --scout 2>&1)
+  expect_code 1 "$?" "antigravity max must refuse: $out"
+  assert_contains "$out" 'antigravity supports only low, medium, and high effort' \
+    'antigravity refusal did not name its supported levels'
+  [ ! -s "$LAUNCH_LOG" ] || fail 'antigravity max refusal delivered a launch command'
+  pass 'antigravity refuses an effort level agy does not accept'
+}
+
 test_worker_bridge_refuses_secondmate() {
   local harness rec id sm out
   for harness in hermes antigravity; do
@@ -1284,6 +1324,7 @@ test_worker_bridge_refuses_secondmate() {
 }
 
 test_worker_bridge_spawn_delivers_native_profile
+test_worker_bridge_effort_vocabulary
 test_worker_bridge_refuses_secondmate
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults

@@ -1860,9 +1860,19 @@ effort_flag_for_harness() {
   local harness=$1 effort=$2 model=${3:-}
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
-    hermes|antigravity)
+    hermes)
+      # The bridge forwards this as `hermes chat --reasoning`, which accepts
+      # none|minimal|low|medium|high|xhigh|max|ultra as of hermes 0.21.1;
+      # firstmate's profile axis spans the five shared levels.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    antigravity)
+      # agy 1.1.28 documents --effort as low|medium|high; the dispatch guard
+      # above refuses anything else before a launch command is built.
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     claude)
