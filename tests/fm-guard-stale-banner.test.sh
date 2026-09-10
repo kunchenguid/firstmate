@@ -438,7 +438,7 @@ test_autoarm_long_handling_turn_stays_silent() {
 # healthy-generation signal must restore the banner; the stale beacon alone
 # is not enough to stay quiet, and adding a failure marker is not either.
 test_autoarm_long_turn_requires_every_healthy_signal() {
-  local dir home out pid replacement_pid= case_name
+  local dir home out pid replacement_pid='' case_name
   for case_name in no-epoch failed-outcome failure-notified failure-alarmed dead-lock missing-lock changed-lock moved-recovery later-beacon; do
     dir=$(make_guard_case "autoarm-long-turn-$case_name")
     home=$(case_home "$dir")
