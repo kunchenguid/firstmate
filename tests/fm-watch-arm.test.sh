@@ -21,13 +21,6 @@ WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 
-# An arm whose cycle ends with no wake only exits after wait_for_healthy_successor
-# has spent the whole confirmation budget, so cases that wait for that exit must
-# outlast the largest production default (30s on MSYS, 10s elsewhere - see
-# ARM_CONFIRM_DEFAULT in bin/fm-watch-arm.sh). This is a ceiling spent only when
-# an arm genuinely fails to exit; a passing case returns as soon as it does.
-ARM_FAIL_EXIT_POLLS=400
-
 TMP_ROOT=$(fm_test_tmproot fm-watch-arm-tests)
 
 # Both starters background a real process the test later waits on, so they set a
