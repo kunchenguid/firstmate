@@ -991,26 +991,32 @@ test_issue_fills_the_intent_and_carries_the_merge_request_contract() {
   pass "fm-brief: --issue fills the captain's intent from the issue and carries the small-merge-request contract"
 }
 
-# A scout delivers a report, so it gets the issue's words and none of the
-# merge-request contract; an ordinary brief is completely unchanged.
-test_issue_is_scoped_to_the_kind_that_ships() {
+# local-only ships nothing to review, so it carries the issue and its contract
+# line without the merge-request block - a brief that carried both would hand
+# the worker two mutually exclusive delivery contracts. An ordinary brief is
+# completely unchanged.
+test_issue_is_scoped_to_the_modes_that_ship_a_merge_request() {
   local dir brief plain
   command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
-  dir="$TMP_ROOT/issue-scout"
+  dir="$TMP_ROOT/issue-local-only"
   mkdir -p "$dir/home/data"
-  run_issue_brief "$dir" issue-scout-b1 myproj --scout --issue "$ISSUE_URL" >/dev/null
-  brief="$dir/home/data/issue-scout-b1/brief.md"
-  assert_grep 'GitLab issue #42' "$brief" "a scout brief did not carry the issue it came from"
-  assert_grep "Issue contract: issue=$ISSUE_URL" "$brief" "a scout brief records no issue contract"
-  assert_no_grep 'Ship exactly one merge request' "$brief" "a scout brief carries a merge-request contract it cannot fulfil"
-  assert_no_grep 'Related to #42' "$brief" "a scout brief carries a merge-request description rule"
+  run_issue_brief "$dir" issue-local-b1 myproj --mode local-only --issue "$ISSUE_URL" >/dev/null
+  brief="$dir/home/data/issue-local-b1/brief.md"
+  assert_grep 'GitLab issue #42' "$brief" "a local-only brief did not carry the issue it came from"
+  assert_grep '> ## Steps' "$brief" "a local-only brief did not quote the issue text"
+  assert_grep "Issue contract: issue=$ISSUE_URL" "$brief" "a local-only brief records no issue contract"
+  assert_no_grep 'Ship exactly one merge request' "$brief" "a local-only brief carries a merge-request contract it cannot fulfil"
+  assert_no_grep 'Related to #42' "$brief" "a local-only brief carries a merge-request description rule"
+  # The only delivery contract left in that brief is local-only's own.
+  assert_grep 'Delivery contract: mode=local-only' "$brief" "the local-only delivery contract is missing"
+  assert_grep 'Do NOT push, do NOT open a PR' "$brief" "the local-only definition of done is missing"
 
   # No --issue: byte-for-byte the brief firstmate scaffolded before this flag.
   plain="$dir/home/data/issue-none-b2/brief.md"
   run_issue_brief "$dir" issue-none-b2 myproj --mode direct-PR >/dev/null
   assert_grep '{TASK}' "$plain" "a brief without --issue lost its captain-intent placeholder"
   assert_no_grep '# GitLab issue' "$plain" "a brief without --issue grew an issue section"
-  pass "fm-brief: a scout carries the issue without a merge-request contract, and no --issue changes nothing"
+  pass "fm-brief: local-only carries the issue without a merge-request contract, and no --issue changes nothing"
 }
 
 # Every refusal happens before a brief exists, and a malformed URL never reaches
@@ -1038,9 +1044,19 @@ test_issue_refusals_write_no_brief() {
   out=$(run_issue_brief "$dir" issue-sm-c2 --secondmate --no-projects --issue "$ISSUE_URL")
   status=$?
   [ "$status" -ne 0 ] || fail "a secondmate charter carrying --issue should exit non-zero"
-  assert_contains "$out" "--issue applies only to crewmate ship or scout briefs" \
+  assert_contains "$out" "--issue applies only to ship briefs" \
     "the secondmate refusal did not explain the scope"
   assert_absent "$dir/home/data/issue-sm-c2/brief.md" "a refused charter still wrote a brief"
+  [ ! -s "$dir/requests.log" ] || fail "a refused charter still reached GitLab"
+
+  # A scout delivers a report and no merge request, so it is not issue work.
+  out=$(run_issue_brief "$dir" issue-scout-c4 myproj --scout --issue "$ISSUE_URL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout brief carrying --issue should exit non-zero"
+  assert_contains "$out" "--issue applies only to ship briefs" \
+    "the scout refusal did not explain the scope"
+  assert_absent "$dir/home/data/issue-scout-c4/brief.md" "a refused scout brief was still written"
+  [ ! -s "$dir/requests.log" ] || fail "a refused scout brief still reached GitLab"
 
   # An issue that cannot be read refuses instead of writing a brief whose
   # captain intent the worker cannot act on.
@@ -1079,5 +1095,5 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_issue_fills_the_intent_and_carries_the_merge_request_contract
-test_issue_is_scoped_to_the_kind_that_ships
+test_issue_is_scoped_to_the_modes_that_ship_a_merge_request
 test_issue_refusals_write_no_brief

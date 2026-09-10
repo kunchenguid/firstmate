@@ -11,7 +11,7 @@
 # caller spelled it; a task with no --issue records nothing; a batch shares one
 # issue across every pair; the brief's recorded issue and the spawn's flag must
 # agree; and --issue is refused where a task cannot come from an issue
-# (--secondmate, --relaunch) or where the URL is not an issue URL.
+# (--scout, --secondmate, --relaunch) or where the URL is not an issue URL.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -81,20 +81,7 @@ test_the_task_record_holds_the_canonical_issue() {
     assert_grep "issue=$ISSUE_URL" "$meta" "'$spelling' was not recorded as the canonical issue"
     [ "$(grep -c '^issue=' "$meta")" = 1 ] || fail "'$spelling' left more than one issue= line in the task record"
   done
-
-  # A scout dispatched from an issue is tracked by the same record, even though
-  # it carries no delivery posture of its own.
-  fm_test_spawn_brief "$HOME_DIR" issue-rec-a5
-  record_brief_issue "$HOME_DIR" issue-rec-a5 "$ISSUE_URL"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    issue-rec-a5 "$PROJ_DIR" claude --scout --issue "$ISSUE_URL")
-  status=$?
-  expect_code 0 "$status" "an issue-sourced scout spawn should succeed: $out"
-  meta="$HOME_DIR/state/issue-rec-a5.meta"
-  assert_grep "issue=$ISSUE_URL" "$meta" "a scout dispatched from an issue recorded no issue"
-  assert_no_grep '^mode=' "$meta" "an issue-sourced scout recorded a delivery mode"
-  assert_no_grep '^yolo=' "$meta" "an issue-sourced scout recorded a merge posture"
-  pass "fm-spawn: every accepted spelling of one issue records the same canonical issue=, scouts included"
+  pass "fm-spawn: every accepted spelling of one issue records the same canonical issue="
 }
 
 test_a_task_without_an_issue_records_none() {
@@ -192,8 +179,9 @@ test_a_relaunch_keeps_the_recorded_issue() {
 }
 
 # Refusals that happen before anything exists: a URL that is not a GitLab issue
-# URL (the rules bin/fm-gitlab-issue-lib.sh owns), and a persistent secondmate,
-# which is not a task dispatched from an issue.
+# URL (the rules bin/fm-gitlab-issue-lib.sh owns), and the two kinds that cannot
+# come from an issue - a scout, which delivers a report and no merge request,
+# and a persistent secondmate.
 test_issue_scope_and_url_refusals_create_nothing() {
   local rec out status bad
   rec=$(make_case refusals issue-bad-f1)
@@ -216,10 +204,19 @@ test_issue_scope_and_url_refusals_create_nothing() {
     issue-sm-f2 "$HOME_DIR" --secondmate --issue "$ISSUE_URL")
   status=$?
   [ "$status" -ne 0 ] || fail "a secondmate spawn carrying --issue should exit non-zero"
-  assert_contains "$out" "--issue applies only to ship and scout spawns" \
+  assert_contains "$out" "--issue applies only to ship spawns" \
     "the secondmate refusal did not explain the scope"
   assert_absent "$HOME_DIR/state/issue-sm-f2.meta" "a refused secondmate spawn published a task record"
-  pass "fm-spawn: a non-issue URL and a secondmate spawn are refused before any task exists"
+
+  # A scout delivers a report and no merge request, so it is not issue work.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    issue-bad-f1 "$PROJ_DIR" claude --scout --issue "$ISSUE_URL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout spawn carrying --issue should exit non-zero"
+  assert_contains "$out" "--issue applies only to ship spawns" \
+    "the scout refusal did not explain the scope"
+  assert_absent "$HOME_DIR/state/issue-bad-f1.meta" "a refused scout spawn published a task record"
+  pass "fm-spawn: a non-issue URL, a scout, and a secondmate spawn are refused before any task exists"
 }
 
 test_the_task_record_holds_the_canonical_issue

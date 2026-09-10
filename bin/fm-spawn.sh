@@ -2,7 +2,7 @@
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--issue <issue-url>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--issue <issue-url>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -50,15 +50,15 @@
 #   durable link between one issue and every task split out of it: an absent
 #   `issue=` means the task did not come from an issue, and the recorded value
 #   is the canonical URL owned by bin/fm-gitlab-issue-lib.sh, so tasks of one
-#   issue always share one exact spelling. The flag is accepted on ship and
-#   scout spawns and refused on --secondmate (a persistent agent is not issue
-#   work) and on --relaunch (which reuses the recorded value). An issue-sourced
-#   ship spawn also refuses --yolo on: the human who owns the issue reviews and
-#   merges each merge request, so firstmate never merges that work itself. When
-#   the brief records an "Issue contract: issue=<url>" line (bin/fm-brief.sh
-#   --issue writes one), the spawn refuses a disagreeing or missing --issue the
-#   same way it refuses a delivery-mode mismatch, and warns once when only the
-#   flag names an issue.
+#   issue always share one exact spelling. The flag is a ship-spawn flag,
+#   refused on --scout (a scout delivers a report, not a merge request), on
+#   --secondmate (a persistent agent is not issue work), and on --relaunch
+#   (which reuses the recorded value). An issue-sourced ship spawn also refuses
+#   --yolo on: the human who owns the issue reviews and merges each merge
+#   request, so firstmate never merges that work itself. When the brief records
+#   an "Issue contract: issue=<url>" line (bin/fm-brief.sh --issue writes one),
+#   the spawn refuses a disagreeing or missing --issue the same way it refuses a
+#   delivery-mode mismatch, and warns once when only the flag names an issue.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -600,10 +600,10 @@ else
       exit 1
     fi
   else
-    if [ "$ISSUE_SET" -eq 1 ] && [ "$KIND" = secondmate ]; then
-      echo "error: --issue applies only to ship and scout spawns; a persistent secondmate is not a task dispatched from an issue" >&2
+    [ "$ISSUE_SET" -eq 0 ] || {
+      echo "error: --issue applies only to ship spawns; a scout delivers a report and a persistent secondmate is not a task dispatched from an issue" >&2
       exit 1
-    fi
+    }
     [ "$MODE_SET" -eq 0 ] || {
       echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
       exit 1
@@ -2318,13 +2318,13 @@ fi
 # "Issue contract: issue=<url>" line, and the task's own issue= record is what a
 # later step reads to find every task belonging to one issue. A brief that names
 # an issue the spawn does not record would leave that task invisible to it.
-if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+if [ "$KIND" = ship ]; then
   BRIEF_ISSUE=$(sed -n 's/^Issue contract: issue=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -n "$BRIEF_ISSUE" ] && [ -z "$ISSUE_URL" ]; then
-    echo "error: $ID was briefed from GitLab issue $BRIEF_ISSUE but this spawn recorded no issue; pass --issue $BRIEF_ISSUE so the task stays linked to it" >&2
+    echo "error: $ID was briefed from GitLab issue $BRIEF_ISSUE but this spawn recorded no issue; spawn again with --issue $BRIEF_ISSUE, or re-scaffold the brief for the issue this task really belongs to" >&2
     exit 1
   elif [ -n "$BRIEF_ISSUE" ] && [ "$BRIEF_ISSUE" != "$ISSUE_URL" ]; then
-    echo "error: issue mismatch for $ID: the brief says $BRIEF_ISSUE but this spawn recorded $ISSUE_URL; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
+    echo "error: issue mismatch for $ID: the brief says $BRIEF_ISSUE but this spawn passed $ISSUE_URL; spawn again with --issue $BRIEF_ISSUE, or re-scaffold the brief with --issue $ISSUE_URL, so the worker's instructions and the task record agree" >&2
     exit 1
   elif [ -z "$BRIEF_ISSUE" ] && [ -n "$ISSUE_URL" ]; then
     echo "warning: $ID records issue $ISSUE_URL but its brief was not scaffolded from that issue; the worker has no issue text to work from - confirm that is intended" >&2

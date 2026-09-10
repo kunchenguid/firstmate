@@ -13,7 +13,7 @@
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--issue <issue-url>] [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--issue <issue-url>] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -39,17 +39,19 @@
 #   sections after it. bin/fm-gitlab-issue-lib.sh owns the accepted URL shape
 #   and the canonical spelling; the scaffold records it as a fixed
 #   machine-readable "Issue contract: issue=<url>" line that bin/fm-spawn.sh
-#   checks against its own --issue. A ship brief also carries the generated
+#   checks against its own --issue. A brief whose mode actually produces a
+#   merge request - no-mistakes or direct-PR - also carries the generated
 #   small-merge-request contract: one reviewable merge request for the task, a
 #   "#<iid> [n/N] <work>" title, a "Related to #<iid>" line and never a closing
 #   keyword (the human closes the issue), and the regression test shipping with
-#   the first subtask of a reproduced bug. That block is generated build
-#   guidance rather than the captain's words, and it sits outside `# Task` so it
-#   never becomes no-mistakes `--intent`. A scout brief carries the issue
-#   content without it, because a scout delivers a report and no merge request.
-#   --issue is refused on --secondmate, and needs glab and jq on PATH; an issue
-#   that cannot be read refuses the scaffold instead of writing a brief the
-#   worker cannot act on.
+#   the first subtask of a reproduced bug. --mode local-only produces no merge
+#   request, so it carries the issue and its contract line without that block
+#   rather than two contradicting delivery contracts. The block is generated
+#   build guidance rather than the captain's words, and it sits outside `# Task`
+#   so it never becomes no-mistakes `--intent`. --issue is a ship flag, refused
+#   on --scout (a scout delivers a report, not a merge request) and on
+#   --secondmate, and needs glab and jq on PATH; an issue that cannot be read
+#   refuses the scaffold instead of writing a brief the worker cannot act on.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
@@ -213,8 +215,8 @@ fi
 # The issue URL is validated before anything is written or fetched, by the same
 # library every other issue-aware surface uses (bin/fm-gitlab-issue-lib.sh).
 if [ "$ISSUE_SET" -eq 1 ]; then
-  if [ "$KIND" = secondmate ]; then
-    echo "error: --issue applies only to crewmate ship or scout briefs; a secondmate charter is not issue work" >&2
+  if [ "$KIND" != ship ]; then
+    echo "error: --issue applies only to ship briefs; a scout delivers a report and a secondmate charter is not issue work" >&2
     exit 1
   fi
   fm_gitlab_issue_url_parse "$ISSUE_ARG" || {
@@ -420,7 +422,10 @@ This task was dispatched from that issue, quoted under \`## Captain's intent\` a
 The human who opened it owns it: never close it, never change its labels, and never comment on it - firstmate reports back to the issue.
 EOF
   ISSUE_SECTION=${ISSUE_SECTION%$'\n'}
-  if [ "$KIND" = ship ]; then
+  # Only the modes that actually produce a merge request carry the merge-request
+  # contract; local-only ships nothing, so adding it would hand the worker two
+  # mutually exclusive delivery contracts.
+  if [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ]; then
     IFS= read -r -d '' ISSUE_MR_SECTION <<EOF || true
 Ship exactly one merge request for this task by default, small enough that a human reviews the whole diff in one reading.
 If the work genuinely cannot land as one reviewable change, say so to firstmate instead of splitting or stacking merge requests on your own.
@@ -487,7 +492,7 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
-$ISSUE_BLOCK
+
 $HERDR_SECTION
 
 # Setup
@@ -543,7 +548,7 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-li
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-echo "scaffolded: $BRIEF (scout$ISSUE_LABEL; replace $PLACEHOLDER_HINT)"
+echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
 fi
 
