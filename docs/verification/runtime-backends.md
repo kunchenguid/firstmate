@@ -1051,7 +1051,7 @@ endpoint in a session with no server missing
 malformed target                     unreadable
 ```
 
-The same run drove `bin/fm-spawn.sh --relaunch` against a real Herdr pane whose shell had been moved to `/`: the shell was told once to return, ended in the recorded worktree, and the replacement was launched into the SAME pane, leaving one task tab.
+The same run drove `bin/fm-spawn.sh --relaunch` against a real Herdr pane whose shell had been moved outside its recorded worktree: the shell was told once to return, ended in the recorded worktree, and the replacement was launched into the SAME pane, leaving one task tab.
 
 Herdr 0.8.x is not installed on this host, so protocol-20 coverage is structural plus the adapter fixture exercising both response shapes; it is not a live result.
 Refresh the live half, which fails naming the installed version, with:
@@ -1064,10 +1064,13 @@ Observed 2026-09-10:
 
 ```text
 ok - real herdr 0.9.0: a gone session reads recoverable while a live pane and a malformed target do not
+ok - real herdr: a drifted agent-free shell returns to its worktree and reuses the same endpoint
 ```
 
 `tests/fm-backend-herdr.test.sh` pins the logic portably by driving the two signals apart - the same failed pane read yields `missing` under a stopped server and `unreadable` under a running one - and asserts that the husk classifier still refuses on that identical read.
-`tests/fm-control-relaunch.test.sh` pins the drifted-shell relaunch: the shell is told to return and the same endpoint is reused, while a shell that will not move still refuses.
+`tests/fm-control-herdr-smoke.test.sh` proves the Herdr-only drift recovery against a real binary in an isolated lab session.
+`tests/fm-control-relaunch.test.sh` drives a tmux stub and proves that tmux retains its prior refusal without sending `cd` or any other input to the pane.
+The Herdr refusal when a shell accepts the command but does not move is not exercised in this change.
 
 ### Away-mode transport
 
