@@ -380,12 +380,8 @@ source_origin_url() {
   normalize_origin_url "$src" "$url"
 }
 
-# An origin URL never reaches an error message here. bin/fm-project-origin-lib.sh
-# deliberately accepts a user:pass@host authority, so an ordinary seeding error
-# that printed the origin verbatim would carry that credential into whatever chat,
-# ticket, or log the operator pastes the error into. Naming the two clones answers
-# the reader's question just as well and leaves each origin one
-# "git remote get-url origin" away for whoever actually needs to see it.
+# See docs/remote-secondmates.md#provision-a-route for the origin-diagnostic safety contract.
+# Pass the source clone path here so diagnostics do not need its origin URL.
 seeded_origin_url() {
   local project=$1 dst=$2 src=$3 url
   url=$(git -C "$dst" remote get-url origin 2>/dev/null || true)
