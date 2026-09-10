@@ -357,6 +357,61 @@ test_guard_rejects_distinct_or_replaced_path_identity() {
   pass "guard rejects distinct homes, alias repoints, and missing targets"
 }
 
+# Recorded relative spellings carry no cwd of their own: they are resolved by
+# ordinary filesystem lookup in the CHECKING process, against a fixed expected
+# target. From the cwd where they name the watcher's real home and real script
+# the lock is this watcher's; from a cwd where the same spelling names another
+# real object it is not, and each side is judged independently.
+test_guard_relative_spellings_resolve_in_the_checking_cwd() {
+  local dir state home decoy_home_cwd decoy_script_cwd pid identity output
+  dir=$(make_case relative-paths)
+  state="$dir/state"
+  home="$dir/home"
+  decoy_home_cwd="$dir/decoy-home-cwd"
+  decoy_script_cwd="$dir/decoy-script-cwd"
+  mkdir "$home" "$decoy_home_cwd" "$decoy_script_cwd"
+  # From $dir, "home" and "watcher.sh" resolve to the real home and the real
+  # watcher script. Each decoy cwd repoints exactly one of those two spellings
+  # at a different real object of the required type and leaves the other one
+  # resolving to the genuine target.
+  ln -s "$WATCH" "$dir/watcher.sh"
+  mkdir "$decoy_home_cwd/home"
+  ln -s "$WATCH" "$decoy_home_cwd/watcher.sh"
+  ln -s "$home" "$decoy_script_cwd/home"
+  cp "$WATCH" "$decoy_script_cwd/watcher.sh"
+
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not identify relative-path guard watcher"
+  record_guard_watcher_lock "$state" home watcher.sh "$pid" "$identity"
+
+  output=$(cd "$dir" && FM_HOME="$home" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed on equivalent relative spellings"
+  [ -z "$output" ] || fail "guard rejected equivalent relative spellings: $output"
+
+  rm -f "$state/.guard-watcher-stale-banner"
+  output=$(cd "$decoy_home_cwd" && FM_HOME="$home" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed while rejecting a relative home resolved elsewhere"
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' <<< "$output" >/dev/null \
+    || fail "guard accepted a relative home spelling resolving to another object"
+
+  rm -f "$state/.guard-watcher-stale-banner"
+  output=$(cd "$decoy_script_cwd" && FM_HOME="$home" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed while rejecting a relative script resolved elsewhere"
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' <<< "$output" >/dev/null \
+    || fail "guard accepted a relative watcher-script spelling resolving to another object"
+
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "guard resolves relative home and watcher-script spellings in the checking cwd"
+}
+
 test_lock_single_winner_under_concurrency() {
   local dir state lockdir marker i pids pid wins
   dir=$(make_case lock-concurrency)
@@ -1281,6 +1336,7 @@ test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_guard_accepts_equivalent_home_and_script_identity
 test_guard_rejects_distinct_or_replaced_path_identity
+test_guard_relative_spellings_resolve_in_the_checking_cwd
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
