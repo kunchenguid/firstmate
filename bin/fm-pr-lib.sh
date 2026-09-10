@@ -266,7 +266,21 @@ fm_pr_sha256() {
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  # MSYS (Git Bash) has no POSIX file modes: chmod 600 deterministically
+  # reports 644 because Windows ACLs carry the restriction instead. Accept the
+  # mode MSYS reports for the private-mode request; device and link count
+  # still bind the file to this state directory.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      case "$(fm_pr_file_mode "$path")" in
+        "$mode"|644|700|755) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *)
+      [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+      ;;
+  esac
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }
