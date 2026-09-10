@@ -334,6 +334,8 @@ FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_OMP_SPINNER_FRAMES_RE='(⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)'
 FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT='Working…|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]'
 FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
+# agy 1.2.0 renders `esc to cancel` while a turn is active.
+FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc to cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner
 # in two consecutive turns, while `ctrl+c to stop` was present for the whole
@@ -359,6 +361,7 @@ fm_busy_lines_match() {  # [harness]
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
+      agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -393,6 +396,10 @@ FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.|^Plan, s
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
 # text, and only the run's LAST row is ever matched against it.
 FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
+# Antigravity CLI's idle composer is an ASCII `>` row followed by its stable
+# `? for shortcuts` footer, so the shell-looking prompt is accepted only with
+# that independent footer proof.
+FM_COMPOSER_AGY_FOOTER_RE_DEFAULT='^\?[[:space:]]+for shortcuts([[:space:]]|$)'
 # omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
 # git, and context cells. Verified live through Herdr on omp 18.1.11:
@@ -639,6 +646,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_CURSOR_EDGE=0
   FM_COMPOSER_SCAN_BARE_ROW=-1
   FM_COMPOSER_SCAN_SHELL_ROW=-1
+  FM_COMPOSER_SCAN_AGY_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_START=-1
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
   FM_COMPOSER_SCAN_PI_PAIR_FOUND=0
@@ -647,6 +655,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
+  local agy_prompt_row=-1 agy_footer_row=-1
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
   while IFS= read -r line; do
@@ -698,6 +707,13 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         ;;
       *) leftbar_start=-1 ;;
     esac
+    case "$trimmed" in
+      '>'*) agy_prompt_row=$row ;;
+    esac
+    if fm_composer_idle_matches "$trimmed" \
+      "${FM_COMPOSER_AGY_FOOTER_RE:-$FM_COMPOSER_AGY_FOOTER_RE_DEFAULT}" sensitive; then
+      agy_footer_row=$row
+    fi
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
     # lower shell prompts as staleness evidence for cursorless selection.
@@ -820,9 +836,27 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   done <<EOF
 $pane
 EOF
+  if [ "$agy_prompt_row" -ge 0 ] && [ "$agy_footer_row" -gt "$agy_prompt_row" ]; then
+    FM_COMPOSER_SCAN_AGY_ROW=$agy_prompt_row
+  fi
   if [ -n "$cy" ] && [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ]; then
     FM_COMPOSER_SCAN_UNSAFE=1
   fi
+}
+
+# _fm_composer_classify_agy_row: classify Antigravity CLI's prompt row after
+# the scanner has proved the independent footer signal below it.
+_fm_composer_classify_agy_row() {  # <screen> <styled> <row>
+  local screen=$1 styled=$2 row=$3 raw content
+  raw=$(_fm_composer_screen_row "$row" "$screen")
+  content=$(_fm_composer_row_content "$raw" "$styled")
+  fm_composer_normalize_trim_var content
+  case "$content" in
+    '>'*) content=${content#>} ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  fm_composer_normalize_trim_var content
+  [ -n "$content" ] && printf 'pending' || printf 'empty'
 }
 
 # 0 when a mismatched bottom border reads as a legitimate TITLE: the trimmed
@@ -1093,6 +1127,12 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_LEFTBAR_START
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_LEFTBAR_END
   fi
+  if [ "$FM_COMPOSER_SCAN_AGY_ROW" -gt "$generic" ]; then
+    generic=$FM_COMPOSER_SCAN_AGY_ROW
+    FM_COMPOSER_SELECTED_KIND=agy
+    FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_AGY_ROW
+    FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_AGY_ROW
+  fi
   if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
@@ -1189,6 +1229,9 @@ EOF
           leading_blank=0
         fi
         ;;
+      agy)
+        case "$content" in '>'*) content=${content#>} ;; esac
+        ;;
       box)
         if [ "$prompt_row" -lt 0 ] \
            && fm_composer_leading_prompt_glyph_var glyph "$content"; then
@@ -1264,6 +1307,11 @@ EOF
         "$FM_COMPOSER_SCAN_LEFTBAR_START" "$FM_COMPOSER_SCAN_LEFTBAR_END"
       return 0
     fi
+    if [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
+       && [ "$cy" -eq "$FM_COMPOSER_SCAN_AGY_ROW" ]; then
+      _fm_composer_classify_agy_row "$screen" "$styled" "$cy"
+      return 0
+    fi
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ] && [ "$cy" -eq "$FM_COMPOSER_SCAN_BARE_ROW" ]; then
       if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
          && [ "$cy" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
@@ -1332,6 +1380,10 @@ EOF
     leftbar)
       _fm_composer_classify_leftbar "$screen" "$styled" \
         "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
+      ;;
+    agy)
+      _fm_composer_classify_agy_row "$screen" "$styled" \
+        "$FM_COMPOSER_SELECTED_FIRST"
       ;;
   esac
 }

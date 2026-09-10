@@ -666,6 +666,26 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
   pass "fm_composer_extract_selected_content: scopes user content and excludes furniture"
 }
 
+test_agy_prompt_requires_footer_proof() {
+  local caps='styled=0 cursor=1' out
+  out=$(fm_composer_classify_screen "$caps" $'>\n? for shortcuts Gemini 3.8 Flash · low' 0)
+  [ "$out" = empty ] || fail "an idle agy prompt with its footer must read empty, got '$out'"
+  out=$(fm_composer_classify_screen "$caps" $'> draft\n? for shortcuts Gemini 3.8 Flash · low' 0)
+  [ "$out" = pending ] || fail "typed agy prompt text must read pending, got '$out'"
+  out=$(fm_composer_classify_screen "$caps" $'>\nnot the agy footer' 0)
+  [ "$out" = unknown ] || fail "a bare > without the agy footer must stay unknown, got '$out'"
+  pass "fm_composer_classify_screen: agy requires its independent shortcuts footer"
+}
+
+test_agy_prompt_requires_footer_proof_without_cursor() {
+  local out
+  out=$(fm_composer_classify_screen 'styled=0' $'>\n? for shortcuts Gemini 3.8 Flash · low')
+  [ "$out" = empty ] || fail "cursorless idle agy prompt must read empty, got '$out'"
+  out=$(fm_composer_classify_screen 'styled=0' $'> draft\n? for shortcuts Gemini 3.8 Flash · low')
+  [ "$out" = pending ] || fail "cursorless typed agy prompt must read pending, got '$out'"
+  pass "fm_composer_classify_screen: cursorless agy shape is classified structurally"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -697,6 +717,8 @@ test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
+test_agy_prompt_requires_footer_proof
+test_agy_prompt_requires_footer_proof_without_cursor
 
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out

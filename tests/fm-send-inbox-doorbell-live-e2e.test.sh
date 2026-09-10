@@ -88,6 +88,7 @@ launch_cmd() {  # <name>
     grok) printf '%s' 'grok --always-approve' ;;
     kimi) printf '%s' 'kimi --auto' ;;
     muse) printf '%s' 'MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on muse --yolo' ;;
+    agy) printf '%s' 'agy --dangerously-skip-permissions --effort low' ;;
     *) return 1 ;;
   esac
 }
@@ -185,7 +186,7 @@ check_harness_doorbell() {  # <name>
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
 }
 
-HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'claude codex opencode pi grok kimi muse'}
+HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'claude codex opencode pi grok kimi muse agy'}
 for h in $HARNESSES; do
   if command -v "$h" >/dev/null 2>&1; then
     check_harness_doorbell "$h"

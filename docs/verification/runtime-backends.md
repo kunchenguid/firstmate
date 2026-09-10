@@ -1801,3 +1801,19 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Antigravity CLI (`agy`) worker adapter
+
+The `agy` worker adapter was verified on 2026-09-10 against Antigravity CLI 1.2.0 from `~/.local/bin/agy` on Linux.
+The adapter is CREWMATE and SCOUT only, and `bin/fm-spawn.sh` refuses its secondmate path because no primary supervision protocol is verified.
+The real launch `agy --dangerously-skip-permissions --effort low --prompt-interactive "Reply with AGY_PROBE_READY, then wait for more input."` submitted its brief without a second Enter and kept the TUI live for steering.
+The live launcher reported `comm=agy`, while a real child tool process exported `ANTIGRAVITY_AGENT=1` and the launcher itself exported no `ANTIGRAVITY_*` identity marker.
+The live idle composer was a bare `>` row followed by `? for shortcuts` and `Gemini 3.8 Flash · low`, and the active turn rendered `esc to cancel`.
+The hook probe loaded firstmate-owned `.agents/hooks.json` through an absolute `--add-dir`, observed `PreInvocation` and `Stop`, and confirmed JSON hook output.
+The Escape probe canceled a real long-running tool call without a `Stop` event, so the adapter closes semantic busy state through `fm-interrupt` after verified Escape delivery.
+The native `--conversation=<id>` and `--continue` relaunch forms both restored the real conversation after `/quit`.
+
+The portable checks were run with `bash tests/fm-gemini-harness.test.sh`, `bash tests/fm-composer-lib.test.sh`, `tests/fm-control.test.sh`, `tests/fm-busy-adapter-wiring.test.sh`, and `tests/fm-tmux-agent-liveness.test.sh`.
+The focused portable result was `ok` for the agy marker, exact liveness name, hook lifecycle, stale-generation rejection, composer states, control contract, and worker-only boundary.
+The opt-in live guards are `FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh` and `FM_COMPOSER_MATRIX_LIVE=1 bin/fm-test-run.sh tests/fm-composer-matrix-live-e2e.test.sh`.
+The live steering-inbox guard also passed for agy on 2026-09-10 with `FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=agy FM_SEND_INBOX_LIVE_TIMEOUT=120 bash tests/fm-send-inbox-doorbell-live-e2e.test.sh`, proving that a real worker acted on and acknowledged a Firstmate steer.

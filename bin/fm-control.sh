@@ -179,7 +179,7 @@ shift 2
 if ! fm_control_verb_allowed "$VERB"; then
   {
     if [ "$VERB" = resume ]; then
-      echo "error: 'resume' is not a control verb: resuming an exited agent is not deterministic across the verified adapters (codex and grok need a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract). Use 'relaunch', which carries the brief plus a progress note into a fresh agent on any adapter."
+      echo "error: 'resume' is not a control verb: resuming an exited agent is not deterministic across the verified adapters (codex and grok need a session id printed at exit, agy resumes by conversation id or latest conversation, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract). Use 'relaunch', which carries the brief plus a progress note into a fresh agent on any adapter."
     else
       echo "error: '$VERB' is not a control verb"
     fi
@@ -373,6 +373,17 @@ send_interrupt_keys() {
     || die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
 }
 
+# agy 1.2.0 cancels a tool invocation with Escape without emitting its Stop
+# hook, so the control plane closes the firstmate-owned semantic busy record
+# after the key is delivered instead of leaving the worker falsely busy.
+record_agy_interrupt_idle() {
+  [ "$HARNESS" = agy ] || return 0
+  [ -f "$STATE/$ID.busy-gen" ] || return 0
+  "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" idle \
+    --current-gen --source fm-interrupt --event interrupt \
+    || die "agy interrupt reached task $ID, but its semantic idle state could not be recorded"
+}
+
 prepare_interrupt_ack() {
   INTERRUPT_ACK_SOURCE=$(fm_control_interrupt_ack_source "$HARNESS")
   INTERRUPT_ACK_LOG=
@@ -411,6 +422,7 @@ deliver_interrupt() {
   local cancel
   prepare_interrupt_ack
   send_interrupt_keys
+  record_agy_interrupt_idle
   cancel=$(interrupt_cancel_claim)
   printf '%s' "$cancel"
 }

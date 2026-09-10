@@ -114,6 +114,37 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
 }
 
+check_agy_idle_empty() {
+  local name=agy win=hx-agy verdict='' i=0 budget=${FM_COMPOSER_MATRIX_LIVE_POLLS:-45} version trust_seen=0
+  version=$(harness_version agy)
+  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" -- \
+    agy --dangerously-skip-permissions --effort low \
+    || fail "agy ($version): could not launch in the isolated tmux server"
+  while [ "$i" -lt "$budget" ]; do
+    screen=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null || true)
+    if [ "$trust_seen" -eq 0 ] && printf '%s\n' "$screen" | grep -qi 'Do you trust'; then
+      tmux -L "$SOCKET" send-keys -t "$SESSION:$win" Enter || fail "agy ($version): trust dialog could not be accepted"
+      trust_seen=1
+      sleep 1
+    fi
+    verdict=$(fm_tmux_composer_state "$SESSION:$win")
+    [ "$verdict" = empty ] && break
+    i=$((i + 1))
+    sleep 1
+  done
+  if [ "$verdict" != empty ]; then
+    printf '# agy pane tail at failure:\n' >&2
+    printf '%s\n' "$screen" | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
+    FAILED=1
+    printf 'not ok - agy (%s): idle composer never classified empty (last verdict: %s)\n' \
+      "$version" "${verdict:-unreadable}" >&2
+  else
+    CHECKED=$((CHECKED + 1))
+    pass "agy ($version): real idle > composer plus shortcuts footer classifies empty"
+  fi
+  tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+}
+
 # --- 1. Every installed verified harness must reach a proven-empty composer --
 for h in claude codex opencode pi grok kimi muse; do
   if command -v "$h" >/dev/null 2>&1; then
@@ -122,6 +153,12 @@ for h in claude codex opencode pi grok kimi muse; do
     note "harness absent, not verified here: $h"
   fi
 done
+
+if command -v agy >/dev/null 2>&1; then
+  check_agy_idle_empty
+else
+  note "harness absent, not verified here: agy"
+fi
 
 # --- 2. The strict blank-row posture, live ----------------------------------
 # A plain shell pane parked on a blank line between two rules (the audit's

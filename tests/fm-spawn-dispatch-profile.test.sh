@@ -47,6 +47,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  fm_fake_exit0 "$fakebin" agy
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -486,6 +487,22 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported xhigh reasoning effort"
+}
+
+test_agy_threads_model_effort_and_private_hooks() {
+  local rec id=profile-agy-z1 out status launch
+  rec=$(make_spawn_case profile-agy agy "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model claude-sonnet-4-6 --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "agy spawn with model and xhigh effort should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/agy' --dangerously-skip-permissions --model 'claude-sonnet-4-6' --effort high --add-dir '$HOME_DIR/state/$id.agy-hooks' --prompt-interactive" \
+    "agy launch did not map xhigh to high or thread the private hook root"
+  assert_contains "$launch" "encode launch-brief" "agy launch did not submit its initial brief"
+  assert_not_contains "$launch" "$WT_DIR/.agents" "agy launch must not point at the worktree's own config"
+  pass "agy receives --model, maps xhigh to --effort high, and uses firstmate-owned hooks"
 }
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
@@ -1314,6 +1331,7 @@ test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
+test_agy_threads_model_effort_and_private_hooks
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn

@@ -133,7 +133,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|agy|omp)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -281,6 +281,8 @@
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
+#     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __AGYHOOKS__  firstmate-owned per-task agy hook customization root
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -288,7 +290,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse and gemini are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, rovo, and agy are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -1131,7 +1133,11 @@ clear_relaunch_harness_wiring() {
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    rm -f -- "$path" || return 1
+    if [ -d "$path" ] && [ ! -L "$path" ]; then
+      rm -rf -- "$path" || return 1
+    else
+      rm -f -- "$path" || return 1
+    fi
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
 EOF
@@ -1389,7 +1395,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|agy|omp)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1428,6 +1434,25 @@ resolve_pi_executable() {
       printf '%s/%s\n' "$dir" "$(basename "$candidate")"
       ;;
   esac
+}
+
+resolve_agy_binary() {
+  local candidate dir
+  candidate=$(command -v agy 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
+  return 1
 }
 
 # Pi's CLI surface is version-dependent, so probe the resolved executable's help
@@ -1596,6 +1621,14 @@ launch_template() {
     # Its turn-end and busy-state signals do NOT ride the launch command:
     # they are project hooks written into the worktree below.
     gemini) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # agy (Antigravity CLI 1.2.0) accepts the initial brief as the
+    # --prompt-interactive value and submits it without a second Enter while
+    # keeping the TUI live for steering.
+    # --dangerously-skip-permissions is the verified unattended-worker
+    # autonomy flag.
+    # --add-dir points only at firstmate's private hook customization root and
+    # never at the task worktree's own agy configuration.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT -u ANTIGRAVITY_AGENTAPI_EXE -u ANTIGRAVITY_CONVERSATION_ID -u ANTIGRAVITY_CSRF_TOKEN -u ANTIGRAVITY_LS_ADDRESS -u ANTIGRAVITY_LS_VERSION -u ANTIGRAVITY_PROJECT_ID -u ANTIGRAVITY_SOURCE_METADATA -u ANTIGRAVITY_TRAJECTORY_ID __AGYBIN__ --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--add-dir __AGYHOOKS__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1691,7 +1724,7 @@ case "$ARG3" in
     ;;
 esac
 
-# muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, rovo, and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -1701,7 +1734,7 @@ esac
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
 # secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -1743,6 +1776,9 @@ case "$HARNESS" in
         fi
       fi
     fi
+    ;;
+  agy)
+    AGY_BIN=$(resolve_agy_binary) || exit 1
     ;;
   omp)
     OMP_BIN=$(resolve_pi_executable omp) || {
@@ -1902,7 +1938,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|agy|omp)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1964,6 +2000,15 @@ effort_flag_for_harness() {
       case "$effort" in
         low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
+      esac
+      ;;
+    agy)
+      # agy 1.2.0 accepts low, medium, and high directly.
+      # xhigh and max cap at agy's highest supported level so the requested
+      # higher effort is never silently omitted.
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+        xhigh|max) printf -- '--effort high ' ;;
       esac
       ;;
     # rovo has no --effort flag on `run`; its effort mapping rides
@@ -3320,6 +3365,18 @@ if [ "$KIND" != secondmate ]; then
         [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       fi
       ;;
+    agy)
+      if [ "$RAW_LAUNCH" -eq 0 ]; then
+        # PreInvocation opens the semantic turn and Stop closes it.
+        # Antigravity's Escape interrupt does not emit Stop in 1.2.0, so the
+        # control and data planes write fm-interrupt idle after delivering it.
+        BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+          echo "error: failed to arm the busy-state contract for $ID" >&2
+          exit 1
+        }
+        [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+      fi
+      ;;
     kimi*)
       # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
       # live-verified installed version (bin/fm-busy-lib.sh owns the gate and
@@ -3385,6 +3442,19 @@ EOF
       g_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true; printf '{}'")
       cat > "$STATE_REAL/$ID.gemini-settings.json" <<EOF
 {"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
+EOF
+      fi
+      ;;
+    agy)
+      if [ "$RAW_LAUNCH" -eq 0 ]; then
+        busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+        busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source agy-hook"
+        a_pre=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '{}'")
+        a_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true; printf '{}'")
+        AGY_HOOK_ROOT="$STATE_REAL/$ID.agy-hooks"
+        mkdir -p "$AGY_HOOK_ROOT/.agents"
+        cat > "$AGY_HOOK_ROOT/.agents/hooks.json" <<EOF
+{"firstmate":{"PreInvocation":[{"command":"$a_pre"}],"Stop":[{"command":"$a_stop"}]}}
 EOF
       fi
       ;;
@@ -3864,6 +3934,7 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
+sq_agyhooks=$(shell_quote "$STATE_REAL/$ID.agy-hooks")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
@@ -3890,6 +3961,7 @@ case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
+  agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"}; LAUNCH=${LAUNCH//__AGYHOOKS__/$sq_agyhooks} ;;
   omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}

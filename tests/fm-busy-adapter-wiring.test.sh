@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini agy)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -316,6 +316,13 @@ run_gemini_hook() {  # <settings.json> <hook-event>
   sh -c "$cmd"
 }
 
+run_agy_hook() {  # <hooks.json> <hook-event>
+  local cmd
+  cmd=$(jq -r ".firstmate.$2[0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  printf '{}' | sh -c "$cmd"
+}
+
 test_gemini_hooks_semantic_lifecycle() {
   local rec id=busy-gm-1 out state settings
   rec=$(make_spawn_case gemini-lifecycle gemini "$id")
@@ -378,6 +385,66 @@ test_gemini_hooks_stale_incarnation_harmless() {
   pass "gemini hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
+test_agy_hooks_semantic_lifecycle() {
+  local rec id=busy-agy-1 out state settings
+  rec=$(make_spawn_case agy-lifecycle agy "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "agy spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$state/$id.agy-hooks/.agents/hooks.json"
+  assert_present "$settings" "agy spawn did not write firstmate-owned hooks"
+  jq -e . "$settings" >/dev/null || fail "agy hooks are not valid JSON"
+  for ev in PreInvocation Stop; do
+    jq -e ".firstmate[\"$ev\"]" "$settings" >/dev/null || fail "agy hooks lack $ev"
+  done
+  assert_absent "$WT_DIR/.agents/hooks.json" \
+    "agy spawn must not write the project's own .agents/hooks.json"
+  out=$(classify agy "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "agy spawn seed must be busy, got '$out'"
+  rm -f "$state/$id.turn-ended"
+  out=$(run_agy_hook "$settings" PreInvocation) || fail "agy PreInvocation hook failed"
+  printf '%s' "$out" | jq -e . >/dev/null || fail "agy PreInvocation must print JSON, got '$out'"
+  [ "$(classify agy "$id" "$state")" = "busy agy-hook" ] \
+    || fail "agy PreInvocation must classify busy agy-hook"
+  out=$(run_agy_hook "$settings" Stop) || fail "agy Stop hook failed"
+  printf '%s' "$out" | jq -e . >/dev/null || fail "agy Stop must print JSON, got '$out'"
+  [ -f "$state/$id.turn-ended" ] || fail "agy Stop must touch the turn-ended marker"
+  [ "$(classify agy "$id" "$state")" = "idle agy-hook" ] \
+    || fail "agy Stop must classify idle agy-hook"
+  pass "agy hooks open on PreInvocation and close on Stop without touching the worktree"
+}
+
+test_agy_hooks_stale_incarnation_harmless() {
+  local rec id=busy-agy-2 out state settings
+  rec=$(make_spawn_case agy-stale agy "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "agy spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$state/$id.agy-hooks/.agents/hooks.json"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  run_agy_hook "$settings" PreInvocation >/dev/null \
+    || fail "a stale agy hook must still exit 0"
+  [ "$(classify agy "$id" "$state")" = "busy fm-spawn" ] \
+    || fail "a stale agy hook must not change the current incarnation"
+  pass "agy hook events from a superseded incarnation are harmless"
+}
+
+test_raw_agy_launch_has_no_semantic_wiring() {
+  local rec id=busy-agy-raw out state
+  rec=$(make_spawn_case agy-raw agy "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 'agy --debug')
+  expect_code 0 $? "raw agy spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  assert_absent "$state/$id.busy-gen" "raw agy launch must not arm a busy generation"
+  assert_absent "$state/$id.agy-hooks" "raw agy launch must not write hooks"
+  [ "$(classify agy "$id" "$state")" = "unknown missing" ] \
+    || fail "raw agy launch must classify unknown, got '$(classify agy "$id" "$state")'"
+  pass "raw agy launch remains unwired and classifies unknown"
+}
+
 test_raw_gemini_launch_has_no_semantic_wiring() {
   local rec id=busy-gm-raw out state
   rec=$(make_spawn_case gemini-raw gemini "$id")
@@ -393,18 +460,21 @@ test_raw_gemini_launch_has_no_semantic_wiring() {
 }
 
 test_gemini_is_refused_as_a_secondmate() {
-  local rec id=busy-gm-3 out
-  rec=$(make_spawn_case gemini-secondmate gemini "$id")
-  read_case_record "$rec"
-  # A secondmate spawn carries no delivery contract, so this one deliberately
-  # bypasses run_spawn's ship-only --mode/--yolo arguments.
-  out=$(GROK_HOME="$HOME_DIR/grok-home" \
-    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" --secondmate "$id" gemini) && {
-    fail "a gemini secondmate must be refused, it has no primary supervision protocol: $out"
-  }
-  assert_contains "$out" 'crewmate/scout adapter only' \
-    "refusing a gemini secondmate must name the crewmate/scout boundary: $out"
-  pass "gemini is refused as a secondmate because it has no primary supervision protocol"
+  local harness rec id out
+  for harness in gemini agy; do
+    id="busy-${harness}-secondmate"
+    rec=$(make_spawn_case "${harness}-secondmate" "$harness" "$id")
+    read_case_record "$rec"
+    # A secondmate spawn carries no delivery contract, so this one deliberately
+    # bypasses run_spawn's ship-only --mode/--yolo arguments.
+    out=$(GROK_HOME="$HOME_DIR/grok-home" \
+      fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" --secondmate "$id" "$harness") && {
+      fail "a $harness secondmate must be refused, it has no primary supervision protocol: $out"
+    }
+    assert_contains "$out" 'crewmate/scout adapter only' \
+      "refusing a $harness secondmate must name the crewmate/scout boundary: $out"
+  done
+  pass "gemini and agy are refused as secondmates because they have no primary supervision protocol"
 }
 
 test_kimi_and_grok_install_no_unverified_wiring() {
@@ -431,6 +501,9 @@ test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
+test_agy_hooks_semantic_lifecycle
+test_agy_hooks_stale_incarnation_harmless
+test_raw_agy_launch_has_no_semantic_wiring
 test_raw_gemini_launch_has_no_semantic_wiring
 test_gemini_is_refused_as_a_secondmate
 test_codex_unverified_until_a_semantic_source_exists

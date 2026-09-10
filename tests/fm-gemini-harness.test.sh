@@ -259,6 +259,68 @@ test_gemini_wiring_stays_outside_the_worktree() {
   pass "fm-control-lib.sh: gemini's wiring stays outside the project worktree"
 }
 
+test_agy_marker_outranks_inherited_claudecode() {
+  local out
+  out=$(CLAUDECODE=1 ANTIGRAVITY_AGENT=1 "$HARNESS")
+  [ "$out" = agy ] || fail "ANTIGRAVITY_AGENT must outrank inherited CLAUDECODE, got '$out'"
+  out=$(env -u CLAUDECODE ANTIGRAVITY_AGENT=1 "$HARNESS")
+  [ "$out" = agy ] || fail "ANTIGRAVITY_AGENT=1 must detect agy, got '$out'"
+  out=$(env -u ANTIGRAVITY_AGENT CLAUDECODE=1 "$HARNESS")
+  [ "$out" = claude ] || fail "without the agy marker CLAUDECODE must remain Claude, got '$out'"
+  out=$(env -u ANTIGRAVITY_AGENT ANTIGRAVITY_AGENT=0 "$HARNESS")
+  [ "$out" != agy ] || fail "ANTIGRAVITY_AGENT=0 must not detect agy"
+  pass "fm-harness.sh: agy's verified child marker outranks an inherited Claude marker"
+}
+
+test_agy_ancestry_matches_only_exact_command_name() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/agy-ancestry")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' '/usr/local/bin/agy'; exit 0 ;;
+  *"args="*) printf '%s\n' 'agy --dangerously-skip-permissions'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(env -u ANTIGRAVITY_AGENT -u CLAUDECODE -u GEMINI_CLI \
+        -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u GROK_AGENT \
+        PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] || fail "an exact agy ancestry command must detect agy, got '$out'"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' '/usr/local/bin/agy-helper'; exit 0 ;;
+  *"args="*) printf '%s\n' 'agy-helper --serve'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(env -u ANTIGRAVITY_AGENT -u CLAUDECODE -u GEMINI_CLI \
+        -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u GROK_AGENT \
+        PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != agy ] || fail "agy-helper must not be misread as agy"
+  pass "fm-harness.sh: agy ancestry is anchored to the exact launcher name"
+}
+
+test_agy_control_and_kind_contract() {
+  local out
+  fm_control_harness_supported agy || fail "agy must be a supported control harness"
+  out=$(fm_control_harness_family agy-1.2.0)
+  [ "$out" = agy ] || fail "agy-prefixed records must resolve to agy, got '$out'"
+  [ "$(fm_control_interrupt_key agy)" = Escape ] || fail "agy must interrupt on Escape"
+  [ "$(fm_control_interrupt_repeat agy)" = 1 ] || fail "agy must use one Escape"
+  [ -z "$(fm_control_interrupt_clear_key agy)" ] || fail "agy must not clear after Escape"
+  [ "$(fm_control_exit_command agy)" = /quit ] || fail "agy must exit with /quit"
+  fm_control_harness_supports_kind agy ship || fail "agy must support ship tasks"
+  fm_control_harness_supports_kind agy scout || fail "agy must support scout tasks"
+  ! fm_control_harness_supports_kind agy secondmate || fail "agy must be refused for secondmates"
+  out=$(fm_control_harness_wiring_paths agy /wt /state task-1)
+  [ "$out" = /state/task-1.agy-hooks ] || fail "agy wiring must stay in firstmate state, got '$out'"
+  pass "agy control contract: worker-only lifecycle and firstmate-owned wiring"
+}
+
 test_gemini_marker_outranks_inherited_claudecode
 test_gemini_does_not_claim_inherited_ai_agent
 test_gemini_ancestry_matches_only_a_native_command_name
@@ -269,3 +331,6 @@ test_gemini_process_identity_preserves_whitespace_in_script_path
 test_gemini_control_mechanics_are_the_verified_ones
 test_gemini_is_crewmate_and_scout_only
 test_gemini_wiring_stays_outside_the_worktree
+test_agy_marker_outranks_inherited_claudecode
+test_agy_ancestry_matches_only_exact_command_name
+test_agy_control_and_kind_contract
