@@ -37,12 +37,12 @@ glab auth login --hostname <host>
 
 Token chỉ nằm trong config của `glab` trên máy đó và không bao giờ được ghi vào bất kỳ file nào trong repo này.
 Không có script nào của first mate đọc, lưu hay in token ra.
-Nếu `glab auth status` báo token đang nằm ở dạng plaintext trong file config, chạy lại `glab auth login --hostname <host>` để chuyển nó vào keyring của hệ điều hành.
+Nếu `glab auth status --hostname <host>` báo token đang nằm ở dạng plaintext trong file config, chạy lại `glab auth login --hostname <host>` để chuyển nó vào keyring của hệ điều hành.
 
 Kiểm tra lại trước khi đi tiếp:
 
 ```sh
-glab auth status
+glab auth status --hostname <host>
 ```
 
 ## Bước 2: tạo bảy label ở cấp group
@@ -242,7 +242,7 @@ Nếu một issue thuộc project chưa được clone và đăng ký, first mat
 
 **Token bot hết hạn.**
 Triệu chứng là poll báo lỗi thay vì im lặng, và không issue nào được nhận nữa.
-Kiểm tra bằng `glab auth status`, rồi đăng nhập lại bằng `glab auth login --hostname <host>`.
+Kiểm tra bằng `glab auth status --hostname <host>`, rồi đăng nhập lại bằng `glab auth login --hostname <host>`.
 Poll chỉ báo cùng một lỗi một lần mỗi giờ chứ không báo mỗi vòng, nên bạn nhận một thông báo chứ không bị dội; nhịp đó thuộc về header của [`bin/fm-gitlab-issues.sh`](../bin/fm-gitlab-issues.sh).
 Một vòng poll lỗi không làm mất dấu các issue đã thấy, nên sau khi token được sửa, các issue đang chờ vẫn được nhận đúng một lần.
 
@@ -251,7 +251,8 @@ Issue bị gắn `fm::needs-human` với lời nhắc đăng ký.
 Làm hai bước ở mục "Thêm project mới vào group", rồi gắn lại `fm::todo`.
 
 **Cấu hình sai định dạng.**
-`bin/fm-gitlab-issues.sh arm` từ chối và nêu tên trường sai.
+Nếu file không phải JSON hợp lệ, `bin/fm-gitlab-issues.sh arm` từ chối và chỉ báo rằng file không phải JSON hợp lệ, không nêu trường nào.
+Nếu file là JSON hợp lệ nhưng có giá trị sai, `arm` từ chối và nêu tên trường sai.
 
 **Bạn gỡ hết label ngoài quy trình.**
 Một issue không còn label `fm::` nào được hiểu là bạn đã rút việc đó lại.
