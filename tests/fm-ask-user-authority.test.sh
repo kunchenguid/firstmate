@@ -9,27 +9,38 @@ BRIEF="$ROOT/bin/fm-brief.sh"
 TMP_ROOT=$(fm_test_tmproot fm-ask-user-authority)
 
 test_primary_and_secondmate_instruction_generation() {
-  local home ship charter
+  local home ship charter mode
   home="$TMP_ROOT/home"
   mkdir -p "$home/data"
 
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$BRIEF" authority-worker sample --mode no-mistakes >/dev/null 2>&1
-  ship="$home/data/authority-worker/brief.md"
-  assert_grep 'ask-user findings are never yours to answer' "$ship" \
-    "generated implementation brief lets the worker own an ask-user decision"
-  assert_grep "Firstmate applies \`ask-user-authority\` and obtains any required captain decision" "$ship" \
-    "generated implementation brief bypasses the primary authority owner"
-  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'NEVER pass `--yes` (or `-y`) to `no-mistakes axi run` or `no-mistakes axi respond`' "$ship" \
-    "generated implementation brief does not prohibit silent ask-user auto-resolution"
-  assert_grep 'It auto-resolves every gate including ask-user findings with no escalation' "$ship" \
-    "generated implementation brief does not explain the ask-user authority bypass"
-  assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
-    "generated implementation brief retained conflicting captain-only wording"
+  for mode in direct-PR no-mistakes; do
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      "$BRIEF" "authority-worker-$mode" sample --mode "$mode" >/dev/null 2>&1 \
+      || fail "could not generate $mode implementation brief"
+    ship="$home/data/authority-worker-$mode/brief.md"
+    assert_grep 'If a decision belongs above the implementation worker (product choices, destructive actions),' "$ship" \
+      "generated implementation brief does not identify decisions outside worker authority"
+    # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+    assert_grep 'append `needs-decision: {summary of options}` and stop. Firstmate will reply with the decision.' "$ship" \
+      "generated implementation brief bypasses firstmate decision routing"
+    assert_grep 'Never merge a PR.' "$ship" \
+      "generated implementation brief gives the worker merge authority"
+    assert_grep 'Do not install or invoke no-mistakes, gh-axi, chrome-devtools-axi, or lavish-axi.' "$ship" \
+      "generated implementation brief permits removed tooling"
+    # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+    assert_grep 'push your branch and open a PR with `gh`' "$ship" \
+      "generated implementation brief does not use supported PR tooling"
+    assert_grep 'Do NOT run /no-mistakes.' "$ship" \
+      "generated implementation brief retained the pipeline requirement"
+    assert_no_grep 'no-mistakes axi' "$ship" \
+      "generated implementation brief retained pipeline-specific authority instructions"
+    assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
+      "generated implementation brief retained conflicting captain-only wording"
+  done
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='Handle sample work.' \
-    "$BRIEF" authority-mate --secondmate --no-projects >/dev/null 2>&1
+    "$BRIEF" authority-mate --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "could not generate secondmate charter"
   charter="$home/data/authority-mate/brief.md"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'The local `AGENTS.md` is your job description' "$charter" \

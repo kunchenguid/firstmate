@@ -14,7 +14,7 @@
 #   - registry line records scope (from a filled charter brief) and project list
 #   - charter is copied into the subhome
 #   - remote-backed projects are cloned with their origin URL preserved
-#   - a no-mistakes project is initialized (init + doctor) in the NEW subhome clone
+#   - projects are seeded without invoking no-mistakes, including legacy modes
 #     and the parent project clone is never mutated (no write through a project)
 #   - spawn meta records kind=secondmate, home=, and the project list; launch runs
 #     in the subhome with the persistent charter and cleared operational overrides
@@ -38,6 +38,10 @@ LOG="$TMP_ROOT/tmux.log"
 PANE="$TMP_ROOT/pane.txt"
 ALPHA_ORIGIN=
 BETA_ORIGIN=
+GAMMA_ORIGIN=
+PARENT_GAMMA_HEAD=
+PARENT_GAMMA_CONFIG=
+NO_MISTAKES_LOG="$TMP_ROOT/no-mistakes.log"
 
 # --- shared world + seed ----------------------------------------------------
 setup_world() {
@@ -55,11 +59,15 @@ setup_world() {
 EOF
   ALPHA_ORIGIN=$(git -C "$HOME_DIR/projects/alpha" remote get-url origin)
   BETA_ORIGIN=$(git -C "$HOME_DIR/projects/beta" remote get-url origin)
+  GAMMA_ORIGIN=$(git -C "$HOME_DIR/projects/gamma" remote get-url origin)
+  PARENT_GAMMA_HEAD=$(git -C "$HOME_DIR/projects/gamma" rev-parse HEAD)
+  PARENT_GAMMA_CONFIG=$(cat "$HOME_DIR/projects/gamma/.git/config")
 
-  # One combined fakebin: tmux + treehouse (spawn/send/teardown) and no-mistakes
-  # (gamma initialization during seed).
+  # Record any attempt to invoke the removed dependency, even if seed ignores
+  # its failure. The legacy-mode project must use the same extras-free path.
   FAKEBIN=$(make_fake_tmux "$TMP_ROOT/fake")
-  make_fake_no_mistakes "$TMP_ROOT/fake" >/dev/null
+  make_recording_no_mistakes "$TMP_ROOT/fake" >/dev/null
+  : > "$NO_MISTAKES_LOG"
 
   # A filled charter brief whose routing scope differs from the charter summary,
   # so the registry must read the scope from the brief, not invent a generic one.
@@ -71,6 +79,7 @@ EOF
 phase_seed() {
   local out
   out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
+    FM_FAKE_NO_MISTAKES_LOG="$NO_MISTAKES_LOG" FM_FAKE_NO_MISTAKES_FAIL_PROJECT=gamma \
     "$ROOT/bin/fm-home-seed.sh" design "$SUB" alpha beta gamma) \
     || fail "seed failed"
   SUB_ABS=$(cd "$SUB" && pwd -P)
@@ -88,11 +97,20 @@ phase_seed() {
     || fail "alpha clone did not preserve its origin URL"
   [ "$(git -C "$SUB/projects/beta" remote get-url origin)" = "$BETA_ORIGIN" ] \
     || fail "direct-PR beta clone did not preserve its origin URL"
+  [ "$(git -C "$SUB/projects/gamma" remote get-url origin)" = "$GAMMA_ORIGIN" ] \
+    || fail "legacy-mode gamma clone did not preserve its origin URL"
 
-  # no-mistakes init runs in the NEW clone, never the parent project.
-  assert_present "$SUB/projects/gamma/.no-mistakes-init" "no-mistakes project was not initialized in the subhome"
-  assert_present "$SUB/projects/gamma/.no-mistakes-doctor" "no-mistakes project was not doctored in the subhome"
+  [ ! -s "$NO_MISTAKES_LOG" ] || fail "seed invoked the removed no-mistakes dependency"
+  assert_absent "$SUB/projects/gamma/.no-mistakes-init" "seed initialized no-mistakes in the subhome"
+  assert_absent "$SUB/projects/gamma/.no-mistakes-doctor" "seed doctored no-mistakes in the subhome"
   assert_absent "$HOME_DIR/projects/gamma/.no-mistakes-init" "seed wrote no-mistakes state through the parent project"
+  assert_absent "$HOME_DIR/projects/gamma/.no-mistakes-doctor" "seed doctored the parent project"
+  [ "$(git -C "$HOME_DIR/projects/gamma" rev-parse HEAD)" = "$PARENT_GAMMA_HEAD" ] \
+    || fail "seed changed the parent project's HEAD"
+  [ "$(cat "$HOME_DIR/projects/gamma/.git/config")" = "$PARENT_GAMMA_CONFIG" ] \
+    || fail "seed changed the parent project's config"
+  [ -z "$(git -C "$HOME_DIR/projects/gamma" status --porcelain --untracked-files=all)" ] \
+    || fail "seed mutated the parent project's working tree"
 
   # Registry line: scope from the filled brief, project list, no legacy owns field.
   assert_grep '- design - customer onboarding charter' "$HOME_DIR/data/secondmates.md" "registry summary not from the charter"
@@ -107,7 +125,7 @@ phase_seed() {
     || fail "beta delivery mode not preserved in the subhome"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after seed"
 
-  pass "seed: registry scope+projects, charter copied, clones+origins, no-mistakes init in subhome only"
+  pass "seed: registry scope+projects, charter copied, clones+origins, no removed dependency or parent mutation"
 }
 
 phase_spawn() {

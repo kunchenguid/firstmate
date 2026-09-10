@@ -781,6 +781,54 @@ test_local_delivery_broken_origin_still_refuses() {
   pass "local-only delivery never falls back around a configured broken origin"
 }
 
+test_origin_config_uses_target_directory() {
+  local scenario id caller out status before expected
+  for scenario in linked standalone empty-origin; do
+    id="pool-origin-cwd-$scenario-r1"
+    read_case_record "$(make_local_case "origin-cwd-$scenario" "$id")"
+    caller="$CASE_DIR/caller checkout"
+    fm_git_init_commit "$caller"
+    if [ "$scenario" != empty-origin ]; then
+      git -C "$caller" remote add origin "file://$CASE_DIR/caller-only.git"
+    fi
+    if [ "$scenario" != linked ]; then
+      git clone --quiet --no-local "$PROJECT_DIR" "$CASE_DIR/standalone target"
+      POOL_DIR="$CASE_DIR/standalone target"
+      git -C "$POOL_DIR" remote remove origin
+    fi
+    if [ "$scenario" = empty-origin ]; then
+      printf '\n[remote "origin"]\n' >> "$POOL_DIR/.git/config"
+    fi
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+    expected=$(git -C "$PROJECT_DIR" rev-parse main)
+    out=$(cd "$caller" && run_spawn "$id" --mode local-only --yolo off)
+    status=$?
+    case "$scenario" in
+      linked)
+        expect_code 0 "$status" "caller's origin blocked an origin-less linked target: $out"
+        [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$expected" ] \
+          || fail "linked target did not refresh from its local default branch"
+        assert_present "$HOME_DIR/state/$id.meta" "linked target did not launch"
+        ;;
+      standalone|empty-origin)
+        [ "$status" -ne 0 ] || fail "spawn accepted $scenario target"
+        if [ "$scenario" = standalone ]; then
+          assert_contains "$out" 'does not belong to project' "caller's origin hid target ownership refusal: $out"
+        else
+          assert_contains "$out" 'could not fetch origin' "target's empty origin was ignored: $out"
+        fi
+        [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+          || fail "$scenario refusal moved target HEAD"
+        assert_absent "$HOME_DIR/state/$id.meta" "$scenario refusal published metadata"
+        ;;
+    esac
+    [ "$(git -C "$PROJECT_DIR" rev-parse main)" = "$expected" ] \
+      || fail "$scenario spawn changed the primary default branch"
+  done
+  pass "origin detection reads the target config from standalone callers for linked, unrelated, and empty-origin targets"
+}
+
+test_origin_config_uses_target_directory
 test_remote_less_local_base
 test_local_base_refusals
 test_local_delivery_broken_origin_still_refuses
