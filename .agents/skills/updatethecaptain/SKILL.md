@@ -39,12 +39,14 @@ It is scoped to this loop and ends with it; it never changes what an unrequested
 1. If this session has not yet taken the helm, run `bin/fm-session-start.sh` once and read its digest before anything else.
    The timer rides the supervision cycle this home already runs, so a session that never started has nothing to keep the loop alive.
 
-2. Build the list of workers under way from this home's own durable records with `bin/fm-bearings-snapshot.sh --all-in-flight --all-landed --all-queued`.
+2. Build the list of workers under way from this home's own durable records with `FM_BEARINGS_GATES=200 bin/fm-bearings-snapshot.sh --all-in-flight --all-landed`.
    That command is the single fleet-state source for this skill.
    Do not add a second reader, and do not reconstruct the fleet from conversation history.
    The same output carries what has landed and what is waiting together with the thing each waiting item waits on, which is what the dependency map is drawn from.
-   All three flags are needed because the map claims to be the whole body of work: the default view caps how much landed work and how much waiting work it returns, and drops queued items whose body reads as superseded, not required, or deferred.
-   Read the `omitted` array in that same output before drawing, because that is where the snapshot discloses every bound it is still applying, and say on the map what it reports rather than letting a bounded view pass for the complete picture.
+   The two flags and the raised bound are what the map needs, because the map claims to be the whole body of work while the default view caps how much landed work and how much waiting work it returns.
+   Lift the waiting cap with `FM_BEARINGS_GATES` and never with `--all-queued`, because that flag also puts back the queued items whose bodies read as superseded, not required, or deferred, and this output carries no field that tells them apart from real waiting work.
+   Read the `omitted` array in that same output before drawing, and carry over only the entries saying that landed, running, or waiting work was capped or could not be read, as a plain line naming the work the captain cannot see.
+   Every other entry there is machinery about surfaces the map never draws, such as task paths, watch and steer actions, or live pull request discovery, and none of it reaches the captain under `AGENTS.md` section 9.
    Where a worker's actual current step matters to part (b) or part (d) below, read it with `bin/fm-crew-state.sh <id>`, because a status line records a past event rather than current state.
    Include every worker in this home, including one only just dispatched and one waiting on something outside its control.
 
@@ -103,8 +105,11 @@ Never summarise the fleet in aggregate, never drop a worker for having nothing n
 
 Each worker's entry carries its running clock beside the name: how long that worker has been running, in minutes.
 Take it from that task's durable spawn record, `state/<id>.meta`, whose `spawn_gen=` value begins with `s` followed by the epoch second at which that worker was dispatched, and report the minutes between that second and now.
-The figure is elapsed wall time since dispatch, so it is readable from the record alone and does not depend on the worker still being alive.
+The figure is elapsed wall time since the current dispatch, so it is readable from the record alone and does not depend on the worker still being alive.
 Never read it from the file's modification time, because unrelated events rewrite that record after launch, and never from conversation memory or from an estimate.
+A relaunch records a fresh `spawn_gen`, so the clock restarts with it.
+When a worker has been relaunched, say so in its entry and say what it was doing before, taken from the status log that survives the relaunch and that `bin/fm-crew-state.sh <id>` reconciles.
+Without that line the restarted clock hides the very overrun the clock exists to expose.
 The clock is what exposes a worker forty minutes into a ten-minute job, which no description of the work can show.
 
 Give each worker exactly these four parts, in this order, in plain English:
