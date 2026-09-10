@@ -438,7 +438,12 @@ case "$MODE" in
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+# Captured via `read -d ''` rather than `DOD=$(...)`: command substitution
+# silently strips trailing newlines, which would lose trailing blank lines
+# the rendered Definition of done should keep. MODE is validated above to
+# one of fm_dod_block's three known modes, so its unknown-mode error path
+# is unreachable here.
+IFS= read -r -d '' DOD < <(fm_dod_block "$MODE" "$ID") || true
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
