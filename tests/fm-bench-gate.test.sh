@@ -1463,7 +1463,8 @@ for entrant in e1 e2; do
   printf 'candidate work %s\n' "$entrant" > "$ISO/$entrant/answer.txt"
   git -C "$ISO/$entrant" add -A
   git -C "$ISO/$entrant" -c user.name=t -c user.email=t@x commit -qm work
-  mkdir -p "$ISO/$entrant/.git/worktrees/w"
+  # Use a real registration so Git maintenance cannot prune the positive control.
+  git -C "$ISO/$entrant" worktree add -q --detach "$ISO/$entrant-linked" HEAD
 done
 
 write_isolation() {  # <bench-dir> <mechanism> [image]
@@ -4363,6 +4364,7 @@ if [ -n "$RESTORE_MECHANISM" ]; then
   # The unreachable-object probe needs a real detached commit in each entrant
   # for its positive control, exactly as the enforced-isolation e2e proof does.
   for entrant in e1 e2; do
+    git -C "$ISO/$entrant" worktree prune --expire now
     git -C "$ISO/$entrant" -c user.name=t -c user.email=t@x commit -qm detached --allow-empty
     git -C "$ISO/$entrant" reset -q --hard HEAD~1
   done
