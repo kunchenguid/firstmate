@@ -116,6 +116,8 @@ Read all findings even when an earlier summary says the review is clean.
 
 Run a fresh local Codex review against the exact checked-out PR head after the implementation is committed.
 The reviewer must not be the worker that authored or fixed the change.
+Firstmate dispatches this independent review as a managed scout under the existing spawn and harness contracts; it does not fetch, create a worktree, or audit project code itself.
+The following preparation commands and brief belong to that scout in its isolated worktree.
 Fetch both immutable commits before entering the read-only review, then detach or use a disposable worktree at `REVIEW_HEAD` and verify every prerequisite before invoking Codex.
 The narrow scout omission for a hand-verified dependency bump is owned only by `dependency-bump-triage`; every other part of this cycle still applies.
 

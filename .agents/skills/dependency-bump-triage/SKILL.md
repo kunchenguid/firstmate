@@ -40,9 +40,11 @@ After regeneration, require no unexplained change in the manifest and lockfile s
 
 ```sh
 <project lockfile regeneration or frozen-lock command>
-git diff --exit-code -- <dependency manifests and lockfiles>
+git diff --exit-code
+test -z "$(git status --porcelain=v1)"
 ```
 
+Require the entire checkout to remain clean, including package-manager metadata and untracked generated outputs, rather than checking only the expected manifest and lockfile paths.
 If the project has no deterministic regeneration or frozen-lock validation path, record that evidence gap and do not use the independent-review exception.
 
 Record the package, ecosystem, exact old version, exact new version, and upstream source repository.
