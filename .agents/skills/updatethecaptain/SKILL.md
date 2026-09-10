@@ -49,6 +49,7 @@ It is scoped to this loop and ends with it; it never changes what an unrequested
    Read the `omitted` array in that same output before drawing, and carry over only the entries saying that landed, running, or waiting work was capped or could not be read, as a plain line naming the work the captain cannot see.
    Every other entry there is machinery about surfaces the map never draws, such as task paths, watch and steer actions, or live pull request discovery, and none of it reaches the captain under `AGENTS.md` section 9.
    Where a worker's actual current step matters to part (b) or part (d) below, read it with `bin/fm-crew-state.sh <id>`, because a status line records a past event rather than current state.
+   A worker's own measured cost and remaining count reach this output in what it last reported, which is where part (d) below takes them from; `bin/fm-brief.sh` owns what a worker must put there.
    Include every worker in this home, including one only just dispatched and one waiting on something outside its control.
 
 3. Report immediately, before arming the timer.
@@ -121,10 +122,13 @@ Give each worker exactly these four parts, in this order, in plain English:
 - **(c) What it still has to do** - what remains between now and the worker being finished.
 - **(d) How long it needs** - a time estimate for finishing the whole job.
 
-Two rules govern part (d):
+Three rules govern part (d):
 
 - Always give an estimate, even when it is a guess.
   Say it is a rough guess when it is one, but never omit it and never replace it with "unclear" or "hard to say".
+- Where the worker has reported what its slowest step measured and how many runs of it are left, the estimate is that measured cost multiplied by that remaining count, and the report says so in the captain's own words.
+  What a worker measured is the only figure here that is not a guess, so name the step and its measured cost in the same sentence as the total, and let the arithmetic be visible rather than presenting the total alone.
+  An estimate built any other way is a guess and is named as one, however confident it feels.
 - When a job has already run past an estimate given in an earlier report, say that plainly in this report, then give the new estimate.
   Never quietly issue a fresh estimate as though the earlier one had not been given.
 

@@ -62,6 +62,13 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Both crewmate scaffolds also require every status line appended while work is
+# under way to carry the worker's own stopwatch: the measured wall-clock seconds
+# of the slowest step it has finished, and how many more runs of that step it
+# expects. Those two numbers are what firstmate multiplies into the estimate it
+# gives the captain, and only the worker can measure them. They ride the existing
+# status line as ordinary prose, so bin/fm-classify-lib.sh parses these lines
+# unchanged.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -356,6 +363,26 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+# The worker's stopwatch, carried identically by both crewmate scaffolds.
+# Firstmate's captain-facing estimate is arithmetic over the two numbers only the
+# worker can measure: what one slow step actually cost, and how many runs of it
+# are left. Written as prose inside the note of a status line that already exists,
+# so no second channel, artifact, or parser is introduced. The quoted heredoc
+# keeps the example's backticks literal; the value is then interpolated into the
+# generated brief, where it is inserted verbatim rather than re-evaluated.
+IFS= read -r -d '' STOPWATCH_CONTRACT <<'EOF' || true
+   Every line you do append while the work is still under way carries your own stopwatch:
+   name the slowest step you have already finished and the wall-clock seconds it really took,
+   then say how many more runs of that step you still expect. Write both into the sentence
+   rather than into a form, for example
+   `working: fault reproduced, the full test run took 512s, 2 more runs expected`.
+   Time the step rather than estimating it, and when nothing long has run yet write
+   "no long step yet" instead of inventing a number.
+   Firstmate cannot see your clock and multiplies those two numbers into the estimate it
+   gives the captain, so a line without them leaves that estimate a guess.
+EOF
+STOPWATCH_CONTRACT=${STOPWATCH_CONTRACT%$'\n'}
+
 # Fleet-wide engineering guidelines, mirroring AGENTS.md's "General Guidelines
 # for all crewmates, including firstmate" section. A crewmate works in a
 # worktree of some other project and never loads firstmate's AGENTS.md, so the
@@ -411,6 +438,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
+$STOPWATCH_CONTRACT
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
@@ -503,6 +531,7 @@ $RULE1
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
+$STOPWATCH_CONTRACT
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
