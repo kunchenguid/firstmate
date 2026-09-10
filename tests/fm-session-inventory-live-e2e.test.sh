@@ -281,14 +281,22 @@ else
       # unreadable fleet snapshot is an ordinary, disclosed collector failure
       # that merely leaves own_workers unknowable, and reporting it as drift
       # would send the maintainer at the wrong component.
-      cwds_ok=$(printf '%s' "$json" | jq -r '[.sources[] | select(.name == "harness-sessions") | .ok] | first // true')
-      fleet_ok=$(printf '%s' "$json" | jq -r '[.sources[] | select(.name == "fleet-snapshot") | .ok] | first // true')
+      # `// true` would be wrong here and silently so: jq's `//` takes its right
+      # operand for `false` exactly as it does for null, so a source that IS
+      # present and NOT ok would read as ok and this whole split would collapse.
+      # Absent and false have to be told apart explicitly.
+      cwds_ok=$(printf '%s' "$json" | jq -r '[.sources[] | select(.name == "harness-sessions") | .ok]
+        | if length == 0 then true else .[0] end')
+      fleet_ok=$(printf '%s' "$json" | jq -r '[.sources[] | select(.name == "fleet-snapshot") | .ok]
+        | if length == 0 then true else .[0] end')
       if [ "$owner" = stale ] || [ "$owner" = absent ]; then
         note "the session lock in $ROLE_HOME names no live harness right now, so the lock-owner half of this guard checked nothing"
-      elif [ "$owner" = not_checked ] && [ "$cwds_ok" != true ]; then
+      elif [ "$cwds_ok" != true ]; then
         fail "LIVE-SESSION DRIFT: the working directory of the processes under harness $root could not be read here, so a live session cannot be told from an idle pool process at all. That is the one input the verdict rests on."
-      elif [ "$owner" = not_checked ] || [ "$fleet_ok" != true ]; then
+      elif [ "$fleet_ok" != true ]; then
         note "the fleet snapshot for $ROLE_HOME was unreadable this run, so which processes are its own workers is unknowable and the accounting half of this guard checked nothing (that is a snapshot failure, not overview drift)"
+      elif [ "$owner" = not_checked ]; then
+        note "$ROLE_HOME reports no verdict this run while every source read cleanly, so the accounting half of this guard checked nothing; nothing here names a cause, so nothing is blamed on one"
       else
         # Every harness process under that root must land on one side or the
         # other: claimed as a session of this home, or counted as belonging

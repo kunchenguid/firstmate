@@ -16,6 +16,9 @@
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "TANGLE: <remediation>",
 #                 "SESSIONS_STALE: <what> - <n>d, <where> - close: <command>",
+#                 "SESSIONS_STALE: could not check everything - <source> unreadable
+#                 | the running-session check did not finish within <n>s
+#                 | the running-session check failed (exit <n>); run bin/fm-session-view.sh",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",

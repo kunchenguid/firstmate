@@ -36,7 +36,11 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Nothing is wrong on its own and nothing needs repairing; this is the captain's standing ask to be told, unasked, what has been running longer than three days.
   Relay it as one short list in the captain's own nouns with the age and the plain consequence, keep it to a few words per item, and offer to close the ones he names - never a report.
   Close only what the captain names, only through the printed command, and never widen it: a worker with work under way needs his explicit word first, an unlanded-work refusal is a stop-and-investigate result, and a background session is his to end, never yours.
-  A `could not finish the running-session check` line means the inventory was too slow this start, not that nothing is old; run `bin/fm-session-view.sh` when the captain asks.
+- `SESSIONS_STALE: could not check everything - <what>; run bin/fm-session-view.sh` - a DIFFERENT line, and not an overdue item: the check itself could not be completed, so silence below it does not mean nothing is old.
+  `<source> unreadable` names a collector that could not be read (fleet-snapshot, lavish, process-table, worker-processes, harness-sessions); `the running-session check did not finish within Ns` and `the running-session check failed (exit N)` mean the whole pass was cut short or never ran.
+  Any overdue lines printed alongside it are still real and still complete rows; what is missing is whatever that source would have contributed.
+  Say in one clause that the check was partial and what was unreadable, never as an item to close, and run `bin/fm-session-view.sh` if the captain wants the rest.
+  Also expect `SESSIONS_STALE: and N more - see bin/fm-session-view.sh` when more rows are overdue than the line budget allows; that one is a count, not an item.
 - `STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>` - the visible startup-memory budget is not a safe one-line positive decimal file; do not infer the default or propagate it.
   Correct the local primary file, then rerun session start so the normal convergence path can deliver the validated value to secondmate homes.
 - `CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>` - the optional dispatch profile file exists but failed low-cost bootstrap validation; stop profile-based dispatch, report the actionable error, and require correction of the malformed schema, unverified harness name, or invalid harness/effort pair rather than falling back around it or selecting a bad profile.
