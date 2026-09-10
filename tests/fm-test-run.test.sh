@@ -1635,6 +1635,29 @@ test_shard_balance_passes_and_reports_bound() {
   pass "shard balance: shards well inside the cap pass and report the bound"
 }
 
+test_shard_balance_pins_the_72_percent_threshold() {
+  # Declare the expected share here so changing the runner's threshold cannot
+  # move the test's expectation with it.
+  local expected_percent=72
+  local tmp bound threshold below above a out rc
+  tmp=$(fm_test_tmproot fm-test-run-balance-threshold)
+  bound=$(shard_balance_bound_ms) || fail "could not read the guard's job cap"
+  # Whole-minute caps make this percentage exact in milliseconds.
+  threshold=$((bound * expected_percent / 100))
+  below=$((threshold - 1))
+  above=$((threshold + 1))
+  a=$(shard_balance_artifact "$tmp" portable-serial-1of1 "$below" "tests/a.test.sh:$below")
+  out=$("$RUNNER" --check-shard-balance "$a" 2>&1) \
+    || fail "a shard just below ${expected_percent}% of the job cap must pass: $out"
+  a=$(shard_balance_artifact "$tmp" portable-serial-1of1 "$above" "tests/a.test.sh:$above")
+  rc=0
+  out=$("$RUNNER" --check-shard-balance "$a" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "a shard just above ${expected_percent}% of the job cap must fail (exit $rc): $out"
+  rm -rf "$tmp"
+  pass "shard balance: the threshold is pinned at ${expected_percent}% of the job cap"
+}
+
 test_shard_balance_goes_red_on_an_imbalanced_shard() {
   # The guard is only worth shipping if it can fail. One shard is parked just
   # under the cap while its sibling idles; the guard must refuse and say so.
@@ -1762,6 +1785,7 @@ test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
 test_shard_balance_passes_and_reports_bound
+test_shard_balance_pins_the_72_percent_threshold
 test_shard_balance_goes_red_on_an_imbalanced_shard
 test_shard_balance_goes_red_on_a_stale_hint_table
 test_shard_balance_measures_the_recorded_wall_time
