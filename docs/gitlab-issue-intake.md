@@ -67,7 +67,7 @@ Màu tùy bạn chọn, nhưng nên để ba label người dùng đặt khác m
 Kiểm tra lại:
 
 ```sh
-glab api --hostname <host> --method GET "groups/<group url-encoded>/labels?per_page=100" \
+glab api --hostname <host> --method GET --paginate "groups/<group url-encoded>/labels?per_page=100" \
   | jq -r '.[] | select(.name | startswith("fm::")) | .name'
 ```
 
@@ -164,7 +164,7 @@ Nếu bạn thấy một issue im lặng nhiều giờ, đó là bình thường
 
 **Comment phân loại và kế hoạch.**
 Đăng một lần khi nhận việc.
-Nó nêu loại issue (`bug`, `feature`, `chore`, `docs`, `question`), cỡ (`S`, `M`, `L`), làm theo hướng `ship` (ra merge request) hay `scout` (chỉ điều tra), mức kiểm định sẽ áp dụng (`no-mistakes`, `direct-PR` hoặc `local-only`), kèm một checklist các việc con.
+Nó nêu loại issue (`bug`, `feature`, `chore`, `docs`, `question`), cỡ (`S`, `M`, `L`), làm theo hướng `ship` (ra merge request) hay `scout` (chỉ điều tra), mức kiểm định (delivery mode) sẽ áp dụng là một trong `no-mistakes`, `no-mistakes-prod-only` hoặc `direct-PR`, kèm một checklist các việc con.
 Mỗi việc con được chia nhỏ để làm trong khoảng 2 đến 5 phút và ra một merge request nhỏ, đủ để bạn đọc hết trong một lượt review.
 
 Comment này không bị thay bằng comment mới khi có tiến triển: first mate sửa tại chỗ chính comment đó.
@@ -223,8 +223,11 @@ Quyết định cuối là của bạn: bạn đóng issue nếu đồng ý.
 
 Thêm một project vào luồng không cần sửa code.
 
-1. Clone project vào home đang chạy luồng này và đăng ký nó với delivery mode mặc định của bạn (`no-mistakes`, `direct-PR` hoặc `local-only`), và phải để `yolo` tắt cho project đó.
+1. Clone project vào home đang chạy luồng này và đăng ký nó với mức kiểm định mặc định của bạn, một trong `no-mistakes`, `no-mistakes-prod-only` hoặc `direct-PR`, và phải để `yolo` tắt cho project đó.
    `yolo` tắt là điều kiện bắt buộc của luồng này, vì tiêu chí đã chốt là người thật merge từng merge request; `yolo` bật cho phép first mate tự merge và phá mất tiền đề đó.
+   `no-mistakes-prod-only` là mức mặc định khi thêm một project có remote mà không nói gì thêm, nên đó là mức bạn gặp nhiều nhất ở bước này.
+   Còn `local-only` không dùng được cho luồng này, vì nó làm việc trên nhánh local mà không cần remote và không ra merge request, trong khi tiền đề của trang này là mỗi việc con kết thúc bằng một merge request nhỏ do bạn merge.
+   Tên các mức thuộc về [`bin/fm-project-mode.sh`](../bin/fm-project-mode.sh); nếu danh sách đó đổi thì đọc ở đó chứ không phải ở đây.
    Nhờ first mate làm bước này; nó có quy trình riêng cho việc thêm project.
 2. Thêm đường dẫn project vào danh sách `projects` trong `config/gitlab-issues.json`.
    Viết tương đối so với group (`api-service`) hoặc viết đầy đủ (`<group>/api-service`) đều được.
