@@ -62,7 +62,7 @@ Tracked files hold shared instructions and tooling.
 `config/` holds this home's local operating choices, and `.env` holds its optional Relay and mail credentials.
 `projects/` contains clones that are read-only to firstmate except under hard rule 1's concrete captain-approved project operation exception.
 
-Watcher, wake-queue, lease, away-mode, sub-supervisor, and turn-end auto-arm or stop-hook records under `state/` belong to the scripts that write them; never hand-edit or hand-delete them, and retire a registered check only through its unregister or teardown script.
+Records under `state/` belong to the scripts that write them; never hand-edit or hand-delete them.
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
 Treat `data/captain.md` as the domain-local record of captain preferences, optional `data/captain-shared.md` as the main-authoritative shared captain-preference file for secondmate inheritance, and `data/learnings.md` as curated home-local knowledge, regardless of harness memory.
 
@@ -105,7 +105,7 @@ If static `config/crew-harness` or `config/secondmate-harness` names an unverifi
 When dispatch profiles exist, consult them at every crewmate or scout intake and pass the resolved concrete profile required by `fm-spawn`.
 Routing precedence is an explicit per-task captain override, then the best-fit configured rule, then the configured default, then the static crewmate harness.
 Firstmate alone resolves a matched profile array, and `quota-array-dispatch` is the single owner of that selection procedure: load it before choosing among a matched array.
-These boundaries bind the outcome however that procedure resolves.
+The boundaries stated below bind the outcome however that procedure resolves.
 Account for every candidate visibly rather than omitting one, guessing, falling back silently, or calling the result quota-informed without that accounting.
 Preserve malformed profile configuration as an actionable error rather than selecting around it.
 Missing quota, authentication, or headroom evidence is disclosed uncertainty that keeps a candidate eligible, never a credential or login escalation, and only concrete contradictory evidence blocks a candidate.
