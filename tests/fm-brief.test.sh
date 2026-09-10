@@ -270,6 +270,10 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
         "no-mistakes existing-PR brief did not record its base branch"
       assert_grep "--base-branch" "$brief" \
         "no-mistakes existing-PR brief did not target the recorded PR base"
+      assert_grep "gh-axi pr list --state all --base 'release/2.x' --head \"\$PR_BRANCH\" --limit 100 --fields url" "$brief" \
+        "no-mistakes existing-PR brief did not verify the base against the live PR"
+      assert_grep "--base-branch does not match the live existing PR base" "$brief" \
+        "no-mistakes existing-PR brief did not explain a live base mismatch"
       assert_grep "Never push directly: no-mistakes alone owns the push to that branch." "$brief" \
         "no-mistakes existing-PR brief bypassed the selected delivery pipeline"
       assert_no_grep "git push origin \"HEAD:" "$brief" \
@@ -296,7 +300,7 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
 }
 
 test_existing_pr_setup_checks_out_a_new_origin_branch() {
-  local root remote source work holder home brief setup_command setup_out source_head fakebin real_git reuse_brief reuse_command reuse_out held_brief held_command held_out default_brief default_command default_out
+  local root remote source work holder home brief setup_command setup_out source_head fakebin real_git reuse_brief reuse_command reuse_out base_brief base_command base_out wrong_base_brief wrong_base_command wrong_base_out held_brief held_command held_out default_brief default_command default_out
   root="$TMP_ROOT/existing-pr-checkout"
   remote="$root/remote.git"
   source="$root/source"
@@ -344,6 +348,19 @@ EOF
   chmod +x "$fakebin/git"
   cat > "$fakebin/gh-axi" <<'EOF'
 #!/bin/sh
+if [ "$1" = pr ] && [ "$2" = list ]; then
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --base) listed_base=$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [ "${listed_base:-}" = "${FM_TEST_PR_BASE:-main}" ]; then
+    printf '%s\n' '  2460,"fixture",open,test,no,none,"https://github.com/kunchenguid/firstmate/pull/2460"'
+  fi
+  exit 0
+fi
 [ "$1" = pr ] && [ "$2" = checkout ] && [ "$3" = 2460 ] || exit 2
 pr_branch=${FM_TEST_PR_BRANCH:-existing/head}
 git fetch origin "+refs/heads/$pr_branch:refs/remotes/origin/$pr_branch" || exit
@@ -380,8 +397,30 @@ EOF
     || fail "generated existing-PR setup could not reuse a synchronized local branch: $reuse_out"
   [ "$(git -C "$work" config --get branch.existing/head.remote)" = origin ] \
     || fail "generated existing-PR setup did not repair the local branch upstream"
-
   git -C "$work" switch main >/dev/null 2>&1
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" checkout-base firstmate --mode no-mistakes \
+    --existing-pr https://github.com/kunchenguid/firstmate/pull/2460 \
+    --branch existing/head --base-branch main >/dev/null 2>&1
+  base_brief="$home/data/checkout-base/brief.md"
+  # shellcheck disable=SC2016 # The sed expression is a literal parser for the generated Markdown command.
+  base_command=$(sed -n 's/^1\. First action:.*: `\(.*\)`\.$/\1/p' "$base_brief")
+  base_out=$(cd "$work" && FM_TEST_PR_REMOTE="$remote" FM_TEST_PR_BASE=main PATH="$fakebin:$PATH" eval "$base_command" 2>&1) \
+    || fail "generated existing-PR setup rejected the live PR base: $base_out"
+  git -C "$work" switch main >/dev/null 2>&1
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" checkout-wrong-base firstmate --mode no-mistakes \
+    --existing-pr https://github.com/kunchenguid/firstmate/pull/2460 \
+    --branch existing/head --base-branch release/2.x >/dev/null 2>&1
+  wrong_base_brief="$home/data/checkout-wrong-base/brief.md"
+  # shellcheck disable=SC2016 # The sed expression is a literal parser for the generated Markdown command.
+  wrong_base_command=$(sed -n 's/^1\. First action:.*: `\(.*\)`\.$/\1/p' "$wrong_base_brief")
+  if wrong_base_out=$(cd "$work" && FM_TEST_PR_REMOTE="$remote" FM_TEST_PR_BASE=main PATH="$fakebin:$PATH" eval "$wrong_base_command" 2>&1); then
+    fail "generated existing-PR setup accepted a base that did not match the live PR"
+  fi
+  assert_contains "$wrong_base_out" "--base-branch does not match the live existing PR base" \
+    "generated existing-PR setup did not explain its live base mismatch"
+
   holder="$root/holder"
   git -C "$work" worktree add "$holder" existing/head >/dev/null 2>&1 \
     || fail "could not put the existing PR branch in a linked worktree"
@@ -425,6 +464,15 @@ Delivery contract: mode=no-mistakes
 The task ships a new PR.
 EOF
   cat > "$existing" <<'EOF'
+# Task
+## Captain's intent
+Delivery contract: mode=no-mistakes
+Existing PR: https://github.com/copied/prose/pull/9
+Existing PR base branch: main
+
+## Firstmate spec
+Verify that copied metadata cannot mask the real delivery contract.
+
 # Definition of done
 Delivery contract: mode=no-mistakes
 Existing PR: https://github.com/o/r/pull/1
