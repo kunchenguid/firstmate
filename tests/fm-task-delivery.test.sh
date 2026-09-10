@@ -307,7 +307,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id brief_dod delivered_dod
+  local home meta out sendroot payload mode id brief_dod delivered_dod headings
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -337,6 +337,26 @@ STUB
          eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
       || fail "$mode: promotion's delivery command did not run"
     assert_present "$payload" "$mode: promotion delivered no message to the worker"
+
+    if [ "$mode" = local-only ]; then
+      assert_no_grep '# PR body' "$payload" "$mode: promoted worker received a PR body contract"
+    else
+      assert_grep '# PR body' "$payload" "$mode: promoted worker omitted the PR body contract"
+      # shellcheck disable=SC2016
+      headings=$(sed -n 's/^- `\(## [^`]*\)` -.*/\1/p' "$payload")
+      [ "$headings" = '## Intent
+## What Changed
+## Choices made where the spec was silent
+## Risk Assessment
+## Testing' ] || fail "$mode: promoted worker PR headings are missing, duplicated, or out of order"
+      assert_grep 'never hand-write or edit them' "$payload" "$mode: promoted worker lost the tool-owned metadata boundary"
+      if [ "$mode" = no-mistakes ]; then
+        assert_grep 'gh-axi pr edit <number> --body-file <path>' "$payload" "$mode: promoted worker omitted the post-open body edit"
+        assert_grep 'attestation comment byte-identically' "$payload" "$mode: promoted worker lost byte-preservation"
+      else
+        assert_no_grep 'After the pipeline opens the PR' "$payload" "$mode: promoted worker received pipeline-only instructions"
+      fi
+    fi
 
     grep -qx "Delivery contract: mode=$mode" "$payload" \
       || fail "$mode: promoted worker did not receive the machine-readable delivery contract"

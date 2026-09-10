@@ -49,7 +49,7 @@
 # recorded task metadata cannot drift apart.
 # Ship no-mistakes and direct-PR briefs include a captain-first PR body contract
 # beside the definition of done; local-only, scout, and secondmate briefs omit it.
-# The generated contract owns the section order and tool-owned metadata boundary.
+# bin/fm-dod-lib.sh owns the generated PR body contract.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -443,24 +443,6 @@ case "$MODE" in
 esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
 
-PR_BODY_SECTION=""
-if [ "$MODE" != local-only ]; then
-  IFS= read -r -d '' PR_BODY_SECTION <<'EOF' || true
-# PR body
-Write for the captain first: plain language before evidence, in this section order:
-- `## Intent` - open with a plain-language paragraph of the captain's ask and why it matters to him, then explicit scope (in and out) and acceptance criteria.
-- `## What Changed` - one bullet per changed file saying what changed there.
-- `## Choices made where the spec was silent` - every choice the spec did not settle, least-confident first.
-- `## Risk Assessment` - a severity line with blast-radius reasoning and what was verified unchanged.
-- `## Testing` - reproduce-first evidence on the base commit and after the fix, then lint and test evidence.
-The no-mistakes Pipeline section and attestation stamp are tool-owned: never hand-write or edit them.
-EOF
-  if [ "$MODE" = no-mistakes ]; then
-    PR_BODY_SECTION="$PR_BODY_SECTION
-After the pipeline opens the PR, apply this body with \`gh-axi pr edit <number> --body-file <path>\` (the \`gh pr edit --body-file\` operation), preserving the existing Pipeline section and attestation comment byte-identically."
-  fi
-fi
-
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -526,7 +508,5 @@ If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
-
-$PR_BODY_SECTION
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"

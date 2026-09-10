@@ -252,4 +252,22 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
+  if [ "$mode" != local-only ]; then
+    cat <<'EOF'
+
+# PR body
+Write for the captain first: plain language before evidence, in this section order:
+- `## Intent` - open with a plain-language paragraph of the captain's ask and why it matters to him, then explicit scope (in and out) and acceptance criteria.
+- `## What Changed` - one bullet per changed file saying what changed there.
+- `## Choices made where the spec was silent` - every choice the spec did not settle, least-confident first.
+- `## Risk Assessment` - a severity line with blast-radius reasoning and what was verified unchanged.
+- `## Testing` - reproduce-first evidence on the base commit and after the fix, then lint and test evidence.
+The no-mistakes Pipeline section and attestation stamp are tool-owned: never hand-write or edit them.
+EOF
+    if [ "$mode" = no-mistakes ]; then
+      cat <<'EOF'
+After the pipeline opens the PR, apply this body with `gh-axi pr edit <number> --body-file <path>` (the `gh pr edit --body-file` operation), preserving the existing Pipeline section and attestation comment byte-identically.
+EOF
+    fi
+  fi
 }
