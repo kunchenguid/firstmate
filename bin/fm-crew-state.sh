@@ -65,6 +65,18 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
+#      A terminal outcome maps to `done` as a statement about the PIPELINE
+#      only: this reader never queries the forge, so it can never report that
+#      a PR merged, closed, or is reviewable right now. `passed` does not even
+#      establish green checks - a step whose gate cannot return a valid verdict
+#      may be SKIPPED with authorization and the run still ends passed - and
+#      `checks-passed` records checks green at pipeline time, not now. Both
+#      details therefore report PR state as unconfirmed and send the reader to
+#      the forge before any landing-dependent action such as teardown (pinned
+#      by tests/fm-crew-state.test.sh's two terminal-outcome PR-claim cases;
+#      2026-09-10 mp-chat-grounding-fixes incident). The ci-log-tail readings
+#      above are different: their green-check and held-for-merge details rest
+#      on positive evidence read from the run's own ci log.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
