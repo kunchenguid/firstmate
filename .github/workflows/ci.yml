@@ -356,6 +356,21 @@ jobs:
           bin/fm-test-run.sh --aggregate-json \
             "$RUNNER_TEMP/fm-test/fm-test-timing-aggregate.json" \
             "${inputs[@]}"
+      # The measured counterpart to the coverage guard's unhinted-share bound:
+      # that one catches a hint that is missing, this one catches a hint that is
+      # wrong, and reports which scripts to re-measure before a shard reaches
+      # the tests-portable-serial cap (docs/fm-test-portable-shards.md).
+      - name: Check portable serial shard balance
+        run: |
+          set -eu
+          shopt -s nullglob
+          serial=("$RUNNER_TEMP"/fm-test-aggregate/fm-test-timing-portable-serial-*.json)
+          if [ "${#serial[@]}" -eq 0 ]; then
+            echo "::warning::no portable serial timing JSON found; shard balance unchecked"
+            exit 0
+          fi
+          # Cap ownership and regression: docs/fm-test-portable-shards.md.
+          bin/fm-test-run.sh --check-shard-balance "${serial[@]}"
       - name: Upload aggregate timing artifact
         if: always()
         uses: actions/upload-artifact@v4
