@@ -429,6 +429,11 @@ FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-20}
 # large region between them can never be promoted into a composer.
 FM_COMPOSER_PI_MAX_LINES=${FM_COMPOSER_PI_MAX_LINES:-8}
 
+# Agy allows a multi-line composer between its horizontal separator rows. Bound
+# the row distance between the pair so two unrelated transcript rules with an
+# arbitrarily large region between them can never be promoted into a composer.
+FM_COMPOSER_AGY_MAX_LINES=${FM_COMPOSER_AGY_MAX_LINES:-7}
+
 # 0 when <content> is exactly one glyph drawn from <glyph-list>.
 _fm_composer_is_prompt_glyph() {  # <content> <glyph-list>
   local content=$1 glyph
@@ -1492,7 +1497,9 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
 fm_composer_separated_state() {  # <capture> [cursor-row]
   [ "${FM_COMPOSER_HARNESS:-}" = agy ] || return 1
   local capture=$1 cursor=${2:-} plain line trimmed rule_probe
-  local row=0 previous_separator=-1 top=-1 bottom=-1 footer_row=-1 hint_row=-1 label_row=-1 content="" content_row
+  local row=0 previous_separator=-1 top=-1 bottom=-1 footer_row=-1 hint_row=-1 label_row=-1 content="" content_row agy_max
+  agy_max=$FM_COMPOSER_AGY_MAX_LINES
+  case "$agy_max" in ''|*[!0-9]*|0) agy_max=7 ;; esac
   plain=$(printf '%s\n' "$capture" | fm_composer_strip_ansi)
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
@@ -1501,7 +1508,7 @@ fm_composer_separated_state() {  # <capture> [cursor-row]
     if [ -z "$rule_probe" ] && [ "${#trimmed}" -ge 20 ]; then
       if [ "$previous_separator" -ge 0 ] \
          && [ $((row - previous_separator)) -ge 2 ] \
-         && [ $((row - previous_separator)) -le 7 ]; then
+         && [ $((row - previous_separator)) -le "$agy_max" ]; then
         top=$previous_separator
         bottom=$row
         hint_row=-1
