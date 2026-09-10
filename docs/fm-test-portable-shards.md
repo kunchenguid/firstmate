@@ -5,73 +5,40 @@
 
 ## Verification inputs
 
-Balance hints must be measured on the same instrument the lanes run on, or they describe something other than the lane.
-The lanes were previously packed from the 2026-08-20 concurrent isolation proof in [fm-test-isolation-proof.md](fm-test-isolation-proof.md), which runs 24 candidates across four local workers.
-That record answers whether the candidates are safe to run concurrently, not how long a serial CI lane takes, and by 2026-09-10 the parallel set had grown about 3.2x past it without anything noticing.
-Balance hints now come from serial runs of the real lanes on `ubuntu-latest`.
+Balance hints come from serial runs of the real lanes on `ubuntu-latest`.
+The concurrent isolation proof in [fm-test-isolation-proof.md](fm-test-isolation-proof.md) establishes concurrency safety, not serial CI duration.
+Local timings are not interchangeable with CI timings: platform and machine load can affect each script differently and change their relative weights.
 
-The current hints are the slowest value each script reached across six CI runs on 2026-09-10: [34459949083](https://github.com/kunchenguid/firstmate/actions/runs/34459949083), [34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299), [34462530836](https://github.com/kunchenguid/firstmate/actions/runs/34462530836), [34462758357](https://github.com/kunchenguid/firstmate/actions/runs/34462758357), [34466966385](https://github.com/kunchenguid/firstmate/actions/runs/34466966385), and [34470382458](https://github.com/kunchenguid/firstmate/actions/runs/34470382458).
+The retained hints are the slowest completed value each script reached across six CI runs on 2026-09-10: [34459949083](https://github.com/kunchenguid/firstmate/actions/runs/34459949083), [34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299), [34462530836](https://github.com/kunchenguid/firstmate/actions/runs/34462530836), [34462758357](https://github.com/kunchenguid/firstmate/actions/runs/34462758357), [34466966385](https://github.com/kunchenguid/firstmate/actions/runs/34466966385), and [34470382458](https://github.com/kunchenguid/firstmate/actions/runs/34470382458).
 Shard 2 completed in all six, so its scripts come from the uploaded `fm-test-timing-portable-parallel-2` artifacts.
-Shard 1 was cancelled at its 10-minute cap in five of the six, so its scripts come from the `FM_TEST_END duration_ms=` markers in each cancelled job's log, which record every script that finished before the cancellation, plus the one complete `fm-test-timing-portable-parallel-1` artifact from run 34462758357.
-Taking the slowest of several runs rather than a single run keeps the balance honest on a slow runner.
+Shard 1 was cancelled at its job cap in five of the six, so its scripts come from the `FM_TEST_END duration_ms=` markers in each cancelled job's log, which record every script that finished before the cancellation, plus the one complete `fm-test-timing-portable-parallel-1` artifact from run 34462758357.
+Observed maxima provide conservative packing weights, not an upper bound on future durations.
 
-`n` below is how many of the six runs measured that script; the two scripts at `n=1` are the tail of shard 1 that only the one complete run reached.
+The measurements cover all 24 candidates, with six samples per script except:
 
-| max duration_ms | n | script |
-|---:|---:|---|
-| 296481 | 6 | `tests/fm-captain-hold-lifecycle.test.sh` |
-| 164262 | 4 | `tests/fm-lint.test.sh` |
-| 111145 | 6 | `tests/fm-pr-merge.test.sh` |
-| 92944 | 6 | `tests/fm-test-run.test.sh` |
-| 31870 | 6 | `tests/fm-x-mode.test.sh` |
-| 30898 | 6 | `tests/fm-arm-pretool-check.test.sh` |
-| 22144 | 6 | `tests/fm-backend-herdr.test.sh` |
-| 16964 | 6 | `tests/fm-cd-pretool-check.test.sh` |
-| 11557 | 6 | `tests/fm-crew-state.test.sh` |
-| 8624 | 3 | `tests/fm-pi-primary-types.test.sh` |
-| 6936 | 6 | `tests/fm-herdr-lab.test.sh` |
-| 6563 | 6 | `tests/fm-grok-harness.test.sh` |
-| 4939 | 6 | `tests/fm-send-popup-settle.test.sh` |
-| 4798 | 6 | `tests/fm-composer-lib.test.sh` |
-| 3861 | 6 | `tests/fm-send-strict.test.sh` |
-| 2747 | 3 | `tests/fm-review-diff.test.sh` |
-| 2477 | 6 | `tests/fm-tmux-submit-busy.test.sh` |
-| 2265 | 6 | `tests/fm-spawn-batch.test.sh` |
-| 2120 | 6 | `tests/fm-composer-ghost.test.sh` |
-| 2051 | 6 | `tests/fm-send-settle.test.sh` |
-| 1625 | 1 | `tests/fm-brief.test.sh` |
-| 901 | 6 | `tests/fm-ensure-agents-md.test.sh` |
-| 297 | 6 | `tests/fm-supervision-instructions.test.sh` |
-| 99 | 1 | `tests/fm-transition-lib.test.sh` |
+| Samples | Scripts |
+|---:|---|
+| 4 | `tests/fm-lint.test.sh` |
+| 3 | `tests/fm-pi-primary-types.test.sh`, `tests/fm-review-diff.test.sh` |
+| 1 | `tests/fm-brief.test.sh`, `tests/fm-transition-lib.test.sh` |
 
-Those maxima total 828568 ms, about 13 min 49 s of serial work across the 24 scripts.
-Establish that total before designing a split: a lane cancelled at its cap has no total, only a lower bound, and a split derived from a truncated number describes something other than the lane.
-
-A local run is not a substitute for these hints.
-A 2026-09-10 macOS cross-check of the same scripts, on a developer machine also running other work, came in between 1.7x and 5.0x slower than the runner: `tests/fm-test-run.test.sh` at 157420 ms against 92944 ms, `tests/fm-x-mode.test.sh` at 67217 ms against 31870 ms, and `tests/fm-composer-ghost.test.sh` at 10521 ms against 2120 ms.
-The ratio varies by script, so local timings do not merely scale the lane, they reorder it, and a packing derived from them would balance the wrong thing.
+The two scripts with one sample are the tail of shard 1 that only the complete run reached.
+Collect completed per-script measurements for every member before calculating a split.
+A cancelled lane's elapsed duration is only a lower bound; its unfinished scripts have no completed duration for that invocation.
+The complete historical run supplies tail-script hints, not a completion time for any later cancelled invocation or for the rebalanced jobs.
 
 ## Parallel lanes
 
 The two parallel lanes use longest-processing-time assignment over those hints.
+[`bin/fm-test-run.sh`](../bin/fm-test-run.sh) holds the duration values in `portable_parallel_weight_hints` and the ordered memberships and lane-specific prerequisite constraints beside `list_portable_parallel_1` and `list_portable_parallel_2`.
+Read the derived packing estimates with that runner's `--check-coverage`; its header and `--help` own the output fields and the selection-specific `--list-scheduled` weight rules.
+The largest individual hint sets a lower bound on the estimated duration of any split, regardless of how evenly the remaining work is assigned.
+The CI cap and its rationale are owned by [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
 
-| Lane | Script count | Packed duration |
-|---|---:|---:|
-| `portable-parallel-1` | 11 | 414269 ms (~6.90 min) |
-| `portable-parallel-2` | 13 | 414299 ms (~6.90 min) |
-| imbalance | | 30 ms |
-
-`bin/fm-test-run.sh` holds the hints in `portable_parallel_weight_hints` and the exact ordered memberships in `list_portable_parallel_1` and `list_portable_parallel_2`.
-Read the current numbers from `bin/fm-test-run.sh --check-coverage`, which prints `parallel_max_ms` and `parallel_imbalance_ms` derived from those lists, rather than trusting the table above.
-
-`tests/fm-pi-primary-types.test.sh` must stay in whichever lane the CI workflow installs the Pi package into, currently `portable-parallel-1`.
-
-Two facts bound any future rebalance of these lanes.
-`tests/fm-captain-hold-lifecycle.test.sh` alone is 296481 ms, 36 percent of the whole set, so no two-lane split can run shorter than that single script.
-Against the 10-minute CI cap, the worst lane at 6.90 min leaves about 1.45x of tripwire margin, where the sibling serial lane keeps roughly 2x, so further growth is a trunk decision about the cap or the lane count rather than something another rebalance absorbs.
-
-Nothing refuses a stale parallel hint the way `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT` bounds the serial lane; `--check-coverage` reports `parallel_unhinted` but does not fail on it.
-Refresh these hints from a green run's `fm-test-timing-portable-parallel-*` artifacts whenever the parallel set gains scripts or a member grows materially.
+[`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh), in `test_portable_parallel_lanes_stay_duration_balanced`, requires every parallel member to have a hint and the lane sums to differ by no more than five percent of the larger sum.
+Its scheduling regressions also check stored parallel lane order and preserve serial-weight scheduling for other selections.
+These checks do not detect a script outgrowing an existing hint or establish measured job headroom.
+Refresh `portable_parallel_weight_hints` with the slowest completed `duration_ms` per script from several green CI runs' `fm-test-timing-portable-parallel-*` artifacts whenever the parallel set gains scripts or a member grows materially.
 
 ## Portable serial remainder
 
@@ -151,9 +118,9 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 
 | Lane | Bound | Rationale |
 |---|---|---|
-| portable parallel 1/2 | job `timeout-minutes: 10` | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
+| portable parallel 1/2 | See [CI workflow](../.github/workflows/ci.yml) | The workflow owns the parallel cap rationale and its evidence limits. |
 | portable serial 1-5 | job `timeout-minutes: 30` | Current runners can take about 20 minutes; the 30-minute cap remains a hang tripwire while leaving margin for job setup and runner-speed spread. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finished around 7 minutes before this lane gained `fm-backend-herdr-focus-flash-e2e`, which measures about 2 minutes against a real lab locally, so the step bound is still the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. Refresh this figure from the lane's uploaded timing artifact. |
 
-Timeouts are hang tripwires rather than expected healthy durations.
+Timeouts are intended as hang tripwires; a passing coverage guard does not establish a healthy job duration.
 `.github/workflows/ci.yml` owns the exact numbers.

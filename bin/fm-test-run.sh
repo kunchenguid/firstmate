@@ -36,7 +36,11 @@
 #                   tool this host could not exercise.
 #   --list          print selected script paths (one per line) and exit 0
 #   --list-scheduled
-#                   print selected paths longest-hint-first and exit 0
+#                   print selected paths longest-hint-first and exit 0.
+#                   Only --lane portable-parallel-1 or portable-parallel-2 uses
+#                   parallel hints, falling back to serial weights if missing.
+#                   Every other selection uses serial weights alone.
+#                   Equal weights are ordered by path under LC_ALL=C.
 #   --base <ref>    with --changed, compare against this ref (default: origin/main)
 #   --exclude-family <name>
 #                   drop scripts whose primary family matches <name> after selection
@@ -60,7 +64,7 @@
 #                   family proofs may impose a lower cap. Individually proven
 #                   scripts share one phase; scripts admitted only by a family
 #                   proof run in a separate phase for each family. Concurrent
-#                   phases are ordered longest-hint-first. Unproven stateful
+#                   phases use serial weights, longest-hint-first. Unproven stateful
 #                   scripts run serially after all concurrent phases. Default is
 #                   1 (serial) except for plain --changed and a plain list of
 #                   script paths, which use the bounded automatic scheduler.
@@ -117,9 +121,11 @@
 # owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a
 # duration-balanced partition of that exact set, packed from the measured hints
 # in portable_parallel_weight_hints (see docs/fm-test-portable-shards.md).
-# --check-coverage prints the resulting parallel_max_ms and
-# parallel_imbalance_ms, so what the lanes are balanced to is always a derived
-# number and never a literal in prose that can go stale unnoticed.
+# --check-coverage reports parallel_max_ms (the larger lane hint sum),
+# parallel_imbalance_ms (the absolute difference between the sums), and
+# parallel_unhinted (the number of members missing a parallel hint).
+# These sums exclude unhinted members and are estimates, not measured job wall
+# times. Missing parallel hints are reported without failing this guard.
 #
 # portable-serial stays strictly serial. Its CI shards (portable-serial-<k>of<n>)
 # split it across separate runners, so two of its stateful scripts still never
@@ -467,15 +473,9 @@ tests/fm-x-mode.test.sh
 EOF
 }
 
-# Measured serial duration of every proven-isolated script, one "<path> <ms>"
-# per line, and the single basis the two portable parallel lanes are packed
-# from. The instrument has to match what the lanes actually do: these are
-# serial runs of the real lanes on ubuntu-latest, not the 4-way concurrent
-# local timings in docs/fm-test-isolation-proof.json, which measure isolation
-# rather than lane wall clock. Each value is the slowest of the 2026-09-10 CI
-# runs recorded in docs/fm-test-portable-shards.md, which owns the refresh.
-# --check-coverage derives and prints the resulting lane weights, so the lane
-# duration is a computed number rather than a literal in prose that can rot.
+# Per-script serial CI duration hints, one "<path> <ms>" per line, used to
+# pack only the two portable parallel lanes. Measurement provenance and the
+# refresh procedure are owned by docs/fm-test-portable-shards.md.
 portable_parallel_weight_hints() {
   cat <<'EOF'
 tests/fm-arm-pretool-check.test.sh 30898
@@ -518,8 +518,8 @@ portable_parallel_lane_weight() {
 }
 
 # Portable parallel shard 1: LPT balance of the proven-isolated set over the
-# hints above. Execution order is longest first so wall-clock stays near the
-# balanced sum. tests/fm-pi-primary-types.test.sh belongs to this lane because
+# hints above. Stored order agrees with this lane's --list-scheduled output.
+# tests/fm-pi-primary-types.test.sh belongs to this lane because
 # this is the parallel job that installs the Pi package; moving it needs that
 # workflow step moved with it.
 list_portable_parallel_1() {
@@ -539,9 +539,6 @@ EOF
 }
 
 # Portable parallel shard 2: the complementary LPT half of the proven set.
-# tests/fm-captain-hold-lifecycle.test.sh alone is 36% of the whole parallel
-# set, so it fixes this lane's floor: no two-lane split can run shorter than
-# that one script.
 list_portable_parallel_2() {
   cat <<'EOF'
 tests/fm-captain-hold-lifecycle.test.sh
@@ -1075,10 +1072,8 @@ run_coverage_guard() {
     fi
   fi
 
-  # Report what the two parallel lanes are actually packed to, derived from the
-  # hint table rather than asserted in a comment, so the claim that they are
-  # duration-balanced is a number a reader can re-derive with one command. The
-  # worst lane is what the CI job cap applies to.
+  # Keep these estimates derived from the membership and hint owners; see the
+  # header for the distinction between packed weights and measured job time.
   read -r p1_ms p1_unhinted <<<"$(list_portable_parallel_1 | portable_parallel_lane_weight)"
   read -r p2_ms p2_unhinted <<<"$(list_portable_parallel_2 | portable_parallel_lane_weight)"
   parallel_max_ms=$p1_ms

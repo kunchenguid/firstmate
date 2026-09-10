@@ -47,16 +47,13 @@ jobs:
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
-    # Do not restate the shard wall as a literal here: it was recorded as "~1
-    # min of serial sum", grew past this cap without announcing it, and cancelled
-    # both lanes. `bin/fm-test-run.sh --check-coverage` prints the current
-    # parallel_max_ms, which is the number this cap has to clear.
-    #
-    # On 2026-09-10 that worst lane is ~6.9 min of serial sum, so this 10-minute
-    # cap is still a hang tripwire rather than the expected healthy end of the
-    # lane, but only by about 1.45x. Its sibling serial lane keeps roughly 2x.
-    # Growing the parallel set materially is therefore a trunk decision about
-    # this cap or the lane count, not something a rebalance can absorb again.
+    # This cap is intended as a hang tripwire, but the previous lane 1 reached
+    # it; the former "~1 min of serial sum" estimate no longer applies.
+    # Compare it with the derived hints from fm-test-run.sh --check-coverage
+    # and completed job timings, allowing for setup and runner-speed spread.
+    # A packed hint sum is not a measured job wall time or proof of headroom.
+    # Evidence and refresh procedure: docs/fm-test-portable-shards.md.
+    # Changes to this cap or the lane count require a separate scope decision.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -100,8 +97,7 @@ jobs:
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
     runs-on: ubuntu-latest
-    # Same cap and the same reasoning as shard 1 above. The two lanes are packed
-    # to within a second of each other, so neither is the privileged one.
+    # Same timeout rationale as portable parallel shard 1 above.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
