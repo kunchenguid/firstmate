@@ -12,8 +12,12 @@ metadata:
 # pr-review-cycle
 
 This skill is the single owner of the review-to-clean procedure for every pull request.
-It is written so a firstmate can apply it directly or paste the relevant sections unchanged into a crewmate brief.
+A firstmate uses it for intake, briefing, and independent read-only verification, while project-specific inspection and fixes remain delegated under `AGENTS.md` section 1.
+The review and fix briefs below are written to paste unchanged into a crewmate brief.
 Merge authority is not part of this procedure and remains owned by `AGENTS.md` section 7.
+
+Loading this skill for a review-only request grants no authority to edit code, push, change draft state, post comments, or resolve threads.
+In that case, run only the read-only inspection and report findings; enter the mutation steps only when the authorized task includes taking the PR to clean.
 
 ## Pin the review target
 
@@ -169,7 +173,7 @@ Report the full PR URL, final head SHA, check rollup, reviewer verdict evidence,
 Never accept a worker's `done:` or ready claim without a fresh firstmate-side read.
 Fetch the PR again and verify all of the following against one unchanged head:
 
-- The current full head SHA equals the SHA the worker reported.
+- The current full head SHA still equals the captured `REVIEW_HEAD`; when a worker also reported a SHA, it equals both.
 - The current base repository and ref equal `BASE_REPO` and `BASE_REF`; after fetching its current tip, `git merge-base <current-base-tip> "$REVIEW_HEAD"` still equals `MERGE_BASE`.
 - The pull request is open, non-draft, and `MERGEABLE`, its active `reviewDecision` has no change request, and every required approval is present.
 - `statusCheckRollup` and `gh-axi pr checks` show every current CI context and no pending, skipped-without-explanation, cancelled, or failing required work.

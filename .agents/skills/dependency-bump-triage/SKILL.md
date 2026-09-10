@@ -12,7 +12,8 @@ metadata:
 # dependency-bump-triage
 
 This skill is the single owner of the Dependabot and Renovate bump-triage procedure.
-It is written so a firstmate can apply it directly or paste it unchanged into a crewmate brief.
+A firstmate uses it to scope, brief, and verify the triage, while project-specific inspection and any lockfile regeneration remain delegated under `AGENTS.md` section 1.
+The procedure below is written to paste unchanged into a crewmate brief.
 Merge authority remains owned by `AGENTS.md` section 7.
 Load `pr-review-cycle` with this skill and apply its common exact-head review cycle to every bump.
 Only its independent Codex scout may be omitted under the narrow exception below.
