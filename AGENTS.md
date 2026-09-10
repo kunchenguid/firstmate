@@ -50,7 +50,7 @@ Never add an agent name as a commit co-author.
 ## 2. Layout and state
 
 `docs/configuration.md` owns the top-level operational-home layout and the configuration schemas it documents, while each producing script's header and help own exact child fields and mutation mechanics, and each per-feature doc owns its own schema.
-Read those owners when a concrete path, field, or configuration knob matters rather than working from a remembered file list.
+Read those owners when a concrete path, field, or configuration knob matters rather than working from a remembered file list, and read a `bin/` script's own header before first use because that header is the authoritative account of its behavior, flags, and contracts.
 
 `FM_HOME` selects an instance's private `data/`, `state/`, `config/`, and `projects/`, while scripts continue to come from their tracked code root.
 Each secondmate has a persistent isolated `FM_HOME`, including its own state, backlog, projects, and session lock.
@@ -61,7 +61,6 @@ Tracked files hold shared instructions and tooling.
 `state/` holds runtime records: task metadata, append-only status events, the durable wake queue, steering inboxes, decision and poll records, the away posture, and watcher coordination.
 `config/` holds this home's local operating choices, and `.env` holds its optional Relay and mail credentials.
 `projects/` contains clones that are read-only to firstmate except under hard rule 1's concrete captain-approved project operation exception.
-`.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
 
 Watcher, wake-queue, lease, away-mode, sub-supervisor, and turn-end auto-arm or stop-hook records under `state/` belong to the scripts that write them; never hand-edit or hand-delete them, and retire a registered check only through its unregister or teardown script.
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
