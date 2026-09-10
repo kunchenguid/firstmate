@@ -981,7 +981,7 @@ test_issue_fills_the_intent_and_carries_the_merge_request_contract() {
   assert_grep "Issue contract: issue=$ISSUE_URL" "$brief" "the brief records no machine-readable issue contract"
   assert_grep 'Ship exactly one merge request for this task by default' "$brief" "the one-merge-request default is missing"
   # shellcheck disable=SC2016 # The backticks are literal brief text, not a command substitution.
-  assert_grep '`#42 [n/N] <what this task changes>`' "$brief" "the merge request title shape is missing"
+  assert_grep '`#42 <what this task changes>`' "$brief" "the merge request title shape is missing"
   assert_grep 'Related to #42' "$brief" "the merge request description rule is missing"
   # shellcheck disable=SC2016 # The backticks are literal brief text, not a command substitution.
   assert_grep 'never carry `Closes`' "$brief" "the brief does not forbid a closing keyword"
@@ -1071,6 +1071,88 @@ test_issue_refusals_write_no_brief() {
   pass "fm-brief: --issue refuses a bad URL, a charter, and an unreadable issue without writing a brief"
 }
 
+# Under --mode no-mistakes the pipeline is what opens the merge request, so the
+# brief makes setting its title and description the worker's last step, and the
+# single owner of the definition of done holds the task open until that step is
+# done instead of ending at CI green.
+test_issue_no_mistakes_puts_the_merge_request_step_inside_the_done_gate() {
+  local dir brief dod issue_section
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-no-mistakes"
+  mkdir -p "$dir/home/data"
+
+  run_issue_brief "$dir" issue-nm-g1 myproj --mode no-mistakes --issue "$ISSUE_URL" >/dev/null
+  brief="$dir/home/data/issue-nm-g1/brief.md"
+  issue_section=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$brief" "# GitLab issue" )
+  assert_contains "$issue_section" 'set the open merge request'"'"'s title and description' \
+    "a no-mistakes issue brief never tells the worker to set the merge request metadata"
+  assert_contains "$issue_section" 'edits the metadata of an already-open merge request' \
+    "the brief does not distinguish that step from the fixes the pipeline owns"
+
+  # The done gate is the part that decides when the worker stops, so the step
+  # has to sit inside it rather than after "you are finished".
+  dod=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$brief" "# Definition of done" )
+  assert_contains "$dod" 'GitLab issue' "the no-mistakes done gate does not point at the merge-request step"
+  assert_not_contains "$dod" 'You are finished.' \
+    "the no-mistakes done gate still ends at CI green for an issue-sourced task"
+
+  # Without --issue the gate is exactly the one every other no-mistakes task
+  # gets, and no merge-request step is invented for it.
+  run_issue_brief "$dir" issue-nm-g2 myproj --mode no-mistakes >/dev/null
+  dod=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$dir/home/data/issue-nm-g2/brief.md" "# Definition of done" )
+  assert_contains "$dod" 'You are finished.' "an ordinary no-mistakes task lost its done gate"
+
+  # direct-PR opens its own merge request, so it gets no pipeline step and its
+  # done gate is untouched.
+  run_issue_brief "$dir" issue-nm-g3 myproj --mode direct-PR --issue "$ISSUE_URL" >/dev/null
+  brief="$dir/home/data/issue-nm-g3/brief.md"
+  assert_no_grep 'glab mr update' "$brief" "a direct-PR brief was told to amend a pipeline-opened merge request"
+  dod=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$brief" "# Definition of done" )
+  assert_contains "$dod" 'open a PR with' "the direct-PR done gate changed"
+  pass "fm-brief: a no-mistakes issue brief carries the merge-request metadata step inside its done gate"
+}
+
+# A placeholder position must never reach a real merge request title: the brief
+# either states this task's resolved position or requires a title with no
+# position segment at all.
+test_issue_part_renders_a_position_or_none_at_all() {
+  local dir brief out status bad
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-part"
+  mkdir -p "$dir/home/data"
+
+  run_issue_brief "$dir" issue-part-h1 myproj --mode no-mistakes --issue "$ISSUE_URL" --issue-part 2/3 >/dev/null
+  brief="$dir/home/data/issue-part-h1/brief.md"
+  # shellcheck disable=SC2016 # The backticks are literal brief text, not a command substitution.
+  assert_grep '`#42 [2/3] <what this task changes>`' "$brief" "the resolved subtask position is not in the title form"
+  assert_no_grep 'n/N' "$brief" "the brief kept a placeholder position"
+
+  run_issue_brief "$dir" issue-part-h2 myproj --mode no-mistakes --issue "$ISSUE_URL" >/dev/null
+  brief="$dir/home/data/issue-part-h2/brief.md"
+  # shellcheck disable=SC2016 # The backticks are literal brief text, not a command substitution.
+  assert_grep '`#42 <what this task changes>` with no position segment' "$brief" \
+    "an unpositioned brief does not require a title without a position segment"
+  assert_no_grep 'n/N' "$brief" "an unpositioned brief carries a placeholder position"
+  assert_no_grep '#42 [' "$brief" "an unpositioned brief invented a position segment"
+
+  # A position that is not a real <n>/<N>, or one without an issue to be a
+  # position within, is refused before a brief exists.
+  out=$(run_issue_brief "$dir" issue-part-h3 myproj --mode no-mistakes --issue-part 2/3)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--issue-part without --issue should exit non-zero"
+  assert_contains "$out" "pass it with --issue" "the refusal did not tie --issue-part to --issue"
+  assert_absent "$dir/home/data/issue-part-h3/brief.md" "a refused --issue-part still wrote a brief"
+
+  for bad in 3 0/3 4/3 1/2/3 '' 'a/b' '1/'; do
+    out=$(run_issue_brief "$dir" issue-part-h4 myproj --mode no-mistakes --issue "$ISSUE_URL" --issue-part "$bad")
+    status=$?
+    [ "$status" -ne 0 ] || fail "--issue-part accepted '$bad'"
+    assert_contains "$out" "--issue-part" "the refusal did not name the flag: $bad"
+    assert_absent "$dir/home/data/issue-part-h4/brief.md" "a refused --issue-part still wrote a brief: $bad"
+  done
+  pass "fm-brief: --issue-part renders a resolved position, and its absence leaves no placeholder"
+}
+
 test_worker_role_scope
 test_script_parses
 test_no_heredoc_in_command_substitution
@@ -1096,4 +1178,6 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_issue_fills_the_intent_and_carries_the_merge_request_contract
 test_issue_is_scoped_to_the_modes_that_ship_a_merge_request
+test_issue_no_mistakes_puts_the_merge_request_step_inside_the_done_gate
+test_issue_part_renders_a_position_or_none_at_all
 test_issue_refusals_write_no_brief

@@ -12,7 +12,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--issue <issue-url>] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--issue <issue-url> [--issue-part <n>/<N>]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -41,17 +41,29 @@
 #   machine-readable "Issue contract: issue=<url>" line that bin/fm-spawn.sh
 #   checks against its own --issue. A brief whose mode actually produces a
 #   merge request - no-mistakes or direct-PR - also carries the generated
-#   small-merge-request contract: one reviewable merge request for the task, a
-#   "#<iid> [n/N] <work>" title, a "Related to #<iid>" line and never a closing
-#   keyword (the human closes the issue), and the regression test shipping with
-#   the first subtask of a reproduced bug. --mode local-only produces no merge
-#   request, so it carries the issue and its contract line without that block
-#   rather than two contradicting delivery contracts. The block is generated
-#   build guidance rather than the captain's words, and it sits outside `# Task`
-#   so it never becomes no-mistakes `--intent`. --issue is a ship flag, refused
-#   on --scout (a scout delivers a report, not a merge request) and on
-#   --secondmate, and needs glab and jq on PATH; an issue that cannot be read
-#   refuses the scaffold instead of writing a brief the worker cannot act on.
+#   small-merge-request contract: one reviewable merge request for the task, its
+#   title, a "Related to #<iid>" line and never a closing keyword (the human
+#   closes the issue), and the regression test shipping with the first subtask of
+#   a reproduced bug. Under --mode no-mistakes the pipeline is what opens the
+#   merge request, so that block also makes setting the merge request's title and
+#   description the worker's last step - metadata of an already-open merge
+#   request, edited after the run, never code the pipeline owns - and
+#   bin/fm-dod-lib.sh puts that step inside the no-mistakes done gate for an
+#   issue-sourced task. Under --mode direct-PR the worker opens the merge request
+#   itself, so the title and description are already its own. --mode local-only
+#   produces no merge request, so it carries the issue and its contract line
+#   without that block rather than two contradicting delivery contracts. The
+#   block is generated build guidance rather than the captain's words, and it
+#   sits outside `# Task` so it never becomes no-mistakes `--intent`. --issue is
+#   a ship flag, refused on --scout (a scout delivers a report, not a merge
+#   request) and on --secondmate, and needs glab and jq on PATH; an issue that
+#   cannot be read refuses the scaffold instead of writing a brief the worker
+#   cannot act on.
+#   --issue-part <n>/<N> is this task's resolved position among the subtasks the
+#   issue was split into, and it requires --issue. Given 2/3, the required merge
+#   request title becomes "#<iid> [2/3] <work>"; omitted, the required title is
+#   "#<iid> <work>" with no position segment at all, so a generated brief never
+#   carries a placeholder position that could reach a real merge request title.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
@@ -149,6 +161,8 @@ MODE=
 MODE_SET=0
 ISSUE_ARG=
 ISSUE_SET=0
+ISSUE_PART=
+ISSUE_PART_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -159,6 +173,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       issue) ISSUE_ARG=$a; ISSUE_SET=1 ;;
+      issue-part) ISSUE_PART=$a; ISSUE_PART_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -173,6 +188,8 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --issue) want_value=issue ;;
     --issue=*) ISSUE_ARG=${a#--issue=}; ISSUE_SET=1 ;;
+    --issue-part) want_value=issue-part ;;
+    --issue-part=*) ISSUE_PART=${a#--issue-part=}; ISSUE_PART_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -221,6 +238,29 @@ if [ "$ISSUE_SET" -eq 1 ]; then
   fi
   fm_gitlab_issue_url_parse "$ISSUE_ARG" || {
     echo "error: --issue is not a GitLab issue URL (expected https://<host>/<group>/<project>/-/issues/<iid>): $ISSUE_ARG" >&2
+    exit 1
+  }
+fi
+
+# The subtask position is what keeps a placeholder out of a real merge request
+# title, so it is validated here and refused when there is no issue to be a
+# position within.
+if [ "$ISSUE_PART_SET" -eq 1 ]; then
+  [ "$ISSUE_SET" -eq 1 ] || {
+    echo "error: --issue-part is this task's position among one issue's subtasks; pass it with --issue or not at all" >&2
+    exit 1
+  }
+  case "$ISSUE_PART" in
+    [1-9]*/[1-9]*) ISSUE_PART_N=${ISSUE_PART%%/*}; ISSUE_PART_TOTAL=${ISSUE_PART#*/} ;;
+    *) ISSUE_PART_N=; ISSUE_PART_TOTAL= ;;
+  esac
+  case "$ISSUE_PART_N$ISSUE_PART_TOTAL" in
+    '' | *[!0-9]*)
+      echo "error: --issue-part must be <n>/<N>, two positive whole numbers (got '$ISSUE_PART')" >&2
+      exit 1 ;;
+  esac
+  [ "$ISSUE_PART_N" -le "$ISSUE_PART_TOTAL" ] || {
+    echo "error: --issue-part <n>/<N> needs n no larger than N: this task cannot be subtask $ISSUE_PART_N of $ISSUE_PART_TOTAL" >&2
     exit 1
   }
 fi
@@ -426,14 +466,33 @@ EOF
   # contract; local-only ships nothing, so adding it would hand the worker two
   # mutually exclusive delivery contracts.
   if [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ]; then
+    # The title carries this task's own position when firstmate recorded one,
+    # and no position segment at all when it did not: a placeholder like n/N
+    # must never reach a real merge request title.
+    if [ "$ISSUE_PART_SET" -eq 1 ]; then
+      ISSUE_TITLE_RULE="Title it \`#$FM_GITLAB_ISSUE_IID [$ISSUE_PART_N/$ISSUE_PART_TOTAL] <what this task changes>\`, where $ISSUE_PART_N/$ISSUE_PART_TOTAL is this task's resolved position among the subtasks issue #$FM_GITLAB_ISSUE_IID was split into - do not change it."
+    else
+      ISSUE_TITLE_RULE="Title it \`#$FM_GITLAB_ISSUE_IID <what this task changes>\` with no position segment: firstmate recorded no subtask position for this task, so do not invent one."
+    fi
     IFS= read -r -d '' ISSUE_MR_SECTION <<EOF || true
 Ship exactly one merge request for this task by default, small enough that a human reviews the whole diff in one reading.
 If the work genuinely cannot land as one reviewable change, say so to firstmate instead of splitting or stacking merge requests on your own.
-Title it \`#$FM_GITLAB_ISSUE_IID [n/N] <what this task changes>\`, where n/N is this task's position among the subtasks issue #$FM_GITLAB_ISSUE_IID was split into; \`## Firstmate spec\` names it, and when it does not, ask firstmate rather than guessing.
+$ISSUE_TITLE_RULE
 The description must carry the line \`Related to #$FM_GITLAB_ISSUE_IID\` and must never carry \`Closes\`, \`Fixes\`, \`Resolves\`, or any other closing keyword: the human closes the issue after reviewing every merge request.
 When the issue is a bug you reproduced, the regression test ships with the first subtask's merge request; if the spec above says this is that subtask, this merge request must contain it.
 EOF
     ISSUE_SECTION="$ISSUE_SECTION"$'\n\n'"${ISSUE_MR_SECTION%$'\n'}"
+    # Under no-mistakes the pipeline opens the merge request, so the title and
+    # description above are the worker's to set once it exists. This step is
+    # inside the definition of done, which bin/fm-dod-lib.sh renders.
+    if [ "$MODE" = no-mistakes ]; then
+      IFS= read -r -d '' ISSUE_NM_SECTION <<EOF || true
+The no-mistakes pipeline opens this merge request for you, so setting its title and description is your last step, not the pipeline's.
+After the pipeline reports CI green, set the open merge request's title and description to exactly the form above with \`glab mr update\`, and only then report done.
+That step edits the metadata of an already-open merge request: it changes no code and it happens after the run has finished, so it is not the hand-editing of findings the pipeline owns.
+EOF
+      ISSUE_SECTION="$ISSUE_SECTION"$'\n\n'"${ISSUE_NM_SECTION%$'\n'}"
+    fi
   fi
   ISSUE_BLOCK=$'\n'"$ISSUE_SECTION"$'\n'
 fi
@@ -572,7 +631,7 @@ case "$MODE" in
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$ISSUE_SET") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
