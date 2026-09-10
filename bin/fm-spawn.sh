@@ -3666,11 +3666,12 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
   # Every field this write owns is emitted above, so the preserved fields are
-  # this record's tail with pr= last. bin/fm-pr-lib.sh's identity parser
-  # refuses a record carrying an unknown line after pr=, and that refusal
-  # silently disarms the merge poll. Later appenders - spawn_record_traceparent
-  # below, and the other rewriters named at that parser - land after pr=
-  # regardless of order here, so the parser knows each of them by name.
+  # this record's tail in their prior order and no spawn-owned line lands after
+  # pr=. bin/fm-pr-lib.sh's identity parser refuses a record carrying an
+  # unknown line after pr=, and that refusal silently disarms the merge poll.
+  # Later appenders - spawn_record_traceparent below, and the other rewriters
+  # named at that parser - land after pr= regardless of order here, so the
+  # parser knows each of them by name.
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
   fi
