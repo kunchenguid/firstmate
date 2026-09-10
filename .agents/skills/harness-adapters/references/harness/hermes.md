@@ -15,6 +15,7 @@ A response that breaks the 1 MiB limit is a failed turn with a blocked status wa
 Diagnostics that break the same limit keep their last 1 MiB with a notice, so the verdict still rests on the response and on the `session_id` line Hermes writes after it, which the retained tail carries however noisy the turn was.
 The opening brief is delivered in the canonical `launch-brief` envelope owned by `../../../bin/fm-operational-input.sh`, the same typed envelope every other adapter's launch command carries.
 The bridge owns generation-bound busy events, the existing `❯` bare composer, turn-end wakes, and child process-group cleanup.
+A raw launch command replaces the generated bridge wiring, so that unverified escape hatch arms no busy record and has no trusted busy state.
 The native CLI runs once per turn, and its whole process group is reaped when that turn ends, so a process the worker leaves running in the background does not outlive the turn that started it; a service that must stay up belongs in its own task.
 `../../../bin/fm-spawn.sh` owns model and effort arguments, and `../../../bin/fm-control-lib.sh` owns lifecycle keys and commands.
 Effort becomes `hermes chat --reasoning`, whose own help on hermes 0.21.1 lists none, minimal, low, medium, high, xhigh, max and ultra; firstmate propagates the five levels its profile axis shares with that list, and no credentialed run has exercised any of them.
