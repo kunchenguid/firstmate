@@ -26,7 +26,7 @@ PR=<number>
 gh-axi api "/repos/$OWNER/$REPO/pulls/$PR" --jq '{url:.html_url,draft,headRef:.head.ref,headRepo:.head.repo.full_name,headCloneUrl:.head.repo.clone_url,headSha:.head.sha,baseRef:.base.ref,baseRepo:.base.repo.full_name,baseCloneUrl:.base.repo.clone_url,baseSha:.base.sha}'
 ```
 
-Use the returned head SHA as `REVIEW_HEAD` and the returned base SHA as `BASE_SHA`.
+Use the returned head SHA as `REVIEW_HEAD` and the returned current base-branch tip as `BASE_SHA`.
 Every review result, check result, and ready claim is stale if the PR head no longer equals `REVIEW_HEAD`.
 
 ## Read the complete review surface
@@ -104,17 +104,20 @@ git fetch --no-tags "$HEAD_CLONE_URL" "$REVIEW_HEAD"
 test "$(git rev-parse HEAD)" = "$REVIEW_HEAD" || exit 1
 git cat-file -e "$BASE_SHA^{commit}" || exit 1
 git cat-file -e "$REVIEW_HEAD^{commit}" || exit 1
+MERGE_BASE=$(git merge-base "$BASE_SHA" "$REVIEW_HEAD") || exit 1
+git cat-file -e "$MERGE_BASE^{commit}" || exit 1
 codex exec --sandbox read-only --ephemeral '<adversarial review brief>'
 ```
 
-The brief itself supplies `BASE_SHA` and `REVIEW_HEAD` because the installed Codex CLI rejects a custom prompt combined with `codex exec review --base`.
+Review the three-dot PR change from `BASE_SHA...REVIEW_HEAD`, whose left side Git resolves to `MERGE_BASE`, so base-branch commits made after the PR diverged are not misclassified as reversions in the PR.
+The brief itself supplies `BASE_SHA`, `MERGE_BASE`, and `REVIEW_HEAD` because the installed Codex CLI rejects a custom prompt combined with `codex exec review --base`.
 
 Use this brief verbatim after filling in the placeholders:
 
 ```text
-Review pull request <full URL> adversarially at exact head <full SHA> against base <full base SHA from BASE_SHA>.
+Review pull request <full URL> adversarially at exact head <full SHA from REVIEW_HEAD> against the exact three-dot change <full BASE_SHA>...<full REVIEW_HEAD>, whose verified merge base is <full MERGE_BASE>.
 Do not modify files.
-Read the complete diff and the surrounding implementation, tests, contracts, and relevant history.
+Read the complete `git diff <full BASE_SHA>...<full REVIEW_HEAD>` and the surrounding implementation, tests, contracts, and relevant history.
 Focus on correctness, regressions, unsafe state transitions, concurrency or recovery gaps, security boundaries, compatibility, and missing user-visible behavior.
 For changed tests, judge their negative controls: identify whether each test would fail under the plausible broken implementation it is meant to exclude, and call out vacuous, mock-only, or same-implementation assertions.
 Do not request unrelated cleanup or speculative scope expansion.
