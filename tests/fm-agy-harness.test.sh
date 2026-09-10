@@ -461,7 +461,14 @@ make_agy_spawn_case() {
   wt="$case_dir/wt"
   fakebin=$(make_agy_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief for agy\n' > "$home/data/$id/brief.md"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise agy dispatch.
+
+## Firstmate spec
+Verify agy harness behavior under test.
+EOF
   printf 'agy\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
