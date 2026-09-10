@@ -47,9 +47,9 @@ jobs:
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
-    # Measured shard wall is ~1 min of serial sum on proven scripts; this cap is
-    # a hang tripwire with margin, not the expected healthy end of the lane.
-    timeout-minutes: 10
+    # Include setup and the lint/typecheck regressions in this shard's budget.
+    # The job cap remains a hang tripwire above the healthy test workload.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:
@@ -135,10 +135,9 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Current runners can take ~20 min for a balanced shard. This 30-minute cap
-    # preserves the timeout as a hang tripwire while allowing runner-speed and
-    # job-setup margin; it is not the expected healthy end of the lane.
-    timeout-minutes: 30
+    # Shard 2 also replays benchmark archives in real confinement and needs
+    # more time than the ordinary serial shards, including setup overhead.
+    timeout-minutes: ${{ matrix.shard == 2 && 60 || 30 }}
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
