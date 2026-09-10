@@ -2264,9 +2264,19 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add Captain: lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
         exit 1
       fi
+  fi
+fi
+if [ "$KIND" != secondmate ]; then
+  RECORDED_CREW_BRANCH=$(fm_brief_crew_branch "$BRIEF")
+  if [ -n "$RECORDED_CREW_BRANCH" ]; then
+    CURRENT_DEFAULT_BRANCH=$(default_branch "$PROJ_ABS" || true)
+    if [ -n "$CURRENT_DEFAULT_BRANCH" ] && [ "$RECORDED_CREW_BRANCH" = "$CURRENT_DEFAULT_BRANCH" ]; then
+      echo "error: $BRIEF records crew branch $RECORDED_CREW_BRANCH, which is the project default branch; refusing to launch" >&2
+      exit 1
     fi
   fi
-  # Use the existing launch-brief overlay for every worker kind, including
+fi
+# Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
   BRIEF="$DATA/$ID/launch-brief.md"

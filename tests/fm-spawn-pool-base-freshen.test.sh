@@ -70,13 +70,31 @@ add_base_contract_decoy() {
 }
 
 scaffold_ship_brief() {
-  local id=$1 mode=$2 base_branch=${3:-}
+  local id=$1 mode=$2 base_branch=${3:-} branch_name=${4:-}
   local -a args=("$id" test-project --mode "$mode")
   [ -z "$base_branch" ] || args+=(--base-branch "$base_branch")
+  [ -z "$branch_name" ] || args+=(--branch-name "$branch_name")
   rm -f "$HOME_DIR/data/$id/brief.md"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "${args[@]}" >/dev/null \
     || fail "fm-brief.sh could not scaffold the $id ship brief"
   fill_spawn_brief_placeholders "$HOME_DIR/data/$id/brief.md"
+}
+
+test_custom_crew_branch_never_targets_default() {
+  local rec id out status
+  id='pool-crew-default-collision-r11'
+  rec=$(make_case crew-default-collision "$id")
+  read_case_record "$rec"
+  scaffold_ship_brief "$id" direct-PR '' "$DEFAULT_BRANCH"
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a custom crew branch equal to the project default"
+  assert_contains "$out" "which is the project default branch" \
+    "default-branch crew collision did not explain the unsafe target"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "default-branch crew collision published task metadata"
+  pass "spawn refuses a custom crew branch equal to the project default"
 }
 
 scaffold_scout_brief() {
@@ -1109,5 +1127,6 @@ test_originless_base_branch_uses_local_or_refuses
 test_base_branch_refused_on_relaunch_secondmate_and_orca
 test_local_only_origin_only_base_refuses
 test_scout_base_branch_contract_agrees_and_records
+test_custom_crew_branch_never_targets_default
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

@@ -303,6 +303,7 @@ test_recorded_crew_branch_ignores_parked_head() {
   cat >> "$case_dir/data/task-x1/brief.md" <<'EOF'
 
 ## Progress note (2026-09-10T00:00:00Z)
+<!-- fm-generated-contract -->
 Crew branch: branch=main
 
 # Definition of done

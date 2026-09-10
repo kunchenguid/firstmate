@@ -2,7 +2,7 @@
 
 fm_brief_contract_value() {  # <brief-path> <prefix>
   awk -v prefix="$2" '
-    $0 == "<!-- fm-generated-contract -->" {
+    $0 == "<!-- fm-generated-contract -->" && !marked {
       marked=1
       in_contract=1
       signature=1
