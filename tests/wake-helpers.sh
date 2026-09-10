@@ -302,6 +302,7 @@ SH
 # MSYS, 10s elsewhere - see ARM_CONFIRM_DEFAULT in bin/fm-watch-arm.sh). This is
 # a ceiling spent only when an arm genuinely fails to exit; a passing case
 # returns as soon as it does.
+# shellcheck disable=SC2034 # Shared test-timing constant consumed by sourcing suites.
 ARM_FAIL_EXIT_POLLS=400
 
 wait_for_exit() {
