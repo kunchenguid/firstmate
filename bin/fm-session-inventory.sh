@@ -429,20 +429,25 @@ collect_worker_processes() {  # <worktree>...
   [ -s "$PSTABLE" ] || return 0
   saved=$CWDMAP
   CWDMAP="$WORK/worker-cwd.tsv"
-  if read_all_cwds; then
-    while IFS=$'\t' read -r pid cwd; do
-      [ -n "$pid" ] && [ -n "$cwd" ] || continue
-      keep=0
-      for dir in "${dirs[@]}"; do
-        if path_within "$cwd" "$dir"; then keep=1; break; fi
-      done
-      [ "$keep" = 1 ] || continue
-      # Only now, for the few survivors, ask the expensive question.
-      is_harness_pid "$pid" || continue
-      age=$(ps_field "$pid" 2)
-      printf '%s\t%s\t%s\n' "$pid" "$age" "$cwd" >> "$WORKER_PROCS"
-    done < "$CWDMAP"
+  if ! read_all_cwds; then
+    note_source worker-processes 0 \
+      'cannot read process working directories here, so a running worker cannot be matched to its own process'
+    CWDMAP=$saved
+    return 0
   fi
+  note_source worker-processes 1 ''
+  while IFS=$'\t' read -r pid cwd; do
+    [ -n "$pid" ] && [ -n "$cwd" ] || continue
+    keep=0
+    for dir in "${dirs[@]}"; do
+      if path_within "$cwd" "$dir"; then keep=1; break; fi
+    done
+    [ "$keep" = 1 ] || continue
+    # Only now, for the few survivors, ask the expensive question.
+    is_harness_pid "$pid" || continue
+    age=$(ps_field "$pid" 2)
+    printf '%s\t%s\t%s\n' "$pid" "$age" "$cwd" >> "$WORKER_PROCS"
+  done < "$CWDMAP"
   CWDMAP=$saved
 }
 
@@ -606,7 +611,10 @@ close_prefix() {
 collect_reviews() {
   local out="$WORK/lavish.txt" rc=0 file status url pending sid age age_source pid safety cnote
   if ! command -v lavish-axi >/dev/null 2>&1; then
-    note_source lavish 0 'lavish-axi is not installed'
+    # Not installed is not unreadable: there are no review pages on this machine
+    # to miss, so this collector answered zero truthfully and must not put a
+    # "could not check everything" line on every session start forever.
+    note_source lavish 1 'lavish-axi is not installed, so this machine serves no review pages'
     return 0
   fi
   fm_run_timed "$LAVISH_TIMEOUT" lavish-axi > "$out" 2>/dev/null || rc=$?
@@ -897,7 +905,11 @@ collect_harness_sessions() {
   # alarm for a home that simply has two workers running. So the rows are still
   # listed - they are running, and seeing that is the point - but the verdict and
   # every close command are withheld, and the unreadable source says why.
-  if [ "$FLEET_SNAPSHOT_OK" != 1 ]; then
+  # Nothing to tell apart is not the same as being unable to tell things apart:
+  # with no session in this home at all, `none` is the honest verdict whether or
+  # not the worker list could be read, and the alarm below it would fire over an
+  # empty set.
+  if [ "$FLEET_SNAPSHOT_OK" != 1 ] && [ "${#mine[@]}" -gt 0 ]; then
     HARNESS_LOCK_OWNER=not_checked
     SELF_RESOLUTION=unresolved
   else
@@ -1043,6 +1055,18 @@ fi
 # that is precisely how every home ends up repeating these lines again.
 REVIEW_LINES=1
 fm_root_is_secondmate_home "$FM_HOME" && REVIEW_LINES=0
+#
+# SILENCE MUST MEAN "NOTHING IS OLD", NEVER "I COULD NOT LOOK". This is the one
+# surface the captain does not ask for, so an empty pass reads to him as good
+# news - and a collector that failed produces exactly the same emptiness as a
+# home with nothing overdue. sources[] already records every input that could
+# not be read; this renders that record, as ONE short line naming the sources,
+# ahead of whatever rows did survive. That is the single route: any collector
+# that cannot read its input notes itself there and is disclosed here, rather
+# than each one growing its own handling. The rows it could still gather are
+# printed either way - one unreadable source must not drag the rest down with
+# it - and a pass where everything was readable and nothing is old stays exactly
+# as silent as before.
 printf '%s\n' "$JSON" | jq -r --argjson cap 8 --argjson reviews "$REVIEW_LINES" '
   def row_label($r):
     if $r.kind == "harness-session" then "background session \($r.id)"
@@ -1051,9 +1075,13 @@ printf '%s\n' "$JSON" | jq -r --argjson cap 8 --argjson reviews "$REVIEW_LINES" 
     else "service \($r.label // $r.id)" end;
   # Oldest first across every kind, so the cap below can only ever drop the
   # least overdue lines.
-  [.rows[] | select(.notify) | select($reviews == 1 or .kind != "review")]
+  ([.sources[] | select(.ok | not) | .name] | join(", ")) as $unreadable
+  | [.rows[] | select(.notify) | select($reviews == 1 or .kind != "review")]
   | sort_by(-(.age_seconds // 0)) as $stale
-  | if ($stale | length) == 0 then empty
+  | (if $unreadable == "" then empty
+     else "SESSIONS_STALE: could not check everything - \($unreadable) unreadable; run bin/fm-session-view.sh"
+     end),
+    if ($stale | length) == 0 then empty
     else
       ($stale[:$cap][] |
         "SESSIONS_STALE: \(row_label(.)) - \(.age_days)d, \(.belongs_to // "-") - close: \(.close)" +

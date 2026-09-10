@@ -1508,11 +1508,19 @@ detect_stale_sessions() {
     FM_SESSION_INVENTORY_LAVISH_TIMEOUT="${FM_SESSION_INVENTORY_LAVISH_TIMEOUT:-$inner}" \
     fm_run_timed "$FM_STALE_SESSION_TIMEOUT" \
     "$SCRIPT_DIR/fm-session-inventory.sh" --stale-lines 2>/dev/null) || rc=$?
+  # The inventory discloses its OWN unreadable sources, in one line of exactly
+  # this shape. Only the two failures it cannot report on itself are left here -
+  # it never finished, or it never ran - and they take the same shape for the
+  # same reason: on this surface, silence means "nothing is old", so a check
+  # that did not happen may never look like one that found nothing.
   if [ "$rc" = 124 ]; then
-    echo "SESSIONS_STALE: could not finish the running-session check within ${FM_STALE_SESSION_TIMEOUT}s; run bin/fm-session-view.sh to see what is still open"
+    echo "SESSIONS_STALE: could not check everything - the running-session check did not finish within ${FM_STALE_SESSION_TIMEOUT}s; run bin/fm-session-view.sh"
     return 0
   fi
-  [ "$rc" = 0 ] || return 0
+  if [ "$rc" != 0 ]; then
+    echo "SESSIONS_STALE: could not check everything - the running-session check failed (exit $rc); run bin/fm-session-view.sh"
+    return 0
+  fi
   [ -n "$out" ] || return 0
   printf '%s\n' "$out"
 }

@@ -45,7 +45,21 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
+  # A bare `lavish-axi` answers with its sessions listing, and a listing with no
+  # sessions still carries the header. A stub that answers only `--version` and
+  # then nothing is a tool whose listing cannot be parsed, which the
+  # running-session inventory correctly reports as a source it could not read -
+  # so the stub has to honour both halves of the contract, not just the version.
+  cat > "$fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_LAVISH_AXI_VERSION:-0.1.46}"
+  exit 0
+fi
+printf 'sessions[0]{file,status,url,pending_prompts}:\n'
+exit 0
+SH
+  chmod +x "$fakebin/lavish-axi"
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then

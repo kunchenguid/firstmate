@@ -275,10 +275,20 @@ else
       sessions=$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')
       elsewhere=$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')
       own_workers=$(printf '%s' "$json" | jq -r '.harness_sessions.own_workers // 0')
+      # `not_checked` has two causes, and only one of them is this guard's
+      # subject. sources[] says which: the working-directory read is the input
+      # the live-session rule itself rests on, so losing it IS drift here; an
+      # unreadable fleet snapshot is an ordinary, disclosed collector failure
+      # that merely leaves own_workers unknowable, and reporting it as drift
+      # would send the maintainer at the wrong component.
+      cwds_ok=$(printf '%s' "$json" | jq -r '[.sources[] | select(.name == "harness-sessions") | .ok] | first // true')
+      fleet_ok=$(printf '%s' "$json" | jq -r '[.sources[] | select(.name == "fleet-snapshot") | .ok] | first // true')
       if [ "$owner" = stale ] || [ "$owner" = absent ]; then
         note "the session lock in $ROLE_HOME names no live harness right now, so the lock-owner half of this guard checked nothing"
-      elif [ "$owner" = not_checked ]; then
+      elif [ "$owner" = not_checked ] && [ "$cwds_ok" != true ]; then
         fail "LIVE-SESSION DRIFT: the working directory of the processes under harness $root could not be read here, so a live session cannot be told from an idle pool process at all. That is the one input the verdict rests on."
+      elif [ "$owner" = not_checked ] || [ "$fleet_ok" != true ]; then
+        note "the fleet snapshot for $ROLE_HOME was unreadable this run, so which processes are its own workers is unknowable and the accounting half of this guard checked nothing (that is a snapshot failure, not overview drift)"
       else
         # Every harness process under that root must land on one side or the
         # other: claimed as a session of this home, or counted as belonging

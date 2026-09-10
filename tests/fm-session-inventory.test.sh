@@ -546,6 +546,19 @@ EOF
   assert_contains "$out" "SESSIONS_STALE: worker old-anchor" \
     "overdue work must still be reported when this home has no session of its own"
 
+  # An unreadable worker list changes nothing here: with no process working in
+  # this home there is nothing to tell apart from a worker, so `none` stays the
+  # honest verdict rather than a withheld one.
+  json=$(FM_SNAPSHOT_BUDGET=not-a-number run_inventory "$home" --json) \
+    || fail "the inventory must still run when the fleet snapshot fails"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')" = none ] \
+    || fail "an empty session set needs no worker list to be reported honestly"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.self_resolution')" = not_applicable ] \
+    || fail "with no session to attribute, ownership is not applicable rather than unresolved"
+  assert_not_contains "$(COLUMNS=110 FM_SNAPSHOT_BUDGET=not-a-number run_view "$home" --color never)" \
+    "cannot be told apart from a worker" \
+    "the view must not warn about telling sessions apart when there are none"
+
   kill_spawned
   pass "inventory: a lock-owning harness with no session here still reports everything else"
 }
@@ -686,6 +699,11 @@ test_nothing_old_prints_nothing_at_session_start() {
 
   out=$(run_inventory "$home" --stale-lines) || fail "--stale-lines failed on a fresh home"
   [ -z "$out" ] || fail "a home with nothing old must print no session-start lines, got: $out"
+  # Silence is only allowed to mean "nothing is old" - which is only true while
+  # every collector could actually be read. This pins the frugal half of that
+  # rule; the disclosure half is pinned where a collector genuinely fails.
+  [ "$(run_inventory "$home" --json | jq -r '[.sources[] | select(.ok | not)] | length')" = 0 ] \
+    || fail "this case only proves silence is safe while every source was readable"
 
   # Same home, every threshold pushed out of reach: the view says so in words
   # rather than printing an empty table.
@@ -1433,6 +1451,51 @@ test_secondmate_suppression_follows_the_shared_marker_rule() {
 # would offer a bare `kill` in place of the cleanup command that refuses rather
 # than discarding unlanded work, and two of them would raise the
 # several-sessions-at-once alarm for a home that simply has two workers running.
+# SILENCE ON THIS SURFACE MEANS "NOTHING IS OLD". It is the one output the
+# captain never asks for, so an empty pass reads as good news - and a collector
+# that could not be read produces exactly the same emptiness as a home with
+# nothing overdue. That false negative lands on his own standing question, so
+# every unreadable source has to say so, in one line, by the one route sources[]
+# already provides.
+test_an_unreadable_source_says_so_on_the_unasked_line() {
+  local home out lines
+  home=$(make_home unreadable-unasked)
+  # Two review pages old enough to notice, so there are rows to keep as well.
+  local artifact="$TMP_ROOT/unreadable-unasked-project/plan.html"
+  mkdir -p "$(dirname "$artifact")"
+  printf '<html></html>\n' > "$artifact"
+  touch -t "$(date -u -r "$((NOW_EPOCH - 30 * DAY))" +%Y%m%d%H%M 2>/dev/null \
+    || date -u -d "@$((NOW_EPOCH - 30 * DAY))" +%Y%m%d%H%M)" "$artifact"
+  write_lavish_stub "$FAKEBIN" "$artifact" open 0
+  write_worker "$home" old-worker 30
+  finish_backlog "$home"
+
+  # Everything readable: the overdue rows, and not a word about sources.
+  out=$(run_inventory "$home" --stale-lines) || fail "--stale-lines failed"
+  assert_contains "$out" "SESSIONS_STALE: worker old-worker" \
+    "an overdue worker must reach the unasked line"
+  assert_not_contains "$out" "could not check everything" \
+    "a pass where every source was readable must claim nothing about sources"
+
+  # The fleet snapshot fails, which is what drops every worker row. Without the
+  # disclosure the captain would read the same picture as "nothing is old".
+  out=$(FM_SNAPSHOT_BUDGET=not-a-number run_inventory "$home" --stale-lines) \
+    || fail "--stale-lines failed with an unreadable fleet snapshot"
+  assert_contains "$out" "SESSIONS_STALE: could not check everything - fleet-snapshot unreadable" \
+    "an unreadable collector must be named on the unasked line, not silently reported as nothing"
+  # One line about it, never a report.
+  lines=$(printf '%s\n' "$out" | LC_ALL=C grep -c "could not check everything")
+  [ "$lines" = 1 ] || fail "the disclosure must be exactly one line, got $lines"
+  # And the rows that survived are still there: one unreadable source must not
+  # drag the rest down with it.
+  assert_contains "$out" "review page plan.html" \
+    "an overdue row from a readable source must survive an unreadable one"
+  assert_not_contains "$out" "old-worker" \
+    "this case only proves anything while the failing source is what drops those rows"
+
+  pass "inventory: an unreadable source is named on the unasked line, and the readable rows survive"
+}
+
 test_an_unreadable_fleet_snapshot_withholds_the_session_verdict() {
   local home spec daemon json rendered out
   home=$(make_home fleet-unreadable)
@@ -1467,8 +1530,10 @@ EOF
 
   out=$(FM_SESSION_STALE_DAYS=0 FM_SNAPSHOT_BUDGET=not-a-number \
     run_inventory "$home" --stale-lines) || fail "--stale-lines failed"
-  assert_not_contains "$out" "kill " \
+  assert_not_contains "$out" "close: kill " \
     "the unasked line must not propose a kill for something that may be a worker"
+  assert_contains "$out" "could not check everything" \
+    "and it must say why it is not proposing anything, rather than going quiet"
 
   rendered=$(COLUMNS=110 FM_SNAPSHOT_BUDGET=not-a-number run_view "$home" --color never)
   assert_contains "$rendered" "fleet-snapshot unreadable:" \
@@ -1544,5 +1609,6 @@ test_a_pane_that_cannot_tell_whose_session_offers_none_for_closing
 test_a_workers_own_process_is_not_a_second_background_session
 test_secondmate_suppression_follows_the_shared_marker_rule
 test_inventory_does_not_rewrite_the_busy_classifier_cache
+test_an_unreadable_source_says_so_on_the_unasked_line
 test_an_unreadable_fleet_snapshot_withholds_the_session_verdict
 test_inventory_closes_nothing_it_reports
