@@ -64,9 +64,9 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
-The 157 current hints are the slowest measured `duration_ms` per script across the `fm-test-timing-portable-serial-*` artifacts of four green CI runs on 2026-09-10, [34413640474](https://github.com/kunchenguid/firstmate/actions/runs/34413640474), [34413651260](https://github.com/kunchenguid/firstmate/actions/runs/34413651260), [34413670094](https://github.com/kunchenguid/firstmate/actions/runs/34413670094), and [34439204619](https://github.com/kunchenguid/firstmate/actions/runs/34439204619).
-Those per-script maxima total 5434244 ms of conservative balance weight and cover the whole 157-script lane, so no script currently runs on the `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
-Taking the slowest of several CI runs rather than a single run keeps the balance honest on a slow runner.
+The 157 current hints are the slowest measured `duration_ms` per script across the `fm-test-timing-portable-serial-*` artifacts of five CI runs on 2026-09-10 whose serial shards all passed: [34413640474](https://github.com/kunchenguid/firstmate/actions/runs/34413640474), [34413651260](https://github.com/kunchenguid/firstmate/actions/runs/34413651260), [34413670094](https://github.com/kunchenguid/firstmate/actions/runs/34413670094), [34439204619](https://github.com/kunchenguid/firstmate/actions/runs/34439204619), and [34466966385](https://github.com/kunchenguid/firstmate/actions/runs/34466966385).
+Those per-script maxima total 5741282 ms of conservative balance weight and cover the whole 157-script lane, so no script currently runs on the `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
+Adding the fifth run raises 39 hints while retaining every slower measurement from the earlier four runs, rather than rebuilding from the latest run alone.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 Balance is still worth keeping current, because drifted hints let one shard carry far more than another shard's real work and reach the job cap while another runner sits idle.
 That is not hypothetical, and it has now happened three times.
@@ -78,28 +78,30 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of5` | 30 | 1086864 ms (~18.11 min) |
-| `portable-serial-2of5` | 31 | 1086841 ms (~18.11 min) |
-| `portable-serial-3of5` | 32 | 1086851 ms (~18.11 min) |
-| `portable-serial-4of5` | 31 | 1086833 ms (~18.11 min) |
-| `portable-serial-5of5` | 33 | 1086855 ms (~18.11 min) |
-| imbalance | | 31 ms |
+| `portable-serial-1of5` | 29 | 1148228 ms (~19.14 min) |
+| `portable-serial-2of5` | 32 | 1148260 ms (~19.14 min) |
+| `portable-serial-3of5` | 32 | 1148251 ms (~19.14 min) |
+| `portable-serial-4of5` | 32 | 1148272 ms (~19.14 min) |
+| `portable-serial-5of5` | 32 | 1148271 ms (~19.14 min) |
+| imbalance | | 44 ms |
 
 The current table is generated from the runner's retained maxima, which now cover every script in the lane.
-Those weights are conservative only relative to the runs they were measured from: each is that script's slowest observed duration across those four runs, so a shard's predicted total covers any of them.
+Those weights are conservative only relative to the runs they were measured from: each is that script's slowest observed duration across those five runs, so a shard's predicted total covers the sum of its scripts in any of them.
 It does not bound a slower runner.
-In the first real CI run on this table the worst shard measured 20.53 min of suite wall time against 18.11 min of assignment weight, so a shard can and does exceed its predicted weight.
-The table was validated against a held-out run rather than fitted to the runs that produced it: rebuilding the hints from the four runs above and scoring that partition against [run 34447627189](https://github.com/kunchenguid/firstmate/actions/runs/34447627189), which contributed nothing to the table, puts its worst shard at 16.99 min against 18.11 min of assignment weight, with the five shards spanning 14.47 to 16.99 min.
-The same held-out run under the previous hints spanned 13.24 to 21.93 min.
+Scoring the current partition against the held-out [run 34447627189](https://github.com/kunchenguid/firstmate/actions/runs/34447627189), which contributes nothing to the hint table, puts its worst shard, shard 1, at 16.95 min against 19.14 min of assignment weight, with the five shards spanning 13.58 to 16.95 min, a spread of 3.37 min.
+Under the four-run hints, that same held-out replay spanned 14.47 to 16.99 min, a spread of 2.52 min: the fifth sample slightly lowers the worst shard but widens the spread.
 That replay is a prediction, not a bound: it reuses one run's per-script durations and so cannot model another run's runner-speed spread.
-The first real CI run on the refreshed table, [run 34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299), measured a higher worst suite wall time of 20.53 min.
+Replaying the added sample, run 34466966385, into the current partition lowers its worst script sum from 21.63 to 18.58 min, with the five shards spanning 14.32 to 18.58 min; this is an in-sample check, not held-out validation.
+The first real CI run on the four-run table, [run 34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299), measured a higher worst suite wall time of 20.53 min against 18.11 min of assignment weight, so a shard can and does exceed its predicted weight.
 Its whole-job times ranged from 13.51 to 20.78 min, including steps outside the suite.
+The later run 34466966385 measured a worst suite wall time of 21.67 min on that same four-run table and fired the balance guard; its whole-job times ranged from 14.83 to 21.97 min.
+There is no measured CI margin for the current five-run table yet.
 Prefer a figure measured by an actual run over a replayed one whenever both are available.
 
 The single longest script, `tests/fm-watch-triage.test.sh` at 592748 ms, is the floor for any shard count.
-At 9.88 min it is 10.9% of the whole lane, so no shard count can bring a shard below it.
+At 9.88 min it is 10.3% of the whole lane's assignment weight, so no shard count can bring a shard below it.
 
-Refresh the CI-derived hints by downloading the per-shard timing artifacts from several green CI runs, replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the slowest measured `duration_ms` per `path`, and updating the table above:
+Refresh the CI-derived hints by downloading the per-shard timing artifacts from several CI runs whose serial shards all passed, replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the slowest measured `duration_ms` per `path`, and updating the table above:
 
 ```sh
 for run in <run-id> <run-id> <run-id>; do
@@ -150,21 +152,27 @@ That direction matters more than the exact figure.
 A bound of 78% or higher fires on none of the 29 green shard measurements taken across those runs, including the runs immediately before the cancellation, so it could not have warned about anything.
 A guard that cannot go red is worse than no guard, because it reassures.
 
-The margin the bound leaves, in minutes:
+The measured margin before the current five-run hint refresh, in minutes:
 
 | | minutes | share of the 30-minute cap |
 |---|---:|---:|
-| worst shard suite wall time measured by CI on the refreshed hints ([run 34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299)) | 20.53 | 68.4% |
+| earlier worst shard suite wall time on the four-run hints ([run 34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299)) | 20.53 | 68.4% |
+| latest worst shard suite wall time on the four-run hints ([run 34466966385](https://github.com/kunchenguid/firstmate/actions/runs/34466966385)) | 21.67 | 72.2% |
 | guard fails above | 21.60 | 72% |
 | job is cancelled at | 30.00 | 100% |
 
-That leaves roughly **1.1 minutes of growth** between the lane as measured and the guard's failure threshold, and a further 8.4 minutes between that threshold and a cancellation.
-Read that first number as small on purpose rather than as slack: this bound is an early warning, so the guard is expected to fire on modest drift, and a firing means refresh the hints or repack the lane rather than raise the bound.
-An earlier revision of this section put that margin at 4.61 minutes; that came from the held-out replay above rather than from a run, and the measured figure supersedes it.
+Run 34460760299 left roughly **1.1 minutes of growth**, but run 34466966385 consumed that margin: shard 4 recorded 1299925 ms, exceeding the 1296000 ms bound by **3.925 seconds with every shard's tests passing**.
+At five shards a balanced lane sits near **58% of the cap**: run 34466966385's measured suite wall times total 86.97 min, or 17.39 min per shard if evenly distributed, against the 72% bound at 21.6 min.
+Ordinary runner variance can consume that margin, as it did on this run.
+The current conservative hint weights predict 19.14 min per shard, or 63.8% of the cap; that assignment weight is distinct from the measured lane average.
+Refreshing the hints improves the pack but **does not make the guard immune to a slow runner**.
+This bound is an early warning, so the guard is expected to fire on modest drift, and a firing means refresh the hints or repack the lane rather than raise the bound.
+The refreshed held-out replay leaves 4.65 min below the threshold, but this is predicted headroom, not a measured CI margin for the current pack.
+A further 8.4 minutes separate the guard threshold from cancellation.
 The numerator is the suite's wall clock while `timeout-minutes` bounds the whole job, so the share understates the job by whatever the surrounding steps cost.
-That bias is measured, not assumed: across the 30 `tests-portable-serial` jobs of those runs, non-suite time ranged from 15 to 35 seconds, at most 1.9% of the cap.
-Against a margin this size that bias is a material fraction of it rather than negligible, which is a further reason to treat a firing as a signal to re-measure.
-Re-derive every number in this section from the most recent green CI run whenever the job gains or loses steps, the lane's variance changes, or the hints are refreshed.
+That bias is measured, not assumed: across run 34466966385's five serial jobs, non-suite time ranged from 17.2 to 22.0 seconds, about 1.2% of the cap at the upper end.
+That overhead matters when margins are measured in seconds, which is a further reason to treat a firing as a signal to re-measure.
+Re-derive every number in this section from the most recent CI run whose serial shards all passed whenever the job gains or loses steps, the lane's variance changes, or the hints are refreshed.
 
 ### What it reports
 
