@@ -105,11 +105,8 @@ fm_path_mtime() {
 # unreadable, or malformed operand fails the whole call, so callers stay
 # fail-closed.
 fm_path_identity() {
-  local want=$# path identities field saved_ifs
+  local want=$# identities field saved_ifs
   [ "$want" -gt 0 ] || return 1
-  for path in "$@"; do
-    [ -e "$path" ] || return 1
-  done
   if [ "$_FM_UNAME" = Darwin ]; then
     identities=$(/usr/bin/stat -L -f '%d:%i' "$@" 2>/dev/null) || return 1
   else
