@@ -963,7 +963,7 @@ test_exclude_family() {
 }
 
 test_portable_shard_union_and_coverage_guard() {
-  local s1 s2 proven serial herdr all_count union_count overlap out first
+  local s1 s2 proven serial herdr all_count union_count overlap out lane
   s1=$("$RUNNER" --list --lane portable-parallel-1)
   s2=$("$RUNNER" --list --lane portable-parallel-2)
   proven=$("$RUNNER" --list --proven-isolated)
@@ -991,11 +991,36 @@ test_portable_shard_union_and_coverage_guard() {
   # No duplicates across the four partitions.
   [ "$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" | LC_ALL=C sort | uniq -d | wc -l | tr -d ' ')" = "0" ] \
     || fail "lanes must not duplicate scripts"
-  # LPT order: first script of shard 1 is the longest proven script.
-  first=$(printf '%s\n' "$s1" | head -n 1)
-  [ "$first" = "tests/fm-x-mode.test.sh" ] \
-    || fail "shard 1 must start with the longest proven script, got $first"
+  # LPT execution order, asserted against the runner's own measured schedule
+  # rather than against a script name: naming the current longest script here is
+  # what let the recorded lane duration go stale unnoticed in the first place.
+  for lane in portable-parallel-1 portable-parallel-2; do
+    [ "$("$RUNNER" --list --lane "$lane")" = "$("$RUNNER" --list-scheduled --lane "$lane")" ] \
+      || fail "$lane membership must be stored longest-measured-first"
+  done
   pass "portable shard union, disjointness, and coverage guard hold"
+}
+
+# The two parallel lanes are only "duration-balanced" while every member has a
+# measured hint and the packing over those hints stays even. Both halves went
+# unchecked until one lane grew past its CI job cap and was cancelled on every
+# run, so assert them through the guard's own reported numbers.
+test_portable_parallel_lanes_stay_duration_balanced() {
+  local out max imbalance unhinted
+  out=$("$RUNNER" --check-coverage)
+  unhinted=$(printf '%s\n' "$out" | sed -n 's/.*parallel_unhinted=\([0-9]*\).*/\1/p')
+  max=$(printf '%s\n' "$out" | sed -n 's/.*parallel_max_ms=\([0-9]*\).*/\1/p')
+  imbalance=$(printf '%s\n' "$out" | sed -n 's/.*parallel_imbalance_ms=\([0-9]*\).*/\1/p')
+  [ -n "$unhinted" ] && [ -n "$max" ] && [ -n "$imbalance" ] \
+    || fail "coverage guard must report parallel_unhinted, parallel_max_ms, parallel_imbalance_ms: $out"
+  [ "$unhinted" = "0" ] \
+    || fail "$unhinted proven-isolated scripts have no measured parallel hint, so the lanes are packed on a guess"
+  [ "$max" -gt 0 ] || fail "parallel_max_ms must be a positive packed duration, got $max"
+  # 5% of the worst lane: wide enough that one script's growth does not trip it,
+  # narrow enough that a lopsided partition cannot call itself balanced.
+  [ "$((imbalance * 20))" -le "$max" ] \
+    || fail "parallel lanes differ by ${imbalance}ms against a ${max}ms worst lane, more than 5%"
+  pass "portable parallel lanes are fully hinted and packed within 5% of each other"
 }
 
 test_portable_serial_shards_partition_the_serial_lane() {
@@ -1603,6 +1628,7 @@ test_live_guards_expect_a_capability_skip_class
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_portable_parallel_lanes_stay_duration_balanced
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_shard_lane_refusals

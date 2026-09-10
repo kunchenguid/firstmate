@@ -18,6 +18,7 @@
 #   fm-test-run.sh --list --family <name>
 #   fm-test-run.sh --list --lane portable-parallel-1
 #   fm-test-run.sh --list-scheduled --family <name>
+#   fm-test-run.sh --list-scheduled --lane portable-parallel-1
 #   fm-test-run.sh --list-families
 #   fm-test-run.sh --list-concurrent-safe-families
 #   fm-test-run.sh --concurrent-safe-family-jobs-max <name>
@@ -114,7 +115,11 @@
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
 # owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a
-# duration-balanced partition of that exact set (see docs/fm-test-portable-shards.md).
+# duration-balanced partition of that exact set, packed from the measured hints
+# in portable_parallel_weight_hints (see docs/fm-test-portable-shards.md).
+# --check-coverage prints the resulting parallel_max_ms and
+# parallel_imbalance_ms, so what the lanes are balanced to is always a derived
+# number and never a literal in prose that can go stale unnoticed.
 #
 # portable-serial stays strictly serial. Its CI shards (portable-serial-<k>of<n>)
 # split it across separate runners, so two of its stateful scripts still never
@@ -462,41 +467,96 @@ tests/fm-x-mode.test.sh
 EOF
 }
 
-# Portable parallel shard 1: LPT balance of the proven-isolated set using the
-# current concurrent-proof durations in docs/fm-test-isolation-proof.json.
-# Execution order is longest first so wall-clock stays near the balanced sum.
+# Measured serial duration of every proven-isolated script, one "<path> <ms>"
+# per line, and the single basis the two portable parallel lanes are packed
+# from. The instrument has to match what the lanes actually do: these are
+# serial runs of the real lanes on ubuntu-latest, not the 4-way concurrent
+# local timings in docs/fm-test-isolation-proof.json, which measure isolation
+# rather than lane wall clock. Each value is the slowest of the 2026-09-10 CI
+# runs recorded in docs/fm-test-portable-shards.md, which owns the refresh.
+# --check-coverage derives and prints the resulting lane weights, so the lane
+# duration is a computed number rather than a literal in prose that can rot.
+portable_parallel_weight_hints() {
+  cat <<'EOF'
+tests/fm-arm-pretool-check.test.sh 30898
+tests/fm-backend-herdr.test.sh 22144
+tests/fm-brief.test.sh 1625
+tests/fm-captain-hold-lifecycle.test.sh 296481
+tests/fm-cd-pretool-check.test.sh 16964
+tests/fm-composer-ghost.test.sh 2120
+tests/fm-composer-lib.test.sh 4798
+tests/fm-crew-state.test.sh 11557
+tests/fm-ensure-agents-md.test.sh 901
+tests/fm-grok-harness.test.sh 6563
+tests/fm-herdr-lab.test.sh 6936
+tests/fm-lint.test.sh 164262
+tests/fm-pi-primary-types.test.sh 8624
+tests/fm-pr-merge.test.sh 111145
+tests/fm-review-diff.test.sh 2747
+tests/fm-send-popup-settle.test.sh 4939
+tests/fm-send-settle.test.sh 2051
+tests/fm-send-strict.test.sh 3861
+tests/fm-spawn-batch.test.sh 2265
+tests/fm-supervision-instructions.test.sh 297
+tests/fm-test-run.test.sh 92944
+tests/fm-tmux-submit-busy.test.sh 2477
+tests/fm-transition-lib.test.sh 99
+tests/fm-x-mode.test.sh 31870
+EOF
+}
+
+# Sum the hints above for the scripts read on stdin, and report how many of
+# them had no hint at all, as "<summed_ms> <unhinted_count>".
+portable_parallel_lane_weight() {
+  awk '
+    NR == FNR { if (NF) { hint[$1] = $2 } ; next }
+    NF {
+      if ($1 in hint) { total += hint[$1] } else { unhinted++ }
+    }
+    END { printf "%d %d\n", total + 0, unhinted + 0 }
+  ' <(portable_parallel_weight_hints) -
+}
+
+# Portable parallel shard 1: LPT balance of the proven-isolated set over the
+# hints above. Execution order is longest first so wall-clock stays near the
+# balanced sum. tests/fm-pi-primary-types.test.sh belongs to this lane because
+# this is the parallel job that installs the Pi package; moving it needs that
+# workflow step moved with it.
 list_portable_parallel_1() {
   cat <<'EOF'
-tests/fm-x-mode.test.sh
-tests/fm-cd-pretool-check.test.sh
-tests/fm-captain-hold-lifecycle.test.sh
-tests/fm-test-run.test.sh
-tests/fm-composer-ghost.test.sh
-tests/fm-grok-harness.test.sh
 tests/fm-lint.test.sh
+tests/fm-pr-merge.test.sh
+tests/fm-test-run.test.sh
+tests/fm-cd-pretool-check.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-grok-harness.test.sh
+tests/fm-composer-lib.test.sh
 tests/fm-review-diff.test.sh
+tests/fm-tmux-submit-busy.test.sh
+tests/fm-composer-ghost.test.sh
 tests/fm-brief.test.sh
-tests/fm-transition-lib.test.sh
 EOF
 }
 
 # Portable parallel shard 2: the complementary LPT half of the proven set.
+# tests/fm-captain-hold-lifecycle.test.sh alone is 36% of the whole parallel
+# set, so it fixes this lane's floor: no two-lane split can run shorter than
+# that one script.
 list_portable_parallel_2() {
   cat <<'EOF'
-tests/fm-backend-herdr.test.sh
+tests/fm-captain-hold-lifecycle.test.sh
+tests/fm-x-mode.test.sh
 tests/fm-arm-pretool-check.test.sh
+tests/fm-backend-herdr.test.sh
 tests/fm-crew-state.test.sh
 tests/fm-herdr-lab.test.sh
-tests/fm-pr-merge.test.sh
 tests/fm-send-popup-settle.test.sh
-tests/fm-tmux-submit-busy.test.sh
-tests/fm-send-settle.test.sh
 tests/fm-send-strict.test.sh
 tests/fm-spawn-batch.test.sh
-tests/fm-supervision-instructions.test.sh
+tests/fm-send-settle.test.sh
 tests/fm-ensure-agents-md.test.sh
-tests/fm-composer-lib.test.sh
+tests/fm-supervision-instructions.test.sh
+tests/fm-transition-lib.test.sh
 EOF
 }
 
@@ -747,6 +807,20 @@ portable_serial_unhinted() {
   rm -rf "$tmp"
 }
 
+# One scheduling weight lookup for every lane. The parallel hints cover the
+# proven-isolated set and the serial hints cover the remainder, so
+# --list-scheduled ranks a parallel lane on its measured durations instead of
+# handing every one of its scripts the serial default guess.
+script_weight_for() {
+  local want=$1 ms
+  ms=$(portable_parallel_weight_hints | awk -v want="$want" '$1 == want { print $2; exit }')
+  if [ -n "$ms" ]; then
+    printf '%s\n' "$ms"
+    return 0
+  fi
+  portable_serial_weight_for "$want"
+}
+
 portable_serial_weight_for() {
   local want=$1 path ms
   while read -r path ms; do
@@ -875,6 +949,7 @@ select_lane() {
 
 run_coverage_guard() {
   local tmp missing extra a b shard unhinted serial_total
+  local p1_ms p1_unhinted p2_ms p2_unhinted parallel_max_ms parallel_imbalance_ms
   local -a saved_scripts=()
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
@@ -1004,9 +1079,23 @@ run_coverage_guard() {
     fi
   fi
 
-  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s serial=%s serial_shards=%s serial_unhinted=%s herdr=%s\n' \
+  # Report what the two parallel lanes are actually packed to, derived from the
+  # hint table rather than asserted in a comment, so the claim that they are
+  # duration-balanced is a number a reader can re-derive with one command. The
+  # worst lane is what the CI job cap applies to.
+  read -r p1_ms p1_unhinted <<<"$(list_portable_parallel_1 | portable_parallel_lane_weight)"
+  read -r p2_ms p2_unhinted <<<"$(list_portable_parallel_2 | portable_parallel_lane_weight)"
+  parallel_max_ms=$p1_ms
+  [ "$p2_ms" -le "$parallel_max_ms" ] || parallel_max_ms=$p2_ms
+  parallel_imbalance_ms=$((p1_ms - p2_ms))
+  [ "$parallel_imbalance_ms" -ge 0 ] || parallel_imbalance_ms=$((-parallel_imbalance_ms))
+
+  printf 'FM_TEST_COVERAGE ok total=%s parallel=%s parallel_max_ms=%s parallel_imbalance_ms=%s parallel_unhinted=%s serial=%s serial_shards=%s serial_unhinted=%s herdr=%s\n' \
     "$(wc -l <"$tmp/all" | tr -d ' ')" \
     "$(wc -l <"$tmp/shards_union" | tr -d ' ')" \
+    "$parallel_max_ms" \
+    "$parallel_imbalance_ms" \
+    "$((p1_unhinted + p2_unhinted))" \
     "$(wc -l <"$tmp/serial" | tr -d ' ')" \
     "$PORTABLE_SERIAL_SHARDS" \
     "$unhinted" \
@@ -1934,7 +2023,7 @@ fi
 if [ "$LIST_ONLY" -eq 1 ] || [ "$LIST_SCHEDULED" -eq 1 ]; then
   if [ "$LIST_SCHEDULED" -eq 1 ]; then
     for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
-      printf '%s\t%s\n' "$(portable_serial_weight_for "$s")" "$s"
+      printf '%s\t%s\n' "$(script_weight_for "$s")" "$s"
     done | LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2 | cut -f2-
   else
     for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
