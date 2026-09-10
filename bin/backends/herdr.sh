@@ -600,18 +600,14 @@ fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id>
   printf '%s' "$token"
 }
 
-fm_backend_herdr_projection_journal_field() {  # <journal> <key>
-  local journal=$1 key=$2 count
-  count=$(grep -c "^${key}=" "$journal" 2>/dev/null || true)
-  [ "$count" = 1 ] || return 1
-  grep "^${key}=" "$journal" 2>/dev/null | cut -d= -f2-
-}
-
 # fm_backend_herdr_projection_journal_snapshot: validate a version 1 attempt
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines expected_label expected_task_label exact
+  local journal=$1 id=$2 line_count=0 key value expected_label expected_task_label exact
+  local version_count=0 task_id_count=0 projection_id_count=0 home_count=0
+  local session_count=0 workspace_count=0 tab_count=0 pane_count=0
+  local parent_workspace_count=0 parent_label_count=0 workspace_label_count=0 task_label_count=0
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
   FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=""
@@ -625,29 +621,45 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=""
   FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=""
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
-  lines=$(wc -l < "$journal" 2>/dev/null | tr -d '[:space:]')
-  FM_BACKEND_HERDR_JOURNAL_VERSION=$(fm_backend_herdr_projection_journal_field "$journal" version) || return 1
-  FM_BACKEND_HERDR_JOURNAL_TASK_ID=$(fm_backend_herdr_projection_journal_field "$journal" task_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=$(fm_backend_herdr_projection_journal_field "$journal" projection_id) || return 1
+  while IFS='=' read -r key value; do
+    line_count=$((line_count + 1))
+    case "$key" in
+      version) version_count=$((version_count + 1)); FM_BACKEND_HERDR_JOURNAL_VERSION=$value ;;
+      task_id) task_id_count=$((task_id_count + 1)); FM_BACKEND_HERDR_JOURNAL_TASK_ID=$value ;;
+      projection_id) projection_id_count=$((projection_id_count + 1)); FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=$value ;;
+      home) home_count=$((home_count + 1)); FM_BACKEND_HERDR_JOURNAL_HOME=$value ;;
+      session) session_count=$((session_count + 1)); FM_BACKEND_HERDR_JOURNAL_SESSION=$value ;;
+      workspace_id) workspace_count=$((workspace_count + 1)); FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID=$value ;;
+      tab_id) tab_count=$((tab_count + 1)); FM_BACKEND_HERDR_JOURNAL_TAB_ID=$value ;;
+      pane_id) pane_count=$((pane_count + 1)); FM_BACKEND_HERDR_JOURNAL_PANE_ID=$value ;;
+      parent_workspace_id) parent_workspace_count=$((parent_workspace_count + 1)); FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID=$value ;;
+      parent_label) parent_label_count=$((parent_label_count + 1)); FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=$value ;;
+      workspace_label) workspace_label_count=$((workspace_label_count + 1)); FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=$value ;;
+      task_label) task_label_count=$((task_label_count + 1)); FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=$value ;;
+    esac
+  done < "$journal"
+  [ "$version_count" -eq 1 ] \
+    && [ "$task_id_count" -eq 1 ] \
+    && [ "$projection_id_count" -eq 1 ] || return 1
   [ "$FM_BACKEND_HERDR_JOURNAL_TASK_ID" = "$id" ] || return 1
   [ "${#FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID}" -eq 22 ] || return 1
   case "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" in
     *[!A-Za-z0-9_-]*) return 1 ;;
   esac
-  case "$FM_BACKEND_HERDR_JOURNAL_VERSION:$lines" in
+  case "$FM_BACKEND_HERDR_JOURNAL_VERSION:$line_count" in
     1:3) return 0 ;;
     2:12) ;;
     *) return 1 ;;
   esac
-  FM_BACKEND_HERDR_JOURNAL_HOME=$(fm_backend_herdr_projection_journal_field "$journal" home) || return 1
-  FM_BACKEND_HERDR_JOURNAL_SESSION=$(fm_backend_herdr_projection_journal_field "$journal" session) || return 1
-  FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID=$(fm_backend_herdr_projection_journal_field "$journal" workspace_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_TAB_ID=$(fm_backend_herdr_projection_journal_field "$journal" tab_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PANE_ID=$(fm_backend_herdr_projection_journal_field "$journal" pane_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_journal_field "$journal" parent_workspace_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" parent_label) || return 1
-  FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" workspace_label) || return 1
-  FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" task_label) || return 1
+  [ "$home_count" -eq 1 ] \
+    && [ "$session_count" -eq 1 ] \
+    && [ "$workspace_count" -eq 1 ] \
+    && [ "$tab_count" -eq 1 ] \
+    && [ "$pane_count" -eq 1 ] \
+    && [ "$parent_workspace_count" -eq 1 ] \
+    && [ "$parent_label_count" -eq 1 ] \
+    && [ "$workspace_label_count" -eq 1 ] \
+    && [ "$task_label_count" -eq 1 ] || return 1
   case "$FM_BACKEND_HERDR_JOURNAL_HOME" in
     /*) ;;
     *) return 1 ;;
@@ -676,6 +688,20 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
 fm_backend_herdr_projection_journal_token() {  # <journal> <task-id>
   fm_backend_herdr_projection_journal_snapshot "$1" "$2" || return 1
   printf '%s' "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
+}
+
+# fm_backend_herdr_projection_journal_retire: remove one validated presentation
+# journal. Callers supply the exact snapshot facts they proved when available;
+# this fresh read prevents a stale candidate from authorizing a later unlink.
+fm_backend_herdr_projection_journal_retire() { # <journal> <task-id> [token version workspace tab pane]
+  local journal=$1 id=$2 token=${3:-} version=${4:-} workspace=${5:-} tab=${6:-} pane=${7:-}
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  [ -z "$token" ] || [ "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" = "$token" ] || return 1
+  [ -z "$version" ] || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = "$version" ] || return 1
+  [ -z "$workspace" ] || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$workspace" ] || return 1
+  [ -z "$tab" ] || [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$tab" ] || return 1
+  [ -z "$pane" ] || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$pane" ] || return 1
+  rm -f -- "$journal"
 }
 
 fm_backend_herdr_projection_home_identity() {  # <home>

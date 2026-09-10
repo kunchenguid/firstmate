@@ -3240,7 +3240,13 @@ HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
+HERDR_PRESENTATION_TOKEN=
+HERDR_PRESENTATION_VERSION=
+HERDR_PRESENTATION_BOUND_WORKSPACE=
+HERDR_PRESENTATION_BOUND_TAB=
+HERDR_PRESENTATION_BOUND_PANE=
+if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] \
+   && [ "$BACKEND" = herdr ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   fm_backend_source herdr || true
   HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
@@ -3254,6 +3260,11 @@ if [ "$BACKEND" = herdr ] \
        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
        "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
     HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+    HERDR_PRESENTATION_TOKEN=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
+    HERDR_PRESENTATION_VERSION=$FM_BACKEND_HERDR_JOURNAL_VERSION
+    HERDR_PRESENTATION_BOUND_WORKSPACE=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+    HERDR_PRESENTATION_BOUND_TAB=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+    HERDR_PRESENTATION_BOUND_PANE=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
   fi
 fi
 
@@ -3283,9 +3294,21 @@ elif [ "$BACKEND" = herdr ]; then
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+if [ "$TEARDOWN_WORKTREE_OWNED" != 1 ] \
+  && [ "$BACKEND" = herdr ] \
+  && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  if ! fm_backend_source herdr; then
+    echo "warning: herdr presentation journal for $ID could not be retired because the adapter is unavailable; retaining it" >&2
+  elif ! fm_backend_herdr_projection_journal_retire "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    echo "warning: herdr presentation journal for $ID could not be validated for retirement; retaining it" >&2
+  fi
+elif [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
+    fm_backend_herdr_projection_journal_retire \
+      "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_PRESENTATION_TOKEN" \
+      "$HERDR_PRESENTATION_VERSION" "$HERDR_PRESENTATION_BOUND_WORKSPACE" \
+      "$HERDR_PRESENTATION_BOUND_TAB" "$HERDR_PRESENTATION_BOUND_PANE" \
+      || echo "warning: exact herdr task-pane close was confirmed for $ID but its journal changed and remains quarantined" >&2
   else
     echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
   fi
