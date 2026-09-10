@@ -101,7 +101,7 @@ The restore drill treats archived evaluator bytes as untrusted candidate output.
 It restores, rebinds, and statically validates each sample in a short-lived workspace, then releases that repository and worktree immediately while retaining only the bounded selection's copied tree for later execution.
 Only differential execution is bounded: the drill selects the first sample in the archive's stable lexical order and records that selection in the receipt.
 Both evaluator executions use the same preflight-proven `bin/fm-bench-confine.sh` mechanism with networking disabled, a scrubbed environment, and one independently generated opaque run root as the only writable candidate-data bind.
-The replay declaration's `package_files` lists only content-addressed code and measurement inputs from `capture_and_scoring`; when omitted, it defaults to the executable alone.
+The replay package must match the preregistered frozen layout described below; an executable alone cannot satisfy the required evaluator configuration mapping.
 The package excludes `capture.json` and candidate bundles, so neither the expected result nor an untouched candidate copy reaches replay.
 The archive and repository are not mounted for the evaluator, and the genuine and perturbed runs expose the same internal layout without a role-bearing path, environment value, or recognizable perturbation marker.
 The gate supports pure-data JSON-value, source text-token, and PNG-pixel declarations for JSON, TypeScript, JavaScript, CSS, HTML, and non-interlaced 8-bit PNG inputs.
@@ -152,10 +152,12 @@ The benchmark family includes `tests/fm-bench-review.test.sh`, which runs the Py
 Container wrappers require an explicit `repository@sha256:<64 hex digits>` or `sha256:<64 hex digits>` image identity; mutable tags and ambient image defaults cannot authorize launch or replay.
 Preflight records `evaluator_sha256` over the frozen scoring code, execution contract, and evaluator configuration.
 Each archived `evaluator_rerun.frozen_package` maps its package filenames to frozen source paths, including both evaluator configuration files; all package bytes must match those hashes.
-The archived entrypoint must be the execution contract’s `program`, or one of its explicitly preregistered `archive_programs`.
-The execution contract’s `archive_packages` maps each source entrypoint to its exact `argv` and complete `frozen_package` destination-to-source mapping. Archive layouts must match that frozen declaration. If omitted, each entrypoint uses its source path as `argv` and preserves the source paths of every frozen scoring file and both evaluator configuration files.
+The archived entrypoint must belong to the execution contract's `archive_programs`, which defaults to a list containing only `program` when omitted.
+The execution contract's `archive_packages` maps each source entrypoint to its exact `argv` and complete `frozen_package` destination-to-source mapping.
+Archive layouts must match that frozen declaration, and `package_files` must list exactly its mapped destinations.
+If `archive_packages` is omitted, each entrypoint uses its source path as `argv` and preserves the source paths of every frozen scoring file and both evaluator configuration files.
 Scored archives must retain valid timing intervals before archive verification, restore, or cleanup can pass.
 
-Each provisioned isolation entrant declares its full `starting_commit`. Preflight checks that revision, and fresh benchmark launches verify it and a clean checkout before skipping the ordinary default-branch refresh.
+The [spawn header](../bin/fm-spawn.sh) owns the benchmark exception to fresh-base handling; [the launch library](../bin/fm-bench-launch-lib.sh) owns its frozen-start check.
 
 Archived `packet.md` and `ground-truth.md` must match frozen `packets/<packet>.md` and `ground-truth/<packet>.md`. Files under packet-specific source directories retain their source-relative paths in the archive and must all appear in `packet_and_ground_truth`.

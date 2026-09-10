@@ -101,6 +101,9 @@ fm_refuse_unconfined_remote_benchmark_entrant() {  # <task-id>
   return 1
 }
 
+# Fresh benchmark launches require the preflight-bound entrant root to remain
+# clean at its full starting_commit from isolation.json; never refresh that
+# checkout to the default branch and silently change the benchmark input.
 fm_bench_verify_start() {
   local id=$1 worktree=$2
   fm_refuse_ungated_benchmark_entrant "$id" || return 1

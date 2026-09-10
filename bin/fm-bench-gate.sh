@@ -36,7 +36,7 @@
 #   evaluator-verify  environment lock, published score map, zero-weight
 #                     validity gates, confined content-addressed executions,
 #                     frozen content-addressed inputs, derived mutation
-#                     calibration, and one capture per planned head
+#                     calibration, and distinct pre-launch calibration captures
 #   evaluator-execute-verify
 #                     run the evaluator proof used by preflight directly
 #   manifest-build / manifest-check
@@ -67,7 +67,7 @@
 #                     passing drill still bound to the archive as it stands
 #
 # Exit codes: 0 pass, 1 refused, 2 usage error, 3 captain-stop. A captain-stop
-# is a new fact the captain must rule on - both historical packets failing
+# is a new fact the captain must rule on - every historical packet in a track failing
 # provenance, or a measured high cost above the approved class - and is never
 # resolvable by substituting a packet or expanding the budget.
 #

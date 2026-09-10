@@ -192,7 +192,9 @@
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
-#   task worktree. When an origin configuration is detected, spawn fetches it,
+#   task worktree. Benchmark entrants use the frozen-start check owned by
+#   bin/fm-bench-launch-lib.sh instead of the ordinary base refresh below.
+#   For ordinary tasks, when an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch, and resets to its tip. When none
 #   is detected, spawn skips that remote freshness check and launches from the
 #   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
@@ -3819,7 +3821,8 @@ esac
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
 # uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
+# an unset value is the single-store default and needs no prefix. Confined
+# benchmark entrants use their private home and do not inherit this host store.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ] \
    && { [[ "$ID" != bench-* ]] || [ "${FM_BENCH_LAUNCH_BYPASS:-}" = 1 ]; }; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
