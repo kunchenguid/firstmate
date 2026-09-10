@@ -91,12 +91,7 @@ for arg in "$@"; do
     case "$arg" in *=*) origin=${arg#*=} ;; esac
     safe_id "$name" || die "invalid project name: $name"
     case "$arg" in
-      # The rejected value is never echoed back. fm-project-origin-lib.sh
-      # deliberately accepts a user:pass@host authority, so an ordinary
-      # validation error that repeated the origin verbatim would carry that
-      # credential into whatever chat, ticket, or log the operator pastes it
-      # into. The operator supplied this value on the command line, so naming
-      # the argument points at it without printing it.
+      # See docs/remote-secondmates.md#provision-a-route for the origin-diagnostic safety contract.
       *=*) fm_project_origin_safe "$origin" \
         || die "project $name origin is not an accepted clone URL; check the origin you passed as $name=<origin-url>" ;;
     esac
@@ -183,8 +178,7 @@ EOF
   fi
   [ -n "$ORIGIN" ] \
     || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"
-  # Same secrecy rule as the command-line check above: name where the origin
-  # can be read rather than printing it.
+  # Keep this diagnostic under the same safety contract as the argument check above.
   fm_project_origin_safe "$ORIGIN" \
     || die "project $project origin is not an accepted clone URL; inspect the origin of the clone at $PROJECTS/$project, or pass an accepted one as $project=<origin-url>"
   REGISTRY_LINE=$(awk -v p="$project" '$1 == "-" && $2 == p { print; exit }' "$DATA/projects.md" 2>/dev/null || true)
