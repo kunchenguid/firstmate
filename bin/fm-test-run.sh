@@ -807,11 +807,7 @@ portable_serial_unhinted() {
   rm -rf "$tmp"
 }
 
-# One scheduling weight lookup for every lane. The parallel hints cover the
-# proven-isolated set and the serial hints cover the remainder, so
-# --list-scheduled ranks a parallel lane on its measured durations instead of
-# handing every one of its scripts the serial default guess.
-script_weight_for() {
+portable_parallel_weight_for() {
   local want=$1 ms
   ms=$(portable_parallel_weight_hints | awk -v want="$want" '$1 == want { print $2; exit }')
   if [ -n "$ms" ]; then
@@ -2023,7 +2019,14 @@ fi
 if [ "$LIST_ONLY" -eq 1 ] || [ "$LIST_SCHEDULED" -eq 1 ]; then
   if [ "$LIST_SCHEDULED" -eq 1 ]; then
     for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
-      printf '%s\t%s\n' "$(script_weight_for "$s")" "$s"
+      case "$MODE:$LANE" in
+        lane:portable-parallel-1|lane:portable-parallel-2)
+          printf '%s\t%s\n' "$(portable_parallel_weight_for "$s")" "$s"
+          ;;
+        *)
+          printf '%s\t%s\n' "$(portable_serial_weight_for "$s")" "$s"
+          ;;
+      esac
     done | LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2 | cut -f2-
   else
     for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
