@@ -227,7 +227,7 @@ test_projection_bounds_and_counts() {
 }
 
 test_snapshot_project_source_uses_cache_without_observing_terminals() {
-  local home cache remote_home cache_key cache_file fakebin before after out observation_log
+  local home cache remote_home cache_key cache_file fakebin before after out observation_log run_branch run_head run_repo
   home="$TMP_ROOT/read-only-home"
   cache="$home/state/secondmate-summary-cache"
   remote_home=/srv/remote-firstmate
@@ -259,7 +259,24 @@ SH
 printf '%s\n' "$*" >> "${OBSERVATION_LOG:?}"
 exit 1
 SH
-  chmod +x "$fakebin/fake-ssh" "$fakebin/tmux"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "axi status" ]; then
+  cat <<EOF
+run:
+  id: "01PROJECTSTATUS"
+  branch: ${FM_FAKE_RUN_BRANCH:?}
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:?}"
+  pr: ""
+  findings: none
+  steps[1]{step,status,findings,duration_ms}:
+    review,running,0,0
+EOF
+fi
+exit 0
+SH
+  chmod +x "$fakebin/fake-ssh" "$fakebin/tmux" "$fakebin/no-mistakes"
   observation_log="$TMP_ROOT/terminal-observations.log"
   out=$(PATH="$fakebin:$PATH" OBSERVATION_LOG="$observation_log" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
     FM_SNAPSHOT_CACHE_DIR="$cache" FM_SNAPSHOT_NOW=2026-09-10T18:07:25Z \
@@ -274,7 +291,8 @@ SH
   ' >/dev/null || fail "read-only snapshot did not consume the existing cache: $out"
 
   home="$TMP_ROOT/read-only-no-cache"
-  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects/local-work"
+  run_repo="$home/projects/run-work"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects/local-work" "$run_repo"
   cat > "$home/data/secondmates.md" <<EOF
 - remote - Remote scope (host: fake-host; root: /srv/code; home: $remote_home; scope: remote; projects: RemoteProject; added 2026-09-10)
 EOF
@@ -284,23 +302,40 @@ EOF
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] local-work - Local work (repo: LocalProject) (kind: ship) (since 2026-09-10)
+- [ ] run-work - Validating work (repo: RunProject) (kind: ship) (since 2026-09-10)
 EOF
   fm_write_meta "$home/state/local-work.meta" \
     "kind=ship" "project=$home/projects/local-work" "worktree=$home/projects/local-work" \
     "window=firstmate:fm-local-work" "harness=claude" "mode=no-mistakes"
   printf 'working: secret terminal context\n' > "$home/state/local-work.status"
+  git -C "$run_repo" init -q
+  git -C "$run_repo" config user.email test@example.test
+  git -C "$run_repo" config user.name Test
+  printf 'fixture\n' > "$run_repo/README"
+  git -C "$run_repo" add README
+  git -C "$run_repo" commit -q -m fixture
+  run_branch=$(git -C "$run_repo" symbolic-ref --quiet --short HEAD)
+  run_head=$(git -C "$run_repo" rev-parse HEAD)
+  fm_write_meta "$home/state/run-work.meta" \
+    "kind=ship" "project=$run_repo" "worktree=$run_repo" \
+    "window=firstmate:fm-run-work" "harness=claude" "mode=no-mistakes"
   rm -f "$observation_log"
-  out=$(PATH="$fakebin:$PATH" OBSERVATION_LOG="$observation_log" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+  out=$(PATH="$fakebin:$PATH" OBSERVATION_LOG="$observation_log" FM_FAKE_RUN_BRANCH="$run_branch" FM_FAKE_RUN_HEAD="$run_head" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
     FM_SNAPSHOT_CACHE_DIR="$home/state/never-create" "$SNAPSHOT" --json --project-status-source) \
     || fail "project-status snapshot source failed without an existing cache"
   [ ! -e "$home/state/never-create" ] || fail "project-status snapshot source created its cache directory"
   [ ! -e "$observation_log" ] || fail "project-status snapshot source invoked terminal observation: $(cat "$observation_log")"
   printf '%s' "$out" | jq -e '
-    .tasks[] | select(.id == "local-work")
-    | .current_state.source == "projection-safe"
-      and .paths.status_log.present == false
-      and .hints.open_decisions == []
-  ' >/dev/null || fail "project-status source retained parent event or terminal-derived state: $out"
+    ([.tasks[] | select(.id == "local-work")][0]) as $local
+    | ([.tasks[] | select(.id == "run-work")][0]) as $run
+    | $local.current_state.state == "unknown"
+      and $local.current_state.source == "none"
+      and $local.paths.status_log.present == false
+      and $local.hints.open_decisions == []
+      and $run.current_state.state == "working"
+      and $run.current_state.source == "run-step"
+  ' >/dev/null || fail "project-status source did not isolate structured run state from prose and terminals: $out"
   pass "project-status source reads cache without writes or terminal observation"
 }
 

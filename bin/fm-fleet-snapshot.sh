@@ -334,6 +334,7 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
       FM_STATE_OVERRIDE="$STATE" \
       FM_CREW_STATE_META_OVERRIDE="$captured_meta" \
       FM_CREW_STATE_STATUS_OVERRIDE="$captured_status" \
+      FM_CREW_STATE_STRUCTURED_ONLY="$SNAPSHOT_PROJECT_STATUS_SOURCE" \
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
@@ -664,9 +665,13 @@ prefetch_task_observations() {  # <meta> <id>
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
   fi
 
-  if [ "$SNAPSHOT_PROJECT_STATUS_SOURCE" -eq 1 ]; then
-    jq -n '{state:"unknown",source:"projection-safe",detail:"endpoint and terminal state not collected",raw:""}' \
+  if [ "$SNAPSHOT_PROJECT_STATUS_SOURCE" -eq 1 ] && [ -n "$remote_host" ]; then
+    jq -n '{state:"unknown",source:"none",detail:"remote current-run state not collected",raw:""}' \
       > "$current_file" || current_rc=1
+    agent_alive=not_checked
+  elif [ "$SNAPSHOT_PROJECT_STATUS_SOURCE" -eq 1 ]; then
+    crew_state_json "$id" "$meta" "$status_capture" > "$current_file" &
+    current_pid=$!
     agent_alive=not_checked
   elif [ -n "$remote_host" ]; then
     jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}' \

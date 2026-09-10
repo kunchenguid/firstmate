@@ -769,6 +769,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
+[ "${FM_CREW_STATE_STRUCTURED_ONLY:-0}" = 1 ] \
+  && emit unknown none "no authoritative structured current-run source available"
+
 # --- fallback: no run attributed to this crew ------------------------------
 # The run-step path above already handled any crew with a run, regardless of pane
 # liveness, so a finished-but-pane-closed crew never reaches here. Down here there
