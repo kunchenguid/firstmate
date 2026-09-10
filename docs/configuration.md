@@ -94,16 +94,18 @@ Both choices are local to each Firstmate home and are not part of secondmate inh
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
-When the default backend is selected and compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations.
+A home may instead select another tasks-axi adapter such as Beads through its own `.tasks.toml` or `TASKS_AXI_BACKEND`; firstmate still uses only tasks-axi verbs for routine backlog reads and mutations, and the adapter maps `start` and evidence-bearing `done` transitions to its native statuses and evidence fields.
 When the automatic transition gate applies, dispatch and completion are not separate operator actions: each moves its work item inside the same run that creates or removes the task's record, so the ordinary successful path cannot leave the backlog and live task set out of sync ([`bin/fm-backlog-transition-lib.sh`](../bin/fm-backlog-transition-lib.sh)).
 Under that gate, dispatch accepts only an unheld, unblocked Queued or In flight item in this home; a missing, Done, held, or dependency-blocked item is refused before any endpoint or local copy is created.
 Completion refuses to report success until the item is closed, and session start reconciles this home's own books after an interrupted run.
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
-Automatic transition mutations address the configured `<data>/backlog.md` explicitly from the data directory's parent, keeping relocated backlog configuration, archives, and relative scout-report links together.
-That explicit markdown file belongs to the markdown backend only: a home whose resolved tasks-axi backend is non-markdown never receives a markdown file override and requires no markdown backlog file, so its reads, probes, and mutations address the backend its own configuration selects.
+Automatic transitions run from the configured data directory's parent, letting that home's effective tasks-axi configuration address its selected adapter while keeping relative scout-report links rooted there.
+A markdown backlog is additionally addressed by an explicit `--file` at `<data>/backlog.md`, so the change lands in the home that owns the task regardless of the caller's working directory.
+Any other configured adapter is addressed by that root alone, because `--file` would override the adapter's own workspace path.
+The gate does not apply to persistent secondmates, manual-backend homes, or markdown homes without a backlog file, preserving their existing persistent-agent, manual, or ad-hoc lifecycle behavior while configured non-markdown adapters remain active without that file.
 Migrated-hold resolution on a beads home reads its graph path, binary, and prefix from the root `.tasks.toml` `[beads]` section only, and refuses (rc=2) when the beads backend is selected elsewhere (a `TASKS_AXI_BACKEND` override or user-level config) with no root-level `[beads]` section.
-The gate does not apply to persistent secondmates, manual-backend homes, or markdown homes without a backlog file, preserving their existing persistent-agent, manual, or ad-hoc lifecycle behavior.
-On an automatic-backend home with a backlog, missing or incompatible `tasks-axi`, an unresolvable configured data directory, or one containing a control byte fails lifecycle work before mutation.
+On an automatic-backend home, missing or incompatible `tasks-axi`, an unresolvable configured data directory, or one containing a control byte fails lifecycle work before mutation.
+An unreadable backend configuration can refuse lifecycle work before the no-backlog exemption applies; repair the configuration named in the diagnostic ([backend resolution contract](../bin/fm-tasks-axi-lib.sh)).
 Secondmate handoffs bypass that routine-backend choice: `fm-backlog-handoff.sh` keeps only its own fleet-level validation, delegates the item move to `tasks-axi mv`, and requires a verified receiver wake after a new move becomes durable.
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.
 Handoff item bodies must use at least two leading spaces, and the helper refuses a selected item with a single-space or tab-indented continuation rather than risk orphaning it.
@@ -112,8 +114,8 @@ Compatible means the installed build passes the shared version and feature probe
 Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" below for missing-tool reporting and silent default-backend behavior.
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not missing-tool reporting.
 A `manual` home owns its backlog file outright: the lifecycle transitions above are skipped there, dispatch and completion never fail over the file's contents, and a completed teardown prints the hand edit that is owed instead.
-Absent or `tasks-axi` selects the default tasks-axi backend.
-The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
+Absent or `tasks-axi` selects the tasks-axi path.
+On the default markdown adapter, tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
 ## Runtime backend (config/backend / FM_BACKEND)
 
@@ -453,7 +455,7 @@ A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
-An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual`, a home with a backlog refuses lifecycle mutation until compatible `tasks-axi` is on `PATH`, while a manual-backend home keeps its backlog hand-edited.
+An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual`, a home with a configured non-markdown adapter or a markdown backlog refuses lifecycle mutation until compatible `tasks-axi` is on `PATH`, while a manual-backend home keeps its backlog hand-edited.
 An absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
 An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: npm install -g lavish-axi && lavish-axi setup hooks)`.
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
@@ -539,6 +541,38 @@ A sweep that runs out of budget says which tool it did not reach rather than rep
 The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
+
+## Mail plane (.env)
+
+The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
+Its `poll` command surfaces each new message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
+Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
+A duplicate wake is possible if the process is killed between the queue append and the journal write and the drain acknowledges that row before the next poll heals it, or under a triple write fault that leaves a queued row with no durable record; neither case drops mail.
+IMAP and SMTP use implicit TLS on the default ports 993 and 465 (`IMAP4_SSL` / `SMTP_SSL`).
+STARTTLS and port 587 are not supported.
+It is off unless the home's gitignored `.env` provides the connection values.
+This section is the single owner of the mail-plane configuration schema; for direct invocations, environment values override `.env`, matching the Relay contract.
+
+Required, in the home's gitignored `.env`:
+
+```sh
+FM_MAIL_USER=   # IMAP/SMTP login
+FM_MAIL_PASS=   # IMAP/SMTP password
+FM_IMAP_HOST=   # IMAP server hostname
+FM_SMTP_HOST=   # SMTP server hostname
+```
+
+`FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
+The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
+A message whose header cannot be fetched is surfaced with a degraded summary instead of being skipped, so it is never missed and cannot block later mail.
+A later poll retries that fetch and, on success, surfaces the real sender and subject; a persistently unfetchable message stays degraded without repeating that wake.
+
+A home that wants mail polled unattended arms the standing check in the live home: `bin/fm-mail-check.sh arm`.
+Arming writes `state/mail.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`), so the plane's `poll` runs on its own: new mail still surfaces as `check: mail <uid>` wakes from the poll, and the standing check itself also prints a line (and the watcher turns that line into a wake) unless the poll is a proven no-op.
+Same-line silence is only for a proven no-op: a successful poll with no new mail, or a repeated identical pre-wake failure that cannot have queued mail.
+A fail-closed poll that already queued a wake, and a timeout, always print so the watcher wakes to drain it.
+`FM_MAIL_CHECK_BUDGET` (default 15, valid 5..25) bounds one standing poll and is cut down to fit `FM_CHECK_TIMEOUT`.
+`bin/fm-mail-check.sh disarm` removes the standing check.
 
 ## Relay (.env)
 
@@ -797,14 +831,18 @@ Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `F
 Each claim binds its caller-reported home and runner PID to a process identity, unique claim generation, exact registration-file generation, and resolved state-root identity.
 Registration, acquisition, replacement, retirement, and generation-bound release are serialized at one machine-wide boundary per source.
 A live identity-matched owner is never displaced, and release removes only the exact generation the caller acquired.
-Retirement and orphan reconciliation select a runner process group for signalling only while its recorded process identity still matches and the live runner still leads that group.
+Every stop proves ownership before its first signal: the live runner's recorded process identity must match and it must still lead its process group.
+Once that stop has proved ownership and sent TERM, its own escalation to KILL checks only whether the proved group still has members; it does not re-read the leader's identity or group membership, which can change or become unreadable as TERM ends the leader.
+This proof belongs only to that stop's own escalation and cannot authorize another caller that encounters an unproved group.
 A claim counts as reclaimable only when its owner is stale and an independent process-group check finds no members; a crashed leader or reused pid whose process group still has members cannot relax ownership cleanup, so reconcile preserves the claim without signalling the ambiguous group or starting a replacement.
+If the leader dies to anything other than the stop's own signal, `retire`, `reconcile`, `sweep-home`, and the guard all refuse its surviving group permanently, and the source silently stops listening.
+Whether that group may ever be signalled remains an open decision; the repaired guard does not close this gap.
 Reclaiming a generation that IS gone is not gated on tidying its capture-reservation records.
 Those records are keyed by claim token and every replacement claims a fresh one, so a leftover that can no longer be located - a state-root identity a claim recorded before its home was re-created, for example - is stale bytes rather than an ownership hazard.
 Ordinary release and reclamation still attempt reservation cleanup and require it unless both owner staleness and whole-group absence prove the generation gone.
 The narrow live-owner terminal-self-retirement path also attempts cleanup but tolerates its own still-in-flight reservation, which the runner removes on the normal end-of-capture path; exact home, PID, and claim-token ownership remains mandatory before the claim is released.
-If identity cannot be established for a live PID, or a surviving owned group cannot be proved stopped, the operation preserves the registration and claim for safe retry rather than adding a second owner.
-A live PID whose identity no longer matches is a reused PID, so cleanup refuses it before signalling.
+If identity cannot be established before the first signal, or a surviving owned group cannot be proved stopped, the operation preserves the registration and claim for safe retry rather than adding a second owner.
+A live PID whose identity no longer matches is refused before the first signal.
 Identity and process-group verification cannot be made atomic with signalling in portable shell: the reaper signals only a target it has verified as the recorded generation, but PID and group reuse remain possible in the narrow interval between verification and the signal.
 Launch pacing is the primary host-wedge protection; watchdog cleanup is a backstop.
 
@@ -826,13 +864,16 @@ Detaching a runner into its own process group is what lets a persistent source o
 So a home's process-event state carries a lease that registration, attached start, reconciliation, acknowledgement, and listing refresh, and the watcher's reconcile cycle is what keeps it fresh in a live home.
 An attached public `start` continues refreshing the lease while its caller remains attached.
 Each runner fails closed unless a small guard starts successfully beside it in a separate process group.
-That guard accepts the lease only while the state root retains the device/inode identity recorded by the runner's claim, and stops the runner's whole process group after two consecutive checks cannot prove that identity and lease freshness.
+That guard accepts the lease only while the state root retains the device/inode identity recorded by the runner's claim, and initiates the verified stop after two consecutive reads cannot prove that identity and lease freshness, so one unreadable read cannot kill a live runner.
+Those two reads are spaced half a check interval apart, so the pair the debounce requires completes inside one check interval instead of costing two of them.
+For a runner whose ownership can still be proved, the nominal detection bound is therefore the lease plus one check interval, after which the verified stop runs within its own grace period; the lease age is compared in whole seconds, so a configured lease is honoured until that age reads one second past it, and scheduling delays or failed inspection and signalling can extend the whole bound.
+That grace is a ceiling rather than a delay every stop pays: two seconds for the ordinary signal and two more for the forced one, spent only by a group that outlives the signal it was sent, which is why a healthy runner's stop completes in a fraction of a second.
 The group signal reaches the blocking child and everything under it exactly as retirement does.
 A runner exports the inherited `FM_PROCEVENT_IN_RUNNER` marker and every lease refresh is skipped under it, so a runner and its ordinary children do not certify their own owner, and the next reconcile in a live home simply starts a replacement runner.
 That no-self-refresh rule is CONFUSED-AGENT-GRADE, the same deliberate captain-decided grade `bin/fm-lease-lib.sh` documents: it stops the accidental case this boundary exists for, an orphaned or test-scaffolding source tree that would otherwise keep its own owner alive.
 A source that DELIBERATELY strips the marker from its environment can still refresh the lease, so adversarial-grade unforgeability is explicitly out of scope here and tracked as separate follow-up design work.
 Scope is the owning state root and one runner generation, never a script or process name, so a live source in another home is untouched: that home refreshes its own lease.
-`FM_PROCEVENT_OWNER_LEASE_SECONDS` (default 600, range 1..86400) is how long a runner keeps going with no sign of activity in its owning home, and `FM_PROCEVENT_OWNER_CHECK_SECONDS` (default 15, range 1..3600) is how often its guard re-reads the lease.
+`FM_PROCEVENT_OWNER_LEASE_SECONDS` (default 600, range 1..86400) is how long a runner keeps going with no sign of activity in its owning home, and `FM_PROCEVENT_OWNER_CHECK_SECONDS` (default 15, range 1..3600) is the guard's detection interval: it re-reads the lease and the recorded state-root identity twice within each interval, half an interval apart, so the two reads its debounce needs fit inside one interval rather than costing two.
 `FM_PROCEVENT_LAUNCH_FLOOR_SECONDS` (default 1, range 1..3600) is the minimum time between consecutive launches of one registration generation's stored command, bounding the launch rate of an immediately returning source during that lease window.
 The generation's first launch is immediate, later launches share its monotonic pacing timestamp, a timestamp from before a reboot is treated as expired, and replacing the registration starts a fresh pacing generation.
 
@@ -917,6 +958,9 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls
 FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may sit before the watcher attempts doorbell delivery on an idle pane; also the minimum spacing between attempts
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
+FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate
+FM_MAIL_TIMEOUT=20   # mail-plane IMAP/SMTP socket timeout in seconds; invalid or non-positive values become 20
 FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 probes on every run, other values must be 60..86400
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
@@ -924,15 +968,21 @@ FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sw
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no activity in its owning home; 1..86400
-FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # how often a runner's guard re-reads that lease; 1..3600
+FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # a runner guard's detection interval, read twice per interval; 1..3600
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of one registration generation's source command; 1..3600
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
-FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed directly
+FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when the runs ledger is consulted: axi status cannot be attributed directly, or its answer is terminal and may have a live sibling run
 FM_TEARDOWN_NM_RUNS_LIMIT=200  # recent no-mistakes run rows scanned to prove an unresolved-head parked run belongs to teardown's task
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_MAIL_USER=      # mail-plane IMAP/SMTP login, from .env or environment (docs/configuration.md "Mail plane")
+FM_MAIL_PASS=      # mail-plane IMAP/SMTP password
+FM_IMAP_HOST=      # mail-plane IMAP server hostname
+FM_IMAP_PORT=993   # mail-plane IMAP server port
+FM_SMTP_HOST=      # mail-plane SMTP server hostname
+FM_SMTP_PORT=465   # mail-plane SMTP server port
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
