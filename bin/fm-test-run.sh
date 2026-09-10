@@ -291,6 +291,7 @@ family_for_basename() {
     fm-backend-herdr-launcher-workspace-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
     fm-backend-herdr-focus-flash-e2e.test.sh|\
+    fm-backend-herdr-stale-active-tab-e2e.test.sh|\
     fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
     fm-control-herdr-smoke.test.sh)

@@ -39,7 +39,7 @@
 # behind the focused one when needed, and ends its verified lone idle shell
 # so Herdr removes the emptied workspace through the focus-preserving
 # pane-death path, with the exact pre-close tab restore as the backstop and a
-# refusal to close the active tab itself.
+# refusal to close the tab a live foreground client is viewing.
 #
 # Target string shape: "<herdr-session>:<pane-id>", e.g. "default:w1:p2" (the
 # pane id itself contains a colon; the session is always the FIRST field, the
@@ -941,11 +941,35 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
   return 0
 }
 
+# fm_backend_herdr_foreground_client_present: whether a live Herdr client is
+# the session's foreground viewer, as opposed to the persisted .focused
+# pointer workspace list still reports after that client detaches.
+# `herdr status --json` `.client.protocol` / `.client.version` name the CLI
+# making the call, so they cannot answer this; `herdr terminal title clear`
+# maps to client.window_title.clear, which returns reason
+# `no_foreground_client` when no viewer is attached and `cleared` when one is.
+# Unreadable or unexpected reasons are unknown rather than permission to
+# treat the persisted pointer as a live viewer.
+# Return codes: 0 present, 1 absent, 2 unknown.
+fm_backend_herdr_foreground_client_present() {  # <session>
+  local session=$1 out reason
+  out=$(fm_backend_herdr_cli "$session" terminal title clear 2>/dev/null) || return 2
+  reason=$(printf '%s' "$out" | jq -r '.result.reason // empty' 2>/dev/null) || return 2
+  case "$reason" in
+    no_foreground_client) return 1 ;;
+    cleared|set) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
 # fm_backend_herdr_projection_close_pane_focus_preserving: close one exact
 # response-derived projection pane without leaving the captain focused
 # anywhere else.
-# If the target belongs to the active tab, exact tab preservation is
-# impossible, so cleanup refuses instead of changing focus.
+# If the target belongs to the active tab AND a live foreground client is
+# attached, exact tab preservation is impossible, so cleanup refuses instead
+# of changing focus. When no live client is attached, the persisted .focused
+# pointer is not a viewer, so the close proceeds and focus restore is skipped
+# because there is no live focus to preserve.
 # When the close would empty the target workspace, Herdr 0.7.5's explicit
 # close moves focus to the workspace's neighbor, so the close is planned by
 # fm_backend_herdr_emptying_close_plan: reposition the doomed workspace
@@ -957,6 +981,7 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
   local session=$1 pane_id=$2 required_agent_state=${3:-}
   local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
+  local skip_restore=0 foreground_rc=0
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
@@ -976,8 +1001,13 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     return 1
   fi
   if [ "$target_tab" = "$active_tab" ]; then
-    echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
-    return 1
+    fm_backend_herdr_foreground_client_present "$session" || foreground_rc=$?
+    if [ "$foreground_rc" -eq 1 ]; then
+      skip_restore=1
+    else
+      echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
+      return 1
+    fi
   fi
   if [ -n "$required_agent_state" ]; then
     state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
@@ -1028,7 +1058,9 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   if [ "$close_status" -ne 0 ]; then
     fm_backend_herdr_emptying_move_rollback "$plan_move_record" || true
   fi
-  fm_backend_herdr_projection_focus_restore "$session" "$before" "pane close" || return 2
+  if [ "$skip_restore" -eq 0 ]; then
+    fm_backend_herdr_projection_focus_restore "$session" "$before" "pane close" || return 2
+  fi
   [ "$close_status" -eq 0 ]
 }
 

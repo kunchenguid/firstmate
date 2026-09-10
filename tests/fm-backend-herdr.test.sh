@@ -1661,16 +1661,45 @@ test_projection_close_refuses_active_tab() {
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t2","focused":true}]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t2","focused":true}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"changed":true,"reason":"cleared","type":"client_window_title"}}' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "cleanup must refuse when exact active-tab preservation is impossible"
+  [ "$status" -ne 0 ] || fail "cleanup must refuse when a live client is viewing the active tab"
   assert_contains "$out" "target is the captain's active tab" \
     "active-tab cleanup refusal did not explain the focus-safety boundary"
+  assert_contains "$(cat "$log")" $'terminal\x1ftitle\x1fclear' \
+    "live-client active-tab refusal did not probe foreground attachment"
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' \
     "active-tab cleanup refusal still closed the pane"
-  pass "herdr presentation focus: cleanup refuses rather than close the captain's active tab"
+  pass "herdr presentation focus: cleanup refuses rather than close the tab a live client is viewing"
+}
+
+test_projection_close_allows_stale_active_tab_without_foreground_client() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/projection-focus-stale-active-allow"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t2","focused":true}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t2","focused":true}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"changed":false,"reason":"no_foreground_client","type":"client_window_title"}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","workspace_id":"w9"},{"tab_id":"w9:t2","workspace_id":"w9"}]}}' > "$resp/5.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "cleanup must close a persisted-focused tab when no live client is attached: $out"
+  assert_not_contains "$out" "target is the captain's active tab" \
+    "detached persisted-focus close still used the live-viewer refusal"
+  assert_contains "$(cat "$log")" $'terminal\x1ftitle\x1fclear' \
+    "detached persisted-focus close did not probe foreground attachment"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p2' \
+    "detached persisted-focus close did not close the exact pane"
+  assert_not_contains "$(cat "$log")" $'tab\x1ffocus' \
+    "detached persisted-focus close restored a persisted pointer with no live viewer"
+  pass "herdr presentation focus: cleanup closes a persisted-focused tab when no live client is attached"
 }
 
 test_projection_close_reports_focus_restore_failure() {
@@ -2476,6 +2505,7 @@ test_projection_seeded_prune_refuses_active_tab() {
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t1","focused":true}]}}' > "$resp/4.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","focused":true},{"tab_id":"w9:t2","focused":false}]}}' > "$resp/5.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}' > "$resp/6.out"
+  printf '%s\n' '{"result":{"changed":true,"reason":"cleared","type":"client_window_title"}}' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w9 w9:t1 focus-preserving' "$ROOT" 2>&1)
@@ -4784,6 +4814,7 @@ test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab
+test_projection_close_allows_stale_active_tab_without_foreground_client
 test_projection_close_reports_focus_restore_failure
 test_projection_close_rechecks_required_agent_state_at_boundary
 test_projection_close_emptying_after_focus_uses_pane_death_without_move
