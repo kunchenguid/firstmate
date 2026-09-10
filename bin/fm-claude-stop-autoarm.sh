@@ -329,13 +329,13 @@ if [ "$HEALTHY" -eq 1 ]; then
     done
     {
       if [ "$PENDING" -eq 1 ]; then
-        printf 'firstmate watcher auto-arm HELD THIS TURN OPEN - a live watcher with a fresh beacon was verified, but the failure-episode reset for this home could not be recorded, so recovery is not yet provably closed.\n'
+        printf 'firstmate watcher auto-arm HELD THIS TURN OPEN - a live watcher with a fresh beacon was verified, but the failure-episode reset for this home could not be recorded, so recovery is not yet provably closed. Read %s (outcome=failed-suppressed).\n' \
+          "$STATE/.claude-autoarm-epoch"
       else
         printf 'firstmate watcher auto-arm HELD THIS TURN OPEN - a live watcher with a fresh beacon was verified and no failure episode is open, but the reset that records that could not be taken. With none of those markers present the lock is the only thing left that can refuse, so the usual cause is benign contention: the turn-end guard on this same Stop event holding it for its own reset, which clears on the next turn.\n'
       fi
-      printf 'The arm is not the cause here: the bookkeeping write refused. Read %s (outcome=failed-suppressed), the three markers it clears (%s, %s, %s), and the lock serializing them (%s): a busy lock, or any of those three existing as a directory, refuses it. If this repeats, the state directory itself is refusing the write.\n' \
-        "$STATE/.claude-autoarm-epoch" "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM" \
-        "$BUDGET_LOCK"
+      printf 'The arm is not the cause here: the bookkeeping write refused. The reset clears %s, %s and %s and serializes on %s: a busy lock, or any of those three existing as a directory, refuses it. If this repeats, the state directory itself is refusing the write.\n' \
+        "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$BUDGET_LOCK"
     } >&2
   fi
   if autoarm_commit failed-suppressed; then

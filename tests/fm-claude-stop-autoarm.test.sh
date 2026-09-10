@@ -684,6 +684,8 @@ test_reset_contention_without_an_episode_names_no_failure() {
     "the block did not name the lock that actually refused"
   assert_not_contains "$out" "recovery is not yet provably closed" \
     "the block claimed a recovery this home never needed"
+  assert_not_contains "$out" ".claude-autoarm-epoch" \
+    "the block sent the operator to an episode ledger for a home with no episode"
   assert_not_contains "$out" "automatic supervision mechanism is broken" \
     "no-episode contention escalated to the full failure notice: $out"
   assert_absent "$dir/state/.turnend-claude-blocks" "no-episode contention invented a block budget"
