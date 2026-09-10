@@ -14,6 +14,8 @@ metadata:
 This skill is the single owner of the Dependabot and Renovate bump-triage procedure.
 It is written so a firstmate can apply it directly or paste it unchanged into a crewmate brief.
 Merge authority remains owned by `AGENTS.md` section 7.
+Load `pr-review-cycle` with this skill and apply its common exact-head review cycle to every bump.
+Only its independent Codex scout may be omitted under the narrow exception below.
 
 ## Establish the exact bump
 
@@ -23,7 +25,7 @@ Set the repository and pull request explicitly, then capture the immutable head 
 OWNER=<owner>
 REPO=<repo>
 PR=<number>
-gh-axi api "/repos/$OWNER/$REPO/pulls/$PR" --jq '{url:.html_url,author:.user.login,draft,headRef:.head.ref,headSha:.head.sha,baseRef:.base.ref}'
+gh-axi api "/repos/$OWNER/$REPO/pulls/$PR" --jq '{url:.html_url,author:.user.login,authorType:.user.type,authorAssociation:.author_association,draft,headRef:.head.ref,headSha:.head.sha,baseRef:.base.ref}'
 gh-axi api "/repos/$OWNER/$REPO/pulls/$PR/files?per_page=100" --paginate --jq '.[] | [.filename,.status,.additions,.deletions] | @tsv'
 gh-axi pr diff "$PR" -R "$OWNER/$REPO" --full
 ```
@@ -34,6 +36,8 @@ Any source, build logic, test logic, workflow behavior, vendored implementation,
 
 Record the package, ecosystem, exact old version, exact new version, and upstream source repository.
 Do not infer those values from the PR title when the manifest or lockfile disagrees.
+Verify that the author is the repository's configured Dependabot or Renovate bot, that GitHub reports its actor type as `Bot`, and that the head branch matches that automation's configured namespace.
+Route a human author, an unrecognized bot, or an identity mismatch through the full `pr-review-cycle` with no shortcut.
 
 ## Find the project's actual dependency surface
 
@@ -117,8 +121,9 @@ A hand-verified bump may skip the independent Codex scout only when all of these
 - No relevant security advisory or unresolved evidence gap exists.
 - CI covers the affected install, build, test, and runtime surface without an unexplained bot-only skip.
 
-If any condition is false, load and run `pr-review-cycle` in full.
-The exception removes only the local Codex scout; it does not waive thread inspection, CI reading, bot findings, or exact-head verification required by the standing PR policy.
+If any condition is false, run `pr-review-cycle` in full, including its independent Codex scout.
+If every condition is true, continue the common `pr-review-cycle` while marking only its independent Codex scout not applicable with this evidence.
+The exception does not waive thread inspection, CI reading, bot findings, or exact-head verification required by the common cycle.
 
 ## Report shape
 

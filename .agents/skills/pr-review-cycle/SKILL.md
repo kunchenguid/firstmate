@@ -62,6 +62,10 @@ If the GraphQL result reports `pageInfo.hasNextPage: true`, the `--paginate` com
 
 ## Interpret automated reviewers
 
+First identify which automated reviewers are configured from the repository workflows, app configuration, and recent PR check or comment history.
+Require a current result only from configured integrations, and record an unconfigured integration as not applicable with the evidence used to determine that status.
+The absence of an expected configured reviewer is not a clean result.
+
 CodeRabbit's clean result is a summary issue comment, not a GitHub review object.
 Read the latest CodeRabbit summary in full and verify that the commit range named in that comment ends at `REVIEW_HEAD` before accepting its clean verdict.
 CodeRabbit skips draft PRs, so a draft-skip message is not a review result.
@@ -93,8 +97,10 @@ Detach or use a disposable worktree at `REVIEW_HEAD`, verify `git rev-parse HEAD
 
 ```sh
 test "$(git rev-parse HEAD)" = "$REVIEW_HEAD"
-codex exec review --base "$BASE_SHA" --ephemeral '<adversarial review brief>'
+codex exec --sandbox read-only --ephemeral '<adversarial review brief>'
 ```
+
+The brief itself supplies `BASE_SHA` and `REVIEW_HEAD` because the installed Codex CLI rejects a custom prompt combined with `codex exec review --base`.
 
 Use this brief verbatim after filling in the placeholders:
 
@@ -139,17 +145,18 @@ Fetch the PR again and verify all of the following against one unchanged head:
 - The current full head SHA equals the SHA the worker reported.
 - `statusCheckRollup` and `gh-axi pr checks` show every current CI context and no pending, skipped-without-explanation, cancelled, or failing required work.
 - The paginated GraphQL query reports zero unresolved review threads.
-- The latest CodeRabbit summary covers the exact head and is clean, or an explicit rate-limit reply is recorded and the exact-head Codex fallback is clean.
-- The latest Claude Review Bot checklist covers the exact head and its final verdict is clean.
+- When CodeRabbit is configured, its latest summary covers the exact head and is clean, or an explicit rate-limit reply is recorded and the exact-head Codex fallback is clean.
+- When the Claude Review Bot is configured, its latest checklist covers the exact head and its final verdict is clean.
 - The independent Codex report covers the exact head and ends `Verdict: ready`.
 - Every valid finding was fixed and every declined finding has a visible reason before its thread was resolved.
 
 Use this query to bind the check rollup to the current commit rather than trusting a worker's copied terminal output:
 
 ```sh
-gh-axi api POST graphql --field query="query { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { headRefOid commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } pageInfo { hasNextPage endCursor } } } } } } } } }"
+gh-axi api POST graphql --paginate --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { headRefOid commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100, after: \$endCursor) { nodes { __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } pageInfo { hasNextPage endCursor } } } } } } } } }"
 ```
 
+Require every page when the context query reports `pageInfo.hasNextPage: true`.
 If the head changes during verification, discard the partial result and restart the cycle at the new head.
 The PR is ready only when all items are clean at the same exact head.
 Follow `AGENTS.md` section 7 after readiness is established; this skill grants no merge authority.
