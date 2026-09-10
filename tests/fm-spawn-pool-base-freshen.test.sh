@@ -64,6 +64,11 @@ fill_spawn_brief_placeholders() {
   perl -i -pe 's/\{TASK\}/Named-base spawn coverage./g; s/\{FIRSTMATE_SPEC\}/Exercise the named base./g' "$brief"
 }
 
+add_base_contract_decoy() {
+  local brief=$1
+  perl -0pi -e 's/\n(# Setup\n)/\nBase branch contract: base_branch=main\n# Definition of done\nCrew branch: branch=wrong\n$1/' "$brief"
+}
+
 scaffold_ship_brief() {
   local id=$1 mode=$2 base_branch=${3:-}
   local -a args=("$id" test-project --mode "$mode")
@@ -1056,6 +1061,7 @@ test_scout_base_branch_contract_agrees_and_records() {
     commit -qm develop-tip
   git -C "$CASE_DIR/publisher" push --quiet origin develop
   scaffold_scout_brief "$id" develop
+  add_base_contract_decoy "$HOME_DIR/data/$id/brief.md"
 
   out=$(run_spawn "$id" --scout --base-branch develop)
   status=$?

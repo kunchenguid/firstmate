@@ -296,7 +296,8 @@ test_recorded_crew_branch_ignores_parked_head() {
   printf 'scratch-only\n' > "$case_dir/wt/scratch.txt"
   git -C "$case_dir/wt" add scratch.txt
   git -C "$case_dir/wt" commit -qm scratch
-  printf '%s\n' '# Definition of done' 'Crew branch: branch=feature/custom' \
+  printf '%s\n' '# Task' 'User text' '# Definition of done' 'Crew branch: branch=main' \
+    '# Setup' 'Generated setup' '# Definition of done' 'Crew branch: branch=feature/custom' \
     > "$case_dir/data/task-x1/brief.md"
   cat >> "$case_dir/data/task-x1/brief.md" <<'EOF'
 

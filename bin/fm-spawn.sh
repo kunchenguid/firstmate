@@ -452,6 +452,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-brief-contract-lib.sh
+. "$SCRIPT_DIR/fm-brief-contract-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
@@ -2319,7 +2321,7 @@ if [ "$KIND" = ship ]; then
 fi
 # Spawn-time agreement only. Downstream review, promotion, landing, and teardown
 # read state/<id>.meta base_branch=, never this brief line.
-BRIEF_BASE=$(sed -n 's/^Base branch contract: base_branch=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+BRIEF_BASE=$(fm_brief_contract_value "$BRIEF" 'Base branch contract: base_branch=')
 if [ -n "$BRIEF_BASE" ]; then
   if [ -z "${BASE_BRANCH:-}" ]; then
     echo "error: base mismatch for $ID: the brief says base_branch=$BRIEF_BASE but this spawn passed no --base-branch; correct the flag or re-scaffold the brief so the worker's instructions and the pool agree" >&2

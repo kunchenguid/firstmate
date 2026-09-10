@@ -141,13 +141,14 @@ fi
 
 # Clean fast-forward only: TARGET must be an ancestor of BRANCH.
 branch_sha=$(git -C "$PROJ" rev-parse "$BRANCH_REF")
-if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "$branch_sha"; then
+target_sha=$(git -C "$PROJ" rev-parse "$TARGET_REF")
+if ! git -C "$PROJ" merge-base --is-ancestor "$target_sha" "$branch_sha"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $TARGET (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $TARGET, then retry." >&2
   exit 1
 fi
 
-before=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
+before=$(git -C "$PROJ" rev-parse --short "$target_sha")
 hold_status=0
 FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
   "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" --distinguish-absent || hold_status=$?
@@ -173,7 +174,7 @@ else
   fi
   # Stay on the default checkout and fast-forward the named base in place.
   git -C "$PROJ" update-ref -m "fm-merge-local: fast-forward $TARGET to $BRANCH" \
-    "$TARGET_REF" "$branch_sha" "$(git -C "$PROJ" rev-parse "$TARGET_REF")" || merge_status=$?
+    "$TARGET_REF" "$branch_sha" "$target_sha" || merge_status=$?
 fi
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
