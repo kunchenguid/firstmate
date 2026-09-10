@@ -935,7 +935,7 @@ SH
 # crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
 # model/effort is invented for it even though its own project has no profile set.
 test_spawn_fallback_chain_and_crew_scout_unaffected() {
-  local w sm meta home proj wt fakebin launchlog id launch
+  local w sm meta home proj wt fakebin launchlog id launch node_bin node_dir
   w="$TMP_ROOT/spawn-fallback-and-crew"
   sm="$w/sm"
   launchlog="$w/launch.log"
@@ -960,7 +960,9 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   wt="$w/crew-wt"
   fakebin=$(make_launch_capturing_tmux "$w/tmux-crew")
   fm_git_worktree "$proj" "$wt" "wt-crew"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state"
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/user-home"
+  node_bin=$(command -v node) || fail "crew-unaffected: node is required for Codex trust registration"
+  node_dir=${node_bin%/*}
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
 ## Captain's intent
@@ -970,7 +972,9 @@ Exercise an ordinary crew launch.
 Verify secondmate harness settings do not affect it.
 EOF
   : > "$launchlog"
-  PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
+  # Codex trust registration needs Node and writes the launching user's store.
+  # Keep Node on this restricted path and contain the store in the fixture.
+  PATH="$fakebin:$node_dir:$BASE_PATH" HOME="$home/user-home" TMUX="fake,1,0" CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
