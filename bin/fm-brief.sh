@@ -481,6 +481,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 $INBOX_SECTION
 
+<!-- fm-generated-contract-boundary -->
 <!-- fm-generated-contract -->
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -587,6 +588,7 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
+<!-- fm-generated-contract-boundary -->
 <!-- fm-generated-contract -->
 $DOD
 <!-- fm-generated-contract-end -->

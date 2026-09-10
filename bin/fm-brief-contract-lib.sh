@@ -2,7 +2,14 @@
 
 fm_brief_contract_value() {  # <brief-path> <prefix>
   awk -v prefix="$2" '
-    $0 == "<!-- fm-generated-contract -->" && !marked {
+    $0 == "<!-- fm-generated-contract-boundary -->" && !boundary_seen {
+      boundary_seen=1
+      marked=0
+      in_contract=0
+      value=""
+      next
+    }
+    $0 == "<!-- fm-generated-contract -->" && !marked && !contract_done {
       marked=1
       in_contract=1
       signature=1
@@ -11,6 +18,7 @@ fm_brief_contract_value() {  # <brief-path> <prefix>
     }
     $0 == "<!-- fm-generated-contract-end -->" && marked {
       in_contract=0
+      contract_done=1
       next
     }
     !marked && !legacy_anchor && ($0 == "# Project memory" || $0 == "# Firstmate instruction inbox") {
