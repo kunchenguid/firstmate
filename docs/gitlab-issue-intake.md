@@ -62,7 +62,6 @@ glab api --hostname <host> --method POST "groups/<group url-encoded>/labels" \
 ```
 
 `<group url-encoded>` là đường dẫn đầy đủ của group với `/` thay bằng `%2F`, ví dụ `team%2Fplatform`.
-Bạn cũng có thể dùng group id thay cho đường dẫn nếu tiện hơn.
 
 Lặp lại cho đủ bảy tên: `fm::todo`, `fm::triage`, `fm::plan-review`, `fm::accepted`, `fm::needs-human`, `fm::done`, `fm::human-replied`.
 Màu tùy bạn chọn, nhưng nên để ba label người dùng đặt khác màu rõ ràng với bốn label first mate đặt.
