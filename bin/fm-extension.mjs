@@ -685,9 +685,12 @@ async function installPackage(home, sourceInfo) {
         || sourceAfterCopy.manifestDigest !== sourceInfo.manifestDigest) {
       fail("integrity-mismatch", "package changed while it was copied into the managed store");
     }
+    // APFS refuses to rename a directory that is not writable by its owner,
+    // so the temporary root stays writable (0700, private to this user)
+    // across the rename and only the published destination is tightened.
+    await chmod(temporary, 0o700);
     try {
       await rename(temporary, destination);
-      return { packageInfo: await validatePackage(destination, { installed: true }) };
     } catch (error) {
       if (!error || !["EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;
       await removeManagedTree(temporary);
@@ -695,6 +698,13 @@ async function installPackage(home, sourceInfo) {
       if (winner.tree.digest !== sourceInfo.tree.digest) fail("integrity-mismatch", "concurrent package install produced a different tree");
       return { packageInfo: winner };
     }
+    try {
+      await chmod(destination, 0o555);
+    } catch (error) {
+      await removeManagedTree(destination).catch(() => {});
+      throw error;
+    }
+    return { packageInfo: await validatePackage(destination, { installed: true }) };
   } catch (error) {
     await removeManagedTree(temporary).catch(() => {});
     throw error;
