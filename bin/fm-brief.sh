@@ -32,12 +32,15 @@
 #   the issue itself into `## Captain's intent` as CONTEXT - canonical URL,
 #   project path, author, state, title, description, and the issue's comments,
 #   read through `bin/fm-gitlab-issue.sh show` - so the worker reads the original
-#   request without calling GitLab. The `{TASK}` placeholder stays inside that
-#   subsection, under the context, for Firstmate to fill with THIS subtask's own
-#   work, and the scaffold closes the subsection with a scope sentence naming
-#   this task's `<n>/<N>` position and stating that the issue's other subtasks
-#   are neither this task's scope nor its acceptance criteria - so a no-mistakes
-#   `--intent` taken from that subsection asks for this subtask alone.
+#   request without calling GitLab. A scope sentence naming this task's `<n>/<N>`
+#   position follows the context, and the `{TASK}` placeholder closes the
+#   subsection for Firstmate to fill with THIS subtask's own work - so a
+#   no-mistakes `--intent` taken from that subsection asks for this subtask
+#   alone. The scope sentence precedes the fill because an unfenced heading
+#   inside the fill ends the subsection. When the issue was split (`<N>` above
+#   one) that sentence says the issue's other subtasks are neither this task's
+#   scope nor its acceptance criteria; for `1/1` it says the unsplit issue is
+#   this task's whole work, so its content is context and criteria both.
 #   `{FIRSTMATE_SPEC}` keeps its meaning and stays out of `--intent`. Every line of
 #   issue-authored text is quoted with a leading "> ", so a heading or code
 #   fence written in the issue cannot end that subsection or restructure the
@@ -426,11 +429,13 @@ issue_show_field() {  # <jq-filter>
   printf '%s\n' "$ISSUE_SHOW" | jq -r "$1"
 }
 
-# The captain-facing half of --issue: the issue as CONTEXT, then the retained
-# {TASK} placeholder Firstmate fills with this subtask's own work, then the
-# sentence that limits the ask to this subtask. The whole subsection is what a
+# The captain-facing half of --issue: the issue as CONTEXT, the sentence that
+# limits the ask to this subtask, and last the retained {TASK} placeholder
+# Firstmate fills with this subtask's own work. The whole subsection is what a
 # no-mistakes run passes as --intent, so the issue must read as context for one
-# subtask's work rather than as N subtasks' acceptance criteria.
+# subtask's work rather than as N subtasks' acceptance criteria. The scope
+# sentence goes before {TASK} because an unfenced heading in that fill ends the
+# subsection, and anything rendered after it would leave with the truncation.
 render_issue_intent() {
   local title description notes
   title=$(issue_show_field '.title // ""')
@@ -454,12 +459,16 @@ render_issue_intent() {
   else
     printf '\nThe issue has no comments.\n'
   fi
-  printf '\nTHE WORK OF THIS TASK, which is the whole of what you are asked to deliver:\n'
-  printf '{TASK}\n'
   printf '\nSCOPE - this task is subtask %s of the %s that issue #%s was split into.\n' \
     "$ISSUE_PART_N" "$ISSUE_PART_TOTAL" "$FM_GITLAB_ISSUE_IID"
-  printf 'Only the work stated directly above is in scope, and only it is this task'"'"'s acceptance criteria.\n'
-  printf 'The issue above is context for reading that work, not a checklist for this task: the issue'"'"'s other subtasks are NOT this task'"'"'s work, NOT its scope, and NOT its acceptance criteria - they are dispatched separately.\n'
+  if [ "$ISSUE_PART_TOTAL" -gt 1 ]; then
+    printf 'Only the work stated below is in scope, and only it is this task'"'"'s acceptance criteria.\n'
+    printf 'The issue above is context for reading that work, not a checklist for this task: the issue'"'"'s other subtasks are NOT this task'"'"'s work, NOT its scope, and NOT its acceptance criteria - they are dispatched separately.\n'
+  else
+    printf 'The issue was not split, so the issue above IS the whole of this task'"'"'s work: its content is this task'"'"'s context AND its acceptance criteria.\n'
+  fi
+  printf '\nTHE WORK OF THIS TASK, which is what you are asked to deliver:\n'
+  printf '{TASK}\n'
 }
 
 ISSUE_SHOW=

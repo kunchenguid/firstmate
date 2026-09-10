@@ -1189,10 +1189,19 @@ test_issue_part_is_required_and_renders_concretely() {
 
 # The `## Captain's intent` subsection is verbatim what a no-mistakes run passes
 # as `--intent`, so for subtask n/N it has to ask for this subtask's work alone:
-# the issue is context, this subtask's work is the retained `{TASK}` fill, and
-# the scope sentence disowns the issue's other subtasks. Until that fill happens
-# the composed subsection is never exactly the token, so the dispatch gate has
-# to catch the token wherever it sits.
+# the issue is context, the scope sentence disowns the issue's other subtasks,
+# and this subtask's work is the retained `{TASK}` fill that closes the
+# subsection. The scope sentence must survive whatever firstmate fills in, and
+# until that fill happens the composed subsection is never the bare token, so
+# the dispatch gate has to catch a token still standing alone on its line.
+issue_fill_intent() {  # <brief> <out> <intent-fill> [<spec-fill>]
+  local content
+  content=$(cat "$1")
+  content=${content//'{TASK}'/$3}
+  content=${content//'{FIRSTMATE_SPEC}'/${4:-Touch only the redirect guard.}}
+  printf '%s\n' "$content" > "$2"
+}
+
 test_issue_intent_asks_for_this_subtask_only() {
   local dir brief intent filled
   command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
@@ -1215,8 +1224,7 @@ test_issue_intent_asks_for_this_subtask_only() {
 
   # Once firstmate fills both subsections, the same brief is dispatchable.
   filled="$dir/filled.md"
-  sed -e 's/{TASK}/Rate-limit the login redirect./' \
-      -e 's/{FIRSTMATE_SPEC}/Touch only the redirect guard./' "$brief" > "$filled"
+  issue_fill_intent "$brief" "$filled" 'Rate-limit the login redirect.'
   ( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_placeholders_present "$filled" ) \
     && fail "a filled --issue brief was still refused as unfilled"
   ( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_content_valid "$filled" ) \
@@ -1226,7 +1234,40 @@ test_issue_intent_asks_for_this_subtask_only() {
     "the filled subtask work is not part of the intent the pipeline receives"
   assert_not_contains "$intent" 'Touch only the redirect guard.' \
     "the firstmate spec leaked into the intent"
+
+  # An unfenced heading in the fill ends the subsection, so anything rendered
+  # after the fill would silently leave the --intent the pipeline receives.
+  filled="$dir/filled-heading.md"
+  issue_fill_intent "$brief" "$filled" 'Rework the redirect guard.
+## Acceptance
+- the guard returns 429'
+  intent=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$filled" "## Captain's intent" )
+  assert_contains "$intent" 'subtask 2 of the 3' \
+    "a heading in the subtask work truncated this task's position out of the intent"
+  assert_contains "$intent" 'NOT its acceptance criteria' \
+    "a heading in the subtask work truncated the scope limitation out of the intent"
   pass "fm-brief: an --issue subtask's intent carries the issue as context and asks for that subtask only"
+}
+
+# An issue that was never split has no other subtasks to disown, and the issue
+# itself is that single task's ask, so it stays acceptance criteria rather than
+# being demoted to background reading.
+test_issue_intent_keeps_an_unsplit_issue_as_criteria() {
+  local dir brief intent
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-intent-single"
+  mkdir -p "$dir/home/data"
+  run_issue_brief "$dir" issue-single-l1 "$ISSUE_REPO" --mode no-mistakes --issue "$ISSUE_URL" --issue-part 1/1 >/dev/null
+  brief="$dir/home/data/issue-single-l1/brief.md"
+  intent=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$brief" "## Captain's intent" )
+
+  assert_contains "$intent" '> ## Steps' "the single-subtask intent lost the issue itself"
+  assert_contains "$intent" 'subtask 1 of the 1' "the intent does not name this task's own position"
+  assert_contains "$intent" 'context AND its acceptance criteria' \
+    "an unsplit issue is not stated to be this task's acceptance criteria"
+  assert_not_contains "$intent" 'NOT its acceptance criteria' \
+    "an unsplit issue's own content was disowned as acceptance criteria"
+  pass "fm-brief: an unsplit issue stays its single subtask's acceptance criteria"
 }
 
 # A merge request's bare `#<iid>` resolves against its own project, so the task
@@ -1281,5 +1322,6 @@ test_issue_direct_pr_opens_the_merge_request_with_glab
 test_issue_no_mistakes_puts_the_merge_request_step_inside_the_done_gate
 test_issue_part_is_required_and_renders_concretely
 test_issue_intent_asks_for_this_subtask_only
+test_issue_intent_keeps_an_unsplit_issue_as_criteria
 test_issue_must_belong_to_the_briefed_project
 test_issue_refusals_write_no_brief

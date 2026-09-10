@@ -457,17 +457,31 @@ EOF
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "filled-ship brief should scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" \
-    "Fix placeholder replacement in Herdr briefs." \
-    "Keep the scaffold's own examples intact."
+    "Fix replacement of \`{TASK}\` in Herdr briefs." \
+    "Keep literal \`{FIRSTMATE_SPEC}\` examples intact."
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
   assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
-    "a filled ship brief was refused as unfilled"
+    "a filled ship brief mentioning placeholder tokens was refused as unfilled"
   assert_not_contains "$out" "must contain nonempty" \
-    "a filled ship brief failed content validation"
+    "a filled ship brief mentioning placeholder tokens failed content validation"
+
+  # bin/fm-brief.sh --issue quotes the issue verbatim into the intent, so a
+  # human who wrote the token in the issue must not brick the brief.
+  id=delivery-quoted-token-ship
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "quoted-token ship brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "The reporter wrote:
+> {TASK}
+Restore the scaffold's replacement." \
+    "Touch only the replacement helper."
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+    "an intent quoting the token as issue text was refused as unfilled"
 
   # A subsection scaffolded with surrounding context - bin/fm-brief.sh --issue
-  # writes the issue around a retained {TASK} - is never exactly the token, so
-  # the gate refuses the token wherever it sits rather than only on its own.
+  # writes the issue around a retained {TASK} - is never exactly the whole
+  # subsection, so a token still standing alone on its line is unfilled.
   id=delivery-composed-ship
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "composed-ship brief should scaffold"

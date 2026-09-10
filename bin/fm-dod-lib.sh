@@ -45,21 +45,24 @@ Other projects retain their own instructions unchanged.
 EOF
 }
 
-# Return 0 when a Task subsection still carries a scaffold placeholder token
-# anywhere in it. A subsection scaffolded with surrounding context - bin/fm-brief.sh
-# --issue writes the issue around a retained `{TASK}` - is never exactly the
-# token, so an equality test would pass an unfilled brief straight to a worker.
-# A brief still holding the literal token is unfilled by definition. A missing
-# file and legacy briefs carry no such placeholders.
+# Return 0 when a Task subsection still carries a scaffold placeholder token on
+# a line of its own, which is how both scaffolds emit it - alone in the
+# subsection, or surrounded by generated context as bin/fm-brief.sh --issue
+# writes it. Anything else is filled text that merely names the token: prose
+# about the scaffolding, a backticked example, or a "> " quote of issue text
+# that happens to contain it. A missing file and legacy briefs carry no such
+# placeholders.
 fm_brief_task_placeholders_present() {  # <file>
   local file=$1 intent spec
   [ -f "$file" ] || return 1
   intent=$(fm_brief_task_heading_body "$file" "## Captain's intent")
   spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
-  case "$intent$spec" in
-    *'{TASK}'* | *'{FIRSTMATE_SPEC}'*) return 0 ;;
-  esac
-  return 1
+  printf '%s\n%s\n' "$intent" "$spec" | awk '
+    { line = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      if (line == "{TASK}" || line == "{FIRSTMATE_SPEC}") { found = 1; exit }
+    }
+    END { exit found ? 0 : 1 }'
 }
 
 # Parse an exact ATX heading outside fenced blocks. Body mode prints through
