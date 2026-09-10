@@ -106,10 +106,10 @@
 #
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
 # SECOND concurrent session run bootstrap's mutating sweeps - converging
-# secondmate homes, retrying pending handoff outboxes, writing X-mode artifacts,
-# and fetching or fast-forwarding every project clone - before ever discovering
-# another session already holds the lock. Two sessions racing those sweeps is
-# exactly the hazard the lock exists to prevent, so locking first closes the
+# secondmate homes, retrying pending handoff outboxes and receiver wakes, writing
+# X-mode artifacts, and fetching or fast-forwarding every project clone - before
+# ever discovering another session already holds the lock. Two sessions racing
+# those sweeps is exactly the hazard the lock exists to prevent, so locking first closes the
 # hole outright: only the session that actually wins the lock ever touches
 # shared mutable state.
 #

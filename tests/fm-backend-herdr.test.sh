@@ -353,6 +353,64 @@ run_with_clients() {  # <dir> <path> <body>
     bash -c ". \"\$0/bin/backends/herdr.sh\"; $body" "$ROOT"
 }
 
+# The #4091 widening, and the boundary it is deliberately confined to.
+#
+# A recovery-grade read that cannot confirm the pane is `missing` only when the
+# session's server is POSITIVELY stopped - absence for that whole session -
+# and stays `unreadable` otherwise. The two signals are driven apart here on
+# purpose: the SAME failed pane read is settled two ways by the server state
+# alone, so the case cannot go quietly vacuous if one signal stops being read.
+#
+# The second half matters as much as the first: the widening must not reach the
+# husk classifier under it, because that one licenses CLOSING panes.
+test_recovery_grade_read_widens_only_at_its_own_boundary() {
+  local dir log resp fb gone running husk
+
+  herdr_state_with_server() {  # <dir-suffix> <server-running-json>
+    local dir="$TMP_ROOT/recovery-widen-$1" resp log fb
+    mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+    # 1: the pane read, failing in a way this parse cannot interpret.
+    printf 'Error: socket unavailable\n' > "$resp/1.out"
+    printf '1\n' > "$resp/1.exit"
+    # 2: the server-state read that settles it.
+    printf '{"client":{"protocol":22},"server":{"running":%s}}\n' "$2" > "$resp/2.out"
+    fb=$(make_herdr_fakebin "$dir")
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w1:p2' "$ROOT"
+  }
+
+  gone=$(herdr_state_with_server gone false)
+  running=$(herdr_state_with_server running true)
+  [ "$gone" = missing ] \
+    || fail "an uninterpretable pane read against a positively stopped server must read missing, got '$gone'"
+  [ "$running" = unreadable ] \
+    || fail "an uninterpretable pane read against a RUNNING server must stay unreadable, got '$running'"
+  [ "$gone" != "$running" ] \
+    || fail "the server-state signal is not being consulted: both verdicts are '$gone'"
+
+  # An unreadable server state is not evidence of absence either.
+  dir="$TMP_ROOT/recovery-widen-unknown"; mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  printf 'Error: socket unavailable\n' > "$resp/1.out"; printf '1\n' > "$resp/1.exit"
+  printf 'not json at all\n' > "$resp/2.out"; printf '1\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w1:p2' "$ROOT")
+  [ "$out" = unreadable ] \
+    || fail "a server state that cannot itself be read must keep the conservative verdict, got '$out'"
+
+  # The confinement: the husk classifier sees the SAME stopped-server read and
+  # must still refuse, because it is what licenses closing a pane.
+  dir="$TMP_ROOT/recovery-widen-husk"; mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  printf 'Error: socket unavailable\n' > "$resp/1.out"; printf '1\n' > "$resp/1.exit"
+  printf '{"client":{"protocol":22},"server":{"running":false}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  husk=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2; printf " "; fm_backend_herdr_tab_is_husk fmtest w1:p2 && printf husk || printf refused' "$ROOT")
+  [ "$husk" = "unknown refused" ] \
+    || fail "the stopped-server rule leaked into the husk classifier, which licenses closing panes: got '$husk'"
+  pass "herdr recovery-grade read: a stopped server means missing there, and nowhere else"
+}
+
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one() {
   local dir out err
   dir="$TMP_ROOT/client-pair-bypass"; make_herdr_client_pair "$dir"
@@ -4667,6 +4725,7 @@ test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
+test_recovery_grade_read_widens_only_at_its_own_boundary
 test_cli_caches_the_selected_client_within_a_process
 test_cli_scopes_the_selected_client_to_its_session
 test_cli_unrelated_failure_never_triggers_reselection

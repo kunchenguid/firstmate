@@ -607,6 +607,47 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### fm-remote server birth and login-keychain access
+
+Measured 2026-09-09 on macOS 26 (Darwin 25.6.0) aarch64 with Claude Code 2.1.266 and Herdr 0.9.0, the guarantee behind `bin/fm-remote-herdr-guard.sh` and the doctor's `herdr-server` check: login-keychain access follows the audit session a process was born into, never the launch shape or the shell.
+
+Same user, same `HOME`, same login keychain item, three births, probed with `launchctl managername`, `getaudit_addr` (a compiled probe), `security find-generic-password -a "$USER" -w -s "Claude Code-credentials"` (output withheld), and `claude auth status`:
+
+| Birth | `managername` | audit session | `security ... -w` | `claude auth status` |
+| --- | --- | --- | --- | --- |
+| `gui/501` LaunchAgent, bare `ProgramArguments`, `launchctl bootstrap` + `kickstart -k` mid-session | Aqua | asid 100038 (the `gui/501` asid), `HAS_GRAPHIC_ACCESS HAS_TTY HAS_CONSOLE_ACCESS HAS_AUTHENTICATED` | exit 0 | `loggedIn: true` |
+| `gui/501` LaunchAgent, `zsh -l -c 'exec ...'`, same reload | Aqua | asid 100038, same flags | exit 0 | `loggedIn: true` |
+| `user/501` LaunchAgent (`LimitLoadToSessionType=Background`), same reload | Background | asid 100056, flags `0x0` | exit 36 `User interaction is not allowed.`, item metadata still readable | `loggedIn: false`, `authMethod: none` |
+
+Claude Code 2.1.266 maps that exit 36 (and 44) to "no keychain data" and reads `~/.claude/.credentials.json` instead; with a stale file it prints `Failed to authenticate: OAuth session expired and could not be refreshed` (interactive: `Login expired · Please run /login`).
+
+Candidate birth markers were read with `ps -Eww -o command= -p <pid>` for own-uid processes, noting that macOS hides the environment of Apple platform binaries such as `/bin/sleep` and that a herdr server is never one.
+
+```text
+launchd-born herdr server (child of launchd, gui/501):  XPC_SERVICE_NAME=org.nix-community.home.herdr-server  no SSH_*
+SSH-born herdr server (child of `herdr --session fm-remote remote-client-bridge` under `sshd-session: user@notty`):  SSH_CLIENT=... SSH_CONNECTION=...  no XPC_SERVICE_NAME
+```
+
+`XPC_SERVICE_NAME` identifies a launchd label but does not identify its domain, because the Background `user/501` job also carried that variable while lacking keychain access.
+The owner classifier therefore accepts that label only when `launchctl print gui/<uid>/<label>` identifies the owner pid or the label is loaded in `gui/<uid>` but not `user/<uid>`.
+`XPC_SERVICE_NAME=0`, including a value inherited by a herdr live-handoff child, remains unknown.
+`FM_REMOTE_JOB_ACTIVE=1` proves the Aqua worker only when `dev.firstmate.remote-job` is loaded in `gui/<uid>` but not `user/<uid>`.
+
+The SSH-born row was read on the remote host whose `dev.firstmate.herdr.fm-remote` job showed `state = spawn scheduled`, `runs = 239`, `last exit code = 1` and a log repeating `error: herdr server is already running`: herdr's remote attach had started the session's server as its own child before the login session existed, and launchd's copy lost the socket on every retry.
+`pgrep -f` did not list the herdr server's argv on macOS; `lsof -U -a -c herdr -F pn` named the socket owner.
+
+A separate foreground-supervision check ran on 2026-09-09 on macOS 26 (Darwin 25.6.0) with Herdr 0.9.0 using the throwaway Aqua launch agent `dev.fm-rca.herdr-fg`.
+Its `ProgramArguments` ran `/run/current-system/sw/bin/zsh -l -c "exec /etc/profiles/per-user/kunchen/bin/herdr server --session fm-lab-fg-90381-18985"`, with `KeepAlive={SuccessfulExit=false}` and `ThrottleInterval=10`, after `launchctl bootstrap gui/501 <plist>` and `launchctl kickstart -k gui/501/dev.fm-rca.herdr-fg`.
+`launchctl print gui/501/dev.fm-rca.herdr-fg` reported `state = running` and `pid = 4806`.
+`lsof -U -a -c herdr -F pn` named pid 4806 as the owner of `~/.config/herdr/sessions/fm-lab-fg-90381-18985/herdr.sock`.
+`ps -o pid,ppid,command -p 4806` reported `4806 1 /etc/profiles/per-user/kunchen/bin/herdr server --session fm-lab-fg-90381-18985`, and its environment carried `XPC_SERVICE_NAME=dev.fm-rca.herdr-fg`.
+No other herdr process existed for that session, and after 15 seconds the job remained running with pid 4806.
+After a guarded `herdr session stop`, the job reported `state = not running` and `last exit code = 0`, and it stayed at rest through the throttle interval.
+A second `launchctl kickstart -k gui/501/dev.fm-rca.herdr-fg` started pid 45574, which was also the new socket owner.
+This proves that `herdr server` remains in the foreground as the launchd job, so the guard's final `exec` supplies the intended supervision and the earlier server that survived `launchctl bootout` was the unrelated SSH-bridge-born process.
+
+`bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh` pins the resulting decision table against real marker-carrying processes, and `tests/fm-remote-doctor.test.sh` pins the doctor's verdicts on the same markers.
+
 ### Client selection
 
 Measured 2026-09-08 on a macOS aarch64 host running a Herdr 0.9.0 server (protocol 22) for the `fm-remote` session while `~/.local/bin/herdr` still held the self-updated 0.8.2 client (protocol 20) ahead of the Nix-managed 0.9.0 client on the remote-job `PATH`.
@@ -983,6 +1024,53 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+
+### Endpoint recovery classification
+
+Measured 2026-09-10 on macOS aarch64 against Herdr 0.9.0 (protocol 22) in an isolated `fm-lab-` session.
+
+An endpoint recorded in a session whose server is not running cannot be read by any operational call, and `status` is the one command that answers with a body instead of refusing:
+
+```sh
+herdr pane get w1:p2 --session fm-lab-never-started
+herdr status --json --session fm-lab-never-started | jq -c "{running: .server.running, status: .server.status}"
+```
+
+```text
+{"id":"cli:pane:get","error":{"code":"server_not_running","message":"no herdr server is running at /Users/kunchen/.config/herdr/sessions/fm-lab-never-started/herdr.sock; run `herdr session attach fm-lab-never-started` to start or attach it"}}
+{"running":false,"status":"not_running"}
+```
+
+`fm_backend_herdr_agent_state` therefore settles an uninterpretable pane read with `.server.running` rather than with the `server_not_running` error code, which keeps the verdict working across the supported range: the field is present on 0.8.2 protocol 20 and 0.9.0 protocol 22 alike (measured in "Client selection" above), while the code is not.
+Only that recovery-grade read is widened; the husk classifier under it stays strict, because it licenses closing panes.
+Observed in the lab, in one run:
+
+```text
+live agent-free pane                 dead
+endpoint in a session with no server missing
+malformed target                     unreadable
+```
+
+The same run drove `bin/fm-spawn.sh --relaunch` against a real Herdr pane whose shell had been moved outside its recorded worktree: the shell was told once to return, ended in the recorded worktree, and the replacement was launched into the SAME pane, leaving one task tab.
+
+Herdr 0.8.x is not installed on this host, so protocol-20 coverage is structural plus the adapter fixture exercising both response shapes; it is not a live result.
+Refresh the live half, which fails naming the installed version, with:
+
+```sh
+tests/fm-control-herdr-smoke.test.sh
+```
+
+Observed 2026-09-10:
+
+```text
+ok - real herdr 0.9.0: a gone session reads recoverable while a live pane and a malformed target do not
+ok - real herdr: a drifted agent-free shell returns to its worktree and reuses the same endpoint
+```
+
+`tests/fm-backend-herdr.test.sh` pins the logic portably by driving the two signals apart - the same failed pane read yields `missing` under a stopped server and `unreadable` under a running one - and asserts that the husk classifier still refuses on that identical read.
+`tests/fm-control-herdr-smoke.test.sh` proves the Herdr-only drift recovery against a real binary in an isolated lab session.
+`tests/fm-control-relaunch.test.sh` drives a tmux stub and proves that tmux retains its prior refusal without sending `cd` or any other input to the pane.
+The Herdr refusal when a shell accepts the command but does not move is not exercised in this change.
 
 ### Away-mode transport
 
