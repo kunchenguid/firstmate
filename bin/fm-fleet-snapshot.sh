@@ -518,7 +518,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
           | .local_note = (.local_note
               // (cap(.body_lines[-1]; "^(?<v>local-landing:[^[:space:]]+)$") as $explicit
-                  | if $explicit != null then
+                  | if $explicit != null and (.completion.verb == "done")
+                      and (any(.body_lines[];
+                           test("^Resolution recorded by fm-(captain|decision)-hold\\.$")) | not)
+                    then
                       "local " + ($explicit | sub("^local-landing:"; ""))
                     elif any(.body_lines[];
                           test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
