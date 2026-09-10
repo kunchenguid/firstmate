@@ -103,8 +103,8 @@ pane_agent_status_field() {  # <pane_id>
 }
 
 wait_until() {  # <pane_id> <idle|gone> [attempts]
-  local pane=$1 want=$2 attempts=${3:-90} i code status
-  for i in $(seq 1 "$attempts"); do
+  local pane=$1 want=$2 attempts=${3:-90} code status
+  for _ in $(seq 1 "$attempts"); do
     code=$(agent_get_code "$pane")
     status=$(agent_get_status "$pane")
     case "$want" in
