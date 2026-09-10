@@ -12,7 +12,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--existing-pr <url>] [--branch <name>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -34,6 +34,12 @@
 #   after scaffolding and the caller-supplied repo string cannot reliably
 #   identify this repo. Briefs made without it carry a loud declaration so an
 #   omitted contract cannot be silent.
+#   --existing-pr scaffolds work on an existing GitHub pull request or GitLab
+#   merge request instead of a new branch and PR. It applies only to ship tasks
+#   in no-mistakes or direct-PR mode. The worker fetches and checks out the PR's
+#   head branch from origin, pushes only to that same branch without force, and
+#   never opens a second PR. Pass --branch <name> when known; otherwise the brief
+#   retains {EXISTING_PR_BRANCH}, which bin/fm-spawn.sh refuses until filled.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -48,6 +54,9 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Every scaffold records the absolute Firstmate home and absolute task-artifact
+# directory so home-relative data/<task-id>/ references cannot be mistaken for
+# project-worktree paths.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -121,6 +130,10 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+EXISTING_PR=
+EXISTING_PR_SET=0
+BRANCH=
+BRANCH_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -130,6 +143,8 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      existing-pr) EXISTING_PR=$a; EXISTING_PR_SET=1 ;;
+      branch) BRANCH=$a; BRANCH_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -142,6 +157,10 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --existing-pr) want_value=existing-pr ;;
+    --existing-pr=*) EXISTING_PR=${a#--existing-pr=}; EXISTING_PR_SET=1 ;;
+    --branch) want_value=branch ;;
+    --branch=*) BRANCH=${a#--branch=}; BRANCH_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -168,6 +187,36 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+
+if [ "$EXISTING_PR_SET" -eq 1 ]; then
+  [ "$KIND" = ship ] || {
+    echo "error: --existing-pr applies only to ship briefs" >&2
+    exit 1
+  }
+  [ "$MODE" != local-only ] || {
+    echo "error: --existing-pr cannot be combined with local-only mode because an existing PR requires a remote branch" >&2
+    exit 1
+  }
+  # shellcheck source=bin/fm-pr-lib.sh
+  . "$SCRIPT_DIR/fm-pr-lib.sh"
+  fm_pr_url_parse "$EXISTING_PR" || {
+    echo "error: --existing-pr requires a canonical GitHub pull request or GitLab merge request URL" >&2
+    exit 1
+  }
+  EXISTING_PR=$FM_PR_URL
+elif [ "$BRANCH_SET" -eq 1 ]; then
+  echo "error: --branch requires --existing-pr" >&2
+  exit 1
+fi
+
+if [ "$BRANCH_SET" -eq 1 ]; then
+  git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || {
+    echo "error: --branch is not a valid git branch name: $BRANCH" >&2
+    exit 1
+  }
+elif [ "$EXISTING_PR_SET" -eq 1 ]; then
+  BRANCH='{EXISTING_PR_BRANCH}'
 fi
 ID=${POS[0]}
 
@@ -196,6 +245,12 @@ shell_quote() {
   printf "'"
 }
 
+if [ "$EXISTING_PR_SET" -eq 1 ]; then
+  BRANCH_QUOTED=$(shell_quote "$BRANCH")
+  ORIGIN_BRANCH_QUOTED=$(shell_quote "origin/$BRANCH")
+  PUSH_BRANCH_QUOTED=$(shell_quote "HEAD:$BRANCH")
+fi
+
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 
@@ -211,6 +266,14 @@ When a terminal message says an instruction is waiting there - and at any natura
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
+
+IFS= read -r -d '' HOME_SECTION <<EOF || true
+# Firstmate home and task artifacts
+The absolute Firstmate home for this task is \`$FM_HOME\`.
+Firstmate-owned task artifacts live under \`$DATA/$ID/\`, not in the project worktree.
+Treat any home-relative \`data/$ID/...\` deliverable or referenced report as living under that absolute task-artifact directory unless the brief gives another absolute path.
+EOF
+HOME_SECTION=${HOME_SECTION%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -238,6 +301,8 @@ You are a persistent second mate managed by the main firstmate. Work on your own
 
 # Charter
 $SECONDMATE_CHARTER
+
+$HOME_SECTION
 
 # Routing scope
 $SECONDMATE_SCOPE
@@ -359,6 +424,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $TASK_SECTION
 
+$HOME_SECTION
+
 $HERDR_SECTION
 
 # Setup
@@ -423,27 +490,41 @@ fi
 # which bin/fm-promote.sh renders too so a promoted scout receives the same contract.
 # The block opens with the fixed "Delivery contract: mode=<mode>" line that
 # bin/fm-spawn.sh checks against its own explicit --mode before launching.
-case "$MODE" in
-  direct-PR)
-    SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    ;;
-  local-only)
-    SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    ;;
-  *)  # no-mistakes
+if [ "$EXISTING_PR_SET" -eq 1 ]; then
+  SETUP1="1. First action: fetch and check out the existing PR head branch from origin: \`git fetch origin $BRANCH_QUOTED && git checkout -B $BRANCH_QUOTED --track $ORIGIN_BRANCH_QUOTED\`."
+  if [ "$MODE" = no-mistakes ]; then
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
-    ;;
-esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+  else
+    SETUP2=""
+  fi
+  RULE1="1. Commit on \`$BRANCH\` and push only to that same origin branch with \`git push origin $PUSH_BRANCH_QUOTED\`. Never force-push, never open a second PR, and never merge the existing PR."
+else
+  SETUP1="1. First action: create your branch: \`git checkout -b fm/$ID\`"
+  case "$MODE" in
+    direct-PR)
+      SETUP2=""
+      RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+      ;;
+    local-only)
+      SETUP2=""
+      RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+      ;;
+    *)  # no-mistakes
+      SETUP2="
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+      RULE1='1. Never push to the default branch. Never merge a PR.'
+      ;;
+  esac
+fi
+DOD=$(fm_dod_block "$MODE" "$ID" "$EXISTING_PR") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
+
+$HOME_SECTION
 
 $HERDR_SECTION
 
@@ -454,7 +535,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$SETUP1$SETUP2
 
 # Rules
 $RULE1

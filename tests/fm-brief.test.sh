@@ -221,6 +221,69 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+test_existing_pr_ship_briefs_replace_new_pr_contract() {
+  local home id brief url mode
+  home="$TMP_ROOT/existing-pr-home"
+  mkdir -p "$home/data"
+  url=https://github.com/kunchenguid/firstmate/pull/2460
+
+  for mode in direct-PR no-mistakes; do
+    id="brief-existing-${mode}"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode "$mode" \
+      --existing-pr "$url" --branch bookie/existing-head >/dev/null 2>&1 \
+      || fail "existing-PR $mode brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    assert_grep "Existing PR: $url" "$brief" \
+      "$mode existing-PR brief did not record the canonical PR URL"
+    assert_grep "git fetch origin 'bookie/existing-head'" "$brief" \
+      "$mode existing-PR brief did not fetch the existing head branch from origin"
+    assert_grep "git checkout -B 'bookie/existing-head' --track 'origin/bookie/existing-head'" "$brief" \
+      "$mode existing-PR brief did not check out the existing origin head"
+    assert_grep "git push origin 'HEAD:bookie/existing-head'" "$brief" \
+      "$mode existing-PR brief did not push back to the same branch"
+    assert_grep "Never force-push, never open a second PR" "$brief" \
+      "$mode existing-PR brief lost its force-push and duplicate-PR prohibitions"
+    assert_grep "done: PR $url head <sha> checks green" "$brief" \
+      "$mode existing-PR brief did not bind done to the existing PR head and green checks"
+    assert_no_grep "git checkout -b fm/$id" "$brief" \
+      "$mode existing-PR brief retained the new task-branch instruction"
+    assert_no_grep "open a PR with \`gh-axi\`" "$brief" \
+      "$mode existing-PR brief retained the new-PR delivery instruction"
+  done
+
+  id="brief-existing-placeholder"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode direct-PR \
+    --existing-pr "$url" >/dev/null 2>&1 \
+    || fail "existing-PR brief without --branch should scaffold for later filling"
+  assert_grep "origin/{EXISTING_PR_BRANCH}" "$home/data/$id/brief.md" \
+    "existing-PR brief without --branch did not retain a guarded branch placeholder"
+  pass "fm-brief.sh: existing-PR ship briefs replace new-branch and new-PR contracts"
+}
+
+test_generated_briefs_name_the_absolute_firstmate_home() {
+  local home id brief kind
+  home="$TMP_ROOT/absolute-home-briefs"
+  mkdir -p "$home/data"
+  home=$(cd "$home" && pwd -P)
+
+  for kind in ship scout secondmate; do
+    id="brief-absolute-home-$kind"
+    case "$kind" in
+      ship) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode direct-PR >/dev/null ;;
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null ;;
+      secondmate) FM_HOME="$home" FM_SECONDMATE_CHARTER=x "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep "The absolute Firstmate home for this task is \`$home\`." "$brief" \
+      "$kind brief did not identify the absolute Firstmate home"
+    assert_grep "Firstmate-owned task artifacts live under \`$home/data/$id/\`, not in the project worktree." "$brief" \
+      "$kind brief did not identify the absolute task-artifact directory"
+    assert_grep "home-relative \`data/$id/...\` deliverable or referenced report" "$brief" \
+      "$kind brief did not disambiguate home-relative evidence paths"
+  done
+  pass "fm-brief.sh: every scaffold identifies its absolute Firstmate home and task artifacts"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -290,6 +353,10 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+branch without existing PR|brief-refused-b5 some-proj --mode direct-PR --branch existing/head|--branch requires --existing-pr
+existing PR in local-only mode|brief-refused-b6 some-proj --mode local-only --existing-pr https://github.com/o/r/pull/1|--existing-pr cannot be combined with local-only mode
+existing PR on a scout brief|brief-refused-b7 some-proj --scout --existing-pr https://github.com/o/r/pull/1|--existing-pr applies only to ship briefs
+malformed existing PR URL|brief-refused-b8 some-proj --mode direct-PR --existing-pr not-a-pr|--existing-pr requires a canonical GitHub pull request or GitLab merge request URL
 ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
@@ -873,6 +940,8 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_existing_pr_ship_briefs_replace_new_pr_contract
+test_generated_briefs_name_the_absolute_firstmate_home
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
