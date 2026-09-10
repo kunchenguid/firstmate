@@ -3,7 +3,7 @@ name: updatethecaptain
 description: >-
   Keep the captain updated on every worker under way, in plain English, on a repeating ten-minute timer.
   Use when the captain invokes /updatethecaptain or asks to be kept posted on what the workers are doing.
-  Every report covers every worker with what it has finished, what it is doing now, what it still has to do, and how long it needs.
+  Every update opens with a dependency map of the whole body of work, then covers every worker with what it has finished, what it is doing now, what it still has to do, and how long it needs.
   The loop reports once immediately, repeats every ten minutes, picks up workers started since the last report, and ends by itself when no worker is left running or when the captain invokes /updatethecaptain-stop.
 user-invocable: true
 metadata:
@@ -17,7 +17,7 @@ Report once at invocation, then again every ten minutes, until the last worker s
 
 ## What this skill owns, and what it does not
 
-This skill owns exactly two contracts, stated in full below: the four-part report, and the format for a worker's question.
+This skill owns exactly three contracts, stated in full below: the dependency map that opens every update, the four-part report, and the format for a worker's question.
 Everything else already has an owner and is referenced here, never restated.
 
 - `AGENTS.md` section 9 owns how to talk to the captain, including which words to use and which internal terms must never reach the captain.
@@ -31,7 +31,7 @@ Everything else already has an owner and is referenced here, never restated.
 
 While this loop is running the captain has asked for the whole report on every tick, including a tick where nothing has changed.
 That is a deliberate exception to section 8's rule that no-change updates are not captain-facing progress.
-Equally, while this loop is running a tick is never collapsed into section 9's short acknowledgement, however quiet the ten minutes were, and the full four-part report is always sent.
+Equally, while this loop is running a tick is never collapsed into section 9's short acknowledgement, however quiet the ten minutes were, and the full update, map included, is always sent.
 It is scoped to this loop and ends with it; it never changes what an unrequested wake surfaces.
 
 ## Procedure
@@ -39,9 +39,15 @@ It is scoped to this loop and ends with it; it never changes what an unrequested
 1. If this session has not yet taken the helm, run `bin/fm-session-start.sh` once and read its digest before anything else.
    The timer rides the supervision cycle this home already runs, so a session that never started has nothing to keep the loop alive.
 
-2. Build the list of workers under way from this home's own durable records with `bin/fm-bearings-snapshot.sh --all-in-flight`.
+2. Build the list of workers under way from this home's own durable records with `FM_BEARINGS_GATES=200 FM_SNAPSHOT_SECONDMATE_QUEUED=200 FM_SNAPSHOT_SECONDMATE_CHILDREN=200 bin/fm-bearings-snapshot.sh --all-in-flight --all-landed`.
    That command is the single fleet-state source for this skill.
    Do not add a second reader, and do not reconstruct the fleet from conversation history.
+   The same output carries what has landed and what is waiting together with the thing each waiting item waits on, which is what the dependency map is drawn from.
+   The two flags and the raised bound are what the map needs, because the map claims to be the whole body of work while the default view caps how much landed work and how much waiting work it returns.
+   Lift the waiting cap with `FM_BEARINGS_GATES` and never with `--all-queued`, because that flag also puts back the queued items whose bodies read as superseded, not required, or deferred, and this output carries no field that tells them apart from real waiting work.
+   Raise the two secondmate bounds the same way, because they slice the queued and running work inside each registered secondmate home before it ever reaches this output, and unlike the other bounds they are not disclosed in the `omitted` array read below.
+   Read the `omitted` array in that same output before drawing, and carry over only the entries saying that landed, running, or waiting work was capped or could not be read, as a plain line naming the work the captain cannot see.
+   Every other entry there is machinery about surfaces the map never draws, such as task paths, watch and steer actions, or live pull request discovery, and none of it reaches the captain under `AGENTS.md` section 9.
    Where a worker's actual current step matters to part (b) or part (d) below, read it with `bin/fm-crew-state.sh <id>`, because a status line records a past event rather than current state.
    Include every worker in this home, including one only just dispatched and one waiting on something outside its control.
 
@@ -69,10 +75,44 @@ It is not a shell background job, not a detached process, and not a second super
 That matters for three reasons: the wake is durable, so a tick survives the captain sending messages in between and needs nothing from the captain to stay alive; the check's bytes are trust-bound, so nothing else can turn it into a different command; and it fires only while a supervision cycle is live, which is exactly the window in which there is worker progress to report.
 The line lands on the first monitoring pass at or after ten minutes, never before it.
 
+## The dependency map
+
+Every update opens with the dependency map, above every worker's line.
+The map and the four-part report are both in every update, and neither one is ever sent instead of the other.
+When a worker's question is in the message, the question stays at the very top and the map follows it, still above every worker's line.
+
+Draw a real graph rather than a list with corners on it.
+Every piece of work is a node named by the job it is doing, and every dependency is an edge between two named nodes carrying the reason that edge exists.
+The test is simple: if deleting every edge would leave the drawing saying the same thing, it is a list and has to be redrawn.
+
+The map covers the whole body of work rather than only the part that is running:
+
+- What has landed, so the captain can see what the rest is built on.
+- What is running now.
+- What is waiting, and the exact thing each waiting piece is waiting on.
+
+Draw the edges between running jobs too, not only the edges into waiting work.
+One of those edges is always present and is the one most often left out: landings are fast-forward only, so every landing forces each other branch to rebase and re-run its checks.
+That is a real mutual dependency across everything running, and it belongs on the map as an edge over the running set rather than as a remark underneath it.
+
+A job held back because the machine is full is not a dependency.
+Show it as waiting and say that it is waiting on capacity.
+A queue drawn as an edge tells the captain the chain is stuck when only the machine is busy.
+
 ## The four-part report
 
 Report **every** worker on the list.
 Never summarise the fleet in aggregate, never drop a worker for having nothing new, and never merge two workers into one entry.
+
+Each worker's entry carries its running clock beside the name: how long that worker has been running, in minutes.
+Take it from that task's durable spawn record, `state/<id>.meta`, whose `spawn_gen=` value begins with `s` followed by the epoch second at which that worker was dispatched, and report the minutes between that second and now.
+That record's fields are owned by `bin/fm-spawn.sh`'s header, which is where both this field's shape and this skill's reliance on it are recorded.
+The figure is elapsed wall time since the current dispatch, so it is readable from the record alone and does not depend on the worker still being alive.
+Never read it from the file's modification time, because unrelated events rewrite that record after launch, and never from conversation memory or from an estimate.
+A relaunch records a fresh `spawn_gen`, so the clock restarts with it.
+When that same record carries a `control_relaunch_tx=` line, the worker was relaunched, and its entry says so and says that its clock runs from the relaunch rather than from the original dispatch.
+Without that line the restarted clock hides the very overrun the clock exists to expose.
+The clock is what exposes a worker forty minutes into a ten-minute job, which no description of the work can show.
 
 Give each worker exactly these four parts, in this order, in plain English:
 
