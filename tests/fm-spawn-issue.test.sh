@@ -10,8 +10,10 @@
 # Covered: the canonical issue URL is what lands in the record however the
 # caller spelled it; a task with no --issue records nothing; a batch shares one
 # issue across every pair; the brief's recorded issue and the spawn's flag must
-# agree; and --issue is refused where a task cannot come from an issue
-# (--scout, --secondmate, --relaunch) or where the URL is not an issue URL.
+# agree; --issue is refused where a task cannot come from an issue
+# (--scout, --secondmate, --relaunch) or where the URL is not an issue URL; and
+# the dispatch boundary refuses the delivery postures that cannot produce the
+# merge request an issue subtask exists for (--yolo on, --mode local-only).
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -178,6 +180,41 @@ test_a_relaunch_keeps_the_recorded_issue() {
   pass "fm-spawn: a relaunch reuses the recorded issue and refuses to be told another one"
 }
 
+# The spawn is the boundary that records `issue=`, and that record is what a
+# later step reads to find every task of one issue and list its merge requests.
+# So a delivery posture that can never produce one is refused here too, not only
+# at the brief: local-only pushes nothing and opens no merge request, and yolo on
+# would have firstmate merge work the issue's owner is meant to review.
+test_issue_refuses_a_posture_that_ships_no_reviewable_merge_request() {
+  local rec out status
+  rec=$(make_case posture issue-posture-g1 issue-posture-g2 issue-posture-g3)
+  read_case "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    issue-posture-g1 "$PROJ_DIR" claude --mode local-only --yolo off --issue "$ISSUE_URL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "--issue with --mode local-only should exit non-zero"
+  assert_contains "$out" "local-only opens no merge request" "the refusal did not give the reason"
+  assert_absent "$HOME_DIR/state/issue-posture-g1.meta" \
+    "a local-only issue spawn still recorded the task against the issue"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    issue-posture-g2 "$PROJ_DIR" claude --mode direct-PR --yolo on --issue "$ISSUE_URL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "--issue with --yolo on should exit non-zero"
+  assert_contains "$out" "cannot ship with --yolo on" "the refusal did not name the merge authority"
+  assert_absent "$HOME_DIR/state/issue-posture-g2.meta" "a yolo-on issue spawn published a task record"
+
+  # local-only itself is untouched for a task that did not come from an issue.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    issue-posture-g3 "$PROJ_DIR" claude --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "an ordinary local-only spawn should still succeed: $out"
+  assert_no_grep 'issue=' "$HOME_DIR/state/issue-posture-g3.meta" \
+    "an ordinary local-only task recorded an issue"
+  pass "fm-spawn: an issue-sourced spawn refuses local-only and yolo on before any task record exists"
+}
+
 # Refusals that happen before anything exists: a URL that is not a GitLab issue
 # URL (the rules bin/fm-gitlab-issue-lib.sh owns), and the two kinds that cannot
 # come from an issue - a scout, which delivers a report and no merge request,
@@ -224,6 +261,7 @@ test_a_task_without_an_issue_records_none
 test_a_batch_shares_one_issue_across_every_pair
 test_the_brief_and_the_spawn_must_name_the_same_issue
 test_a_relaunch_keeps_the_recorded_issue
+test_issue_refuses_a_posture_that_ships_no_reviewable_merge_request
 test_issue_scope_and_url_refusals_create_nothing
 
 echo "# all fm-spawn-issue tests passed"

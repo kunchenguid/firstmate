@@ -457,13 +457,31 @@ EOF
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "filled-ship brief should scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" \
-    "Fix replacement of \`{TASK}\` in Herdr briefs." \
-    "Keep literal \`{FIRSTMATE_SPEC}\` examples intact."
+    "Fix placeholder replacement in Herdr briefs." \
+    "Keep the scaffold's own examples intact."
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
   assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
-    "a filled ship brief mentioning placeholder tokens was refused as unfilled"
+    "a filled ship brief was refused as unfilled"
   assert_not_contains "$out" "must contain nonempty" \
-    "a filled ship brief mentioning placeholder tokens failed content validation"
+    "a filled ship brief failed content validation"
+
+  # A subsection scaffolded with surrounding context - bin/fm-brief.sh --issue
+  # writes the issue around a retained {TASK} - is never exactly the token, so
+  # the gate refuses the token wherever it sits rather than only on its own.
+  id=delivery-composed-ship
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "composed-ship brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Context for the ask.
+{TASK}
+Only that work is in scope." \
+    "Touch only the redirect guard."
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of a composed but unfilled intent should exit non-zero"
+  assert_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+    "an unfilled {TASK} surrounded by context passed the placeholder gate"
+  assert_absent "$home/state/$id.meta" "a composed unfilled brief wrote task metadata"
 
   id=delivery-legacy-fenced-headings
   mkdir -p "$home/data/$id"

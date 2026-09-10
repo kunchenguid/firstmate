@@ -28,12 +28,17 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
-#   --issue <issue-url> scaffolds work dispatched from a GitLab issue. It FILLS
-#   `## Captain's intent` from the issue itself - canonical URL, project path,
-#   author, state, title, description, and the issue's comments, read through
-#   `bin/fm-gitlab-issue.sh show` - so the worker reads the original request
-#   without calling GitLab and no `{TASK}` placeholder is left in that
-#   subsection; `{FIRSTMATE_SPEC}` is still firstmate's to fill. Every line of
+#   --issue <issue-url> scaffolds work dispatched from a GitLab issue. It writes
+#   the issue itself into `## Captain's intent` as CONTEXT - canonical URL,
+#   project path, author, state, title, description, and the issue's comments,
+#   read through `bin/fm-gitlab-issue.sh show` - so the worker reads the original
+#   request without calling GitLab. The `{TASK}` placeholder stays inside that
+#   subsection, under the context, for Firstmate to fill with THIS subtask's own
+#   work, and the scaffold closes the subsection with a scope sentence naming
+#   this task's `<n>/<N>` position and stating that the issue's other subtasks
+#   are neither this task's scope nor its acceptance criteria - so a no-mistakes
+#   `--intent` taken from that subsection asks for this subtask alone.
+#   `{FIRSTMATE_SPEC}` keeps its meaning and stays out of `--intent`. Every line of
 #   issue-authored text is quoted with a leading "> ", so a heading or code
 #   fence written in the issue cannot end that subsection or restructure the
 #   sections after it. bin/fm-gitlab-issue-lib.sh owns the accepted URL shape
@@ -43,7 +48,9 @@
 #   merge request also carries the generated small-merge-request contract: one
 #   reviewable merge request for the task, its title, a "Related to #<iid>" line
 #   and never a closing keyword (the human closes the issue), and the regression
-#   test shipping with the first subtask of a reproduced bug. The merge request
+#   test for a reproduced bug, which the block places on this merge request or
+#   on subtask 1's from the `<n>/<N>` position the scaffold already resolved,
+#   never from what the spec happens to restate. The merge request
 #   is a GitLab one, so the block names `glab` as its tool in both modes. Under
 #   --mode no-mistakes the pipeline is what opens it, so the block also makes
 #   setting its title and description the worker's last step - metadata of an
@@ -419,14 +426,17 @@ issue_show_field() {  # <jq-filter>
   printf '%s\n' "$ISSUE_SHOW" | jq -r "$1"
 }
 
-# The captain-facing half of --issue: the issue itself, rendered so the worker
-# never has to call GitLab to learn what was asked.
+# The captain-facing half of --issue: the issue as CONTEXT, then the retained
+# {TASK} placeholder Firstmate fills with this subtask's own work, then the
+# sentence that limits the ask to this subtask. The whole subsection is what a
+# no-mistakes run passes as --intent, so the issue must read as context for one
+# subtask's work rather than as N subtasks' acceptance criteria.
 render_issue_intent() {
   local title description notes
   title=$(issue_show_field '.title // ""')
   description=$(issue_show_field '.description // ""')
   notes=$(issue_show_field '.notes[]? | "@" + (.author.username // "unknown") + " at " + (.created_at // "unknown time") + ":\n" + (.body // "") + "\n"')
-  printf 'This task was dispatched from GitLab issue #%s in %s, opened by @%s and currently %s:\n' \
+  printf 'CONTEXT - this task was dispatched from GitLab issue #%s in %s, opened by @%s and currently %s:\n' \
     "$FM_GITLAB_ISSUE_IID" "$ISSUE_PROJECT_PATH" "$ISSUE_AUTHOR" "$ISSUE_STATE"
   printf '%s\n\n' "$FM_GITLAB_ISSUE_URL"
   printf 'The issue is quoted below as it was written; the leading "> " on each line is the quote, not part of the text.\n\n'
@@ -444,6 +454,12 @@ render_issue_intent() {
   else
     printf '\nThe issue has no comments.\n'
   fi
+  printf '\nTHE WORK OF THIS TASK, which is the whole of what you are asked to deliver:\n'
+  printf '{TASK}\n'
+  printf '\nSCOPE - this task is subtask %s of the %s that issue #%s was split into.\n' \
+    "$ISSUE_PART_N" "$ISSUE_PART_TOTAL" "$FM_GITLAB_ISSUE_IID"
+  printf 'Only the work stated directly above is in scope, and only it is this task'"'"'s acceptance criteria.\n'
+  printf 'The issue above is context for reading that work, not a checklist for this task: the issue'"'"'s other subtasks are NOT this task'"'"'s work, NOT its scope, and NOT its acceptance criteria - they are dispatched separately.\n'
 }
 
 ISSUE_SHOW=
@@ -482,12 +498,20 @@ This task was dispatched from that issue, quoted under \`## Captain's intent\` a
 The human who opened it owns it: never close it, never change its labels, and never comment on it - firstmate reports back to the issue.
 EOF
   ISSUE_SECTION=${ISSUE_SECTION%$'\n'}
+  # The scaffold already resolved and validated this task's position, so the
+  # regression-test obligation is stated from that, never deferred to whatever
+  # the firstmate spec happens to restate about which subtask this is.
+  if [ "$ISSUE_PART_N" -eq 1 ]; then
+    ISSUE_REGRESSION_RULE="When the issue is a bug that was reproduced, the regression test ships with the first subtask's merge request, and this task IS subtask 1 of $ISSUE_PART_TOTAL: this merge request must contain it."
+  else
+    ISSUE_REGRESSION_RULE="When the issue is a bug that was reproduced, the regression test ships with subtask 1's merge request; this task is subtask $ISSUE_PART_N of $ISSUE_PART_TOTAL, so carrying it is not this merge request's job."
+  fi
   IFS= read -r -d '' ISSUE_MR_SECTION <<EOF || true
 Ship exactly one merge request for this task by default, small enough that a human reviews the whole diff in one reading.
 If the work genuinely cannot land as one reviewable change, say so to firstmate instead of splitting or stacking merge requests on your own.
 Title it \`#$FM_GITLAB_ISSUE_IID [$ISSUE_PART_N/$ISSUE_PART_TOTAL] <what this task changes>\`, where $ISSUE_PART_N/$ISSUE_PART_TOTAL is this task's resolved position among the subtasks issue #$FM_GITLAB_ISSUE_IID was split into - do not change it.
 The description must carry the line \`Related to #$FM_GITLAB_ISSUE_IID\` and must never carry \`Closes\`, \`Fixes\`, \`Resolves\`, or any other closing keyword: the human closes the issue after reviewing every merge request.
-When the issue is a bug you reproduced, the regression test ships with the first subtask's merge request; if the spec above says this is that subtask, this merge request must contain it.
+$ISSUE_REGRESSION_RULE
 EOF
   ISSUE_SECTION="$ISSUE_SECTION"$'\n\n'"${ISSUE_MR_SECTION%$'\n'}"
   # Who opens the merge request differs by mode, and the tool never does: this
@@ -507,11 +531,11 @@ EOF
   ISSUE_SECTION="$ISSUE_SECTION"$'\n\n'"${ISSUE_TOOL_SECTION%$'\n'}"
   ISSUE_BLOCK=$'\n'"$ISSUE_SECTION"$'\n'
 fi
-# --issue fills the captain's intent from the issue, so only the spec is left.
+# --issue supplies the issue as context around {TASK}, so both placeholders are
+# still Firstmate's to fill.
 PLACEHOLDER_HINT='{TASK} and {FIRSTMATE_SPEC}'
 ISSUE_LABEL=
 if [ "$ISSUE_SET" -eq 1 ]; then
-  PLACEHOLDER_HINT='{FIRSTMATE_SPEC}'
   ISSUE_LABEL=", issue=#$FM_GITLAB_ISSUE_IID"
 fi
 

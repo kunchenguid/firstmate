@@ -55,7 +55,9 @@
 #   --secondmate (a persistent agent is not issue work), and on --relaunch
 #   (which reuses the recorded value). An issue-sourced ship spawn also refuses
 #   --yolo on: the human who owns the issue reviews and merges each merge
-#   request, so firstmate never merges that work itself. When the brief records
+#   request, so firstmate never merges that work itself. It refuses --mode
+#   local-only for the mirror-image reason: that mode opens no merge request,
+#   and a subtask dispatched from an issue exists to produce one. When the brief records
 #   an "Issue contract: issue=<url>" line (bin/fm-brief.sh --issue writes one),
 #   the spawn refuses a disagreeing or missing --issue the same way it refuses a
 #   delivery-mode mismatch, and warns once when only the flag names an issue.
@@ -597,6 +599,13 @@ else
     # the issue afterwards.
     if [ "$ISSUE_SET" -eq 1 ] && [ "$YOLO" = on ]; then
       echo "error: a task dispatched from a GitLab issue cannot ship with --yolo on: the human who owns the issue reviews and merges each merge request; pass --yolo off" >&2
+      exit 1
+    fi
+    # This is the boundary that records `issue=`, so it enforces the same rule
+    # the brief does: a task counted as one of an issue's subtasks must be able
+    # to produce the merge request that subtask exists for.
+    if [ "$ISSUE_SET" -eq 1 ] && [ "$MODE" = local-only ]; then
+      echo "error: a task dispatched from a GitLab issue cannot ship --mode local-only: local-only opens no merge request, and every subtask dispatched from an issue must produce one small merge request for the human to review and merge" >&2
       exit 1
     fi
   else

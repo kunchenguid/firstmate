@@ -45,15 +45,20 @@ Other projects retain their own instructions unchanged.
 EOF
 }
 
-# Return 0 when a Task subsection still consists only of its scaffold
-# placeholder. A missing file and legacy briefs carry no such placeholders.
+# Return 0 when a Task subsection still carries a scaffold placeholder token
+# anywhere in it. A subsection scaffolded with surrounding context - bin/fm-brief.sh
+# --issue writes the issue around a retained `{TASK}` - is never exactly the
+# token, so an equality test would pass an unfilled brief straight to a worker.
+# A brief still holding the literal token is unfilled by definition. A missing
+# file and legacy briefs carry no such placeholders.
 fm_brief_task_placeholders_present() {  # <file>
   local file=$1 intent spec
   [ -f "$file" ] || return 1
   intent=$(fm_brief_task_heading_body "$file" "## Captain's intent")
   spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
-  [ "$(printf '%s' "$intent" | tr -d '[:space:]')" = '{TASK}' ] && return 0
-  [ "$(printf '%s' "$spec" | tr -d '[:space:]')" = '{FIRSTMATE_SPEC}' ] && return 0
+  case "$intent$spec" in
+    *'{TASK}'* | *'{FIRSTMATE_SPEC}'*) return 0 ;;
+  esac
   return 1
 }
 
