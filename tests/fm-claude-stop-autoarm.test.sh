@@ -1415,8 +1415,18 @@ mode_incapable_root() {
   local candidate root probe rc
   for candidate in "${FM_TEST_MODE_INCAPABLE_PARENT:-}" /mnt/*/ /Volumes/*/; do
     [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ] || continue
+    # A root here sits outside $TMPDIR, so the global orphan sweep never sees
+    # it: reap this mount's own leftovers before adding another. Same policy as
+    # that sweep - only a directory this suite named and marked, whose owning
+    # shell is gone and whose age is past the bound, is removed.
+    fm_test_reap_stale_fixtures "${candidate%/}"/fm-autoarm-modeless.*/.fm-test-fixture
     root=$(mktemp -d "${candidate%/}/fm-autoarm-modeless.XXXXXX" 2>/dev/null) || continue
-    fm_test_track_dir "$root"
+    # Without the marker a hard kill would strand this root on a user mount
+    # forever, so a location that cannot carry one is not usable for a fixture.
+    if ! fm_test_track_dir "$root"; then
+      rm -rf "$root"
+      continue
+    fi
     probe="$root/probe"
     if mkdir -p "$probe/d" 2>/dev/null && : > "$probe/f" 2>/dev/null &&
       chmod 600 "$probe/f" 2>/dev/null && chmod 700 "$probe/d" 2>/dev/null &&
