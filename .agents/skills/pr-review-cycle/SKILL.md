@@ -1,0 +1,155 @@
+---
+name: pr-review-cycle
+description: >-
+  Agent-only procedure for taking any pull request from review intake to independently verified clean.
+  Load before reviewing, fixing, or declaring a PR ready, and before accepting a worker's PR-ready or done claim.
+  Owns exact-head adversarial Codex review briefs, CI and bot review inspection, review-thread disposition, existing-PR fix briefs, and final independent verification.
+user-invocable: false
+metadata:
+  internal: true
+---
+
+# pr-review-cycle
+
+This skill is the single owner of the review-to-clean procedure for every pull request.
+It is written so a firstmate can apply it directly or paste the relevant sections unchanged into a crewmate brief.
+Merge authority is not part of this procedure and remains owned by `AGENTS.md` section 7.
+
+## Pin the review target
+
+Set the repository and pull request explicitly, then record the current head before reviewing anything.
+
+```sh
+OWNER=<owner>
+REPO=<repo>
+PR=<number>
+gh-axi api "/repos/$OWNER/$REPO/pulls/$PR" --jq '{url:.html_url,draft,headRef:.head.ref,headRepo:.head.repo.full_name,headSha:.head.sha,baseRef:.base.ref,baseSha:.base.sha}'
+```
+
+Use the returned head SHA as `REVIEW_HEAD` and the returned base SHA as `BASE_SHA`.
+Every review result, check result, and ready claim is stale if the PR head no longer equals `REVIEW_HEAD`.
+
+## Read the complete review surface
+
+Read every check and the complete PR conversation, review submission, inline comment, and current review thread.
+
+```sh
+gh-axi pr checks "$PR" -R "$OWNER/$REPO"
+gh-axi pr view "$PR" -R "$OWNER/$REPO" --full --comments --reviews
+gh-axi api "/repos/$OWNER/$REPO/issues/$PR/comments" --paginate --full
+gh-axi api "/repos/$OWNER/$REPO/pulls/$PR/reviews" --paginate --full
+gh-axi api "/repos/$OWNER/$REPO/pulls/$PR/comments" --paginate --full
+gh-axi api "/repos/$OWNER/$REPO/commits/$REVIEW_HEAD/check-runs?per_page=100" --paginate --full
+gh-axi api "/repos/$OWNER/$REPO/commits/$REVIEW_HEAD/statuses?per_page=100" --paginate --full
+gh-axi api POST graphql --paginate --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { reviewThreads(first: 100, after: \$endCursor) { nodes { id isResolved isOutdated comments(first: 100) { nodes { databaseId url path line body author { login } createdAt } } } pageInfo { hasNextPage endCursor } } } } }"
+```
+
+Do not treat an outdated thread as resolved.
+Classify every unresolved thread as valid, already fixed, or declined.
+Fix valid findings, reply with the commit or concrete correction, and resolve the thread only after the fix is present on the PR head.
+For an already-fixed finding, reply with the exact evidence and resolve it.
+For a declined finding, reply with the specific reason it does not apply or would violate the accepted contract, then resolve it.
+Reply to an inline comment before resolving its thread when a disposition is not already visible in the conversation.
+
+```sh
+COMMENT_ID=<database-id-from-thread>
+gh-axi api POST "/repos/$OWNER/$REPO/pulls/$PR/comments/$COMMENT_ID/replies" --field body='<specific disposition and evidence>'
+THREAD_ID=<graphql-review-thread-id>
+gh-axi api POST graphql --field query='mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { id isResolved } } }' --field thread="$THREAD_ID"
+```
+
+If the GraphQL result reports `pageInfo.hasNextPage: true`, the `--paginate` command must return the later pages before the enumeration is complete.
+
+## Interpret automated reviewers
+
+CodeRabbit's clean result is a summary issue comment, not a GitHub review object.
+Read the latest CodeRabbit summary in full and verify that the commit range named in that comment ends at `REVIEW_HEAD` before accepting its clean verdict.
+CodeRabbit skips draft PRs, so a draft-skip message is not a review result.
+Make the PR ready through the authorized workflow and request or await review before claiming clean.
+CodeRabbit reports rate limiting in a reply comment.
+When that explicit rate-limit reply applies to `REVIEW_HEAD`, record the comment URL and use the independent Codex adversarial review as the fallback required by the captain's directive instead of waiting indefinitely or inventing a CodeRabbit verdict.
+
+The Claude Review Bot from `anthropics/claude-code-action` posts a checklist comment after each push.
+Read the latest checklist comment in full, treat its last section as the verdict, and verify that it belongs to `REVIEW_HEAD` or to the review run triggered by that push.
+An older clean checklist cannot cover a newer head.
+
+After each push, wait for the push-triggered CI and Claude checklist and request a fresh CodeRabbit pass when it did not start automatically.
+
+```sh
+gh-axi pr comment "$PR" -R "$OWNER/$REPO" --body '@coderabbitai review'
+```
+
+Do not repeatedly summon CodeRabbit after its explicit rate-limit reply.
+If the Claude workflow does not run on the new head, inspect its workflow trigger and report the missing review instead of treating the old checklist as current.
+
+Identify automated comments by their author and content together because app login display names can change.
+Read all findings even when an earlier summary says the review is clean.
+
+## Independent Codex adversarial review
+
+Run a fresh local Codex review against the exact checked-out PR head after the implementation is committed.
+The reviewer must not be the worker that authored or fixed the change.
+Detach or use a disposable worktree at `REVIEW_HEAD`, verify `git rev-parse HEAD` equals it, and run Codex read-only against the PR base.
+
+```sh
+test "$(git rev-parse HEAD)" = "$REVIEW_HEAD"
+codex exec review --base "$BASE_SHA" --ephemeral '<adversarial review brief>'
+```
+
+Use this brief verbatim after filling in the placeholders:
+
+```text
+Review pull request <full URL> adversarially at exact head <full SHA> against base <base ref>.
+Do not modify files.
+Read the complete diff and the surrounding implementation, tests, contracts, and relevant history.
+Focus on correctness, regressions, unsafe state transitions, concurrency or recovery gaps, security boundaries, compatibility, and missing user-visible behavior.
+For changed tests, judge their negative controls: identify whether each test would fail under the plausible broken implementation it is meant to exclude, and call out vacuous, mock-only, or same-implementation assertions.
+Do not request unrelated cleanup or speculative scope expansion.
+Report only actionable findings grouped as P1, P2, or P3, each with file and line, concrete failure mode, evidence, and smallest valid correction.
+End with exactly `Verdict: ready` when there are no actionable findings, or `Verdict: needs-fixes` when any finding remains.
+```
+
+Treat the report as evidence, not authority.
+Validate each finding against the accepted intent and route any genuinely ambiguous scope decision through the existing decision owner rather than silently expanding the PR.
+
+## Existing-PR fix brief
+
+Use this brief verbatim after filling in the placeholders:
+
+```text
+Fix the actionable findings on existing pull request <full URL>.
+Work on that PR's own head branch <head branch> in its head repository <head repository>.
+Do not create a new branch or a new pull request.
+Before editing, verify the checked-out branch and head SHA against the PR.
+Read every CI result, review, issue comment, inline comment, and review thread.
+Fix valid findings with focused tests, reply to each thread with the fix evidence, and resolve it only after the fix is pushed.
+For every declined finding, reply with the concrete reason and resolve the thread.
+Commit and push only to the existing PR branch.
+After every push, capture the new exact head and rerun the independent Codex adversarial review plus every configured automated reviewer.
+Repeat until the exact head has all CI checks green, no actionable Codex, CodeRabbit, or Claude Review Bot findings, and zero unresolved review threads.
+Do not merge.
+Report the full PR URL, final head SHA, check rollup, reviewer verdict evidence, and unresolved-thread count.
+```
+
+## Verify a ready claim independently
+
+Never accept a worker's `done:` or ready claim without a fresh firstmate-side read.
+Fetch the PR again and verify all of the following against one unchanged head:
+
+- The current full head SHA equals the SHA the worker reported.
+- `statusCheckRollup` and `gh-axi pr checks` show every current CI context and no pending, skipped-without-explanation, cancelled, or failing required work.
+- The paginated GraphQL query reports zero unresolved review threads.
+- The latest CodeRabbit summary covers the exact head and is clean, or an explicit rate-limit reply is recorded and the exact-head Codex fallback is clean.
+- The latest Claude Review Bot checklist covers the exact head and its final verdict is clean.
+- The independent Codex report covers the exact head and ends `Verdict: ready`.
+- Every valid finding was fixed and every declined finding has a visible reason before its thread was resolved.
+
+Use this query to bind the check rollup to the current commit rather than trusting a worker's copied terminal output:
+
+```sh
+gh-axi api POST graphql --field query="query { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { headRefOid commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } pageInfo { hasNextPage endCursor } } } } } } } } }"
+```
+
+If the head changes during verification, discard the partial result and restart the cycle at the new head.
+The PR is ready only when all items are clean at the same exact head.
+Follow `AGENTS.md` section 7 after readiness is established; this skill grants no merge authority.

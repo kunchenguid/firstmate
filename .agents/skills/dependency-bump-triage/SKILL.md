@@ -1,0 +1,144 @@
+---
+name: dependency-bump-triage
+description: >-
+  Agent-only procedure for reviewing Dependabot and Renovate dependency bumps.
+  Load before triaging, reviewing, or briefing an automated dependency-version PR.
+  Owns lockfile and pin verification, imported-symbol impact analysis, upstream comparison, security and CI-gap checks, risk escalation, and the final bump verdict.
+user-invocable: false
+metadata:
+  internal: true
+---
+
+# dependency-bump-triage
+
+This skill is the single owner of the Dependabot and Renovate bump-triage procedure.
+It is written so a firstmate can apply it directly or paste it unchanged into a crewmate brief.
+Merge authority remains owned by `AGENTS.md` section 7.
+
+## Establish the exact bump
+
+Set the repository and pull request explicitly, then capture the immutable head and complete changed-file list.
+
+```sh
+OWNER=<owner>
+REPO=<repo>
+PR=<number>
+gh-axi api "/repos/$OWNER/$REPO/pulls/$PR" --jq '{url:.html_url,author:.user.login,draft,headRef:.head.ref,headSha:.head.sha,baseRef:.base.ref}'
+gh-axi api "/repos/$OWNER/$REPO/pulls/$PR/files?per_page=100" --paginate --jq '.[] | [.filename,.status,.additions,.deletions] | @tsv'
+gh-axi pr diff "$PR" -R "$OWNER/$REPO" --full
+```
+
+Confirm from the full diff that the change contains only dependency manifest pins, generated lockfiles, and automation metadata directly required for the version bump.
+Generated lockfile transitive changes must be explainable by the selected package version.
+Any source, build logic, test logic, workflow behavior, vendored implementation, install script, patch file, or unrelated dependency change makes the PR non-routine and requires the normal `pr-review-cycle`.
+
+Record the package, ecosystem, exact old version, exact new version, and upstream source repository.
+Do not infer those values from the PR title when the manifest or lockfile disagrees.
+
+## Find the project's actual dependency surface
+
+Search the whole project for the package name before excluding generated dependency files.
+
+```sh
+PACKAGE=<package-name>
+rg -n --hidden --glob '!.git/**' --glob '!vendor/**' --glob '!node_modules/**' --glob '!dist/**' --glob '!build/**' "$PACKAGE" .
+```
+
+Read every import, require, include, feature flag, command invocation, configuration key, type reference, and wrapper found by that search.
+List every symbol or executable surface the project actually uses from the package.
+Run focused searches for each imported symbol so aliases, re-exports, fixtures, and runtime construction sites are included.
+
+```sh
+SYMBOL=<imported-symbol-or-command>
+rg -n --hidden --glob '!.git/**' --glob '!vendor/**' --glob '!node_modules/**' --glob '!dist/**' --glob '!build/**' "$SYMBOL" .
+```
+
+An empty source-usage result is a fact to report, not permission to skip upstream and security checks.
+
+## Compare upstream changes to local usage
+
+Fetch the authoritative upstream comparison for the exact released versions.
+
+```sh
+UPSTREAM_OWNER=<upstream-owner>
+UPSTREAM_REPO=<upstream-repo>
+OLD_VERSION=<old-tag-or-sha>
+NEW_VERSION=<new-tag-or-sha>
+gh-axi api "/repos/$UPSTREAM_OWNER/$UPSTREAM_REPO/compare/$OLD_VERSION...$NEW_VERSION" --full --jq '{status,ahead_by,behind_by,total_commits,commits:[.commits[] | {sha:.sha,message:.commit.message}],files:[.files[] | {filename,status,additions,deletions,patch}]}'
+```
+
+Verify tag naming in the upstream repository when the package uses prefixes such as `v`, package-scoped tags, or monorepo release tags.
+Inspect every changed upstream file that defines, exports, documents, tests, or calls a symbol or executable surface used by the project.
+Check signatures, defaults, return types, error behavior, feature gates, platform support, and transitive native or protocol changes rather than relying on release-note labels.
+If GitHub truncates a patch or the compare response, fetch the named file or commit diff separately before deciding.
+
+## Check advisories and risk amplifiers
+
+Inspect both the target repository's Dependabot alerts and the upstream repository's published advisories when access permits.
+
+```sh
+gh-axi api "/repos/$OWNER/$REPO/dependabot/alerts?state=open&per_page=100" --paginate --full
+gh-axi api "/repos/$UPSTREAM_OWNER/$UPSTREAM_REPO/security-advisories?per_page=100" --paginate --full
+```
+
+Record an authorization failure as an evidence gap rather than claiming there are no advisories.
+Read the bump PR body, release notes, changelog, and upstream compare for security fixes or newly disclosed vulnerabilities affecting either version.
+
+Never rubber-stamp any of these cases:
+
+- A TLS, fingerprinting, anti-bot, browser-impersonation, proxy, or transport client.
+- An authentication, authorization, session, token, password, cryptography, WebAuthn, TOTP, HOTP, OTP, or recovery-code library.
+- A major-version bump or any release with documented breaking behavior.
+- A release associated with a security advisory, security fix, withdrawn version, compromised package, or changed trust boundary.
+- An upstream change touching a locally imported symbol, its signature, its defaults, or its transitive protocol behavior.
+
+These cases require targeted review and tests appropriate to the affected boundary even when the repository diff itself is lockfile-only.
+
+## Account for CI gaps
+
+Read every check on the exact PR head and inspect workflow conditions that can skip work for bot-authored pull requests.
+
+```sh
+gh-axi pr checks "$PR" -R "$OWNER/$REPO"
+rg -n --hidden 'dependabot|renovate|github\.actor|pull_request_target|if:' .github/workflows
+```
+
+For every skipped or absent job, state what behavior it normally validates and whether another result covers that behavior on this head.
+A green subset is not equivalent to a green normal-PR matrix.
+Run or request the smallest missing targeted validation when the skipped coverage intersects the package's actual use.
+
+## Apply the review exception narrowly
+
+A hand-verified bump may skip the independent Codex scout only when all of these are true:
+
+- The repository diff is exclusively the one manifest pin and its mechanically generated lockfile or automation metadata.
+- The bump is not in any risk-amplifier class above.
+- The upstream compare does not touch any locally used symbol, signature, default, or transitive behavior.
+- No relevant security advisory or unresolved evidence gap exists.
+- CI covers the affected install, build, test, and runtime surface without an unexplained bot-only skip.
+
+If any condition is false, load and run `pr-review-cycle` in full.
+The exception removes only the local Codex scout; it does not waive thread inspection, CI reading, bot findings, or exact-head verification required by the standing PR policy.
+
+## Report shape
+
+Report this compact evidence block:
+
+```text
+PR: <full URL>
+Head: <full SHA>
+Bump: <package> <old version> -> <new version> (<ecosystem>)
+Repository diff: <exactly which manifest, lockfile, or other files changed>
+Local use: <every imported symbol or executable surface, or none>
+Upstream impact: <whether changed upstream files touch local use and how>
+Security: <relevant advisories or explicit evidence gap>
+CI: <all checks and any bot-only skipped coverage>
+Review path: <hand-verified exception or full pr-review-cycle>
+Verdict: routine | targeted review required | needs fixes
+Reason: <one plain sentence naming the decisive fact>
+```
+
+Use `routine` only when every exception condition is proven.
+Use `targeted review required` when risk or missing coverage needs deeper evidence but no defect is established.
+Use `needs fixes` when the proposed version or PR is demonstrably unsafe or incomplete.
+Never merge as part of triage; follow `AGENTS.md` section 7 for merge authority.
