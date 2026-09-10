@@ -338,8 +338,8 @@ fm_afk_daemon_owns_supervision() {
 #                              stale-beacon - the beacon is stale beyond grace or
 #                                             absent (a genuine supervision lapse)
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
-# because the watcher only runs between turns. A stale or absent beacon is still
-# healthy while fm_autoarm_midturn_healthy proves a Claude auto-arm generation
+# because the watcher only runs between turns. A stale beacon is still healthy
+# while fm_autoarm_midturn_healthy proves a Claude auto-arm generation
 # explains the gap (a rewake bound to the current recovery generation and
 # live session lock), because turn-end re-arms.
 # Without that proof a stale or absent beacon is a genuine lapse.
@@ -1253,9 +1253,11 @@ fm_failure_episode_reset() {
 # state/.claude-autoarm-epoch, whose monotonic epoch sequence IS the claim
 # generation. This is an optimistic, generation-based single-flight design:
 #
-#   - The CURRENT claim is the ledger's latest entry: line 1 is the classic
-#     "epoch=N owner_pid=P outcome=O updated_at=T" record, and line 2 is the
-#     claiming process's pid-identity, the same identity every other
+#   - The CURRENT claim is the ledger's latest entry: line 1 begins with the
+#     "epoch=N owner_pid=P outcome=O updated_at=T" record. A "rewake" outcome
+#     also records "session_pid=S recovery_generation=G", binding that
+#     handling turn to its live session-lock owner and watcher recovery episode.
+#     Line 2 is the claiming process's pid-identity, the same identity every other
 #     supervision lock in this repo records (fm_pid_identity above). The
 #     identity is MANDATORY: a claimant that cannot record it does not claim
 #     (continuity falls to the synchronous guard), and the identity is read
