@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # fm-project-status.sh - bounded project projection over fm-fleet-snapshot.v1.
 #
-# `--json <project>` runs bin/fm-fleet-snapshot.sh --json --read-only under an
-# eight-second subprocess bound and a 4 MiB source cap, then emits exactly one
+# `--json <project>` runs the no-write, conversation-free project-status source
+# mode of bin/fm-fleet-snapshot.sh under an eight-second subprocess bound and a
+# 4 MiB source cap, then emits exactly one
 # fm-project-status.v1 object no larger than 64 KiB. It never collects fleet
 # state independently.
 # Project lookup is exact, ASCII case-insensitive, and unique across the main
@@ -59,7 +60,7 @@ unavailable_json() {  # <reason-code> <warning>
 
 limit=$((SOURCE_MAX_BYTES + 1))
 # shellcheck disable=SC2016  # Positional parameters expand in the child bash.
-capture_script='set -o pipefail; "$1" --json --read-only | LC_ALL=C head -c "$2"'
+capture_script='set -o pipefail; "$1" --json --project-status-source | LC_ALL=C head -c "$2"'
 if fm_run_timed "$TIMEOUT_SECONDS" bash -c "$capture_script" fm-project-status \
     "$SCRIPT_DIR/fm-fleet-snapshot.sh" "$limit" > "$SOURCE_JSON" 2>/dev/null; then
   snapshot_rc=0

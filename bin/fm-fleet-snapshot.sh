@@ -8,7 +8,9 @@
 # atomically refresh parent-side cached copies of remote home summaries under
 # state/secondmate-summary-cache; those observational cache writes are its only
 # fleet-state mutation. `--read-only` retains live and existing-cache reads but
-# disables both cache-directory creation and cache refresh.
+# disables both cache-directory creation and cache refresh. The dedicated
+# `--project-status-source` mode additionally suppresses task endpoint and
+# terminal observations and parent event collection.
 #
 # Top-level fields:
 #   schema: stable schema id.
@@ -225,7 +227,7 @@ esac
 
 usage() {
   cat <<'EOF'
-usage: fm-fleet-snapshot.sh --json [--read-only]
+usage: fm-fleet-snapshot.sh --json [--read-only|--project-status-source]
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a structured snapshot of the firstmate fleet.
@@ -233,6 +235,8 @@ JSON is the stable machine-readable output contract. The default snapshot
 refreshes only its parent-side remote-summary cache as an observational side effect.
 With --read-only, live remote reads and reads from an existing valid cache remain
 enabled, but the cache directory is neither created nor refreshed.
+--project-status-source also disables cache writes and omits parent event,
+endpoint-state, and terminal collection for conversation-free projection.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -280,10 +284,12 @@ EOF
 
 OUTPUT_MODE=json
 SNAPSHOT_READ_ONLY=0
+SNAPSHOT_PROJECT_STATUS_SOURCE=0
 for arg in "$@"; do
   case "$arg" in
     --json) ;;
     --read-only) SNAPSHOT_READ_ONLY=1 ;;
+    --project-status-source) SNAPSHOT_READ_ONLY=1; SNAPSHOT_PROJECT_STATUS_SOURCE=1 ;;
     --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
@@ -654,11 +660,15 @@ prefetch_task_observations() {  # <meta> <id>
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
-    snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
+    [ "$SNAPSHOT_PROJECT_STATUS_SOURCE" -eq 1 ] || snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
   fi
 
-  if [ -n "$remote_host" ]; then
+  if [ "$SNAPSHOT_PROJECT_STATUS_SOURCE" -eq 1 ]; then
+    jq -n '{state:"unknown",source:"projection-safe",detail:"endpoint and terminal state not collected",raw:""}' \
+      > "$current_file" || current_rc=1
+    agent_alive=not_checked
+  elif [ -n "$remote_host" ]; then
     jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     agent_alive=unknown
@@ -1875,7 +1885,10 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
       terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r --arg note "$event_note" '
         any(.activities[]; .verdict == "contradicts" and .summary == $note)')
-      if [ "$terminal_contradiction" = true ]; then
+      if [ "$SNAPSHOT_PROJECT_STATUS_SOURCE" -eq 1 ]; then
+        terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
+          '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"project-status source suppresses terminal evidence",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
+      elif [ "$terminal_contradiction" = true ]; then
         terminal=$(terminal_evidence_json "$task" "$event_note" true)
       else
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
@@ -1912,7 +1925,10 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         provenance=unknown
         freshness=unknown
       fi
-      if [ -n "$event_raw" ]; then
+      if [ "$SNAPSHOT_PROJECT_STATUS_SOURCE" -eq 1 ]; then
+        terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
+          '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"project-status source suppresses terminal evidence",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
+      elif [ -n "$event_raw" ]; then
         terminal=$(terminal_evidence_json "$task" "$event_note" false)
       else
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \

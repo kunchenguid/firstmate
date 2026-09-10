@@ -104,8 +104,8 @@ test_projection_resolution_and_authority() {
       and [.queued[].id] == ["alpha-call","alpha-next"]
       and [.recently_landed[].id] == ["alpha-done"]
   ' >/dev/null || fail "exact local project projection was wrong: $out"
-  [ "$(cat "$arg_log")" = "--json --read-only" ] \
-    || fail "project status did not invoke the fleet snapshot read-only"
+  [ "$(cat "$arg_log")" = "--json --project-status-source" ] \
+    || fail "project status did not invoke the conversation-free snapshot mode"
 
   out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" "$runner" --json BetaProject)
   printf '%s' "$out" | jq -e '
@@ -220,8 +220,8 @@ test_projection_bounds_and_counts() {
   pass "project status caps all collections, disclosures, and final JSON while preserving totals"
 }
 
-test_snapshot_read_only_uses_cache_without_writing() {
-  local home cache remote_home cache_key cache_file fakebin before after out
+test_snapshot_project_source_uses_cache_without_observing_terminals() {
+  local home cache remote_home cache_key cache_file fakebin before after out observation_log
   home="$TMP_ROOT/read-only-home"
   cache="$home/state/secondmate-summary-cache"
   remote_home=/srv/remote-firstmate
@@ -248,10 +248,16 @@ EOF
 #!/usr/bin/env bash
 exit 1
 SH
-  chmod +x "$fakebin/fake-ssh"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${OBSERVATION_LOG:?}"
+exit 1
+SH
+  chmod +x "$fakebin/fake-ssh" "$fakebin/tmux"
+  observation_log="$TMP_ROOT/terminal-observations.log"
+  out=$(PATH="$fakebin:$PATH" OBSERVATION_LOG="$observation_log" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
     FM_SNAPSHOT_CACHE_DIR="$cache" FM_SNAPSHOT_NOW=2026-09-10T18:07:25Z \
-    FM_SNAPSHOT_NOW_EPOCH=1789063645 "$SNAPSHOT" --json --read-only)
+    FM_SNAPSHOT_NOW_EPOCH=1789063645 "$SNAPSHOT" --json --project-status-source)
   after=$(shasum -a 256 "$cache_file" | awk '{print $1}')
   [ "$before" = "$after" ] || fail "read-only snapshot rewrote an existing cache entry"
   printf '%s' "$out" | jq -e '
@@ -262,23 +268,39 @@ SH
   ' >/dev/null || fail "read-only snapshot did not consume the existing cache: $out"
 
   home="$TMP_ROOT/read-only-no-cache"
-  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects/local-work"
   cat > "$home/data/secondmates.md" <<EOF
 - remote - Remote scope (host: fake-host; root: /srv/code; home: $remote_home; scope: remote; projects: RemoteProject; added 2026-09-10)
 EOF
   fm_write_meta "$home/state/remote.meta" \
     "kind=secondmate" "home=$remote_home" "projects=RemoteProject" \
     "remote_host=fake-host" "remote_root=/srv/code" "harness=codex" "mode=secondmate"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
-    FM_SNAPSHOT_CACHE_DIR="$home/state/never-create" "$SNAPSHOT" --json --read-only >/dev/null \
-    || fail "read-only snapshot failed without an existing cache"
-  [ ! -e "$home/state/never-create" ] || fail "read-only snapshot created its cache directory"
-  pass "snapshot read-only mode reads cache but never creates or refreshes it"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] local-work - Local work (repo: LocalProject) (kind: ship) (since 2026-09-10)
+EOF
+  fm_write_meta "$home/state/local-work.meta" \
+    "kind=ship" "project=$home/projects/local-work" "worktree=$home/projects/local-work" \
+    "window=firstmate:fm-local-work" "harness=claude" "mode=no-mistakes"
+  printf 'working: secret terminal context\n' > "$home/state/local-work.status"
+  rm -f "$observation_log"
+  out=$(PATH="$fakebin:$PATH" OBSERVATION_LOG="$observation_log" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_SNAPSHOT_CACHE_DIR="$home/state/never-create" "$SNAPSHOT" --json --project-status-source) \
+    || fail "project-status snapshot source failed without an existing cache"
+  [ ! -e "$home/state/never-create" ] || fail "project-status snapshot source created its cache directory"
+  [ ! -e "$observation_log" ] || fail "project-status snapshot source invoked terminal observation: $(cat "$observation_log")"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "local-work")
+    | .current_state.source == "projection-safe"
+      and .paths.status_log.present == false
+      and .hints.open_decisions == []
+  ' >/dev/null || fail "project-status source retained parent event or terminal-derived state: $out"
+  pass "project-status source reads cache without writes or terminal observation"
 }
 
 test_projection_resolution_and_authority
 test_projection_source_failures_are_explicit
 test_projection_bounds_and_counts
-test_snapshot_read_only_uses_cache_without_writing
+test_snapshot_project_source_uses_cache_without_observing_terminals
 
 echo "All fm-project-status tests passed."
