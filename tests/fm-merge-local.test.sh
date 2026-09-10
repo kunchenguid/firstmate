@@ -55,6 +55,32 @@ test_recorded_custom_branch_merges() {
   pass "merge-local lands the crew branch recorded by the brief"
 }
 
+test_legacy_recorded_custom_branch_merges() {
+  local case_dir project id=task-legacy-custom
+  case_dir=$(make_case legacy-custom "$id")
+  project=$case_dir/project
+  commit_on "$project" feature/custom custom.txt
+  git -C "$project" checkout -q main
+  printf '%s\n' '# Task' 'User text' '# Definition of done' 'Crew branch: branch=main' \
+    '# Project memory' 'Generated project memory' '# Definition of done' \
+    'Delivery contract: mode=local-only' 'The task is complete only when committed.' \
+    'Crew branch: branch=feature/custom' \
+    > "$case_dir/home/data/$id/brief.md"
+  cat >> "$case_dir/home/data/$id/brief.md" <<'EOF'
+
+## Progress note (2026-09-10T00:00:00Z)
+Crew branch: branch=main
+
+# Definition of done
+Crew branch: branch=main
+EOF
+  run_merge "$case_dir" "$id" >/dev/null \
+    || fail "merge-local refused the recorded custom crew branch from a legacy brief"
+  [ "$(git -C "$project" rev-parse refs/heads/main)" = "$(git -C "$project" rev-parse refs/heads/feature/custom)" ] \
+    || fail "merge-local did not land the legacy recorded custom crew branch"
+  pass "merge-local preserves a custom crew branch from a pre-marker brief"
+}
+
 test_omitted_crew_branch_uses_fm_id() {
   local case_dir project id=task-default
   case_dir=$(make_case default "$id")
@@ -185,6 +211,7 @@ test_diverged_branch_refuses() {
 }
 
 test_recorded_custom_branch_merges
+test_legacy_recorded_custom_branch_merges
 test_omitted_crew_branch_uses_fm_id
 test_last_recorded_crew_branch_wins
 test_metadata_base_is_authoritative
