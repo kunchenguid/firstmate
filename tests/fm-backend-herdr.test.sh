@@ -601,7 +601,7 @@ test_agent_descendant_under_a_spaced_install_path_stays_alive() {
   # The executable path the process table reports contains a space (the macOS
   # `/Library/Application Support/...` shape), so a field-split read of the
   # process table sees only a fragment of the name.
-  lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support"; mkdir -p "$lab"
+  lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"; mkdir -p "$lab"
   ln -sf "$sleep_bin" "$lab/pi"
   sh -c "'$lab/pi' 300; :" &
   shell_pid=$!
