@@ -90,6 +90,42 @@ fm_pid_identity() {
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
 
+# The holder's process start time alone, with no program image folded in.
+# Generic lock liveness needs exactly this and nothing more: a pid whose start
+# time differs is a different process, which is the pid reuse this guards
+# against, while a live holder that exec'd into another program keeps both its
+# pid and its start time and is still the same holder. fm_pid_identity
+# deliberately folds the command in as well, so a ROLE predicate can retire a
+# process that exec'd away from the role it registered for; reusing that string
+# for holder liveness would read a live exec'd holder as dead and let its lock
+# be stolen out from under it. Mirrors fm_pid_identity's source selection so
+# both read the same process facts on every platform.
+fm_pid_start_identity() {  # <pid>
+  local pid=$1 proc_root stat_line starttime
+  local -a stat_fields
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    # After the final comm delimiter, array index 19 is proc stat field 22.
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    starttime=${stat_fields[19]}
+    case "$starttime" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    printf 'proc-starttime=%s\n' "$starttime"
+    return 0
+  fi
+  # Same LC_ALL=C pinning as fm_pid_identity: lstart is written under one locale
+  # and re-read under the machine's ambient one.
+  starttime=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ -n "$starttime" ] || return 1
+  printf 'lstart=%s\n' "$(printf '%s' "$starttime" | sed 's/^[[:space:]]*//')"
+}
+
 fm_path_mtime() {
   if [ "$_FM_UNAME" = Darwin ]; then
     /usr/bin/stat -f %m "$1" 2>/dev/null
@@ -399,6 +435,7 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/pid-start" \
     "$lockdir/role" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
@@ -486,7 +523,7 @@ fm_lock_claim_blocked_by_steal() {
 }
 
 fm_lock_claim() {
-  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back identity
+  local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back identity start_identity
   fm_current_pid mypid || return 1
   if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
     fm_lock_discard_owner "$ownerdir"
@@ -500,9 +537,15 @@ fm_lock_claim() {
   # Best-effort holder identity, so a later contender can tell this live pid
   # from a reused one (fm_lock_holder_alive). A failed computation degrades
   # this one hold to the legacy bare-liveness read instead of blocking the
-  # claim.
+  # claim. Two records, because they answer different questions: pid-identity
+  # carries the program image for the role predicates, while pid-start carries
+  # only the start time, which is what survives this holder exec'ing into
+  # another program.
   if identity=$(fm_pid_identity "$mypid" 2>/dev/null) && [ -n "$identity" ]; then
     printf '%s\n' "$identity" > "$ownerdir/pid-identity" 2>/dev/null || true
+  fi
+  if start_identity=$(fm_pid_start_identity "$mypid" 2>/dev/null) && [ -n "$start_identity" ]; then
+    printf '%s\n' "$start_identity" > "$ownerdir/pid-start" 2>/dev/null || true
   fi
   if ! fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
@@ -898,22 +941,29 @@ fm_recovery_marker_reopen_announced() {
 }
 
 # True while the recorded holder of <lockdir> is genuinely alive: its pid is
-# live AND, when the hold records the holder's pid-identity, the live process
-# still answers to that identity. A live pid whose recorded identity no longer
-# matches is pid reuse after a mid-hold kill and reads as dead, so the ordinary
-# steal path reclaims it; without this check one such reused pid wedged
-# state/.claude-autoarm.lock and silently froze the Stop-owned auto-arm's
-# claim ledger for hours (guard blocking every turn end), and the same shape on
-# a marker lock can hang a starting watcher inside fm_lock_acquire_wait.
-# An identityless hold (a pre-identity build's, or a failed identity
+# live AND, when the hold recorded the holder's start time, the live process
+# still started when the holder did. A live pid that started at a different
+# time is a different process wearing a recycled number - pid reuse after a
+# mid-hold kill - and reads as dead, so the ordinary steal path reclaims it;
+# without this check one such reused pid wedged state/.claude-autoarm.lock and
+# silently froze the Stop-owned auto-arm's claim ledger for hours (guard
+# blocking every turn end), and the same shape on a marker lock can hang a
+# starting watcher inside fm_lock_acquire_wait.
+# It compares pid-start and NOT the fuller pid-identity on purpose. A holder
+# that exec's into another program - the ordinary "hold the lock, then become
+# the long-lived thing" shape - keeps its pid and its start time but replaces
+# its command, so an identity comparison would call that live holder dead and
+# hand its lock to a contender. Start time answers the reuse question without
+# asking the unrelated one.
+# A hold with no recorded start time (a pre-identity build's, or a failed
 # computation at claim time) keeps the conservative bare-liveness read, as does
-# a holder whose current identity cannot be computed right now.
+# a holder whose start time cannot be read right now.
 fm_lock_holder_alive() {  # <lockdir> <pid>
   local lockdir=$1 pid=$2 recorded current
   fm_pid_alive "$pid" || return 1
-  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  recorded=$(cat "$lockdir/pid-start" 2>/dev/null || true)
   [ -n "$recorded" ] || return 0
-  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 0
+  current=$(fm_pid_start_identity "$pid" 2>/dev/null) || return 0
   [ -n "$current" ] || return 0
   [ "$current" = "$recorded" ]
 }

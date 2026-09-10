@@ -309,11 +309,11 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
 }
 
 # Identity-hardened reclaim: a hold left by a holder killed mid-hold, whose pid
-# a live unrelated process later reuses, must be stolen - the recorded
-# pid-identity disproves the reused pid - while the reused process itself is
-# never signalled. The two liveness signals (pid aliveness, recorded identity)
-# are driven apart deliberately and the divergence is asserted, so the case
-# cannot go quietly vacuous.
+# a live unrelated process later reuses, must be stolen - the recorded start
+# time disproves the reused pid - while the reused process itself is never
+# signalled. The two liveness signals (pid aliveness, recorded start time) are
+# driven apart deliberately and the divergence is asserted, so the case cannot
+# go quietly vacuous.
 test_lock_steals_live_reused_pid_with_mismatched_identity() {
   local dir state lockdir live live_identity stale_identity rc newpid
   dir=$(make_case lock-reused-pid-steal)
@@ -321,13 +321,13 @@ test_lock_steals_live_reused_pid_with_mismatched_identity() {
   lockdir="$state/.contend.lock"
   sleep 300 &
   live=$!
-  live_identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+  live_identity=$(bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$LIB" "$live") \
     || fail "could not identify the live reuse pid"
-  stale_identity='stale-holder killed-mid-hold identity'
+  stale_identity='proc-starttime=stale-holder-killed-mid-hold'
   [ "$stale_identity" != "$live_identity" ] || fail "fixture identities did not diverge"
   mkdir "$lockdir"
   printf '%s\n' "$live" > "$lockdir/pid"
-  printf '%s\n' "$stale_identity" > "$lockdir/pid-identity"
+  printf '%s\n' "$stale_identity" > "$lockdir/pid-start"
   rc=0
   newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
@@ -342,8 +342,8 @@ test_lock_steals_live_reused_pid_with_mismatched_identity() {
   pass "a live reused pid with mismatched recorded identity is reclaimed without being signalled"
 }
 
-# The same live pid holding with its own matching recorded identity is a
-# genuine holder and must be refused, proving the identity check gates the
+# The same live pid holding with its own matching recorded start time is a
+# genuine holder and must be refused, proving the start-time check gates the
 # steal rather than the pid's mere existence in both directions.
 test_lock_keeps_live_holder_with_matching_identity() {
   local dir state lockdir live live_identity out lockpid
@@ -352,12 +352,12 @@ test_lock_keeps_live_holder_with_matching_identity() {
   lockdir="$state/.contend.lock"
   sleep 300 &
   live=$!
-  live_identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+  live_identity=$(bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$LIB" "$live") \
     || fail "could not identify the live holder pid"
   [ -n "$live_identity" ] || fail "live holder identity computed empty"
   mkdir "$lockdir"
   printf '%s\n' "$live" > "$lockdir/pid"
-  printf '%s\n' "$live_identity" > "$lockdir/pid-identity"
+  printf '%s\n' "$live_identity" > "$lockdir/pid-start"
   out=$(FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
@@ -393,10 +393,73 @@ test_lock_claim_records_holder_identity() {
     [ -n "$recorded" ] || exit 8
     current=$(fm_pid_identity "${BASHPID:-$$}" 2>/dev/null) || exit 9
     [ "$recorded" = "$current" ] || exit 10
+    recorded=$(cat "$2/pid-start" 2>/dev/null || true)
+    [ -n "$recorded" ] || exit 11
+    current=$(fm_pid_start_identity "${BASHPID:-$$}" 2>/dev/null) || exit 12
+    [ "$recorded" = "$current" ] || exit 13
     fm_lock_release "$2"
   ' _ "$LIB" "$lockdir" || rc=$?
   [ "$rc" -eq 0 ] || fail "fresh hold did not record its holder identity (rc=$rc)"
-  pass "a fresh lock hold records the holder's pid-identity"
+  pass "a fresh lock hold records the holder's pid-identity and start time"
+}
+
+# A holder that exec's into another program is the ordinary "take the lock, then
+# become the long-lived thing" shape: one process throughout, same pid, same
+# start time, an entirely different command. Holder liveness must still read it
+# as the genuine holder. The two signals are driven apart deliberately - the
+# full pid-identity is asserted to have CHANGED across the exec while the
+# recorded start time is asserted to have survived it - so the case cannot go
+# quietly vacuous, and the contender is then required to refuse the steal.
+# Comparing pid-identity here instead would call a live holder dead and hand its
+# lock away mid-hold.
+test_lock_keeps_live_holder_that_exec_changed_its_command() {
+  local dir state lockdir ready holder before after now_start recorded out lockpid i
+  dir=$(make_case lock-exec-holder)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  ready="$dir/held"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    fm_pid_identity "${BASHPID:-$$}" > "$3.identity" 2>/dev/null
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    exec sleep 300
+  ' _ "$LIB" "$lockdir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$ready" ] || { kill "$holder" 2>/dev/null || true; fail "exec holder never took the lock"; }
+  before=$(cat "$ready.identity" 2>/dev/null || true)
+  after=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder" 2>/dev/null || true)
+  now_start=$(bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$LIB" "$holder" 2>/dev/null || true)
+  recorded=$(cat "$lockdir/pid-start" 2>/dev/null || true)
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ -n "$before" ] && [ -n "$after" ] \
+    || fail "could not read the exec holder's identity on both sides of the exec"
+  [ "$before" != "$after" ] \
+    || fail "fixture did not diverge: the exec left pid-identity unchanged, so this case proves nothing"
+  [ -n "$recorded" ] && [ "$recorded" = "$now_start" ] \
+    || fail "the exec changed the holder's recorded start time (recorded '$recorded', now '$now_start')"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "a live holder that exec'd into another program had its lock stolen: $out" ;;
+  esac
+  case "$out" in
+    *"held=$holder"*) ;;
+    *) fail "exec'd holder not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  [ "$lockpid" = "$holder" ] || fail "exec'd holder's lock pid was clobbered (got '$lockpid')"
+  pass "a live holder that exec'd into another program keeps its lock"
 }
 
 test_lock_does_not_steal_live_lock() {
@@ -1207,6 +1270,7 @@ test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_steals_live_reused_pid_with_mismatched_identity
 test_lock_keeps_live_holder_with_matching_identity
+test_lock_keeps_live_holder_that_exec_changed_its_command
 test_lock_claim_records_holder_identity
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace

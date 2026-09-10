@@ -89,9 +89,15 @@ WEDGE_IDENTITY=$(bash -c '. "$1"; fm_pid_identity "$$"' _ "$ROOT/bin/fm-wake-lib
 WEDGE_LIVE_IDENTITY=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$WEDGE_PID") \
   || fail "could not identify the live reused pid"
 [ "$WEDGE_IDENTITY" != "$WEDGE_LIVE_IDENTITY" ] || fail "wedge fixture identities did not diverge"
+WEDGE_START=$(bash -c '. "$1"; fm_pid_start_identity "$$"' _ "$ROOT/bin/fm-wake-lib.sh") \
+  || fail "could not fabricate the dead holder's start time"
+WEDGE_LIVE_START=$(bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$WEDGE_PID") \
+  || fail "could not read the live reused pid's start time"
+[ "$WEDGE_START" != "$WEDGE_LIVE_START" ] || fail "wedge fixture start times did not diverge"
 mkdir -p "$HOME_DIR/state/.claude-autoarm.lock"
 printf '%s\n' "$WEDGE_PID" > "$HOME_DIR/state/.claude-autoarm.lock/pid"
 printf '%s\n' "$WEDGE_IDENTITY" > "$HOME_DIR/state/.claude-autoarm.lock/pid-identity"
+printf '%s\n' "$WEDGE_START" > "$HOME_DIR/state/.claude-autoarm.lock/pid-start"
 printf 'epoch=2688 owner_pid=9999998 outcome=rewake updated_at=1\n' > "$HOME_DIR/state/.claude-autoarm-epoch"
 touch -t 202001010000 "$HOME_DIR/state/.claude-autoarm-epoch"
 
