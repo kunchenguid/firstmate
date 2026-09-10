@@ -406,23 +406,54 @@ test_relaunch_preserves_durable_task_metadata() {
 # after pr= and silently disarms the watcher's merge notification.
 test_relaunch_keeps_the_armed_merge_poll_authenticated() {
   local dir out rc
-  dir=$(new_case pr-poll-auth rl20)
-  add_ship_task "$dir" rl20 claude
+  dir=$(new_case pr-poll-auth rl43)
+  add_ship_task "$dir" rl43 claude
 
   out=$(env FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    "$ROOT/bin/fm-pr-check.sh" rl20 https://github.com/example/repo/pull/20 2>&1); rc=$?
+    "$ROOT/bin/fm-pr-check.sh" rl43 https://github.com/example/repo/pull/20 2>&1); rc=$?
   expect_code 0 "$rc" "arming the merge poll should succeed"$'\n'"$out"
-  poll_authenticated "$dir" rl20 \
+  poll_authenticated "$dir" rl43 \
     || fail "the merge poll must authenticate before the relaunch, or this case proves nothing"
 
-  out=$(run_control "$dir" rl20 relaunch --note "continuing the review"); rc=$?
+  out=$(run_control "$dir" rl43 relaunch --note "continuing the review"); rc=$?
   expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
 
-  [ "$(meta_field "$dir" rl20 pr)" = "https://github.com/example/repo/pull/20" ] \
+  [ "$(meta_field "$dir" rl43 pr)" = "https://github.com/example/repo/pull/20" ] \
     || fail "the task PR must survive relaunch"
-  poll_authenticated "$dir" rl20 \
+  poll_authenticated "$dir" rl43 \
     || fail "the armed merge poll stopped authenticating after relaunch, so the merge would go unnoticed"
   pass "fm-control relaunch: the armed merge poll still authenticates after the record is rewritten"
+}
+
+# With trace context on, the relaunch republishes the trace carrier AFTER the
+# replacement record is published, so traceparent= lands past pr= no matter how
+# the publication itself orders its fields. bin/fm-pr-lib.sh's identity parser
+# therefore has to know that carrier by name, or the armed merge poll stops
+# authenticating and the merge goes unnoticed.
+test_trace_on_relaunch_keeps_the_armed_merge_poll_authenticated() {
+  local dir out rc traceparent
+  dir=$(new_case pr-poll-trace rl44)
+  add_ship_task "$dir" rl44 claude
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+
+  out=$(env FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-pr-check.sh" rl44 https://github.com/example/repo/pull/44 2>&1); rc=$?
+  expect_code 0 "$rc" "arming the merge poll should succeed"$'\n'"$out"
+  poll_authenticated "$dir" rl44 \
+    || fail "the merge poll must authenticate before the relaunch, or this case proves nothing"
+
+  out=$(run_control "$dir" rl44 relaunch --note "continuing under trace context"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
+
+  traceparent=$(meta_field "$dir" rl44 traceparent)
+  fm_trace_context_valid "$traceparent" \
+    || fail "the relaunch recorded no trace carrier, so this case would prove nothing"
+  [ "$(meta_field "$dir" rl44 pr)" = "https://github.com/example/repo/pull/44" ] \
+    || fail "the task PR must survive relaunch"
+  poll_authenticated "$dir" rl44 \
+    || fail "the republished trace carrier disarmed the armed merge poll, so the merge would go unnoticed"
+  pass "fm-control relaunch: a republished trace carrier leaves the armed merge poll authenticated"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1601,6 +1632,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_keeps_the_armed_merge_poll_authenticated
+test_trace_on_relaunch_keeps_the_armed_merge_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
