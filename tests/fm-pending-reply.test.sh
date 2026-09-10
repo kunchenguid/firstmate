@@ -1550,7 +1550,7 @@ test_escalated_undelivered_correlation_stays_retryable() {
   fm_pending_reply_maybe_escalate "$state" "$corr" || fail "delivery-unknown escalation should fire"
   [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase should be escalated"
   [ -z "$(fm_pending_reply_get "$rec" delivered_epoch)" ] || fail "escalation must not invent delivery"
-  [ "$(grep -cF "blocked [key=pending-reply-$corr]:" "$state/hibit.status")" = 1 ] \
+  [ "$(grep -cF "blocked [key=pending-reply-$corr]" "$state/hibit.status")" = 1 ] \
     || fail "delivery-unknown escalation should publish once"
   fm_pending_reply_corr_reusable "$state" "$corr" hibit \
     || fail "an escalated undelivered correlation must stay reusable by its owner"
