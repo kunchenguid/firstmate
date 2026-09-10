@@ -106,6 +106,7 @@ Never summarise the fleet in aggregate, never drop a worker for having nothing n
 
 Each worker's entry carries its running clock beside the name: how long that worker has been running, in minutes.
 Take it from that task's durable spawn record, `state/<id>.meta`, whose `spawn_gen=` value begins with `s` followed by the epoch second at which that worker was dispatched, and report the minutes between that second and now.
+That record's fields are owned by `bin/fm-spawn.sh`'s header, which is where both this field's shape and this skill's reliance on it are recorded.
 The figure is elapsed wall time since the current dispatch, so it is readable from the record alone and does not depend on the worker still being alive.
 Never read it from the file's modification time, because unrelated events rewrite that record after launch, and never from conversation memory or from an estimate.
 A relaunch records a fresh `spawn_gen`, so the clock restarts with it.
