@@ -1414,7 +1414,7 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
     return 0
   fi
   agent=${identity%%$'\t'*}
-  if [ "$agent" = pi ]; then
+  if [ "$agent" = pi ] || [ "$agent" = agy ]; then
     _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
   else
     _fm_composer_classify_bare_row "$screen" "$styled" "$row"
@@ -1446,6 +1446,10 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   agent=${identity%%$'\t'*}
   agent_status=${identity#*$'\t'}
+  if [ "$agent" = agy ]; then
+    _fm_composer_agy_verdict "$screen" "$styled" "$agent_status"
+    return 0
+  fi
   if [ "$agent" != pi ] || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
     printf 'unknown'
     return 0
@@ -1459,4 +1463,115 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
     idle|done) printf 'empty' ;;
     *) printf 'unknown' ;;
   esac
+}
+
+# agy 1.2.0 de-emphasises its own composer furniture (the mode placeholder a
+# fresh or prompt-interactive-launched session keeps in the input row, the
+# shortcuts hint, the rules) in palette colour 38;5;8 rather than a dim or dark
+# truecolor run, so the shared ghost stripper keeps it. Typed input renders
+# bold. This agy-scoped strip drops dim runs and 38;5;8-foreground runs the
+# same way fm_composer_strip_ghost drops its classes, and nothing broader: no
+# other harness's styling vocabulary is load-bearing here.
+_fm_composer_agy_strip_ghost() {
+  LC_ALL=C awk '
+    function sgr_code(v, b) {
+      b = v
+      sub(/:.*/, "", b)
+      if (b == "") b = "0"
+      return b
+    }
+    function skip_color_payload(a, p, k, mode, code) {
+      if (index(a[p], ":") > 0) return p
+      if (p >= k) return p
+      mode = a[p + 1]
+      code = sgr_code(mode)
+      if (index(mode, ":") > 0) return p + 1
+      if (code == "5") return p + 2
+      if (code == "2") return p + 4
+      return p + 1
+    }
+    function fg38_is_palette8(a, p, k, spec) {
+      spec = a[p]
+      if (index(spec, ":") > 0) return (spec == "38:5:8") ? 1 : 0
+      return (p + 2 <= k && a[p + 1] == "5" && a[p + 2] == "8") ? 1 : 0
+    }
+    {
+      line = $0; out = ""; dim = 0; pal8 = 0; n = length(line); i = 1
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (c == "\033") {
+          j = i + 1
+          if (substr(line, j, 1) == "[") {
+            j++; params = ""
+            while (j <= n) {
+              cc = substr(line, j, 1)
+              if (cc ~ /[@-~]/) break
+              params = params cc; j++
+            }
+            if (j <= n && substr(line, j, 1) == "m") {
+              if (params == "") params = "0"
+              k = split(params, a, ";")
+              for (p = 1; p <= k; p++) {
+                v = a[p]; code = sgr_code(v)
+                if (code == "38") {
+                  pal8 = fg38_is_palette8(a, p, k)
+                  p = skip_color_payload(a, p, k)
+                } else if (code == "48" || code == "58") {
+                  p = skip_color_payload(a, p, k)
+                } else if (code == "2") dim = 1
+                else if (code == "0") { dim = 0; pal8 = 0 }
+                else if (code == "22") dim = 0
+                else if (code == "39") pal8 = 0
+                else if (code + 0 >= 30 && code + 0 <= 37) pal8 = 0
+                else if (code + 0 >= 90 && code + 0 <= 97) pal8 = 0
+              }
+            }
+            if (j <= n) { i = j + 1; continue }
+          }
+          i = i + 1; continue
+        }
+        if (dim == 0 && pal8 == 0) out = out c
+        i++
+      }
+      print out
+    }
+  '
+}
+
+# agy 1.2.0 uses a shell-like > inside solid rules. Require native identity,
+# an idle agent and the immediate shortcuts or accept-edits footer; a trust or
+# help dialog must never become an injection target just because old rules
+# remain on screen. Content is read through the agy ghost strip so the palette
+# placeholder never reads as typed input.
+_fm_composer_agy_verdict() {  # <screen> <styled> <agent-status>
+  local screen=$1 styled=$2 status=$3 row raw plain content pending=0
+  [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] || { printf 'unknown'; return; }
+  case "$status" in idle|done) ;; *) printf 'unknown'; return ;; esac
+  raw=$(_fm_composer_screen_row "$((FM_COMPOSER_SCAN_PI_CLOSE + 1))" "$screen")
+  plain=$(printf '%s' "$raw" | fm_composer_strip_ansi)
+  fm_composer_normalize_trim_var plain
+  case "$plain" in '? for shortcuts '*' · '*|'accept-edits · '*) ;; *) printf 'unknown'; return ;; esac
+  row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
+  while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$screen")
+    plain=$(printf '%s' "$raw" | fm_composer_strip_ansi)
+    fm_composer_normalize_trim_var plain
+    if [ "$styled" = 1 ]; then
+      content=$(printf '%s' "$raw" | _fm_composer_agy_strip_ghost | fm_composer_strip_ansi)
+    else
+      content=$plain
+    fi
+    fm_composer_normalize_trim_var content
+    if [ "$row" -eq "$((FM_COMPOSER_SCAN_PI_OPEN + 1))" ]; then
+      case "$plain" in '>'*) ;; *) printf 'unknown'; return ;; esac
+      content=${content#>}
+      fm_composer_normalize_trim_var content
+    fi
+    [ -z "$content" ] || pending=1
+    row=$((row + 1))
+  done
+  if [ "$pending" = 0 ]; then printf 'empty'
+  elif [ "$styled" = 1 ]; then printf 'pending'
+  else printf 'unknown'
+  fi
 }

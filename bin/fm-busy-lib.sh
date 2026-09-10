@@ -861,6 +861,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
   case "$harness" in
+    agy)
+      # agy 1.2.0's rendered cancel footer outlives an interrupted model turn
+      # while a background shell task runs. No semantic source is verified.
+      printf 'unknown agy-unverified'
+      return 0
+      ;;
     kimi*)
       if ! fm_busy_kimi_verified; then
         printf 'unknown kimi-unverified'
