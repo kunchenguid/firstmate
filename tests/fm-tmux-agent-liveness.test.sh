@@ -70,6 +70,9 @@ ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
 ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
 ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+# The Hermes/Antigravity endpoint's decoy: its trampoline identity is the exact
+# word `fm-worker-bridge`, so a suffixed neighbour must stay unattributed.
+ln -s "$SLEEP_BIN" "$LAB/bin/fm-worker-bridged"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -193,6 +196,25 @@ for decoy in ompd comp; do
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
+
+# --- the worker bridge's rewritten trampoline identity ----------------------
+# The Hermes and Antigravity endpoint runs as `exec -a fm-worker-bridge bash -c
+# '<python3 ...>; exit $?'`, so the live executable is a bash and the anchored
+# name lives only in the rewritten argv[0]. Which source keeps it differs by
+# platform - macOS `ps -o comm=` reports the rewritten name while tmux reports
+# `bash`, and Linux tmux reads argv[0] from /proc/<pgrp>/cmdline instead - so
+# this asserts only the verdict. A pane misread here reads as a dead endpoint
+# and licenses a duplicate crewmate on a live worktree.
+
+new_window bridge bash -c "exec -a fm-worker-bridge bash -c '$SLEEP_BIN 900; exit \$?'"
+wait_for_state "$SESSION:bridge" alive \
+  || fail "the worker bridge's rewritten trampoline identity must classify alive"
+pass "tmux liveness: the worker bridge trampoline classifies alive from its rewritten argv[0]"
+
+new_window decoy-fm-worker-bridged "$LAB/bin/fm-worker-bridged" 900
+wait_for_state "$SESSION:decoy-fm-worker-bridged" ambiguous \
+  || fail "'fm-worker-bridged' merely extends the anchored bridge name and must not classify as a live agent pane"
+pass "tmux liveness: a name extending fm-worker-bridge stays ambiguous"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that
