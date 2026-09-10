@@ -287,9 +287,9 @@ make_spawn_fakebin() {
 fm_test_run_spawn() {
   local home=$1 pane=$2 fakebin=$3
   shift 3
-  # A claude spawn pre-registers workspace trust in the launching user's own
-  # store (bin/fm-claude-trust.sh), so every spawn here runs against a throwaway
-  # HOME; without it the suite would write the developer's real ~/.claude.json.
+  # Claude and Codex spawns pre-register trust in the launching user's own
+  # vendor store, so every spawn here runs against a throwaway HOME; without it
+  # a suite could write the developer's real ~/.claude.json or Codex config.
   # CLAUDE_CONFIG_DIR must be pinned too, and pinned EMPTY: the script resolves
   # the store as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so a value inherited from the
   # developer's shell would beat the throwaway HOME and the sandbox would not

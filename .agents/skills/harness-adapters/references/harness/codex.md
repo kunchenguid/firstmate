@@ -29,8 +29,9 @@ A first run for a repository root can present two gates in sequence, and the lau
 Clearing only the first leaves the agent parked with its launch brief unread.
 
 The first is the directory trust dialog: "Do you trust the contents of this directory?"
-Its selection starts on the accepting choice, so Enter accepts it.
-The decision persists for the repository, so later worktrees of the same project skip it.
+For a non-secondmate Firstmate spawn, `../../../bin/fm-codex-trust.sh` records this worktree as trusted in Codex's user config before launch and reads the setting back, so the worker does not meet the dialog.
+The helper preserves every unrelated config byte and refuses a path it cannot establish as a linked worktree of the supplied project.
+A Codex secondmate is deliberately excluded from pre-registration because its home is persistent rather than a fresh per-task worktree.
 
 The second appears when that root's `.codex/hooks.json` is new or changed: "Hooks need review", offering `1. Review hooks`, `2. Trust all and continue`, and `3. Continue without trusting (hooks won't run)`.
 Its selection starts on `1. Review hooks`, so Enter alone opens the review rather than accepting, and accepting requires moving the selection first.

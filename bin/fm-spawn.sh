@@ -299,15 +299,16 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# claude is the one harness whose pre-launch setup can REFUSE the spawn: before
-# any per-task state exists, and before its worktree .claude/settings.local.json
-# hooks are written, a non-secondmate claude launch pre-registers the worktree in
-# the launching user's own Claude trust store through bin/fm-claude-trust.sh,
-# because Claude's interactive workspace-trust dialog gates a fresh worktree and
-# firstmate cannot answer it. That helper's header owns the structural scope test
-# and every refusal; a failed registration stops this spawn rather than launching
-# a worker that would wedge on the dialog. A --secondmate launch never runs it,
-# so a claude secondmate home keeps its own one-time trust decision.
+# Claude and Codex pre-launch trust setup can REFUSE the spawn. Before any
+# per-task state exists, a non-secondmate launch pre-registers the worktree in
+# the launching user's own vendor trust store through bin/fm-claude-trust.sh or
+# bin/fm-codex-trust.sh, because each interactive trust dialog gates a fresh
+# worktree before its brief is read and firstmate cannot answer it. Each helper's
+# header owns its structural scope test and every refusal; a failed registration
+# stops this spawn rather than launching a worker that would wedge on the dialog.
+# A --secondmate launch never runs either helper, so a persistent secondmate home
+# keeps its own one-time trust decision. Claude's registration also precedes its
+# worktree .claude/settings.local.json hooks, which that trust gate controls.
 # Every claude launch also carries the attribution-off policy in its per-launch
 # --settings JSON, so a spawned worker never writes a Co-Authored-By trailer,
 # Claude-Session link, or generated-with line into a commit or PR body;
@@ -3397,22 +3398,24 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-# Pre-register Claude's workspace trust for the worktree, at the first point the
-# worktree is known and before any per-task state is created below. The dialog
-# gates the pane before the brief is ever read, and it also gates loading the
-# project settings written further down, so nothing armed below takes effect
-# without it. bin/fm-claude-trust.sh owns the structural scope test and refuses
-# any path that is not this project's own isolated worktree; a refusal blocks the
-# spawn rather than launching a worker that would wedge on a dialog firstmate
-# cannot answer. Refusing here rather than beside the arm keeps this in the same
-# class as the two worktree refusals just above: no temp root, no retired
-# relaunch wiring and no busy record exists yet to strand, so the refusal names
-# the endpoint the same way they do and leaves nothing else behind.
+# Pre-register Claude or Codex trust at the first point the worktree is known
+# and before any per-task state is created below. Each helper owns its structural
+# scope test and refuses a path it cannot establish as this project's linked
+# worktree. A refusal blocks the spawn rather than launching a worker that would
+# wedge on a dialog before reading its brief. Refusing here rather than beside
+# the arm keeps this in the same class as the two worktree refusals just above:
+# no temp root, retired relaunch wiring, or busy record exists yet to strand.
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
       if ! "$FM_ROOT/bin/fm-claude-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
         echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
+        exit 1
+      fi
+      ;;
+    codex)
+      if ! "$FM_ROOT/bin/fm-codex-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
+        echo "error: could not pre-register Codex directory trust for $WT; refusing to launch a codex worker that would wedge on the trust dialog; inspect window $T" >&2
         exit 1
       fi
       ;;
