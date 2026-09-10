@@ -49,7 +49,7 @@ It is scoped to this loop and ends with it; it never changes what an unrequested
    Read the `omitted` array in that same output before drawing, and carry over only the entries saying that landed, running, or waiting work was capped or could not be read, as a plain line naming the work the captain cannot see.
    Every other entry there is machinery about surfaces the map never draws, such as task paths, watch and steer actions, or live pull request discovery, and none of it reaches the captain under `AGENTS.md` section 9.
    Where a worker's actual current step matters to part (b) or part (d) below, read it with `bin/fm-crew-state.sh <id>`, because a status line records a past event rather than current state.
-   A worker's own measured cost and remaining count ride the line it last reported, so part (d) below takes them from that same `bin/fm-crew-state.sh <id>` reading rather than from this output's `doing` field, which cuts a long line short; `bin/fm-brief.sh` owns what a worker must put there.
+   Part (d) below takes a worker's measured cost and remaining count from one place only, the last line that worker appended to its own `state/<id>.status` log in this home, and never from this output or from the reading above, neither of which carries that line whole; `bin/fm-brief.sh` owns what a worker must put on it.
    Include every worker in this home, including one only just dispatched and one waiting on something outside its control.
 
 3. Report immediately, before arming the timer.
