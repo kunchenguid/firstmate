@@ -523,6 +523,8 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] reported-comma - Reported Scout data/reported-comma/report.md (repo: gamma, reported 2026-07-10) (kind: scout)
 - [x] done-note - Done Note - local-landing:main (repo: delta, done 2026-07-11) (kind: ship)
 - [x] done-named - Done Named - local-landing:develop (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-body-note - Done Body Note (repo: delta, done 2026-07-11) (kind: ship)
+  local-landing:feature/custom
 - [x] done-title-main - Investigate local main (repo: delta, done 2026-07-11) (kind: ship)
 - [x] done-title-prose - Investigate local develop (repo: delta, done 2026-07-11) (kind: ship)
 - [x] done-title-suffix - Investigate local develop - local branch (repo: delta, done 2026-07-11) (kind: ship)
@@ -634,6 +636,13 @@ EOF
       and .done == "2026-07-11"
       and .completion == {verb:"done",date:"2026-07-11"}
   ' >/dev/null || fail "named-base local note did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-body-note")
+    | .title == "Done Body Note"
+      and .local_note == "local feature/custom"
+      and .done == "2026-07-11"
+      and .completion == {verb:"done",date:"2026-07-11"}
+  ' >/dev/null || fail "body local-landing note did not parse"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-title-main")
     | .title == "Investigate local main" and .local_note == null
