@@ -159,13 +159,33 @@ run_spawn() {
 }
 
 test_spawn_isolation_abort() {
-  local home proj fakebin out status
+  local home proj fakebin out status real_perl
   home="$TMP_ROOT/spawn-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-proj")
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake")
   # The assertions concern identity, not how long an unchanged cwd is polled.
+  # Advance the public script's monotonic-clock dependency deterministically so
+  # both 60-second refusals execute without making this regression wait two real
+  # minutes.
   fm_test_fake_sleep_noop "$fakebin"
+  real_perl=$(command -v perl)
+  cat > "$fakebin/perl" <<SH
+#!/usr/bin/env bash
+set -u
+clock="\$0.clock"
+case "\$*" in
+  *CLOCK_MONOTONIC*)
+    now=\$(cat "\$clock" 2>/dev/null || printf '0')
+    now=\$((now + 1000))
+    printf '%s\\n' "\$now" > "\$clock"
+    printf '%s\\n' "\$now"
+    ;;
+  *Time::HiRes=sleep*) ;;
+  *) exec "$real_perl" "\$@" ;;
+esac
+SH
+  chmod +x "$fakebin/perl"
   # A genuine isolated linked worktree of the project, detached on the default.
   git -C "$proj" worktree add -q --detach "$TMP_ROOT/spawn-wt" >/dev/null 2>&1
   # The non-git case must BE non-git wherever this suite runs. A directory under
@@ -278,8 +298,10 @@ test_spawn_tmux_window_construction() {
     "must disable allow-rename on the spawned window"
 
   # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
+  assert_grep "send-keys -t @spawnwid if [" "$rec" \
     "treehouse get must be sent to the stable window id"
+  assert_grep "treehouse get" "$rec" \
+    "the stable-window delivery must run treehouse get"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 

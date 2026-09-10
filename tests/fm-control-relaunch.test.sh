@@ -105,6 +105,15 @@ case "${1:-}" in
             : > "$FM_FAKE_CWD_RACE_READY"
             /bin/sleep 1
           fi
+          if [ -n "${FM_FAKE_PANE_SEQUENCE_FILE:-}" ]; then
+            seqn=0
+            [ -f "$D/pane-seq-count" ] && seqn=$(cat "$D/pane-seq-count")
+            seqn=$((seqn + 1))
+            printf '%s\n' "$seqn" > "$D/pane-seq-count"
+            seqline=$(sed -n "${seqn}p" "$FM_FAKE_PANE_SEQUENCE_FILE")
+            [ -n "$seqline" ] || seqline=$(tail -1 "$FM_FAKE_PANE_SEQUENCE_FILE")
+            printf '%s\n' "$seqline"; exit 0
+          fi
           cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
     done
@@ -1523,6 +1532,31 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding its work"
 }
 
+# The settle loop's break condition is break-on-match: it must keep polling while
+# the pane reports anything other than the recorded worktree and break the instant
+# it reaches it. A relaunch whose pane starts elsewhere - the way a restarted
+# shell can transiently report a stale launch directory before its cwd settles -
+# but then reaches the recorded worktree must succeed. This is the positive
+# counterpart to the test above: that one pins a pane that NEVER reaches the
+# worktree; this one drives a pane that reaches it after a few mismatched reads.
+# A loop whose break polarity is inverted (break-on-mismatch) breaks on the first
+# stale read and the post-loop check then refuses, so this fails before the fix.
+test_relaunch_settles_when_the_pane_reaches_the_recorded_worktree_late() {
+  local dir out rc seq id=settle-late-rl
+  dir=$(new_case late-settle "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'zsh' > "$dir/fake/command"
+  seq="$dir/fake/pane-sequence"
+  printf '%s\n%s\n%s\n%s\n' "$dir/proj" "$dir/proj" "$dir/proj" "$dir/wt" > "$seq"
+  out=$(FM_FAKE_PANE_SEQUENCE_FILE="$seq" \
+    run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "a relaunch should succeed once the pane reaches the recorded worktree"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=claude" "the relaunch did not report a successful launch"
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/wt" ] \
+    || fail "the relaunch must reuse the recorded worktree, not reallocate it"
+  pass "fm-spawn --relaunch: a pane that starts outside the worktree but reaches it succeeds"
+}
+
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
   local dir out rc=0
   command -v tasks-axi >/dev/null 2>&1 || {
@@ -1609,5 +1643,6 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_relaunch_settles_when_the_pane_reaches_the_recorded_worktree_late
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
