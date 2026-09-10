@@ -1046,10 +1046,11 @@ EOF
 }
 
 test_oversized_backlog_survives_the_kernel_argument_limit() {
-  local home data fakebin out bytes i summary bearings rc
+  local home data scratch fakebin out bytes i summary bearings rc
   home=$(make_home oversized)
   data=$TMP_ROOT/oversized-data
-  mkdir -p "$data"
+  scratch=$TMP_ROOT/oversized-tmp
+  mkdir -p "$data" "$scratch"
   {
     printf '## In flight\n\n## Queued\n'
     i=0
@@ -1062,36 +1063,105 @@ test_oversized_backlog_survives_the_kernel_argument_limit() {
   bytes=$(LC_ALL=C wc -c < "$data/backlog.md" | tr -d ' ')
   [ "$bytes" -gt 200000 ] || fail "fixture backlog must exceed 200000 bytes to reproduce the kernel argument limit, got $bytes"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$SNAPSHOT" --json 2>"$TMP_ROOT/oversized.err"); rc=$?
+  out=$(PATH="$fakebin:$PATH" TMPDIR="$scratch" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$SNAPSHOT" --json 2>"$TMP_ROOT/oversized.err"); rc=$?
   [ "$rc" -eq 0 ] || fail "fm-fleet-snapshot.sh --json must exit 0 against an oversized backlog: $(cat "$TMP_ROOT/oversized.err")"
   assert_no_grep "Argument list too long" "$TMP_ROOT/oversized.err" "stderr must never report E2BIG"
   printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1" and (.backlog.records | length) == 3000' >/dev/null \
     || fail "oversized snapshot must still parse as fm-fleet-snapshot.v1 with every backlog row: $out"
-  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$SNAPSHOT" --secondmate-home-summary 2>"$TMP_ROOT/oversized-summary.err"); rc=$?
+  summary=$(PATH="$fakebin:$PATH" TMPDIR="$scratch" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$SNAPSHOT" --secondmate-home-summary 2>"$TMP_ROOT/oversized-summary.err"); rc=$?
   [ "$rc" -eq 0 ] || fail "--secondmate-home-summary must exit 0 against an oversized backlog: $(cat "$TMP_ROOT/oversized-summary.err")"
   assert_no_grep "Argument list too long" "$TMP_ROOT/oversized-summary.err" "home-summary stderr must never report E2BIG"
   printf '%s' "$summary" | jq -e '.schema == "fm-secondmate-home-summary.v1"' >/dev/null \
     || fail "oversized home summary must still parse as the bounded contract: $summary"
-  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>"$TMP_ROOT/oversized-bearings.err"); rc=$?
+  bearings=$(PATH="$fakebin:$PATH" TMPDIR="$scratch" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>"$TMP_ROOT/oversized-bearings.err"); rc=$?
   [ "$rc" -eq 0 ] || fail "fm-bearings-snapshot.sh --json must exit 0 against an oversized backlog: $(cat "$TMP_ROOT/oversized-bearings.err")"
   assert_no_grep "Argument list too long" "$TMP_ROOT/oversized-bearings.err" "bearings stderr must never report E2BIG"
   printf '%s' "$bearings" | jq -e '.schema == "fm-bearings.v1"' >/dev/null \
     || fail "oversized bearings digest must still parse as fm-bearings.v1: $bearings"
+  [ -z "$(find "$scratch" -mindepth 1 -print -quit)" ] \
+    || fail "snapshot readers must remove every temp payload they create: $(ls -A "$scratch")"
   pass "an oversized structured backlog survives the kernel single-argument limit across both readers"
 }
 
-test_small_fleet_output_is_byte_identical_apart_from_generated() {
-  local home fakebin out_a out_b norm_a norm_b
-  home=$(make_home unchanged)
-  write_fixture "$home"
+test_oversized_secondmate_aggregation_survives_the_kernel_argument_limit() {
+  local home fakebin padding id i out rc bytes
+  home=$(make_home oversized-secondmates)
+  padding=$(LC_ALL=C head -c 12000 /dev/zero | tr '\0' x)
+  i=0
+  while [ "$i" -lt 8 ]; do
+    id=$(printf 'wide-secondmate-%02d' "$i")
+    mkdir -p "$home/projects/$id"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" \
+      "worktree=$home/projects/$id" \
+      "project=alpha" \
+      "harness=codex" \
+      "kind=secondmate" \
+      "mode=secondmate" \
+      "home=$home/projects/$id"
+    printf 'working: %s\n' "$padding" > "$home/state/$id.status"
+    i=$((i + 1))
+  done
   fakebin=$(make_fakebin "$home")
-  out_a=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-14T00:00:00Z "$SNAPSHOT" --json)
-  out_b=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-14T00:00:00Z "$SNAPSHOT" --json)
-  norm_a=$(printf '%s' "$out_a" | jq -S 'del(.generated)')
-  norm_b=$(printf '%s' "$out_b" | jq -S 'del(.generated)')
-  [ "$norm_a" = "$norm_b" ] \
-    || fail "a small fleet snapshot must stay byte-identical apart from the generated timestamp"
-  pass "a small fleet snapshot stays byte-identical apart from the generated timestamp"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json 2>"$TMP_ROOT/oversized-secondmates.err"); rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-fleet-snapshot.sh --json must exit 0 when secondmate records exceed the kernel argument limit: $(cat "$TMP_ROOT/oversized-secondmates.err")"
+  assert_no_grep "Argument list too long" "$TMP_ROOT/oversized-secondmates.err" "secondmate aggregation stderr must never report E2BIG"
+  bytes=$(printf '%s' "$out" | jq -c '.secondmate_current.records' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$bytes" -gt 131072 ] || fail "fixture secondmate records must exceed 131072 bytes to reproduce the kernel argument limit, got $bytes"
+  printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1" and (.secondmate_current.records | length) == 8' >/dev/null \
+    || fail "oversized secondmate aggregation must keep every record: $out"
+  pass "secondmate aggregation beyond the kernel single-argument limit keeps every record"
+}
+
+PRE_FIX_SNAPSHOT_COMMIT=7ee0c192e9d664b022361bd4609303bebfc7de14
+
+pre_fix_snapshot_bin() {
+  local bin=$TMP_ROOT/pre-fix/bin
+  mkdir -p "$bin"
+  ln -s "$ROOT"/bin/* "$bin/" || return 1
+  rm "$bin/fm-fleet-snapshot.sh"
+  git -C "$ROOT" show "$PRE_FIX_SNAPSHOT_COMMIT:bin/fm-fleet-snapshot.sh" > "$bin/fm-fleet-snapshot.sh" || return 1
+  chmod +x "$bin/fm-fleet-snapshot.sh"
+  printf '%s\n' "$bin"
+}
+
+test_small_fleet_output_matches_the_pre_fix_snapshot() {
+  local home mate fakebin pre_fix_bin golden current
+  if ! git -C "$ROOT" cat-file -e "$PRE_FIX_SNAPSHOT_COMMIT:bin/fm-fleet-snapshot.sh" 2>/dev/null; then
+    echo "skip: pre-fix snapshot commit $PRE_FIX_SNAPSHOT_COMMIT is not in this clone"
+    return 0
+  fi
+  home=$(make_home golden)
+  write_fixture "$home"
+  mate=$TMP_ROOT/golden-secondmate-home
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects" "$mate/bin"
+  printf '# Firstmate fixture\n' > "$mate/AGENTS.md"
+  printf 'mate\n' > "$mate/.fm-secondmate-home"
+  printf '## In flight\n\n## Queued\n- [ ] mate-queued - Mate queued work (repo: alpha) (kind: ship)\n\n## Done\n' > "$mate/data/backlog.md"
+  printf -- '- mate - fixture domain (home: %s; scope: fixture work; projects: alpha; added 2026-07-11)\n' \
+    "$mate" > "$home/data/secondmates.md"
+  fm_write_meta "$home/state/mate.meta" \
+    "window=firstmate:fm-mate" \
+    "worktree=$mate" \
+    "project=$mate" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$mate" \
+    "projects=alpha"
+  printf 'working: supervising fixture work\n' > "$home/state/mate.status"
+  fakebin=$(make_fakebin "$home")
+  pre_fix_bin=$(pre_fix_snapshot_bin) || fail "could not stage the pre-fix snapshot script"
+  golden=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-14T00:00:00Z \
+    "$pre_fix_bin/fm-fleet-snapshot.sh" --json | jq -S 'del(.generated)')
+  current=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-14T00:00:00Z \
+    "$SNAPSHOT" --json | jq -S 'del(.generated)')
+  [ -n "$golden" ] || fail "the pre-fix snapshot must produce golden output"
+  printf '%s' "$current" | jq -e 'any(.secondmate_current.records[]; .provenance.selected == "structured-home")' >/dev/null \
+    || fail "the golden fixture must exercise a structured secondmate home: $current"
+  [ "$current" = "$golden" ] \
+    || fail "a small fleet snapshot must match the pre-fix output apart from the generated timestamp: $(diff <(printf '%s\n' "$golden") <(printf '%s\n' "$current"))"
+  pass "a small fleet snapshot matches the pre-fix output apart from the generated timestamp"
 }
 
 test_empty_fleet_json
@@ -1113,4 +1183,5 @@ test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
 test_oversized_backlog_survives_the_kernel_argument_limit
-test_small_fleet_output_is_byte_identical_apart_from_generated
+test_oversized_secondmate_aggregation_survives_the_kernel_argument_limit
+test_small_fleet_output_matches_the_pre_fix_snapshot
