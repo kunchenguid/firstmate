@@ -1079,8 +1079,15 @@ fm_lock_acquire_wait() {
 # waiting caller before exiting. The lock's ordinary stale-owner recovery makes
 # every interruption safe: before transfer the helper is the owner; after
 # transfer the still-live caller is the owner.
+# The whole holder record moves, not just the pid: the helper's pid-start and
+# pid-identity are dropped BEFORE the pid is rewritten, and the caller's own
+# are recorded after. Any interruption inside that window leaves a pid with no
+# recorded start time, which fm_lock_holder_alive reads with the conservative
+# bare-liveness rule. Recording the caller's pid first would instead leave the
+# live caller measured against the exited helper's start time, which reads the
+# genuine holder as dead and invites a contender to steal the held lock.
 _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
-  local lockdir=$1 caller_pid=$2 ownerdir current back
+  local lockdir=$1 caller_pid=$2 ownerdir current back identity start_identity
   case "$caller_pid" in ''|*[!0-9]*) return 1 ;; esac
   fm_pid_alive "$caller_pid" || return 1
   trap 'fm_lock_release "$lockdir"; exit 143' TERM INT
@@ -1095,11 +1102,22 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
   fi
   fm_current_pid current || { fm_lock_release "$lockdir"; return 1; }
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  if [ "$back" != "$current" ] \
-    || ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
+  if [ "$back" != "$current" ]; then
+    fm_lock_release "$lockdir"
+    return 1
+  fi
+  rm -f "$ownerdir/pid-start" "$ownerdir/pid-identity" 2>/dev/null || true
+  if ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
     || [ "$(cat "$ownerdir/pid" 2>/dev/null || true)" != "$caller_pid" ]; then
     fm_lock_release "$lockdir"
     return 1
+  fi
+  if start_identity=$(fm_pid_start_identity "$caller_pid" 2>/dev/null) \
+    && [ -n "$start_identity" ]; then
+    printf '%s\n' "$start_identity" > "$ownerdir/pid-start" 2>/dev/null || true
+  fi
+  if identity=$(fm_pid_identity "$caller_pid" 2>/dev/null) && [ -n "$identity" ]; then
+    printf '%s\n' "$identity" > "$ownerdir/pid-identity" 2>/dev/null || true
   fi
   trap - TERM INT
 }

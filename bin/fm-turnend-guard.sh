@@ -81,12 +81,16 @@
 #      cycle itself: it spawns the watcher singleton detached, verifies it
 #      against the same strict predicate within FM_CLAUDE_GUARD_ARM_CONFIRM
 #      seconds (default 5), and on success blocks once with the restored-cycle
-#      banner so one handling turn drains what the lapse queued;
-#   4. only when that last resort cannot verify a cycle either: re-block
-#      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
-#      (default 3) consecutive blocks per session - safely below Claude Code's
-#      hard 8-consecutive-block override - then allow one loud attended
-#      fail-open only for an already verified failure episode.
+#      banner so one handling turn drains what the lapse queued. That block
+#      spends one FM_CLAUDE_TURNEND_BLOCK_BUDGET slot like any other, so a
+#      wedged auto-arm cannot make the guard re-arm and re-block unbounded;
+#      once the budget is spent the last resort stands down to step 4;
+#   4. when that last resort cannot verify a cycle, or has no budget left to
+#      spend: re-block with the repair banner, bounded to
+#      FM_CLAUDE_TURNEND_BLOCK_BUDGET (default 3) consecutive blocks per
+#      session - safely below Claude Code's hard 8-consecutive-block override -
+#      then allow one loud attended fail-open only for an already verified
+#      failure episode.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -496,8 +500,28 @@ guard_last_resort_arm() {
   done
 }
 
-if guard_last_resort_arm; then
-  fm_failure_episode_reset "$STATE" || true
+# The restored-cycle block spends one bounded continuation, exactly like the
+# repair re-block below. bin/fm-watch.sh queues and exits on an actionable
+# wake, so against a persistently wedged auto-arm the watcher is gone again by
+# the next turn end and this path would otherwise arm and block once more,
+# every turn, without bound - past Claude Code's hard 8-consecutive-block
+# override, which force-ends the turn with no attended alarm ever fired.
+# Accounting therefore runs before the arm, so a spent budget stands the last
+# resort down and lets the terminal decision below run instead.
+# The episode reset that used to run here is gone with it: it deletes the
+# block-budget file along with the failure notice and alarm, so an arm that
+# both spent a slot and reset would erase the very progression that bounds it,
+# and would keep the terminal fail-open unreachable forever by clearing the
+# notice it verifies. An episode ends when a stop is allowed on health alone,
+# not when a block is issued; the following healthy stop performs that reset
+# through the ordinary recovery path above, exactly as it does after any other
+# Claude-mode block.
+BUDGET_ACCOUNTED=0
+if budget_account_current_epoch; then
+  BUDGET_ACCOUNTED=1
+fi
+if [ "$BUDGET_ACCOUNTED" -eq 1 ] && [ "$COUNT" -le "$BLOCK_BUDGET" ] \
+  && guard_last_resort_arm; then
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
@@ -512,10 +536,12 @@ if guard_last_resort_arm; then
   exit 2
 fi
 
-# The auto-arm genuinely failed to establish and the last-resort arm could not
-# verify a cycle either: consume the bounded re-block budget before considering
-# the verified one-time attended fail-open.
-budget_account_current_epoch || block_stop
+# The auto-arm genuinely failed to establish and the last-resort arm either
+# could not verify a cycle or had no bounded continuation left: finish
+# consuming the re-block budget before considering the verified one-time
+# attended fail-open. Accounting that already succeeded above is not repeated,
+# because an epoch identity is accounted at most once per stop.
+[ "$BUDGET_ACCOUNTED" -eq 1 ] || budget_account_current_epoch || block_stop
 terminal_fail_open
 terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then
