@@ -300,6 +300,28 @@ test_trailing_newline_resolution_does_not_exhaust_bound() {
   pass "byte-preserving resolution does not exhaust the bound on trailing-newline names"
 }
 
+test_long_repeated_bytes_do_not_invent_cycle() {
+  local rec id out status short_name long_name target root
+  id=treehouse-root-od-repeat-e1
+  rec=$(make_case od-repeat)
+  read_case "$rec"
+  short_name=$(printf '%096d' 0 | tr 0 a)
+  long_name=$(printf '%0112d' 0 | tr 0 a)
+  target="$CASE_DIR/$long_name"
+  root="$CASE_DIR/$short_name/pool"
+  mkdir "$target"
+  ln -s "$target" "$CASE_DIR/$short_name"
+  printf '%s\n' "$root" > "$HOME_DIR/config/treehouse-root"
+
+  out=$(run_worker_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "distinct paths with long repeated bytes must not share a cycle key"
+  assert_contains "$out" "spawned $id" \
+    "long repeated-byte regression did not report a successful spawn"
+  assert_only_treehouse_command "treehouse get --root '$root'"
+  pass "lossless cycle keys distinguish paths with long repeated bytes"
+}
+
 test_dollar_character_is_refused_before_treehouse_expands_it() {
   local rec id out status root
   id=treehouse-root-dollar-c2
@@ -438,6 +460,7 @@ test_missing_project_storage_boundary_is_refused
 test_filesystem_root_spellings_are_refused
 test_trailing_newline_resolution_does_not_invent_cycle
 test_trailing_newline_resolution_does_not_exhaust_bound
+test_long_repeated_bytes_do_not_invent_cycle
 test_missing_parent_dotdot_hidden_symlink_reproduction_is_refused
 test_normalization_reveals_project_storage_symlink
 test_dotdot_component_is_refused_even_when_destination_is_safe

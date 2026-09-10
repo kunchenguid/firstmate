@@ -77,8 +77,9 @@
 #   component, and must not resolve inside the effective projects directory or
 #   spawning checkout or resolve to the filesystem root. Existing symlinked
 #   ancestors are resolved repeatedly after path normalization until stable,
-#   preserving trailing newline bytes; cycles and the bounded non-convergent
-#   case refuse. Containment compares filesystem identity as well as path
+#   preserving trailing newline bytes. Lossless non-compressing hex keys detect
+#   cycles; cycles and the bounded non-convergent case refuse. Containment
+#   compares filesystem identity as well as path
 #   spelling so case-insensitive aliases cannot bypass it, and refuses when a
 #   protected boundary or the identity comparison is unavailable. A present
 #   file naming no root refuses. When no root is configured, spawn sends the
@@ -2110,10 +2111,14 @@ resolve_path_once_through_existing_ancestor() {  # <absolute-path>
   RESOLVED_PATH_ONCE=$NORMALIZED_ABSOLUTE_PATH
 }
 
+path_cycle_key() {  # <path>
+  LC_ALL=C printf '%s' "$1" | od -An -v -tx1 | tr -d '[:space:]'
+}
+
 resolve_path_through_existing_ancestor() {  # <absolute-path>
   local current current_key next next_key seen iteration max_iterations
   current=$1
-  current_key=$(printf '%s' "$current" | od -An -tx1 | tr -d '[:space:]') || return 1
+  current_key=$(path_cycle_key "$current") || return 1
   seen=$'\n'"$current_key"$'\n'
   max_iterations=16
   iteration=1
@@ -2124,7 +2129,7 @@ resolve_path_through_existing_ancestor() {  # <absolute-path>
       RESOLVED_PATH=$next
       return 0
     fi
-    next_key=$(printf '%s' "$next" | od -An -tx1 | tr -d '[:space:]') || return 1
+    next_key=$(path_cycle_key "$next") || return 1
     case "$seen" in
       *$'\n'"$next_key"$'\n'*)
         echo "error: Treehouse pool path resolution entered a cycle at $next" >&2
