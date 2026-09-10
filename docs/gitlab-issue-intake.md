@@ -75,7 +75,7 @@ Tập bảy tên này không phải do tài liệu này định nghĩa.
 Nơi định nghĩa duy nhất là biến `FM_LABEL_VOCABULARY` trong [`bin/fm-gitlab-issue.sh`](../bin/fm-gitlab-issue.sh).
 Script đó từ chối mọi tên `fm::` nằm ngoài tập này trước khi gửi request, nên gõ sai một tên sẽ không vô tình tạo ra label mới trên GitLab.
 Nếu bạn cần đổi hoặc thêm tên, sửa ở đó chứ không phải ở đây.
-Nhưng trang này giữ hai bản sao của bộ tên, danh sách bảy tên ở trên và bảng ở mục "Ba label người dùng cần biết", nên một thay đổi bộ label buộc phải cập nhật cả hai chỗ đó trong tài liệu này chứ không chỉ sửa script.
+Nhưng trang này chép lại tên label ở bốn chỗ, danh sách bảy tên ở trên, bảng ở mục "Ba label người dùng cần biết", dòng `intake_labels` trong khối cấu hình mẫu ở "Bước 3", và câu nêu mặc định của `intake_labels` ngay dưới khối đó, nên một thay đổi bộ label buộc phải cập nhật cả bốn chỗ trong tài liệu này chứ không chỉ sửa script.
 
 ## Bước 3: viết cấu hình
 
@@ -265,7 +265,7 @@ Giới hạn thành thật của cách này là việc phát hiện xảy ra ở
 
 Hai script làm phần cơ khí của luồng: [`bin/fm-gitlab-issues.sh`](../bin/fm-gitlab-issues.sh) phát hiện và ghi lại, [`bin/fm-gitlab-issue.sh`](../bin/fm-gitlab-issue.sh) đọc và sửa một issue.
 Phần còn lại của luồng, gồm phân loại, chia việc con, soạn ba loại comment và chuyển label theo đúng thứ tự, thuộc về skill `gitlab-issue-intake`, và không có script nào cưỡng chế nửa này của luồng.
-Skill đó được giao bằng một thay đổi riêng trong cùng chuỗi việc này, nên chừng nào nó chưa có trong checkout của bạn thì chỉ poll và helper thao tác issue là chạy được, còn nửa phía agent của luồng chưa hoạt động.
+Chừng nào skill `gitlab-issue-intake` chưa có trong checkout của bạn thì chỉ poll và helper thao tác issue là chạy được, còn nửa phía agent của luồng chưa hoạt động.
 Nếu bạn thấy first mate đi lệch khỏi tài liệu này, đó là chỗ cần báo lại chứ không phải chỗ tự sửa bằng tay trên GitLab.
 
 Việc theo dõi và merge merge request trên GitLab là một cơ chế riêng, đã có sẵn từ trước; xem [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md).
