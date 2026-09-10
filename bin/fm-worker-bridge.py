@@ -94,12 +94,15 @@ def main():
     atexit.register(herdr_report)
 
     def event(value, reason):
-        result = subprocess.run([str(root / 'fm-busy-event.sh'), 'apply',
-            str(state), args.id, value, '--gen', args.gen,
-            '--source', 'worker-bridge', '--event', reason], check=False)
-        if result.returncode:
-            raise RuntimeError('busy generation retired or state publication failed')
-        herdr_report(value)
+        # The record writer holds an mkdir lock; a signal that killed it would
+        # strand that lock and refuse every later publication.
+        with deferred():
+            result = subprocess.run([str(root / 'fm-busy-event.sh'), 'apply',
+                str(state), args.id, value, '--gen', args.gen,
+                '--source', 'worker-bridge', '--event', reason], check=False)
+            if result.returncode:
+                raise RuntimeError('busy generation retired or state publication failed')
+            herdr_report(value)
 
     def terminate(process):
         if process is None or getattr(process, "_fm_drained", False):
@@ -119,17 +122,30 @@ def main():
         process.wait()
         process._fm_drained = True
 
-    spawning = False
+    deferring = False
     pending_signal = None
 
     def terminated(signum, frame):
         nonlocal pending_signal
-        if spawning:
+        if deferring:
             pending_signal = signum
             return
         if signum == signal.SIGINT:
             raise KeyboardInterrupt
         raise SystemExit(128 + signum)
+
+    @contextlib.contextmanager
+    def deferred():
+        nonlocal deferring, pending_signal
+        deferring = True
+        try:
+            yield
+        finally:
+            deferring = False
+        if pending_signal is not None:
+            signum = pending_signal
+            pending_signal = None
+            terminated(signum, None)
 
     @contextlib.contextmanager
     def uninterrupted():
@@ -159,7 +175,7 @@ def main():
     signal.signal(signal.SIGHUP, terminated)
 
     def run(prompt):
-        nonlocal conversation, spawning, pending_signal
+        nonlocal conversation
         if args.harness == 'hermes':
             command = ['hermes', 'chat', '--cli', '--oneshot', '-Q', '--yolo',
                        '--continue', session, '--create-if-missing',
@@ -185,15 +201,10 @@ def main():
         try:
             event('busy', 'turn-start')
             print('Firstmate worker running', flush=True)
-            spawning = True
-            process = subprocess.Popen(command, stdin=subprocess.PIPE,
-                stdout=output_file, stderr=error_file, text=True,
-                env=env, start_new_session=True)
-            spawning = False
-            if pending_signal is not None:
-                interrupted = pending_signal
-                pending_signal = None
-                terminated(interrupted, None)
+            with deferred():
+                process = subprocess.Popen(command, stdin=subprocess.PIPE,
+                    stdout=output_file, stderr=error_file, text=True,
+                    env=env, start_new_session=True)
             process.communicate(payload)
             with uninterrupted():
                 terminate(process)
@@ -248,7 +259,6 @@ def main():
             event('unknown', 'turn-error')
             raise
         finally:
-            spawning = False
             terminate(process)
             output_file.close()
             error_file.close()

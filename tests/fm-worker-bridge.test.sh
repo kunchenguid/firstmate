@@ -36,6 +36,9 @@ if sys.argv[0].endswith('hermes'): print('session_id: exact-hermes-session', fil
 print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','response':'BRIDGE_OK'}))
 ''')
         binary.chmod(0o755)
+    clock = fake / 'date'
+    clock.write_text('#!/bin/sh\n[ -z "$BRIDGE_SLOW_CLOCK" ] || sleep 0.4\nexec /bin/date "$@"\n')
+    clock.chmod(0o755)
     env = dict(os.environ, PATH=str(fake)+os.pathsep+os.environ['PATH'], BRIDGE_CALLS=str(base/'calls'))
     def envelope(body):
         return subprocess.run([str(root/'bin/fm-operational-input.sh'),'encode','launch-brief'],
@@ -194,5 +197,18 @@ print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','res
             assert 'Herdr agent registration failed' in unregistered.stderr, unregistered.stderr
             assert 'BRIDGE_OK' not in unregistered.stdout, unregistered.stdout
             assert not (state/'probe.turn-ended').exists()
+            lock = state/'probe.busy-state.lock'
+            process = subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=dict(env,BRIDGE_SLOW_CLOCK='1',FM_BUSY_LOCK_STALE_SECS='60'))
+            for _ in range(400):
+                if lock.exists(): break
+                time.sleep(.01)
+            else: raise AssertionError('the turn-start writer never took the busy lock')
+            process.send_signal(signal.SIGINT)
+            output,error = process.communicate('/exit\n',timeout=30)
+            assert process.returncode == 0, error
+            assert 'cancelled' in output, output
+            assert 'state=idle' in (state/'probe.busy-state').read_text()
+            assert (state/'probe.turn-ended').exists()
+            assert not lock.exists(), 'the busy-state lock outlived the interrupted publication'
     print('PASS: both bridges preserve session identity, turn state, failures, cancellation and exit')
 PY
