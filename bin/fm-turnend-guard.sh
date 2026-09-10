@@ -82,15 +82,25 @@
 #      against the same strict predicate within FM_CLAUDE_GUARD_ARM_CONFIRM
 #      seconds (default 5), and on success blocks once with the restored-cycle
 #      banner so one handling turn drains what the lapse queued. That block
-#      spends one FM_CLAUDE_TURNEND_BLOCK_BUDGET slot like any other, so a
-#      wedged auto-arm cannot make the guard re-arm and re-block unbounded;
-#      once the budget is spent the last resort stands down to step 4;
+#      spends one FM_CLAUDE_TURNEND_BLOCK_BUDGET slot like any other, and once
+#      the budget is spent the last resort stands down to step 4. Read the
+#      reach of that bound precisely, because it is narrower than "per
+#      session": budget_account_current_epoch advances the count only when the
+#      ledger's epoch differs from the one already recorded in the budget file,
+#      so a slot is spent per auto-arm GENERATION, not per stop. An auto-arm
+#      whose generation never advances - the hook disabled, or the script
+#      erroring before its first ledger write - is NOT bounded by it, and in
+#      that state the guard can re-arm and re-block past Claude Code's hard
+#      8-consecutive-block override with no attended alarm. That limit comes
+#      from the per-epoch budget itself and applies equally to the ordinary
+#      repair re-block below, so the last-resort arm does not introduce it;
 #   4. when that last resort cannot verify a cycle, or has no budget left to
 #      spend: re-block with the repair banner, bounded to
 #      FM_CLAUDE_TURNEND_BLOCK_BUDGET (default 3) consecutive blocks per
-#      session - safely below Claude Code's hard 8-consecutive-block override -
-#      then allow one loud attended fail-open only for an already verified
-#      failure episode.
+#      auto-arm generation - intended to stay safely below Claude Code's hard
+#      8-consecutive-block override, subject to the frozen-generation caveat in
+#      step 3 - then allow one loud attended fail-open only for an already
+#      verified failure episode.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -503,11 +513,12 @@ guard_last_resort_arm() {
 # The restored-cycle block spends one bounded continuation, exactly like the
 # repair re-block below. bin/fm-watch.sh queues and exits on an actionable
 # wake, so against a persistently wedged auto-arm the watcher is gone again by
-# the next turn end and this path would otherwise arm and block once more,
-# every turn, without bound - past Claude Code's hard 8-consecutive-block
-# override, which force-ends the turn with no attended alarm ever fired.
-# Accounting therefore runs before the arm, so a spent budget stands the last
-# resort down and lets the terminal decision below run instead.
+# the next turn end and this path would otherwise arm and block once more every
+# turn with nothing accounted at all. Accounting therefore runs before the arm,
+# so a spent budget stands the last resort down and lets the terminal decision
+# below run instead. How far that bound actually reaches is stated once, in
+# step 3 of the numbered contract at the top of this file; it does not hold for
+# every stop, and this comment is not the place that owns the caveat.
 # The episode reset that used to run here is gone with it: it deletes the
 # block-budget file along with the failure notice and alarm, so an arm that
 # both spent a slot and reset would erase the very progression that bounds it,

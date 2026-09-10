@@ -2176,6 +2176,15 @@ test_hook_claude_mode_last_resort_arm_stands_down_for_afk() {
 # watcher is gone again at every turn end; unaccounted, the guard would arm and
 # block every single turn, straight past Claude Code's hard 8-consecutive-block
 # override, which force-ends the turn with no attended alarm ever raised.
+#
+# What this case does NOT cover, named here rather than left implied: the
+# frozen-epoch path. This fixture never creates state/.claude-autoarm-epoch, so
+# current_epoch is empty, budget_account_current_epoch takes its incrementing
+# branch on every run, and the bound engages. An auto-arm that leaves a ledger
+# at epoch=N and then stops firing entirely keeps current_epoch frozen at N, the
+# count never advances, and this assertion would hold while the guard re-armed
+# forever. A test that cannot fail on the case it appears to cover is a trap, so
+# the gap is stated instead of implied; closing the bound there is separate work.
 test_hook_claude_mode_last_resort_arm_spends_the_block_budget() {
   local dir out status i pid waited
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-last-resort-bounded")
