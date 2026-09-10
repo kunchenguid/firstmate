@@ -181,12 +181,42 @@ if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0
 fi
+# Exit 2 blocks the turn and the stderr collected here is the operator's only
+# view of why, so no blocking path may be silent: a block that prints nothing
+# leaves the session re-waking with no message naming a cause. Supervision is
+# provably healthy on every path that reaches this, and only the bookkeeping
+# write refused, so the text says exactly that and names the artifacts the reset
+# actually touches - the lock it serializes on and the three markers it clears.
+# The reset runs on EVERY healthy Claude-mode stop, so reaching here does not
+# imply a failure episode: with none of the markers present the lock is the only
+# possible refusal, and the most common holder is the auto-arm on this same Stop
+# event. Only the episode case names the ledger, which may not even exist.
+block_unrecorded_episode_reset() {
+  local pending=0 path
+  for path in "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM"; do
+    [ -e "$path" ] || continue
+    pending=1
+    break
+  done
+  {
+    if [ "$pending" -eq 1 ]; then
+      printf 'firstmate turn-end guard HELD THIS TURN OPEN - supervision for this home is verified healthy, but the failure-episode reset could not be recorded, so the previous failure cannot be proven closed. Read the episode outcome in %s.\n' \
+        "$STATE/.claude-autoarm-epoch"
+    else
+      printf 'firstmate turn-end guard HELD THIS TURN OPEN - supervision for this home is verified healthy and no failure episode is open, but the reset that records that could not be taken. With none of those markers present the lock is the only thing left that can refuse, so the usual cause is benign contention: the auto-arm on this same Stop event holding it for its own reset, which clears on the next turn.\n'
+    fi
+    printf 'The reset serializes on %s and clears %s, %s and %s: a busy lock, or any of those three existing as a directory, refuses it. A state directory that refuses these writes keeps every turn blocked until it is repaired.\n' \
+      "$BUDGET_LOCK" "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM"
+  } >&2
+  exit 2
+}
+
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
-  exit 2
+  block_unrecorded_episode_reset
 }
 
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
@@ -440,7 +470,7 @@ i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-      fm_failure_episode_reset "$STATE" || exit 2
+      fm_failure_episode_reset "$STATE" || block_unrecorded_episode_reset
     fi
     exit 0
   fi
@@ -449,7 +479,7 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
 done
 if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-    fm_failure_episode_reset "$STATE" || exit 2
+    fm_failure_episode_reset "$STATE" || block_unrecorded_episode_reset
   fi
   exit 0
 fi

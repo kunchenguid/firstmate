@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Behavior tests for tests/lib.sh's shared fixture-tempdir helper
-# (fm_test_tmproot / fm_test_cleanup / fm_test_reap_orphans).
+# Behavior tests for tests/lib.sh's shared fixture-tempdir helpers
+# (fm_test_tmproot / fm_test_track_dir / fm_test_cleanup /
+# fm_test_reap_orphans / fm_test_reap_stale_fixtures).
 #
 # The near-universal call pattern across this suite is
 # `TMP_ROOT=$(fm_test_tmproot prefix)`, which forks a subshell to capture the
@@ -8,8 +9,12 @@
 # that exact pattern and assert the fixture root is actually gone once the
 # owning process's guarded teardown has run - on a normal exit and on a
 # terminating signal - plus that a stale marked fixture from a killed prior
-# run gets reaped on the next source. Nothing here inspects tests/lib.sh's
-# source text; it only observes filesystem state around the real helper.
+# run gets reaped on the next source. The last case covers the other way a
+# fixture is registered: a directory placed outside $TMPDIR because it must sit
+# on a particular filesystem, handed to fm_test_track_dir, which the global
+# orphan sweep never sees and only a same-policy sweep of that location can
+# reclaim. Nothing here inspects tests/lib.sh's source text; it only observes
+# filesystem state around the real helpers.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -164,9 +169,76 @@ test_orphan_sweep_reaps_read_only_package_tree() {
   pass "the orphan sweep reaps read-only package fixtures"
 }
 
+# fm_test_track_dir exists for the one fixture that cannot live under $TMPDIR
+# because it must sit on a particular filesystem - a real user mount, where a
+# leak is permanent. The global sweep only ever looks under $TMPDIR, so such a
+# root is reapable at all only if it carries the same ownership marker, and the
+# suite that placed it can sweep its own mount with the same policy.
+test_tracked_dir_outside_tmpdir_is_reapable_after_a_hard_kill() {
+  local harness outside child_tmp killed_file active_file killed_dir active_dir killed_pid active_pid role tries
+  harness=$(fm_test_tmproot fm-test-cleanup-tracked-harness)
+  outside="$harness/mount"
+  child_tmp="$harness/child-tmp"
+  killed_file="$harness/killed-dir"
+  active_file="$harness/active-dir"
+  mkdir -p "$outside" "$child_tmp"
+
+  for role in killed active; do
+    TMPDIR="$child_tmp" bash -c '
+      # shellcheck source=tests/lib.sh
+      . "$1"
+      d=$(mktemp -d "$2/fm-test-cleanup-tracked.XXXXXX") || exit 1
+      fm_test_track_dir "$d" || exit 1
+      printf "%s\n" "$d" > "$3"
+      while :; do sleep 0.1; done
+    ' _ "$LIB" "$outside" "$harness/$role-dir" &
+    case "$role" in
+      killed) killed_pid=$! ;;
+      *) active_pid=$! ;;
+    esac
+  done
+
+  tries=0
+  while [ "$tries" -lt 200 ]; do
+    [ -s "$killed_file" ] && [ -s "$active_file" ] && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ -s "$killed_file" ] && [ -s "$active_file" ] \
+    || fail "a tracked-dir child never published its root before the wait timed out"
+  killed_dir=$(cat "$killed_file")
+  active_dir=$(cat "$active_file")
+
+  assert_present "$killed_dir/.fm-test-fixture" \
+    "a directory registered through fm_test_track_dir carries no ownership marker, so no sweep can ever reclaim it"
+
+  # SIGKILL is the case the marker exists for: no trap runs, so the owning
+  # process's registry never reaps this root.
+  kill -KILL "$killed_pid"
+  wait "$killed_pid" 2>/dev/null
+  assert_present "$killed_dir" \
+    "the hard-killed owner somehow still cleaned up, so this is not the leak the marker guards"
+
+  touch -t 202001010000 "$killed_dir/.fm-test-fixture"
+  touch -t 202001010000 "$active_dir/.fm-test-fixture"
+  fm_test_reap_stale_fixtures "$outside"/fm-test-cleanup-tracked.*/.fm-test-fixture
+
+  assert_absent "$killed_dir" \
+    "the mount sweep left behind a tracked root whose owner was killed hard enough to skip every trap"
+  assert_present "$active_dir" \
+    "the mount sweep removed a tracked root whose owning process is still alive"
+
+  kill -TERM "$active_pid"
+  wait "$active_pid" 2>/dev/null
+  assert_absent "$active_dir" \
+    "the surviving tracked root outlived its owning process's teardown"
+  pass "a tracked fixture outside TMPDIR is marked, survives its owner only until the same-policy sweep, and spares a live owner"
+}
+
 test_fixture_root_gone_after_normal_exit
 test_fixture_root_gone_after_sigterm
 test_cleanup_registry_resists_precreation
 test_fixture_registration_failure_rolls_back_root
 test_orphan_sweep_respects_fixture_ownership
 test_orphan_sweep_reaps_read_only_package_tree
+test_tracked_dir_outside_tmpdir_is_reapable_after_a_hard_kill

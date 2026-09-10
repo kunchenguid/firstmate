@@ -1567,7 +1567,9 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   for i in 1 2 3 4; do
     out=$(run_integrated_autoarm "$dir"); status=$?
     expect_code 2 "$status" "failed epoch $i must retain the automatic retry handoff"
-    [ -z "$out" ] || fail "failed epoch $i repeated the operator notice: $out"
+    [ -n "$out" ] || fail "failed epoch $i blocked the turn with empty output"
+    assert_not_contains "$out" "automatic supervision mechanism is broken" \
+      "failed epoch $i repeated the operator notice: $out"
     guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
     if [ "$i" -lt 4 ]; then
       expect_code 2 "$guard_status" "failed epoch $i must consume a bounded blind-stop block"
@@ -1614,6 +1616,64 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   pass "fm-turnend-guard --claude: integrated fresh failures reach one bounded fail-open, stop continuation, and reset on recovery"
 }
 
+test_hook_claude_mode_unrecordable_reset_blocks_loudly() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-unrecordable-reset")
+  : > "$dir/state/task1.meta"
+  seed_claude_budget "$dir" 1
+  # A refusing episode record: the reset cannot clear a marker that is not the
+  # regular file it owns, which is exactly how a state directory that will not
+  # accept the guard's bookkeeping presents itself.
+  mkdir -p "$dir/state/.claude-autoarm-failure-notified"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the unrecordable-reset watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$dir/state/.watch.lock" "$dir/state/.claude-autoarm-failure-notified"
+  expect_code 2 "$status" "an unrecordable episode reset must hold the turn open"
+  [ -n "$out" ] || fail "the guard blocked the turn with empty output"
+  assert_contains "$out" "HELD THIS TURN OPEN" "the guard block did not name why the turn is held"
+  assert_contains "$out" ".claude-autoarm-epoch" "the guard block did not name the episode record"
+  pass "fm-turnend-guard --claude: an unrecordable episode reset blocks with a named cause, never in silence"
+}
+
+test_hook_claude_mode_reset_contention_without_an_episode_names_no_failure() {
+  local dir pid identity holder out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-no-episode-contention")
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the no-episode contention watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  # A perfectly healthy home with no failure marker of any kind: the reset the
+  # guard takes on every healthy stop loses the lock race against the auto-arm
+  # on this same Stop event. The turn is still held, but nothing failed.
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.turnend-claude-blocks.lock"
+  printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a busy episode-reset lock must still hold the turn open"
+  [ -n "$out" ] || fail "the guard blocked the turn with empty output"
+  assert_contains "$out" "HELD THIS TURN OPEN" "the guard block did not name why the turn is held"
+  assert_contains "$out" "no failure episode is open" \
+    "the guard block did not say that nothing had failed"
+  assert_contains "$out" ".turnend-claude-blocks.lock" \
+    "the guard block did not name the lock that actually refused"
+  assert_not_contains "$out" "previous failure cannot be proven closed" \
+    "the guard block claimed a failure episode this home never had"
+  pass "fm-turnend-guard --claude: reset contention with no open episode blocks without inventing a failure"
+}
+
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   local dir pid identity holder out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-recovery-contention")
@@ -1632,7 +1692,10 @@ test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
   out=$(run_hook_claude "$dir" false); status=$?
   expect_code 2 "$status" "a healthy guard must continue when the episode reset lock is busy"
-  [ -z "$out" ] || fail "guard recovery contention produced output: $out"
+  [ -n "$out" ] || fail "guard recovery contention blocked the turn with empty output"
+  assert_contains "$out" "HELD THIS TURN OPEN" "guard recovery contention did not name why the turn is held"
+  assert_contains "$out" ".claude-autoarm-epoch" "guard recovery contention did not name the episode record"
+  assert_not_contains "$out" 'TURN WOULD END BLIND' "guard recovery contention escalated to the blind-stop banner"
   assert_present "$dir/state/.turnend-claude-blocks" "guard contention partially cleared the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "guard contention partially cleared the failure notice"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "guard contention partially cleared the attended alarm"
@@ -2136,6 +2199,8 @@ test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim
 test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
+test_hook_claude_mode_reset_contention_without_an_episode_names_no_failure
+test_hook_claude_mode_unrecordable_reset_blocks_loudly
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking

@@ -160,18 +160,45 @@ fm_test_cleanup() {
   fi
 }
 
+# fm_test_fixture_marker <dir>: stamp the ownership marker every reap path
+# keys on - the owning shell's pid on the first line, its identity on the rest,
+# so a reaper can tell a live owner from a dead one across pid reuse. Every
+# directory this suite registers for cleanup carries one, so the marker-driven
+# sweep is a real safety net for all of them and not just for the ones under
+# $TMPDIR.
+fm_test_fixture_marker() {
+  [ -n "${1:-}" ] || return 1
+  printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "${1%/}/.fm-test-fixture"
+}
+
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root tmp_base
   tmp_base=${TMPDIR:-/tmp}
   tmp_base=${tmp_base%/}
   root=$(mktemp -d "$tmp_base/${prefix}.XXXXXX") || return 1
   root=$(cd -P -- "$root" && pwd -P) || return 1
-  if ! printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "$root/.fm-test-fixture" ||
-    ! printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"; then
+  if ! printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY" ||
+    ! fm_test_fixture_marker "$root"; then
     rm -rf "$root"
     return 1
   fi
   printf '%s\n' "$root"
+}
+
+# fm_test_track_dir <dir>: register an already-created directory for the same
+# EXIT/INT/TERM removal as fm_test_tmproot's roots. Needed by a case whose
+# fixture cannot live under $TMPDIR because it must sit on a specific
+# filesystem (e.g. one that reverts chmod). Registration goes through the same
+# `$$`-keyed file for the same reason, so it works from a command substitution.
+# The registry entry comes first so the directory is covered before anything is
+# written into it, and the marker follows so a run killed hard enough to skip
+# the traps still leaves the sweep able to recognise and remove it. Returns
+# non-zero when the marker cannot be written, so a caller placing a fixture
+# outside $TMPDIR can reject a location it would not be able to reap.
+fm_test_track_dir() {
+  [ -n "${1:-}" ] || return 1
+  printf '%s\n' "$1" >> "$FM_TEST_CLEANUP_REGISTRY" || return 1
+  fm_test_fixture_marker "$1"
 }
 
 trap fm_test_cleanup EXIT
@@ -183,16 +210,21 @@ trap 'fm_test_cleanup; exit 131' QUIT
 # fm_test_reap_orphans: best-effort sweep for fixture roots left behind by a
 # prior run that was killed hard enough to skip the traps above (e.g. a
 # SIGKILL timeout). Only removes directories carrying the .fm-test-fixture
-# marker fm_test_tmproot writes, so it never touches unrelated fm-* tmp dirs
-# from real (non-test) firstmate commands. The marker identifies the owning
-# shell across PID reuse, so the same live owner always wins over the age
-# fallback for dead or unowned roots.
+# marker every registered fixture root carries, so it never touches unrelated
+# fm-* dirs from real (non-test) firstmate commands. The marker identifies the
+# owning shell across PID reuse, so the same live owner always wins over the
+# age fallback for dead or unowned roots.
 FM_TEST_ORPHAN_MAX_AGE_SECONDS=${FM_TEST_ORPHAN_MAX_AGE_SECONDS:-3600}
 
-fm_test_reap_orphans() {
+# fm_test_reap_stale_fixtures <marker-path>...: the ownership/age policy every
+# sweep shares. Takes already-expanded marker paths (the caller supplies the
+# glob, so a fixture root that had to be created outside $TMPDIR can be swept
+# from wherever it lives), and removes only the directory carrying a marker
+# whose owner is gone and whose age is past the bound.
+fm_test_reap_stale_fixtures() {
   local marker dir mtime now owner_pid owner_identity current_identity
   now=$(date +%s)
-  for marker in "${TMPDIR:-/tmp}"/fm-*/.fm-test-fixture; do
+  for marker in "$@"; do
     [ -e "$marker" ] || continue
     owner_pid=$(sed -n '1p' "$marker" 2>/dev/null) || owner_pid=
     owner_identity=$(sed -n '2,$p' "$marker" 2>/dev/null) || owner_identity=
@@ -213,6 +245,10 @@ fm_test_reap_orphans() {
     fi
     rm -rf "$dir"
   done
+}
+
+fm_test_reap_orphans() {
+  fm_test_reap_stale_fixtures "${TMPDIR:-/tmp}"/fm-*/.fm-test-fixture
 }
 
 # A parent coordinator can reap once before it starts isolated child sections.

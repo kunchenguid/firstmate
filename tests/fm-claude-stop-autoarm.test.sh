@@ -8,6 +8,10 @@
 # Stale-owner cases instead leave a dead recorded pid for the hook to reclaim
 # through the real fm-lock.sh path. The arm wrapper is a per-test fixture, so no
 # real watcher, model, or fleet state is touched.
+# One case is the exception to "everything lives under $TMPDIR": the
+# mode-incapable home needs a filesystem that reverts chmod, which no temp root
+# can simulate, so it places its fixture on a real host mount under a single
+# tracked root and skips when the host offers none (see mode_incapable_root).
 # shellcheck disable=SC2016 # single quotes are deliberate: $FM_HOME expands inside the fake harness child, and grep needles are literal strings
 set -u
 
@@ -174,6 +178,67 @@ echo "$$" >> "$FM_HOME/state/arm-ran"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
 exit 0
+SH
+      ;;
+    untyped-failure)
+      # The shape a refusal raised further down the stack has: a helper that
+      # cannot create its mode-restricted artifacts writes plain text with none
+      # of the arm's typed prefixes.
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'fm-artifact-writer: refusing to publish: %s/private.tmp is mode 777, expected 600\n' "$FM_HOME/state"
+exit 1
+SH
+      ;;
+    nested-refusal)
+      # The shape the REAL arm produces when a helper deeper in the stack
+      # refuses: fm-watch-arm.sh relays the child's untyped stderr verbatim
+      # (print_watch_output) and then appends its own typed close line, so $OUT
+      # carries both. Evidence that keeps only the typed lines drops the actual
+      # cause here.
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'fm-pr-check-migrate: cannot publish %s/pr-check.tmp: mode 777, expected 600\n' "$FM_HOME/state"
+printf 'watcher: FAILED - watcher cycle exited 1 without an actionable reason\n'
+exit 1
+SH
+      ;;
+    mode-restricted-artifact)
+      # The incident's real chain, driven by the filesystem rather than by a
+      # hardcoded exit: publish an artifact that must be private, chmod it,
+      # read the mode back, and refuse - with plain untyped text naming the
+      # concrete mode - only when the mode did not stick. On a filesystem that
+      # holds 600 this arm closes cleanly instead.
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+artifact="$FM_HOME/state/pr-check.tmp"
+: > "$artifact" 2>/dev/null || {
+  printf 'fm-pr-check-migrate: cannot create %s\n' "$artifact"
+  exit 1
+}
+chmod 600 "$artifact" 2>/dev/null || true
+if [ "$(uname)" = Darwin ]; then
+  mode=$(/usr/bin/stat -f %Lp "$artifact" 2>/dev/null)
+else
+  mode=$(stat -c %a "$artifact" 2>/dev/null)
+fi
+rm -f "$artifact" 2>/dev/null || true
+if [ "$mode" != 600 ]; then
+  printf 'fm-pr-check-migrate: cannot publish %s: mode %s, expected 600\n' "$artifact" "$mode"
+  exit 1
+fi
+printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
+exit 0
+SH
+      ;;
+    mute-failure)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+exit 1
 SH
       ;;
     records-grace)
@@ -455,7 +520,12 @@ test_failed_cycles_notify_once_and_keep_retrying() {
   expect_code 2 "$status1" "the first exhausted failure must notify"
   expect_code 2 "$status2" "a consecutive exhausted failure must force another Stop-owned retry"
   [ -n "$out1" ] || fail "the first exhausted failure did not notify"
-  [ -z "$out2" ] || fail "consecutive exhausted failure repeated an operator notice: $out2"
+  [ -n "$out2" ] || fail "a consecutive exhausted failure blocked the turn with empty output"
+  assert_not_contains "$out2" "automatic supervision mechanism is broken" \
+    "consecutive exhausted failure repeated the full operator notice: $out2"
+  assert_contains "$out2" "STILL FAILING" "the suppressed continuation did not name itself"
+  assert_contains "$out2" "watcher: FAILED" "the suppressed continuation did not name what refused"
+  assert_contains "$out2" ".claude-autoarm-epoch" "the suppressed continuation did not name the episode record"
   [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 4 ] || fail "each cycle must retain bounded automatic retries"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "failure episode marker was not recorded"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "second failure must record failed-suppressed"
@@ -484,7 +554,9 @@ test_failure_notice_marker_write_refuses_delivery_and_retries() {
   [ "$(epoch_field "$dir" epoch)" -gt "$gen1" ] || fail "the successor did not supersede the refused terminal entry"
   assert_present "$marker" "the successful successor did not record the failure notice"
   assert_contains "$out2" "automatic supervision mechanism is broken" "the successful successor did not deliver the failure notice"
-  [ -z "$out3" ] || fail "the firing after the successful marker commit repeated the notice: $out3"
+  [ -n "$out3" ] || fail "the firing after the successful marker commit blocked the turn with empty output"
+  assert_not_contains "$out3" "automatic supervision mechanism is broken" \
+    "the firing after the successful marker commit repeated the notice: $out3"
   delivered=$(printf '%s\n%s\n' "$out2" "$out3" | grep -c 'automatic supervision mechanism is broken' || true)
   [ "$delivered" -eq 1 ] || fail "the restored episode delivered $delivered failure notices instead of one"
   pass "auto-arm: marker-write refusal defers delivery until one successor commits the notice"
@@ -566,7 +638,11 @@ test_positive_recovery_budget_contention_preserves_episode() {
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 2 "$status" "a healthy auto-arm must continue when the episode reset lock is busy"
-  [ -z "$out" ] || fail "recovery contention produced an operator notice: $out"
+  [ -n "$out" ] || fail "recovery contention blocked the turn with empty output"
+  assert_contains "$out" "HELD THIS TURN OPEN" "recovery contention did not name why the turn is held"
+  assert_contains "$out" ".claude-autoarm-epoch" "recovery contention did not name the episode record"
+  assert_not_contains "$out" "automatic supervision mechanism is broken" \
+    "recovery contention escalated to the full failure notice: $out"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "recovery contention must not record ordinary clean recovery"
   assert_present "$dir/state/.turnend-claude-blocks" "recovery contention partially cleared the block budget"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "recovery contention partially cleared the failure notice"
@@ -579,6 +655,46 @@ test_positive_recovery_budget_contention_preserves_episode() {
   assert_absent "$dir/state/.turnend-claude-blocks" "successful retry left the block budget"
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "successful retry left the failure notice"
   pass "auto-arm: budget contention preserves the episode and forces a reset retry"
+}
+
+test_reset_contention_without_an_episode_names_no_failure() {
+  local dir out status pid identity holder
+  dir=$(make_primary_dir "$TMP_ROOT/no-episode-contention")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" benign-live
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the no-episode contention watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  # A perfectly healthy home carrying no failure marker of any kind: the reset
+  # every healthy cycle takes loses the lock race against the turn-end guard on
+  # this same Stop event. The turn is still held, but nothing failed.
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.turnend-claude-blocks.lock"
+  printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a busy episode-reset lock must still hold the turn open"
+  [ -n "$out" ] || fail "no-episode contention blocked the turn with empty output"
+  assert_contains "$out" "HELD THIS TURN OPEN" "the block did not name why the turn is held"
+  assert_contains "$out" "no failure episode is open" \
+    "the block did not say that nothing had failed"
+  assert_contains "$out" ".turnend-claude-blocks.lock" \
+    "the block did not name the lock that actually refused"
+  assert_not_contains "$out" "recovery is not yet provably closed" \
+    "the block claimed a recovery this home never needed"
+  assert_not_contains "$out" ".claude-autoarm-epoch" \
+    "the block sent the operator to an episode ledger for a home with no episode"
+  assert_not_contains "$out" "automatic supervision mechanism is broken" \
+    "no-episode contention escalated to the full failure notice: $out"
+  assert_absent "$dir/state/.turnend-claude-blocks" "no-episode contention invented a block budget"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "no-episode contention invented a failure notice"
+  pass "auto-arm: reset contention with no open episode blocks without inventing a failure"
 }
 
 test_owner_mutex_contention_preserves_failure_episode_reset() {
@@ -1184,6 +1300,273 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+# --- no silent block ----------------------------------------------------------
+#
+# Exit 2 blocks the turn and the collected stderr is the operator's only view of
+# why. A blocking firing that prints nothing leaves the home re-waking forever
+# with no message naming a cause; diagnosing the real incident took reading the
+# epoch ledger by hand. These pin the invariant, not the wording: every exit-2
+# firing carries text, and it names what refused and where the episode state is.
+
+# Drive one home through the first exhausted failure and several consecutive
+# ones, publishing the concatenated evidence of every blocking firing in
+# LOUD_BLOCK_OUTPUT. It deliberately does NOT echo that evidence: fail() is an
+# `exit 1`, so a helper invoked as `all=$(...)` would kill only the substitution
+# subshell and let the caller report pass - the regression guard for the silent
+# block could not itself fail the suite.
+LOUD_BLOCK_OUTPUT=
+
+assert_every_block_is_loud() {  # <dir> <label>
+  local dir=$1 label=$2 out status i
+  LOUD_BLOCK_OUTPUT=
+  for i in 1 2 3 4 5; do
+    out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+    expect_code 2 "$status" "$label: firing $i must hold the turn open for another retry"
+    [ -n "$out" ] || fail "$label: firing $i blocked the turn with empty output"
+    assert_contains "$out" ".claude-autoarm-epoch" \
+      "$label: firing $i did not name the episode record"
+    LOUD_BLOCK_OUTPUT="$LOUD_BLOCK_OUTPUT$out"$'\n'
+  done
+}
+
+test_consecutive_failures_never_block_silently() {
+  local dir all notices
+  dir=$(make_primary_dir "$TMP_ROOT/loud-consecutive")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  assert_every_block_is_loud "$dir" "consecutive failure"
+  all=$LOUD_BLOCK_OUTPUT
+  notices=$(printf '%s\n' "$all" | grep -c 'automatic supervision mechanism is broken' || true)
+  [ "$notices" -eq 1 ] \
+    || fail "the episode delivered $notices full notices instead of exactly one"
+  pass "auto-arm: every consecutive failure blocks loudly while the full notice stays once per episode"
+}
+
+test_untyped_arm_refusal_is_still_named() {
+  local dir out1 out2 status
+  dir=$(make_primary_dir "$TMP_ROOT/loud-untyped")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" untyped-failure
+  out1=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an untyped arm refusal must still reach the failure notice"
+  assert_contains "$out1" "mode 777, expected 600" \
+    "the full notice dropped a refusal that carried none of the arm's typed prefixes"
+  out2=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the consecutive untyped refusal must keep the retry handoff"
+  assert_contains "$out2" "mode 777, expected 600" \
+    "the suppressed continuation dropped the untyped refusal"
+  pass "auto-arm: a refusal with none of the arm's typed prefixes is still named in every block"
+}
+
+test_nested_refusal_is_named_beside_the_arms_own_close() {
+  local dir out1 out2 status
+  dir=$(make_primary_dir "$TMP_ROOT/loud-nested")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" nested-refusal
+  out1=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a nested refusal must still reach the failure notice"
+  assert_contains "$out1" "mode 777, expected 600" \
+    "the full notice dropped the nested cause because the arm also closed with a typed line"
+  assert_contains "$out1" "watcher: FAILED" "the full notice dropped the arm's own typed close"
+  out2=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the consecutive nested refusal must keep the retry handoff"
+  assert_contains "$out2" "mode 777, expected 600" \
+    "the suppressed continuation dropped the nested cause"
+  pass "auto-arm: a refusal raised below the arm is named beside the arm's own typed close"
+}
+
+test_uncapturable_arm_output_blames_the_capture_file_not_the_arm() {
+  local dir shim real out status
+  dir=$(make_primary_dir "$TMP_ROOT/loud-uncapturable")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  # The hook redirects the arm to /dev/null when it cannot create its capture
+  # file, so a loud arm reaches the operator as silence. Reproduce exactly that:
+  # only the capture pattern is refused, every other mktemp still works.
+  real=$(command -v mktemp) || fail "no mktemp on this host"
+  shim="$dir/shim"
+  mkdir -p "$shim"
+  cat > "$shim/mktemp" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *.claude-autoarm-output.*) exit 1 ;;
+  esac
+done
+exec "$real" "\$@"
+SH
+  chmod +x "$shim/mktemp"
+  out=$(printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+    | FM_HOME="$dir" FM_TEST_SHIM="$shim" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        PATH="$FM_TEST_SHIM:$PATH" "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1); status=$?
+  expect_code 2 "$status" "an uncapturable arm failure must still hold the turn open"
+  [ -n "$out" ] || fail "an uncapturable arm failure blocked the turn with empty output"
+  assert_contains "$out" "could not create its capture file" \
+    "the block did not admit that the hook, not the arm, lost the output"
+  assert_contains "$out" "$dir/state/.claude-autoarm-output" \
+    "the block did not name the capture file that could not be created"
+  assert_not_contains "$out" "no diagnostic output of its own" \
+    "the block blamed the arm for output the hook itself discarded"
+  pass "auto-arm: output the hook could not capture is never reported as an arm that said nothing"
+}
+
+test_arm_without_any_output_still_names_the_block() {
+  local dir out1 out2 status
+  dir=$(make_primary_dir "$TMP_ROOT/loud-mute")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" mute-failure
+  out1=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an arm that says nothing must still reach the failure notice"
+  assert_contains "$out1" "no diagnostic output" "the block did not admit that the arm said nothing"
+  assert_contains "$out1" ".claude-autoarm-epoch" "the block did not name the episode record"
+  out2=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the consecutive mute failure must keep the retry handoff"
+  [ -n "$out2" ] || fail "a mute arm produced an empty blocking firing"
+  pass "auto-arm: an arm with no output of its own still yields a block that names itself"
+}
+
+fm_test_file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
+# The real condition behind the incident: a state directory that silently
+# reverts chmod, so nothing can hold a restricted mode. Reproduced only where
+# the host actually offers such a filesystem, and only after the revert is
+# measured rather than assumed.
+#
+# Everything this suite puts on that filesystem - the probe and the fixture home
+# alike - lives under ONE dedicated root, registered for removal on every exit
+# path before anything is written into it. The mount root itself is a real user
+# location (a Windows drive under /mnt, a volume under /Volumes), so a fixture
+# leaked there by a failing assertion would be a permanent artifact outside any
+# temp root.
+# Both object types are probed, because the fixture depends on both: the real
+# incident is a FILE that will not hold 600, while the fixture's own evidence
+# that it landed on such a filesystem is a DIRECTORY that will not hold 700. A
+# host that reverts one and preserves the other is not this condition, and must
+# skip rather than fail the suite for a property of the host.
+# Reverting modes is necessary but not sufficient: the fixture runs the hook and
+# its arm FROM this mount, so a candidate that cannot execute a script it owns
+# (noexec, or an fmask that clears the execute bit while still reverting 600 to
+# 644) is rejected here and skips, instead of failing the suite at exit 126.
+mode_incapable_root() {
+  local candidate root probe rc
+  for candidate in "${FM_TEST_MODE_INCAPABLE_PARENT:-}" /mnt/*/ /Volumes/*/; do
+    [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ] || continue
+    # A root here sits outside $TMPDIR, so the global orphan sweep never sees
+    # it: reap this mount's own leftovers before adding another. Same policy as
+    # that sweep - only a directory this suite named and marked, whose owning
+    # shell is gone and whose age is past the bound, is removed.
+    fm_test_reap_stale_fixtures "${candidate%/}"/fm-autoarm-modeless.*/.fm-test-fixture
+    root=$(mktemp -d "${candidate%/}/fm-autoarm-modeless.XXXXXX" 2>/dev/null) || continue
+    # Without the marker a hard kill would strand this root on a user mount
+    # forever, so a location that cannot carry one is not usable for a fixture.
+    if ! fm_test_track_dir "$root"; then
+      rm -rf "$root"
+      continue
+    fi
+    probe="$root/probe"
+    if mkdir -p "$probe/d" 2>/dev/null && : > "$probe/f" 2>/dev/null &&
+      chmod 600 "$probe/f" 2>/dev/null && chmod 700 "$probe/d" 2>/dev/null &&
+      [ -f "$probe/f" ] && [ "$(fm_test_file_mode "$probe/f")" != 600 ] &&
+      [ "$(fm_test_file_mode "$probe/d")" != 700 ] &&
+      printf '#!/bin/sh\nexit 7\n' > "$probe/x" 2>/dev/null &&
+      chmod +x "$probe/x" 2>/dev/null; then
+      "$probe/x" >/dev/null 2>&1
+      rc=$?
+      if [ "$rc" -eq 7 ]; then
+        rm -rf "$probe"
+        printf '%s\n' "$root"
+        return 0
+      fi
+    fi
+    rm -rf "$root"
+  done
+  return 1
+}
+
+test_mode_incapable_state_dir_never_blocks_silently() {
+  local root dir all probe reverted
+  if ! root=$(mode_incapable_root); then
+    printf 'skip: no filesystem on this host reverts chmod on both files and directories while still executing what it stores; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
+    return 0
+  fi
+  dir=$(mktemp -d "$root/home.XXXXXX") || fail "could not create a home under $root"
+  make_primary_dir "$dir" >/dev/null
+  # Ask for the restricted mode the real artifacts ask for, then prove it did
+  # not stick. Without the chmod the check is vacuous: umask 022 leaves a plain
+  # mkdir at 755 on a mode-capable filesystem too.
+  chmod 700 "$dir/state" 2>/dev/null || true
+  [ "$(fm_test_file_mode "$dir/state")" != 700 ] \
+    || fail "$root stopped reverting modes between the probe and the fixture"
+  # The arm below refuses on a FILE mode, so measure the same kind of object
+  # here: this is the concrete mode the operator must be shown, not a guess.
+  probe="$dir/state/.mode-probe"
+  : > "$probe" || fail "could not create a mode probe in $dir/state"
+  chmod 600 "$probe" 2>/dev/null || true
+  reverted=$(fm_test_file_mode "$probe")
+  rm -f "$probe"
+  [ "$reverted" != 600 ] \
+    || fail "$root stopped reverting file modes between the probe and the fixture"
+  : > "$dir/state/task.meta"
+  # Not a hardcoded failure: this arm publishes a restricted artifact and
+  # refuses only because the filesystem reverted its mode, so the whole chain
+  # from the mount to the operator-visible block runs for real.
+  write_arm_fixture "$dir" mode-restricted-artifact
+  assert_every_block_is_loud "$dir" "mode-incapable home"
+  all=$LOUD_BLOCK_OUTPUT
+  assert_contains "$all" "mode $reverted, expected 600" \
+    "the mode-incapable home dropped the concrete mode the filesystem forced"
+  assert_contains "$all" "$dir/state/pr-check.tmp" \
+    "the mode-incapable home dropped the artifact that could not be published"
+  pass "auto-arm: a state directory that cannot hold restricted modes never blocks a turn with empty output"
+}
+
+test_mode_capable_home_keeps_every_silent_path_silent() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/mode-capable-unchanged")
+  # The control needs a state dir that HOLDS 700. A runner whose TMPDIR sits on
+  # a mode-reverting mount cannot offer that condition, which is a property of
+  # the host and not a regression: skip it exactly as the mode-incapable case
+  # skips when the host offers no reverting mount.
+  chmod 700 "$dir/state" 2>/dev/null || true
+  if [ "$(fm_test_file_mode "$dir/state")" != 700 ]; then
+    printf 'skip: TMPDIR on this host does not hold restricted modes, so the mode-capable control proves nothing; point TMPDIR at a filesystem that does to run\n'
+    return 0
+  fi
+  : > "$dir/state/task.meta"
+
+  # An idle-but-verified home still ends its turn silently at exit 0.
+  write_arm_fixture "$dir" benign-live
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the control watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$dir/state/.watch.lock"
+  expect_code 0 "$status" "a verified healthy cycle must still end the turn"
+  [ -z "$out" ] || fail "a mode-capable home lost its silent healthy close: $out"
+
+  # And an actionable wake still carries exactly the wake banner, nothing more.
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an actionable wake must still translate to a rewake"
+  assert_contains "$out" "firstmate watcher wake" "the actionable rewake banner changed"
+  assert_not_contains "$out" "STILL FAILING" "an actionable wake leaked a failure continuation"
+  assert_not_contains "$out" "HELD THIS TURN OPEN" "an actionable wake leaked a held-open continuation"
+  pass "auto-arm: a home whose state dir can hold restricted modes keeps its silent and actionable paths unchanged"
+}
+
+
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
@@ -1201,6 +1584,7 @@ test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
+test_reset_contention_without_an_episode_names_no_failure
 test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight
 test_arms_for_registered_custom_check_without_inflight
@@ -1225,3 +1609,10 @@ test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
 test_fm_lock_status_still_works_with_shared_lib
+test_consecutive_failures_never_block_silently
+test_untyped_arm_refusal_is_still_named
+test_nested_refusal_is_named_beside_the_arms_own_close
+test_arm_without_any_output_still_names_the_block
+test_uncapturable_arm_output_blames_the_capture_file_not_the_arm
+test_mode_incapable_state_dir_never_blocks_silently
+test_mode_capable_home_keeps_every_silent_path_silent
