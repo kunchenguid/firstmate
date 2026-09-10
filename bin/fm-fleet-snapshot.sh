@@ -83,8 +83,10 @@
 #     untrusted supplements only and never override readable structured-home facts.
 #     Each structured-home record carries active_children, decisions_open, holds,
 #     queued, landed, endpoints, counts, and omitted. Rows in the first five
-#     collections carry a nullable project field; older v1 producers without it
-#     remain valid, and consumers must treat those rows as project-unidentifiable.
+#     collections carry a nullable project field. The additive invalidities[]
+#     collection expands the compatibility invalidity object into project-scoped
+#     entries. Older v1 producers without these fields remain valid, and consumers
+#     must treat their affected rows and invalidity as project-unidentifiable.
 #     provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
@@ -1092,6 +1094,16 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | (if ($strict_invalidities | length) > 0 then $strict_invalidities[0] | del(.reason)
        elif ($unknown_children | length) > 0 then {kind:"child_current_unavailable",ids:($unknown_children | map(.id))}
        else {kind:null,ids:[]} end) as $invalidity
+    | (([ $strict_invalidities[] as $inv
+          | if ($inv.ids | length) == 0 then $inv + {project:null} | del(.reason)
+            else $inv.ids[] as $id
+              | $inv + {ids:[$id],project:([ $backlog.records[]? | select(.id == $id) | .repo ][0] // null)} | del(.reason)
+            end ]
+        + [ $unknown_children[] as $child
+            | {kind:"child_current_unavailable",ids:[$child.id],
+               project:([ $backlog.records[]? | select(.id == $child.id) | .repo ][0] // null)} ])
+       | group_by([.kind,.project])
+       | map({kind:.[0].kind,project:.[0].project,ids:([.[].ids[]] | unique)})) as $invalidities
     | (if ($valid | not)
           and (($unknown_children | length) > 0
                or (["orphan_in_flight","unowned_current","terminal_in_flight"]
@@ -1110,6 +1122,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         valid:$valid,
         reason:$reason,
         invalidity:$invalidity,
+        invalidities:$invalidities,
         state:$state,
         active_children:$active_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
@@ -1882,7 +1895,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
         {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          spawn_gen:($spawn_gen | if . == "" then null else . end),
          current:{state:$state,reason:(if $summary_valid then null else "structured home state invalid: " + ($summary.reason // "unknown reason") end)},invalidity:$summary.invalidity,
-         reconcile_inventory:$summary.invalidity,
+         invalidities:($summary.invalidities // null),reconcile_inventory:$summary.invalidity,
          provenance:{selected:"structured-home",structured_home:$home,summary_source:$summary_source,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
          freshness:{status:$summary_freshness,observed_at:$observed,age_seconds:$summary_age},

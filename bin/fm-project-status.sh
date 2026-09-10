@@ -146,6 +146,7 @@ jq -n --arg query "$QUERY" --slurpfile snapshot "$SOURCE_JSON" '
      ]) as $all_candidates
   | ([ $all_candidates[] | select((.name | lower) == ($query | lower)) ]) as $matches
   | ([ $matches[] | select(.owner.kind == "secondmate") | .owner.id ] | unique) as $mate_ids
+  | ([ $matches[].owner | [.kind,(.id // "")] | join(":") ] | unique) as $owners
   | ([ $matches[] | .name ] | unique) as $exact_names
   | if ($matches | length) == 0 and $s.project_registry.available != true then
       {schema:"fm-project-status.v1",generated:$s.generated,query:$query,
@@ -163,14 +164,14 @@ jq -n --arg query "$QUERY" --slurpfile snapshot "$SOURCE_JSON" '
        counts:{underway:0,captain_calls:0,queued:0,landed:0},
        provenance:{source:"fm-fleet-snapshot.v1",trust:"none",freshness:"unknown",observed_at:$s.generated,age_seconds:null},
        warnings:["no exact case-insensitive project match"],omitted:[]}
-    elif ($mate_ids | length) > 1 then
+    elif ($owners | length) > 1 then
       {schema:"fm-project-status.v1",generated:$s.generated,query:$query,
        match:{status:"ambiguous",project:null,candidates:($exact_names[:5])},owner:null,
-       current:{state:"unknown",reason_code:"ambiguous_project_owner",reason_ids:$mate_ids[:5]},
+       current:{state:"unknown",reason_code:"ambiguous_project_owner",reason_ids:$owners[:5]},
        underway:[],captain_calls:[],queued:[],recently_landed:[],
        counts:{underway:0,captain_calls:0,queued:0,landed:0},
        provenance:{source:"fm-fleet-snapshot.v1",trust:"none",freshness:"unknown",observed_at:$s.generated,age_seconds:null},
-       warnings:["more than one secondmate declares the exact project name"],omitted:[]}
+       warnings:["more than one owner declares the exact project name"],omitted:[]}
     elif ($mate_ids | length) == 1 then
       ($mate_ids[0]) as $owner_id
       | ([ $matches[] | select(.owner.kind == "secondmate" and .owner.id == $owner_id) | .name ][0]) as $project
@@ -189,6 +190,9 @@ jq -n --arg query "$QUERY" --slurpfile snapshot "$SOURCE_JSON" '
           | ([ $record.holds[]? | select(belongs($project)) ]) as $holds
           | ([ $record.queued[]? | select(belongs($project)) ]) as $queued
           | ([ $record.landed[]? | select(belongs($project)) ]) as $landed
+          | ($record.invalidities // [($record.invalidity + {project:null})]) as $invalidities
+          | ([ $invalidities[]? | select(belongs($project)) ]) as $project_invalidities
+          | ([ $invalidities[]? | select((.project | type) != "string" or .project == "") ]) as $unknown_invalidities
           | ([{surface:"underway",rows:[$record.active_children[]?]},
               {surface:"captain_calls",rows:[$record.decisions_open[]?]},
               {surface:"current_holds",rows:[$record.holds[]?]},
@@ -200,7 +204,7 @@ jq -n --arg query "$QUERY" --slurpfile snapshot "$SOURCE_JSON" '
                | select(.surface == "active_children" or .surface == "decisions_open" or
                         .surface == "holds" or .surface == "queued" or .surface == "landed") ]) as $source_omitted
           | (($source_omitted | any(.surface == "active_children" or .surface == "decisions_open" or .surface == "holds"))) as $current_incomplete
-          | ([if $record.provenance.trust == "partial-structured" then "current state is incomplete; independently reliable structured fields were retained" else empty end,
+          | ([if ($project_invalidities + $unknown_invalidities | length) > 0 then "current state is incomplete; independently reliable structured fields were retained" else empty end,
               if $current_incomplete then "project current state may be incomplete because the structured home was truncated" else empty end,
               if ($unidentified | length) > 0 then "structured rows without project identity were omitted" else empty end,
               if $record.contradiction == true then "historical parent evidence contradicts the structured home and was not used as current state" else empty end,
@@ -210,12 +214,14 @@ jq -n --arg query "$QUERY" --slurpfile snapshot "$SOURCE_JSON" '
                  if ($decisions | length) > 5 then {surface:"captain_calls",count:(($decisions | length) - 5)} else empty end,
                  if ($queued | length) > 5 then {surface:"queued",count:(($queued | length) - 5)} else empty end,
                  if ($landed | length) > 3 then {surface:"recently_landed",count:(($landed | length) - 3)} else empty end]) as $omitted
-          | (($record.provenance.trust == "partial-structured") or $current_incomplete or
+          | (($project_invalidities + $unknown_invalidities | length) > 0 or $current_incomplete or
              any($unidentified[]; .surface == "underway" or .surface == "captain_calls" or .surface == "current_holds")) as $unknown_current
           | {schema:"fm-project-status.v1",generated:$s.generated,query:$query,
              match:{status:"exact",project:$project,candidates:[]},owner:{kind:"secondmate",id:$owner_id},
              current:(if $unknown_current then
-                 {state:"unknown",reason_code:(if $current_incomplete or any($unidentified[]; .surface == "underway" or .surface == "captain_calls" or .surface == "current_holds") then "project_projection_incomplete" else ($record.invalidity.kind // "structured_home_unknown") end),reason_ids:($record.invalidity.ids // [])[:10]}
+                 {state:"unknown",
+                  reason_code:(if $current_incomplete or any($unidentified[]; .surface == "underway" or .surface == "captain_calls" or .surface == "current_holds") then "project_projection_incomplete" else (($project_invalidities + $unknown_invalidities)[0].kind // "structured_home_unknown") end),
+                  reason_ids:([$project_invalidities[].ids[]?, $unknown_invalidities[].ids[]?] | unique)[:10]}
                elif ($decisions | length) > 0 then {state:"captain_decision",reason_code:null,reason_ids:[]}
                elif ($active | length) > 0 then {state:"active_child_work",reason_code:null,reason_ids:[]}
                elif ($holds | length) > 0 then {state:"externally_held",reason_code:null,reason_ids:[]}
@@ -233,29 +239,39 @@ jq -n --arg query "$QUERY" --slurpfile snapshot "$SOURCE_JSON" '
     else
       ([ $matches[] | select(.source == "main-registry") | .name ][0]
         // [ $matches[] | .name ][0]) as $project
-      | ([ $s.tasks[]? | select((.project | type) == "string" and (.project | lower) == ($project | lower)) ]) as $tasks
       | ([ $s.backlog.records[]? | select(.structured == true and (.repo | type) == "string" and (.repo | lower) == ($project | lower)) ]) as $backlog
+      | ([ $s.tasks[]? | select(.kind != "secondmate" and (.backlog.structured == true) and
+             ((.backlog.repo | type) == "string" and (.backlog.repo | lower) == ($project | lower))) ]) as $tasks
+      | ([ $s.tasks[]? | select(.kind != "secondmate" and
+             ((.backlog.structured != true) or ((.backlog.repo | type) != "string") or .backlog.repo == "")) | .id ]) as $unidentified_task_ids
+      | ([ $backlog[] | select(.state == "in_flight" and .requires_child_metadata == true) as $work
+             | select(any($s.tasks[]?; .id == $work.id) | not) | .id ]) as $project_orphan_ids
+      | ([ $s.backlog.records[]? | select(.structured != true and (.state == "in_flight" or .state == "queued") and
+             (.repo | type) == "string" and (.repo | lower) == ($project | lower)) | .id ]) as $project_unstructured_ids
+      | ([ $s.backlog.records[]? | select(.structured != true and (.state == "in_flight" or .state == "queued") and
+             ((.repo | type) != "string" or .repo == "")) | .id ]) as $unidentified_backlog_ids
+      | (($project_orphan_ids + $project_unstructured_ids + $unidentified_task_ids + $unidentified_backlog_ids) | unique) as $inventory_ids
       | ([ $tasks[] | select((.current_state.state // "unknown") == "unknown") | .id ]) as $unknown_ids
       | ([ $tasks[].current_state.state // "unknown" ] | unique) as $states
       | ([ $backlog[] | select(.captain_actionable == true) | decision_row ]
          + [ $tasks[] as $task | $task.hints.open_decisions[]? | . + {id:$task.id} | decision_row ] | unique_by([.id,.key])) as $calls
       | ([ $backlog[] | select(.state == "queued") | queued_row ]) as $queued
       | ([ $backlog[] | select(.state == "done") | landed_row ] | sort_by([(.completion.date // ""),.id]) | reverse) as $landed
-      | ([if $s.main_inventory.valid != true then "main project inventory is incomplete" else empty end]) as $warnings
+      | ([if ($inventory_ids | length) > 0 then "main project inventory is incomplete or contains project-unidentifiable current rows" else empty end]) as $warnings
       | ([if ($tasks | length) > 5 then {surface:"underway",count:(($tasks | length) - 5)} else empty end,
           if ($calls | length) > 5 then {surface:"captain_calls",count:(($calls | length) - 5)} else empty end,
           if ($queued | length) > 5 then {surface:"queued",count:(($queued | length) - 5)} else empty end,
           if ($landed | length) > 3 then {surface:"recently_landed",count:(($landed | length) - 3)} else empty end]) as $omitted
       | {schema:"fm-project-status.v1",generated:$s.generated,query:$query,
          match:{status:"exact",project:$project,candidates:[]},owner:{kind:"main",id:null},
-         current:(if $s.main_inventory.valid != true then {state:"unknown",reason_code:"main_inventory_incomplete",reason_ids:($s.main_inventory.orphan_in_flight // [])[:10]}
+         current:(if ($inventory_ids | length) > 0 then {state:"unknown",reason_code:"main_inventory_incomplete",reason_ids:$inventory_ids[:10]}
                   elif ($unknown_ids | length) > 0 then {state:"unknown",reason_code:"task_current_unavailable",reason_ids:$unknown_ids[:10]}
                   elif ($tasks | length) == 0 then {state:"no_active_work",reason_code:null,reason_ids:[]}
                   elif ($states | length) == 1 then {state:$states[0],reason_code:null,reason_ids:[]}
                   else {state:"mixed",reason_code:null,reason_ids:[]} end),
          underway:([$tasks[] | task_row][:5]),captain_calls:$calls[:5],queued:$queued[:5],recently_landed:$landed[:3],
          counts:{underway:($tasks | length),captain_calls:($calls | length),queued:($queued | length),landed:($landed | length)},
-         provenance:{source:"fm-fleet-snapshot.v1/main",trust:(if $s.main_inventory.valid == true then "complete" else "partial-structured" end),
+         provenance:{source:"fm-fleet-snapshot.v1/main",trust:(if ($inventory_ids | length) == 0 then "complete" else "partial-structured" end),
            freshness:"fresh",observed_at:$s.generated,age_seconds:0}}
         | finish($warnings; $omitted)
     end

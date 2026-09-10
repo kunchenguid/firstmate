@@ -35,22 +35,23 @@ SH
 write_projection_fixture() {  # <file>
   jq -n '
     {schema:"fm-fleet-snapshot.v1",generated:"2026-09-10T18:07:25Z",
-     project_registry:{path:"/home/data/projects.md",present:true,available:true,reason:null,records:[{name:"AlphaProject"}]},
+     project_registry:{path:"/home/data/projects.md",present:true,available:true,reason:null,records:[{name:"AlphaProject"},{name:"BetaProject"},{name:"Collision"}]},
      backlog:{path:"/home/data/backlog.md",present:true,records:[
        {structured:true,id:"alpha-active",title:"Implement alpha",repo:"AlphaProject",kind:"ship",state:"in_flight",captain_actionable:false},
        {structured:true,id:"alpha-call",title:"Choose alpha route",repo:"AlphaProject",kind:"captain",state:"queued",captain_actionable:true,hold_reason:"choose route",hold_bucket:"live"},
        {structured:true,id:"alpha-next",title:"Queue alpha",repo:"AlphaProject",kind:"ship",state:"queued",captain_actionable:false,unresolved_blocker_ids:["alpha-active"]},
-       {structured:true,id:"alpha-done",title:"Alpha delivered",repo:"AlphaProject",kind:"ship",state:"done",captain_actionable:false,completion:{verb:"merged",date:"2026-09-09"},pr_url:"https://example.test/pull/1"}
+       {structured:true,id:"alpha-done",title:"Alpha delivered",repo:"AlphaProject",kind:"ship",state:"done",captain_actionable:false,completion:{verb:"merged",date:"2026-09-09"},pr_url:"https://example.test/pull/1"},
+       {structured:true,id:"beta-orphan",title:"Beta orphan",repo:"BetaProject",kind:"ship",state:"in_flight",requires_child_metadata:true,captain_actionable:false}
      ]},
      main_inventory:{valid:true,reason:null,orphan_in_flight:[],unstructured_current_count:0},
      tasks:[
-       {id:"alpha-active",kind:"ship",project:"AlphaProject",secondmate_projects:[],backlog:{title:"Implement alpha"},
+       {id:"alpha-active",kind:"ship",project:"/home/projects/AlphaProject",secondmate_projects:[],backlog:{structured:true,repo:"AlphaProject",title:"Implement alpha"},
         current_state:{state:"working",source:"run-step",detail:"tests"},pr:{url:null},paths:{report:{path:null}}},
        {id:"dofumax",kind:"secondmate",project:"/homes/dofumax",secondmate_projects:["DofuMax"],
         current_state:{state:"unknown"},pr:{url:null},paths:{report:{path:null}}},
        {id:"portfolio",kind:"secondmate",project:"/homes/portfolio",secondmate_projects:["AlphaMate","BetaMate"],
         current_state:{state:"unknown"},pr:{url:null},paths:{report:{path:null}}},
-       {id:"mate-one",kind:"secondmate",project:"/homes/one",secondmate_projects:["Shared"],
+       {id:"mate-one",kind:"secondmate",project:"/homes/one",secondmate_projects:["Shared","Collision"],
         current_state:{state:"unknown"},pr:{url:null},paths:{report:{path:null}}},
        {id:"mate-two",kind:"secondmate",project:"/homes/two",secondmate_projects:["Shared"],
         current_state:{state:"unknown"},pr:{url:null},paths:{report:{path:null}}}
@@ -71,8 +72,9 @@ write_projection_fixture() {  # <file>
         ],
         counts:{active_children:0,decisions_open:0,holds:0,queued:2,landed:2,endpoints:1},omitted:[],
         parent_event:{raw:"working: delivery ready",note:"delivery ready"},contradiction:true},
-       {id:"portfolio",current:{state:"active_child_work"},invalidity:{kind:null,ids:[]},
-        provenance:{selected:"structured-home",trust:"complete"},
+       {id:"portfolio",current:{state:"unknown"},invalidity:{kind:"child_current_unavailable",ids:["alpha-unavailable"]},
+        invalidities:[{kind:"child_current_unavailable",ids:["alpha-unavailable"],project:"AlphaMate"}],
+        provenance:{selected:"structured-home",trust:"partial-structured"},
         freshness:{status:"fresh",observed_at:"2026-09-10T18:05:59Z",age_seconds:86},
         active_children:[{id:"alpha-secret",title:"Alpha secret",project:"AlphaMate",kind:"ship",state:"working",source:"run-step",doing:"private alpha work"}],
         decisions_open:[{id:"alpha-call",project:"AlphaMate",key:"alpha-call",summary:"Alpha secret decision",source:"status"}],
@@ -105,6 +107,12 @@ test_projection_resolution_and_authority() {
   [ "$(cat "$arg_log")" = "--json --read-only" ] \
     || fail "project status did not invoke the fleet snapshot read-only"
 
+  out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" "$runner" --json BetaProject)
+  printf '%s' "$out" | jq -e '
+    .current == {state:"unknown",reason_code:"main_inventory_incomplete",reason_ids:["beta-orphan"]}
+      and .underway == [] and ([.current.reason_ids[]] | index("alpha-active") | not)
+  ' >/dev/null || fail "main inventory invalidity was not scoped to its project: $out"
+
   out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" "$runner" --json DofuMax)
   printf '%s' "$out" | jq -e '
     .match.status == "exact" and .owner == {kind:"secondmate",id:"dofumax"}
@@ -127,6 +135,7 @@ test_projection_resolution_and_authority() {
       and [.queued[].id] == ["beta-queue"]
       and [.recently_landed[].id] == ["beta-landed"]
       and .counts == {underway:0,captain_calls:0,queued:1,landed:1}
+      and (.current.reason_ids | index("alpha-unavailable") | not)
       and (.omitted | any(.surface == "queued" and .reason == "project identity unavailable"))
       and ([.queued[].title,.recently_landed[].title] | all(contains("Alpha secret") | not))
   ' >/dev/null || fail "multi-project secondmate projection leaked or misattributed another project: $out"
@@ -134,9 +143,15 @@ test_projection_resolution_and_authority() {
   out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" "$runner" --json Shared)
   printf '%s' "$out" | jq -e '
     .match.status == "ambiguous" and .current.reason_code == "ambiguous_project_owner"
-      and (.current.reason_ids | sort) == ["mate-one","mate-two"]
+      and (.current.reason_ids | sort) == ["secondmate:mate-one","secondmate:mate-two"]
       and .underway == []
   ' >/dev/null || fail "ambiguous exact project ownership was not refused: $out"
+
+  out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" "$runner" --json Collision)
+  printf '%s' "$out" | jq -e '
+    .match.status == "ambiguous" and .current.reason_code == "ambiguous_project_owner"
+      and (.current.reason_ids | sort) == ["main:","secondmate:mate-one"]
+  ' >/dev/null || fail "main and secondmate ownership collision was not refused: $out"
 
   out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" "$runner" --json Alpha)
   printf '%s' "$out" | jq -e '.match.status == "unknown" and .current.reason_code == "project_not_found"' >/dev/null \
