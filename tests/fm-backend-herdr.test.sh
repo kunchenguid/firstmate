@@ -578,7 +578,6 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
   shell_pid=$!
   sleep 0.3
   out=$(stale_registration_case descendant idle "$(shell_only_process_info "$shell_pid")")
-  shell_verdict=$(stale_registration_case descendant-control idle "$(shell_only_process_info "$shell_pid")")
   pkill -P "$shell_pid" 2>/dev/null || true
   kill "$shell_pid" 2>/dev/null || true
   [ "$out" = "live alive refused" ] \
