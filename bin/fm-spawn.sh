@@ -3168,14 +3168,18 @@ rovo_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
-# No task record is ever published on this failure path, so nothing else
-# (teardown, the watcher) will ever learn this endpoint exists to close it:
-# without this, the already-launched --yolo rovo process keeps running as an
-# orphaned autonomous agent outside task control. Mirrors fm-teardown.sh's own
-# generic non-orca kill call; orca's worktree+terminal are owned by the
-# separate ORCA_ABORT_CLEANUP trap path and are out of scope here.
+# The launch-then-confirm gates run after the task record is published, when
+# ORCA_ABORT_CLEANUP is already cleared and neither the abort trap nor a
+# teardown owns this endpoint yet, so a gate failure must close the launched
+# process here or it keeps running as an orphaned autonomous agent outside
+# task control. Mirrors fm-teardown.sh's own generic kill call. On orca only
+# the exact terminal is closed: that stops the CLI while its worktree stays
+# for the record's own teardown, which owns worktree deletion.
 rovo_endpoint_cleanup() {
-  [ "$BACKEND" = orca ] && return 0
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_kill orca "$T" 2>/dev/null || true
+    return 0
+  fi
   local tab_id=
   [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true

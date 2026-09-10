@@ -42,6 +42,14 @@ git -C "$LAB/workspace" config user.name "guard" || fail "could not configure th
 git -C "$LAB/workspace" commit -q --allow-empty -m init || fail "could not seed the isolated agy workspace"
 WORKSPACE=$(cd "$LAB/workspace" && pwd -P) || fail "could not resolve the isolated agy workspace"
 
+# The worker runs under a throwaway HOME holding a copy of ~/.gemini (the
+# method recorded in docs/verification/agy.md), so its trust answer and every
+# other agy write land in the lab store, never the operator's real one.
+AGY_HOME="$LAB/home"
+mkdir -p "$AGY_HOME" || fail "could not create the throwaway agy HOME"
+[ -d "$HOME/.gemini" ] || fail "no ~/.gemini to stage for the throwaway agy HOME"
+cp -R "$HOME/.gemini" "$AGY_HOME/.gemini" || fail "could not stage the throwaway agy credential copy"
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=/dev/null
@@ -61,15 +69,14 @@ capture() {
 # reply token would false-positive on the shell echo (including across tmux
 # wrapped rows).
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l \
-  "$AGY_BIN --prompt-interactive \"Add 12345 and 67890. Reply with exactly the sum and nothing else\" --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions" \
+  "HOME=\"$AGY_HOME\" $AGY_BIN --prompt-interactive \"Add 12345 and 67890. Reply with exactly the sum and nothing else\" --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions" \
   || fail "could not type the agy launch line"
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
   || fail "could not submit the agy launch line"
 
 # A fresh workspace stops on the folder-trust dialog. Answer the preselected
-# safe choice once it renders. Side effect: the scratch workspace is appended
-# to trustedWorkspaces in ~/.gemini/antigravity-cli/settings.json, the same
-# additive record any agy run in a new directory leaves behind.
+# safe choice once it renders. The answer appends the workspace to
+# trustedWorkspaces in the throwaway HOME's copy of the agy settings store.
 screen=
 for _ in $(seq 1 150); do
   screen=$(capture)
@@ -130,8 +137,10 @@ if case "$(capture)" in *"Do you trust the contents of this project?"*) true ;; 
   [ -n "$idle" ] || fail "the agy composer never went idle after the trust answer"
 fi
 
-# Interrupt a genuinely long turn: poll until busy is observed, then Escape
-# until the cancel renders, so a fixed-timer Escape cannot fall between states.
+# Interrupt a genuinely long turn: poll until busy is observed, then send
+# exactly one Escape and wait only for the Interrupted row it prints; a busy
+# footer that merely disappears is not cancellation and no further Escape is
+# sent, so a turn that survives one Escape fails this guard.
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l \
   "Write a 1500-word essay on the history of glass" \
   || fail "could not type the long agy prompt"
@@ -144,13 +153,13 @@ for _ in $(seq 1 100); do
 done
 printf '%s' "$screen" | fm_busy_agy_tail_busy \
   || fail "the long agy turn never showed its busy footer"
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Escape \
+  || fail "could not send Escape to the real agy turn"
 cancelled=
-for _ in $(seq 1 6); do
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Escape >/dev/null 2>&1 || true
-  sleep 5
+for _ in $(seq 1 120); do
   screen=$(capture)
   case "$screen" in *Interrupted*) cancelled=1; break ;; esac
-  printf '%s' "$screen" | fm_busy_agy_tail_busy || { cancelled=1; break; }
+  sleep 0.5
 done
 [ -n "$cancelled" ] || fail "a single Escape never cancelled the real agy turn"
 pass "a single Escape cancels the real agy turn"
