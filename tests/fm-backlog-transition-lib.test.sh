@@ -38,28 +38,53 @@ assert_replay_note() {  # <serialized-value> <expected-note>
   assert_contains "$out" "$expected" "$encoded replay changed the landing note"
 }
 
-test_legacy_and_named_notes_replay() {
-  assert_replay_note local%20main 'local main'
-  assert_replay_note local%20develop 'local develop'
-  assert_replay_note local-landing:develop 'local-landing:develop'
-  pass "pending-close replay accepts legacy and named local landing notes"
+assert_replay_rejected() {  # <serialized-value>
+  local encoded=$1 case_dir marker
+  case_dir=$TMP_ROOT/reject-${encoded//[^A-Za-z0-9]/_}
+  marker=$case_dir/state/task-x1.backlog-close
+  mkdir -p "$case_dir/state" "$case_dir/data"
+  printf 'id=task-x1\ndata=%s\nspawn_gen=spawn-one\narg=--note\narg=%s\n' \
+    "$case_dir/data" "$encoded" > "$marker"
+
+  FM_HOME=$case_dir fm_backlog_close_marker_replay \
+    "$case_dir/state" "$marker" "$case_dir/data" \
+    && fail "pending-close replay accepted $encoded"
 }
 
-test_named_note_serializes() {
+test_legacy_and_named_notes_replay() {
+  assert_replay_note local%20main 'local main'
+  assert_replay_note local-landing:develop 'local-landing:develop'
+  assert_replay_rejected local%20develop
+  pass "pending-close replay accepts only supported local landing notes"
+}
+
+test_legacy_note_serializes() {
   local case_dir tmp
   case_dir=$TMP_ROOT/stage
   tmp=$case_dir/state/.task-x1.backlog-close.tmp
   mkdir -p "$case_dir/state" "$case_dir/data"
   FM_HOME=$case_dir fm_backlog_close_marker_stage \
     "$tmp" task-x1 "$case_dir/data" spawn-one "$case_dir/state" 0 \
+    --note 'local main' \
+    || fail "legacy local note did not serialize: $FM_BACKLOG_TRANSITION_ERROR"
+  assert_grep 'arg=local%20main' "$tmp" \
+    "legacy local note was not encoded in the pending-close record"
+  pass "pending-close serialization preserves the supported legacy note"
+}
+
+test_arbitrary_legacy_note_rejected() {
+  local case_dir tmp
+  case_dir=$TMP_ROOT/stage-reject
+  tmp=$case_dir/state/.task-x1.backlog-close.tmp
+  mkdir -p "$case_dir/state" "$case_dir/data"
+  FM_HOME=$case_dir fm_backlog_close_marker_stage \
+    "$tmp" task-x1 "$case_dir/data" spawn-one "$case_dir/state" 0 \
     --note 'local develop' \
-    || fail "named local note did not serialize: $FM_BACKLOG_TRANSITION_ERROR"
-  assert_grep 'arg=local%20develop' "$tmp" \
-    "named local note was not encoded in the pending-close record"
-  pass "pending-close serialization accepts a named local landing note"
+    && fail "pending-close staging accepted arbitrary legacy local note"
 }
 
 test_legacy_and_named_notes_replay
-test_named_note_serializes
+test_legacy_note_serializes
+test_arbitrary_legacy_note_rejected
 
 echo "# all fm-backlog-transition-lib tests passed"

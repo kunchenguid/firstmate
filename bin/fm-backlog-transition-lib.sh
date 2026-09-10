@@ -939,7 +939,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
       case "${args[0]}" in
         --note)
           case "${args[1]}" in
-            local%20*) git check-ref-format --branch "${args[1]#local%20}" >/dev/null 2>&1 ;;
+            local%20main) true ;;
             local-landing:*) git check-ref-format --branch "${args[1]#local-landing:}" >/dev/null 2>&1 ;;
             *) false ;;
           esac
@@ -1041,8 +1041,8 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     shift
   fi
   for arg in "$@"; do
-    if [ "$previous_arg" = --note ] && [ "${arg#local }" != "$arg" ]; then
-      serialized_args+=("local%20${arg#local }")
+    if [ "$previous_arg" = --note ] && [ "$arg" = 'local main' ]; then
+      serialized_args+=(local%20main)
     else
       serialized_args+=("$arg")
     fi
