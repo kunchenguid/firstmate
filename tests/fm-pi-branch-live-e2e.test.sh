@@ -266,25 +266,56 @@ pass "real Pi SDK $PI_VERSION accepts the branch session construction and preser
 # so no provider request leaves the machine, but Pi still persists the error
 # assistant message and resolves session.prompt() through its production loop.
 errorhome="$TMP_ROOT/error-home"
-erroragentdir="$TMP_ROOT/error-agent-dir"
-mkdir -p "$errorhome/state" "$errorhome/config" "$erroragentdir"
+erroragentdir="$TMP_ROOT/work agent dir"
+erroruserhome="$TMP_ROOT/user-home"
+mkdir -p "$errorhome/state" "$errorhome/config" "$erroragentdir" "$erroruserhome/.pi/agent"
+# Default and selected roots deliberately disagree. These are public sentinel
+# values, never real credentials. Both CLI catalog inspection and the actual
+# branch runtime below must resolve the selected model and stored sentinel key.
+cat > "$erroruserhome/.pi/agent/models.json" <<'JSON'
+{"providers":{"fm-default":{"baseUrl":"https://fm-default.invalid/v1","api":"openai-completions","apiKey":"default-placeholder","models":[{"id":"default-only-model"}]}}}
+JSON
+printf '%s\n' '{"fm-live-error":{"type":"api_key","key":"work-placeholder"}}' > "$erroragentdir/auth.json"
+printf 'fm-live-error/fm-live-error-model\n' > "$errorhome/config/supervision-branch-model"
+printf 'low\n' > "$errorhome/config/supervision-branch-effort"
 cat > "$erroragentdir/models.json" <<'JSON'
 {
   "providers": {
     "fm-live-error": {
       "baseUrl": "https://fm-provider-error.invalid/v1",
       "api": "openai-completions",
-      "apiKey": "fm-live-placeholder",
       "models": [
-        { "id": "fm-live-error-model", "name": "fm live error", "contextWindow": 8192, "maxTokens": 512 }
+        { "id": "fm-live-error-model", "name": "fm live error", "reasoning": true, "contextWindow": 8192, "maxTokens": 512 }
       ]
     }
   }
 }
 JSON
+catalog_checks=0
+for executable in pi pi-signed; do
+  pi_binary=$(command -v "$executable" 2>/dev/null || true)
+  if [ -z "$pi_binary" ]; then
+    echo "skip: $executable not installed for account-root catalog proof"
+    continue
+  fi
+  catalog=$(cd "$erroruserhome" && env -i PATH="$PATH" HOME="$erroruserhome" \
+    PI_CODING_AGENT_DIR="$erroragentdir" PI_OFFLINE=1 "$pi_binary" \
+    --no-extensions --no-skills --no-prompt-templates --no-context-files --list-models) \
+    || fail "$executable selected-root catalog command failed"
+  assert_contains "$catalog" fm-live-error-model "$executable did not read the selected Pi root"
+  assert_not_contains "$catalog" default-only-model "$executable read the default root as well"
+  default_catalog=$(cd "$erroruserhome" && env -i PATH="$PATH" HOME="$erroruserhome" PI_OFFLINE=1 \
+    "$pi_binary" --no-extensions --no-skills --no-prompt-templates --no-context-files --list-models) \
+    || fail "$executable default-root catalog command failed"
+  assert_contains "$default_catalog" default-only-model "$executable default-root counterfactual is vacuous"
+  assert_not_contains "$default_catalog" fm-live-error-model "$executable default root saw the selected catalog"
+  pass "$executable --list-models separates explicit and default roots without inference"
+  catalog_checks=$((catalog_checks + 1))
+done
+[ "$catalog_checks" -gt 0 ] || fail "no installed Pi executable checked account-root selection"
 BRANCH_PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" \
   WATCH_PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
-  FM_HOME="$errorhome" FM_REAL_ROOT="$ROOT" FM_WATCH_ROOT="$repo" \
+  HOME="$erroruserhome" PI_OFFLINE=1 FM_HOME="$errorhome" FM_REAL_ROOT="$ROOT" FM_WATCH_ROOT="$repo" \
   FM_LIVE_WATCH_LOG="$TMP_ROOT/error-watch.log" FM_LIVE_WATCH_TRIGGER="$TMP_ROOT/error-watch.trigger" \
   PI_CODING_AGENT_DIR="$erroragentdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
   node --input-type=module > "$TMP_ROOT/error-output" 2>&1 <<'EOF'
@@ -298,10 +329,14 @@ mkdirSync(approvedProject, { recursive: true });
 writeFileSync(`${home}/state/live-error-probe.meta`, `project=${approvedProject}\nwindow=fm-live-error-probe\n`);
 writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tlive-error-probe.status\tsignal: c1 429 probe\n");
 let providerRequests = 0;
-globalThis.fetch = async (input) => {
+globalThis.fetch = async (input, init) => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   if (!url.startsWith("https://fm-provider-error.invalid/")) {
     throw new Error(`unexpected network request in provider-free guard: ${url}`);
+  }
+  const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+  if (headers.get("authorization") !== "Bearer work-placeholder") {
+    throw new Error("branch did not use the selected root's stored sentinel credential");
   }
   providerRequests += 1;
   return new Response(
@@ -349,7 +384,7 @@ const pi = {
     }
   },
   getThinkingLevel() {
-    return "off";
+    return "medium";
   },
 };
 process.env.FM_ROOT_OVERRIDE = process.env.FM_REAL_ROOT;
@@ -409,6 +444,9 @@ if (!queue.includes("\tsignal\tlive-error-probe.status\t")) {
 const pointer = readFileSync(`${home}/state/.branch-session`, "utf8").trim();
 const { SessionManager } = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
 const persistedContext = SessionManager.open(pointer, `${home}/state/branch-session`).buildSessionContext();
+if (persistedContext.thinkingLevel !== "low") {
+  throw new Error("the branch's independent low effort pin did not override its medium supervisor");
+}
 const persistedError = persistedContext.messages
   .filter((message) => message.role === "assistant")
   .at(-1);
@@ -429,7 +467,7 @@ out=$(cat "$TMP_ROOT/error-output")
 if [ "$status" -ne 0 ] || [ "$out" != "ERROR_FALLBACK_OK" ]; then
   fail "real-SDK Pi settled-provider-error guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi SDK $PI_VERSION rejects a post-construction 429 to watcher-owned main delivery without losing its durable row"
+pass "real Pi SDK $PI_VERSION branch uses the selected root's model and stored sentinel credential and preserves its 429 wake"
 
 # Third probe: the vendor contract the supervision-branch model pin rests on.
 # An explicit model must beat the model a reopened session recorded, or a pin

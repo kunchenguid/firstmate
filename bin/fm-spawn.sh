@@ -183,6 +183,17 @@
 #   CLAUDE_CONFIG_DIR from the spawning environment wins, then the active home's
 #   readable config/claude-config-dir supplies one absolute existing directory,
 #   and otherwise Claude receives no prefix and uses its default configuration.
+#   Pi and Pi-signed optionally use config/pi-agent-dir: one absolute path plus
+#   one newline naming a readable, searchable existing directory. A ship/scout
+#   reads the active home's config; a secondmate reads its OWN home's config,
+#   including on relaunch and the host-local leg of a remote launch. This pin is
+#   home-local, never inherited. It overrides both caller and destination-shell
+#   PI_CODING_AGENT_DIR, including inside a filtered launch environment. Invalid
+#   or unreadable configuration refuses before endpoint creation. Absence leaves
+#   the existing ambient launch behavior unchanged. The pin follows the resolved
+#   harness, so a raw launch command whose executable is pi or pi-signed receives
+#   it too; other harnesses are unaffected. No credential files are read or
+#   transferred.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -2564,6 +2575,38 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+# Account selection belongs to the home running Pi, not to the parent launching
+# that home's supervisor. Resolve after the secondmate home is validated, but
+# before an endpoint or task record can be created. Inheritance deliberately
+# excludes this file, so convergence cannot overwrite a lane's account choice.
+PI_AGENT_ROOT=
+case "$HARNESS" in
+  pi|pi-signed)
+    PI_AGENT_CONFIG="$CONFIG/pi-agent-dir"
+    [ "$KIND" != secondmate ] || PI_AGENT_CONFIG="$PROJ_ABS/config/pi-agent-dir"
+    PI_AGENT_CONFIG_PRESENT=$(fm_config_source_present "$PI_AGENT_CONFIG") || exit 1
+    if [ "$PI_AGENT_CONFIG_PRESENT" = 1 ]; then
+      if [ ! -f "$PI_AGENT_CONFIG" ] || [ ! -r "$PI_AGENT_CONFIG" ]; then
+        echo "error: config/pi-agent-dir must be a readable regular file: $PI_AGENT_CONFIG" >&2
+        exit 1
+      fi
+      # Parse bytes before the shell can drop NULs or trailing newlines. Paths
+      # are literal, not shell expressions; spaces and quotes are valid.
+      if ! PI_AGENT_ROOT=$(perl -0777 -e '
+        my $body = <> // "";
+        $body =~ /\A(\/[^\x00-\x1f\x7f]*)\n\z/ or exit 1;
+        print $1;
+      ' -- "$PI_AGENT_CONFIG"); then
+        echo "error: config/pi-agent-dir must contain one absolute path followed by one newline: $PI_AGENT_CONFIG" >&2
+        exit 1
+      fi
+      if [ ! -d "$PI_AGENT_ROOT" ] || [ ! -r "$PI_AGENT_ROOT" ] || [ ! -x "$PI_AGENT_ROOT" ]; then
+        echo "error: config/pi-agent-dir must name a readable, searchable existing directory: $PI_AGENT_CONFIG" >&2
+        exit 1
+      fi
+    fi
+    ;;
+esac
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
@@ -4318,6 +4361,9 @@ esac
 # the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "$CLAUDE_CONFIG_ROOT" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_ROOT") $LAUNCH"
+fi
+if [ -n "$PI_AGENT_ROOT" ]; then
+  LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$PI_AGENT_ROOT") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

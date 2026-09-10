@@ -1237,6 +1237,174 @@ SH
   done
 }
 
+# Execute the actual emitted launch in an independently populated destination
+# shell, rather than treating the presence of an assignment as process proof.
+test_pi_home_account_selection() {
+  local harness kind filter rec id out status pin parent sm launch shell result expected
+  for harness in pi pi-signed; do
+    for kind in ship scout secondmate; do
+      for filter in absent empty contradictory; do
+        id="root-$harness-$kind-$filter"
+        rec=$(make_spawn_case "$id" "$harness" "$id")
+        read_case_record "$rec"
+        pin="$CASE_DIR/work root's literal \$(not-a-command)"
+        parent="$CASE_DIR/parent root"
+        mkdir -p "$pin" "$parent"
+        case "$filter" in
+          empty) : > "$HOME_DIR/config/launch-env-allowlist" ;;
+          contradictory) printf 'PI_CODING_AGENT_DIR\n' > "$HOME_DIR/config/launch-env-allowlist" ;;
+        esac
+        printf '%s\n' "$pin" > "$HOME_DIR/config/pi-agent-dir"
+        if [ "$kind" = secondmate ]; then
+          sm="$CASE_DIR/secondmate"
+          make_seeded_secondmate_home "$sm" "$id"
+          mkdir -p "$sm/config" "$sm/state"
+          printf '%s\n' "$pin" > "$sm/config/pi-agent-dir"
+          printf '%s\n' "$parent" > "$HOME_DIR/config/pi-agent-dir"
+          out=$(PI_CODING_AGENT_DIR="$parent" run_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+            "$id" "$sm" --secondmate --harness "$harness" --model sentinel/model --effort medium); status=$?
+          [ "$(cat "$sm/config/pi-agent-dir")" = "$pin" ] || fail "inheritance overwrote secondmate Pi pin"
+        elif [ "$kind" = ship ]; then
+          out=$(PI_CODING_AGENT_DIR="$parent" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+            "$id" "$PROJ_DIR" --harness "$harness" --model sentinel/model --effort xhigh); status=$?
+        else
+          out=$(PI_CODING_AGENT_DIR="$parent" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+            "$id" "$PROJ_DIR" --scout --harness "$harness" --model sentinel/model --effort xhigh); status=$?
+        fi
+        expect_code 0 "$status" "Pi root selection spawn failed: $out"
+        launch=$(cat "$LAUNCH_LOG")
+        cat > "$FAKEBIN_DIR/$harness" <<'SH'
+#!/bin/sh
+model= effort=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model) model=$2; shift ;;
+    --thinking) effort=$2; shift ;;
+  esac
+  shift
+done
+printf '%s|%s|%s|%s\n' "${PI_CODING_AGENT_DIR:-unset}" "$FM_PI_HARNESS" "$model" "$effort"
+SH
+        chmod +x "$FAKEBIN_DIR/$harness"
+        for shell in /bin/sh /bin/bash /bin/zsh; do
+          [ -x "$shell" ] || continue
+          result=$(env -i HOME="$CASE_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+            PI_CODING_AGENT_DIR="$parent" "$shell" -c "$launch") || fail "Pi launch failed in $shell"
+          expected="$pin|$harness|sentinel/model|xhigh"
+          [ "$kind" != secondmate ] || expected="$pin|$harness|sentinel/model|medium"
+          [ "$result" = "$expected" ] || fail "Pi launch selected the wrong root/identity: $result"
+        done
+        pass "$harness $kind $filter: home pin beats caller and destination roots in actual shell execution"
+      done
+    done
+  done
+}
+
+test_pi_home_account_invalid_refuses() {
+  local kind bad rec id out status cfg pin reason
+  for kind in scout secondmate; do
+    for bad in empty relative no-newline extra-line nul missing-root file-root unreadable-root unsearchable-root unreadable-config dangling-link directory-config; do
+      id="invalid-root-$kind-$bad"
+      rec=$(make_spawn_case "$id" pi "$id")
+      read_case_record "$rec"
+      cfg="$HOME_DIR/config/pi-agent-dir"
+      if [ "$kind" = secondmate ]; then
+        make_seeded_secondmate_home "$CASE_DIR/sm" "$id"
+        mkdir -p "$CASE_DIR/sm/config" "$CASE_DIR/sm/state"
+        cfg="$CASE_DIR/sm/config/pi-agent-dir"
+      fi
+      pin="$CASE_DIR/work-root"
+      mkdir -p "$pin"
+      printf '%s\n' "$pin" > "$cfg"
+      case "$bad" in
+        empty) : > "$cfg" ;;
+        relative) printf 'relative\n' > "$cfg" ;;
+        no-newline) printf '%s' "$pin" > "$cfg" ;;
+        extra-line) printf '%s\n\n' "$pin" > "$cfg" ;;
+        nul) printf '%s\0\n' "$pin" > "$cfg" ;;
+        missing-root) printf '%s\n' "$CASE_DIR/missing" > "$cfg" ;;
+        file-root) rmdir "$pin"; : > "$pin" ;;
+        unreadable-root) chmod 100 "$pin"; [ ! -r "$pin" ] || { chmod 700 "$pin"; continue; } ;;
+        unsearchable-root) chmod 400 "$pin"; [ ! -x "$pin" ] || { chmod 700 "$pin"; continue; } ;;
+        unreadable-config) chmod 000 "$cfg"; [ ! -r "$cfg" ] || { chmod 600 "$cfg"; continue; } ;;
+        dangling-link) rm "$cfg"; ln -s absent "$cfg" ;;
+        directory-config) rm "$cfg"; mkdir "$cfg" ;;
+      esac
+      if [ "$kind" = secondmate ]; then
+        out=$(PI_CODING_AGENT_DIR="$HOME_DIR" run_spawn "$HOME_DIR" "$CASE_DIR/sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+          "$id" "$CASE_DIR/sm" --secondmate --harness pi); status=$?
+      else
+        out=$(PI_CODING_AGENT_DIR="$HOME_DIR" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+          "$id" "$PROJ_DIR" --scout --harness pi); status=$?
+      fi
+      chmod 700 "$pin" 2>/dev/null || true
+      [ "$bad" != unreadable-config ] || chmod 600 "$cfg"
+      expect_code 1 "$status" "invalid $kind Pi config ($bad) must refuse: $out"
+      case "$bad" in
+        unreadable-config|dangling-link|directory-config) reason="must be a readable regular file" ;;
+        empty|relative|no-newline|extra-line|nul) reason="must contain one absolute path followed by one newline" ;;
+        *) reason="must name a readable, searchable existing directory" ;;
+      esac
+      assert_contains "$out" "config/pi-agent-dir $reason" "Pi config refusal ($bad) must name its owner and its reason"
+      [ ! -s "$LAUNCH_LOG" ] || fail "invalid Pi config delivered a launch"
+      assert_absent "$HOME_DIR/state/$id.meta" "invalid Pi config published a task"
+    done
+  done
+  pass "invalid Pi home roots refuse, including a valid contradictory ambient root"
+}
+
+test_pi_absent_account_pin_preserves_ambient() {
+  local harness rec id out status launch result
+  for harness in pi pi-signed; do
+    id="root-absent-$harness"
+    rec=$(make_spawn_case "$id" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(PI_CODING_AGENT_DIR=caller-root run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --scout --harness "$harness"); status=$?
+    expect_code 0 "$status" "absent Pi config failed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    cat > "$FAKEBIN_DIR/$harness" <<'SH'
+#!/bin/sh
+printf '%s\n' "${PI_CODING_AGENT_DIR:-unset}"
+SH
+    result=$(env -i HOME="$CASE_DIR" PATH="$PATH" PI_CODING_AGENT_DIR=destination-root /bin/sh -c "$launch")
+    [ "$result" = destination-root ] || fail "absent pin changed ambient behavior"
+    result=$(env -i HOME="$CASE_DIR" PATH="$PATH" /bin/sh -c "$launch")
+    [ "$result" = unset ] || fail "absent pin set a new default"
+  done
+  pass "absent Pi pin preserves both default and destination ambient behavior"
+}
+
+test_pi_raw_launch_command_receives_pin() {
+  local rec id out status launch result pin
+  id="root-raw-pi"
+  rec=$(make_spawn_case "$id" pi "$id")
+  read_case_record "$rec"
+  pin="$CASE_DIR/work root"
+  mkdir -p "$pin"
+  printf '%s\n' "$pin" > "$HOME_DIR/config/pi-agent-dir"
+  cat > "$FAKEBIN_DIR/pi" <<'SH'
+#!/bin/sh
+printf '%s\n' "${PI_CODING_AGENT_DIR:-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/pi"
+  # The pin follows the resolved harness, and a raw command's harness is its
+  # executable basename, so a raw `pi ...` launch is pinned like any other.
+  out=$(PI_CODING_AGENT_DIR="$CASE_DIR/parent" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --scout "pi --print"); status=$?
+  expect_code 0 "$status" "raw Pi launch failed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  result=$(env -i HOME="$CASE_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    PI_CODING_AGENT_DIR="$CASE_DIR/parent" /bin/sh -c "$launch") || fail "raw Pi launch did not run"
+  [ "$result" = "$pin" ] || fail "raw Pi launch did not receive the home pin: $result"
+  pass "raw pi launch command receives the home account pin"
+}
+
+test_pi_home_account_selection
+test_pi_home_account_invalid_refuses
+test_pi_absent_account_pin_preserves_ambient
+test_pi_raw_launch_command_receives_pin
+
 test_launch_environment_allowlist
 test_launch_environment_invalid_config_refuses
 test_launch_environment_inaccessible_config_refuses

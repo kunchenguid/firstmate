@@ -116,6 +116,7 @@ Inherited `config/backend` becomes that secondmate home's local runtime-backend 
 A present primary value always converges byte-exact into validated secondmate homes, and primary absence removes the destination so those homes keep runtime auto-detection.
 Explicit per-spawn `--backend` and `FM_BACKEND` remain stronger than every home's local `config/backend`, including an inherited default.
 `config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.
+`config/pi-agent-dir` is not inherited either, because it selects that home's own Pi account root; provision it directly in a new secondmate home that needs a pin, before its first launch, or that home launches on the ambient account.
 `data/captain-shared.md` is main-authoritative in the primary home and read-only in secondmate homes.
 Its primary file header must state that the file is main-authoritative, read-only in secondmate homes, must not be edited there, and that new captain-preference discoveries are routed to the main firstmate through marked status or a document pointer.
 Every propagation point converges the secondmate copy to the primary bytes; when the primary file is absent, any existing secondmate copy is quarantined and removed so absence converges too.

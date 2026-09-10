@@ -1829,6 +1829,45 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+## Pi account-root selection
+
+Verified on 2026-09-08 with Pi 0.85.1 and its installed SDK.
+The configuration contract is owned by [Pi configuration root](../configuration.md#pi-configuration-root-configpi-agent-dir--pi_coding_agent_dir), and `bin/fm-spawn.sh` owns the launch implementation.
+No real credentials were inspected or copied and no paid inference was performed.
+
+Portable verification:
+
+```sh
+bin/fm-test-run.sh --jobs 1 tests/fm-spawn-dispatch-profile.test.sh tests/fm-control-relaunch.test.sh tests/fm-secondmate-harness.test.sh
+```
+
+These suites execute emitted launch commands in independent `sh`, Bash, and Zsh processes where installed, with conflicting caller/destination roots, ordinary and filtered environments, and literal paths containing spaces, quotes, and shell syntax.
+They cover ship, scout, initial secondmate, and control-plane relaunch on both Pi identities, invalid/unreadable pins, unchanged absent-pin behavior, and pin preservation through config push and startup convergence.
+The account tests keep supervisor model/medium, monitoring model/low, and worker model/xhigh independent; they do not change live profiles.
+All three suites passed with `FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0`.
+
+Real-runtime verification, with the npm package matching the selected CLI:
+
+```sh
+export FM_PI_PACKAGE_DIR="$(PATH="$(dirname "$(command -v pi)"):$PATH" npm root -g)/@earendil-works/pi-coding-agent"
+FM_PI_BRANCH_LIVE_E2E=1 bash tests/fm-pi-branch-live-e2e.test.sh
+```
+
+Relevant output:
+
+```text
+ok - pi --list-models separates explicit and default roots without inference
+skip: pi-signed not installed for account-root catalog proof
+ok - real Pi SDK 0.85.1 branch uses the selected root's model and stored sentinel credential and preserves its 429 wake
+```
+
+The catalog counterfactual uses two nonsecret synthetic directories with mutually exclusive models.
+The actual supervision-branch extension uses the selected root's stored sentinel credential with its low effort pin despite a medium supervisor; the test intercepts its request in-process before transport.
+Pi-signed's launch identity and root forwarding have portable proof, but no installed-wrapper runtime proof in this verification environment.
+The backend integrations all receive the same already-constructed launch text: tmux literal send, Herdr `pane send-text`, Zellij bracketed paste, Orca terminal send, and cmux send were inspected without changing their transport contracts.
+Remote secondmate launch/relaunch delegates to the same host-local spawn owner; no cross-host account or filesystem identity was tested.
+The separate no-mistakes daemon and externally started review agents are not covered by this account-root guarantee.
+
 ## Pi supervision branch
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.

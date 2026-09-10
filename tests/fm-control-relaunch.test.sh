@@ -307,6 +307,46 @@ SH
 
 # --- 1. same-harness relaunch -----------------------------------------------
 
+test_pi_relaunch_keeps_home_account() {
+  local kind harness dir cfg pin out rc launch result
+  for kind in ship secondmate; do
+    for harness in pi pi-signed; do
+      dir=$(new_case "root-$kind-$harness" root1)
+      add_ship_task "$dir" root1 "$harness"
+      mkdir -p "$dir/home/config" "$dir/work root" "$dir/default root"
+      pin="$dir/work root"
+      cfg="$dir/home/config/pi-agent-dir"
+      printf '%s\n' "$pin" > "$cfg"
+      if [ "$kind" = secondmate ]; then
+        mkdir -p "$dir/wt/state" "$dir/wt/data" "$dir/wt/bin" "$dir/wt/config"
+        printf 'root1\n' > "$dir/wt/.fm-secondmate-home"
+        printf '# Synthetic Firstmate\n' > "$dir/wt/AGENTS.md"
+        printf '%s\n' "$pin" > "$dir/wt/config/pi-agent-dir"
+        printf '%s\n' "$dir/default root" > "$cfg"
+        printf '%s sentinel/model medium\n' "$harness" > "$dir/home/config/secondmate-harness"
+        awk '!/^(kind|mode|home)=/' "$dir/home/state/root1.meta" > "$dir/prior.meta"
+        { cat "$dir/prior.meta"; printf 'kind=secondmate\nmode=secondmate\nhome=%s\n' "$dir/wt"; } > "$dir/home/state/root1.meta"
+      fi
+      printf 'PI_CODING_AGENT_DIR\n' > "$dir/home/config/launch-env-allowlist"
+      cat > "$dir/fakebin/$harness" <<'SH'
+#!/bin/sh
+[ "${1:-}" != --help ] || { printf '%s\n' '--tui-mode'; exit; }
+printf '%s|%s\n' "$PI_CODING_AGENT_DIR" "$FM_PI_HARNESS"
+SH
+      chmod +x "$dir/fakebin/$harness"
+      printf '%s' "$harness" > "$dir/fake/command"
+      printf '%s' "$harness" > "$dir/fake/becomes"
+      out=$(PI_CODING_AGENT_DIR="$dir/default root" run_control "$dir" root1 relaunch --note "preserve work and account"); rc=$?
+      expect_code 0 "$rc" "Pi $kind relaunch failed: $out"
+      launch=$(tail -1 "$dir/fake/literal")
+      result=$(env -i HOME="$dir" PATH="$PATH" PI_CODING_AGENT_DIR="$dir/default root" /bin/sh -c "$launch")
+      [ "$result" = "$pin|$harness" ] || fail "Pi relaunch lost the lane root or executable identity: $result"
+      [ "$(meta_field "$dir" root1 worktree)" = "$dir/wt" ] || fail "Pi root relaunch changed the worktree"
+      pass "$harness $kind relaunch reads the correct home pin despite caller and destination roots"
+    done
+  done
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   local dir out rc gen_before gen_after
   dir=$(new_case same rl1)
@@ -1681,6 +1721,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_pi_relaunch_keeps_home_account
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven

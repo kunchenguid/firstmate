@@ -2739,6 +2739,32 @@ test_claude_config_dir_inheritance_present_unchanged_and_absent() {
   pass "config-push: Claude configuration root pushes, stays unchanged, and converges absence"
 }
 
+test_pi_account_pin_is_home_local() {
+  local w head phase out status
+  w=$(new_world pi-account-local)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config"
+  printf '/synthetic/lane-account\n' > "$w/sm/config/pi-agent-dir"
+  for phase in present changed absent; do
+    case "$phase" in
+      present) printf '/synthetic/primary-account\n' > "$w/home/config/pi-agent-dir" ;;
+      changed) printf '/synthetic/another-account\n' > "$w/home/config/pi-agent-dir" ;;
+      absent) rm "$w/home/config/pi-agent-dir" ;;
+    esac
+    out=$(run_config_push "$w" 2>&1); status=$?
+    expect_code 0 "$status" "config push with $phase primary Pi pin failed: $out"
+    [ "$(cat "$w/sm/config/pi-agent-dir")" = /synthetic/lane-account ] \
+      || fail "config push overwrote the home-local Pi account pin"
+    out=$(run_bootstrap "$w" 2>&1); status=$?
+    expect_code 0 "$status" "bootstrap with $phase primary Pi pin failed: $out"
+    [ "$(cat "$w/sm/config/pi-agent-dir")" = /synthetic/lane-account ] \
+      || fail "bootstrap overwrote the home-local Pi account pin"
+  done
+  pass "Pi account pins survive primary changes and absence in config push and startup convergence"
+}
+
+test_pi_account_pin_is_home_local
 test_claude_config_dir_inheritance_present_unchanged_and_absent
 test_spawn_claude_config_dir_precedence
 test_spawn_refuses_invalid_claude_config_dir

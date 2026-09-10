@@ -315,6 +315,37 @@ An invalid readable file refuses the Claude spawn and names the file, while non-
 The file is materialized by hand because bootstrap cannot choose an account: run `mkdir -p config && printf '%s\n' "$CLAUDE_CONFIG_DIR" > config/claude-config-dir`, then run `bin/fm-config-push.sh` to converge already-running secondmate homes.
 The inherited-local-material contract in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) propagates the literal file and converges primary absence, so each secondmate's own Claude spawns resolve the same root from its local copy.
 
+## Pi configuration root (config/pi-agent-dir / PI_CODING_AGENT_DIR)
+
+`config/pi-agent-dir` optionally pins this home's Pi configuration/account directory.
+It is local, gitignored, and deliberately **not inherited**: configure each home that needs a pin, including a secondmate home before its first launch.
+The file contains one literal absolute path followed by exactly one newline; the directory must already exist and be readable and searchable.
+Paths are not shell-expanded; spaces and quotes are literal, while control bytes, empty files, extra lines, missing directories, and unreadable configuration are refused.
+Firstmate never creates the account directory or reads, copies, or changes its credentials.
+
+For standard Pi and Pi-signed launches, a ship or scout reads the active home's file, while a secondmate reads the destination home's own file, not its parent's account choice.
+The pin beats both the spawning process's and the destination shell's `PI_CODING_AGENT_DIR`, including when the [launch environment filter](#worker-launch-environment-configlaunch-env-allowlist) is enabled.
+Relaunch and startup recovery use the same selection; config push and secondmate convergence leave this home-local file untouched.
+Remote secondmates resolve it on the destination host, where the selected directory must exist; account directories are never transferred over SSH.
+A missing file preserves the previous ambient behavior, including the destination shell's account selection, so removing a pin is not a safe way to require a particular account.
+The pin follows the resolved harness, so a raw launch command whose executable is `pi` or `pi-signed` receives it too;
+other harnesses are unchanged.
+[`bin/fm-spawn.sh --help`](../bin/fm-spawn.sh) owns launch validation and executable mechanics.
+
+Changing the file affects future launches, not an already-running Pi process.
+For a manually launched primary outside `fm-spawn`, explicitly set Pi's documented `PI_CODING_AGENT_DIR` before starting the selected Pi executable; the bare `pi` command does not read Firstmate config.
+Pi's SDK-backed [supervision branch](pi-supervision-branch.md) resolves credentials and resources under the supervisor process's Pi directory, independently of its model and effort pins.
+The installed Pi `docs/environment-variables.md`, `docs/sdk.md`, and `docs/providers.md` own directory, resource, and credential precedence: selecting a root does not disable provider environment keys, runtime overrides, custom providers, or trusted extensions.
+This is account-root routing, not a credential sandbox or an account-identity check.
+A pinned root is not reflected in quota evidence either.
+`quota-axi` reports one row per provider family, so two homes on different Pi accounts are scored against the same `pi` row;
+quota-driven dispatch must not read that row as lane-specific, because a pinned lane's remaining runway is not what that row measures.
+
+Review and validation agents started by a separate service do not pass through `fm-spawn`.
+In particular, no-mistakes owns its daemon environment, agent executable, and model/effort configuration; its agents do not inherit the submitting worker's Pi root merely because that worker started validation.
+Use the service's documented isolated configuration and verify that boundary separately before requiring account exclusivity for validation; a Firstmate pin alone cannot establish it.
+[Runtime verification](verification/runtime-backends.md#pi-account-root-selection) records the portable launch proof and the real-Pi non-inference checks.
+
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
