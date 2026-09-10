@@ -1,45 +1,25 @@
 # Contributing
 
 Thanks for wanting to contribute.
-One rule up front:
-
 This fork supports local use and ordinary Git pushes to a personal repository without no-mistakes, gh-axi, chrome-devtools-axi, or lavish-axi.
 Use the development checks below and standard `git` / `gh` commands; tasks-axi and quota-axi remain required runtime tools.
-The upstream submission instructions and `Require no-mistakes` workflow below are retained for upstream compatibility, not as local setup requirements.
-Pushing this fork needs no pipeline, but PRs to `main` in a repository running the inherited workflow still need its attestation unless that repository's owner separately changes the gate.
+Pull requests to this fork use the ordinary branch, test, push, and review workflow below.
 This fork does not remove preexisting global agent hooks, Git hooks, proxy remotes, or running validation jobs.
 Legacy run reconciliation and teardown safeguards remain to avoid abandoning existing work; they are not instructions to start new pipeline runs.
 For day-to-day operation, use a standalone clone with these changes on its local default branch; a feature-branch worktree can trigger Firstmate's checkout-repair policy.
 Keep the original installation and its private fleet state separate during the initial trial.
 
-**Upstream human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes).**
-We require this to reduce the maintainer's burden of reviewing and merging contributions.
-
-`no-mistakes` puts a local git proxy in front of your real remote.
-Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
-
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and requires both the deterministic signature and a parseable structured attestation from no-mistakes v1.46.0 or newer.
-The attestation must bind to the current PR head commit and report the review, test, and document steps as completed, so a stale attestation, a missing `head_sha`, or a skipped required step fails.
-It evaluates every PR opening and body edit independently, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
-
 ## Workflow
 
-1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
-2. Create a branch and make your changes.
-3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (contributing to firstmate requires **no-mistakes v1.46.0+** for structured attestation; without a fork, plain `no-mistakes init` still works for maintainers with push access).
-4. Commit your changes.
-5. Push through the gate instead of pushing to `origin`:
+1. Clone this fork or use your existing clone.
+2. Create a feature branch and make your changes.
+3. Run the relevant tests and lint checks described under Development.
+4. Commit your changes and push the feature branch with `git push -u origin <branch>`.
+5. Open a pull request against this fork with `gh pr create`, describing the change and validation results.
+6. Wait for review and the configured merge approval.
 
-   ```sh
-   git push no-mistakes
-   ```
-
-6. Run `no-mistakes` to attach to the pipeline, watch findings, authorize auto-fixes, and review ask-user findings as needed.
-   Follow the installed no-mistakes version's SKILL.md and live `axi` help for gate mechanics.
-7. Once the pipeline passes, it pushes the branch to your fork and opens the PR against the parent repo for you.
-
-See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
+For contributions to [upstream Firstmate](https://github.com/kunchenguid/firstmate), follow that repository's contribution instructions.
+Upstream enforces its own pull-request requirements independently of this fork.
 
 ## Repo conventions
 
@@ -55,7 +35,7 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
-  `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, and pinned actionlint workflow lint), and both CI and the no-mistakes pre-push gate invoke it with no arguments.
+  `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, and pinned actionlint workflow lint), and CI invokes it with no arguments.
   Its header and `--help` output own the exact local lint modes, file-set selection, and analysis flags.
   A malformed `.github/workflows/*.yml`, including a self-broken `ci.yml`, fails that local lint path before merge because a broken workflow cannot report its own breakage.
   It pins one exact shellcheck version and one exact actionlint version and refuses to run under any other.
@@ -71,7 +51,6 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 ## Development
 
 Tracked changes to this local fork ship on a feature branch through the direct-PR or local-only path and require the configured merge approval.
-The no-mistakes pipeline applies only when submitting upstream under the instructions above.
 Before making any such change, load the agent-only `firstmate-coding-guidelines` skill (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
 It has the knowledge-placement rules that keep `AGENTS.md` from regrowing after each diet pass.
 There is no reliable way for `bin/fm-brief.sh`'s scaffold to detect that a task's repo is firstmate itself, so firstmate adds this skill's load line to firstmate-repo briefs by hand.
