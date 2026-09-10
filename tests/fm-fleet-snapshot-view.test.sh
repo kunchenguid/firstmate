@@ -1045,6 +1045,55 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_oversized_backlog_survives_the_kernel_argument_limit() {
+  local home data fakebin out bytes i summary bearings rc
+  home=$(make_home oversized)
+  data=$TMP_ROOT/oversized-data
+  mkdir -p "$data"
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=0
+    while [ "$i" -lt 3000 ]; do
+      printf -- '- [ ] oversized-task-%04d - Oversized filler task number %04d with extra padding text to grow every row well past the kernel single-argument limit (repo: alpha) (kind: ship)\n' "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$data/backlog.md"
+  bytes=$(LC_ALL=C wc -c < "$data/backlog.md" | tr -d ' ')
+  [ "$bytes" -gt 200000 ] || fail "fixture backlog must exceed 200000 bytes to reproduce the kernel argument limit, got $bytes"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$SNAPSHOT" --json 2>"$TMP_ROOT/oversized.err"); rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-fleet-snapshot.sh --json must exit 0 against an oversized backlog: $(cat "$TMP_ROOT/oversized.err")"
+  assert_no_grep "Argument list too long" "$TMP_ROOT/oversized.err" "stderr must never report E2BIG"
+  printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1" and (.backlog.records | length) == 3000' >/dev/null \
+    || fail "oversized snapshot must still parse as fm-fleet-snapshot.v1 with every backlog row: $out"
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$SNAPSHOT" --secondmate-home-summary 2>"$TMP_ROOT/oversized-summary.err"); rc=$?
+  [ "$rc" -eq 0 ] || fail "--secondmate-home-summary must exit 0 against an oversized backlog: $(cat "$TMP_ROOT/oversized-summary.err")"
+  assert_no_grep "Argument list too long" "$TMP_ROOT/oversized-summary.err" "home-summary stderr must never report E2BIG"
+  printf '%s' "$summary" | jq -e '.schema == "fm-secondmate-home-summary.v1"' >/dev/null \
+    || fail "oversized home summary must still parse as the bounded contract: $summary"
+  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>"$TMP_ROOT/oversized-bearings.err"); rc=$?
+  [ "$rc" -eq 0 ] || fail "fm-bearings-snapshot.sh --json must exit 0 against an oversized backlog: $(cat "$TMP_ROOT/oversized-bearings.err")"
+  assert_no_grep "Argument list too long" "$TMP_ROOT/oversized-bearings.err" "bearings stderr must never report E2BIG"
+  printf '%s' "$bearings" | jq -e '.schema == "fm-bearings.v1"' >/dev/null \
+    || fail "oversized bearings digest must still parse as fm-bearings.v1: $bearings"
+  pass "an oversized structured backlog survives the kernel single-argument limit across both readers"
+}
+
+test_small_fleet_output_is_byte_identical_apart_from_generated() {
+  local home fakebin out_a out_b norm_a norm_b
+  home=$(make_home unchanged)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  out_a=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-14T00:00:00Z "$SNAPSHOT" --json)
+  out_b=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-14T00:00:00Z "$SNAPSHOT" --json)
+  norm_a=$(printf '%s' "$out_a" | jq -S 'del(.generated)')
+  norm_b=$(printf '%s' "$out_b" | jq -S 'del(.generated)')
+  [ "$norm_a" = "$norm_b" ] \
+    || fail "a small fleet snapshot must stay byte-identical apart from the generated timestamp"
+  pass "a small fleet snapshot stays byte-identical apart from the generated timestamp"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
@@ -1063,3 +1112,5 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_oversized_backlog_survives_the_kernel_argument_limit
+test_small_fleet_output_is_byte_identical_apart_from_generated
