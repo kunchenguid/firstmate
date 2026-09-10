@@ -101,9 +101,9 @@ fm_path_mtime() {
 # fm_path_identity <path>...
 # Prints one "<device>:<inode>" line per operand, in argument order. All operands
 # are resolved in a SINGLE stat: this runs inside the 0.2s confirm and 0.5s
-# attach polls, so one exec per comparison rather than one per path. A missing,
-# unreadable, or malformed operand fails the whole call, so callers stay
-# fail-closed.
+# attach polls, so one exec per comparison rather than one per path. An operand
+# that cannot be looked up or stat'd now, or whose reported field is malformed,
+# fails the whole call, so callers stay fail-closed.
 fm_path_identity() {
   local want=$# identities field saved_ifs
   [ "$want" -gt 0 ] || return 1
@@ -131,18 +131,19 @@ fm_paths_same_object() {
   local left=$1 right=$2 identities first
   identities=$(fm_path_identity "$left" "$right") || return 1
   first=${identities%%[!0-9:]*}
-  [ -n "$first" ] || return 1
   [ "$identities" = "$first
 $first" ]
 }
 
 # fm_paths_equivalent <dir|file> <left> <right>
 # The single owner of "these two recorded spellings name the same watcher home or
-# watcher script". Both operands must exist with the required type before any
-# comparison, so a missing, unreadable, or replaced target fails closed; only then
-# may an identical spelling take the fast path, and any other spelling must prove
-# filesystem identity. Health checks and stale-lock recovery share this predicate
-# so the two arms of the same ownership decision cannot drift apart.
+# watcher script". Both operands must resolve now to an existing object of the
+# required type, so a target that is gone or cannot be looked up fails closed;
+# only then may an identical spelling take the fast path on that type gate alone,
+# which is why a target replaced at that same spelling is not detected, and any
+# other spelling must prove filesystem identity. Health checks and stale-lock
+# recovery share this predicate so the two arms of the same ownership decision
+# cannot drift apart.
 fm_paths_equivalent() {
   local kind=$1 left=$2 right=$3
   case "$kind" in
