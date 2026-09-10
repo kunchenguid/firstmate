@@ -15,6 +15,7 @@ A result stream that breaks the 1 MiB limit or the JSON result contract is also 
 Diagnostics that break the same limit keep their last 1 MiB with a notice and do not change the verdict, so a completed turn keeps its conversation id however noisy its stderr was, while the truncated-response note agy writes last still lands in the retained tail.
 The opening brief is delivered in the canonical `launch-brief` envelope owned by `../../../bin/fm-operational-input.sh`, the same typed envelope every other adapter's launch command carries.
 The bridge owns the stable readline composer, generation-bound busy events, turn-end wake, cancellation, and process cleanup; native TUI glyphs and Herdr's idle observations are not semantic state sources.
+The native CLI runs once per turn, and its whole process group is reaped when that turn ends, so a process the worker leaves running in the background does not outlive the turn that started it; a service that must stay up belongs in its own task.
 On Herdr, the bridge reports native working/idle state through a generation-scoped lifecycle source and releases that source on exit.
 A failed first report is fatal because an unregistered pane reads as a dead agent; once registration succeeds, a later publication failure only prints, so the semantic record and completion wake still land.
 Its `❯` prompt uses the existing bare-agent composer classifier.

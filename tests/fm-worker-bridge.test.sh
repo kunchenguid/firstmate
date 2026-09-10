@@ -54,7 +54,7 @@ print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','res
         brief = state / 'brief'; brief.write_text('literal $HOME `no-exec`')
         gen = subprocess.check_output([str(root/'bin/fm-busy-event.sh'), 'arm',str(state),'probe'], text=True).strip()
         command = [sys.executable,str(root/'bin/fm-worker-bridge.py'),'--harness',harness,'--state',str(state),'--id','probe','--gen',gen,'--brief',str(brief)]
-        herdr_env = dict(env, HERDR_ENV='1', HERDR_PANE_ID='w1:p2', HERDR_SESSION='fm-lab-portable', HERDR_BIN_PATH=str(fake/'herdr'))
+        herdr_env = dict(env, HERDR_ENV='1', HERDR_PANE_ID='w1:p2', HERDR_SESSION='fm-lab-portable')
         result = subprocess.run(command + ['--backend','herdr'],input='/exit\n',capture_output=True,text=True,env=herdr_env,timeout=20)
         assert result.returncode == 0, result.stderr
         lifecycle = [json.loads(line) for line in (base/'calls').read_text().splitlines() if json.loads(line)[0].endswith('/herdr')]

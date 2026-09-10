@@ -66,7 +66,7 @@ def main():
         nonlocal herdr_registered
         if not herdr_pane:
             return
-        command = [env.get('HERDR_BIN_PATH') or 'herdr', 'pane',
+        command = ['herdr', 'pane',
                    'report-agent' if value is not None else 'release-agent',
                    herdr_pane, '--source', herdr_source, '--agent', native_agent,
                    '--seq', str(time.time_ns()), '--session', herdr_session]
