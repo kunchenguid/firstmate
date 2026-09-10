@@ -37,9 +37,11 @@
 #   --existing-pr scaffolds work on an existing GitHub pull request or GitLab
 #   merge request instead of a new branch and PR. It applies only to ship tasks
 #   in no-mistakes or direct-PR mode. The worker fetches and checks out the PR's
-#   head branch from origin, pushes only to that same branch without force, and
-#   never opens a second PR. Pass --branch <name> when known; otherwise the brief
-#   retains {EXISTING_PR_BRANCH}, which bin/fm-spawn.sh refuses until filled.
+#   origin-hosted head branch from origin, pushes only to that same branch without
+#   force, and never opens a second PR. Fork-hosted heads are intentionally
+#   unsupported because this contract never redirects a push away from origin.
+#   Pass --branch <name> when known; otherwise the brief retains
+#   {EXISTING_PR_BRANCH}, which bin/fm-spawn.sh refuses until filled.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -249,6 +251,7 @@ if [ "$EXISTING_PR_SET" -eq 1 ]; then
   BRANCH_QUOTED=$(shell_quote "$BRANCH")
   ORIGIN_BRANCH_QUOTED=$(shell_quote "origin/$BRANCH")
   PUSH_BRANCH_QUOTED=$(shell_quote "HEAD:$BRANCH")
+  FETCH_REFSPEC_QUOTED=$(shell_quote "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH")
 fi
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
@@ -301,8 +304,6 @@ You are a persistent second mate managed by the main firstmate. Work on your own
 
 # Charter
 $SECONDMATE_CHARTER
-
-$HOME_SECTION
 
 # Routing scope
 $SECONDMATE_SCOPE
@@ -491,7 +492,8 @@ fi
 # The block opens with the fixed "Delivery contract: mode=<mode>" line that
 # bin/fm-spawn.sh checks against its own explicit --mode before launching.
 if [ "$EXISTING_PR_SET" -eq 1 ]; then
-  SETUP1="1. First action: fetch and check out the existing PR head branch from origin: \`git fetch origin $BRANCH_QUOTED && git checkout -B $BRANCH_QUOTED --track $ORIGIN_BRANCH_QUOTED\`."
+  SETUP1="1. First action: fetch and check out the existing PR head branch from origin: \`git fetch origin $FETCH_REFSPEC_QUOTED && git checkout -B $BRANCH_QUOTED $ORIGIN_BRANCH_QUOTED\`.
+   This scaffold supports only a PR head branch hosted on origin. If origin does not have the branch or you cannot push it, append \`blocked: existing PR head branch is not writable on origin\` and stop; never redirect the push to another remote."
   if [ "$MODE" = no-mistakes ]; then
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."

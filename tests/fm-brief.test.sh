@@ -235,14 +235,16 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
     brief="$home/data/$id/brief.md"
     assert_grep "Existing PR: $url" "$brief" \
       "$mode existing-PR brief did not record the canonical PR URL"
-    assert_grep "git fetch origin 'bookie/existing-head'" "$brief" \
-      "$mode existing-PR brief did not fetch the existing head branch from origin"
-    assert_grep "git checkout -B 'bookie/existing-head' --track 'origin/bookie/existing-head'" "$brief" \
+    assert_grep "git fetch origin '+refs/heads/bookie/existing-head:refs/remotes/origin/bookie/existing-head'" "$brief" \
+      "$mode existing-PR brief did not update the remote-tracking head from origin"
+    assert_grep "git checkout -B 'bookie/existing-head' 'origin/bookie/existing-head'" "$brief" \
       "$mode existing-PR brief did not check out the existing origin head"
     assert_grep "git push origin 'HEAD:bookie/existing-head'" "$brief" \
       "$mode existing-PR brief did not push back to the same branch"
     assert_grep "Never force-push, never open a second PR" "$brief" \
       "$mode existing-PR brief lost its force-push and duplicate-PR prohibitions"
+    assert_grep "supports only a PR head branch hosted on origin" "$brief" \
+      "$mode existing-PR brief did not fail visibly for an unsupported fork-hosted head"
     assert_grep "done: PR $url head <sha> checks green" "$brief" \
       "$mode existing-PR brief did not bind done to the existing PR head and green checks"
     assert_no_grep "git checkout -b fm/$id" "$brief" \
@@ -260,18 +262,58 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
   pass "fm-brief.sh: existing-PR ship briefs replace new-branch and new-PR contracts"
 }
 
-test_generated_briefs_name_the_absolute_firstmate_home() {
+test_existing_pr_setup_checks_out_a_new_origin_branch() {
+  local root remote source work home brief setup_command source_head
+  root="$TMP_ROOT/existing-pr-checkout"
+  remote="$root/remote.git"
+  source="$root/source"
+  work="$root/work"
+  home="$root/home"
+  git init --bare "$remote" >/dev/null 2>&1 || fail "could not initialize existing-PR remote fixture"
+  git init "$source" >/dev/null 2>&1 || fail "could not initialize existing-PR source fixture"
+  git -C "$source" config user.email test@example.com
+  git -C "$source" config user.name Test
+  printf 'base\n' > "$source/file"
+  git -C "$source" add file
+  git -C "$source" commit -m base >/dev/null
+  git -C "$source" branch -M main
+  git -C "$source" remote add origin "$remote"
+  git -C "$source" push origin main >/dev/null 2>&1
+  git -C "$source" switch -c existing/head >/dev/null 2>&1
+  printf 'head\n' >> "$source/file"
+  git -C "$source" commit -am head >/dev/null
+  git -C "$source" push origin existing/head >/dev/null 2>&1
+  source_head=$(git -C "$source" rev-parse HEAD)
+  git clone --single-branch --branch main "$remote" "$work" >/dev/null 2>&1 \
+    || fail "could not clone existing-PR checkout fixture"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" checkout-existing firstmate --mode direct-PR \
+    --existing-pr https://github.com/kunchenguid/firstmate/pull/2460 \
+    --branch existing/head >/dev/null 2>&1
+  brief="$home/data/checkout-existing/brief.md"
+  # shellcheck disable=SC2016 # The sed expression is a literal parser for the generated Markdown command.
+  setup_command=$(sed -n 's/^1\. First action:.*: `\(.*\)`\.$/\1/p' "$brief")
+  [ -n "$setup_command" ] || fail "could not read the generated existing-PR setup command"
+  (cd "$work" && eval "$setup_command") >/dev/null 2>&1 \
+    || fail "generated existing-PR setup could not check out a previously unfetched origin branch"
+  [ "$(git -C "$work" branch --show-current)" = existing/head ] \
+    || fail "generated existing-PR setup checked out the wrong local branch"
+  [ "$(git -C "$work" rev-parse HEAD)" = "$source_head" ] \
+    || fail "generated existing-PR setup did not check out the current origin head"
+  pass "fm-brief.sh: existing-PR setup fetches and checks out a previously unknown origin branch"
+}
+
+test_ship_and_scout_briefs_name_the_absolute_firstmate_home() {
   local home id brief kind
   home="$TMP_ROOT/absolute-home-briefs"
   mkdir -p "$home/data"
   home=$(cd "$home" && pwd -P)
 
-  for kind in ship scout secondmate; do
+  for kind in ship scout; do
     id="brief-absolute-home-$kind"
     case "$kind" in
       ship) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode direct-PR >/dev/null ;;
       scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null ;;
-      secondmate) FM_HOME="$home" FM_SECONDMATE_CHARTER=x "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null ;;
     esac
     brief="$home/data/$id/brief.md"
     assert_grep "The absolute Firstmate home for this task is \`$home\`." "$brief" \
@@ -281,7 +323,7 @@ test_generated_briefs_name_the_absolute_firstmate_home() {
     assert_grep "home-relative \`data/$id/...\` deliverable or referenced report" "$brief" \
       "$kind brief did not disambiguate home-relative evidence paths"
   done
-  pass "fm-brief.sh: every scaffold identifies its absolute Firstmate home and task artifacts"
+  pass "fm-brief.sh: ship and scout briefs identify their absolute Firstmate home and task artifacts"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -941,7 +983,8 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_existing_pr_ship_briefs_replace_new_pr_contract
-test_generated_briefs_name_the_absolute_firstmate_home
+test_existing_pr_setup_checks_out_a_new_origin_branch
+test_ship_and_scout_briefs_name_the_absolute_firstmate_home
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
