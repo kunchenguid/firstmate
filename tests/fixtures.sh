@@ -94,12 +94,13 @@ fm_test_fake_gh_axi() {
 # fm_test_fake_tmux_spawn <fakebin>
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
 # firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
-# set, each send-keys -l payload is appended one per line. Optional
+# set, each send-keys -l payload is appended one per line. When FM_FAKE_CMD_LOG
+# is set, each submitted text line is appended one per line. Optional
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
-# cleanup and option operations are no-ops. Launch logging is env-gated, so
-# suites that do not set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
+# cleanup and option operations are no-ops. Both logs are env-gated, so suites
+# that set neither keep a silent send-keys.
 fm_test_fake_tmux_spawn() {
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'
@@ -118,14 +119,23 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
-      for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
+    prev=
+    prior=
+    last=
+    literal=0
+    for a in "$@"; do
+      prior=$last
+      last=$a
+      if [ "$prev" = "-l" ]; then
+        literal=1
+        if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
-        prev=$a
-      done
+      fi
+      prev=$a
+    done
+    if [ "$literal" = 0 ] && [ -n "${FM_FAKE_CMD_LOG:-}" ] && [ "$last" = Enter ]; then
+      printf '%s\n' "$prior" >> "$FM_FAKE_CMD_LOG"
     fi
     exit 0
     ;;
@@ -270,8 +280,10 @@ make_spawn_fakebin() {
 
 # fm_test_run_spawn <home> <pane-path> <fakebin> [fm-spawn args...]
 # Common spawn env. Extra variables in the caller (GROK_HOME, FM_FAKE_LAUNCH_LOG,
-# CLAUDE_CONFIG_DIR, ...) are inherited. Does not add --mode/--yolo; ship tests
-# that need a delivery contract pass those flags themselves.
+# CLAUDE_CONFIG_DIR, ...) are inherited. FM_TEST_PROJECTS_OVERRIDE can replace
+# the default projects directory for a case that exercises path resolution.
+# Does not add --mode/--yolo; ship tests that need a delivery contract pass those
+# flags themselves.
 fm_test_run_spawn() {
   local home=$1 pane=$2 fakebin=$3
   shift 3
@@ -290,7 +302,8 @@ fm_test_run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="${FM_TEST_PROJECTS_OVERRIDE:-$home/projects}" \
+    FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$@" 2>&1

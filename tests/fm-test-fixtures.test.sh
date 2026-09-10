@@ -86,10 +86,12 @@ test_fake_gh_and_gh_axi() {
 }
 
 test_spawn_tmux_and_fakebin() {
-  local fakebin out log
+  local fakebin out log command_log
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn" gh-axi)
   log="$TMP_ROOT/spawn/launch.log"
+  command_log="$TMP_ROOT/spawn/command.log"
   : > "$log"
+  : > "$command_log"
   out=$(FM_FAKE_PANE_PATH=/tmp/wt "$fakebin/tmux" display-message -p '#{pane_current_path}')
   [ "$out" = /tmp/wt ] || fail "spawn tmux pane path should be FM_FAKE_PANE_PATH, got '$out'"
   out=$(unset FM_FAKE_PANE_PATH; "$fakebin/tmux" display-message -p '#{pane_current_path}')
@@ -98,6 +100,8 @@ test_spawn_tmux_and_fakebin() {
   [ "$out" = firstmate ] || fail "spawn tmux session name should be firstmate, got '$out'"
   FM_FAKE_LAUNCH_LOG="$log" "$fakebin/tmux" send-keys -t @w -l 'codex --yolo'
   assert_grep 'codex --yolo' "$log" "send-keys -l payload was not logged"
+  FM_FAKE_CMD_LOG="$command_log" "$fakebin/tmux" send-keys -t @w 'treehouse get' Enter
+  assert_grep 'treehouse get' "$command_log" "submitted text line was not logged"
   [ -x "$fakebin/treehouse" ] || fail "spawn fakebin should include treehouse"
   [ -x "$fakebin/gh-axi" ] || fail "extra exit-0 tools should land in the spawn fakebin"
   "$fakebin/treehouse" get
