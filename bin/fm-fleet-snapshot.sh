@@ -7,7 +7,8 @@
 # mutate backlog state, or write reports. Its default ledger collector may
 # atomically refresh parent-side cached copies of remote home summaries under
 # state/secondmate-summary-cache; those observational cache writes are its only
-# fleet-state mutation.
+# fleet-state mutation. `--read-only` retains live and existing-cache reads but
+# disables both cache-directory creation and cache refresh.
 #
 # Top-level fields:
 #   schema: stable schema id.
@@ -46,6 +47,9 @@
 #     project it as a Charted Next gate stating why, and disclose it in
 #     omitted[]; --all-decisions reveals every captain hold available within the
 #     bounded snapshot.
+#   project_registry: {path,present,records[]} exposes exact registered project
+#     names from data/projects.md for downstream projections. The registry line
+#     format remains owned by bin/fm-project-mode.sh.
 #   tasks[]: one row per task metadata record captured at snapshot start, sorted
 #     by id. A record removed before capture is omitted. If a captured task's
 #     generation changes while observations run, its selected metadata remains
@@ -216,12 +220,14 @@ esac
 
 usage() {
   cat <<'EOF'
-usage: fm-fleet-snapshot.sh --json
+usage: fm-fleet-snapshot.sh --json [--read-only]
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
 refreshes only its parent-side remote-summary cache as an observational side effect.
+With --read-only, live remote reads and reads from an existing valid cache remain
+enabled, but the cache directory is neither created nor refreshed.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -268,12 +274,20 @@ EOF
 }
 
 OUTPUT_MODE=json
-case "${1:---json}" in
-  --json) ;;
-  --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
+SNAPSHOT_READ_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --json) ;;
+    --read-only) SNAPSHOT_READ_ONLY=1 ;;
+    --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+if [ "$OUTPUT_MODE" = secondmate-home-summary ] && [ "$SNAPSHOT_READ_ONLY" -eq 1 ]; then
+  usage >&2
+  exit 2
+fi
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
 
@@ -546,6 +560,25 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         else . end)
     | del(.section,.order)
   ' < "$backlog"
+}
+
+project_registry_json() {
+  local registry="$DATA/projects.md" names
+  if [ ! -f "$registry" ]; then
+    jq -n --arg path "$registry" \
+      '{path:$path,present:false,available:true,reason:null,records:[]}'
+    return 0
+  fi
+  if ! names=$(awk '
+    $1 == "-" && $2 != "" { print $2 }
+  ' "$registry"); then
+    jq -n --arg path "$registry" \
+      '{path:$path,present:true,available:false,reason:"project registry is unreadable",records:[]}'
+    return 0
+  fi
+  printf '%s\n' "$names" | jq -Rn --arg path "$registry" '
+    {path:$path,present:true,available:true,reason:null,
+     records:[inputs | select(length > 0) | {name:.}]}'
 }
 
 SNAPSHOT_TASK_DIR=
@@ -1288,6 +1321,7 @@ snapshot_cache_prepare() {
     case "$mode" in ''|*[!0-7]*) return 1 ;; esac
     [ $((8#$mode & 077)) -eq 0 ] || return 1
   else
+    [ "$SNAPSHOT_READ_ONLY" -eq 0 ] || return 0
     [ -d "$(dirname "$FM_SNAPSHOT_CACHE_DIR")" ] || return 1
     (umask 077; mkdir "$FM_SNAPSHOT_CACHE_DIR") 2>/dev/null || return 1
   fi
@@ -1312,6 +1346,7 @@ snapshot_route_cache_path() {  # <id> <host> <home>
 
 snapshot_cache_store() {  # <summary-json-file> <destination>
   local summary_file=$1 destination=$2 tmp
+  [ "$SNAPSHOT_READ_ONLY" -eq 0 ] || return 0
   [ "$SNAPSHOT_CACHE_AVAILABLE" -eq 1 ] || return 1
   case "$destination" in "$FM_SNAPSHOT_CACHE_DIR"/*) ;; *) return 1 ;; esac
   [ ! -L "$destination" ] || return 1
@@ -1926,12 +1961,15 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+PROJECT_REGISTRY_JSON=$(project_registry_json) \
+  || { echo "fm-fleet-snapshot: project registry read failed" >&2; exit 1; }
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
 JSON_TRANSPORT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") \
   || { echo "fm-fleet-snapshot: temporary transport directory creation failed" >&2; exit 1; }
 BACKLOG_JSON_FILE="$JSON_TRANSPORT_DIR/backlog.json"
+PROJECT_REGISTRY_JSON_FILE="$JSON_TRANSPORT_DIR/project-registry.json"
 TASKS_JSON_FILE="$JSON_TRANSPORT_DIR/tasks.json"
 MAIN_INVENTORY_JSON_FILE="$JSON_TRANSPORT_DIR/main-inventory.json"
 SCOUT_REPORTS_JSON_FILE="$JSON_TRANSPORT_DIR/scout-reports.json"
@@ -1939,6 +1977,8 @@ SECONDMATE_CURRENT_JSON_FILE="$JSON_TRANSPORT_DIR/secondmate-current.json"
 SECONDMATE_LANDED_JSON_FILE="$JSON_TRANSPORT_DIR/secondmate-landed.json"
 printf '%s\n' "$BACKLOG_JSON" > "$BACKLOG_JSON_FILE" \
   || { echo "fm-fleet-snapshot: temporary backlog file write failed" >&2; exit 1; }
+printf '%s\n' "$PROJECT_REGISTRY_JSON" > "$PROJECT_REGISTRY_JSON_FILE" \
+  || { echo "fm-fleet-snapshot: temporary project registry file write failed" >&2; exit 1; }
 printf '%s\n' "$TASKS_JSON" > "$TASKS_JSON_FILE" \
   || { echo "fm-fleet-snapshot: temporary task file write failed" >&2; exit 1; }
 
@@ -1966,12 +2006,14 @@ jq -n \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
   --slurpfile backlog "$BACKLOG_JSON_FILE" \
+  --slurpfile project_registry "$PROJECT_REGISTRY_JSON_FILE" \
   --slurpfile tasks "$TASKS_JSON_FILE" \
   --slurpfile main_inventory "$MAIN_INVENTORY_JSON_FILE" \
   --slurpfile scout_reports "$SCOUT_REPORTS_JSON_FILE" \
   --slurpfile secondmate_current "$SECONDMATE_CURRENT_JSON_FILE" \
   --slurpfile secondmate_landed "$SECONDMATE_LANDED_JSON_FILE" \
   '($backlog[0]) as $backlog
+   | ($project_registry[0]) as $project_registry
    | ($tasks[0]) as $tasks
    | ($main_inventory[0]) as $main_inventory
    | ($scout_reports[0]) as $scout_reports
@@ -1986,6 +2028,7 @@ jq -n \
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
      backlog:$backlog,
+     project_registry:$project_registry,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),

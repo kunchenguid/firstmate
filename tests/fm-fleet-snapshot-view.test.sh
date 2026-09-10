@@ -72,6 +72,7 @@ record_claude_idle() {  # <state-dir> <id>
 write_fixture() {  # <home>
   local home=$1 fixture_gen
   mkdir -p "$home/projects/alpha-worktree" "$home/projects/scout-worktree" "$home/secondmate-home"
+  printf '%s\n' '- alpha [no-mistakes] - Alpha fixture (added 2026-07-07)' > "$home/data/projects.md"
   cat > "$home/data/backlog.md" <<EOF
 ## In flight
 - [ ] scout-task - Scout Task data/scout-task/report.md (repo: alpha) (kind: scout) (since 2026-07-07)
@@ -190,6 +191,9 @@ test_fixture_snapshot_json() {
   printf '%s' "$out" | jq -e '
     [.backlog.records[] | select(.state == "queued")] | length == 2
   ' >/dev/null || fail "queued canonical and unstructured backlog records missing"
+  printf '%s' "$out" | jq -e '
+    .project_registry == {path:(.roots.data + "/projects.md"),present:true,available:true,reason:null,records:[{name:"alpha"}]}
+  ' >/dev/null || fail "project registry names were not exposed by the fleet snapshot"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-task")
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"

@@ -88,11 +88,19 @@ Only when no matching run exists does it consult semantic busy state; exact busy
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
 The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
-For whole-fleet review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, local current crew state, supervision-owned endpoint evidence, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
+For whole-fleet review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the project registry, backlog, task metadata, local current crew state, supervision-owned endpoint evidence, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 Each home atomically publishes that bounded home summary with freshness epoch metadata at `state/home-summary.json` after a locked session start, a watcher-observed status change, task spawn, task teardown, and on a recurring live-watcher cadence; `bin/fm-home-summary-refresh.sh` owns the publication mechanics.
 The fleet snapshot and Bearings paths use the concurrent remote-ledger collection, cache, unreadable-home disclosure, and remote-liveness boundary owned by `bin/fm-fleet-snapshot.sh`'s header.
+The snapshot's explicit `--read-only` mode keeps live reads and valid existing-cache reads while disabling cache creation and refresh.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 The script header owns the exact JSON schema.
+
+`bin/fm-project-status.sh --json <project>` projects `fm-project-status.v1` from one read-only fleet snapshot and never collects fleet state independently.
+It resolves an exact ASCII case-insensitive project name across the snapshot's main registry names, structured backlog repo fields, and secondmate project declarations, and it refuses unknown, fuzzy, or multiply owned matches.
+The projection caps active work, captain calls, queued work, recent deliveries, warnings and omissions, source bytes, final JSON bytes, and subprocess duration; its header owns the exact bounds and output contract.
+For a secondmate-owned project, the selected `secondmate_current` structured-home record is the only current-state authority.
+A partial structured record keeps independently reliable collections and counts while reporting current state as unknown, and neither parent events nor terminal or conversation text can replace it.
+[`verification/project-status.md`](verification/project-status.md) records the current behavioral verification.
 
 On a Pi primary, supervision is default-on: the watcher extension can hand eligible task-local rows from an ordinary actionable wake, plus selected fleet-wide heartbeat reviews, to a persistent in-process supervision conversation while main-only rows remain on the captain-facing path.
 The branch handles those rows, stores the outcome durably, and merges it back into main.
