@@ -1337,6 +1337,9 @@ test_orca_worktree_id_accepts_opaque_forms_and_refuses_corruption() {
     '74c6a297-f6ab-433d-b0ca-6136c9b1dbea'
     '74c6a297-f6ab-433d-b0ca-6136c9b1dbea::/Users/cap/orca/workspaces/node/fm-audit-k9'
     'repo-1::/Users/cap/orca/work spaces/my project/fm-audit-k9'
+    'repo-1::/Users/cap/orca/My Repo (fork)/fm-audit-k9'
+    "repo-1::/Users/cap/orca/Cap's & Co [1]/fm-audit-k9"
+    'repo-1::/Users/cap/orca/$notes {draft}/fm-audit-k9'
     ''
     'wt 7'
     ' wt-7'
@@ -1350,21 +1353,10 @@ test_orca_worktree_id_accepts_opaque_forms_and_refuses_corruption() {
     '::/Users/cap/wt'
     'repo-1::/Users/cap/a::/Users/cap/b'
     're po::/Users/cap/wt'
-    'repo-1::/Users/cap/$(id)'
-    'repo-1::/Users/cap/`id`'
-    'repo-1::/Users/cap/a;rm -rf b'
-    'repo-1::/Users/cap/a|b'
-    'repo-1::/Users/cap/a&b'
-    'repo-1::/Users/cap/a*'
-    'repo-1::/Users/cap/a?b'
-    'repo-1::/Users/cap/a$b'
-    'repo-1::/Users/cap/a\b'
-    'repo-1::/Users/cap/"a"'
   )
-  expected=$'accept\naccept\naccept\naccept'
-  expected="$expected"$'\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse'
-  expected="$expected"$'\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse'
+  expected=$'accept\naccept\naccept\naccept\naccept\naccept\naccept'
   expected="$expected"$'\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse'
+  expected="$expected"$'\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse'
   verdicts=$( bash -c '
     . "$1/bin/fm-backend.sh"
     fm_backend_source orca || exit 9
@@ -1379,7 +1371,7 @@ test_orca_worktree_id_accepts_opaque_forms_and_refuses_corruption() {
   ' _ "$ROOT" "${values[@]}" )
   [ "$verdicts" = "$expected" ] || fail \
     "Orca worktree id verdicts changed"$'\n'"--- got ---"$'\n'"$verdicts"$'\n'"--- want ---"$'\n'"$expected"
-  pass "fm_backend_orca_worktree_id_valid: legacy atom and compound ids resolve; corrupt, ambiguous, and shell-unsafe ids refuse"
+  pass "fm_backend_orca_worktree_id_valid: legacy atom and compound ids resolve, including punctuated workspace paths; corrupt and ambiguous ids refuse"
 }
 
 test_orca_endpoint_records_validate_both_worktree_id_forms() {

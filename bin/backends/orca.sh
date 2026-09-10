@@ -193,11 +193,9 @@ fm_backend_orca_send_literal() {  # <terminal-id> <text>
 # Refused: empty, leading or trailing whitespace, any control character (so a
 # line break, carriage return, or tab can never smuggle a second value onto one
 # record line), a second "::" (which would make the split ambiguous), a
-# non-atom repo half, a relative or bare path half, and any path character
-# outside the allowlist below. That allowlist is deliberately narrower than the
-# filesystem allows: it excludes every shell metacharacter and glob character,
-# so even an unquoted expansion of a recorded id cannot become an evaluated or
-# word-split command argument.
+# non-atom repo half, and a relative or bare path half. The path half is
+# otherwise whatever the filesystem allows on one line: it is Orca's workspace
+# path, and teardown binds it to the path Orca reports before acting on it.
 # The atom halves reuse fm_backend_endpoint_atom_valid, the shared endpoint
 # character contract owned by bin/fm-backend.sh, which is the dispatcher that
 # sources this adapter; the compound SHAPE stays here because it is Orca's,
@@ -217,9 +215,6 @@ fm_backend_orca_worktree_id_valid() {  # <value>
         *::*) return 1 ;;
         /?*) ;;
         *) return 1 ;;
-      esac
-      case "$path" in
-        *[!A-Za-z0-9._+@%,:#~=/\ -]*) return 1 ;;
       esac
       fm_backend_endpoint_atom_valid "$repo"
       ;;
