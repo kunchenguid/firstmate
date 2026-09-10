@@ -224,7 +224,7 @@ elif [ "$BRANCH_SET" -eq 1 ]; then
 fi
 
 if [ "$BRANCH_SET" -eq 1 ]; then
-  git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || {
+  git check-ref-format "refs/heads/$BRANCH" >/dev/null 2>&1 || {
     echo "error: --branch is not a valid git branch name: $BRANCH" >&2
     exit 1
   }
@@ -234,7 +234,7 @@ if [ "$BASE_BRANCH_SET" -eq 1 ]; then
     echo "error: --base-branch applies only to an existing-PR no-mistakes brief" >&2
     exit 1
   }
-  git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1 || {
+  git check-ref-format "refs/heads/$BASE_BRANCH" >/dev/null 2>&1 || {
     echo "error: --base-branch is not a valid git branch name: $BASE_BRANCH" >&2
     exit 1
   }
@@ -519,7 +519,7 @@ fi
 # The block opens with the fixed "Delivery contract: mode=<mode>" line that
 # bin/fm-spawn.sh checks against its own explicit --mode before launching.
 if [ "$EXISTING_PR_SET" -eq 1 ]; then
-  SETUP1="1. First action: resolve the existing PR head through gh-axi, verify its repository and upstream are origin, then refresh and check out that exact origin branch: \`case \"\$(git remote get-url origin)\" in $EXPECTED_ORIGIN_HTTPS|$EXPECTED_ORIGIN_HTTPS_GIT|$EXPECTED_ORIGIN_SSH|$EXPECTED_ORIGIN_SSH_URL) ;; *) echo 'error: origin does not match the existing PR repository' >&2; exit 1 ;; esac; gh-axi pr checkout $FM_PR_NUMBER && PR_BRANCH=\$(git branch --show-current) && git check-ref-format --branch \"\$PR_BRANCH\" >/dev/null$BRANCH_ASSERT; [ \"\$(git config --get \"branch.\$PR_BRANCH.remote\")\" = origin ] || { echo 'error: existing PR head is not hosted on origin' >&2; exit 1; }; git fetch origin \"+refs/heads/\$PR_BRANCH:refs/remotes/origin/\$PR_BRANCH\" && git checkout -B \"\$PR_BRANCH\" \"origin/\$PR_BRANCH\"\`.
+  SETUP1="1. First action: resolve the existing PR head through gh-axi, verify its repository and upstream are origin, then refresh and check out that exact origin branch: \`case \"\$(git remote get-url origin)\" in $EXPECTED_ORIGIN_HTTPS|$EXPECTED_ORIGIN_HTTPS_GIT|$EXPECTED_ORIGIN_SSH|$EXPECTED_ORIGIN_SSH_URL) ;; *) echo 'error: origin fetch URL does not match the existing PR repository' >&2; exit 1 ;; esac; case \"\$(git remote get-url --push origin)\" in $EXPECTED_ORIGIN_HTTPS|$EXPECTED_ORIGIN_HTTPS_GIT|$EXPECTED_ORIGIN_SSH|$EXPECTED_ORIGIN_SSH_URL) ;; *) echo 'error: origin push URL does not match the existing PR repository' >&2; exit 1 ;; esac; gh-axi pr checkout $FM_PR_NUMBER && PR_BRANCH=\$(git branch --show-current) && git check-ref-format \"refs/heads/\$PR_BRANCH\" >/dev/null$BRANCH_ASSERT; [ \"\$(git config --get \"branch.\$PR_BRANCH.remote\")\" = origin ] || { echo 'error: existing PR head is not hosted on origin' >&2; exit 1; }; git fetch origin \"+refs/heads/\$PR_BRANCH:refs/remotes/origin/\$PR_BRANCH\" && git checkout -B \"\$PR_BRANCH\" \"origin/\$PR_BRANCH\"\`.
    If the PR head is fork-hosted, origin lacks the branch, or you cannot push it, append \`blocked: existing PR head branch is not writable on origin\` and stop; never redirect the push to another remote."
   if [ "$MODE" = no-mistakes ]; then
     SETUP2="

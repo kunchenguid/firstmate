@@ -81,7 +81,7 @@ fm_brief_existing_pr_base_invalid() {  # <file>
   [ -n "$record" ] || return 1
   base=${record#*"$tab"}
   [ -n "$base" ] && [ "$base" != '{EXISTING_PR_BASE_BRANCH}' ] || return 0
-  git check-ref-format --branch "$base" >/dev/null 2>&1 || return 0
+  git check-ref-format "refs/heads/$base" >/dev/null 2>&1 || return 0
   return 1
 }
 

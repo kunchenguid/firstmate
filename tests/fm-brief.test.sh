@@ -251,6 +251,8 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
       "$mode existing-PR brief did not assert the caller-supplied head branch"
     assert_grep "git config --get \"branch.\$PR_BRANCH.remote\"" "$brief" \
       "$mode existing-PR brief did not reject a fork-hosted head"
+    assert_grep "git remote get-url --push origin" "$brief" \
+      "$mode existing-PR brief did not validate origin's effective push target"
     assert_grep "git push origin \"HEAD:\$PR_BRANCH\"" "$brief" \
       "$mode existing-PR brief did not push back to the same branch"
     assert_grep "Never force-push, never open a second PR" "$brief" \
@@ -309,7 +311,8 @@ test_existing_pr_setup_checks_out_a_new_origin_branch() {
   real_git=$(command -v git)
   cat > "$fakebin/git" <<EOF
 #!/bin/sh
-if [ "\${1:-}" = remote ] && [ "\${2:-}" = get-url ] && [ "\${3:-}" = origin ]; then
+if [ "\${1:-}" = remote ] && [ "\${2:-}" = get-url ] \
+  && { [ "\${3:-}" = origin ] || { [ "\${3:-}" = --push ] && [ "\${4:-}" = origin ]; }; }; then
   printf '%s\n' https://github.com/kunchenguid/firstmate
   exit 0
 fi
@@ -369,6 +372,9 @@ EOF
   sed -i.bak 's/{EXISTING_PR_BASE_BRANCH}/release\/2.x/' "$existing"
   ! fm_brief_existing_pr_base_invalid "$existing" \
     || fail "existing-PR delivery metadata rejected a valid filled base branch"
+  sed -i.bak 's/release\/2.x/@{-1}/' "$existing"
+  fm_brief_existing_pr_base_invalid "$existing" \
+    || fail "existing-PR delivery metadata accepted context-dependent reflog shorthand"
   pass "fm-dod-lib: existing-PR base validation is scoped to adjacent delivery metadata"
 }
 
@@ -470,6 +476,7 @@ existing PR on a scout brief|brief-refused-b7 some-proj --scout --existing-pr ht
 malformed existing PR URL|brief-refused-b8 some-proj --mode direct-PR --existing-pr not-a-pr|--existing-pr requires a canonical GitHub pull request URL
 base branch without existing PR no-mistakes|brief-refused-b9 some-proj --mode no-mistakes --base-branch release/2.x|--base-branch applies only to an existing-PR no-mistakes brief
 base branch on existing PR direct-PR|brief-refused-b10 some-proj --mode direct-PR --existing-pr https://github.com/o/r/pull/1 --base-branch main|--base-branch applies only to an existing-PR no-mistakes brief
+reflog shorthand as existing PR base|brief-refused-b11 some-proj --mode no-mistakes --existing-pr https://github.com/o/r/pull/1 --base-branch @{-1}|--base-branch is not a valid git branch name
 ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
