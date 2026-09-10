@@ -12,7 +12,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--issue <issue-url> [--issue-part <n>/<N>]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--issue <issue-url> --issue-part <n>/<N>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -58,12 +58,17 @@
 #   a ship flag, refused on --scout (a scout delivers a report, not a merge
 #   request) and on --secondmate, and needs glab and jq on PATH; an issue that
 #   cannot be read refuses the scaffold instead of writing a brief the worker
-#   cannot act on.
-#   --issue-part <n>/<N> is this task's resolved position among the subtasks the
-#   issue was split into, and it requires --issue. Given 2/3, the required merge
-#   request title becomes "#<iid> [2/3] <work>"; omitted, the required title is
-#   "#<iid> <work>" with no position segment at all, so a generated brief never
-#   carries a placeholder position that could reach a real merge request title.
+#   cannot act on. The issue must belong to <repo-name>'s own GitLab project -
+#   compared against the project path the issue itself reports, by full path or
+#   by project name - because a merge request's bare "#<iid>" resolves against
+#   the merge request's own project, so a cross-project pairing would silently
+#   reference a different or missing issue.
+#   --issue-part <n>/<N> is REQUIRED with --issue and refused without it: it is
+#   this task's resolved position among the subtasks the issue was split into,
+#   and the required merge request title carries it, e.g. "#<iid> [2/3] <work>".
+#   Firstmate planned the split, so it always knows the position; a missing one
+#   is a caller mistake that fails here rather than reaching a merge request
+#   title as a placeholder.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
@@ -240,11 +245,14 @@ if [ "$ISSUE_SET" -eq 1 ]; then
     echo "error: --issue is not a GitLab issue URL (expected https://<host>/<group>/<project>/-/issues/<iid>): $ISSUE_ARG" >&2
     exit 1
   }
+  # The merge request title must name this subtask's position, so the caller
+  # that planned the split states it here rather than the worker guessing it.
+  [ "$ISSUE_PART_SET" -eq 1 ] || {
+    echo "error: --issue requires --issue-part <n>/<N>, this task's position among the subtasks the issue was split into; the merge request title must carry it" >&2
+    exit 1
+  }
 fi
 
-# The subtask position is what keeps a placeholder out of a real merge request
-# title, so it is validated here and refused when there is no issue to be a
-# position within.
 if [ "$ISSUE_PART_SET" -eq 1 ]; then
   [ "$ISSUE_SET" -eq 1 ] || {
     echo "error: --issue-part is this task's position among one issue's subtasks; pass it with --issue or not at all" >&2
@@ -447,6 +455,13 @@ if [ "$ISSUE_SET" -eq 1 ]; then
   }
   ISSUE_PROJECT_PATH=$(issue_show_field '.project_path_with_namespace // ""')
   [ -n "$ISSUE_PROJECT_PATH" ] || ISSUE_PROJECT_PATH=$FM_GITLAB_ISSUE_PATH
+  # A merge request's bare `#<iid>` resolves against the merge request's own
+  # project, so an issue from another project would cross-link a different or
+  # missing issue. The task's project must be the issue's own.
+  if [ "$REPO" != "$ISSUE_PROJECT_PATH" ] && [ "$REPO" != "${ISSUE_PROJECT_PATH##*/}" ]; then
+    echo "error: --issue belongs to GitLab project $ISSUE_PROJECT_PATH but this brief is for project $REPO; \`Related to #$FM_GITLAB_ISSUE_IID\` in a $REPO merge request would point at a different issue" >&2
+    exit 1
+  fi
   ISSUE_AUTHOR=$(issue_show_field '.author.username // "unknown"')
   ISSUE_STATE=$(issue_show_field '.state // "unknown"')
   CAPTAIN_INTENT_BODY=$(render_issue_intent)
@@ -466,18 +481,10 @@ EOF
   # contract; local-only ships nothing, so adding it would hand the worker two
   # mutually exclusive delivery contracts.
   if [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ]; then
-    # The title carries this task's own position when firstmate recorded one,
-    # and no position segment at all when it did not: a placeholder like n/N
-    # must never reach a real merge request title.
-    if [ "$ISSUE_PART_SET" -eq 1 ]; then
-      ISSUE_TITLE_RULE="Title it \`#$FM_GITLAB_ISSUE_IID [$ISSUE_PART_N/$ISSUE_PART_TOTAL] <what this task changes>\`, where $ISSUE_PART_N/$ISSUE_PART_TOTAL is this task's resolved position among the subtasks issue #$FM_GITLAB_ISSUE_IID was split into - do not change it."
-    else
-      ISSUE_TITLE_RULE="Title it \`#$FM_GITLAB_ISSUE_IID <what this task changes>\` with no position segment: firstmate recorded no subtask position for this task, so do not invent one."
-    fi
     IFS= read -r -d '' ISSUE_MR_SECTION <<EOF || true
 Ship exactly one merge request for this task by default, small enough that a human reviews the whole diff in one reading.
 If the work genuinely cannot land as one reviewable change, say so to firstmate instead of splitting or stacking merge requests on your own.
-$ISSUE_TITLE_RULE
+Title it \`#$FM_GITLAB_ISSUE_IID [$ISSUE_PART_N/$ISSUE_PART_TOTAL] <what this task changes>\`, where $ISSUE_PART_N/$ISSUE_PART_TOTAL is this task's resolved position among the subtasks issue #$FM_GITLAB_ISSUE_IID was split into - do not change it.
 The description must carry the line \`Related to #$FM_GITLAB_ISSUE_IID\` and must never carry \`Closes\`, \`Fixes\`, \`Resolves\`, or any other closing keyword: the human closes the issue after reviewing every merge request.
 When the issue is a bug you reproduced, the regression test ships with the first subtask's merge request; if the spec above says this is that subtask, this merge request must contain it.
 EOF
