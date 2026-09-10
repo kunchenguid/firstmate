@@ -12,7 +12,7 @@ It requires both exit code zero and `status=SUCCESS` with a conversation id; a f
 Turns carry an explicit 24h `--print-timeout` because agy's five-minute default returns partial output and exits zero when it expires, and a run whose stderr carries agy's truncated-response note is recorded as a failed turn even when its JSON result says SUCCESS.
 A truncated turn still binds the conversation id it returned, so the follow-up continues that same conversation instead of restarting one.
 A result stream that breaks the 1 MiB limit or the JSON result contract is also a failed turn with a blocked status wake; the endpoint stays alive and keeps its composer.
-Diagnostics that break the same limit are truncated for display with a notice and do not change the verdict, so a completed turn keeps its conversation id however noisy its stderr was.
+Diagnostics that break the same limit keep their last 1 MiB with a notice and do not change the verdict, so a completed turn keeps its conversation id however noisy its stderr was, while the truncated-response note agy writes last still lands in the retained tail.
 The opening brief is delivered in the canonical `launch-brief` envelope owned by `../../../bin/fm-operational-input.sh`, the same typed envelope every other adapter's launch command carries.
 The bridge owns the stable readline composer, generation-bound busy events, turn-end wake, cancellation, and process cleanup; native TUI glyphs and Herdr's idle observations are not semantic state sources.
 On Herdr, the bridge reports native working/idle state through a generation-scoped lifecycle source and releases that source on exit.

@@ -12,7 +12,7 @@ Unverified gap, deliberately left open: every turn passes only its own payload w
 Hermes loads project instructions from the supplied worktree; the bridge does not ask Hermes to create another worktree.
 A successful turn requires exit zero, a nonempty response, and Hermes's post-conversation `session_id` line on stderr, so a successful process exit during first-run setup cannot masquerade as completed work.
 A response that breaks the 1 MiB limit is a failed turn with a blocked status wake; the endpoint stays alive and keeps its composer.
-Diagnostics that break the same limit are truncated for display with a notice, so the verdict still rests on the response and the `session_id` line the retained head must carry.
+Diagnostics that break the same limit keep their last 1 MiB with a notice, so the verdict still rests on the response and on the `session_id` line Hermes writes after it, which the retained tail carries however noisy the turn was.
 The opening brief is delivered in the canonical `launch-brief` envelope owned by `../../../bin/fm-operational-input.sh`, the same typed envelope every other adapter's launch command carries.
 The bridge owns generation-bound busy events, the existing `❯` bare composer, turn-end wakes, and child process-group cleanup.
 `../../../bin/fm-spawn.sh` owns model and effort arguments, and `../../../bin/fm-control-lib.sh` owns lifecycle keys and commands.

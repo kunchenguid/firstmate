@@ -209,17 +209,18 @@ def main():
             with uninterrupted():
                 terminate(process)
                 output_file.seek(0)
-                error_file.seek(0)
                 raw_output = output_file.read(PROTOCOL_LIMIT + 1)
-                raw_errors = error_file.read(PROTOCOL_LIMIT + 1)
                 output_overflow = len(raw_output) > PROTOCOL_LIMIT
-                error_overflow = len(raw_errors) > PROTOCOL_LIMIT
                 output = raw_output[:PROTOCOL_LIMIT].decode(errors='replace')
-                errors = raw_errors[:PROTOCOL_LIMIT].decode(errors='replace')
+                # Both CLIs write their turn markers last, so keep the tail.
+                error_size = error_file.seek(0, os.SEEK_END)
+                error_overflow = error_size > PROTOCOL_LIMIT
+                error_file.seek(max(error_size - PROTOCOL_LIMIT, 0))
+                errors = error_file.read().decode(errors='replace')
                 if errors:
                     print(errors, flush=True)
                 if error_overflow:
-                    print('CLI diagnostics exceeded the 1 MiB protocol limit and were truncated', flush=True)
+                    print('CLI diagnostics exceeded the 1 MiB protocol limit; showing the last 1 MiB', flush=True)
                 if output_overflow:
                     print('CLI output exceeded the 1 MiB protocol limit', flush=True)
                 success = process.returncode == 0 and not output_overflow

@@ -392,6 +392,23 @@ test_raw_gemini_launch_has_no_semantic_wiring() {
   pass "raw gemini launch remains unwired and classifies unknown"
 }
 
+test_raw_worker_bridge_launch_has_no_semantic_wiring() {
+  local rec harness id out state
+  for harness in hermes antigravity; do
+    id="busy-$harness-raw"
+    rec=$(make_spawn_case "$harness-raw" "$harness" "$id")
+    read_case_record "$rec"
+    fm_fake_exit0 "$FAKEBIN_DIR" hermes agy antigravity
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" "$harness --version")
+    expect_code 0 $? "raw $harness spawn should succeed: $out"
+    state="$HOME_DIR/state"
+    assert_absent "$state/$id.busy-gen" "raw $harness launch must not arm a busy generation"
+    out=$(classify "$harness" "$id" "$state")
+    [ "$out" = "unknown missing" ] || fail "raw $harness launch must classify unknown, got '$out'"
+    pass "raw $harness launch remains unwired and classifies unknown"
+  done
+}
+
 test_gemini_is_refused_as_a_secondmate() {
   local rec id=busy-gm-3 out
   rec=$(make_spawn_case gemini-secondmate gemini "$id")
@@ -432,6 +449,7 @@ test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
+test_raw_worker_bridge_launch_has_no_semantic_wiring
 test_gemini_is_refused_as_a_secondmate
 test_codex_unverified_until_a_semantic_source_exists
 

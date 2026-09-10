@@ -28,8 +28,9 @@ if os.environ.get('BRIDGE_HUGE'):
     sys.stdout.buffer.write(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','response':'\\u754c'*700000}, ensure_ascii=False).encode())
     sys.exit(0)
 if os.environ.get('BRIDGE_HUGE_ERRORS'):
-    if sys.argv[0].endswith('hermes'): print('session_id: exact-hermes-session', file=sys.stderr)
     sys.stderr.write('diagnostic\\n' * 120000)
+    if sys.argv[0].endswith('hermes'): print('session_id: exact-hermes-session', file=sys.stderr)
+    if os.environ.get('BRIDGE_TRUNCATED'): print('error: print timeout expired (response may be truncated)', file=sys.stderr)
     print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','response':'BRIDGE_OK'}))
     sys.exit(0)
 if os.environ.get('BRIDGE_BANNER'): print('Antigravity update available')
@@ -89,6 +90,9 @@ print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','res
         if harness == 'antigravity':
             call = json.loads((base/'calls').read_text().splitlines()[-1])
             assert call[call.index('--conversation')+1] == 'conversation-exact', call
+            buried = subprocess.run(command,input='/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_HUGE_ERRORS='1',BRIDGE_TRUNCATED='1'),timeout=30)
+            assert buried.returncode == 0, buried.stderr[:400]
+            assert 'turn failed' in buried.stdout, buried.stdout[-400:]
         if harness == 'antigravity':
             result = subprocess.run(command,input='fail-json\nretry\n/exit\n',capture_output=True,text=True,env=env,timeout=20)
             assert result.returncode == 0, result.stderr
