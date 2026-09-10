@@ -83,17 +83,6 @@ case "${1:-}" in
     else
       printf '%s\n' "$payload" >> "$D/keys"
       case "$payload" in
-        # The stub models the pane's shell, so a cd actually moves it: a re-home
-        # has to be observable as a shell that ENDED UP somewhere, not merely as
-        # a line that was typed. FM_FAKE_IGNORE_CD models the opposite pane -
-        # one that accepts the keystroke and stays put.
-        'cd -- '*)
-          [ -z "${FM_FAKE_IGNORE_CD:-}" ] || exit 0
-          target=${payload#cd -- }
-          target=${target#\'}
-          target=${target%\'}
-          printf '%s' "$target" > "$D/cwd"
-          ;;
         'export GOTMPDIR='*)
           if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
             : > "$FM_FAKE_TRACE_PREPARE"
@@ -189,7 +178,6 @@ run_control() {  # <case-dir> <args...>
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
-    FM_FAKE_IGNORE_CD="${FM_FAKE_IGNORE_CD:-}" \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
@@ -209,7 +197,6 @@ run_spawn() {  # <case-dir> <args...>
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
-    FM_FAKE_IGNORE_CD="${FM_FAKE_IGNORE_CD:-}" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -1053,11 +1040,10 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
   dir=$(new_case rollback rl13)
   add_ship_task "$dir" rl13 claude
   before=$(cat "$dir/home/state/rl13.meta")
-  # The endpoint's shell is not in the recorded worktree and will not return
-  # when told to, so the launch owner refuses AFTER the previous agent has
-  # already been stopped.
+  # The endpoint's shell is not in the recorded worktree, so the launch owner
+  # refuses AFTER the previous agent has already been stopped.
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
-  out=$(FM_FAKE_IGNORE_CD=1 run_control "$dir" rl13 relaunch --harness codex --note "carry this forward"); rc=$?
+  out=$(run_control "$dir" rl13 relaunch --harness codex --note "carry this forward"); rc=$?
   expect_code 1 "$rc" "a failed launch should fail closed"$'\n'"$out"
   assert_contains "$out" "no agent is running" "the failure should say no agent is running"
   assert_contains "$out" "$dir/wt" "the failure should say where the work is preserved"
@@ -1077,7 +1063,7 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
   dir=$(new_case rollback-race rl30)
   add_ship_task "$dir" rl30 claude
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
-  FM_FAKE_CWD_RACE_READY="$dir/cwd-race-ready" FM_FAKE_IGNORE_CD=1 \
+  FM_FAKE_CWD_RACE_READY="$dir/cwd-race-ready" \
     run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
       > "$dir/control.out" &
   control_pid=$!
@@ -1524,37 +1510,17 @@ test_spawn_relaunch_refuses_an_unrecorded_task() {
   pass "fm-spawn --relaunch: an unrecorded task is refused"
 }
 
-# The reproduced stranding: a task whose agent had exited left its shell sitting
-# somewhere other than the recorded worktree, and the relaunch refused outright,
-# leaving no sanctioned way to put a worker back on that work.
-test_spawn_relaunch_rehomes_a_pane_outside_the_worktree() {
-  local dir out rc=0
-  dir=$(new_case drifted rl18)
+test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
+  local dir out rc
+  dir=$(new_case wrongcwd rl18)
   add_ship_task "$dir" rl18 claude
   printf 'zsh' > "$dir/fake/command"
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
-  out=$(run_spawn "$dir" rl18 --relaunch --harness claude) || rc=$?
-  expect_code 0 "$rc" "a drifted pane should be re-homed, not refused ($out)"
-  grep -Fqx "cd -- '$dir/wt'" "$dir/fake/keys" \
-    || fail "the relaunch did not tell the drifted shell to return to the recorded worktree"
-  [ "$(cat "$dir/fake/cwd")" = "$dir/wt" ] \
-    || fail "the re-homed shell did not end up in the recorded worktree"
-  [ "$(meta_field "$dir" rl18 window)" = "fmses:fm-rl18" ] \
-    || fail "re-homing must reuse the same endpoint, not replace it"
-  pass "fm-spawn --relaunch: a shell that drifted out of the worktree is told to return, and the same endpoint is reused"
-}
-
-test_spawn_relaunch_refuses_a_pane_that_will_not_return_to_the_worktree() {
-  local dir out rc
-  dir=$(new_case wrongcwd rl41)
-  add_ship_task "$dir" rl41 claude
-  printf 'zsh' > "$dir/fake/command"
-  printf '%s' "$dir/proj" > "$dir/fake/cwd"
-  out=$(FM_FAKE_IGNORE_CD=1 run_spawn "$dir" rl41 --relaunch --harness claude); rc=$?
-  expect_code 1 "$rc" "a pane that will not return to the worktree should refuse"
-  assert_contains "$out" "did not return to its recorded worktree" \
-    "the refusal should name the shell that would not move"
-  pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
+  out=$(run_spawn "$dir" rl18 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a pane outside the worktree should refuse"
+  assert_contains "$out" "not its recorded worktree" "the refusal should name the wrong location"
+  [ ! -s "$dir/fake/keys" ] || fail "a refused tmux relaunch must send nothing to the pane"
+  pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding its work"
 }
 
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
@@ -1642,7 +1608,6 @@ test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
-test_spawn_relaunch_rehomes_a_pane_outside_the_worktree
-test_spawn_relaunch_refuses_a_pane_that_will_not_return_to_the_worktree
+test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight

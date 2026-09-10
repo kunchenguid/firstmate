@@ -44,7 +44,14 @@ SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)
 HOME_DIR="$SCRATCH/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/hsmoke"
-printf '# brief\n' > "$HOME_DIR/data/hsmoke/brief.md"
+cat > "$HOME_DIR/data/hsmoke/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise Herdr lifecycle control safely.
+
+## Firstmate spec
+Keep the isolated endpoint and worktree intact.
+EOF
 
 # A real git worktree so the control plane's checkpoint has a real local copy.
 PROJ="$SCRATCH/proj"
@@ -55,6 +62,8 @@ printf '# proj\n' > "$PROJ/README.md"
 git -C "$PROJ" add README.md
 git -C "$PROJ" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 git -C "$PROJ" worktree add --quiet -b hsmoke "$WT"
+PROJ_REAL=$(cd "$PROJ" && pwd -P)
+WT_REAL=$(cd "$WT" && pwd -P)
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -90,7 +99,7 @@ EOF
 } > "$HOME_DIR/state/hsmoke.meta"
 
 run_control() {
-  env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" \
+  env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
     FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=2 \
     "$ROOT/bin/fm-control.sh" "$@" 2>&1
 }
@@ -141,6 +150,45 @@ STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
 [ "$(fm_backend_agent_state herdr "no-separator-here")" = unreadable ] \
   || version_fail "a malformed endpoint target does not stay unreadable"
 pass "real herdr $HERDR_VERSION: a gone session reads recoverable while a live pane and a malformed target do not"
+
+FAKEBIN="$SCRATCH/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/codex" <<EOF
+#!/usr/bin/env bash
+: > "$SCRATCH/codex-launched"
+EOF
+chmod +x "$FAKEBIN/codex"
+printf -v FAKEBIN_Q '%q' "$FAKEBIN"
+printf -v PROJ_Q '%q' "$PROJ"
+fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "export PATH=$FAKEBIN_Q:\$PATH" \
+  || fail "could not put the inert test harness on the pane PATH"
+fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "cd -- $PROJ_Q" \
+  || fail "could not move the agent-free pane out of its recorded worktree"
+for _ in $(seq 1 20); do
+  [ "$(fm_backend_herdr_current_path "$SESSION:$PANE_ID" 2>/dev/null || true)" != "$PROJ_REAL" ] || break
+  sleep 0.1
+done
+[ "$(fm_backend_herdr_current_path "$SESSION:$PANE_ID" 2>/dev/null || true)" = "$PROJ_REAL" ] \
+  || fail "the real Herdr pane did not drift out of its recorded worktree"
+
+OUT=$(env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
+  "$ROOT/bin/fm-spawn.sh" hsmoke --relaunch --harness codex) \
+  || fail "a drifted, agent-free Herdr pane should be re-homed and relaunched: $OUT"
+for _ in $(seq 1 20); do
+  [ ! -e "$SCRATCH/codex-launched" ] || break
+  sleep 0.1
+done
+[ -e "$SCRATCH/codex-launched" ] || fail "the replacement harness was not launched"
+[ "$(fm_backend_herdr_current_path "$SESSION:$PANE_ID" 2>/dev/null || true)" = "$WT_REAL" ] \
+  || fail "the relaunched Herdr shell did not end up in its recorded worktree"
+[ "$(sed -n 's/^window=//p' "$HOME_DIR/state/hsmoke.meta" | tail -1)" = "$SESSION:$PANE_ID" ] \
+  || fail "the Herdr relaunch replaced its endpoint instead of reusing it"
+herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
+  || fail "the Herdr relaunch removed the endpoint it was required to reuse"
+awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.meta" \
+  > "$HOME_DIR/state/hsmoke.meta.tmp"
+mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
+pass "real herdr: a drifted agent-free shell returns to its worktree and reuses the same endpoint"
 
 if OUT=$(run_control hsmoke interrupt 2>&1); then
   fail "interrupt should refuse when herdr reports no agent on the pane: $OUT"
