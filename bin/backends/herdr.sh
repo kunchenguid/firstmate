@@ -2263,7 +2263,7 @@ EOF
 # A missing, failed, or malformed create response stays ambiguous and grants no
 # cleanup authority.
 fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-label>
-  local cwd=$1 workspace_label=$2 task_label=$3 session out tabs panes tab_count pane_count focus_before foreground_rc
+  local cwd=$1 workspace_label=$2 task_label=$3 session out tabs panes tab_count pane_count focus_before foreground_rc active_tab
   FM_BACKEND_HERDR_PROJECTION_SESSION=""
   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=""
   FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=""
@@ -2339,9 +2339,17 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     echo "error: herdr presentation seeded-tab prune refused a focus-unsafe close; leaving its journal quarantined" >&2
     return 1
   fi
-  foreground_rc=0
-  fm_backend_herdr_foreground_client_present "$session" || foreground_rc=$?
-  if [ "$foreground_rc" -ne 1 ]; then
+  active_tab=${focus_before#*$'\t'}
+  if [ "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" = "$active_tab" ]; then
+    foreground_rc=0
+    fm_backend_herdr_foreground_client_present "$session" || foreground_rc=$?
+    if [ "$foreground_rc" -ne 1 ]; then
+      fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "seeded-tab prune" || {
+        echo "error: herdr presentation seeded-tab prune did not preserve exact active focus; leaving its journal quarantined" >&2
+        return 1
+      }
+    fi
+  else
     fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "seeded-tab prune" || {
       echo "error: herdr presentation seeded-tab prune did not preserve exact active focus; leaving its journal quarantined" >&2
       return 1
