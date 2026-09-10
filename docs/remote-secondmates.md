@@ -357,6 +357,7 @@ That clone's configured origin is then read instead of being retyped.
 [`bin/fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) owns which URLs are accepted.
 It decides on structure and safety alone, so no forge, domain, or host is privileged and a self-hosted server works exactly as a hosted one does.
 The primary validates every resolved origin before transport, and the receiving host validates it again before cloning.
+An accepted origin may carry a `user:pass@host` authority, so a seeding error names the argument or the clone that supplied a refused or mismatched origin instead of repeating the URL; read the value with `git remote get-url origin` in the clone the error names.
 
 ### Delivery mode
 
