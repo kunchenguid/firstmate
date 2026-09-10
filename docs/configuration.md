@@ -541,6 +541,24 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Review-ready Discord notifications (config/discord-webhook)
+
+`config/discord-webhook` is an optional local, gitignored file holding one Discord webhook URL, followed by one newline.
+Dropping the file into a home opts that home in to review-ready notifications.
+The recommended file mode is `0600`, because the URL is a bearer secret for the channel.
+An absent, empty, or unreadable file is inert: the notifier exits 0 silently and no message is sent.
+
+When a task's pull request is recorded as ready by [`bin/fm-pr-check.sh`](../bin/fm-pr-check.sh), that step invokes [`bin/fm-notify.sh`](../bin/fm-notify.sh) once to post a short message naming the task, giving a one-line summary of what was implemented, and carrying the full PR URL.
+The summary is the PR title fetched best-effort through the same forge CLI the merge poll uses, falling back to the task's backlog title and then to the task id.
+The message is bounded to Discord's 2000-character limit, truncating the summary rather than the URL.
+
+The notification is best-effort and can never fail or delay the calling step: the webhook is read fresh on every call, the POST is bounded to about 10 seconds, and any failure logs one warning to stderr and exits 0.
+A private per-task marker records the exact notified PR identity, so re-running `fm-pr-check.sh` for the same PR never sends a second message; a different PR for the same task notifies on its own first record.
+The webhook URL is never printed, logged, or written into task records, and it is streamed to curl as a private config document rather than passed as an argument.
+
+This file is home-local and is not part of secondmate inherited configuration, so each home that should notify configures its own webhook.
+See [`docs/examples/discord-webhook`](examples/discord-webhook) for a copyable starting point.
+
 ## Mail plane (.env)
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.

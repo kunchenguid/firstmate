@@ -329,6 +329,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/discord-webhook",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/process-event-extension/file-signal.mjs",
       "audience": "operator-example"
     },
