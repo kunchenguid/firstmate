@@ -962,6 +962,21 @@ fm_backend_herdr_foreground_client_present() {  # <session>
   esac
 }
 
+fm_backend_herdr_projection_target_tab_mutation_allowed() {  # <session> <tab-id>
+  local session=$1 target_tab=$2 foreground_rc=0 focus active_tab
+  fm_backend_herdr_foreground_client_present "$session" || foreground_rc=$?
+  [ "$foreground_rc" -eq 1 ] && return 0
+  focus=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+  active_tab=${focus#*$'\t'}
+  [ "$target_tab" != "$active_tab" ] && return 0
+  if [ "$foreground_rc" -eq 0 ]; then
+    echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
+  else
+    echo "warning: herdr presentation cleanup could not verify whether a foreground client is viewing the target tab; refusing a focus-unsafe mutation" >&2
+  fi
+  return 1
+}
+
 # fm_backend_herdr_projection_close_pane_focus_preserving: close one exact
 # response-derived projection pane without leaving the captain focused
 # anywhere else.
@@ -981,7 +996,7 @@ fm_backend_herdr_foreground_client_present() {  # <session>
 fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
   local session=$1 pane_id=$2 required_agent_state=${3:-}
   local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
-  local skip_restore=0 foreground_rc=0
+  local skip_restore=0
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
@@ -1005,11 +1020,12 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
     [ "$state" = "$required_agent_state" ] || return 1
   fi
+  [ "$target_tab" != "$active_tab" ] || skip_restore=1
   plan=plain
   plan_shell_pid=
   plan_move_record=
-  if [ -n "$target_ws" ] && [ "$target_tab" != "$active_tab" ]; then
-    plan=$(fm_backend_herdr_emptying_close_plan "$session" "$pane_id" "$target_ws" "$target_tab" "${before%%$'\t'*}")
+  if [ -n "$target_ws" ]; then
+    plan=$(fm_backend_herdr_emptying_close_plan "$session" "$pane_id" "$target_ws" "$target_tab" "${before%%$'\t'*}" "$target_tab")
     case "$plan" in
       moved$'\t'*)
         plan_move_record=${plan%%$'\n'*}
@@ -1021,36 +1037,31 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
         plan_shell_pid=${plan#death }
         plan=death
         ;;
+      refuse)
+        return 1
+        ;;
       *)
         plan=plain
         ;;
     esac
   fi
-  if [ "$target_tab" = "$active_tab" ]; then
-    fm_backend_herdr_foreground_client_present "$session" || foreground_rc=$?
-    if [ "$foreground_rc" -ne 1 ]; then
-      echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
-      return 1
-    fi
-    skip_restore=1
-  fi
+  # Herdr has no atomic target-focus-aware mutation, so these immediate
+  # checkpoints bound but cannot eliminate the checkpoint-to-mutation race;
+  # a durable atomic close remains deferred until Herdr exposes one.
   if [ "$plan" = death ]; then
-    if fm_backend_herdr_death_close_pane "$session" "$pane_id" "$plan_shell_pid"; then
+    if fm_backend_herdr_death_close_pane "$session" "$pane_id" "$plan_shell_pid" "$target_tab"; then
       close_status=0
-    elif fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
+    elif fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab" \
+      && fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
       close_status=0
     else
       close_status=1
     fi
+  elif fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab" \
+    && fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
+    close_status=0
   else
-    # For an active-tab target Herdr has no atomic client-aware close, so the
-    # immediately preceding checkpoint only bounds the probe-to-close attach
-    # race; a durable atomic close remains deferred until Herdr exposes one.
-    if fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
-      close_status=0
-    else
-      close_status=1
-    fi
+    close_status=1
   fi
   if [ "$close_status" -eq 0 ] && [ -n "$plan_move_record" ]; then
     workspace_presence=$(fm_backend_herdr_workspace_presence_state "$session" "$target_ws")
@@ -1060,7 +1071,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     fi
   fi
   if [ "$close_status" -ne 0 ]; then
-    fm_backend_herdr_emptying_move_rollback "$plan_move_record" || true
+    fm_backend_herdr_emptying_move_rollback "$plan_move_record" "$session" "$target_tab" || true
   fi
   if [ "$skip_restore" -eq 0 ]; then
     fm_backend_herdr_projection_focus_restore "$session" "$before" "pane close" || return 2
@@ -1146,8 +1157,8 @@ fm_backend_herdr_workspace_move_capable() {  # <session>
 # focused one (repositioned to the end first when it does not, with the move
 # verified against the server-returned order and focus), and the exact pane
 # to hold one provably lone idle recognized shell.
-fm_backend_herdr_emptying_close_plan() {  # <session> <pane-id> <workspace-id> <tab-id> <focused-workspace-id>
-  local session=$1 pane_id=$2 ws_id=$3 tab_id=$4 focused_ws=$5
+fm_backend_herdr_emptying_close_plan() {  # <session> <pane-id> <workspace-id> <tab-id> <focused-workspace-id> [guard-tab-id]
+  local session=$1 pane_id=$2 ws_id=$3 tab_id=$4 focused_ws=$5 guard_tab=${6:-}
   local tabs panes list indices r rest a len capable socket mover response move_status shell_pid before_order
   [ -n "$ws_id" ] && [ -n "$tab_id" ] && [ -n "$focused_ws" ] || { printf 'plain\n'; return 0; }
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$ws_id" 2>/dev/null) || { printf 'plain\n'; return 0; }
@@ -1206,6 +1217,11 @@ fm_backend_herdr_emptying_close_plan() {  # <session> <pane-id> <workspace-id> <
     }
     mover=${FM_BACKEND_HERDR_WORKSPACE_MOVER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-workspace-move.py}
     before_order=$(printf '%s' "$list" | jq -c '[.result.workspaces[].workspace_id]' 2>/dev/null)
+    if [ -n "$guard_tab" ] \
+      && ! fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$guard_tab"; then
+      printf 'refuse\n'
+      return 0
+    fi
     if response=$("$mover" "$socket" "$ws_id" "$len" 2>/dev/null); then
       move_status=0
     else
@@ -1243,8 +1259,8 @@ fm_backend_herdr_emptying_close_plan() {  # <session> <pane-id> <workspace-id> <
 # line, or empty for a no-op when no move was attempted.
 # The rollback is verified against the mover's returned order and focus and
 # warns on any failure, so a lasting reorder is never silent.
-fm_backend_herdr_emptying_move_rollback() {  # <move-record>
-  local record=$1 marker ws index socket focused order mover response
+fm_backend_herdr_emptying_move_rollback() {  # <move-record> [session] [guard-tab-id]
+  local record=$1 session=${2:-} guard_tab=${3:-} marker ws index socket focused order mover response
   [ -n "$record" ] || return 0
   IFS=$'\t' read -r marker ws index socket focused order <<FMEOF
 $record
@@ -1260,7 +1276,8 @@ FMEOF
       ;;
   esac
   mover=${FM_BACKEND_HERDR_WORKSPACE_MOVER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-workspace-move.py}
-  if ! response=$("$mover" "$socket" "$ws" "$index" 2>/dev/null) \
+  if { [ -n "$guard_tab" ] && ! fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$guard_tab"; } \
+    || ! response=$("$mover" "$socket" "$ws" "$index" 2>/dev/null) \
     || ! printf '%s' "$response" | jq -e --argjson expected "$order" --arg focused "$focused" '
       .result.type == "workspace_list"
       and ([.result.workspaces[].workspace_id] == $expected)
@@ -1280,8 +1297,8 @@ FMEOF
 # unless the same pid is still the pane's strict bare idle shell, so an
 # exited or reused pid is never signaled.
 # Returns 0 only when the pane is confirmed gone.
-fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid>
-  local session=$1 pane_id=$2 shell_pid=$3 ps_bin attempt max_attempts presence resampled_pid
+fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid> [guard-tab-id]
+  local session=$1 pane_id=$2 shell_pid=$3 guard_tab=${4:-} ps_bin attempt max_attempts presence resampled_pid
   ps_bin=${FM_HERDR_PS_BIN:-ps}
   case "$shell_pid" in
     ''|*[!0-9]*) return 1 ;;
@@ -1289,6 +1306,7 @@ fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid>
   command -v "$ps_bin" >/dev/null 2>&1 || return 1
   max_attempts=${FM_BACKEND_HERDR_DEATH_CLOSE_POLLS:-40}
   fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$shell_pid" || return 1
+  [ -z "$guard_tab" ] || fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$guard_tab" || return 1
   kill -HUP "$shell_pid" 2>/dev/null || true
   attempt=0
   while [ "$attempt" -lt "$max_attempts" ]; do
@@ -1303,6 +1321,7 @@ fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid>
   resampled_pid=$(fm_backend_herdr_pane_idle_shell_sample "$session" "$pane_id") || return 1
   [ "$resampled_pid" = "$shell_pid" ] || return 1
   fm_backend_herdr_pid_is_bare_shell "$ps_bin" "$shell_pid" || return 1
+  [ -z "$guard_tab" ] || fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$guard_tab" || return 1
   kill -KILL "$shell_pid" 2>/dev/null || true
   attempt=0
   while [ "$attempt" -lt "$max_attempts" ]; do

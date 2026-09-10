@@ -61,6 +61,11 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
   exit 0
 fi
+if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
+  reason=${FM_FAKE_HERDR_FOREGROUND_REASON:-no_foreground_client}
+  printf '{"result":{"reason":"%s"}}\n' "$reason"
+  exit 0
+fi
 n=$next
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
@@ -155,6 +160,9 @@ done
 case "$cmd $sub" in
   "status --json")
     printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+    ;;
+  "terminal title")
+    printf '{"result":{"reason":"no_foreground_client"}}\n'
     ;;
   "workspace list")
     jq_state '{result:{workspaces:.workspaces}}'
@@ -1661,9 +1669,12 @@ test_projection_close_refuses_active_tab() {
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t2","focused":true}]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t2","focused":true}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
-  printf '%s\n' '{"result":{"changed":true,"reason":"cleared","type":"client_window_title"}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","workspace_id":"w9"},{"tab_id":"w9:t2","workspace_id":"w9"}]}}' > "$resp/4.out"
+  cp "$resp/1.out" "$resp/5.out"
+  cp "$resp/2.out" "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_FAKE_HERDR_FOREGROUND_REASON=cleared \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "cleanup must refuse when a live client is viewing the active tab"
@@ -1683,7 +1694,7 @@ test_projection_close_allows_stale_active_tab_without_foreground_client() {
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t2","focused":true}]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t2","focused":true}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
-  printf '%s\n' '{"result":{"changed":false,"reason":"no_foreground_client","type":"client_window_title"}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","workspace_id":"w9"},{"tab_id":"w9:t2","workspace_id":"w9"}]}}' > "$resp/4.out"
   : > "$resp/5.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
@@ -1772,7 +1783,7 @@ test_projection_close_rechecks_foreground_client_after_agent_validation() {
     }
     fm_backend_herdr_cli() {
       case "$2 $3" in
-        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\",\"workspace_id\":\"w9\"}}}\n" ;;
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\"}}}\n" ;;
         "terminal title")
           printf "foreground\n" >> "$EVENTS"
           if [ -e "$ATTACHED" ]; then
@@ -1793,6 +1804,40 @@ test_projection_close_rechecks_foreground_client_after_agent_validation() {
   assert_contains "$out" "target is the captain's active tab" \
     "fresh foreground-client refusal did not explain the active-tab boundary"
   pass "herdr presentation focus: active-tab attachment is rechecked after agent validation"
+}
+
+test_projection_close_rechecks_target_focus_after_planning() {
+  local dir events focused out status
+  dir="$TMP_ROOT/projection-close-focus-switch"; mkdir -p "$dir"
+  events="$dir/events"; focused="$dir/focused"; : > "$events"
+  out=$(ROOT="$ROOT" EVENTS="$events" FOCUSED="$focused" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() {
+      if [ -e "$FOCUSED" ]; then
+        printf "w9\tw9:t2"
+      else
+        printf "w1\tw1:t1"
+      fi
+    }
+    fm_backend_herdr_emptying_close_plan() {
+      : > "$FOCUSED"
+      printf "plain\n"
+    }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\",\"workspace_id\":\"w9\"}}}\n" ;;
+        "terminal title") printf "{\"result\":{\"reason\":\"cleared\"}}\n" ;;
+        "pane close") printf "close\n" >> "$EVENTS" ;;
+      esac
+    }
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2
+  ' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a target focused during planning must defer the pane close"
+  [ ! -s "$events" ] || fail "the focus-switched target was still mutated: $(cat "$events")"
+  assert_contains "$out" "target is the captain's active tab" \
+    "focus-switch refusal did not explain the active-tab boundary"
+  pass "herdr presentation focus: pre-close checkpoint catches a target focused during planning"
 }
 
 # --- emptying-close focus-safe removal (Herdr 0.7.5 #1621 mitigation) ------
@@ -2542,9 +2587,12 @@ test_projection_seeded_prune_refuses_active_tab() {
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t1","focused":true}]}}' > "$resp/4.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","focused":true},{"tab_id":"w9:t2","focused":false}]}}' > "$resp/5.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}' > "$resp/6.out"
-  printf '%s\n' '{"result":{"changed":true,"reason":"cleared","type":"client_window_title"}}' > "$resp/7.out"
+  cp "$resp/1.out" "$resp/7.out"
+  cp "$resp/4.out" "$resp/8.out"
+  cp "$resp/5.out" "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_FAKE_HERDR_FOREGROUND_REASON=cleared \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w9 w9:t1 focus-preserving' "$ROOT" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "projected seeded pruning must refuse the active tab"
@@ -3092,7 +3140,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   [ -n "$agent_line" ] && [ "$agent_line" -lt "$close_line" ] \
     || fail "reclaim did not recheck the old pane agent state before the close"
   boundary_mutations=$(sed -n "$((agent_line + 1)),$((close_line - 1))p" "$log" \
-    | grep -Ev $'\x1f(tab\x1flist|pane\x1flist|workspace\x1flist)' || true)
+    | grep -Ev $'\x1f(tab\x1flist|pane\x1flist|workspace\x1flist|terminal\x1ftitle\x1fclear)' || true)
   [ -z "$boundary_mutations" ] \
     || fail "reclaim mutated between the old pane agent recheck and the close: $boundary_mutations"
   assert_not_contains "$calls" $'workspace\x1fclose' "reclaim introduced workspace-close authority"
@@ -4855,6 +4903,7 @@ test_projection_close_allows_stale_active_tab_without_foreground_client
 test_projection_close_reports_focus_restore_failure
 test_projection_close_rechecks_required_agent_state_at_boundary
 test_projection_close_rechecks_foreground_client_after_agent_validation
+test_projection_close_rechecks_target_focus_after_planning
 test_projection_close_emptying_after_focus_uses_pane_death_without_move
 test_projection_close_emptying_before_focus_repositions_then_uses_pane_death
 test_projection_close_emptying_before_last_focus_needs_no_move
