@@ -1580,6 +1580,152 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+
+# Write one portable serial timing artifact.
+# $1 dir, $2 lane, $3 shard wall ms, then "path:duration_ms" pairs.
+shard_balance_artifact() {
+  local dir=$1 lane=$2 wall=$3 out entries pair
+  shift 3
+  out="$dir/fm-test-timing-$lane.json"
+  entries=""
+  for pair in "$@"; do
+    [ -z "$entries" ] || entries="$entries,"
+    entries="$entries{\"path\": \"${pair%%:*}\", \"family\": \"afk\", \"duration_ms\": ${pair##*:}, \"exit\": 0, \"gate_skip\": false}"
+  done
+  cat >"$out" <<JSON
+{
+  "run_id": "$lane",
+  "selection": "lane=$lane",
+  "started_at": "2026-09-10T00:00:00Z",
+  "finished_at": "2026-09-10T00:30:00Z",
+  "summary": {"total": $#, "failed": 0, "skipped_gate": 0, "duration_ms": $wall},
+  "scripts": [$entries]
+}
+JSON
+  printf '%s\n' "$out"
+}
+
+# The job cap the guard scores against, read back from its own output rather
+# than from the runner's source.
+shard_balance_bound_ms() {
+  local tmp a out bound
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-bound.XXXXXX")
+  a=$(shard_balance_artifact "$tmp" portable-serial-1of1 1000 "tests/a.test.sh:1000")
+  out=$("$RUNNER" --check-shard-balance "$a") || {
+    rm -rf "$tmp"
+    return 1
+  }
+  bound=$(printf '%s\n' "$out" | sed -n 's/.*bound=\([0-9]*\)min.*/\1/p')
+  rm -rf "$tmp"
+  [ -n "$bound" ] || return 1
+  printf '%s\n' $((bound * 60000))
+}
+
+test_shard_balance_passes_and_reports_bound() {
+  local tmp bound a b out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-ok.XXXXXX")
+  bound=$(shard_balance_bound_ms) || fail "could not read the guard's job cap"
+  a=$(shard_balance_artifact "$tmp" portable-serial-1of2 $((bound / 4)) "tests/a.test.sh:$((bound / 4))")
+  b=$(shard_balance_artifact "$tmp" portable-serial-2of2 $((bound / 5)) "tests/b.test.sh:$((bound / 5))")
+  out=$("$RUNNER" --check-shard-balance "$a" "$b") \
+    || fail "balanced shards must pass the balance guard"
+  assert_contains "$out" "FM_TEST_SHARD_BALANCE ok shards=2" "balance guard reports both shards"
+  assert_contains "$out" "bound=" "balance guard names the cap it scored against"
+  rm -rf "$tmp"
+  pass "shard balance: shards well inside the cap pass and report the bound"
+}
+
+test_shard_balance_goes_red_on_an_imbalanced_shard() {
+  # The guard is only worth shipping if it can fail. One shard is parked just
+  # under the cap while its sibling idles; the guard must refuse and say so.
+  local tmp bound a b out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-red.XXXXXX")
+  bound=$(shard_balance_bound_ms) || fail "could not read the guard's job cap"
+  a=$(shard_balance_artifact "$tmp" portable-serial-1of2 $((bound * 99 / 100)) "tests/slow.test.sh:$((bound * 99 / 100))")
+  b=$(shard_balance_artifact "$tmp" portable-serial-2of2 $((bound / 10)) "tests/fast.test.sh:$((bound / 10))")
+  rc=0
+  out=$("$RUNNER" --check-shard-balance "$a" "$b" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a shard at 99% of the job cap must fail the balance guard"
+  assert_contains "$out" "shard balance guard failed" "balance guard states the refusal"
+  assert_contains "$out" "portable-serial-1of2" "balance guard names the offending shard"
+  assert_contains "$out" "job cap" "balance guard names the cap it scored against"
+  rm -rf "$tmp"
+  pass "shard balance: a shard near its job cap turns the guard red"
+}
+
+test_shard_balance_goes_red_on_a_stale_hint_table() {
+  # The failure the guard exists for: the hints still parse and still cover the
+  # lane, but they no longer describe reality. The refusal must name the scripts
+  # to re-measure, not merely say a shard was slow.
+  local tmp bound a out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-stale.XXXXXX")
+  bound=$(shard_balance_bound_ms) || fail "could not read the guard's job cap"
+  # fm-watch-triage.test.sh is hinted; here it runs far over that hint and
+  # carries the shard past the cap share on its own.
+  a=$(shard_balance_artifact "$tmp" portable-serial-1of1 $((bound * 95 / 100)) \
+    "tests/fm-watch-triage.test.sh:$((bound * 90 / 100))" \
+    "tests/fm-teardown.test.sh:$((bound * 5 / 100))")
+  rc=0
+  out=$("$RUNNER" --check-shard-balance "$a" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a shard whose scripts ran far over their hints must fail the guard"
+  assert_contains "$out" "re-measure the scripts furthest over their hints" \
+    "balance guard says what to re-measure"
+  assert_contains "$out" "tests/fm-watch-triage.test.sh" \
+    "balance guard names the drifted script"
+  rm -rf "$tmp"
+  pass "shard balance: a stale hint table turns the guard red and names what drifted"
+}
+
+test_shard_balance_measures_the_recorded_wall_time() {
+  # The shard's own recorded wall clock decides, not the sum of its scripts: a
+  # lane that spends time between scripts must not score as if it did not.
+  local tmp bound a out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-wall.XXXXXX")
+  bound=$(shard_balance_bound_ms) || fail "could not read the guard's job cap"
+  a=$(shard_balance_artifact "$tmp" portable-serial-1of1 $((bound * 99 / 100)) "tests/a.test.sh:1000")
+  rc=0
+  out=$("$RUNNER" --check-shard-balance "$a" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the guard must score the recorded wall time, not the script sum"
+  assert_contains "$out" "shard balance guard failed" "wall-time shard is refused"
+  rm -rf "$tmp"
+  pass "shard balance: the shard's recorded wall time is what is scored"
+}
+
+test_shard_balance_reports_missing_artifacts() {
+  # A cancelled shard uploads no artifact, so the guard must say how much of the
+  # partition it could actually read instead of implying it checked all of it.
+  local tmp bound a out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-balance-partial.XXXXXX")
+  bound=$(shard_balance_bound_ms) || fail "could not read the guard's job cap"
+  a=$(shard_balance_artifact "$tmp" portable-serial-1of5 $((bound / 4)) "tests/a.test.sh:$((bound / 4))")
+  out=$("$RUNNER" --check-shard-balance "$a") \
+    || fail "one readable shard under the cap must still pass"
+  assert_contains "$out" "FM_TEST_SHARD_BALANCE partial 1 of 5" \
+    "balance guard reports how many shards it could read"
+  rm -rf "$tmp"
+  pass "shard balance: missing shard artifacts are reported, not assumed green"
+}
+
+test_portable_serial_job_cap_has_one_owner() {
+  # The guard scores against a cap that ci.yml actually enforces. If the two
+  # drift, the guard silently measures against a bound nothing applies.
+  command -v ruby >/dev/null 2>&1 \
+    || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
+  local workflow_cap runner_bound_ms runner_cap
+  workflow_cap=$(ruby -ryaml -e '
+doc = YAML.load_file(ARGV[0])
+job = doc.fetch("jobs").fetch("tests-portable-serial")
+raise "tests-portable-serial has no timeout-minutes" unless job.key?("timeout-minutes")
+puts job.fetch("timeout-minutes")
+' "$ROOT/.github/workflows/ci.yml") \
+    || fail "could not read the tests-portable-serial cap from ci.yml"
+  runner_bound_ms=$(shard_balance_bound_ms) || fail "could not read the guard's job cap"
+  runner_cap=$((runner_bound_ms / 60000))
+  [ "$workflow_cap" = "$runner_cap" ] \
+    || fail "shard balance guard scores against ${runner_cap} min but ci.yml caps tests-portable-serial at ${workflow_cap} min"
+  pass "shard balance: the job cap has one owner across ci.yml and the runner"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1615,3 +1761,9 @@ test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+test_shard_balance_passes_and_reports_bound
+test_shard_balance_goes_red_on_an_imbalanced_shard
+test_shard_balance_goes_red_on_a_stale_hint_table
+test_shard_balance_measures_the_recorded_wall_time
+test_shard_balance_reports_missing_artifacts
+test_portable_serial_job_cap_has_one_owner
