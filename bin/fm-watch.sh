@@ -401,7 +401,7 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc dir base
+  local w=$1 task=$2 action verb rec count tail40 reason ring_rc dir base backend agent_state
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   rec=${action#* }
@@ -415,17 +415,25 @@ inbox_steer_check() {  # <window> <task>
       rec=$(fm_task_inbox_oldest_unhandled "$STATE" "$task" 2>/dev/null) || return 0
       ;;
   esac
-  tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
+  dir=$(fm_task_inbox_dir "$STATE" "$task")
+  base=${rec##*/}
+  [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ] && return 0
+  backend=$(window_backend "$w")
+  agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
+  case "$agent_state" in
+    dead|missing)
+      inbox_steer_escalate_unavailable "$w" "$task" "$rec"
+      return 0
+      ;;
+  esac
+  tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
   # Capture failure when the endpoint is not affirmatively alive means doorbell
   # delivery is impossible; surface the unread steer immediately instead of
   # spending the ring ladder's grace and attempt budget (triage_unreadable_endpoint
   # contract). Alive alone is excluded so a transient capture glitch cannot false-
   # escalate while send may still succeed.
   if [ -z "$tail40" ] \
-     && [ "$(fm_backend_agent_alive "$(window_backend "$w")" "$w" 2>/dev/null || printf unknown)" != alive ]; then
-    dir=$(fm_task_inbox_dir "$STATE" "$task")
-    base=${rec##*/}
-    [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ] && return 0
+     && [ "$(fm_backend_agent_alive "$backend" "$w" 2>/dev/null || printf unknown)" != alive ]; then
     count=$(fm_task_inbox_ring_max)
     verb=escalate
   else

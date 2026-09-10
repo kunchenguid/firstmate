@@ -7,6 +7,8 @@
 # join command under state/rooms/<review-id>/.
 # join-cmd <review-id> <seat-name> prints the exact environment and command for
 # one seat to join its review room.
+# handoff <review-id> <sender-seat> <recipient-task-id> <handoff-key> <message>
+# publishes one keyed room packet and durably notifies the recorded recipient.
 # transcript <review-id> exports the raw Agent Room state and verbatim room
 # transcript into data/<review-id>/.
 # stop <review-id> terminates only the review-owned server after checking its
@@ -20,6 +22,7 @@
 #   fm-room.sh setup
 #   fm-room.sh start <review-id>
 #   fm-room.sh join-cmd <review-id> <seat-name>
+#   fm-room.sh handoff <review-id> <sender-seat> <recipient-task-id> <handoff-key> <message>
 #   fm-room.sh transcript <review-id>
 #   fm-room.sh stop <review-id>
 #   fm-room.sh status
@@ -345,6 +348,186 @@ join_command() {
     "$HOST" "$port" "$dir" "$js_runner" "$js" "$code" "$seat"
 }
 
+room_api() {
+  local runner=$1 base=$2 method=$3 path=$4 name=${5:-} content=${6:-}
+  FM_ROOM_API_BASE="$base" FM_ROOM_API_METHOD="$method" FM_ROOM_API_PATH="$path" \
+    FM_ROOM_API_NAME="$name" FM_ROOM_API_CONTENT="$content" "$runner" - <<'NODE'
+const base = process.env.FM_ROOM_API_BASE;
+const method = process.env.FM_ROOM_API_METHOD;
+const url = new URL(process.env.FM_ROOM_API_PATH, base).toString();
+const body = method === "POST" ? JSON.stringify({
+  name: process.env.FM_ROOM_API_NAME,
+  content: process.env.FM_ROOM_API_CONTENT,
+}) : undefined;
+const configuredTimeout = Number(process.env.FM_ROOM_API_TIMEOUT_MS || 10000);
+const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 10000;
+const controller = new AbortController();
+const timer = setTimeout(() => controller.abort(), timeoutMs);
+try {
+  const response = await fetch(url, {
+    method,
+    headers: body ? { "content-type": "application/json" } : undefined,
+    body,
+    signal: controller.signal,
+  });
+  const value = await response.json();
+  if (!response.ok) throw new Error(value.error || `${method} ${url} failed (${response.status})`);
+  process.stdout.write(JSON.stringify(value));
+} finally {
+  clearTimeout(timer);
+}
+NODE
+}
+
+room_handoff_normalize() {
+  local runner=$1 dir=$2 sender=$3 message=$4 prefix=$5 output
+  output=$(mktemp "$dir/.handoff.XXXXXX") || return 1
+  if ! FM_ROOM_HANDOFF_SENDER="$sender" FM_ROOM_HANDOFF_CONTENT="$message" \
+    FM_ROOM_HANDOFF_PREFIX="$prefix" "$runner" - >"$output" <<'NODE'
+const normalizedSender = String(process.env.FM_ROOM_HANDOFF_SENDER || "Agent").trim();
+const sender = normalizedSender.slice(0, 80) || "Agent";
+const content = String(process.env.FM_ROOM_HANDOFF_CONTENT || "").trim();
+const prefix = process.env.FM_ROOM_HANDOFF_PREFIX || "";
+if (/[\r\n]/.test(normalizedSender)) throw new Error("handoff sender contains an embedded newline");
+if (!content) throw new Error("handoff message is empty after Agent Room normalization");
+if (`${prefix}\n${content}`.length > 20000) throw new Error("handoff message exceeds Agent Room's 20000-character limit");
+process.stdout.write(`${sender}\n${content}`);
+NODE
+  then
+    rm -f "$output"
+    return 1
+  fi
+  printf '%s' "$output"
+}
+
+room_packet_matches() {
+  local runner=$1 room_json=$2 packet_id=$3 sender=$4 content=$5
+  FM_ROOM_JSON="$room_json" FM_ROOM_PACKET_ID="$packet_id" \
+    FM_ROOM_HANDOFF_SENDER="$sender" FM_ROOM_HANDOFF_CONTENT="$content" "$runner" - <<'NODE'
+const room = JSON.parse(process.env.FM_ROOM_JSON);
+const packet = room.message;
+const expectedId = Number(process.env.FM_ROOM_PACKET_ID);
+const expectedSender = process.env.FM_ROOM_HANDOFF_SENDER;
+const expectedContent = process.env.FM_ROOM_HANDOFF_CONTENT;
+if (!packet || packet.id !== expectedId || packet.sender !== expectedSender || packet.content !== expectedContent) {
+  throw new Error("Agent Room altered the retained handoff payload");
+}
+NODE
+}
+
+room_handoff_lookup() {
+  local runner=$1 room_json=$2 marker=$3 sender=$4 content=$5
+  FM_ROOM_JSON="$room_json" FM_ROOM_HANDOFF_MARKER="$marker" \
+    FM_ROOM_HANDOFF_SENDER="$sender" FM_ROOM_HANDOFF_CONTENT="$content" "$runner" - <<'NODE'
+const room = JSON.parse(process.env.FM_ROOM_JSON);
+const marker = process.env.FM_ROOM_HANDOFF_MARKER;
+const keyPrefix = `${marker.split(" recipient=", 1)[0]} `;
+const sender = process.env.FM_ROOM_HANDOFF_SENDER;
+const content = process.env.FM_ROOM_HANDOFF_CONTENT;
+const exact = [];
+const conflicting = [];
+for (const message of Array.isArray(room.messages) ? room.messages : []) {
+  const firstLine = String(message.content || "").split("\n", 1)[0];
+  if (!firstLine.startsWith(keyPrefix)) continue;
+  if (firstLine === marker && message.sender === sender && message.content === content) exact.push(message.id);
+  else conflicting.push(message.id);
+}
+if (exact.length > 1) { console.log(`ambiguous ${exact.join(",")}`); }
+else if (exact.length === 1 && conflicting.length === 0) { console.log(`reuse ${exact[0]}`); }
+else if (conflicting.length) { console.log(`conflict ${conflicting.join(",")}`); }
+else { console.log("missing"); }
+NODE
+}
+
+room_packet_id() {
+  local runner=$1 room_json=$2
+  FM_ROOM_JSON="$room_json" "$runner" - <<'NODE'
+const room = JSON.parse(process.env.FM_ROOM_JSON);
+const id = room.message?.id;
+if (!Number.isInteger(id) || id < 1) throw new Error("room API returned no packet id");
+console.log(id);
+NODE
+}
+
+handoff() {
+  [ "$#" -ge 5 ] || fail "handoff requires <review-id> <sender-seat> <recipient-task-id> <handoff-key> <message>"
+  local id=$1 sender=$2 recipient=$3 key=$4 dir code port base js js_runner room_json marker content lookup packet_id notification send_output send_rc normalized recipient_kind recipient_mode recipient_remote
+  shift 4
+  local message=$*
+  case "$recipient" in
+    ''|.|..|*[!A-Za-z0-9._-]*) fail "recipient task id must be a recorded task slug: $recipient" ;;
+  esac
+  case "$key" in
+    ''|*[!A-Za-z0-9._-]*) fail "handoff key must contain only letters, numbers, dot, underscore, or hyphen: $key" ;;
+  esac
+  [ -n "$message" ] || fail "handoff message cannot be empty"
+  dir=$(review_dir "$id")
+  [ ! -L "$dir" ] || fail "review directory is a symlink: $dir"
+  [ -d "$dir" ] || fail "review does not exist: $id"
+  trusted_dir_tree "$dir"
+  [ -f "$dir/meta" ] || fail "review does not exist: $id"
+  safe_existing_file "$dir/meta"
+  safe_existing_file "$STATE/$recipient.meta"
+  [ -f "$STATE/$recipient.meta" ] || fail "recipient task id is not recorded in this home: $recipient"
+  recipient_kind=$(awk -F= '$1 == "kind" { sub(/^[^=]*=/, ""); print; exit }' "$STATE/$recipient.meta")
+  recipient_mode=$(awk -F= '$1 == "mode" { sub(/^[^=]*=/, ""); print; exit }' "$STATE/$recipient.meta")
+  recipient_remote=$(awk -F= '$1 == "remote" || $1 == "remote_host" || $1 == "remote_root" || $1 == "remote_backend" { found=1 } END { exit(found ? 0 : 1) }' "$STATE/$recipient.meta" && printf 1 || true)
+  if [ "$recipient_kind" = secondmate ] || [ "$recipient_mode" = secondmate ] || [ "$recipient_remote" = 1 ]; then
+    fail "room handoff only supports local ordinary task recipients: $recipient"
+  fi
+  code=$(meta_get "$dir" room_code)
+  port=$(meta_get "$dir" port)
+  [ -n "$code" ] || fail "room code is missing for review $id"
+  [ -n "$port" ] || fail "room port is missing for review $id"
+  case "$code" in *[!A-Za-z0-9-]*) fail "room code is invalid for review $id" ;; esac
+  base="http://$HOST:$port"
+  js=$(room_script)
+  js_runner=$(runtime)
+  runtime_check "$js_runner"
+  marker="fm-room-handoff.v1 key=$key recipient=$recipient"
+  normalized=$(room_handoff_normalize "$js_runner" "$dir" "$sender" "$message" "$marker") \
+    || fail "handoff payload could not be normalized for Agent Room"
+  sender=$(sed -n '1p' "$normalized")
+  message=$(tail -n +2 "$normalized")
+  rm -f "$normalized"
+  valid_seat_name "$sender" || fail "invalid sender seat"
+  [ -n "$message" ] || fail "handoff message cannot be empty after Agent Room normalization"
+  content="$marker"$'\n'"$message"
+  acquire_start_lock "$dir"
+  trap 'release_start_lock' EXIT HUP INT TERM
+  health "$base" || fail "Agent Room is not healthy for review $id"
+  room_json=$(room_api "$js_runner" "$base" GET "/api/rooms/$code" "" "") \
+    || fail "could not read Agent Room state for review $id"
+  lookup=$(room_handoff_lookup "$js_runner" "$room_json" "$marker" "$sender" "$content")
+  case "$lookup" in
+    reuse\ *) packet_id=${lookup#reuse } ;;
+    missing)
+      room_json=$(room_api "$js_runner" "$base" POST "/api/rooms/$code/messages" "$sender" "$content") \
+        || fail "could not publish room handoff for review $id"
+      packet_id=$(room_packet_id "$js_runner" "$room_json") \
+        || fail "room handoff was published without a packet id; retry the same handoff key"
+      room_packet_matches "$js_runner" "$room_json" "$packet_id" "$sender" "$content" \
+        || fail "Agent Room altered the retained handoff payload; refusing durable notification"
+      ;;
+    conflict\ *) fail "handoff key '$key' already names a different room packet; refusing a duplicate or changed payload" ;;
+    ambiguous\ *) fail "handoff key '$key' names multiple room packets; refusing to guess a packet" ;;
+    *) fail "could not classify room handoff identity for review $id" ;;
+  esac
+  notification="Read room $code packet $packet_id for handoff key $key; publication is not acceptance."
+  send_output=
+  if send_output=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 \
+    "$ROOT/bin/fm-send.sh" "$recipient" "$notification" 2>&1); then
+    printf 'Room handoff packet #%s durably notified %s.\n' "$packet_id" "$recipient"
+    return 0
+  else
+    send_rc=$?
+    printf 'fm-room: room handoff packet #%s is published but its durable notification to %s failed; retry the same handoff key.\n' \
+      "$packet_id" "$recipient" >&2
+    [ -z "$send_output" ] || printf '%s\n' "$send_output" >&2
+    return "$send_rc"
+  fi
+}
+
 START_LOCK=
 START_LOCK_CANDIDATE=
 START_LOCK_START=
@@ -631,6 +814,9 @@ case "$command" in
     [ -f "$dir/meta" ] || fail "review does not exist: $2"
     safe_existing_file "$dir/meta"
     join_command "$dir" "$3"
+    ;;
+  handoff)
+    handoff "${@:2}"
     ;;
   transcript)
     [ "$#" -eq 2 ] || fail "transcript requires <review-id>"

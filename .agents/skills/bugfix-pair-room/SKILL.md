@@ -47,6 +47,9 @@ The profile is the choice.
 4. **Coder fixes**: the coder turns the reproduction into the regression test, confirms red, makes the smallest change that turns it green, and posts `head <sha> ready for driver re-verdict`.
    Second failed fix on the same symptom stops the coder.
    The driver re-diagnoses.
+   Actionable packets use `bin/fm-room.sh handoff <review-id> <sender-seat> <recipient-task-id> <handoff-key> <message>`, which publishes the packet and durably notifies the recorded recipient as one action.
+   Repeating the exact key and payload reuses the published packet and idempotent notification; a changed payload for that key fails loudly.
+   Raw room chat remains conversation, not an actionable handoff.
 5. **Driver verdict**: `driver-verdict <id> <PR URL> ok|defects: <one line>` at the exact head.
    The independent reviewer (shipwright-reviewer) stays outside the room and gates the PR as usual.
 6. **Land and propagate**: shipwright merges through `bin/fm-pr-merge.sh` on the reviewer's exact-head LGTM plus the local gate, then `bin/fm-update.sh` so every running home gets the fix the same day.
