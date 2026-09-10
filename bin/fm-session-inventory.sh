@@ -36,12 +36,17 @@
 #   rows[]            uniform rows, ordered kind-then-age, described below.
 #   counts            {total, stale, notify, by_kind{worker,review,service,harness_session}}.
 #   harness_sessions  {root_pid, lock_pid, lock_owner, self_resolution,
-#                     sessions, elsewhere}.
+#                     sessions, own_workers, elsewhere}.
 #                     `sessions` counts the live harness sessions working in THIS
-#                     home; `elsewhere` counts the other harness processes under
-#                     the same harness - pool machinery, other homes' sessions,
-#                     and this home's own workers, which are reported as worker
-#                     rows instead - which are neither listed nor claimed here.
+#                     home. `own_workers` counts the harness processes running
+#                     one of this home's own workers, which are reported as
+#                     worker rows and are deliberately not counted anywhere else:
+#                     one running thing is one row. `elsewhere` counts what is
+#                     left under the same harness - pool machinery and other
+#                     homes' sessions - which is neither listed nor claimed here.
+#                     The three together account for every harness process under
+#                     the recorded lock's harness, which is what lets the live
+#                     drift guard prove none has been quietly lost.
 #                     self_resolution says which signal answered "which of these
 #                     is the captain's own session": "ancestry", "session-lock",
 #                     "unresolved" when neither could, and "not_applicable" when
@@ -759,6 +764,7 @@ HARNESS_ROOT=
 HARNESS_LOCK_PID=
 HARNESS_LOCK_OWNER=not_checked
 HARNESS_OTHER=0
+HARNESS_OWN_WORKERS=0
 
 # WHOSE SESSION IS THIS? Handing the captain a `kill` for the conversation he is
 # having is worse than telling him nothing, so no row may carry one until that
@@ -771,22 +777,28 @@ HARNESS_OTHER=0
 #      When it resolves it is conclusive in both directions - if none of this
 #      home's sessions is in that ancestry, the captain is demonstrably talking
 #      to something else, and every row here is genuinely closeable.
-#   2. THE RECORDED SESSION LOCK. The overview's primary home is a pane the
-#      captain leaves open, and that pane is a child of the terminal, not of any
-#      harness, so signal 1 finds nothing there at all. What the pane can still
-#      read is this home's lock: when the pid it records is itself one of the
-#      sessions working in this home, that session is the one driving this home
-#      and therefore his.
+#   2. WHAT THE LOCK WRITER RECORDED BESIDE THE LOCK. The overview's primary
+#      home is a pane the captain leaves open, and that pane is a child of the
+#      terminal, not of any harness, so signal 1 finds nothing there at all. The
+#      lock file itself cannot answer either: it holds the OUTERMOST pid of the
+#      contiguous harness run, which for a shared harness daemon is the daemon,
+#      and the daemon is never one of the sessions listed here. So bin/fm-lock.sh
+#      writes state/.lock.session alongside it, naming the ancestry pids that
+#      were working in this home when the session took the lock - the one thing
+#      a reader outside the session cannot derive for itself. A recorded pid is
+#      believed only when it is still one of the live sessions found here, so a
+#      record left by a session that has since died attributes nothing.
 #
-# NEITHER RESOLVING IS NOT A LICENCE TO OFFER A KILL. A harness that records its
-# outermost daemon rather than the session pid leaves both signals silent, and
-# then every session here is equally likely to be his. Those rows say ownership
-# is unknown and carry no close command: the pid is still printed, so ending one
-# deliberately stays possible, but the overview stops proposing it.
+# NEITHER RESOLVING IS NOT A LICENCE TO OFFER A KILL. An older lock with no
+# record beside it, or a session whose working directory was never this home,
+# leaves both signals silent, and then every session here is equally likely to
+# be his. Those rows say ownership is unknown and carry no close command: the
+# pid is still printed, so ending one deliberately stays possible, but the
+# overview stops proposing it.
 SELF_HARNESS_PIDS=
 SELF_RESOLUTION=not_applicable
 resolve_session_ownership() {  # <session-pid>...
-  local pid pids
+  local pid pids recorded
   SELF_HARNESS_PIDS=' '
   if pids=$(fm_harness_ancestry_pids 2>/dev/null); then
     while IFS= read -r pid; do
@@ -798,13 +810,17 @@ EOF
     SELF_RESOLUTION=ancestry
     return 0
   fi
-  for pid in "$@"; do
-    if [ -n "$HARNESS_LOCK_PID" ] && [ "$pid" = "$HARNESS_LOCK_PID" ]; then
-      SELF_HARNESS_PIDS=" $HARNESS_LOCK_PID "
-      SELF_RESOLUTION=session-lock
-      return 0
-    fi
-  done
+  if [ -r "$STATE/.lock.session" ]; then
+    while IFS= read -r recorded; do
+      case "$recorded" in ''|*[!0-9]*) continue ;; esac
+      for pid in "$@"; do
+        [ "$pid" = "$recorded" ] || continue
+        SELF_HARNESS_PIDS="$SELF_HARNESS_PIDS$recorded "
+        SELF_RESOLUTION=session-lock
+      done
+    done < "$STATE/.lock.session"
+    [ "$SELF_RESOLUTION" != session-lock ] || return 0
+  fi
   SELF_RESOLUTION=unresolved
 }
 is_self_harness_pid() {  # <pid>
@@ -865,7 +881,9 @@ collect_harness_sessions() {
 
   for pid in "${candidates[@]}"; do
     cwd=$(cwd_of "$pid")
-    if path_within "$cwd" "$FM_HOME" && ! within_a_worker_worktree "$cwd"; then
+    if within_a_worker_worktree "$cwd"; then
+      HARNESS_OWN_WORKERS=$((HARNESS_OWN_WORKERS + 1))
+    elif path_within "$cwd" "$FM_HOME"; then
       mine+=("$pid")
     else
       HARNESS_OTHER=$((HARNESS_OTHER + 1))
@@ -920,6 +938,7 @@ JSON=$(
     --arg lock_owner "$HARNESS_LOCK_OWNER" \
     --arg self_resolution "$SELF_RESOLUTION" \
     --argjson other "$HARNESS_OTHER" \
+    --argjson own_workers "$HARNESS_OWN_WORKERS" \
     --rawfile sources_raw "$SOURCES" \
     '
     def blank_null: if . == "" then null else . end;
@@ -978,6 +997,7 @@ JSON=$(
          lock_owner: $lock_owner,
          self_resolution: $self_resolution,
          sessions: ([$ordered[] | select(.kind == "harness-session")] | length),
+         own_workers: $own_workers,
          elsewhere: $other
        },
        sources: $sources}

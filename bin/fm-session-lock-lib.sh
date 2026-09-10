@@ -145,6 +145,56 @@ EOF
   printf '%s\n' "$outermost"
 }
 
+# Print the pids of this session's harness ancestry that are WORKING IN <home>,
+# innermost first, or return 1.
+#
+# The ancestry above says which pid in a contiguous run is the session cannot be
+# read off the ancestry alone. The working directory is the missing half: a
+# harness turns a pooled process into a session by claiming it, and a claimed
+# process works in the home it was claimed for, while the daemon and the pty
+# hosts above it do not. So the pids this prints are the ones that are both in
+# this session's own ancestry and working in this home - which is exactly "the
+# session the captain is talking to", expressed in kernel facts.
+#
+# It exists because that answer cannot be recovered from outside the session:
+# a process with no harness ancestry has nothing to walk. bin/fm-lock.sh records
+# what this returns beside the lock so such a reader can still have it.
+fm_harness_pid_cwds() {  # <pid>,<pid>,...
+  local joined=$1 pid
+  if [ -r /proc/self/cwd ]; then
+    for pid in $(printf '%s' "$joined" | tr ',' ' '); do
+      printf '%s\t%s\n' "$pid" "$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    done
+    return 0
+  fi
+  command -v lsof >/dev/null 2>&1 || return 1
+  lsof -a -d cwd -Fpn -p "$joined" 2>/dev/null | LC_ALL=C awk '
+    /^p/ { pid = substr($0, 2); next }
+    /^n/ { if (pid != "") { printf "%s\t%s\n", pid, substr($0, 2); pid = "" } }'
+}
+
+fm_harness_home_session_pids() {  # <home>
+  local home=$1 pids joined cwds printed=0 pid cwd
+  [ -n "$home" ] || return 1
+  home=$(CDPATH='' cd -P -- "$home" 2>/dev/null && pwd -P) || return 1
+  [ -n "$home" ] || return 1
+  pids=$(fm_harness_ancestry_pids) || return 1
+  joined=$(printf '%s' "$pids" | tr '\n' ',')
+  joined=${joined%,}
+  [ -n "$joined" ] || return 1
+  cwds=$(fm_harness_pid_cwds "$joined") || return 1
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    cwd=$(printf '%s\n' "$cwds" | LC_ALL=C awk -F'\t' -v want="$pid" '$1 == want { print $2; exit }')
+    [ "$cwd" = "$home" ] || continue
+    printf '%s\n' "$pid"
+    printed=1
+  done <<EOF
+$pids
+EOF
+  [ "$printed" -eq 1 ]
+}
+
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args

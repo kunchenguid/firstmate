@@ -29,7 +29,8 @@
 #      component for a shortfall in another one.
 #   2. If this machine has a real home whose recorded lock names a live harness,
 #      every harness process under it must be accounted for - either as a
-#      session of that home or as belonging elsewhere - with none unexplained.
+#      session of that home, as running one of that home's own workers, or as
+#      belonging elsewhere - with none unexplained.
 #
 # Both checks drive the ordinary `--json` contract: the first against a scratch
 # home whose recorded session lock names the probe process, the second against
@@ -273,6 +274,7 @@ else
       root=$(printf '%s' "$json" | jq -r '.harness_sessions.root_pid // "none"')
       sessions=$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')
       elsewhere=$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')
+      own_workers=$(printf '%s' "$json" | jq -r '.harness_sessions.own_workers // 0')
       if [ "$owner" = stale ] || [ "$owner" = absent ]; then
         note "the session lock in $ROLE_HOME names no live harness right now, so the lock-owner half of this guard checked nothing"
       elif [ "$owner" = not_checked ]; then
@@ -285,16 +287,17 @@ else
         # two reads is an ordinary race on a live machine, while real drift
         # survives a second look.
         found=$(harness_processes_under "$root")
-        if [ "$((sessions + elsewhere))" != "$found" ]; then
+        if [ "$((sessions + own_workers + elsewhere))" != "$found" ]; then
           json=$(inventory_of_home "$ROLE_HOME") || fail "the inventory command failed for $ROLE_HOME"
           sessions=$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')
           elsewhere=$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')
+          own_workers=$(printf '%s' "$json" | jq -r '.harness_sessions.own_workers // 0')
           root=$(printf '%s' "$json" | jq -r '.harness_sessions.root_pid // "none"')
           found=$(harness_processes_under "$root")
-          [ "$((sessions + elsewhere))" = "$found" ] || fail \
-            "LIVE-SESSION DRIFT: $found harness process(es) run under harness $root, but the overview accounts for $((sessions + elsewhere)) of them ($sessions in this home, $elsewhere elsewhere). A process that is neither claimed nor counted is one the overview has lost."
+          [ "$((sessions + own_workers + elsewhere))" = "$found" ] || fail \
+            "LIVE-SESSION DRIFT: $found harness process(es) run under harness $root, but the overview accounts for $((sessions + own_workers + elsewhere)) of them ($sessions in this home, $own_workers running this home's own workers, $elsewhere elsewhere). A process that is neither claimed nor counted is one the overview has lost."
         fi
-        note "harness $root: $sessions session(s) in this home, $elsewhere elsewhere, $found under the harness, lock_owner=$owner"
+        note "harness $root: $sessions session(s) in this home, $own_workers running this home's workers, $elsewhere elsewhere, $found under the harness, lock_owner=$owner"
         pass "live session: every harness process under this home lock-owning harness is accounted for"
       fi
       ;;

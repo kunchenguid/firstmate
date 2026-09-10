@@ -12,6 +12,18 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
+# A SIDECAR, NEVER THE LOCK ITSELF. The lock file keeps exactly the one pid
+# fm_harness_ancestry_pid names, with the same meaning and the same exclusion
+# rule; readers that compare its whole contents must keep working unchanged.
+# What this file adds is the one thing the lock deliberately does not say: which
+# pid of that ancestry is the session actually WORKING in this home. Nothing can
+# recover that from outside the session - a pane rendering the running-session
+# overview is a child of the terminal, not of any harness, so it has no ancestry
+# to walk - and without it such a reader can only report every session as
+# unattributable and withhold every close command it might otherwise offer.
+# Recorded here because this is where the ancestry is already known; a reader
+# that finds no sidecar falls back to exactly that safe behaviour.
+LOCK_SESSIONS="$STATE/.lock.session"
 mkdir -p "$STATE" 2>/dev/null || {
   echo "error: cannot create session-lock state directory $STATE; operate read-only until resolved" >&2
   exit 1
@@ -34,6 +46,19 @@ if [ "${1:-}" = "status" ]; then
 fi
 
 me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+
+# Best-effort by design: acquiring the lock must never fail because this could
+# not be written, and a reader must never be handed a record it cannot trust, so
+# a run that resolves nothing removes any record a previous session left.
+record_home_sessions() {
+  local pids
+  if pids=$(fm_harness_home_session_pids "$FM_HOME" 2>/dev/null) && [ -n "$pids" ]; then
+    printf '%s\n' "$pids" > "$LOCK_SESSIONS" 2>/dev/null || rm -f "$LOCK_SESSIONS" 2>/dev/null
+  else
+    rm -f "$LOCK_SESSIONS" 2>/dev/null
+  fi
+  return 0
+}
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -58,6 +83,7 @@ trap 'exit 1' HUP INT TERM
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$old" = "$me" ]; then
+    record_home_sessions
     echo "lock acquired: harness pid $me"
     exit 0
   fi
@@ -103,5 +129,6 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
+record_home_sessions
 release_claim_lock
 echo "lock acquired: harness pid $me"
