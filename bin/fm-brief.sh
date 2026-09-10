@@ -370,6 +370,10 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 # so no second channel, artifact, or parser is introduced. The quoted heredoc
 # keeps the example's backticks literal; the value is then interpolated into the
 # generated brief, where it is inserted verbatim rather than re-evaluated.
+# .agents/skills/firstmate-codexapp/SKILL.md restates this requirement by hand,
+# because a Codex Desktop thread never receives a generated brief and so cannot be
+# sent a pointer to one. tests/fm-brief.test.sh maps that copy onto this wording and
+# fails when the two disagree, so edit both together.
 IFS= read -r -d '' STOPWATCH_CONTRACT <<'EOF' || true
    Every line you do append while the work is still under way carries your own stopwatch:
    name the slowest step you have already finished and the wall-clock seconds it really took,

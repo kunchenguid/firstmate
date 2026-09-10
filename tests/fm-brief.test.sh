@@ -990,6 +990,57 @@ test_briefs_require_the_worker_stopwatch() {
   pass "fm-brief.sh: crewmate briefs require a measured cost and a remaining count"
 }
 
+# The Codex Desktop backend hands a worker its status instruction inline,
+# because a Desktop-owned thread never receives a generated brief and so cannot
+# be sent a pointer to one. That makes the status block in
+# .agents/skills/firstmate-codexapp/SKILL.md a hand-written copy of the
+# stopwatch requirement bin/fm-brief.sh owns, and nothing but this test keeps
+# the two in step: editing the scaffold's wording would otherwise leave the
+# Codex Desktop copy quietly teaching something else. Each surface is worded for
+# its own reader, so every claim is checked as the fragment it takes in each
+# place rather than as one whole-text match, while the worked example - the one
+# line a careless worker actually copies - must read identically in both.
+write_codexapp_stopwatch_map() {
+  cat > "$1" <<'MAP'
+While the work is still under way|while the work is still under way carries your own stopwatch
+the slowest step you already finished|name the slowest step you have already finished
+with the wall-clock seconds it really took|the wall-clock seconds it really took
+how many more runs of that step you expect|how many more runs of that step you still expect
+working: fault reproduced, the full test run took 512s, 2 more runs expected|working: fault reproduced, the full test run took 512s, 2 more runs expected
+Time that step rather than estimating it|Time the step rather than estimating it
+write "no long step yet" when nothing long has run|"no long step yet" instead of inventing a number
+MAP
+}
+
+test_codexapp_status_block_tracks_the_brief_stopwatch() {
+  local home ship skill map codex_line brief_line
+  home="$TMP_ROOT/codexapp-stopwatch-home"
+  mkdir -p "$home/data"
+  skill="$ROOT/.agents/skills/firstmate-codexapp/SKILL.md"
+  map="$TMP_ROOT/codexapp-stopwatch-map.txt"
+  write_codexapp_stopwatch_map "$map"
+
+  # One shared STOPWATCH_CONTRACT renders into both crewmate scaffolds, and
+  # test_briefs_require_the_worker_stopwatch already proves the scout carries
+  # it, so the ship brief is the whole of what the Codex copy has to track.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-codex-s1 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  ship="$home/data/brief-codex-s1/brief.md"
+  assert_present "$ship" "brief was not scaffolded"
+
+  while IFS='|' read -r codex_line brief_line; do
+    [ -n "$codex_line" ] || continue
+    assert_grep "$brief_line" "$ship" \
+      "drift: the Codex Desktop status block says \"$codex_line\", but the brief bin/fm-brief.sh generates (STOPWATCH_CONTRACT) no longer says \"$brief_line\" - update both together"
+    assert_grep "$codex_line" "$skill" \
+      "drift: the brief bin/fm-brief.sh generates says \"$brief_line\", but .agents/skills/firstmate-codexapp/SKILL.md no longer says \"$codex_line\" - a Codex Desktop thread receives no brief, so that block is the only place this requirement reaches it"
+  done < "$map"
+
+  assert_grep "owns that stopwatch requirement for every generated brief" "$skill" \
+    "the Codex Desktop status block no longer names bin/fm-brief.sh as the owner of the requirement it copies"
+  pass "fm-brief.sh: the Codex Desktop status block tracks the scaffold's stopwatch requirement"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -1084,5 +1135,6 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_briefs_require_the_worker_stopwatch
+test_codexapp_status_block_tracks_the_brief_stopwatch
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
