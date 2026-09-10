@@ -215,6 +215,24 @@ fi
 [ "$out" = "none" ] || fail "specific scope: expected 'none', got '$out'"
 ok "specific model scope bounds generic quota"
 
+if out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:openai-codex/codex_bengalfox 2>/dev/null); then
+  fail "omp prefix: the bare codex model scope did not veto, got exit 0 with '$out'"
+fi
+[ "$out" = "none" ] || fail "omp prefix: expected 'none' from the exhausted codex model scope, got '$out'"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:openai-codex/codex_other)
+[ "$out" = "omp openai-codex/codex_other" ] || fail "omp prefix: expected the provider-wide codex quota to select the prefixed model, got '$out'"
+ok "omp openai-codex prefix matches the bare codex model scope"
+
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:ollama/qwen3:8b --candidate claude:claude-3-5-sonnet 2>&1); then
+  fail "unmapped omp prefix unexpectedly selected a later candidate"
+fi
+[ "$err" = "error: omp quota mapping covers only the openai-codex and claude-bridge prefixes: ollama/qwen3:8b" ] || fail "unmapped omp prefix returned: $err"
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate omp 2>&1); then
+  fail "bare omp candidate unexpectedly selected"
+fi
+[ "$err" = "error: omp quota mapping covers only the openai-codex and claude-bridge prefixes: default" ] || fail "bare omp candidate returned: $err"
+ok "omp without a mapped prefix fails closed"
+
 out=$(call_choose --snapshot "$LAB/captured.json" --candidate codex:default)
 [ "$out" = "codex default" ] || fail "default scope: expected provider-wide quota, got '$out'"
 ok "default model uses provider-wide quota"

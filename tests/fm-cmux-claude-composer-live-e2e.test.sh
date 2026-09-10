@@ -4,6 +4,9 @@
 # only one exact fm-test- workspace through the normal scout lifecycle.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK="fm-test-cmux-claude-composer-$$"
 LAB=
@@ -26,16 +29,8 @@ cleanup() {
   [ -z "$LAB" ] || rm -rf -- "$LAB"
 }
 
-if [ "${FM_CMUX_CLAUDE_COMPOSER_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_CMUX_CLAUDE_COMPOSER_LIVE=1 to run the real cmux Claude composer drift guard"
-  exit 0
-fi
+fm_live_gate opt-in FM_CMUX_CLAUDE_COMPOSER_LIVE claude cmux jq treehouse python3
 
-command -v claude >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but Claude Code is not installed"
-command -v cmux >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but cmux is not installed"
-command -v jq >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but jq is not installed"
-command -v treehouse >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but treehouse is not installed"
-command -v python3 >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but python3 is not installed"
 cmux ping >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but the cmux socket is unavailable"
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-cmux-claude-composer.XXXXXX") || fail "could not create an isolated cmux Claude lab"

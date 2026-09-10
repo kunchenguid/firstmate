@@ -4,29 +4,31 @@
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
-# clone for PR-based ship tasks. Before destructive worktree return,
-# ship and scout teardowns print retro-acceleration and secondmate memory-hygiene
-# prompts and refuse when a linked Spec Kit run is unsealed (list_worktrees.py
-# owner). Secondmate teardown prints none of the above.
+# clone for PR-based ship tasks.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
 # completion links (the PR, the report path, a local-main note) live only in the
 # record being removed, the intended transition is recorded in
 # state/<id>.backlog-close first, so a process killed between the halves leaves
-# the next session start enough to finish it; a landed transition removes that
-# record. A transition that fails is fatal and loud, preserves its pending-close
-# record, and is retried by the next session start. The transition is skipped on a
-# config/backlog-backend=manual home and in a home that keeps no
-# data/backlog.md; those cases print the manual follow-up. An automatic-backend
-# home with a backlog but no compatible tasks-axi refuses before cleanup.
+# the next session start enough to finish it; a landed close removes that record.
+# A close that fails is fatal and loud, preserves its pending-close record, and
+# is retried by the next session start. The transition is skipped on a
+# config/backlog-backend=manual home and in a markdown home that keeps no
+# data/backlog.md; those cases print the manual follow-up. A configured
+# non-markdown adapter remains active without a markdown file; any active
+# automatic backend without compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
 # The close - and only the close - is replaced by `tasks-axi reopen` with the
 # deliverable recorded while the backlog item is still an open captain call
 # (bin/fm-captain-hold.sh `open` owns that predicate), because the policy holds
 # the very work item a question gates and cleanup must never retire the
-# captain's own question. The same pending-close record carries that intent as
+# captain's own question.
+# NOTE: this uses `open`'s silent default and depends only on its unchanged
+# 0/1/2 exit-code contract. The optional `--identity` output that bin/fm-watch.sh
+# asks for prints only on an exit 0 and changes nothing read here.
+# The same pending-close record carries that intent as
 # `mode=retain`, so an interrupted cleanup replays the retention rather than a
 # close. "Cannot tell" refuses before any destructive step, --force does not
 # lift the deferral (it authorizes discarding unlanded WORK, never the
@@ -41,6 +43,13 @@
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
+# Squash merges collapse the branch's commits, so per-commit patch ids against main
+# no longer match, and a pipeline rebase can leave the local worktree diverged from
+# the PR head. A diverged copy is not treated as landed: path-set coverage, git
+# cherry, and merge-tree containment each fail to prove content landed without also
+# accepting unlanded edits to the same paths. Teardown still accepts a merged PR
+# whose head contains the current local work (ancestor or equivalent patch ids),
+# or a clean content-in-default tree match. Anything else refuses.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -49,73 +58,45 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes refuse UNLESS bin/fm-worktree-unique-content.sh proves
-# every differing path holds only content already reachable from refs that
-# survive teardown - the state a branch ref rewritten beneath a live worktree
-# leaves behind, where "uncommitted changes" are really deletions of landed
-# content plus pre-merge line versions. That consult can only narrow the dirty
-# refusal (its exit 0 is a positive proof; absence or any failure leaves the
-# refusal standing), and a pass never skips the landed-work checks below.
+# Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
-# Writer scout tasks (kind=scout with absent access= in meta) carve out of that check: their worktree is
+# Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
-# Reader scouts (access=reader in meta, written only by fm-spawn's --access
-# reader path) hold NO pool worktree: their worktree= is a disposable scratch
-# directory under the task temp root. Reader teardown passes the same scout
-# report and decision gates, then removes the scratch directly and never calls
-# treehouse return. Reader-specific refusals guard the axis: a git
-# checkout found anywhere inside the task temp root is evidence the reader violated
-# its no-tracked-file-writes contract by falling back to editing, so teardown
-# refuses (its content may be unlanded work) until the captain explicitly
-# approves discard via --force; and access=reader recorded on any
-# non-scout kind, or an unknown access value, refuses as record damage even
-# under --force, because honoring it would silently skip that task's
-# pool-worktree return and leak the lease.
-# Before destructive cleanup, teardown validates task check artifacts and any
-# matching quarantine entries as ordinary single-link files on the state
-# device. It refuses and preserves task state when that proof fails; otherwise
-# it removes the task's check, trust record, PR sidecar, publication record, and
-# quarantine entries with the rest of the volatile state.
-# Before any ship cleanup retires metadata or PR-poll artifacts, teardown
-# resolves the canonical recorded pr= through the forge identity in
-# bin/fm-pr-lib.sh. MERGED or CLOSED may proceed. OPEN, unreadable, or otherwise
-# unproven state refuses with one actionable line unless an identity-bound
-# replacement watch already covers that same repository and PR, or
-# --acknowledge-open-pr-without-watch carries a nonempty reason that is
-# staged during preflight and written to
-# data/teardown-open-pr-without-watch.jsonl only after every later refusal
-# gate has passed, immediately before watch and metadata retirement. A random
-# check.sh is not replacement proof. --force does not bypass this guard.
-# Ship tasks without a PR, scouts, and merged or closed PRs keep current
-# behavior. The header of this script owns the acknowledgement record.
-# Occupancy may query treehouse status before endpoint identity validation so a
-# rebound lease is refused without inspecting stale endpoint metadata. Missing,
-# empty, malformed, or mismatched endpoints still refuse before tmux, treehouse
-# return, or any other mutating runtime call. Before endpoint kill, process
-# reap, branch deletion, or treehouse return, teardown then proves that the
-# worktree's current treehouse lease or slot identity still belongs to this
-# task. Path equality is not ownership because pooled
-# paths are reused. The reverse is also true: once the occupancy proof shows
-# this task holds the live lease on that path, another record naming the same
-# path is a claim only when it names that same live lease, because a pooled
-# slot re-leased to this task leaves the previous holder's record behind. That
-# lease comes from the occupancy proof above and from no other authority, so a
-# task that cannot prove a live lease - including every Orca task, which has no
-# Treehouse lease - keeps the conservative path-only refusal.
-# Pre-schema writer metadata that lacks treehouse_lease and
-# treehouse_slot may still complete when a unique occupancy row is leased or
-# in-use with lease_holder equal to this task id; teardown uses that live
-# occupancy for return and does not rewrite the old record. Missing path,
-# missing occupancy, or status=available alone is not stale completion:
-# record-only retirement requires the recorded slot/lease identity, a unique
-# available occupancy row for that slot, a missing recorded path, and
-# affirmative endpoint-gone evidence. A slot leased to a different task is
-# not inspected, closed, reaped, reset, or returned through the old record.
-# Unreadable or contradictory occupancy fails closed without mutation.
+# Before destructive cleanup, teardown validates task check artifacts as
+# ordinary single-link files on the state device. It refuses and preserves
+# task state when that proof fails; otherwise it removes the task's check,
+# trust record, PR sidecar, and publication record with the rest of the
+# volatile state.
+# Worktree-slot ownership (teardown-slot-collision): a treehouse pool slot is
+# reused across tasks, so a stale, duplicated, or drifted worktree= record can
+# name a slot a DIFFERENT live task now holds. Cleanup kills every process under
+# that path and hard-resets it before returning it, so releasing a slot that is
+# not genuinely this task's destroys another worker's live work. Before the first
+# cleanup step, teardown verifies record exclusivity: no OTHER task record in
+# this home or any locally registered Firstmate home may name the same live path
+# in its worktree= or home=. One live path with two task records is the reuse
+# collision itself, whichever record is stale. The recorded endpoint's exact
+# task identity and the record's spawn incarnation are validated separately
+# before cleanup. Its current working directory is only incidental process
+# state: the same worker remains the owner after changing directory, so cwd can
+# never veto teardown of that exact recorded endpoint.
+# The scan and destructive return hold a project-identity lock in the local root
+# Firstmate home's state directory, as resolved by bin/fm-wake-lib.sh's
+# fm_firstmate_root_home; a home seeded from another machine is its own local
+# root, since a lock on this filesystem cannot be held or observed across that
+# boundary. Fresh Treehouse spawns for that project in
+# every local Firstmate home hold the same lock from before slot allocation
+# through metadata publication, closing the publication
+# gap; forced secondmate teardown takes it and runs the same checks for every
+# descendant Treehouse slot before touching any child.
+# This refusal is not relaxed by --force: --force authorizes discarding THIS
+# task's unlanded work, never another task's live work. Reconcile whichever
+# record is wrong and re-run. Orca is not a pool slot and proves its path through
+# require_orca_worktree_path_match instead.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -140,41 +121,20 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--terminal-payload <json>]
-#                      [--acknowledge-open-pr-without-watch <reason>]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
-#   checks, skips the reader grown-checkout refusal, discards secondmate child
-#   work for kind=secondmate, and bypasses an
-#   unsealed linked kit-run outcome seal after recording the bypass in
-#   data/teardown-kit-seal-forces.jsonl. Only use it when the captain has
-#   explicitly said to discard the work. It does not bypass the open-PR watch
-#   guard or the worktree occupancy proof.
-#   --acknowledge-open-pr-without-watch stages a nonempty reason during
-#   preflight and is the only explicit bypass for an OPEN, unreadable, or
-#   unproven recorded PR when no identity-bound replacement watch exists.
-#   The durable row is appended and fsync'ed only after every later refusal
-#   gate has passed, immediately before watch and metadata retirement, so a
-#   later refusal writes no row and a retry stays exact-once. An empty
-#   reason refuses.
-#   --terminal-payload is a compatibility fallback for a task with no observable
-#   delivery-gate result. A matching no-mistakes run always supplies mechanical
-#   quality facts instead, and says on stderr that the payload was not recorded.
-#   Without either quality source, the attempt is sealed incomplete.
-#   The recorded row is the payload plus what teardown observed, not the payload
-#   as authored: on a first-time seal the observed usageSource is merged over it,
-#   together with the observed usage when the harness session actually reported
-#   token counts and the observed active duration when one was measured, so a
-#   sealed row never names a usage source whose numbers were thrown away.
-#   That observation is not reproducible once the worktree is gone, so the seal
-#   fingerprints the payload it recorded into state/<id>.meta as
-#   telemetry_terminal_payload_sha256=. Re-running the same command is then a
-#   no-op against the recorded terminal, while a different payload still reaches
-#   the ledger's terminal-conflict refusal. When no digest can be computed the
-#   payload is recorded as authored, which keeps that retry idempotent.
-#   Sealing a recorded attempt is unconditional: no flag bypasses it, --force
-#   included, so a damaged or pruned ledger blocks cleanup until it is repaired.
-#   The refusal prints the ledger path, the failing line or attempt, and the
-#   repair-then-re-run route; bin/fm-model-telemetry.sh owns that contract.
+#   checks, and discards secondmate child work for kind=secondmate. Only use it
+#   when the captain has explicitly said to discard the work.
+#   --legacy-record accepts a task record that predates the spawn_gen field:
+#   teardown then proceeds only when the recorded endpoint is confirmed dead or
+#   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
+#   --force the worktree still passes the ordinary landed-work checks. The
+#   accepted legacy incarnation is stamped into the record before its close is
+#   recorded and named in the teardown line; the flag never relaxes the
+#   unlanded-work refusal, which --force alone can authorize. A legacy- stamp
+#   an abandoned attempt left behind never counts as a published incarnation:
+#   the record still reads as a legacy record, so the endpoint gate runs again
+#   and the retry still needs --legacy-record.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -222,8 +182,18 @@
 #     conclude_task_no_mistakes_run attributes the active-or-most-recent run to
 #     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
 #     strict fm_nm_head_matches_worktree rule) both match this worktree, then
-#     runs `no-mistakes axi abort --run <id>` for
-#     that verified run instance. A run already terminal
+#     runs `no-mistakes axi abort --run <id>` for that verified run instance.
+#     When the run head is absent from this copy's object store - the pipeline
+#     committed its fix round in its own repo and the task copy never fetched
+#     it - attribution falls to the same lib's shared
+#     fm_nm_runs_status_for_worktree ledger rule, whose anchored continuation
+#     recognition is the only remaining path, which refuses every row shape
+#     it cannot prove, and which authorizes the abort only for an explicitly
+#     active (`running`) proved continuation - a terminal newest word is
+#     finished history, never an abort authorization (observed 2026-09-03: a
+#     run parked at a post-CI gate after fix rounds advanced its head past
+#     the submitted head stayed parked forever once the task was cleaned up).
+#     A run already terminal
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
 #   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
@@ -267,8 +237,6 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-backend-hometag-lib.sh
-. "$SCRIPT_DIR/fm-backend-hometag-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
@@ -289,39 +257,25 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
-# shellcheck source=bin/fm-classify-lib.sh
-. "$SCRIPT_DIR/fm-classify-lib.sh"
-# shellcheck source=bin/fm-lease-lib.sh
-. "$SCRIPT_DIR/fm-lease-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
 fi
 ID=$1
-shift
 FORCE=
-TERMINAL_PAYLOAD=
-ACK_OPEN_PR_WITHOUT_WATCH=
-ACK_OPEN_PR_WITHOUT_WATCH_SET=0
+LEGACY_RECORD_GIVEN=0
+shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
-    --terminal-payload)
-      [ "$#" -ge 2 ] || { echo "error: --terminal-payload requires a value" >&2; exit 2; }
-      TERMINAL_PAYLOAD=$2
-      shift
+    --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    *)
+      echo "error: invalid teardown request" >&2
+      exit 2
       ;;
-    --acknowledge-open-pr-without-watch)
-      [ "$#" -ge 2 ] || { echo "error: --acknowledge-open-pr-without-watch requires a reason" >&2; exit 2; }
-      ACK_OPEN_PR_WITHOUT_WATCH=$2
-      ACK_OPEN_PR_WITHOUT_WATCH_SET=1
-      shift
-      ;;
-    *) echo "error: unknown teardown argument $1" >&2; exit 2 ;;
   esac
   shift
 done
-
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -342,6 +296,50 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
+
+# A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
+# Require both its pool state and the same Git common directory as the recorded
+# project; an ordinary linked worktree is not evidence that Treehouse owns it.
+is_treehouse_pool_slot() {  # <project> <worktree>
+  local project=$1 worktree=$2 slot pool state project_common slot_common
+  [ -d "$project" ] && [ -d "$worktree" ] || return 1
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  pool=$(dirname "$(dirname "$slot")")
+  state="$pool/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  project_common=$(CDPATH='' cd -- "$project_common" 2>/dev/null && pwd -P) || return 1
+  slot_common=$(CDPATH='' cd -- "$slot_common" 2>/dev/null && pwd -P) || return 1
+  [ "$project_common" = "$slot_common" ]
+}
+
+META="$STATE/$ID.meta"
+TREEHOUSE_PROJECT_LOCK=
+TREEHOUSE_PROJECT_LOCK_HELD=0
+TREEHOUSE_SLOT_LOCK_REQUIRED=0
+if [ -f "$META" ] && [ ! -L "$META" ]; then
+  TEARDOWN_LOCK_KIND=$(fm_meta_get "$META" kind)
+  [ -n "$TEARDOWN_LOCK_KIND" ] || TEARDOWN_LOCK_KIND=ship
+  TEARDOWN_LOCK_BACKEND=$(fm_meta_get "$META" backend)
+  [ -n "$TEARDOWN_LOCK_BACKEND" ] || TEARDOWN_LOCK_BACKEND=tmux
+  TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
+  TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
+  if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
+     && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
+     && is_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
+    TREEHOUSE_SLOT_LOCK_REQUIRED=1
+    TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$TEARDOWN_LOCK_PROJECT") || {
+      echo "REFUSED: cannot resolve the shared Treehouse project lock for ${TEARDOWN_LOCK_PROJECT:-<missing>}; nothing was changed" >&2
+      exit 1
+    }
+    fm_lock_try_acquire "$TREEHOUSE_PROJECT_LOCK" || {
+      echo "REFUSED: another Treehouse slot allocation or return is in progress for $TEARDOWN_LOCK_PROJECT; nothing was changed" >&2
+      exit 1
+    }
+    TREEHOUSE_PROJECT_LOCK_HELD=1
+  fi
+fi
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
@@ -351,6 +349,7 @@ DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
+DESCENDANT_TREEHOUSE_LOCK_PATHS=()
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -380,6 +379,10 @@ teardown_release_locks() {
     fm_lock_release "$CONTROL_LOCK" || true
     CONTROL_LOCK_HELD=0
   fi
+  if [ "$TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$TREEHOUSE_PROJECT_LOCK" || true
+    TREEHOUSE_PROJECT_LOCK_HELD=0
+  fi
   fm_lease_guard_release || true
   return "$status"
 }
@@ -394,7 +397,6 @@ CONTROL_LOCK_HELD=1
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
-META="$STATE/$ID.meta"
 fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -410,6 +412,11 @@ TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
+TEARDOWN_LEGACY_PENDING=0
+TEARDOWN_LEGACY_ACCEPTED=0
+TEARDOWN_LEGACY_ENDPOINT=
+TEARDOWN_LEGACY_RETAINED_STAMP=
+TEARDOWN_LEGACY_PRESTAMP_SIZE=0
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
@@ -426,10 +433,39 @@ if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
 fi
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   if ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
-    echo "error: task $ID's record has no spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR); refusing automatic teardown - relaunch the task to publish an unambiguous incarnation, then retry teardown" >&2
-    exit 1
+    TEARDOWN_LEGACY_GEN_COUNT=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { count++ } END { print count + 0 }' "$META" 2>/dev/null || printf '0\n')
+    if [ "$TEARDOWN_LEGACY_GEN_COUNT" = 0 ] && [ "$LEGACY_RECORD_GIVEN" = 1 ]; then
+      # A record that predates the incarnation field: acceptance is gated later,
+      # once the recorded endpoint is known, so its state can be confirmed dead
+      # or agent-less before any cleanup decision is made.
+      TEARDOWN_LEGACY_PENDING=1
+    elif [ "$TEARDOWN_LEGACY_GEN_COUNT" = 0 ]; then
+      echo "error: task $ID's record has no spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR); refusing automatic teardown - relaunch the task to publish an unambiguous incarnation, then retry teardown, or pass --legacy-record once its recorded endpoint is confirmed dead or agent-less" >&2
+      exit 1
+    else
+      echo "error: task $ID's record has an unreadable spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR); refusing automatic teardown - fix the record, then retry teardown" >&2
+      exit 1
+    fi
+  else
+    case "$FM_BACKLOG_META_SPAWN_GEN" in
+      legacy-*)
+        # Only this teardown path mints a legacy- token; a launch publishes
+        # s<epoch>.<pid>.<random>. So one still on a retained record is the
+        # stamp an abandoned --legacy-record attempt could not roll back, not
+        # an incarnation any spawn ever published. The record is still the
+        # legacy record it was, and is treated as one: the dead-or-agent-less
+        # endpoint gate runs again on the retry instead of being skipped by
+        # the abandoned attempt's own stamp.
+        if [ "$LEGACY_RECORD_GIVEN" != 1 ]; then
+          echo "error: task $ID's record carries the legacy incarnation stamp $FM_BACKLOG_META_SPAWN_GEN left by an abandoned --legacy-record teardown, not an incarnation published by a spawn; refusing automatic teardown - relaunch the task to publish an unambiguous incarnation, then retry teardown, or pass --legacy-record once its recorded endpoint is confirmed dead or agent-less" >&2
+          exit 1
+        fi
+        TEARDOWN_LEGACY_PENDING=1
+        TEARDOWN_LEGACY_RETAINED_STAMP=$FM_BACKLOG_META_SPAWN_GEN
+        ;;
+    esac
   fi
-  TEARDOWN_META_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+  [ "$TEARDOWN_LEGACY_PENDING" = 1 ] || TEARDOWN_META_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
 fi
 # Cleanup never closes a captain call (see the header). Asked here, before any
 # destructive step, so "cannot tell" can refuse while everything is intact.
@@ -771,7 +807,6 @@ remote_secondmate_teardown() {
   route_home=$SECONDMATE_REGISTRY_HOME
   [ "$route_host" = "$remote_host" ] && [ "$route_root" = "$remote_root" ] && [ "$route_home" = "$remote_home" ] \
     || { echo "REFUSED: remote secondmate metadata does not match its registry route" >&2; return 1; }
-  [ -z "$FORCE" ] || [ "$FORCE" = --force ] || { echo "error: invalid teardown option: $FORCE" >&2; return 2; }
   handoff_wake_retire_validate || return 1
   remote_recovery_paths_validate initial || return 1
   if [ "$FORCE" != --force ] && [ "$REMOTE_OUTBOX_PRESENT" -eq 1 ]; then
@@ -829,7 +864,7 @@ remote_secondmate_teardown() {
   mv -f -- "$tmp" "$SECONDMATE_REG"
   status_retire_presentation_task "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
-  rm -f -- "$STATE/$ID.turn-ended"
+  rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -862,13 +897,14 @@ else
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
-BACKEND=$(fm_backend_of_meta "$META")
-T=$(fm_backend_target_of_meta "$META")
+# This is the first cleanup authorization check. It is metadata-only and must
+# complete before fm-guard, a backend command, file removal, branch deletion,
+# worktree return, registry change, or process termination can run.
+fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
-BASE_COMMIT=$(fm_meta_get "$META" base_commit)
-LOCAL_DELIVERY_BASE=$(fm_meta_get "$META" local_delivery_base)
-LOCAL_DELIVERY_HEAD=$(fm_meta_get "$META" local_delivery_head)
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
@@ -877,8 +913,7 @@ fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
-# (writer /tmp/fm-<id>/ or a home-scoped reader root); absent for tasks spawned
-# before that change, so tolerate empty.
+# (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
@@ -889,88 +924,51 @@ ORCA_PATH_MATCH_VERIFIED=0
 CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 
 KIND=$TEARDOWN_META_KIND
+EXPECTED_TREEHOUSE_PROJECT_LOCK=
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+   && is_treehouse_pool_slot "$PROJ" "$WT"; then
+  EXPECTED_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ") || {
+    echo "REFUSED: cannot resolve the shared Treehouse project lock for ${PROJ:-<missing>}; nothing was changed" >&2
+    exit 1
+  }
+  if [ "$TREEHOUSE_PROJECT_LOCK_HELD" != 1 ] \
+     || [ "$TREEHOUSE_PROJECT_LOCK" != "$EXPECTED_TREEHOUSE_PROJECT_LOCK" ]; then
+    echo "REFUSED: task $ID's Treehouse project identity changed while teardown acquired its locks; nothing was changed" >&2
+    exit 1
+  fi
+elif [ "$TREEHOUSE_SLOT_LOCK_REQUIRED" = 1 ]; then
+  echo "REFUSED: task $ID stopped naming a live Treehouse slot while teardown acquired its locks; nothing was changed" >&2
+  exit 1
+fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
-# Bind the no-mistakes run root from the per-task metadata (finding 2) so the
-# pre-teardown parked-run check and abort query the exact root the worker uses,
-# never the legacy shared root a pre-rollout task still lives in. A task with no
-# nm_home binding predates the per-home isolation rollout and is observed at the
-# legacy shared root ($HOME/.no-mistakes) so its parked run is never orphaned by
-# a false-negative lookup. The helper is the one owner in bin/fm-nm-run-lib.sh.
-if ! NM_HOME=$(fm_nm_home_for_meta "$META"); then
-  echo "error: task $ID records invalid or duplicate nm_home metadata; repair $META before teardown" >&2
-  exit 1
-fi
-export NM_HOME
-# Reader/writer access axis (fm-spawn's --access): absent means writer. An
-# unknown value, or a reader marker on any non-scout kind, is record damage,
-# not a cleanup preference - honoring a forged reader marker would silently
-# skip a pool-worktree return and leak its lease - so both refuse even under
-# --force, exactly like the telemetry seal: repair the record, then re-run.
-if ! ACCESS=$(fm_meta_optional_exact_value "$META" access); then
-  echo "error: task $ID records invalid or duplicate access metadata; repair $META before teardown" >&2
-  exit 1
-fi
-[ -n "$ACCESS" ] || ACCESS=writer
-case "$ACCESS" in
-  reader|writer) ;;
-  *)
-    echo "error: task $ID records an unknown access '$ACCESS'; repair $META before teardown" >&2
-    exit 1
-    ;;
-esac
-if [ "$ACCESS" = reader ] && [ "$KIND" != scout ]; then
-  echo "error: task $ID records access=reader with kind=$KIND, but only a scout can be a reader; repair $META before teardown so this task's worktree return is not silently skipped" >&2
-  exit 1
-fi
-# Reader destruction anchor: cleanup removes only the recorded tasktmp= root,
-# but tasktmp= and worktree= must remain non-symlinked and mutually confined as
-# fm-spawn writes them. A reader record whose tasktmp is not this task's
-# canonical temp root (by spelling or physical resolution), whose worktree
-# resolves outside that root, or whose cleanup anchor is a symlink is record
-# damage. Refuse even under --force; a missing scratch is fine (already
-# cleaned), so worktree containment only checks a still-present target.
-if [ "$ACCESS" = reader ]; then
-  if ! fm_reader_task_tmp "$ID"; then
-    echo "error: task $ID records access=reader but this home's identity '$FM_READER_TASK_TMP_HOMETAG' is not safe for a task temp root" >&2
-    exit 1
-  fi
-  READER_CANONICAL_TMP=$FM_READER_TASK_TMP
-  if [ -L "$READER_CANONICAL_TMP" ] || [ -L "$TASK_TMP" ] || [ -L "$WT" ]; then
-    echo "error: task $ID records access=reader with a symlinked destruction anchor (tasktmp '${TASK_TMP:-<absent>}', worktree '${WT:-<absent>}'); repair $META before teardown so cleanup cannot follow attacker-chosen paths" >&2
-    exit 1
-  fi
-  READER_TASKTMP_REAL=
-  if [ -n "$TASK_TMP" ]; then
-    READER_TASKTMP_REAL=$(CDPATH='' cd -- "$TASK_TMP" 2>/dev/null && pwd -P) || READER_TASKTMP_REAL=
-  fi
-  READER_TASKTMP_OK=0
-  if [ "$TASK_TMP" = "$READER_CANONICAL_TMP" ]; then
-    READER_TASKTMP_OK=1
-  elif [ -n "$READER_TASKTMP_REAL" ]; then
-    READER_CANONICAL_TMP_REAL=$(CDPATH='' cd -- "$READER_CANONICAL_TMP" 2>/dev/null && pwd -P) || READER_CANONICAL_TMP_REAL=
-    if [ -n "$READER_CANONICAL_TMP_REAL" ] && [ "$READER_TASKTMP_REAL" = "$READER_CANONICAL_TMP_REAL" ]; then
-      READER_TASKTMP_OK=1
-    fi
-  fi
-  if [ "$READER_TASKTMP_OK" != 1 ]; then
-    echo "error: task $ID records access=reader with tasktmp '${TASK_TMP:-<absent>}', which is not this task's canonical temp root $READER_CANONICAL_TMP; repair $META before teardown so a damaged record cannot make this cleanup delete an arbitrary directory" >&2
-    exit 1
-  fi
-  if [ -e "$WT" ] || [ -L "$WT" ]; then
-    READER_WT_REAL=$(CDPATH='' cd -- "$WT" 2>/dev/null && pwd -P) || READER_WT_REAL=
-    READER_WT_CONTAINED=0
-    if [ -n "$READER_WT_REAL" ] && [ -n "$READER_TASKTMP_REAL" ]; then
-      case "$READER_WT_REAL" in
-        "$READER_TASKTMP_REAL"/*) READER_WT_CONTAINED=1 ;;
-      esac
-    fi
-    if [ "$READER_WT_CONTAINED" != 1 ]; then
-      echo "error: task $ID records access=reader but its worktree '$WT' does not resolve inside its recorded tasktmp '${TASK_TMP:-<absent>}'; repair $META before teardown so a damaged record cannot make this cleanup delete an arbitrary directory" >&2
+
+# A record accepted as a legacy incarnation (no spawn_gen, --legacy-record
+# given) may be torn down only when its recorded endpoint is confidently gone
+# or agent-less; only the recovery-grade classifier's dead and missing license
+# that, and every ambiguous, unreadable, or unverified endpoint state refuses
+# while the record is still intact. Acceptance resolves the incarnation token
+# here; the record itself is stamped only once every landed-work refusal has
+# passed, immediately before the close marker binds to it, so any refusal
+# leaves the record byte-identical.
+if [ "$TEARDOWN_LEGACY_PENDING" = 1 ]; then
+  TEARDOWN_LEGACY_ENDPOINT=$(fm_backend_agent_state "$BACKEND" "$T")
+  case "$TEARDOWN_LEGACY_ENDPOINT" in
+    dead|missing) ;;
+    *)
+      echo "REFUSED: task $ID's record predates spawn_gen and its recorded endpoint reads '$TEARDOWN_LEGACY_ENDPOINT', not confidently dead or agent-less; --legacy-record teardown is refused while an agent may still be bound to it. Nothing was changed." >&2
+      echo "Reconcile the endpoint first (bin/fm-crew-state.sh $ID), or relaunch the task to publish an unambiguous incarnation, then retry teardown." >&2
       exit 1
-    fi
+      ;;
+  esac
+  if [ -n "$TEARDOWN_LEGACY_RETAINED_STAMP" ]; then
+    TEARDOWN_META_SPAWN_GEN=$TEARDOWN_LEGACY_RETAINED_STAMP
+  else
+    TEARDOWN_META_SPAWN_GEN="legacy-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   fi
+  TEARDOWN_LEGACY_ACCEPTED=1
 fi
+
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -1193,26 +1191,14 @@ retire_busy_state() {
 }
 
 validate_pr_poll_cleanup() {
-  local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
+  local state_dir=$1 id=$2 state_device artifact has_artifact=0
   fm_task_id_path_safe "$id" || return 0
-  quarantine="$state_dir/.pr-check-quarantine"
-  if [ "$id" = _noncanonical ] \
-    && { [ -e "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
-      || [ -L "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
-      || [ -e "$quarantine/_noncanonical.diagnostic.noncanonical" ] \
-      || [ -L "$quarantine/_noncanonical.diagnostic.noncanonical" ]; }; then
-    echo "REFUSED: legacy PR-check quarantine migration is incomplete; preserving task state." >&2
-    return 1
-  fi
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
   done
-  if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
-    has_artifact=1
-  fi
   [ "$has_artifact" -eq 1 ] || return 0
   [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
   state_device=$(fm_pr_file_device "$state_dir") || return 1
@@ -1221,7 +1207,7 @@ validate_pr_poll_cleanup() {
     "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
-      || ! fm_pr_same_store_device "$artifact" "$state_device" \
+      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
       || [ "$(fm_pr_file_link_count "$artifact")" != 1 ]; then
       echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
       return 1
@@ -1234,459 +1220,16 @@ validate_pr_poll_cleanup() {
       return 1
     }
   fi
-  [ -e "$quarantine" ] || [ -L "$quarantine" ] || return 0
-  if [ ! -d "$state_dir" ] || [ -L "$state_dir" ] \
-    || [ ! -d "$quarantine" ] || [ -L "$quarantine" ]; then
-    echo "REFUSED: unsafe PR-check quarantine path $quarantine; preserving task state." >&2
-    return 1
-  fi
-  if ! fm_pr_same_store_device "$quarantine" "$state_device" \
-    || [ "$(fm_pr_file_mode "$quarantine")" != 700 ]; then
-    echo "REFUSED: PR-check quarantine is not on the task state device; preserving task state." >&2
-    return 1
-  fi
-  for artifact in "$quarantine/$id."*; do
-    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-    if ! fm_pr_private_file_valid "$artifact" 600 "$state_device"; then
-      echo "REFUSED: unsafe task quarantine entry; preserving task state." >&2
-      return 1
-    fi
-  done
 }
 
 remove_pr_poll_artifacts() {
-  local state_dir=$1 id=$2 quarantine artifact
+  local state_dir=$1 id=$2
   validate_pr_poll_cleanup "$state_dir" "$id" || return 1
   fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
   fm_pr_poll_merge_notified_remove "$state_dir" "$id" || return 1
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.check-trust" || return 1
-  if fm_task_id_path_safe "$id"; then
-    quarantine="$state_dir/.pr-check-quarantine"
-    if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
-      for artifact in "$quarantine/$id."*; do
-        [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-        rm -f -- "$artifact" || return 1
-      done
-      rmdir "$quarantine" 2>/dev/null || true
-    fi
-  fi
-}
-
-TEARDOWN_OPEN_PR_ACK_LOG="$DATA/teardown-open-pr-without-watch.jsonl"
-TEARDOWN_OPEN_PR_ACK_PENDING=
-TEARDOWN_WORKTREE_OWNED=0
-TEARDOWN_WORKTREE_STALE=0
-TEARDOWN_OCCUPANCY_LEASE=
-TEARDOWN_OCCUPANCY_HOLDER=
-
-teardown_recorded_pr_watch_state() {
-  local target=$1 state raw
-  [ -n "$target" ] || return 1
-  fm_pr_url_parse "$target" || return 1
-  case "$FM_PR_PROVIDER" in
-    github)
-      state=$(gh pr view "$target" --json state -q .state 2>/dev/null) || return 1
-      case "$state" in
-        MERGED|merged) printf '%s\n' MERGED ;;
-        CLOSED|closed) printf '%s\n' CLOSED ;;
-        OPEN|open) printf '%s\n' OPEN ;;
-        *) return 1 ;;
-      esac
-      ;;
-    gitlab)
-      raw=$(glab mr view "$FM_PR_NUMBER" -R "https://$FM_PR_HOST/$FM_PR_PATH" 2>/dev/null) || return 1
-      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1)
-      case "$state" in
-        merged) printf '%s\n' MERGED ;;
-        closed) printf '%s\n' CLOSED ;;
-        open|opened) printf '%s\n' OPEN ;;
-        *) return 1 ;;
-      esac
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-teardown_open_pr_ack_record() {
-  local reason=$1 record log=$TEARDOWN_OPEN_PR_ACK_LOG
-  if ! mkdir -p "$DATA"; then
-    echo "REFUSED: cannot create data directory for open-PR acknowledgement record: $DATA" >&2
-    return 1
-  fi
-  if [ -L "$log" ] || { [ -e "$log" ] && [ ! -f "$log" ]; }; then
-    echo "REFUSED: open-PR acknowledgement record is not a regular non-symlink file: $log" >&2
-    return 1
-  fi
-  if ! record=$(jq -cn \
-    --arg task "$ID" \
-    --arg pr "$PR_URL" \
-    --arg reason "$reason" \
-    --arg acknowledgedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{task:$task,pr:$pr,reason:$reason,acknowledgedAt:$acknowledgedAt}'); then
-    echo "REFUSED: cannot build open-PR acknowledgement record" >&2
-    return 1
-  fi
-  if [ ! -e "$log" ]; then
-    if ! (umask 077 && : > "$log"); then
-      echo "REFUSED: cannot create open-PR acknowledgement record at $log" >&2
-      return 1
-    fi
-  elif ! chmod 0600 "$log" 2>/dev/null; then
-    echo "REFUSED: cannot tighten open-PR acknowledgement record mode to 600 at $log" >&2
-    return 1
-  fi
-  if jq -e --arg task "$ID" 'select(.task==$task)' "$log" >/dev/null 2>&1; then
-    return 0
-  fi
-  if ! python3 - "$log" "$record" <<'PY'
-import os
-import sys
-
-path, record = sys.argv[1:3]
-fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-try:
-    os.write(fd, (record + "\n").encode("utf-8"))
-    os.fsync(fd)
-finally:
-    os.close(fd)
-PY
-  then
-    echo "REFUSED: cannot append open-PR acknowledgement record to $log" >&2
-    return 1
-  fi
-}
-
-teardown_identity_bound_replacement_watch() {
-  local want_provider=$1 want_host=$2 want_path=$3 want_number=$4
-  local registration other_id
-  for registration in "$STATE"/*.pr-poll-registration; do
-    [ -e "$registration" ] || [ -L "$registration" ] || continue
-    other_id=$(basename "$registration" .pr-poll-registration)
-    [ "$other_id" != "$ID" ] || continue
-    fm_pr_task_id_valid "$other_id" || continue
-    fm_pr_poll_artifacts_valid "$STATE" "$other_id" "$SCRIPT_DIR/fm-pr-poll.sh" || continue
-    [ "$FM_PR_REG_PROVIDER" = "$want_provider" ] || continue
-    [ "$FM_PR_REG_HOST" = "$want_host" ] || continue
-    [ "$FM_PR_REG_PATH" = "$want_path" ] || continue
-    [ "$FM_PR_REG_NUMBER" = "$want_number" ] || continue
-    return 0
-  done
-  return 1
-}
-
-teardown_refuse_open_pr_without_watch() {
-  local state want_provider want_host want_path want_number
-  [ "$KIND" = ship ] || return 0
-  [ -n "$PR_URL" ] || return 0
-  if ! fm_pr_url_parse "$PR_URL"; then
-    if [ "$ACK_OPEN_PR_WITHOUT_WATCH_SET" = 1 ]; then
-      if [ -z "$ACK_OPEN_PR_WITHOUT_WATCH" ]; then
-        echo "REFUSED: --acknowledge-open-pr-without-watch requires a nonempty reason; preserving metadata and merge watch." >&2
-        return 1
-      fi
-      TEARDOWN_OPEN_PR_ACK_PENDING=$ACK_OPEN_PR_WITHOUT_WATCH
-      return 0
-    fi
-    echo "REFUSED: task $ID records an unreadable pr=; preserving metadata and merge watch." >&2
-    return 1
-  fi
-  want_provider=$FM_PR_PROVIDER
-  want_host=$FM_PR_HOST
-  want_path=$FM_PR_PATH
-  want_number=$FM_PR_NUMBER
-  if state=$(teardown_recorded_pr_watch_state "$PR_URL"); then
-    case "$state" in
-      MERGED|CLOSED) return 0 ;;
-      OPEN) ;;
-      *)
-        echo "REFUSED: task $ID records an unproven PR state; preserving metadata and merge watch." >&2
-        return 1
-        ;;
-    esac
-  else
-    state=unproven
-  fi
-  if teardown_identity_bound_replacement_watch \
-      "$want_provider" "$want_host" "$want_path" "$want_number"; then
-    return 0
-  fi
-  if [ "$ACK_OPEN_PR_WITHOUT_WATCH_SET" = 1 ]; then
-    if [ -z "$ACK_OPEN_PR_WITHOUT_WATCH" ]; then
-      echo "REFUSED: --acknowledge-open-pr-without-watch requires a nonempty reason; preserving metadata and merge watch." >&2
-      return 1
-    fi
-    TEARDOWN_OPEN_PR_ACK_PENDING=$ACK_OPEN_PR_WITHOUT_WATCH
-    return 0
-  fi
-  echo "REFUSED: task $ID still records an open PR ($PR_URL) without an identity-bound replacement watch; preserving metadata and merge watch. Re-run with --acknowledge-open-pr-without-watch <reason> after explicit discard approval, or leave the watch armed." >&2
-  return 1
-}
-
-teardown_worktree_abs() {
-  local target=$1 parent
-  [ -n "$target" ] || return 1
-  if [ -d "$target" ]; then
-    ( CDPATH='' cd -- "$target" && pwd -P )
-    return 0
-  fi
-  parent=$(dirname -- "$target")
-  if [ -d "$parent" ]; then
-    printf '%s/%s\n' "$(CDPATH='' cd -- "$parent" && pwd -P)" "$(basename -- "$target")"
-    return 0
-  fi
-  printf '%s\n' "$target"
-}
-
-# teardown_meta_records_lease: <meta-file> carries <lease> on any
-# treehouse_lease= line. Contradictory lease lines therefore still match the
-# live lease they name, so ambiguous metadata stays fail-closed.
-teardown_meta_records_lease() {  # <meta-file> <lease>
-  grep -Fxq "treehouse_lease=$2" "$1" 2>/dev/null
-}
-
-# teardown_other_task_claims_worktree: <proven-lease> is this task's live
-# Treehouse lease as proven by the occupancy row, or empty when no such proof
-# exists. Without that proof, path equality alone is a claim.
-teardown_other_task_claims_worktree() {  # <abs-worktree> [proven-lease]
-  local abs=$1 proven_lease=${2:-} meta other_id other_wt other_abs
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    other_id=$(basename "$meta" .meta)
-    [ "$other_id" != "$ID" ] || continue
-    other_wt=$(fm_meta_get "$meta" worktree)
-    [ -n "$other_wt" ] || continue
-    other_abs=$(teardown_worktree_abs "$other_wt") || continue
-    [ "$other_abs" = "$abs" ] || continue
-    [ -n "$proven_lease" ] || return 0
-    # This task holds the live lease on the path, so a record that does not
-    # name that lease describes a superseded occupancy of a re-leased pooled
-    # slot rather than a live claim.
-    teardown_meta_records_lease "$meta" "$proven_lease" || continue
-    return 0
-  done
-  return 1
-}
-
-teardown_refuse_other_task_claim() {
-  local abs proven_lease=
-  [ -n "$WT" ] || return 0
-  abs=$(teardown_worktree_abs "$WT") || abs=$WT
-  if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$TEARDOWN_OCCUPANCY_HOLDER" = "$ID" ]; then
-    proven_lease=$TEARDOWN_OCCUPANCY_LEASE
-  fi
-  teardown_other_task_claims_worktree "$abs" "$proven_lease" || return 0
-  echo "REFUSED: worktree $WT is now recorded for another task; preserving $ID and leaving the live slot untouched." >&2
-  return 1
-}
-
-teardown_occupancy_identity_mismatch() {
-  local current_holder=$1 current_lease=$2 current_slot=$3
-  local recorded_lease=$4 recorded_slot=$5
-  if [ "$current_holder" != "$ID" ]; then
-    return 0
-  fi
-  if [ -z "$recorded_lease" ] || [ -z "$current_lease" ] \
-      || [ "$recorded_lease" != "$current_lease" ]; then
-    return 0
-  fi
-  if [ -n "$recorded_slot" ] && [ -n "$current_slot" ] \
-      && [ "$recorded_slot" != "$current_slot" ]; then
-    return 0
-  fi
-  return 1
-}
-
-teardown_occupancy_identity_matches() {
-  local current_holder=$1 current_lease=$2 current_slot=$3
-  local recorded_lease=$4 recorded_slot=$5
-  [ -n "$recorded_lease" ] && [ -n "$current_lease" ] \
-    && [ "$recorded_lease" = "$current_lease" ] \
-    && [ "$current_holder" = "$ID" ] && return 0
-  return 1
-}
-
-teardown_treehouse_status_entry() {
-  local abs=$1 json matches count
-  json=$(CDPATH='' cd -- "$PROJ" && treehouse status --json 2>/dev/null) || return 2
-  [ -n "$json" ] || json='[]'
-  if ! printf '%s\n' "$json" | jq -e 'type=="array"' >/dev/null 2>&1; then
-    return 2
-  fi
-  matches=$(printf '%s\n' "$json" | jq -c --arg path "$abs" --arg raw "$WT" \
-    '[.[] | select((.path|tostring)==$path or (.path|tostring)==$raw)]') || return 2
-  count=$(printf '%s\n' "$matches" | jq -r 'length') || return 2
-  [ "$count" -ne 0 ] || return 1
-  [ "$count" -eq 1 ] || return 3
-  printf '%s\n' "$matches" | jq -c '.[0]'
-}
-
-TEARDOWN_TREEHOUSE_LOCK_HELD=0
-TEARDOWN_TREEHOUSE_LOCK="$STATE/.treehouse-acquisition.lock"
-
-teardown_treehouse_lock_release() {
-  if [ "$TEARDOWN_TREEHOUSE_LOCK_HELD" = 1 ]; then
-    fm_lock_release "$TEARDOWN_TREEHOUSE_LOCK" || true
-    TEARDOWN_TREEHOUSE_LOCK_HELD=0
-  fi
-}
-
-teardown_treehouse_lock_acquire() {
-  [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] || return 0
-  [ "$BACKEND" != orca ] || return 0
-  [ "$KIND" != secondmate ] || return 0
-  [ "$ACCESS" != reader ] || return 0
-  fm_lock_acquire_wait "$TEARDOWN_TREEHOUSE_LOCK" || return 1
-  TEARDOWN_TREEHOUSE_LOCK_HELD=1
-}
-
-teardown_recorded_endpoint_is_gone() {
-  local state
-  fm_backend_validate_task_endpoint "$META" "$ID" || return 1
-  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
-  T=$FM_BACKEND_VALIDATED_TARGET
-  state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null) || state=unreadable
-  case "$state" in
-    dead|missing) return 0 ;;
-  esac
-  echo "REFUSED: task $ID still has a live or unproven endpoint ($state); preserving metadata and merge watch." >&2
-  return 1
-}
-
-teardown_mark_owned_occupancy() {
-  TEARDOWN_WORKTREE_OWNED=1
-  TEARDOWN_WORKTREE_STALE=0
-  TEARDOWN_OCCUPANCY_LEASE=$1
-  TEARDOWN_OCCUPANCY_HOLDER=$2
-}
-
-teardown_prove_available_occupancy_is_stale() {
-  local current_slot=$1 recorded_lease=$2 recorded_slot=$3
-  if [ -z "$recorded_lease" ] || [ -z "$recorded_slot" ]; then
-    echo "REFUSED: available occupancy for $ID has no recorded lease identity; preserving task state." >&2
-    return 1
-  fi
-  if [ -z "$current_slot" ] || [ "$current_slot" != "$recorded_slot" ]; then
-    echo "REFUSED: available occupancy for $ID does not match its recorded slot identity; preserving task state." >&2
-    return 1
-  fi
-  if [ -d "$WT" ]; then
-    echo "REFUSED: recorded worktree path for $ID still exists while occupancy is available; preserving task state." >&2
-    return 1
-  fi
-  teardown_recorded_endpoint_is_gone || return 1
-  TEARDOWN_WORKTREE_STALE=1
-  TEARDOWN_WORKTREE_OWNED=0
-}
-
-# The claim gate runs after occupancy resolution so it can consume the lease
-# that resolution proved. Orca has no Treehouse lease authority to prove, so it
-# supplies none and keeps the conservative path-only refusal.
-teardown_prove_worktree_occupancy() {
-  TEARDOWN_CLAIM_GATE_APPLIES=0
-  teardown_resolve_worktree_occupancy || return 1
-  [ "$TEARDOWN_CLAIM_GATE_APPLIES" = 1 ] || return 0
-  teardown_refuse_other_task_claim || return 1
-}
-
-teardown_resolve_worktree_occupancy() {
-  local abs recorded_lease recorded_slot entry lookup_rc status current_lease current_holder current_slot
-  TEARDOWN_WORKTREE_OWNED=0
-  TEARDOWN_WORKTREE_STALE=0
-  TEARDOWN_OCCUPANCY_LEASE=
-  TEARDOWN_OCCUPANCY_HOLDER=
-  if [ "$BACKEND" = orca ]; then
-    TEARDOWN_CLAIM_GATE_APPLIES=1
-    TEARDOWN_WORKTREE_OWNED=1
-    return 0
-  fi
-  if [ "$KIND" = secondmate ] || [ "$ACCESS" = reader ]; then
-    TEARDOWN_WORKTREE_OWNED=1
-    return 0
-  fi
-  recorded_lease=$(fm_meta_get "$META" treehouse_lease)
-  recorded_slot=$(fm_meta_get "$META" treehouse_slot)
-  if [ -z "$WT" ]; then
-    echo "REFUSED: task $ID has no recorded worktree path; preserving task state." >&2
-    return 1
-  fi
-  abs=$(teardown_worktree_abs "$WT") || abs=$WT
-  TEARDOWN_CLAIM_GATE_APPLIES=1
-  if [ -d "$WT" ] || [ -n "$recorded_lease" ] || [ -n "$recorded_slot" ]; then
-    if ! command -v treehouse >/dev/null 2>&1; then
-      echo "REFUSED: treehouse occupancy for $ID is unreadable; preserving task state." >&2
-      return 1
-    fi
-    if entry=$(teardown_treehouse_status_entry "$abs"); then
-      lookup_rc=0
-    else
-      lookup_rc=$?
-    fi
-    case "$lookup_rc" in
-      2)
-        echo "REFUSED: treehouse occupancy for $ID is unreadable; preserving task state." >&2
-        return 1
-        ;;
-      1)
-        echo "REFUSED: treehouse occupancy for $ID has no matching identity entry; preserving task state." >&2
-        return 1
-        ;;
-      3)
-        echo "REFUSED: treehouse occupancy for $ID has contradictory duplicate entries; preserving task state." >&2
-        return 1
-        ;;
-    esac
-    status=$(printf '%s\n' "$entry" | jq -r '.status // empty') || {
-      echo "REFUSED: treehouse occupancy for $ID is unreadable; preserving task state." >&2
-      return 1
-    }
-    current_lease=$(printf '%s\n' "$entry" | jq -r '.lease_id // empty') || current_lease=
-    current_holder=$(printf '%s\n' "$entry" | jq -r '.lease_holder // empty') || current_holder=
-    current_slot=$(printf '%s\n' "$entry" | jq -r '.name // empty') || current_slot=
-    if [ "$status" = available ] && [ -z "$current_holder" ] && [ -z "$current_lease" ]; then
-      teardown_prove_available_occupancy_is_stale \
-        "$current_slot" "$recorded_lease" "$recorded_slot" || return 1
-      return 0
-    fi
-    if [ -z "$recorded_lease" ] && [ -z "$recorded_slot" ]; then
-      case "$status" in
-        leased|in-use)
-          if [ "$current_holder" = "$ID" ] && [ -n "$current_lease" ]; then
-            teardown_mark_owned_occupancy "$current_lease" "$current_holder"
-            return 0
-          fi
-          ;;
-      esac
-      echo "REFUSED: treehouse occupancy for $ID has no affirmative task-bound lease identity; preserving task state." >&2
-      return 1
-    fi
-    if teardown_occupancy_identity_mismatch \
-        "$current_holder" "$current_lease" "$current_slot" \
-        "$recorded_lease" "$recorded_slot"; then
-      echo "REFUSED: worktree $WT is leased to ${current_holder:-another identity}, not $ID; preserving task state and leaving the live slot untouched." >&2
-      return 1
-    fi
-    if ! teardown_occupancy_identity_matches \
-        "$current_holder" "$current_lease" "$current_slot" \
-        "$recorded_lease" "$recorded_slot"; then
-      echo "REFUSED: treehouse occupancy for $ID has no affirmative task-bound lease identity; preserving task state." >&2
-      return 1
-    fi
-    teardown_mark_owned_occupancy "$current_lease" "$current_holder"
-    return 0
-  fi
-  echo "REFUSED: treehouse occupancy for $ID has no matching identity entry; preserving task state." >&2
-  return 1
-}
-
-teardown_revalidate_worktree_occupancy() {
-  [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] || return 0
-  teardown_prove_worktree_occupancy || return 1
-  if [ "$TEARDOWN_WORKTREE_OWNED" != 1 ]; then
-    echo "REFUSED: worktree lease ownership changed during teardown; preserving remaining task state." >&2
-    return 1
-  fi
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -1799,19 +1342,6 @@ pr_is_merged() {
   return 0
 }
 
-# Is the task's recorded PR merged? This telemetry-only predicate uses the
-# durable pr= URL from task metadata and the stable project clone, so a returned
-# or reused pool slot is not mistaken for the task's former branch checkout.
-recorded_pr_is_merged() {  # <pr-url>
-  local target=$1 state
-  [ -n "$target" ] || return 1
-  state=$(cd "$PROJ" && gh pr view "$target" --json state -q '.state' 2>/dev/null) || return 1
-  case "$state" in
-    MERGED|merged) return 0 ;;
-  esac
-  return 1
-}
-
 # Is the branch's content already present in the up-to-date default branch? Fetches
 # first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
 # the default branch does not already contain (e.g. its change landed via squash) the
@@ -1848,188 +1378,6 @@ work_is_landed() {
   content_in_default
 }
 
-TEARDOWN_SPEC_KIT_SCRIPTS_DIR="${FM_SPEC_KIT_SCRIPTS_DIR:-$HOME/.claude/skills/artemis-spec-kit-plugin/scripts}"
-TEARDOWN_KIT_SCRATCH_ROOT="${FM_KIT_SCRATCH_ROOT:-$HOME/.claude/scratch}"
-TEARDOWN_KIT_SEAL_FORCE_LOG="$DATA/teardown-kit-seal-forces.jsonl"
-
-record_kit_seal_force_bypass() {
-  local run_dir=$1 error=$2 record log=$TEARDOWN_KIT_SEAL_FORCE_LOG
-  if ! mkdir -p "$DATA"; then
-    echo "REFUSED: cannot create data directory for kit-seal force bypass record: $DATA" >&2
-    return 1
-  fi
-  if [ -L "$log" ] || { [ -e "$log" ] && [ ! -f "$log" ]; }; then
-    echo "REFUSED: kit-seal force bypass record is not a regular non-symlink file: $log" >&2
-    return 1
-  fi
-  if ! record=$(jq -cn \
-    --arg task "$ID" \
-    --arg runDir "$run_dir" \
-    --arg error "$error" \
-    --arg forcedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{task:$task,runDir:$runDir,error:$error,forcedAt:$forcedAt}'); then
-    echo "REFUSED: cannot build kit-seal force bypass record" >&2
-    return 1
-  fi
-  if [ ! -e "$log" ]; then
-    if ! (umask 077 && : > "$log"); then
-      echo "REFUSED: cannot create kit-seal force bypass record at $log" >&2
-      return 1
-    fi
-  elif ! chmod 0600 "$log" 2>/dev/null; then
-    echo "REFUSED: cannot tighten kit-seal force bypass record mode to 600 at $log" >&2
-    return 1
-  fi
-  if ! python3 - "$log" "$record" <<'PY'
-import os
-import sys
-
-path, record = sys.argv[1:3]
-fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-try:
-    os.write(fd, (record + "\n").encode("utf-8"))
-    os.fsync(fd)
-finally:
-    os.close(fd)
-PY
-  then
-    echo "REFUSED: cannot append kit-seal force bypass record to $log" >&2
-    return 1
-  fi
-}
-
-teardown_kit_unsealed_linked_run_error() {
-  local wt=$1 list_worktrees_py py_out py_err py_rc
-  [ -n "$wt" ] || return 0
-  [ -d "$wt" ] || return 0
-  list_worktrees_py="$TEARDOWN_SPEC_KIT_SCRIPTS_DIR/list_worktrees.py"
-  if [ ! -f "$list_worktrees_py" ]; then
-    if [ -n "${FM_SPEC_KIT_SCRIPTS_DIR:-}" ]; then
-      echo "configured kit seal scripts missing: $list_worktrees_py"
-      return 1
-    fi
-    echo "kit-seal-check: Spec Kit scripts not installed; linked-run outcome check skipped" >&2
-    return 0
-  fi
-  py_rc=0
-  py_err=$(mktemp)
-  py_out=$(python3 - "$wt" "$TEARDOWN_KIT_SCRATCH_ROOT" "$list_worktrees_py" 2>"$py_err" <<'PY'
-import importlib.util
-import sys
-from pathlib import Path
-
-worktree, scratch_root, script_path = sys.argv[1:4]
-scripts_dir = str(Path(script_path).resolve().parent)
-if scripts_dir not in sys.path:
-    sys.path.insert(0, scripts_dir)
-spec = importlib.util.spec_from_file_location("fm_list_worktrees", script_path)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-if not hasattr(module, "_unsealed_linked_run"):
-    print("kit-seal-check: list_worktrees.py has no _unsealed_linked_run entry point", file=sys.stderr)
-    sys.exit(2)
-error = module._unsealed_linked_run(worktree, Path(scratch_root))
-if error:
-    print(error)
-PY
-) || py_rc=$?
-  if [ "${py_rc:-0}" -ne 0 ]; then
-    echo "kit-seal-check: linked-run outcome check could not run; teardown continues without it" >&2
-    [ -s "$py_err" ] && cat "$py_err" >&2
-    rm -f "$py_err"
-    return 0
-  fi
-  rm -f "$py_err"
-  [ -n "$py_out" ] || return 0
-  printf '%s\n' "$py_out"
-}
-
-teardown_enforce_kit_outcome_seal() {
-  local error run_dir
-  error=$(teardown_kit_unsealed_linked_run_error "$WT")
-  [ -n "$error" ] || return 0
-  run_dir=$(printf '%s\n' "$error" | sed -n 's/.*linked run \([^ ]*\) .*/\1/p')
-  if [ "$FORCE" = "--force" ]; then
-    record_kit_seal_force_bypass "${run_dir:-unknown}" "$error" || return 1
-    echo "note: --force bypassed unsealed kit-run outcome seal for $ID; recorded in data/teardown-kit-seal-forces.jsonl" >&2
-    return 0
-  fi
-  echo "REFUSED: $error" >&2
-  echo "Seal the linked kit run before teardown, or re-run with --force after explicit discard approval to record a bypass in data/teardown-kit-seal-forces.jsonl:" >&2
-  if [ -n "$run_dir" ]; then
-    case "$KIND" in
-      scout)
-        echo "  python3 $TEARDOWN_SPEC_KIT_SCRIPTS_DIR/record_outcome.py $run_dir --event abandoned" >&2
-        ;;
-      *)
-        echo "  python3 $TEARDOWN_SPEC_KIT_SCRIPTS_DIR/reconcile_run_outcome.py $run_dir --repo-root $PROJ" >&2
-        ;;
-    esac
-  else
-    echo "  PR ships: python3 $TEARDOWN_SPEC_KIT_SCRIPTS_DIR/reconcile_run_outcome.py <run_dir> --repo-root <project>" >&2
-    echo "  Scouts: python3 $TEARDOWN_SPEC_KIT_SCRIPTS_DIR/record_outcome.py <run_dir> --event abandoned" >&2
-  fi
-  return 1
-}
-
-teardown_task_repo() {
-  local id=$1 backlog=$DATA/backlog.md line repo
-  [ -f "$backlog" ] || return 1
-  line=$(grep -E "^- \\[[ x]\\] ${id} - " "$backlog" 2>/dev/null | sed -n '1p') || return 1
-  repo=$(printf '%s\n' "$line" | sed -n 's/.*(repo: \([^)]*\)).*/\1/p')
-  [ -n "$repo" ] || return 1
-  printf '%s\n' "$repo"
-}
-
-teardown_first_ready_task() {
-  local listing rows row id rest repo
-  fm_tasks_axi_backend_available "$CONFIG" || return 1
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  listing=$(tasks-axi ready 2>/dev/null) || return 1
-  rows=$(printf '%s\n' "$listing" | sed -n 's/^  \([A-Za-z0-9._-][A-Za-z0-9._-]*,.*\)$/\1/p')
-  row=$(printf '%s\n' "$rows" | sed -n '1p')
-  [ -n "$row" ] || return 1
-  id=${row%%,*}
-  rest=${row#*,}
-  rest=${rest#*,}
-  rest=${rest#*,}
-  repo=${rest%%,*}
-  [ -n "$id" ] && [ -n "$repo" ] || return 1
-  printf '%s\t%s\n' "$id" "$repo"
-}
-
-teardown_retro_acceleration_reminder() {
-  printf '%s\n' "Retro acceleration: answer in one line each; record only an INVARIANT on its second independent occurrence (the ledger is for counting, never for reading):"
-  printf '%s\n' "- What did this task spend time on that something we already own would have done?"
-  printf '%s\n' "- Did a blocker sit unanswered, and for how long?"
-  printf '%s\n' "- Did a review fail on a defect class our own records already name?"
-  printf '%s\n' "- Did a recheck produce no change at an unchanged head?"
-}
-
-teardown_secondmate_seam_reminder() {
-  local cur_repo next_line next_id next_repo
-  [ -f "$FM_HOME/$SUB_HOME_MARKER" ] || return 0
-  cur_repo=$(teardown_task_repo "$ID") || return 0
-  next_line=$(teardown_first_ready_task) || return 0
-  next_id=${next_line%%$'\t'*}
-  next_repo=${next_line#*$'\t'}
-  [ -n "$next_id" ] && [ -n "$next_repo" ] || return 0
-  [ "$next_repo" != "$cur_repo" ] || return 0
-  printf '%s\n' "Secondmate memory hygiene: $ID ($cur_repo) just finished and the next ready item $next_id ($next_repo) is a different subject. Run /stow in this home, then clear its context, before dispatching $next_id."
-}
-
-teardown_pre_return_reminders() {
-  [ "$KIND" = secondmate ] && return 0
-  teardown_retro_acceleration_reminder
-  teardown_secondmate_seam_reminder
-}
-
-teardown_before_worktree_removal() {
-  [ "$KIND" = secondmate ] && return 0
-  [ -d "$WT" ] || return 0
-  teardown_pre_return_reminders
-}
-
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
 # other ship carries the PR recorded on its own record.
@@ -2057,10 +1405,15 @@ backlog_done_args() {
 # invariant). This prints what already happened, so the follow-up wording stays
 # only where a human still owes the edit.
 backlog_refresh_reminder() {
-  local backlog_display
+  local backlog_display root backend=markdown
   [ "$KIND" = secondmate ] && return 0
   [ "$CLEANUP_RECOVERY" = orca ] && return 0
-  if backlog_display=$(fm_backlog_file "$DATA"); then
+  if root=$(fm_backlog_root "$DATA"); then
+    backend=$(fm_tasks_axi_backend "$root") || return 2
+  fi
+  if [ "$backend" != markdown ]; then
+    backlog_display="this home's configured tasks-axi backend (data directory $DATA)"
+  elif backlog_display=$(fm_backlog_file "$DATA"); then
     :
   else
     backlog_display="${DATA%/}/backlog.md"
@@ -2214,16 +1567,11 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local lease_id=${5:-} lease_holder=${6:-}
   local out lock attempt=0 max_retries lock_desc
-  local -a lease_args=()
-
-  [ -z "$lease_id" ] || lease_args+=(--if-lease-id "$lease_id")
-  [ -z "$lease_holder" ] || lease_args+=(--if-lease-holder "$lease_holder")
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "${lease_args[@]}" "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -2248,7 +1596,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "${lease_args[@]}" "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -2275,7 +1623,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "${lease_args[@]}" "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -2293,22 +1641,8 @@ teardown_treehouse_return() {
   return 1
 }
 
-# Single owner of the benign-untracked carve-outs (harness droppings) shared by
-# the dirty computation below and the classifier's untracked exclusion.
-TEARDOWN_BENIGN_UNTRACKED_RE='\.claude/|\.fm-(grok|kimi)-turnend$'
-
-# Bounded excerpt of the classifier's per-path refusal detail. Empty when the
-# classifier could not run at all (its absence changes nothing about refusing).
-print_unique_content_excerpt() {
-  local report=$1 lines
-  [ -n "$report" ] || return 0
-  lines=$(printf '%s\n' "$report" | grep '^unique ' | head -5 || true)
-  [ -n "$lines" ] || return 0
-  printf 'content reachable from no surviving ref:\n%s\n' "$lines" >&2
-}
-
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty dirty_unique unique_report unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -2323,22 +1657,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE "^\?\? ($TEARDOWN_BENIGN_UNTRACKED_RE)" | head -1 || true)
-
-  # Dirtiness is a proxy: a branch ref rewritten beneath a live worktree leaves
-  # index and working tree at the pre-rewrite state, presenting landed work as
-  # uncommitted changes. Consult the content-reachability classifier; ONLY its
-  # positive proof (exit 0) narrows the refusal, so a missing or failing
-  # classifier leaves the dirty refusal standing exactly as before.
-  dirty_unique=$dirty
-  unique_report=
-  if [ -n "$dirty" ]; then
-    if unique_report=$("$SCRIPT_DIR/fm-worktree-unique-content.sh" "$WT" \
-        --excluded-untracked-regex "^($TEARDOWN_BENIGN_UNTRACKED_RE)" 2>&1); then
-      dirty_unique=
-      echo "teardown: worktree $WT is dirty only with content already reachable from surviving refs (stale index after its branch was rewritten beneath it); continuing to the landed-work checks" >&2
-    fi
-  fi
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2361,18 +1680,16 @@ validate_worktree_teardown_safety() {
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty_unique" ] || [ -n "$unmerged" ]; then
+    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty_unique" ] && echo "uncommitted changes present" >&2
-      [ -n "$dirty_unique" ] && print_unique_content_excerpt "$unique_report"
+      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
-  elif [ -n "$dirty_unique" ]; then
+  elif [ -n "$dirty" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
-    print_unique_content_excerpt "$unique_report"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then
@@ -2393,12 +1710,20 @@ validate_worktree_teardown_safety() {
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
 # worktree $1 belong to THIS task, and is it parked at a gate awaiting an agent
 # that is about to be removed? Prints nothing; returns 0 only on a genuine
-# match so the caller knows it is safe to abort - never a guess.
+# match so the caller knows it is safe to abort - never a guess. Identity
+# binds through the strict object-local head rule, with bin/fm-nm-run-lib.sh's
+# shared ledger-anchored continuation rule as the only recognition for a head
+# this copy cannot resolve at all.
 NM_TEARDOWN_TIMEOUT=${FM_TEARDOWN_NM_TIMEOUT:-10}
 case "$NM_TEARDOWN_TIMEOUT" in ''|*[!0-9]*) NM_TEARDOWN_TIMEOUT=10 ;; esac
+# How many of the most recent `no-mistakes runs` rows the parked-run
+# continuation proof may scan, mirroring bin/fm-crew-state.sh's limit posture
+# (generous: rows of other branches interleave freely in the real ledger).
+NM_TEARDOWN_RUNS_LIMIT=${FM_TEARDOWN_NM_RUNS_LIMIT:-200}
+case "$NM_TEARDOWN_RUNS_LIMIT" in ''|*[!0-9]*) NM_TEARDOWN_RUNS_LIMIT=200 ;; esac
 TASK_RUN_ID=
 task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
-  local wt=$1 out=$2 branch run_id run_branch run_head status outcome awaiting has_gate
+  local wt=$1 out=$2 branch run_id run_branch run_head status outcome awaiting has_gate ledger
   TASK_RUN_ID=
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   [ -n "$branch" ] || return 1
@@ -2408,10 +1733,31 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
   [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
   run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
-  fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   [ -z "$outcome" ] || return 1
   status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
+  [ -n "$status" ] || return 1
+  case "$status" in
+    completed|failed|cancelled|passed|checks-passed|running|fixing|ci) return 1 ;;
+  esac
+  if ! fm_nm_head_matches_worktree "$wt" "$run_head"; then
+    # The strict object-local rule rejected this run head. That rejection is
+    # final when the head object resolves in this copy (diverged or rewritten
+    # tips are genuine mismatches), but when the object is absent entirely -
+    # the pipeline committed its fix round in its own repo and this copy
+    # never fetched it - the ONE shared runs-ledger rule in
+    # bin/fm-nm-run-lib.sh owns the only remaining recognition, and it prints
+    # nothing for any ledger shape it cannot prove, so the run stays
+    # untouched unless the ledger proves this exact continuation. Cleanup
+    # consumes only an explicitly active (`running`) proved word: a terminal
+    # newest row is finished history, never this parked run's abort
+    # authorization (the read path classifies the same owner's answer; the
+    # abort here must never fire for a run that already ended).
+    [ -n "$run_head" ] || return 1
+    [ -z "$(fm_nm_resolve_commit "$wt" "$run_head")" ] || return 1
+    ledger=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" runs --limit "$NM_TEARDOWN_RUNS_LIMIT")
+    [ "$(fm_nm_runs_status_for_worktree "$wt" "$branch" "$ledger" "$run_head")" = running ] || return 1
+  fi
   awaiting=$(printf '%s\n' "$out" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
   has_gate=$(printf '%s\n' "$out" | grep -Eq '^[[:space:]]*gate:[[:space:]]*' && echo 1 || echo 0)
   case "$status" in
@@ -2441,182 +1787,6 @@ task_status_is_terminal_run() {  # <axi-status-output> <run-id>
     cancelled|failed|passed|checks-passed) return 0 ;;
   esac
   return 1
-}
-
-TELEMETRY_GATE_SOURCE=delivery
-TELEMETRY_GATE_RESULT=incomplete
-TELEMETRY_STEP_RERUNS=null
-TELEMETRY_GATE_RUN_ID=
-TELEMETRY_GATE_REFUSAL=
-telemetry_status_is_own_terminal_run() {  # <worktree> <axi-status-output>
-  local wt=$1 out=$2 branch run_id run_branch run_head outcome
-  TELEMETRY_GATE_RUN_ID=
-  TELEMETRY_GATE_REFUSAL=
-  if ! branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null); then
-    TELEMETRY_GATE_REFUSAL='branch mismatch'
-    return 1
-  fi
-  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
-  if [ -z "$run_id" ]; then
-    TELEMETRY_GATE_REFUSAL='no run id'
-    return 1
-  fi
-  run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
-  if [ "$run_branch" != "$branch" ]; then
-    TELEMETRY_GATE_REFUSAL='branch mismatch'
-    return 1
-  fi
-  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
-  if ! fm_nm_head_matches_worktree "$wt" "$run_head"; then
-    TELEMETRY_GATE_REFUSAL='head mismatch'
-    return 1
-  fi
-  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
-  case "$outcome" in
-    passed|checks-passed) TELEMETRY_GATE_RESULT=green ;;
-    failed) TELEMETRY_GATE_RESULT=failed ;;
-    cancelled) TELEMETRY_GATE_RESULT=cancelled ;;
-    *) TELEMETRY_GATE_REFUSAL='unrecognized outcome'; return 1 ;;
-  esac
-  TELEMETRY_GATE_RUN_ID=$run_id
-  return 0
-}
-
-# Counts delivery-gate step ROUNDS BEYOND THE FIRST, one per (step, round>1)
-# pair, so a review fix whose follow-up also re-runs `document` counts two. This
-# is a count of step reruns, never of correction cycles; a run with one review
-# fix can legitimately report more than one.
-telemetry_step_reruns_from_stats() {  # <worktree> <run-id>
-  local wt=$1 run_id=$2 out
-  out=$(fm_nm_run_bounded "$wt" "$NM_TEARDOWN_TIMEOUT" stats --run "$run_id" 2>/dev/null) || return 1
-  printf '%s\n' "$out" | awk '
-    $1=="STEP" && $2=="ROUND" && $3=="PURPOSE" { in_table=1; next }
-    in_table && NF==0 { exit }
-    in_table && $2 ~ /^[0-9]+$/ { rows++; if ($2 > 1) seen[$1 SUBSEP $2]=1 }
-    END {
-      if (!in_table || rows==0) exit 1
-      count=0
-      for (key in seen) count++
-      print count
-    }
-  '
-}
-
-scout_delivery_is_accepted() {
-  [ -s "$DATA/$ID/report.md" ] && [ ! -L "$DATA/$ID/report.md" ] || return 1
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null 2>&1
-}
-
-# Digest of one caller-authored terminal payload, canonicalized first so a
-# reformatted but identical payload still matches.
-telemetry_payload_digest() {  # <payload>
-  local canonical
-  canonical=$(printf '%s' "$1" | jq -cS . 2>/dev/null) || return 1
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$canonical" | shasum -a 256 | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$canonical" | sha256sum | awk '{print $1}'
-  else
-    return 1
-  fi
-}
-
-# Whether the ledger already holds a terminal row for this attempt. Asked of the
-# telemetry owner rather than read from the ledger directly, so the projection
-# that answers it stays the owner's.
-telemetry_attempt_is_sealed() {  # <attempt>
-  local attempt=$1 state
-  state=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-    "$FM_ROOT/bin/fm-model-telemetry.sh" sheet --format json 2>/dev/null |
-    jq -r --arg a "$attempt" 'map(select(.attemptId==$a)) | (.[0].state // "open")' 2>/dev/null) || return 1
-  [ "$state" = terminal ]
-}
-
-observe_telemetry_gate_facts() {  # <worktree>
-  local wt=$1 out reruns status_line status_verb
-  TELEMETRY_GATE_SOURCE=delivery
-  TELEMETRY_GATE_RESULT=incomplete
-  TELEMETRY_STEP_RERUNS=null
-  TELEMETRY_GATE_RUN_ID=
-  TELEMETRY_GATE_REFUSAL=
-  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ -d "$wt" ]; then
-    if ! command -v no-mistakes >/dev/null 2>&1; then
-      TELEMETRY_GATE_REFUSAL='no no-mistakes on PATH'
-    elif ! out=$(fm_nm_run_checked "$wt" "$NM_TEARDOWN_TIMEOUT" axi status); then
-      TELEMETRY_GATE_REFUSAL='status query failed'
-    elif telemetry_status_is_own_terminal_run "$wt" "$out"; then
-      TELEMETRY_GATE_SOURCE=no-mistakes
-    fi
-  fi
-
-  if [ "$TELEMETRY_GATE_SOURCE" = no-mistakes ]; then
-    # An unreadable step table leaves the count unknown; it never demotes an
-    # observed gate result, because the result and the count are separate facts.
-    if reruns=$(telemetry_step_reruns_from_stats "$wt" "$TELEMETRY_GATE_RUN_ID"); then
-      TELEMETRY_STEP_RERUNS=$reruns
-    fi
-    return 0
-  fi
-
-  # Delivery acceptance is a property, not a status-file wording check. A
-  # local-only ship is accepted only when the merge gate recorded a non-empty
-  # commit interval unique to this task at landing time and its exact HEAD
-  # reached local main;
-  # a PR ship is accepted only when the forge confirms its recorded PR merged,
-  # independent of the former task checkout;
-  # and a scout is accepted only after the report and decision gates above.
-  if [ "$KIND" = scout ] && scout_delivery_is_accepted; then
-    TELEMETRY_GATE_RESULT=green
-    return 0
-  fi
-  if [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ -d "$wt" ]; then
-    local default_name delivered_commits worktree_head
-    if default_name=$(default_branch) \
-      && worktree_head=$(git -C "$wt" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
-      && [[ "$BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
-      && [[ "$LOCAL_DELIVERY_BASE" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
-      && [[ "$LOCAL_DELIVERY_HEAD" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
-      && [ "$LOCAL_DELIVERY_HEAD" = "$worktree_head" ] \
-      && git -C "$wt" cat-file -e "$BASE_COMMIT^{commit}" 2>/dev/null \
-      && git -C "$wt" cat-file -e "$LOCAL_DELIVERY_BASE^{commit}" 2>/dev/null \
-      && git -C "$wt" cat-file -e "$LOCAL_DELIVERY_HEAD^{commit}" 2>/dev/null \
-      && git -C "$wt" merge-base --is-ancestor "$BASE_COMMIT" "$LOCAL_DELIVERY_BASE" 2>/dev/null \
-      && git -C "$wt" merge-base --is-ancestor "$LOCAL_DELIVERY_BASE" "$LOCAL_DELIVERY_HEAD" 2>/dev/null \
-      && delivered_commits=$(git -C "$wt" rev-list --count "$LOCAL_DELIVERY_BASE..$LOCAL_DELIVERY_HEAD" 2>/dev/null) \
-      && [ "$delivered_commits" -gt 0 ] \
-      && ! git -C "$wt" diff --quiet "$LOCAL_DELIVERY_BASE" "$LOCAL_DELIVERY_HEAD" -- \
-      && git -C "$wt" merge-base --is-ancestor "$LOCAL_DELIVERY_HEAD" "refs/heads/$default_name" 2>/dev/null; then
-      TELEMETRY_GATE_RESULT=green
-      return 0
-    fi
-    if ! [[ "$BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
-      TELEMETRY_GATE_REFUSAL='missing or invalid task base commit'
-    fi
-  elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && recorded_pr_is_merged "$PR_URL"; then
-    TELEMETRY_GATE_RESULT=green
-    return 0
-  fi
-
-  # A final, parseable failed event is the task's operator-visible terminal
-  # outcome when no stronger delivery oracle exists. Earlier failed events do
-  # not leak through a later resolved/working event. Forced teardown without a
-  # failure is cancellation, never an indistinguishable incomplete attempt.
-  status_line=$(last_status_line "$STATE/$ID.status")
-  status_verb=$(status_line_verb "$status_line")
-  if [ "$status_verb" = failed ]; then
-    TELEMETRY_GATE_SOURCE='task-terminal'
-    TELEMETRY_GATE_RESULT=failed
-  elif [ "$FORCE" = --force ]; then
-    TELEMETRY_GATE_SOURCE=teardown
-    TELEMETRY_GATE_RESULT=cancelled
-  fi
-
-  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-    echo "teardown: no-mistakes gate facts unavailable for $ID: $TELEMETRY_GATE_REFUSAL" >&2
-  elif [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ -n "$TELEMETRY_GATE_REFUSAL" ]; then
-    echo "teardown: local-only gate facts unavailable for $ID: $TELEMETRY_GATE_REFUSAL" >&2
-  fi
 }
 
 task_status_is_run_not_found() {  # <status-error> <run-id>
@@ -2777,7 +1947,7 @@ reap_task_backend_process_group() {  # <label>
   fi
 }
 
-# Reap every process rooted (by cwd) under this task's own environment or tasktmp
+# Reap every process rooted (by cwd) under this task's own worktree or tasktmp
 # - both unique per task and never shared - before either is removed. TERM
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
@@ -2905,6 +2075,92 @@ require_orca_worktree_path_match_if_present() {
   local worktree_id=$1 inspected=$2
   [ -n "$inspected" ] && [ -e "$inspected" ] || return 0
   require_orca_worktree_path_match "$worktree_id" "$inspected"
+}
+
+# The task's own live slot, canonicalized, or empty when this record has no slot
+# to release (a secondmate home, a record with no worktree=, or a path that is
+# already gone). Every slot-ownership check below is scoped to that value, so a
+# record with nothing live to return skips them rather than refusing.
+teardown_live_slot_path() {
+  [ "$KIND" != secondmate ] || return 1
+  is_treehouse_pool_slot "$PROJ" "$WT" || return 1
+  canonical_existing_dir "$WT"
+}
+
+collect_local_firstmate_states() {
+  local record_state=$1 root home reg line child known existing i=0
+  local -a homes
+  TREEHOUSE_OWNER_STATES=("$record_state")
+  root=$(fm_firstmate_root_home "$FM_HOME") || {
+    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
+    return 1
+  }
+  homes=("$root")
+  while [ "$i" -lt "${#homes[@]}" ]; do
+    home=${homes[$i]}
+    i=$((i + 1))
+    known=0
+    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
+      [ "$existing" != "$home/state" ] || known=1
+    done
+    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
+    reg="$home/data/secondmates.md"
+    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
+    [ -f "$reg" ] && [ ! -L "$reg" ] || {
+      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
+      return 1
+    }
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "- "*)
+          secondmate_registry_parse_line "$line" || {
+            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
+            return 1
+          }
+          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || {
+            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
+            return 1
+          }
+          known=0
+          for existing in "${homes[@]}"; do
+            [ "$existing" != "$child" ] || known=1
+          done
+          [ "$known" = 1 ] || homes+=("$child")
+          ;;
+      esac
+    done < "$reg"
+  done
+}
+
+require_exclusive_worktree_slot_record() {
+  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
+  local slot state_dir other other_id field other_path other_slot
+  slot=$(canonical_existing_dir "$worktree") || return 0
+  collect_local_firstmate_states "$record_state" || return 1
+  for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
+    for other in "$state_dir"/*.meta; do
+      [ -f "$other" ] && [ ! -L "$other" ] || continue
+      [ "$other" != "$record_meta" ] || continue
+      other_id=$(basename "$other" .meta)
+      for field in worktree home; do
+        other_path=$(fm_meta_get "$other" "$field")
+        [ -n "$other_path" ] || continue
+        other_slot=$(canonical_existing_dir "$other_path") || continue
+        [ "$other_slot" = "$slot" ] || continue
+        echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
+        echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
+        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
+        return 1
+      done
+    done
+  done
+}
+
+require_exclusive_task_worktree_slot() {
+  local slot
+  slot=$(teardown_live_slot_path) || return 0
+  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -3323,6 +2579,7 @@ preflight_descendant_task_locks() {
   DESCENDANT_TASK_IDS=()
   DESCENDANT_TASK_KINDS=()
   DESCENDANT_TASK_HOMES=()
+  DESCENDANT_TREEHOUSE_LOCK_PATHS=()
   collect_descendant_task_locks "$home" || return 1
   # Acquisition order, which every other holder of these locks must match so
   # they cannot cycle: each home's task-set lock first (parent home before child
@@ -3372,6 +2629,61 @@ preflight_descendant_task_locks() {
   done
 }
 
+preflight_descendant_treehouse_slots() {
+  local i state task_id meta kind backend target worktree project lock_path held
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    state=${DESCENDANT_TASK_STATES[$i]}
+    task_id=${DESCENDANT_TASK_IDS[$i]}
+    meta="$state/$task_id.meta"
+    kind=$(meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+    backend=$(fm_backend_of_meta "$meta")
+    worktree=$(meta_value "$meta" worktree)
+    project=$(meta_value "$meta" project)
+    if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
+      continue
+    fi
+    if ! is_treehouse_pool_slot "$project" "$worktree"; then
+      continue
+    fi
+    lock_path=$(fm_treehouse_project_lock_path "$project") || {
+      echo "REFUSED: cannot resolve the shared Treehouse project lock for child $task_id; forced teardown changed nothing" >&2
+      return 1
+    }
+    held=0
+    [ "$TREEHOUSE_PROJECT_LOCK_HELD" != 1 ] || [ "$TREEHOUSE_PROJECT_LOCK" != "$lock_path" ] || held=1
+    for target in "${DESCENDANT_TREEHOUSE_LOCK_PATHS[@]}"; do
+      [ "$target" != "$lock_path" ] || held=1
+    done
+    if [ "$held" = 0 ]; then
+      fm_lock_try_acquire "$lock_path" || {
+        echo "REFUSED: another Treehouse slot allocation or return is in progress for child $task_id; forced teardown changed nothing" >&2
+        return 1
+      }
+      DESCENDANT_TREEHOUSE_LOCK_PATHS+=("$lock_path")
+      DESCENDANT_LOCK_PATHS+=("$lock_path")
+    fi
+  done
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    state=${DESCENDANT_TASK_STATES[$i]}
+    task_id=${DESCENDANT_TASK_IDS[$i]}
+    meta="$state/$task_id.meta"
+    kind=$(meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+    backend=$(fm_backend_of_meta "$meta")
+    worktree=$(meta_value "$meta" worktree)
+    project=$(meta_value "$meta" project)
+    if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
+      continue
+    fi
+    if ! is_treehouse_pool_slot "$project" "$worktree"; then
+      continue
+    fi
+    fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
+    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
+  done
+}
+
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
   sub_state="$home/state"
@@ -3407,16 +2719,14 @@ validate_firstmate_home_children_removal() {
 TEARDOWN_HERDR_LOCK_RECORDS=
 teardown_release_herdr_locks() {
   local lock_session lock_path
-  if [ -n "$TEARDOWN_HERDR_LOCK_RECORDS" ]; then
-    while IFS=$'\t' read -r lock_session lock_path; do
-      [ -n "$lock_path" ] || continue
-      fm_lock_release "$lock_path" || true
-    done <<FMEOF
+  [ -n "$TEARDOWN_HERDR_LOCK_RECORDS" ] || return 0
+  while IFS=$'\t' read -r lock_session lock_path; do
+    [ -n "$lock_path" ] || continue
+    fm_lock_release "$lock_path" || true
+  done <<FMEOF
 $TEARDOWN_HERDR_LOCK_RECORDS
 FMEOF
-  fi
   TEARDOWN_HERDR_LOCK_RECORDS=
-  teardown_treehouse_lock_release
 }
 
 teardown_herdr_session_lock_held() {  # <session>
@@ -3508,7 +2818,6 @@ $session	$lock_path"
       else
         TEARDOWN_HERDR_LOCK_RECORDS="$session	$lock_path"
       fi
-      trap 'teardown_release_herdr_locks; fm_lease_guard_release || true' EXIT
       return 0
     fi
     sleep 0.1
@@ -3628,11 +2937,12 @@ cleanup_firstmate_home_children() {
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
-    rm -f "$sub_state/$child_id.turn-ended" \
-      "$sub_state/$child_id.pi-ext.ts" \
+    rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
+      "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
-      "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged"
+      "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
+      "$sub_state/.$child_id.branch-outcome-index"
   done
 }
 
@@ -3651,6 +2961,8 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
+require_exclusive_task_worktree_slot || exit 1
+
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
 if [ "$KIND" = secondmate ]; then
@@ -3666,6 +2978,7 @@ if [ "$KIND" = secondmate ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+    preflight_descendant_treehouse_slots || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
@@ -3702,38 +3015,11 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   fi
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null; then
-    echo "REFUSED: scout task $ID has not passed the unresolved-decision completion gate." >&2
+    echo "REFUSED: scout task $ID has not passed the captain-call completion gate." >&2
     echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
     exit 1
   fi
 fi
-
-# Reader boundary, enforced at the destruction edge: a reader can never write
-# to a tracked file, so a git checkout found anywhere this cleanup is about to
-# erase means the reader fell back to editing instead of stopping at the wall
-# its brief mandates. The scan covers the whole task temp root, matching the
-# rm -rf scope below (the scratch is inside it and a violating checkout could
-# sit beside the scratch, e.g. <tasktmp>/wt); a record without tasktmp= falls
-# back to scanning the scratch alone, its only removed path. That checkout's
-# content may be unlanded work - refuse loudly and investigate. The scratch's
-# own read handle is a bare repo.git, never a .git entry, so it does not trip
-# this check.
-reader_refuse_grown_checkout() {
-  local scan_root=$WT grown_checkout=
-  [ "$ACCESS" = reader ] && [ "$FORCE" != "--force" ] || return 0
-  if [ -n "$TASK_TMP" ] && [ -d "$TASK_TMP" ]; then
-    scan_root=$TASK_TMP
-  fi
-  if [ -d "$scan_root" ]; then
-    grown_checkout=$(find "$scan_root" -name .git -print -quit 2>/dev/null || true)
-  fi
-  if [ -n "$grown_checkout" ]; then
-    echo "REFUSED: reader task $ID grew a git checkout inside its task temp root ($grown_checkout)." >&2
-    echo "A reader must never edit tracked files; inspect that checkout for unlanded work, land or discard it explicitly, then re-run (--force only after the captain explicitly approves discarding it)." >&2
-    return 1
-  fi
-}
-reader_refuse_grown_checkout || exit 1
 
 # A public commitment is not kept until its final reply lands in the ORIGINAL
 # thread, and this cleanup removes the task records that make the promise
@@ -3773,22 +3059,6 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reader ]; then
-  fm_lock_acquire_wait "$TEARDOWN_TREEHOUSE_LOCK" || exit 1
-  TEARDOWN_TREEHOUSE_LOCK_HELD=1
-  trap 'teardown_release_herdr_locks; fm_lease_guard_release || true' EXIT
-fi
-teardown_prove_worktree_occupancy || exit 1
-if [ "$TEARDOWN_WORKTREE_STALE" != 1 ]; then
-  fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
-  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
-  T=$FM_BACKEND_VALIDATED_TARGET
-fi
-teardown_refuse_open_pr_without_watch || exit 1
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$TEARDOWN_TREEHOUSE_LOCK_HELD" != 1 ]; then
-  teardown_treehouse_lock_acquire || exit 1
-  trap 'teardown_release_herdr_locks; fm_lease_guard_release || true' EXIT
-fi
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
@@ -3799,7 +3069,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -3813,40 +3083,16 @@ if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ -d "$WT" ] && [ "$FORCE" != "--force"
   fi
 fi
 
-# Linked kit-run outcome seals are ordinary refusals: they run with the other
-# landed-work gates above, before process reaping, telemetry sealing, or any
-# destructive cleanup.
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$KIND" != secondmate ] && [ -d "$WT" ]; then
-  teardown_enforce_kit_outcome_seal || exit 1
-fi
-
-# Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 (see script header) runs here, unconditionally on --force, and
-# before ANY destructive step below - a still-parked run can own live work in
-# this exact worktree. Not for
-# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
-# dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then
-  teardown_revalidate_worktree_occupancy || exit 1
-  conclude_task_no_mistakes_run "$WT"
-  teardown_revalidate_worktree_occupancy || exit 1
-fi
-
-# Fix 3 (see script header): sweep remote job workers abandoned by an already
-# pruned code root. Best effort - a sweep failure never blocks this teardown.
-"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
-
 # A Herdr close may reposition shared workspace order, so the whole
-# destructive sequence below (process reaping, worktree return, pane close,
-# record removal) runs under the named-session presentation lock, acquired
-# BEFORE anything is returned or erased: a contended lock refuses here while
-# the isolated copy, every durable record, and the endpoint are all still
-# intact for a plain rerun. An unresolvable lock path (for example an
-# unreachable server) also refuses before any destructive step.
+# destructive sequence below (worktree return, pane close, record removal)
+# runs under the named-session presentation lock, acquired BEFORE anything is
+# returned or erased: a contended lock refuses here while the isolated copy,
+# every durable record, and the endpoint are all still intact for a plain
+# rerun. An unresolvable lock path (for example an unreachable server) also
+# refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
@@ -3863,12 +3109,66 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
     echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
     exit 1
   }
+# Roll the accepted legacy incarnation's stamp back to the record's exact
+# pre-stamp bytes. Uses perl - already in the teardown lifecycle's curated PATH
+# (truncate is not, and is absent on stock macOS) - and verifies the restored
+# size before reporting success, so a rollback that cannot be proven complete
+# is reported as not rolled back.
+teardown_legacy_stamp_rollback() {
+  [ "$TEARDOWN_LEGACY_PRESTAMP_SIZE" -gt 0 ] 2>/dev/null || return 1
+  perl -e 'truncate($ARGV[0], $ARGV[1]) or exit 1' -- \
+    "$META" "$TEARDOWN_LEGACY_PRESTAMP_SIZE" || return 1
+  [ "$(wc -c < "$META" | tr -d ' ')" = "$TEARDOWN_LEGACY_PRESTAMP_SIZE" ]
+}
+
+  # The accepted legacy incarnation is stamped under the meta lock already
+  # held, right before the close marker binds to it: every refusal above leaves
+  # the record byte-identical, and every later replay reads the same stamped
+  # token the marker carries. A failed close-marker write rolls the stamp back
+  # to the record's pre-stamp bytes, so a retried teardown re-runs the
+  # dead-or-agent-less endpoint gate instead of sailing past it on a stamp the
+  # abandoned attempt left behind.
+  if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ]; then
+    TEARDOWN_LEGACY_PRESTAMP_SIZE=$(wc -c < "$META" | tr -d ' ')
+    TEARDOWN_LEGACY_STAMP_FAILED=
+    if [ -s "$META" ] && [ -n "$(tail -c 1 -- "$META" 2>/dev/null)" ]; then
+      printf '\n' >> "$META" || TEARDOWN_LEGACY_STAMP_FAILED=newline
+    fi
+    if [ -z "$TEARDOWN_LEGACY_STAMP_FAILED" ]; then
+      printf 'spawn_gen=%s\n' "$TEARDOWN_META_SPAWN_GEN" >> "$META" \
+        || TEARDOWN_LEGACY_STAMP_FAILED=append
+    fi
+    if [ -z "$TEARDOWN_LEGACY_STAMP_FAILED" ] \
+       && ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
+      TEARDOWN_LEGACY_STAMP_FAILED=validate
+    fi
+    if [ -n "$TEARDOWN_LEGACY_STAMP_FAILED" ]; then
+      teardown_legacy_stamp_rollback \
+        || echo "error: the legacy incarnation stamp on $ID's record could not be rolled back; re-run teardown with --legacy-record after reconciling its endpoint" >&2
+      if [ "$TEARDOWN_LEGACY_STAMP_FAILED" = validate ]; then
+        echo "error: the stamped legacy incarnation does not validate for $ID ($FM_BACKLOG_TRANSITION_ERROR); refusing destructive teardown" >&2
+      else
+        echo "error: could not stamp the accepted legacy incarnation into task $ID's record; refusing destructive teardown" >&2
+      fi
+      exit 1
+    fi
+  fi
   BACKLOG_CLOSED=1
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
-  fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
-    "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
-    "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" \
-    || { echo "error: the pending backlog $BACKLOG_TRANSITION for $ID could not be recorded ($FM_BACKLOG_TRANSITION_ERROR); retaining every durable task record" >&2; exit 1; }
+  if ! fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
+      "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
+      "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
+    if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ] \
+       && teardown_legacy_stamp_rollback; then
+      echo "error: the pending backlog $BACKLOG_TRANSITION for $ID could not be recorded ($FM_BACKLOG_TRANSITION_ERROR); the accepted legacy incarnation was rolled back, retaining every durable task record" >&2
+    else
+      echo "error: the pending backlog $BACKLOG_TRANSITION for $ID could not be recorded ($FM_BACKLOG_TRANSITION_ERROR); retaining every durable task record" >&2
+      if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ]; then
+        echo "error: the legacy incarnation stamp on $ID's record could not be rolled back; re-run teardown with --legacy-record after reconciling its endpoint" >&2
+      fi
+    fi
+    exit 1
+  fi
 else
   if [ "$CLEANUP_RECOVERY" = orca ]; then
     BACKLOG_SKIP_REASON="Orca cleanup recovery is not a launched backlog worker"
@@ -3877,16 +3177,70 @@ else
   fi
 fi
 
-# Capture a live projection's exact journal-to-endpoint binding before process
-# reaping can make its pane and last-workspace disappear. This snapshot grants
-# only candidate status: journal retirement below still requires the exact pane
-# to be confirmed dead under the same session lock.
+# Every landed/discard-work refusal above has now passed (or --force skipped
+# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# --force, and before ANY destructive step below - a still-parked run or a
+# leaked process can own live work in this exact worktree. Not for
+# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
+# dedicated process-event and firstmate-home removal machinery further below,
+# not by task-worktree cleanup.
+if [ "$KIND" != secondmate ]; then
+  conclude_task_no_mistakes_run "$WT"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+fi
+
+# Fix 3 (see script header): sweep remote job workers abandoned by an already
+# pruned code root. Best effort - a sweep failure never blocks this teardown.
+"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+
+# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
+    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
+    ORCA_PATH_MATCH_VERIFIED=1
+  fi
+  if [ -d "$WT" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$branch" != "HEAD" ]; then
+      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+      "$WT/.opencode/plugins/fm-busy-state.js" \
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  fi
+  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  if [ "$branch" != "HEAD" ]; then
+    if git -C "$WT" checkout --detach -q 2>/dev/null; then
+      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+    fi
+  fi
+  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  # Kills remaining processes in the worktree (including the agent), resets, returns
+  # to pool. treehouse resolves the pool from the working directory, so run it from
+  # the project. teardown_treehouse_return tolerates transient and stale git locks
+  # left by a killed crew process; see the script header for retry and stale-lock proof.
+  post_lock_cleanup_check=
+  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+    post_lock_cleanup_check=validate_worktree_teardown_safety
+  fi
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+    exit 1
+  }
+fi
+
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] \
-   && [ "$BACKEND" = herdr ] \
+if [ "$BACKEND" = herdr ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   fm_backend_source herdr || true
   HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
@@ -3903,208 +3257,10 @@ if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] \
   fi
 fi
 
-# Fix 2 (see script header) reaps leaked worktree processes only after the
-# Herdr endpoint lock and any live journal binding have been captured.
-if [ "$KIND" != secondmate ] && [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
-fi
-
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
-  require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
-  ORCA_PATH_MATCH_VERIFIED=1
-fi
-
-# Model outcome is sealed only after every existing report, public-followup,
-# landed-work, and endpoint preflight gate passes, but before any endpoint,
-# worktree, or task state is deleted. A matching no-mistakes run supplies the
-# quality result and step-rerun count mechanically. Other delivery modes use the
-# completed report, local-main ancestry, or merged-PR property their teardown
-# gate just proved. Exact-attempt harness sessions supply token totals and
-# active wall time; teardown latency is never substituted for missing session
-# facts. Spend stays absent because no harness reports billed spend; every
-# harness cost rendering is derived from its own token counts and price catalog,
-# which this ledger refuses on purpose.
-# Cleanup itself never supplies success; a forced cleanup supplies cancellation.
-TELEMETRY_ATTEMPT=$(fm_meta_get "$META" telemetry_attempt)
-TELEMETRY_SEALED_PAYLOAD_DIGEST=$(fm_meta_get "$META" telemetry_terminal_payload_sha256)
-TELEMETRY_RECORD_PAYLOAD_DIGEST=
-if [ -n "$TELEMETRY_ATTEMPT" ]; then
-  TELEMETRY_USAGE='{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null}'
-  TELEMETRY_WALL_SECONDS=null
-  TELEMETRY_USAGE_SOURCE=null
-  if [ -d "$WT" ]; then
-    if TELEMETRY_OBSERVATION=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      "$FM_ROOT/bin/fm-model-telemetry.sh" usage --attempt "$TELEMETRY_ATTEMPT" --worktree "$WT"); then
-      TELEMETRY_USAGE=$(printf '%s' "$TELEMETRY_OBSERVATION" | jq -c .usage)
-      TELEMETRY_WALL_SECONDS=$(printf '%s' "$TELEMETRY_OBSERVATION" | jq -c .wallSeconds)
-      TELEMETRY_USAGE_SOURCE=$(printf '%s' "$TELEMETRY_OBSERVATION" | jq -c '.usageSource // null')
-    else
-      echo "teardown: exact-attempt harness session facts were unreadable for $ID; token counts and active duration remain absent" >&2
-      TELEMETRY_USAGE='{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null}'
-      TELEMETRY_WALL_SECONDS=null
-      TELEMETRY_USAGE_SOURCE='"unreadable"'
-    fi
-  else
-    TELEMETRY_USAGE_SOURCE='"worktree-missing"'
-  fi
-  if [ -n "$TERMINAL_PAYLOAD" ]; then
-    printf '%s' "$TERMINAL_PAYLOAD" | jq -e 'type=="object"' >/dev/null 2>&1 || {
-      echo "error: --terminal-payload is not a JSON object" >&2
-      exit 1
-    }
-  fi
-  observe_telemetry_gate_facts "$WT"
-  TELEMETRY_PRIMARY_FAILURE_CLASS=null
-  if [ "$TELEMETRY_GATE_RESULT" = green ]; then
-    TELEMETRY_PRIMARY_FAILURE_CLASS='"none"'
-  elif [ -n "$TERMINAL_PAYLOAD" ]; then
-    TELEMETRY_PRIMARY_FAILURE_CLASS=$(printf '%s' "$TERMINAL_PAYLOAD" | jq -c '.primaryFailureClass // null') || {
-      echo "error: --terminal-payload has no readable primaryFailureClass" >&2
-      exit 1
-    }
-  else
-    TELEMETRY_PRIMARY_FAILURE_CLASS='"outcome-observed-cause-unobserved"'
-  fi
-  TELEMETRY_OUTCOME_KIND=none
-  TELEMETRY_OUTCOME_ID=null
-  if [ "$KIND" = scout ]; then
-    if [ -s "$DATA/$ID/report.md" ] && [ ! -L "$DATA/$ID/report.md" ]; then
-      TELEMETRY_OUTCOME_KIND=report
-      TELEMETRY_OUTCOME_ID=$(jq -Rn --arg value "data/$ID/report.md" '$value')
-    fi
-  elif [ -n "$PR_URL" ]; then
-    TELEMETRY_OUTCOME_KIND=pull-request
-    TELEMETRY_OUTCOME_ID=$(jq -Rn --arg value "$PR_URL" '$value')
-  elif [ -d "$WT" ] && TELEMETRY_COMMIT=$(git -C "$WT" rev-parse HEAD 2>/dev/null); then
-    TELEMETRY_OUTCOME_KIND=commit
-    TELEMETRY_OUTCOME_ID=$(jq -Rn --arg value "$TELEMETRY_COMMIT" '$value')
-  fi
-  TELEMETRY_FACTS=$(jq -cn --arg source "$TELEMETRY_GATE_SOURCE" --arg result "$TELEMETRY_GATE_RESULT" \
-    --argjson reruns "$TELEMETRY_STEP_RERUNS" --arg kind "$TELEMETRY_OUTCOME_KIND" \
-    --argjson outcomeId "$TELEMETRY_OUTCOME_ID" --argjson usage "$TELEMETRY_USAGE" \
-    --argjson wallSeconds "$TELEMETRY_WALL_SECONDS" --argjson usageSource "$TELEMETRY_USAGE_SOURCE" \
-    --argjson primaryFailureClass "$TELEMETRY_PRIMARY_FAILURE_CLASS" \
-    '{gate:{source:$source,result:$result,stepReruns:$reruns},outcomeLink:{kind:$kind,id:$outcomeId},usage:$usage,wallSeconds:$wallSeconds,usageSource:$usageSource,primaryFailureClass:$primaryFailureClass}')
-  if [ -z "$TERMINAL_PAYLOAD" ] \
-    || [ "$TELEMETRY_GATE_SOURCE" = no-mistakes ] \
-    || [ "$TELEMETRY_GATE_RESULT" = green ]; then
-    [ -z "$TERMINAL_PAYLOAD" ] ||
-      echo "note: task $ID has an observed terminal result ($TELEMETRY_GATE_RESULT), so mechanical quality facts were sealed; the terminal payload's quality fields were not used" >&2
-    telemetry_args=(terminal-facts --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT" --payload "$TELEMETRY_FACTS")
-  elif [ -n "$TERMINAL_PAYLOAD" ]; then
-    TERMINAL_PAYLOAD_DIGEST=$(telemetry_payload_digest "$TERMINAL_PAYLOAD") || TERMINAL_PAYLOAD_DIGEST=
-    TERMINAL_PAYLOAD=$(printf '%s' "$TERMINAL_PAYLOAD" | jq -c --arg source "$TELEMETRY_GATE_SOURCE" --arg result "$TELEMETRY_GATE_RESULT" --argjson reruns "$TELEMETRY_STEP_RERUNS" '. + {gateFacts:{source:(if ($source|IN("task-terminal","teardown")) then "delivery" else $source end),result:$result,stepReruns:$reruns}}') || exit 1
-    TELEMETRY_ATTEMPT_SEALED=0
-    if telemetry_attempt_is_sealed "$TELEMETRY_ATTEMPT"; then
-      TELEMETRY_ATTEMPT_SEALED=1
-    fi
-    if [ "$TELEMETRY_ATTEMPT_SEALED" -eq 1 ] \
-      && [ -n "$TERMINAL_PAYLOAD_DIGEST" ] \
-      && [ "$TERMINAL_PAYLOAD_DIGEST" = "$TELEMETRY_SEALED_PAYLOAD_DIGEST" ]; then
-      # This teardown already sealed this exact payload, and the observation it
-      # recorded alongside is not reproducible now that the worktree and its
-      # harness session are gone. Sealing against the recorded outcome keeps the
-      # retry a no-op instead of a refusal teardown itself would have authored.
-      echo "note: task $ID already carries the terminal this teardown sealed from the same --terminal-payload; the recorded terminal is immutable and stays authoritative" >&2
-      telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT")
-    else
-      if [ "$TELEMETRY_ATTEMPT_SEALED" -eq 1 ]; then
-        # A different payload against a recorded terminal is a contradiction the
-        # ledger owns and refuses; teardown forwards it unmerged rather than
-        # deciding on its own that the caller meant the recorded outcome.
-        :
-      elif [ -z "$TERMINAL_PAYLOAD_DIGEST" ]; then
-        # Without a digest to recognize this payload by, a merge would make the
-        # rerun of an identical command a contradiction teardown authored. The
-        # caller's payload is forwarded verbatim so the retry stays idempotent.
-        echo "note: task $ID could not be fingerprinted for a seal retry, so --terminal-payload was recorded as authored without the observed usage source" >&2
-      elif [ "$TELEMETRY_USAGE_SOURCE" != null ]; then
-        # The observation owns the usage it names: a sealed terminal never
-        # records usage as silently absent, and usageSource never labels numbers
-        # the observation did not produce. Token counts replace the caller's own
-        # only when the observation actually read some; active duration is a
-        # separate fact, carried only when the observation measured one.
-        TELEMETRY_USAGE_OBSERVED=0
-        if printf '%s' "$TELEMETRY_USAGE" | jq -e '(.inputTokens|type=="number") and (.outputTokens|type=="number")' >/dev/null 2>&1; then
-          TELEMETRY_USAGE_OBSERVED=1
-        fi
-        TERMINAL_PAYLOAD=$(printf '%s' "$TERMINAL_PAYLOAD" |
-          jq -c --argjson usage "$TELEMETRY_USAGE" --argjson wallSeconds "$TELEMETRY_WALL_SECONDS" \
-            --argjson usageSource "$TELEMETRY_USAGE_SOURCE" --argjson observed "$TELEMETRY_USAGE_OBSERVED" \
-            '. + {usageSource:$usageSource}
-               + (if $observed==1 then {usage:$usage} else {} end)
-               + (if $wallSeconds==null then {} else {wallSeconds:$wallSeconds} end)') || {
-          echo "error: --terminal-payload could not carry the observed usage facts" >&2
-          exit 1
-        }
-        TELEMETRY_RECORD_PAYLOAD_DIGEST=$TERMINAL_PAYLOAD_DIGEST
-      fi
-      telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT" --terminal-payload "$TERMINAL_PAYLOAD")
-    fi
-  else
-    # No explicit terminal payload means teardown observed only an abandoned
-    # attempt. The telemetry owner seals that stale lease as lease-conflict.
-    telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT")
-  fi
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      "$FM_ROOT/bin/fm-model-telemetry.sh" "${telemetry_args[@]}" >/dev/null; then
-    echo "error: model telemetry terminal seal refused; teardown preserved the endpoint, worktree, and task state" >&2
-    [ -z "$TERMINAL_PAYLOAD" ] ||
-      echo "note: a --terminal-payload that contradicts the already recorded terminal is refused as such and needs no ledger repair; re-run fm-teardown.sh $ID without --terminal-payload to seal against the recorded outcome and finish cleanup" >&2
-    echo "recovery: no flag bypasses this seal, --force included. Repair the ledger, then re-run this teardown:" >&2
-    echo "  1. the refusal above names the ledger path and the failing line or attempt ($TELEMETRY_ATTEMPT)" >&2
-    echo "  2. repair $DATA/routing-outcomes.jsonl from a backup: restore the missing intake row or the malformed line, keep it a regular file with mode 600" >&2
-    echo "  3. confirm with 'FM_HOME=$FM_HOME FM_DATA_OVERRIDE=$DATA $FM_ROOT/bin/fm-model-telemetry.sh sheet --format json', then re-run fm-teardown.sh $ID" >&2
-    exit 1
-  fi
-  # Remember which caller payload this seal recorded, so a rerun of the same
-  # command is a no-op while a rerun carrying a different one still reaches the
-  # ledger's contradiction refusal.
-  if [ -n "$TELEMETRY_RECORD_PAYLOAD_DIGEST" ] && [ -f "$META" ]; then
-    printf 'telemetry_terminal_payload_sha256=%s\n' "$TELEMETRY_RECORD_PAYLOAD_DIGEST" >> "$META" || true
-  fi
-elif [ -n "$TERMINAL_PAYLOAD" ]; then
-  echo "error: task $ID has no telemetry attempt for --terminal-payload" >&2
-  exit 1
-fi
-
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$TEARDOWN_WORKTREE_STALE" = 1 ] || [ "$TEARDOWN_WORKTREE_OWNED" != 1 ]; then
-  :
-elif [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  teardown_before_worktree_removal
-  if [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-      "$WT/.opencode/plugins/fm-busy-state.js" \
-      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  fi
-  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$ACCESS" = reader ]; then
-  # A reader holds no pool worktree, so it skips the branch drop and treehouse
-  # return below entirely - but its operator still gets the same pre-return
-  # reminders every other kind gets before its work directory is destroyed.
-  teardown_before_worktree_removal
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  :
-fi
-
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then
-  teardown_revalidate_worktree_occupancy || exit 1
-fi
-if [ "$TEARDOWN_WORKTREE_OWNED" != 1 ]; then
-  rm -f "$HERDR_PRESENTATION_JOURNAL"
-elif [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  # The presentation lock was acquired before the endpoint close below; a
+if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+  # The presentation lock was acquired before the worktree return above; a
   # contended lock already refused this teardown while everything was intact.
   if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
-    teardown_revalidate_worktree_occupancy || exit 1
     # stderr is deliberately NOT discarded here. This is the highest-frequency
     # projected-close call site, and the helper's only stderr output is a real
     # warning - unverifiable workspace.move support, a refused focus-unsafe
@@ -4120,13 +3276,11 @@ elif [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   fi
 elif [ "$BACKEND" = herdr ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
-    teardown_revalidate_worktree_occupancy || exit 1
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
 elif [ "$BACKEND" != orca ]; then
-  teardown_revalidate_worktree_occupancy || exit 1
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
@@ -4145,7 +3299,7 @@ fi
 # the locked close. Only a structured not-found proves the pane gone; unknown
 # presence, missing or malformed endpoint identity, and missing confirmation
 # machinery all refuse.
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] && [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ]; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
     echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
@@ -4162,34 +3316,6 @@ if [ "$KIND" != secondmate ]; then
     echo "error: $ID's final outcome has not reached the parent channel; retaining every durable task record so a rerun can retry the delivery" >&2
     exit 1
   fi
-fi
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] \
-   && [ "$BACKEND" != orca ] \
-   && [ "$KIND" != secondmate ] \
-   && [ "$ACCESS" != reader ] \
-   && [ -d "$WT" ]; then
-  teardown_revalidate_worktree_occupancy || exit 1
-  teardown_before_worktree_removal
-  teardown_revalidate_worktree_occupancy || exit 1
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  post_lock_cleanup_check=
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ]; then
-    post_lock_cleanup_check=validate_worktree_teardown_safety
-  fi
-  teardown_revalidate_worktree_occupancy || exit 1
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" \
-    "$TEARDOWN_OCCUPANCY_LEASE" "$TEARDOWN_OCCUPANCY_HOLDER" || {
-    echo "error: conditional treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
-  teardown_treehouse_lock_release
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
@@ -4209,31 +3335,21 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then
-  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-fi
-# Remove the recorded per-task temp root, including its gotmp and any reader scratch.
+fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ]; then
-  reader_refuse_grown_checkout || exit 1
-  [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-fi
-if [ -n "$TEARDOWN_OPEN_PR_ACK_PENDING" ]; then
-  teardown_open_pr_ack_record "$TEARDOWN_OPEN_PR_ACK_PENDING" || exit 1
-  echo "note: recorded open-PR-without-watch acknowledgement for $ID in data/teardown-open-pr-without-watch.jsonl" >&2
-fi
+[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.turn-ended" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
-  "$STATE/$ID.muse-session-current" "$STATE/.$ID.open-decisions-cursor" \
-  "$STATE/$ID.escalation" "$STATE/$ID.cursor-session" \
+  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
-  "$STATE/$ID.reconcile-nudged"
-fm_lock_remove_path "$STATE/.$ID.escalation.lock" || true
+  "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
+  "$STATE/.$ID.branch-outcome-index"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
@@ -4290,5 +3406,9 @@ fi
 if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
-echo "teardown $ID complete (window $T, worktree $WT)"
+if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
+  echo "teardown $ID complete (window $T, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+else
+  echo "teardown $ID complete (window $T, worktree $WT)"
+fi
 backlog_refresh_reminder

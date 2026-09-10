@@ -24,6 +24,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-gemini-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-gemini-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -52,12 +54,10 @@ fm_backend_tmux_send_key() {  # <target> <key>
 
 # fm_backend_tmux_send_text_submit: type <text> into <target> once, then
 # submit with Enter, retried (Enter only, never retyped) until the composer
-# clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh); see that file for
-# the composer-verification contract and echoed verdicts. <expected-label> is a
-# no-op for tmux (targets are pane ids, not looked-up labels), while the
-# optional <harness> selects that harness's submit quirks in the shared core.
-fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
-  fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5" "${7:-}"
+# clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
+# that file for the composer-verification contract and echoed verdicts.
+fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
+  fm_tmux_submit_core "$@"
 }
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
@@ -164,12 +164,32 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
   base=${path##*/}
   base=${base#-}
   case "$base" in
+    # muse is anchored rather than globbed like its neighbours: its installed
+    # binary is muse-bin-<version> (the launcher execs it, so the version is the
+    # live process name and changes on every auto-update), and unlike `claude` or
+    # `codex` the substring `muse` is a common English fragment - a *muse* glob
+    # would classify musescore or amuse as a live agent pane. The install path
+    # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
+    # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|cursor-agent|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
+    # omp (Oh My Pi) is anchored for the same reason as muse: its live process
+    # name is the bare word `omp` (verified, omp 18.1.11) and a glob would claim
+    # unrelated commands such as ompd or comp.
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
         printf 'agent'
+      # cursor-agent runs as a bundled node script, so tmux reports the pane
+      # command as a bare `node` that no name pattern above can own, and its
+      # other installed name is the far-too-generic `agent` (verified live on
+      # cursor-agent 2026.08.11-e8db854: #{pane_current_command} is `node` while
+      # `ps -o comm=` carries the cursor-agent install path). Identity therefore
+      # comes from the narrowed structural rule in bin/fm-cursor-lib.sh, which
+      # demands Cursor's own name or install tree in the path or argv[0]. An
+      # unrelated `node` or `agent` matches nothing here and stays `other`,
+      # which the callers above fold into `ambiguous` rather than `dead`, so a
+      # stranger's node pane is never reported as an agent-free pane.
       elif fm_cursor_process_matches "${path:-$argv0}" '' "$argv0"; then
         printf 'agent'
       else
@@ -216,6 +236,34 @@ fm_backend_tmux_foreground_comms() {  # <target>
       done
 }
 
+# The foreground group's full command lines. Needed because a node-bundle
+# harness carries its identity in argv[1] rather than in its command name or
+# argv[0]; bin/fm-gemini-lib.sh owns what counts as evidence inside one.
+fm_backend_tmux_foreground_args() {  # <target>
+  local target=$1 tty pid pgid tpgid comm args
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+        [ -n "$args" ] && printf '%s\n' "$args"
+      done
+}
+
+fm_backend_tmux_foreground_pids() {  # <target>
+  local target=$1 tty pid pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        printf '%s\n' "$pid"
+      done
+}
+
 fm_backend_tmux_foreground_argv0s() {  # <target>
   local target=$1 tty pid pgid tpgid comm args argv0
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
@@ -249,7 +297,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
-  local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
+  local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -300,6 +348,31 @@ EOF
     fi
   done <<EOF
 $argv0s
+EOF
+
+  # Preserve argv boundaries where the platform exposes them. This is needed
+  # when the Gemini script path contains whitespace, which flattened ps output
+  # cannot represent unambiguously.
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if fm_gemini_pid_is_gemini "$pid"; then
+      printf 'alive'
+      return 0
+    fi
+  done <<EOF
+$(fm_backend_tmux_foreground_pids "$target")
+EOF
+
+  # Fall back to flattened arguments on platforms without /proc. Positive
+  # evidence only - a bare interpreter still reaches the negative verdicts.
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if fm_gemini_args_are_gemini "$name"; then
+      printf 'alive'
+      return 0
+    fi
+  done <<EOF
+$(fm_backend_tmux_foreground_args "$target")
 EOF
 
   comm=$(fm_backend_tmux_current_command "$target") || {

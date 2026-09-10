@@ -8,7 +8,6 @@
 #
 # This file is sourced, never executed. It defines:
 #   fmx_env_get <key> <file>   - read one KEY=VALUE from a .env-style file
-#   fmx_relay_activation_status <home> - active, inactive, or unreadable relay config
 #   fmx_load_config            - resolve FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
 #                                and FMX_THREAD_MAX (env wins over .env)
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
@@ -50,10 +49,6 @@
 # Callers must have FM_HOME set before calling fmx_load_config.
 
 _FM_X_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# File identity checks share the PR store-device owner so overlay file-layer
-# devices stay bound to the expected parent directory device.
-# shellcheck source=bin/fm-pr-lib.sh
-. "$_FM_X_LIB_DIR/fm-pr-lib.sh"
 if ! command -v fm_backlog_atomic_transition >/dev/null 2>&1; then
   # shellcheck source=bin/fm-tasks-axi-lib.sh
   . "$_FM_X_LIB_DIR/fm-tasks-axi-lib.sh"
@@ -65,21 +60,10 @@ fi
 # leading "export ", surrounding whitespace, and one layer of matching single or
 # double quotes. Prints nothing (and succeeds) when the file or key is absent, so
 # callers can treat empty output as "unset".
-_fmx_env_get() {
-  local strict=$1 key=$2 file=$3 line val matches grep_status
-  if [ ! -f "$file" ]; then
-    [ "$strict" -eq 0 ] && return 0
-    return 2
-  fi
-  if matches=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null); then
-    line=${matches##*$'\n'}
-  else
-    grep_status=$?
-    if [ "$grep_status" -eq 1 ] || [ "$strict" -eq 0 ]; then
-      return 0
-    fi
-    return 2
-  fi
+fmx_env_get() {
+  local key=$1 file=$2 line val
+  [ -f "$file" ] || return 0
+  line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null | tail -n1) || return 0
   [ -n "$line" ] || return 0
   val=${line#*=}
   val=${val#"${val%%[![:space:]]*}"}   # strip leading whitespace
@@ -89,37 +73,6 @@ _fmx_env_get() {
     \'*\') val=${val#\'}; val=${val%\'} ;;
   esac
   printf '%s' "$val"
-}
-
-fmx_env_get() {
-  _fmx_env_get 0 "$1" "$2"
-}
-
-fmx_relay_activation_status() {
-  local home=$1 env_file token
-  if [ -n "${FMX_PAIRING_TOKEN+x}" ]; then
-    [ -n "${FMX_PAIRING_TOKEN-}" ]
-    return $?
-  fi
-  [ -d "$home" ] && [ -x "$home" ] || return 2
-  env_file="$home/.env"
-  if [ ! -e "$env_file" ] && [ ! -L "$env_file" ]; then
-    return 1
-  fi
-  [ -f "$env_file" ] && [ -r "$env_file" ] || return 2
-  token=$(_fmx_env_get 1 FMX_PAIRING_TOKEN "$env_file") || return 2
-  [ -n "$token" ]
-}
-
-fmx_relay_active() {
-  local home=$1 token
-  if [ -n "${FMX_PAIRING_TOKEN+x}" ]; then
-    [ -n "${FMX_PAIRING_TOKEN-}" ]
-    return $?
-  fi
-  [ -f "$home/.env" ] || return 1
-  token=$(fmx_env_get FMX_PAIRING_TOKEN "$home/.env")
-  [ -n "$token" ]
 }
 
 fmx_poll_shim_content() {
@@ -133,22 +86,24 @@ fmx_poll_shim_content() {
 }
 
 fmx_single_link_file_valid() {
-  local file=$1 expected_device=${2-} links
+  local file=$1 expected_device=${2-} links device
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   if [ "$(uname)" = Darwin ]; then
-    links=$(stat -f %l "$file" 2>/dev/null) || return 1
+    links=$(/usr/bin/stat -f %l "$file" 2>/dev/null) || return 1
+    device=$(/usr/bin/stat -f %d "$file" 2>/dev/null) || return 1
   else
     links=$(stat -c %h "$file" 2>/dev/null) || return 1
+    device=$(stat -c %d "$file" 2>/dev/null) || return 1
   fi
   [ "$links" = 1 ] || return 1
-  [ -z "$expected_device" ] || fm_pr_same_store_device "$file" "$expected_device"
+  [ -z "$expected_device" ] || [ "$device" = "$expected_device" ]
 }
 
 fmx_single_link_file_mode_valid() {
   local file=$1 expected_mode=$2 expected_device=${3-} mode
   fmx_single_link_file_valid "$file" "$expected_device" || return 1
   if [ "$(uname)" = Darwin ]; then
-    mode=$(stat -f %Lp "$file" 2>/dev/null) || return 1
+    mode=$(/usr/bin/stat -f %Lp "$file" 2>/dev/null) || return 1
   else
     mode=$(stat -c %a "$file" 2>/dev/null) || return 1
   fi
@@ -159,8 +114,8 @@ fmx_private_artifact_dir_device() {
   local dir=$1 mode device
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   if [ "$(uname)" = Darwin ]; then
-    mode=$(stat -f %Lp "$dir" 2>/dev/null) || return 1
-    device=$(stat -f %d "$dir" 2>/dev/null) || return 1
+    mode=$(/usr/bin/stat -f %Lp "$dir" 2>/dev/null) || return 1
+    device=$(/usr/bin/stat -f %d "$dir" 2>/dev/null) || return 1
   else
     mode=$(stat -c %a "$dir" 2>/dev/null) || return 1
     device=$(stat -c %d "$dir" 2>/dev/null) || return 1
@@ -379,42 +334,16 @@ fmx_extract_reply_context() {
   ' "$file"
 }
 
-FMX_INBOX_DIRNAME='x-inbox'
-FMX_OUTBOX_DIRNAME='x-outbox'
-FMX_CONTEXT_DIRNAME='x-context'
-
-fmx_home_path_absence_status() {
-  local home=$1 path=$2 activation_status
-  case "$path" in
-    "state/$FMX_INBOX_DIRNAME"|"state/$FMX_INBOX_DIRNAME/"|\
-    "state/$FMX_OUTBOX_DIRNAME"|"state/$FMX_OUTBOX_DIRNAME/"|\
-    "state/$FMX_CONTEXT_DIRNAME"|"state/$FMX_CONTEXT_DIRNAME/")
-      if fmx_relay_activation_status "$home"; then
-        printf 'UNKNOWN\n'
-      else
-        activation_status=$?
-        if [ "$activation_status" -eq 1 ]; then
-          printf 'OPTIONAL\n'
-        else
-          printf 'UNKNOWN\n'
-        fi
-      fi
-      return 0
-      ;;
-  esac
-  return 1
-}
-
 # fmx_request_inbox_context <state> <request_id>: reply context from a stashed
 # mention payload (state/x-inbox/<request_id>.json), or the empty shape when the
 # inbox file is absent. Thin wrapper over fmx_extract_reply_context.
 fmx_request_inbox_context() {
   local state=$1 rid=$2
-  if ! fmx_private_artifact_file_valid "$state/$FMX_INBOX_DIRNAME" "$rid.json" 600; then
+  if ! fmx_private_artifact_file_valid "$state/x-inbox" "$rid.json" 600; then
     printf '{"platform":"","reply_max_chars":""}\n'
     return 0
   fi
-  fmx_extract_reply_context "$state/$FMX_INBOX_DIRNAME/$rid.json"
+  fmx_extract_reply_context "$state/x-inbox/$rid.json"
 }
 
 # fmx_request_relay_context <request_id>: resolve the reply platform/limit
@@ -481,7 +410,7 @@ fmx_request_relay_context() {
 
 fmx_context_registry_mtime() {
   local file=$1 mtime
-  mtime=$(stat -f '%m' "$file" 2>/dev/null) || mtime=$(stat -c '%Y' "$file" 2>/dev/null) || return 1
+  mtime=$(/usr/bin/stat -f '%m' "$file" 2>/dev/null) || mtime=$(stat -c '%Y' "$file" 2>/dev/null) || return 1
   case "$mtime" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -514,7 +443,7 @@ fmx_context_registry_recorded_at() {
 
 fmx_context_registry_prune() {
   local state=$1 dir now max_age file recorded_at age dir_device
-  dir="$state/$FMX_CONTEXT_DIRNAME"
+  dir="$state/x-context"
   dir_device=$(fmx_private_artifact_dir_device "$dir" 2>/dev/null) || return 0
   now=${FMX_NOW_OVERRIDE:-$(date +%s)}
   case "$now" in
@@ -571,7 +500,7 @@ fmx_context_registry_set() {
   if [ -z "$platform" ] && [ -z "$reply_max" ]; then
     return 0
   fi
-  dir="$state/$FMX_CONTEXT_DIRNAME"
+  dir="$state/x-context"
   dir_device=$(fmx_private_artifact_dir_prepare "$dir") || return 1
   file="$dir/$rid.json"
   if { [ -e "$file" ] || [ -L "$file" ]; } \
@@ -616,7 +545,7 @@ fmx_offer_registry_claim() {
   [ "${#now}" -le 18 ] || return 2
   record=$(jq -cn --arg rid "$rid" --argjson recorded_at "$now" \
     '{request_id:$rid, recorded_at:$recorded_at}') || return 2
-  dir="$state/$FMX_CONTEXT_DIRNAME"
+  dir="$state/x-context"
   printf '%s\n' "$record" \
     | fmx_private_artifact_publish_stdin_once "$dir" "$rid.offered.json" 600
   rc=$?
@@ -631,7 +560,7 @@ fmx_context_registry_get() {
   case "$rid" in
     ''|.*|*[!A-Za-z0-9._-]*) printf '{"platform":"","reply_max_chars":""}\n'; return 0 ;;
   esac
-  dir="$state/$FMX_CONTEXT_DIRNAME"
+  dir="$state/x-context"
   file="$dir/$rid.json"
   if ! fmx_private_artifact_file_valid "$dir" "$rid.json" 600; then
     printf '{"platform":"","reply_max_chars":""}\n'
@@ -650,7 +579,7 @@ fmx_context_registry_clear() {
   case "$rid" in
     ''|.*|*[!A-Za-z0-9._-]*) return 0 ;;
   esac
-  dir="$state/$FMX_CONTEXT_DIRNAME"
+  dir="$state/x-context"
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   rm -f "$dir/$rid.json" 2>/dev/null || true
   return 0

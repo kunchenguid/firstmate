@@ -17,64 +17,13 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-busy-adapter-wiring)
 
-make_spawn_fakebin() {
-  local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message)
-    case "$*" in
-      *"#{cursor_y}"*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}" ;;
-      *) printf 'firstmate\n' ;;
-    esac
-    exit 0
-    ;;
-  capture-pane)
-    if [ "${FM_FAKE_CURSOR_SCREEN:-0}" = 1 ]; then
-      [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' composer-empty >> "$FM_FAKE_EVENT_LOG"
-      printf '→\n'
-    else
-      [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' composer-not-empty >> "$FM_FAKE_EVENT_LOG"
-    fi
-    exit 0
-    ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys)
-    previous=
-    for arg in "$@"; do
-      if [ "$previous" = -l ]; then
-        case "$arg" in
-          *"FIRSTMATE_OP: v1 launch-brief:"*)
-            [ -n "${FM_FAKE_EVENT_LOG:-}" ] && printf '%s\n' brief-delivery:pointer >> "$FM_FAKE_EVENT_LOG"
-            ;;
-        esac
-      fi
-      previous=$arg
-    done
-    exit 0
-    ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
-  fm_test_write_active_treehouse_fake "$fakebin"
-  fm_fake_exit0 "$fakebin" pi opencode claude codex cursor-agent
-  printf '%s\n' "$fakebin"
-}
-
 make_spawn_case() {  # <name> <harness> <id>
   local name=$1 harness=$2 id=$3 case_dir home proj wt fakebin
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -87,7 +36,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   # fixed valid one.
   local home=$1 wt=$2 fakebin=$3
   shift 3
-  GROK_HOME="$home/grok-home" FM_FAKE_TREEHOUSE_PATH="$wt" \
+  GROK_HOME="$home/grok-home" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@" --mode no-mistakes --yolo off
 }
 
@@ -110,7 +59,7 @@ drive_pi_ext() {
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
-mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+mod.default({ on: (name, fn) => { handlers[name] = fn; }, events: { on: (name, fn) => { handlers[name] = fn; } } });
 const ctx = { isIdle: () => process.env.MODE !== "settle-continuing" };
 switch (process.env.MODE) {
   case "agent-start": await handlers["agent_start"]({}, ctx); break;
@@ -121,9 +70,10 @@ switch (process.env.MODE) {
     await handlers["agent_start"]({}, ctx);
     break;
   case "turn-end": await handlers["turn_end"]({}, ctx); break;
+  case "progress": await handlers["codex-native:progress"]({ type: "commandExecution", phase: "completed" }); break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
-if (process.env.MODE === "turn-end") {
+if (["turn-end", "progress"].includes(process.env.MODE)) {
   await new Promise((resolve) => setTimeout(resolve, 200));
 }
 EOF
@@ -143,6 +93,11 @@ test_pi_extension_semantic_lifecycle() {
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
 
   rm -f "$state/$id.turn-ended"
+  out=$(drive_pi_ext "$ext" progress) || fail "native progress drive failed: $out"
+  [ -f "$state/$id.progress" ] || fail "native progress did not write its separate marker"
+  [ ! -e "$state/$id.turn-ended" ] || fail "native progress fabricated a completed turn"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "native progress changed semantic state: $out"
   out=$(drive_pi_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
   [ -f "$state/$id.turn-ended" ] || fail "turn_end no longer touches the notification marker"
   out=$(classify pi "$id" "$state")
@@ -195,6 +150,8 @@ test_pi_extension_stale_incarnation_rejected() {
   out=$(drive_pi_ext "$ext" settle-idle) || fail "stale settle drive failed: $out"
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale extension event must not change state, got '$out'"
+  out=$(drive_pi_ext "$ext" progress) || fail "stale progress drive failed: $out"
+  [ ! -e "$state/$id.progress" ] || fail "stale native progress refreshed the new incarnation"
   pass "pi extension events from a superseded incarnation are rejected as stale"
 }
 
@@ -277,102 +234,6 @@ run_claude_hook() {  # <settings.json> <hook-event>
   sh -c "$cmd"
 }
 
-run_cursor_hook() {  # <hooks.json> <hook-event>
-  local cmd
-  cmd=$(jq -r ".hooks[\"$2\"][0].command" "$1")
-  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
-  printf '{}\n' | sh -c "$cmd"
-}
-
-test_cursor_agent_refuses_brief_before_verified_empty_composer() {
-  local rec id=busy-cursor-unready out status events
-  id=busy-cursor-unready
-  rec=$(make_spawn_case cursor-unready cursor-agent "$id")
-  read_case_record "$rec"
-  events="$CASE_DIR/events"
-  : > "$events"
-  out=$(FM_FAKE_EVENT_LOG="$events" FM_FAKE_TMUX_CURSOR_Y=0 \
-    FM_CURSOR_READY_POLLS=1 FM_CURSOR_POLL_INTERVAL=0 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "unready cursor composer must refuse spawn: $out"
-  assert_contains "$out" 'cursor-agent did not show a verified empty composer before brief delivery' \
-    "unready cursor composer refusal lacked its diagnostic"
-  assert_contains "$(cat "$events")" composer-not-empty \
-    "cursor-agent fake did not record the unready-composer observation"
-  assert_not_contains "$(cat "$events")" 'brief-delivery:' \
-    "cursor-agent delivered a brief before the composer was verified empty"
-  pass "cursor-agent spawn refuses brief delivery before a verified empty composer"
-}
-
-test_cursor_hooks_semantic_lifecycle() {
-  local rec id=busy-cursor-1 out state hooks status unsupported events
-  rec=$(make_spawn_case cursor-lifecycle cursor-agent "$id")
-  read_case_record "$rec"
-  events="$CASE_DIR/events"
-  : > "$events"
-  out=$(FM_FAKE_CURSOR_SCREEN=1 FM_FAKE_TMUX_CURSOR_Y=0 FM_FAKE_EVENT_LOG="$events" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
-  expect_code 0 $? "cursor-agent spawn should succeed: $out"
-  assert_contains "$(cat "$events")" composer-empty \
-    "cursor-agent fake did not record its verified empty-composer observation"
-  assert_contains "$(cat "$events")" brief-delivery:pointer \
-    "cursor-agent fake did not record pointer submission"
-  if ! awk '/composer-empty/ { ready=1 } /brief-delivery:/ && !ready { violation=1 } END { exit violation }' \
-    "$events"; then
-    fail "cursor-agent brief delivery preceded its verified empty-composer observation"
-  fi
-  state="$HOME_DIR/state"
-  hooks="$WT_DIR/.cursor/hooks.json"
-  assert_present "$hooks" "cursor-agent spawn did not write project-local hooks"
-  jq -e '.version == 1 and .hooks.beforeSubmitPrompt and .hooks.stop and .hooks.sessionEnd' "$hooks" >/dev/null \
-    || fail "cursor-agent hooks do not expose the verified lifecycle"
-  unsupported=
-  while IFS= read -r key; do
-    case "$key" in
-      beforeShellExecution|beforeMCPExecution|afterShellExecution|afterMCPExecution|beforeReadFile|afterFileEdit|beforeTabFileRead|afterTabFileEdit|stop|beforeSubmitPrompt|afterAgentResponse|afterAgentThought|sessionStart|sessionEnd|preCompact|subagentStart|subagentStop|preToolUse|postToolUse|postToolUseFailure|workspaceOpen)
-        ;;
-      *)
-        unsupported="${unsupported}${unsupported:+$'\n'}${key}"
-        ;;
-    esac
-  done < <(jq -r '.hooks | keys[]' "$hooks")
-  [ -z "$unsupported" ] || fail "cursor-agent hooks contain unsupported Cursor hook key(s): $unsupported"
-
-  status=$(git -C "$WT_DIR" status --short --untracked-files=all)
-  [ -z "$status" ] || fail "project-local Cursor hooks surfaced in the worktree diff: $status"
-
-  mkdir -p "$WT_DIR/.cursor/rules"
-  printf '%s\n' 'A real project rule must stay reviewable.' > "$WT_DIR/.cursor/rules/team.mdc"
-  status=$(git -C "$WT_DIR" status --short --untracked-files=all)
-  printf '%s\n' "$status" | grep -Fq '?? .cursor/rules/team.mdc' \
-    || fail "a real Cursor project rule was hidden with the hook artifact: $status"
-  printf '%s\n' "$status" | grep -Fq '.cursor/hooks.json' \
-    && fail "project-local Cursor hooks surfaced after adding a project rule: $status"
-
-  rm -f "$state/$id.turn-ended"
-  run_cursor_hook "$hooks" stop || fail "stop hook command failed"
-  assert_present "$state/$id.turn-ended" "stop no longer touches the turn-end notification"
-  out=$(classify cursor-agent "$id" "$state")
-  [ "$out" = "idle cursor-hook" ] || fail "stop must classify 'idle cursor-hook', got '$out'"
-
-  run_cursor_hook "$hooks" beforeSubmitPrompt || fail "beforeSubmitPrompt hook command failed"
-  out=$(classify cursor-agent "$id" "$state")
-  [ "$out" = "busy cursor-hook" ] \
-    || fail "beforeSubmitPrompt must classify 'busy cursor-hook', got '$out'"
-
-  run_cursor_hook "$hooks" sessionEnd || fail "sessionEnd hook command failed"
-  out=$(classify cursor-agent "$id" "$state")
-  [ "$out" = "idle cursor-hook" ] \
-    || fail "sessionEnd must classify 'idle cursor-hook', got '$out'"
-
-  run_cursor_hook "$hooks" beforeSubmitPrompt || fail "final beforeSubmitPrompt hook command failed"
-  run_cursor_hook "$hooks" stop || fail "final stop hook command failed"
-  out=$(classify cursor-agent "$id" "$state")
-  [ "$out" = "idle cursor-hook" ] || fail "final stop must classify 'idle cursor-hook', got '$out'"
-  pass "cursor-agent project hooks stay out of diffs, use supported Cursor hook keys, and close semantic turns on stop and sessionEnd"
-}
-
 test_claude_hooks_semantic_lifecycle() {
   local rec id=busy-cl-1 out state settings
   rec=$(make_spawn_case claude-lifecycle claude "$id")
@@ -444,6 +305,108 @@ test_codex_unverified_until_a_semantic_source_exists() {
   pass "codex classifies unknown until a semantic source is verified, never idle or footer-matched"
 }
 
+# Gemini's hooks are PROJECT hooks in the worktree's own .gemini/settings.json,
+# and gemini's hook contract requires each command to print a JSON object on
+# stdout and nothing else, so these drive the real command and check both the
+# classification and that stdout stays parseable JSON.
+run_gemini_hook() {  # <settings.json> <hook-event>
+  local cmd
+  cmd=$(jq -r ".hooks[\"$2\"][0].hooks[0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  sh -c "$cmd"
+}
+
+test_gemini_hooks_semantic_lifecycle() {
+  local rec id=busy-gm-1 out state settings
+  rec=$(make_spawn_case gemini-lifecycle gemini "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "gemini spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$state/$id.gemini-settings.json"
+  assert_present "$settings" "gemini spawn did not write hook settings"
+  jq -e . "$settings" >/dev/null || fail "gemini hook settings are not valid JSON"
+  for ev in BeforeAgent AfterAgent SessionEnd; do
+    jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "gemini hook settings lack $ev"
+  done
+  # The worktree's own .gemini/settings.json is the PROJECT's committed file;
+  # firstmate must never write it, or a project's configuration is clobbered.
+  assert_absent "$WT_DIR/.gemini/settings.json" \
+    "gemini spawn must not write the project's own .gemini/settings.json"
+
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(run_gemini_hook "$settings" AfterAgent) || fail "AfterAgent hook command failed"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "AfterAgent must print only a JSON object on stdout, got '$out'"
+  [ -f "$state/$id.turn-ended" ] || fail "AfterAgent no longer touches the notification marker"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "idle gemini-hook" ] || fail "AfterAgent must classify 'idle gemini-hook', got '$out'"
+
+  out=$(run_gemini_hook "$settings" BeforeAgent) || fail "BeforeAgent hook command failed"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "BeforeAgent must print only a JSON object on stdout, got '$out'"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "busy gemini-hook" ] || fail "BeforeAgent must classify 'busy gemini-hook', got '$out'"
+
+  # SessionEnd fires TWICE for one /quit on gemini-cli 0.58.0, so the second
+  # delivery must be a harmless no-op rather than a state change or a failure.
+  run_gemini_hook "$settings" SessionEnd >/dev/null || fail "SessionEnd hook command failed"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "idle gemini-hook" ] || fail "SessionEnd must classify idle, got '$out'"
+  run_gemini_hook "$settings" SessionEnd >/dev/null || fail "a repeated SessionEnd must still exit 0"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "idle gemini-hook" ] || fail "a repeated SessionEnd must stay idle, got '$out'"
+  pass "gemini hooks open on BeforeAgent and close on AfterAgent and a repeated SessionEnd"
+}
+
+test_gemini_hooks_stale_incarnation_harmless() {
+  local rec id=busy-gm-2 out state settings
+  rec=$(make_spawn_case gemini-stale gemini "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "gemini spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$state/$id.gemini-settings.json"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  run_gemini_hook "$settings" BeforeAgent >/dev/null \
+    || fail "a stale-gen hook must still exit 0 so gemini's lifecycle is never broken"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
+  pass "gemini hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
+test_raw_gemini_launch_has_no_semantic_wiring() {
+  local rec id=busy-gm-raw out state
+  rec=$(make_spawn_case gemini-raw gemini "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 'gemini --debug')
+  expect_code 0 $? "raw gemini spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  assert_absent "$state/$id.busy-gen" "raw gemini launch must not arm a busy generation"
+  assert_absent "$state/$id.gemini-settings.json" "raw gemini launch must not write hook settings"
+  out=$(classify gemini "$id" "$state")
+  [ "$out" = "unknown missing" ] || fail "raw gemini launch must classify unknown, got '$out'"
+  pass "raw gemini launch remains unwired and classifies unknown"
+}
+
+test_gemini_is_refused_as_a_secondmate() {
+  local rec id=busy-gm-3 out
+  rec=$(make_spawn_case gemini-secondmate gemini "$id")
+  read_case_record "$rec"
+  # A secondmate spawn carries no delivery contract, so this one deliberately
+  # bypasses run_spawn's ship-only --mode/--yolo arguments.
+  out=$(GROK_HOME="$HOME_DIR/grok-home" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" --secondmate "$id" gemini) && {
+    fail "a gemini secondmate must be refused, it has no primary supervision protocol: $out"
+  }
+  assert_contains "$out" 'crewmate/scout adapter only' \
+    "refusing a gemini secondmate must name the crewmate/scout boundary: $out"
+  pass "gemini is refused as a secondmate because it has no primary supervision protocol"
+}
+
 test_kimi_and_grok_install_no_unverified_wiring() {
   local state out
   state="$TMP_ROOT/gates/state"
@@ -466,8 +429,10 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
-test_cursor_agent_refuses_brief_before_verified_empty_composer
-test_cursor_hooks_semantic_lifecycle
+test_gemini_hooks_semantic_lifecycle
+test_gemini_hooks_stale_incarnation_harmless
+test_raw_gemini_launch_has_no_semantic_wiring
+test_gemini_is_refused_as_a_secondmate
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

@@ -87,6 +87,8 @@ write_arm_fixture() {
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
 exit 0
@@ -131,6 +133,8 @@ SH
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
 sleep 2
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'signal: task.status done: slow fixture\n'
 exit 0
@@ -141,6 +145,8 @@ SH
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
 sleep 6
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
 exit 0
@@ -161,6 +167,8 @@ SH
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
 rm -f "$FM_HOME/state/task.meta"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'signal: task.status done: fixture\n'
 exit 0
@@ -171,8 +179,19 @@ SH
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
 : > "$FM_HOME/state/.afk"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
+exit 0
+SH
+      ;;
+    records-grace)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf '%s\n' "${FM_GUARD_GRACE:-unset}" > "$FM_HOME/state/arm-received-grace"
+printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
 exit 0
 SH
       ;;
@@ -386,6 +405,10 @@ test_actionable_close_rewakes_with_reason() {
   assert_contains "$out" "bin/fm-wake-drain.sh" "rewake must direct the drain-first protocol"
   assert_contains "$out" "do NOT run bin/fm-watch-arm.sh" "rewake must forbid a duplicate model re-arm"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  [ "$(epoch_field "$dir" session_pid)" = "$(cat "$dir/state/.lock")" ] \
+    || fail "rewake epoch must bind the lock-owning Claude session"
+  [ "$(epoch_field "$dir" recovery_generation)" = fixture-generation ] \
+    || fail "rewake epoch must bind the watcher recovery generation"
   [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "owner lock must be released after the cycle"
   [ -e "$dir/state/arm-ran" ] || fail "hook never foregrounded the arm wrapper"
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
@@ -621,6 +644,20 @@ test_arms_for_x_mode_poll_need_without_inflight() {
   expect_code 2 "$status" "an X-mode relay poll need must keep the auto-arm active with zero tasks in flight"
   [ -e "$dir/state/arm-ran" ] || fail "hook did not arm for the X-mode poll need"
   pass "auto-arm: X-mode poll need arms the cycle even with no tasks in flight"
+}
+
+test_arms_for_registered_custom_check_without_inflight() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/check-need")
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/state/issue-comments.check.sh"
+  chmod 700 "$dir/state/issue-comments.check.sh"
+  FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-check-register.sh" issue-comments >/dev/null \
+    || fail "fm-check-register.sh could not register the custom check"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a registered custom check must keep the auto-arm active with zero tasks in flight"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm for the registered custom check"
+  pass "auto-arm: a registered custom check arms the cycle even with no tasks in flight"
 }
 
 test_single_flight_admits_exactly_one_owner() {
@@ -1142,6 +1179,18 @@ test_active_in_marked_secondmate_home() {
   pass "auto-arm: active in a marked secondmate home"
 }
 
+test_long_poll_grace_reaches_arm_wrapper() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/long-poll-grace")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" records-grace
+  out=$(unset FM_GUARD_GRACE; FM_POLL=900 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an unverified close without a healthy watcher must still fail closed"
+  [ -e "$dir/state/arm-received-grace" ] || fail "arm wrapper never recorded FM_GUARD_GRACE"
+  [ "$(cat "$dir/state/arm-received-grace")" = 960 ] || fail "arm wrapper must see the poll-derived grace (900+60), got: $(cat "$dir/state/arm-received-grace")"
+  pass "auto-arm: a long FM_POLL with FM_GUARD_GRACE unset reaches fm-watch-arm.sh with the derived grace"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -1168,6 +1217,7 @@ test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight
+test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_abandoned_owner_claim_is_reclaimed_and_rearms
 test_arming_claim_with_fresh_beacon_is_never_reclaimed
@@ -1187,4 +1237,5 @@ test_superseded_owner_goes_silent_and_never_double_translates
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
+test_long_poll_grace_reaches_arm_wrapper
 test_fm_lock_status_still_works_with_shared_lib

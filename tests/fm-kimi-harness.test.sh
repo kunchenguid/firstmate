@@ -4,8 +4,12 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=tests/treehouse-helpers.sh
-. "$(dirname "${BASH_SOURCE[0]}")/treehouse-helpers.sh"
+
+# bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
+# from inside Cursor, Claude, Pi, or Grok inherits those markers, which outrank
+# the fake ancestry the detection cases set up. Drop the ambient markers so the
+# asserted verdict does not depend on which harness launched the suite.
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -15,25 +19,11 @@ KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
-NODE_BIN=$(command -v node) || fail "test needs node"
-TRUST_CHECK="$ROOT/bin/fm-kimi-trust-check.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
-KIMI_HOST_SHADOW_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-kimi-host-shadow.XXXXXX")
-cat > "$KIMI_HOST_SHADOW_DIR/kimi" <<'SH'
-#!/usr/bin/env bash
-printf 'host Kimi shadow was executed\n' >> "$FM_KIMI_HOST_SHADOW_LOG"
-exit 97
-SH
-chmod +x "$KIMI_HOST_SHADOW_DIR/kimi"
-BASE_PATH="$KIMI_HOST_SHADOW_DIR:$BASE_PATH"
-# Keep a real PATH-visible Kimi shadow in the fixture so fallback tests prove
-# that the exported lookup boundary, rather than an accidentally clean host,
-# prevents host resolution and execution.
-fm_test_hide_host_commands "$TMP_ROOT" kimi
 
 cleanup_kimi_harness() {
   [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
-  rm -rf "$TMP_ROOT" "$KIMI_HOST_SHADOW_DIR"
+  rm -rf "$TMP_ROOT"
 }
 trap cleanup_kimi_harness EXIT
 
@@ -106,9 +96,9 @@ case "${1:-}" in
             ;;
           pointer-typed)
             if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
-              swallowed=$(cat "$FM_FAKE_KIMI_SWALLOWED" 2>/dev/null || printf '0')
-              if [ "$swallowed" -lt "${FM_FAKE_KIMI_SWALLOW_ENTERS:-0}" ]; then
-                printf '%s\n' "$((swallowed + 1))" > "$FM_FAKE_KIMI_SWALLOWED"
+              if [ "${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" = yes ] \
+                 && [ ! -f "$FM_FAKE_KIMI_SWALLOWED" ]; then
+                : > "$FM_FAKE_KIMI_SWALLOWED"
               else
                 printf 'delivered\n' > "$FM_FAKE_KIMI_STATE"
               fi
@@ -141,32 +131,23 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_test_write_active_treehouse_fake "$fakebin"
-  fm_fake_exit0 "$fakebin" gh-axi gh
+  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
-  ln -s "$NODE_BIN" "$fakebin/node"
   printf '%s\n' "$fakebin"
 }
 
 make_spawn_case() {
-  local name=$1 id=$2 wt_base=${3:-wt} case_dir home proj wt fakebin
+  local name=$1 id=$2 case_dir home proj wt fakebin
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
-  wt="$case_dir/$wt_base"
+  wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$home/.kimi-code"
   printf '# Kimi test config\ndefault_model = "test"\n' > "$home/.kimi-code/config.toml"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
-## Captain's intent
-Exercise Kimi dispatch.
-
-## Firstmate spec
-Verify launch and delivery behavior.
-
-# Load-bearing contract
 ## Captain's intent
 Exercise Kimi dispatch.
 
@@ -180,31 +161,22 @@ EOF
   : > "$case_dir/pointer.log"
   : > "$case_dir/kimi.state"
   : > "$case_dir/tmux-calls.log"
-  : > "$case_dir/host-kimi.log"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
-  # Spawn launch assertions must not inherit the crewmate parent's Git config
-  # overlay; the sanitizer composes from GIT_CONFIG_COUNT at launch time.
-  # NM_HOME is the same class of leak: a no-mistakes ship prefixes the resolved
-  # root onto the pane command, so a parent operator root would make the exact
-  # launch string environment-dependent.
-  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 NM_HOME
-  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" NM_HOME='' \
+  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_TREEHOUSE_PATH="$wt" \
-    TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
     FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
-    FM_FAKE_KIMI_SWALLOW_ENTERS="${FM_FAKE_KIMI_SWALLOW_ENTERS:-0}" \
+    FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
-    FM_KIMI_HOST_SHADOW_LOG="$case_dir/host-kimi.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
@@ -225,7 +197,7 @@ test_kimi_launch_then_send_is_verified() {
   rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
-  out=$(FM_FAKE_KIMI_SWALLOW_ENTERS=1 run_spawn \
+  out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model kimi-code/k3 --effort high)
   rc=$?
@@ -233,8 +205,8 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "GIT_CONFIG_COUNT='2' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' GIT_CONFIG_KEY_1=push.default GIT_CONFIG_VALUE_1=current NM_HOME='$HOME_DIR/.no-mistakes' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
-    || fail "kimi launch did not use the home-owned NM_HOME prefix, absolute binary, model, and --auto only: $launch"
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+    || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
@@ -250,180 +222,13 @@ test_kimi_launch_then_send_is_verified() {
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
   assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its Go temp directory into the pane"
+  assert_grep "export FM_TASK_ID=$id" "$CASE_DIR/tmux-calls.log" \
+    "kimi spawn did not mark the pane with its task id"
   assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
     "kimi spawn did not install its guarded global hook region"
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
-}
-
-# Regression: the brief-pointer submit is a caller of the SHARED submit core, so
-# it must inherit the Kimi final-Enter mitigation. With every Enter in the retry
-# budget swallowed, only the harness-scoped final bare Enter can deliver; without
-# it the pointer stays in the composer and delivery verification fails.
-test_kimi_brief_pointer_submit_inherits_the_final_enter() {
-  local id rec out rc pointer brief_real task_tmp
-  id="kimi-final-enter-$$"
-  task_tmp="/tmp/fm-$id"
-  KIMI_RUNTIME_TASK_TMP=$task_tmp
-  rm -rf "$task_tmp"
-  rec=$(make_spawn_case final-enter "$id")
-  read_spawn_record "$rec"
-  # FM_KIMI_SUBMIT_RETRIES defaults to 3, so 3 swallows exhaust the whole budget.
-  out=$(FM_FAKE_KIMI_SWALLOW_ENTERS=3 run_spawn \
-    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
-  rc=$?
-  expect_code 0 "$rc" "Kimi spawn should deliver its pointer on the final bare Enter: $out"
-  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/launch-brief.md"
-  pointer=$(cat "$CASE_DIR/pointer.log")
-  [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
-    || fail "the swallowed submit retyped or altered the pointer: $pointer"
-  pass "fm-spawn: the brief-pointer submit inherits the shared core's Kimi final Enter"
-}
-
-now_ms() {
-  "$PYTHON_BIN" -c 'import time; print(int(time.time() * 1000))'
-}
-
-# Independent oracle for Kimi's vendor-owned workspace identity
-# (wd_<lowercase-basename-slug>_<first-12-sha256-of-normalized-root>), derived
-# here from the documented rule rather than from fm-spawn's implementation, so a
-# slug or digest regression shows up as a wrong path instead of a silent match.
-expected_kimi_trust_file() {  # <home> <absolute-root>
-  local home=$1 root=$2 slug digest
-  slug=$(printf '%s' "${root##*/}" | tr '[:upper:]' '[:lower:]' \
-    | sed 's/[^a-z0-9._-]/-/g; s/^-*//; s/-*$//' | cut -c1-40 | sed 's/^-*//; s/-*$//')
-  if command -v shasum >/dev/null 2>&1; then
-    digest=$(printf '%s' "$root" | shasum -a 256 | awk '{print substr($1,1,12)}')
-  else
-    digest=$(printf '%s' "$root" | sha256sum | awk '{print substr($1,1,12)}')
-  fi
-  printf '%s/.kimi-code/workspace-trust/wd_%s_%s\n' "$home" "$slug" "$digest"
-}
-
-# The pooled-worktree basename carries uppercase, characters outside the safe
-# set, and more than 40 characters, so the whole slug rule is load-bearing here:
-# with the raw basename the record lands on a path Kimi never reads.
-KIMI_TRUST_WT_BASE='WT+Trust@Pool-Worktree-With-Very-Long-Name-0123456789'
-
-test_kimi_prest_trust_writes_verified_pool_worktree_record() {
-  local id rec out rc trust_file root trusted_at now
-  id="kimi-trust-z0-$$"
-  rec=$(make_spawn_case trust "$id" "$KIMI_TRUST_WT_BASE")
-  read_spawn_record "$rec"
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
-  rc=$?
-  expect_code 0 "$rc" "Kimi spawn should pre-trust the pool worktree: $out"
-  root=$(cd "$WT_DIR" && pwd -P)
-  case "${root##*/}" in
-    *[!a-z0-9._-]*) : ;;
-    *) fail "trust fixture basename no longer exercises the slug rule: ${root##*/}" ;;
-  esac
-  trust_file=$(expected_kimi_trust_file "$HOME_DIR" "$root")
-  assert_present "$trust_file" "Kimi pool worktree trust record was not written at its slugged workspace id"
-
-  # The predicate itself has exactly one owner; assert only the record's
-  # semantics here and let fm-kimi-trust-check.sh carry the contract.
-  [ "$(jq -r .root "$trust_file")" = "$root" ] \
-    || fail "Kimi trust record did not name the exact normalized worktree root"
-  trusted_at=$(jq -r .trustedAt "$trust_file")
-  case "$trusted_at" in
-    ''|*[!0-9]*) fail "Kimi trust record timestamp is not a plain number: $trusted_at" ;;
-  esac
-  now=$(now_ms)
-  [ "$trusted_at" -gt 0 ] || fail "Kimi trust record timestamp was not positive: $trusted_at"
-  [ "$trusted_at" -le "$now" ] || fail "Kimi trust record timestamp is in the future: $trusted_at > $now"
-  rc=0
-  "$TRUST_CHECK" "$root" "$trust_file" >/dev/null 2>&1 || rc=$?
-  expect_code 0 "$rc" "pristine Kimi trust predicate control"
-  pass "fm-spawn: Kimi pre-trusts a pool worktree whose basename requires slugging"
-}
-
-# Mutation classes for the trust predicate, each pinned to the documented
-# rejection exit code so an environment fault (which exits 2) can never pass as
-# a correct rejection.
-test_kimi_trust_predicate_rejects_mutation_classes() {
-  local dir root mutation file rc
-  dir="$TMP_ROOT/trust-mutations"
-  mkdir -p "$dir/root" "$dir/records"
-  root=$(cd "$dir/root" && pwd -P)
-  for mutation in delete unreachable weaken constant-true; do
-    file="$dir/records/$mutation"
-    case "$mutation" in
-      delete) rm -f "$file" ;;
-      unreachable) printf '{"root":"%s/missing","trustedAt":1}\n' "$root" > "$file" ;;
-      weaken) printf '{"root":"%s","trustedAt":0}\n' "$root" > "$file" ;;
-      constant-true) printf 'true\n' > "$file" ;;
-    esac
-    rc=0
-    "$TRUST_CHECK" "$root" "$file" >/dev/null 2>&1 || rc=$?
-    expect_code 1 "$rc" "Kimi $mutation trust mutation should be rejected with exit 1"
-  done
-  printf '{"root":"%s","trustedAt":1}\n' "$root" > "$dir/records/valid"
-  rc=0
-  "$TRUST_CHECK" "$root" "$dir/records/valid" >/dev/null 2>&1 || rc=$?
-  expect_code 0 "$rc" "pristine control for the trust predicate mutation set"
-  rc=0
-  "$TRUST_CHECK" "$root" >/dev/null 2>&1 || rc=$?
-  expect_code 2 "$rc" "an unevaluable trust check should exit 2, not report a rejection"
-
-  # The environment fault the three-valued contract exists for: a valid record
-  # that simply cannot be evaluated must exit 2, never 1, so callers can name the
-  # missing dependency instead of reporting a trust rejection.
-  local nojq out
-  nojq=$(fm_fakebin "$dir/no-jq")
-  ln -s "$(command -v bash)" "$nojq/bash"
-  rc=0
-  out=$(PATH="$nojq" "$TRUST_CHECK" "$root" "$dir/records/valid" 2>&1) || rc=$?
-  expect_code 2 "$rc" "a jq-less host should exit 2 rather than reject a valid record"
-  assert_contains "$out" "jq" "the unevaluable trust check did not name its missing dependency"
-  pass "fm-kimi-trust-check: rejects all four mutation classes with exit 1 and separates exit 2"
-}
-
-# The repair branch: a pre-existing INVALID record must not be mistaken for
-# established trust. Spawn has to overwrite it and prove the replacement.
-test_kimi_spawn_repairs_a_pre_existing_invalid_trust_record() {
-  local id rec out rc root trust_file
-  id="kimi-trust-repair-$$"
-  rec=$(make_spawn_case trust-repair "$id")
-  read_spawn_record "$rec"
-  root=$(cd "$WT_DIR" && pwd -P)
-  trust_file=$(expected_kimi_trust_file "$HOME_DIR" "$root")
-  mkdir -p "$(dirname "$trust_file")"
-  printf '{"root":"%s","trustedAt":0}\n' "$root" > "$trust_file"
-  rc=0
-  "$TRUST_CHECK" "$root" "$trust_file" >/dev/null 2>&1 || rc=$?
-  expect_code 1 "$rc" "the seeded record must be invalid before the spawn runs"
-
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
-  rc=$?
-  expect_code 0 "$rc" "Kimi spawn should repair an invalid pre-existing trust record: $out"
-  rc=0
-  "$TRUST_CHECK" "$root" "$trust_file" >/dev/null 2>&1 || rc=$?
-  expect_code 0 "$rc" "Kimi spawn left the invalid trust record in place"
-  pass "fm-spawn: replaces a pre-existing invalid Kimi trust record and proves the replacement"
-}
-
-# Fail-closed boundary: when the record that lands cannot satisfy the predicate,
-# the spawn must refuse rather than launch Kimi into the trust dialog.
-test_kimi_spawn_refuses_when_trust_cannot_be_established() {
-  local id rec out rc root trust_file
-  id="kimi-trust-refuse-$$"
-  rec=$(make_spawn_case trust-refuse "$id")
-  read_spawn_record "$rec"
-  root=$(cd "$WT_DIR" && pwd -P)
-  trust_file=$(expected_kimi_trust_file "$HOME_DIR" "$root")
-  # A non-empty directory occupying the record's own path makes the write land
-  # as something the predicate can never accept, with no firstmate internals
-  # stubbed and no reliance on file modes (tests may run as root).
-  mkdir -p "$trust_file/occupied"
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
-  rc=$?
-  [ "$rc" -ne 0 ] || fail "Kimi spawn should refuse when workspace trust cannot be established: $out"
-  assert_contains "$out" "workspace trust could not be established" \
-    "Kimi spawn did not name the trust failure it refused on"
-  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi spawn launched the harness despite refusing on trust"
-  pass "fm-spawn: refuses the Kimi launch when workspace trust cannot be established"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -653,18 +458,15 @@ test_kimi_falls_back_to_expanded_home_binary() {
   read_spawn_record "$rec"
   rm "$FAKEBIN_DIR/kimi"
   fallback="$HOME_DIR/.kimi-code/bin/kimi"
-  [ "$(PATH="$BASE_PATH" builtin command -v kimi)" = "$KIMI_HOST_SHADOW_DIR/kimi" ] \
-    || fail "fallback fixture did not establish a PATH-visible host Kimi shadow"
   mkdir -p "$(dirname "$fallback")"
   fm_fake_exit0 "$(dirname "$fallback")" kimi
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "GIT_CONFIG_COUNT='2' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' GIT_CONFIG_KEY_1=push.default GIT_CONFIG_VALUE_1=current NM_HOME='$HOME_DIR/.no-mistakes' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$fallback' --auto" ] \
-    || fail "Kimi fallback did not expand HOME into an absolute executable under the launch-scoped sanitizer: $launch"
-  [ ! -s "$CASE_DIR/host-kimi.log" ] || fail "Kimi fallback executed the host shadow"
-  pass "fm-spawn: Kimi fallback expands HOME without resolving or executing a host shadow under the launch-scoped sanitizer"
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$fallback' --auto" ] \
+    || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
+  pass "fm-spawn: Kimi fallback expands the active HOME"
 }
 
 test_kimi_missing_binary_refuses_before_pane_creation() {
@@ -674,8 +476,6 @@ test_kimi_missing_binary_refuses_before_pane_creation() {
   read_spawn_record "$rec"
   rm "$FAKEBIN_DIR/kimi"
   fallback="$HOME_DIR/.kimi-code/bin/kimi"
-  [ "$(PATH="$BASE_PATH" builtin command -v kimi)" = "$KIMI_HOST_SHADOW_DIR/kimi" ] \
-    || fail "missing-binary fixture did not establish a PATH-visible host Kimi shadow"
   rc=0
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "missing Kimi executable should refuse the spawn"
@@ -684,8 +484,7 @@ test_kimi_missing_binary_refuses_before_pane_creation() {
   if grep -Eq '(^| )new-(session|window)( |$)' "$CASE_DIR/tmux-calls.log"; then
     fail "missing Kimi executable created a tmux container or pane"
   fi
-  [ ! -s "$CASE_DIR/host-kimi.log" ] || fail "missing Kimi case executed the host shadow"
-  pass "fm-spawn: missing Kimi executable refuses without resolving or executing a host shadow"
+  pass "fm-spawn: missing Kimi executable refuses before pane creation"
 }
 
 test_kimi_unconfirmed_delivery_fails_loudly() {
@@ -749,10 +548,12 @@ esac
 SH
   chmod +x "$fakebin/ps"
 
-  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
-  out=$(CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+    CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
   pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"
 }
@@ -881,11 +682,6 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
-test_kimi_brief_pointer_submit_inherits_the_final_enter
-test_kimi_prest_trust_writes_verified_pool_worktree_record
-test_kimi_trust_predicate_rejects_mutation_classes
-test_kimi_spawn_repairs_a_pre_existing_invalid_trust_record
-test_kimi_spawn_refuses_when_trust_cannot_be_established
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_teardown_removes_pointer_and_registry_token

@@ -509,8 +509,19 @@ test_the_real_writers_produce_tokens_this_library_reads() {
   done
 
   # Writer 2: the optional secondmate report helper, whose bracketed shape must
-  # be read through just as completely. Drive the real script.
-  "$REPORT" "$state/pinned.status" "done" "$corr" "audit clean" \
+  # be read through just as completely. Drive the real script from a seeded
+  # mate home so it resolves the parent channel itself.
+  local parent mate
+  parent="$dir"
+  mate="$dir/mate"
+  mkdir -p "$mate/state"
+  printf 'pinned\n' > "$mate/.fm-secondmate-home"
+  cat > "$mate/.fm-secondmate-parent" <<EOF
+schema=fm-secondmate-parent.v1
+route=local
+parent_home=$parent
+EOF
+  FM_HOME="$mate" "$REPORT" "done" "$corr" "audit clean" \
     || fail "$REPORT failed writing a correlated report"
   helper_line=$(tail -1 "$state/pinned.status")
   verb=$(status_line_verb "$helper_line")
@@ -519,7 +530,7 @@ test_the_real_writers_produce_tokens_this_library_reads() {
   status_is_terminal_verb "$helper_line" \
     || fail "the helper's own line is not seen as a terminal captain verb"
 
-  "$REPORT" --doc "$state/pinned.status" needs-decision "$corr" data/x/report.md "see the report" \
+  FM_HOME="$mate" "$REPORT" --doc needs-decision "$corr" data/x/report.md "see the report" \
     || fail "$REPORT failed writing a correlated doc-pointer report"
   helper_line=$(tail -1 "$state/pinned.status")
   verb=$(status_line_verb "$helper_line")

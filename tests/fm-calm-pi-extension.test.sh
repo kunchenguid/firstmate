@@ -50,35 +50,8 @@ wait_for_text() {
   return 1
 }
 
-# A candidate on PATH is not evidence of a usable browser: Ubuntu ships a
-# /usr/bin/chromium-browser snap shim that exists but cannot render headless
-# ("xdg-settings: not found"), which turned the documented no-browser skip into
-# a hard failure on the shared CI runner. Only a candidate that provably dumps
-# a DOM counts as found.
-chrome_renders() {
-  local chrome=$1 probe_dom="$TMP_ROOT/chrome-probe.dom" probe_pid probe_wait=0
-  rm -f "$probe_dom"
-  "$chrome" \
-    --headless=new \
-    --disable-gpu \
-    --no-sandbox \
-    --user-data-dir="$TMP_ROOT/chrome-probe-profile" \
-    --virtual-time-budget=1000 \
-    --dump-dom \
-    about:blank >"$probe_dom" 2>/dev/null &
-  probe_pid=$!
-  while kill -0 "$probe_pid" 2>/dev/null && [ "$probe_wait" -lt 100 ]; do
-    grep -Fq '</html>' "$probe_dom" 2>/dev/null && break
-    sleep 0.1
-    probe_wait=$((probe_wait + 1))
-  done
-  kill "$probe_pid" 2>/dev/null || true
-  wait "$probe_pid" 2>/dev/null || true
-  grep -Fq '</html>' "$probe_dom" 2>/dev/null
-}
-
 find_chrome() {
-  local candidate resolved
+  local candidate
   if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
     printf '%s\n' "$FM_CHROME_BIN"
     return 0
@@ -90,11 +63,87 @@ find_chrome() {
     chromium-browser \
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   do
-    resolved=$(command -v "$candidate") || continue
-    chrome_renders "$resolved" || continue
-    printf '%s\n' "$resolved"
-    return 0
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
   done
+  return 1
+}
+
+# Render an exported session in real Chrome and leave the DOM in <out_file>.
+#
+# Rendering is a vendor-tool step, not a Calm guarantee: the DOM assertions the
+# caller runs afterwards are what protect the contract. Headless Chrome start-up
+# is the part that fails intermittently on a loaded CI runner - it can exit
+# before writing any DOM at all - and the original single unattended attempt
+# discarded both Chrome's stderr and its exit status, so a CI break surfaced as
+# a bare "could not render" with nothing in the log to tell a Chrome start-up
+# crash apart from a real change in Pi's export shape.
+#
+# So: retry the render a bounded number of times on a fresh profile, and when
+# every attempt fails, print the Chrome binary, its version, the installed Pi
+# version, and each attempt's exit status, stderr tail, and whether the helper
+# timed the attempt out - when it did, the exit status is only this helper's own
+# kill signal. The extra flags remove Chrome's background-network and /dev/shm
+# dependencies, which are the start-up surfaces that fail on a runner; neither
+# changes the rendered DOM of a local file.
+render_export_dom() {
+  local chrome=$1 source_file=$2 out_file=$3 pi_version=$4
+  local attempt pid status wait_count wait_limit reap_wait log profile report timed_out
+  report="$TMP_ROOT/chrome-render-report.txt"
+  wait_limit=${FM_CHROME_RENDER_WAIT_TICKS:-300}
+  : >"$report"
+  for attempt in 1 2 3; do
+    log="$TMP_ROOT/chrome-render-$attempt.err"
+    profile="$TMP_ROOT/chrome-profile-$attempt"
+    rm -rf "$profile"
+    : >"$out_file"
+    "$chrome" \
+      --headless=new \
+      --disable-gpu \
+      --no-sandbox \
+      --disable-dev-shm-usage \
+      --disable-background-networking \
+      --user-data-dir="$profile" \
+      --virtual-time-budget=2000 \
+      --dump-dom \
+      "file://$source_file" >"$out_file" 2>"$log" &
+    pid=$!
+    # Check the DOM before Chrome's liveness, so an attempt that writes the
+    # complete dump and exits immediately is still read as a success.
+    wait_count=0
+    while [ "$wait_count" -lt "$wait_limit" ]; do
+      grep -Fq '</html>' "$out_file" 2>/dev/null && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+      wait_count=$((wait_count + 1))
+    done
+    timed_out=no
+    if [ "$wait_count" -ge "$wait_limit" ]; then
+      timed_out=yes
+    fi
+    kill "$pid" 2>/dev/null || true
+    # Chrome can retain --headless=new after --dump-dom completes and ignore TERM,
+    # so an unbounded wait can hang after the complete DOM has been captured.
+    reap_wait=0
+    while kill -0 "$pid" 2>/dev/null && [ "$reap_wait" -lt 20 ]; do
+      sleep 0.1
+      reap_wait=$((reap_wait + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    status=0
+    wait "$pid" 2>/dev/null || status=$?
+    grep -Fq '</html>' "$out_file" 2>/dev/null && return 0
+    printf 'attempt %s: exit=%s timed_out=%s bytes=%s stderr=%s\n' \
+      "$attempt" "$status" "$timed_out" "$(wc -c <"$out_file" | tr -d ' ')" \
+      "$(tail -c 400 "$log" 2>/dev/null | tr '\n' ' ')" >>"$report"
+  done
+  printf 'chrome=%s chrome_version=%s pi=%s; %s' \
+    "$chrome" "$("$chrome" --version 2>&1 | head -1)" "$pi_version" \
+    "$(tr '\n' ' ' <"$report")"
   return 1
 }
 
@@ -703,8 +752,10 @@ test_rendering_and_session_lifecycle() {
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
-  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$fixture/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$fixture/lib/fm-async-exec.ts"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
@@ -729,7 +780,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const extPath = fileURLToPath(pathToFileURL(process.env.EXT).href);
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
+const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }, { createReadToolDefinition, createBashToolDefinition, createEditToolDefinition, createWriteToolDefinition, createGrepToolDefinition, createFindToolDefinition, createLsToolDefinition }] = await Promise.all([
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/custom-entry.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
@@ -738,7 +789,22 @@ const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionC
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
   import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/core/export-html/tool-renderer.js`).href),
+  // The calm-off equivalence baseline needs each built-in's REAL stock renderers.
+  // Pi 0.84 and older silently substituted the built-in definition when a
+  // ToolExecutionComponent was constructed without one, so a definition-less
+  // baseline used to read as stock; Pi 0.85 removed that substitution and the
+  // definition-less row now renders the generic text fallback instead.
+  import(pathToFileURL(`${packageRoot}/dist/core/tools/index.js`).href),
 ]);
+const stockDefinitions = {
+  read: createReadToolDefinition,
+  bash: createBashToolDefinition,
+  edit: createEditToolDefinition,
+  write: createWriteToolDefinition,
+  grep: createGrepToolDefinition,
+  find: createFindToolDefinition,
+  ls: createLsToolDefinition,
+};
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 
@@ -854,11 +920,11 @@ const operationalChat = {
 const operationalMode = {
   chatContainer: operationalChat,
   editor: { addToHistory: (value) => operationalHistory.push(value) },
-  getMarkdownThemeWithSettings: () => undefined,
-  // Pi 0.84 added this optional renderer dependency to addMessageToChat.
-  // Supplying the public hook keeps the fixture focused on Calm's contract
-  // across supported Pi versions instead of coupling it to one host install.
+  // Pi builds user rows with the registered markdown transformers from 0.83 onward and
+  // without them before that; the stub answers both shapes with the empty list Pi and
+  // Firstmate both use today.
   getMarkdownTransformers: () => [],
+  getMarkdownThemeWithSettings: () => undefined,
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
@@ -914,7 +980,7 @@ const renderUi = { requestRender() {} };
 const rows = [];
 for (const [name, args, result] of cases) {
   const wrapped = tools.find((tool) => tool.name === name);
-  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, undefined, renderUi, process.cwd());
+  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, stockDefinitions[name](process.cwd()), renderUi, process.cwd());
   const actual = new ToolExecutionComponent(name, `wrapped-${name}`, args, { showImages: false }, wrapped, renderUi, process.cwd());
   for (const row of [baseline, actual]) {
     row.markExecutionStarted();
@@ -1073,7 +1139,6 @@ const assistantThinkingTool = new AssistantMessageComponent({
   ...assistantBase,
   content: [
     { type: "thinking", thinking: "HIDDEN_TOOL_THINKING" },
-    { type: "text", text: "VISIBLE_TOOL_INTENT" },
     { type: "toolCall", id: "assistant-layout-tool", name: "read", arguments: { path: "sample.txt" } },
   ],
   stopReason: "toolUse",
@@ -1290,12 +1355,8 @@ if (!customRow.render(100).join("\n").includes("CUSTOM_CALL")) {
 if (watchActual.render(100).length !== 0) {
   throw new Error("Calm left the fm_watch_arm_pi call/result shell visible");
 }
-const assistantThinkingToolRendered = assistantThinkingTool.render(100).join("\n");
-if (!assistantThinkingToolRendered.includes("VISIBLE_TOOL_INTENT")) {
-  throw new Error("Calm removed assistant text immediately before a tool call");
-}
-if (assistantThinkingToolRendered.includes("HIDDEN_TOOL_THINKING")) {
-  throw new Error("Calm left reasoning beside a tool call visible");
+if (assistantThinkingTool.render(100).length !== 0) {
+  throw new Error("Calm-hidden thinking beside a tool call retained vertical height");
 }
 if (JSON.stringify(assistantThinkingText.render(100)) !== JSON.stringify(assistantTextOnly.render(100))) {
   throw new Error("Calm-hidden thinking changed final assistant row geometry");
@@ -1305,9 +1366,8 @@ if (!assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING
   throw new Error("expanding thinking did not restore the original reasoning content");
 }
 assistantThinkingTool.setHideThinkingBlock(true);
-const assistantThinkingToolCollapsed = assistantThinkingTool.render(100).join("\n");
-if (!assistantThinkingToolCollapsed.includes("VISIBLE_TOOL_INTENT") || assistantThinkingToolCollapsed.includes("HIDDEN_TOOL_THINKING")) {
-  throw new Error("collapsing thinking changed the pre-tool assistant text contract");
+if (assistantThinkingTool.render(100).length !== 0) {
+  throw new Error("collapsing thinking again restored residual Calm rows");
 }
 if (JSON.stringify(sessionEntries) !== entriesBefore) {
   throw new Error("calm mode changed session entries or model context");
@@ -1372,7 +1432,6 @@ for (const reason of ["startup", "new", "resume", "fork", "reload"]) {
 await calmCommand.handler("", commandContext);
 
 const readWrapper = tools.find((tool) => tool.name === "read");
-const { createReadToolDefinition } = await import(pathToFileURL(`${packageRoot}/dist/index.js`).href);
 const originalRead = createReadToolDefinition(process.cwd());
 const executeContext = { cwd: process.cwd() };
 const [originalResult, wrappedResult] = await Promise.all([
@@ -1390,8 +1449,268 @@ JS
   pass "Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts"
 }
 
+test_calm_mid_turn_working_notes() {
+  local fixture out output_file status version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm mid-turn renderer test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  record_pi_version_evidence "$version" "Pi calm mid-turn presentation"
+
+  fixture="$TMP_ROOT/calm-mid-turn"
+  mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+
+  output_file="$fixture/node-output"
+  (cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ AssistantMessageComponent }, { initTheme }, { setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+// Both extension instances below resolve their own relative "./lib/..." specifiers to
+// the same module URLs, so they share one live visibility policy exactly the way a
+// single Pi process does.
+const visibility = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href);
+const calmPreferencePath = `${process.env.FM_HOME}/config/calm`;
+const components = [];
+const ui = {
+  getEditorText: () => "",
+  getToolsExpanded: () => false,
+  onTerminalInput: () => () => {},
+  setHiddenThinkingLabel(value) {
+    // Pi's own fan-out: every mounted assistant row re-runs its layout.
+    for (const component of components) component.setHiddenThinkingLabel(value ?? "Thinking...");
+  },
+  setStatus() {},
+  setToolsExpanded() {},
+  setWorkingVisible() {},
+  notify() {},
+};
+const context = { ui };
+
+async function loadCalmExtension() {
+  const registeredTools = [];
+  let sessionStart;
+  let calmCommand;
+  const pi = {
+    events: { emit() {}, on() {} },
+    on(event, handler) {
+      if (event === "session_start") sessionStart = handler;
+    },
+    registerCommand(name, command) {
+      if (name === "calm") calmCommand = command;
+    },
+    registerEntryRenderer() {},
+    registerTool(tool) {
+      registeredTools.push(tool.name);
+    },
+    getAllTools() {
+      return [];
+    },
+  };
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?instance=${Date.now()}-${Math.random()}`);
+  extension.default(pi);
+  if (!calmCommand || !sessionStart) {
+    throw new Error("Calm extension did not register its command and session handler");
+  }
+  return { calmCommand, sessionStart, registeredTools };
+}
+
+const assistantBase = {
+  role: "assistant",
+  api: "calm-mid-turn-test",
+  provider: "calm-mid-turn-test",
+  model: "deterministic",
+  usage: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  },
+  timestamp: 1,
+};
+const toolCall = { type: "toolCall", id: "calm-mid-turn-tool", name: "read", arguments: { path: "sample.txt" } };
+const messages = {
+  // The reported incident: narration emitted in the same assistant message as a tool call.
+  midTurn: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "MIDTURN_WORKING_NOTE" }, toolCall],
+  },
+  // The genuine reply that ends a response, which Calm never hides.
+  finalReply: {
+    ...assistantBase,
+    stopReason: "stop",
+    content: [{ type: "text", text: "FINAL_REPLY_TEXT" }],
+  },
+  // Still streaming: finality is unknown, and hiding here would stop a real reply.
+  streaming: {
+    ...assistantBase,
+    stopReason: "pending",
+    content: [{ type: "text", text: "STREAMING_NOTE_TEXT" }],
+  },
+  // Truncated with tool calls is mid-turn; Pi's own truncation notice stays.
+  truncatedMidTurn: {
+    ...assistantBase,
+    stopReason: "length",
+    content: [{ type: "text", text: "TRUNCATED_MIDTURN_NOTE" }, toolCall],
+  },
+  // Truncated without tool calls ended the response.
+  truncatedFinal: {
+    ...assistantBase,
+    stopReason: "length",
+    content: [{ type: "text", text: "TRUNCATED_FINAL_TEXT" }],
+  },
+};
+const messagesBefore = JSON.stringify(messages);
+const rows = {};
+for (const [name, message] of Object.entries(messages)) {
+  rows[name] = new AssistantMessageComponent(message, true);
+  components.push(rows[name]);
+}
+const rendered = (name) => rows[name].render(100);
+const renderedText = (name) => rendered(name).join("\n");
+const snapshot = () => {
+  const shot = {};
+  for (const name of Object.keys(rows)) shot[name] = JSON.stringify(rendered(name));
+  return shot;
+};
+const requireVisible = (name, needle, context) => {
+  if (rendered(name).length === 0 || !renderedText(name).includes(needle)) {
+    throw new Error(`${context}: ${name} lost ${needle}`);
+  }
+};
+const requireHidden = (name, needle, context) => {
+  if (renderedText(name).includes(needle)) {
+    throw new Error(`${context}: ${name} still rendered ${needle}`);
+  }
+};
+
+let calm = await loadCalmExtension();
+if (calm.registeredTools.length !== 0) {
+  throw new Error("Calm claimed built-in tools with no persisted preference");
+}
+await calm.sessionStart({ reason: "startup" }, context);
+const stockRows = snapshot();
+for (const name of Object.keys(rows)) {
+  if (rendered(name).length === 0) throw new Error(`Calm-off rendering hid ${name}`);
+}
+requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off");
+
+await calm.calmCommand.handler("", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
+  throw new Error("plain /calm from off did not persist on");
+}
+if (rendered("midTurn").length !== 0) {
+  throw new Error(`Calm on left mid-turn working-note rows: ${JSON.stringify(rendered("midTurn"))}`);
+}
+requireHidden("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
+// Pi owns the wording of its truncation notice; Calm must leave that row's own notice
+// standing rather than collapsing an incomplete response to nothing.
+if (rendered("truncatedMidTurn").length === 0) {
+  throw new Error("Calm on removed Pi's own truncation notice with the working note");
+}
+requireVisible("streaming", "STREAMING_NOTE_TEXT", "Calm on");
+requireVisible("truncatedFinal", "TRUNCATED_FINAL_TEXT", "Calm on");
+requireVisible("finalReply", "FINAL_REPLY_TEXT", "Calm on");
+if (JSON.stringify(rendered("finalReply")) !== stockRows.finalReply) {
+  throw new Error("Calm on changed the genuine final reply row");
+}
+if (JSON.stringify(messages) !== messagesBefore) {
+  throw new Error("Calm on mutated the assistant messages instead of a presentation copy");
+}
+
+// The removed third level: /calm parses no argument, so every invocation is the plain
+// on/off toggle and no third literal is ever persisted.
+await calm.calmCommand.handler("max", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
+  throw new Error("/calm max was still read as a level instead of the plain toggle");
+}
+requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off after /calm max");
+const restoredRows = snapshot();
+for (const name of Object.keys(rows)) {
+  if (restoredRows[name] !== stockRows[name]) {
+    throw new Error(`turning Calm off did not restore byte-identical ${name} rendering`);
+  }
+}
+await calm.calmCommand.handler("  MaX  ", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "on\n" || rendered("midTurn").length !== 0) {
+  throw new Error("a spaced, mixed-case argument did not fall through to the plain toggle");
+}
+await calm.calmCommand.handler("unrecognized", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
+  throw new Error("an unrecognized /calm argument did not fall back to the plain toggle");
+}
+
+// Restart from each persisted value, including the legacy "max" a home upgraded from
+// the removed third level still carries: every one restores ordinary Calm, never off.
+for (const persisted of ["on\n", "max\n", "max"]) {
+  writeFileSync(calmPreferencePath, persisted, "utf8");
+  // Scramble the live state the way a fresh process starts, then let a newly loaded
+  // extension restore from the persisted file alone.
+  visibility.setCalmPresentation(false);
+  ui.setHiddenThinkingLabel(undefined);
+  requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "scrambled live state");
+  calm = await loadCalmExtension();
+  if (calm.registeredTools.length !== 7) {
+    throw new Error(
+      `a session restored from ${JSON.stringify(persisted)} claimed ${calm.registeredTools.length} built-in tools instead of 7`,
+    );
+  }
+  for (const reason of ["startup", "resume", "new", "fork", "reload"]) {
+    await calm.sessionStart({ reason }, context);
+    if (rendered("midTurn").length !== 0) {
+      throw new Error(
+        `a ${reason} session restored from ${JSON.stringify(persisted)} did not hide mid-turn working notes`,
+      );
+    }
+    requireVisible("finalReply", "FINAL_REPLY_TEXT", `${reason} session`);
+  }
+  // A session restored as on toggles to off; one that had wrongly dropped to off would
+  // persist "on" here instead.
+  await calm.calmCommand.handler("", context);
+  if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
+    throw new Error(`${JSON.stringify(persisted)} did not restore as ordinary Calm on`);
+  }
+  requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm toggled off after restore");
+}
+if (!existsSync(calmPreferencePath)) {
+  throw new Error("Calm stopped persisting its preference file");
+}
+JS
+  status=$?
+  out=$(cat "$output_file")
+  [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
+  [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
+  pass "Pi calm on collapses mid-turn assistant working notes to zero height while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
+}
+
 test_operational_followup_turn_e2e() {
-  local project home config sessions version label case_name calm_state expected_notifications session_file pane i captain_answer_rows captain_line handled_line geometry_gap exact_session
+  local project home config sessions version label case_name calm_state expected_notifications session_file pane i captain_line handled_line geometry_gap exact_session
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi operational follow-up E2E"
     return 0
@@ -1590,24 +1909,20 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
-    # The session file persists a turn before Pi paints it, so wait for the final
-    # row to render instead of asserting on a one-shot capture. Assert on the
-    # visible frame only: the full scrollback accumulates superseded repaint
-    # frames, so an exact-count check there misreads rendering history as
-    # duplicate transcript rows.
+    # The session file is written before the TUI repaints, so wait for the
+    # rendered rows themselves instead of capturing the pane right away.
     i=0
     while [ "$i" -lt 240 ]; do
-      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" 2>/dev/null || true)
-      if printf '%s\n' "$pane" | grep -Fq "CAPTAIN_ANSWER_$label" \
-        && printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE"; then
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      if printf '%s\n' "$pane" | grep -Fq "CAPTAIN_ANSWER_$label" &&
+        printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE"; then
         break
       fi
       sleep 0.05
       i=$((i + 1))
     done
-    captain_answer_rows=$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)
-    [ "$captain_answer_rows" -eq 1 ] \
-      || fail "Pi follow-up $label case rendered $captain_answer_rows captain answer rows instead of exactly one"
+    [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
+      || fail "Pi follow-up $label case rendered a duplicate captain answer"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
     assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
     if [ "$calm_state" = on ]; then
@@ -1923,7 +2238,9 @@ TS
   i=0
   while [ "$i" -lt 120 ]; do
     capture_geometry_viewport "$snapshot"
-    tail -12 "$snapshot" | grep -Fq "Working..." || break
+    # Pi <=0.84 rendered a "Working..." transcript row; Pi >=0.85 embeds the
+    # indicator in the editor border as "Working". Match either spelling.
+    tail -12 "$snapshot" | grep -Eq "Working(\\.\\.\\.)?([[:space:]]|─|$)" || break
     sleep 0.05
     i=$((i + 1))
   done
@@ -2867,8 +3184,105 @@ JS
   pass "Pi Calm working ship moves on a slow independent cadence over faster fixed-cell blue water, paints the complete boat standard yellow with balanced resets, keeps ANSI-stripped width exact, flips the directional sail on the exact bounce at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes column/direction across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and installs and removes one scheduler-owning widget across starts, settle, abort, failure, shutdown, reload, replacement, and Calm toggles while leaving Calm-off visibility untouched"
 }
 
+# The rendered-DOM assertions below depend on a real browser, so the render step
+# itself is the part that fails for reasons that have nothing to do with Calm.
+# This pins that guard with real processes and no browser: one clean render, one
+# that only succeeds after Chrome's start-up flake, and one that never renders
+# and must report enough to tell a Chrome failure apart from a Pi export change.
+test_export_dom_render_guard() {
+  local dir source_file out_file report
+
+  dir="$TMP_ROOT/render-guard"
+  mkdir -p "$dir"
+  source_file="$dir/export.html"
+  out_file="$dir/dom.html"
+  printf '<html><body>export</body></html>\n' >"$source_file"
+
+  cat >"$dir/chrome-ok" <<'SH'
+#!/bin/sh
+case "${1:-}" in --version) echo "FakeChrome 1.2.3"; exit 0 ;; esac
+echo attempt >>"$FM_FAKE_CHROME_ATTEMPTS"
+printf '<html><head></head><body>export</body></html>\n'
+SH
+  cat >"$dir/chrome-flaky" <<'SH'
+#!/bin/sh
+case "${1:-}" in --version) echo "FakeChrome 1.2.3"; exit 0 ;; esac
+echo attempt >>"$FM_FAKE_CHROME_ATTEMPTS"
+if [ "$(wc -l <"$FM_FAKE_CHROME_ATTEMPTS")" -lt 3 ]; then
+  echo "fake chrome start-up crashed" >&2
+  exit 1
+fi
+printf '<html><head></head><body>export</body></html>\n'
+SH
+  cat >"$dir/chrome-broken" <<'SH'
+#!/bin/sh
+case "${1:-}" in --version) echo "FakeChrome 1.2.3"; exit 0 ;; esac
+echo attempt >>"$FM_FAKE_CHROME_ATTEMPTS"
+echo "FAKE_CHROME_STARTUP_MARKER" >&2
+exit 9
+SH
+  cat >"$dir/chrome-hang" <<'SH'
+#!/bin/sh
+case "${1:-}" in --version) echo "FakeChrome 1.2.3"; exit 0 ;; esac
+echo attempt >>"$FM_FAKE_CHROME_ATTEMPTS"
+printf '<html><head></head><body>export'
+exec sleep 30
+SH
+  chmod +x "$dir/chrome-ok" "$dir/chrome-flaky" "$dir/chrome-broken" "$dir/chrome-hang"
+
+  : >"$dir/attempts-ok"
+  FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-ok" \
+    render_export_dom "$dir/chrome-ok" "$source_file" "$out_file" 9.9.9 >"$dir/report-ok" \
+    || fail "render_export_dom rejected a Chrome that dumped a complete DOM"
+  grep -Fq '</html>' "$out_file" || fail "render_export_dom did not leave the rendered DOM behind"
+  [ "$(wc -l <"$dir/attempts-ok")" -eq 1 ] \
+    || fail "render_export_dom retried a Chrome that had already rendered the DOM"
+  [ ! -s "$dir/report-ok" ] || fail "render_export_dom reported a diagnostic for a successful render"
+
+  : >"$dir/attempts-flaky"
+  : >"$out_file"
+  FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-flaky" \
+    render_export_dom "$dir/chrome-flaky" "$source_file" "$out_file" 9.9.9 >"$dir/report-flaky" \
+    || fail "render_export_dom gave up on a Chrome that renders after a start-up failure"
+  grep -Fq '</html>' "$out_file" || fail "a retried render left no DOM behind"
+  [ "$(wc -l <"$dir/attempts-flaky")" -eq 3 ] \
+    || fail "render_export_dom did not retry the failed Chrome start-ups exactly"
+
+  : >"$dir/attempts-broken"
+  : >"$out_file"
+  if FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-broken" \
+    render_export_dom "$dir/chrome-broken" "$source_file" "$out_file" 9.9.9 >"$dir/report-broken"
+  then
+    fail "render_export_dom accepted a Chrome that never rendered the DOM"
+  fi
+  [ "$(wc -l <"$dir/attempts-broken")" -eq 3 ] \
+    || fail "render_export_dom did not exhaust its bounded retries before failing"
+  report=$(cat "$dir/report-broken")
+  assert_contains "$report" "$dir/chrome-broken" "the render failure did not name the Chrome binary it used"
+  assert_contains "$report" "FakeChrome 1.2.3" "the render failure did not name the Chrome version it used"
+  assert_contains "$report" "pi=9.9.9" "the render failure did not name the installed Pi version"
+  assert_contains "$report" "exit=9" "the render failure did not report Chrome's exit status"
+  assert_contains "$report" "timed_out=no" "the render failure did not report that Chrome exited on its own"
+  assert_contains "$report" "FAKE_CHROME_STARTUP_MARKER" "the render failure discarded Chrome's own diagnostic"
+
+  : >"$dir/attempts-hang"
+  : >"$out_file"
+  if FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-hang" FM_CHROME_RENDER_WAIT_TICKS=3 \
+    render_export_dom "$dir/chrome-hang" "$source_file" "$out_file" 9.9.9 >"$dir/report-hang"
+  then
+    fail "render_export_dom accepted a Chrome that never finished the DOM"
+  fi
+  [ "$(wc -l <"$dir/attempts-hang")" -eq 3 ] \
+    || fail "render_export_dom did not exhaust its bounded retries on a Chrome that never finished"
+  report=$(cat "$dir/report-hang")
+  assert_contains "$report" "timed_out=yes" \
+    "the render failure reported its own kill signal without saying the attempt was timed out"
+
+  pass "the rendered-export-DOM guard renders in one pass, retries a bounded number of Chrome start-up failures, and reports the Chrome binary, Chrome version, Pi version, exit status, and Chrome diagnostic when every attempt fails"
+}
+
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait chrome_reap_wait error_count_before error_count export_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot export_settled_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_report active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -2887,6 +3301,8 @@ test_interactive_terminal_e2e() {
   hidden_snapshot="$TMP_ROOT/hidden.txt"
   active_before_snapshot="$TMP_ROOT/active-before.txt"
   active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
+  export_snapshot="$TMP_ROOT/export.txt"
+  export_settled_snapshot="$TMP_ROOT/export-settled.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
   working_snapshot="$TMP_ROOT/working.txt"
   working_response_snapshot="$TMP_ROOT/working-response.txt"
@@ -2910,8 +3326,10 @@ test_interactive_terminal_e2e() {
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
-  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$project/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$project/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$project/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$project/.pi/extensions/lib/fm-async-exec.ts"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/fm-primary-turnend-guard.ts"
   cp \
@@ -2919,29 +3337,19 @@ test_interactive_terminal_e2e() {
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
     "$ROOT/bin/fm-gate-refuse-lib.sh" \
-    "$ROOT/bin/fm-session-lock-lib.sh" \
-    "$ROOT/bin/fm-hook-host-lib.sh" \
-    "$ROOT/bin/fm-backend.sh" \
-    "$ROOT/bin/fm-pr-lib.sh" \
-    "$ROOT/bin/fm-record-contradictions-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" \
     "$project/bin/"
+  # The real digest is out of scope here: this lab is about how Calm RENDERS the
+  # session-open message and whether it keeps its operational provenance, not
+  # about what session start reports. A stub keeps the run tier's real routing
+  # and the extension's real encoding in the path without dragging a whole
+  # fleet home into a rendering test.
+  cat >"$project/bin/fm-session-start.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'CALM_E2E_SESSION_START_DIGEST\n'
+exit 0
+SH
   chmod +x "$project/bin/"*.sh
-  for required_script in \
-    fm-sessionstart-run.sh \
-    fm-sessionstart-nudge.sh \
-    fm-primary-scope-lib.sh \
-    fm-gate-refuse-lib.sh \
-    fm-session-lock-lib.sh \
-    fm-hook-host-lib.sh \
-    fm-backend.sh \
-    fm-pr-lib.sh \
-    fm-record-contradictions-lib.sh \
-    fm-operational-input.sh
-  do
-    [ -x "$project/bin/$required_script" ] \
-      || fail "native session-start fixture dependency is missing: $required_script"
-  done
   cat >"$project/.pi/extensions/fm-calm-e2e-inject.ts" <<'TS'
 import {
   type AssistantMessage,
@@ -3097,9 +3505,8 @@ TS
   printf '%s\n' '{"tui.input.submit":"alt+s"}' >"$config/keybindings.json"
   printf '%s\n' '{"hideThinkingBlock":true}' >"$config/settings.json"
   now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-  session_started_at=2020-01-01T00:00:00.000Z
   cat >"$session_file" <<JSON
-{"type":"session","version":3,"id":"11111111-1111-4111-8111-111111111111","timestamp":"$session_started_at","cwd":"$project"}
+{"type":"session","version":3,"id":"11111111-1111-4111-8111-111111111111","timestamp":"$now","cwd":"$project"}
 {"type":"message","id":"a0000001","parentId":null,"timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"Show a deterministic tool example."}],"timestamp":1}}
 {"type":"message","id":"a0000002","parentId":"a0000001","timestamp":"$now","message":{"role":"assistant","content":[{"type":"thinking","thinking":"first internal reasoning block"},{"type":"text","text":"I will run one command."},{"type":"toolCall","id":"call_calm_e2e","name":"bash","arguments":{"command":"printf 'CALM_E2E_OUTPUT\\n'"}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2}}
 {"type":"message","id":"a0000003","parentId":"a0000002","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_calm_e2e","toolName":"bash","content":[{"type":"text","text":"CALM_E2E_OUTPUT"}],"details":{},"isError":false,"timestamp":3}}
@@ -3156,6 +3563,7 @@ JSON
     # on screen through this whole redraw rather than disappearing with it.
     if ! grep -Fq "Thinking..." "$hidden_snapshot" &&
       ! grep -Fq "/calm" "$hidden_snapshot" &&
+      grep -Fq "I will run one command." "$hidden_snapshot" &&
       grep -Fq "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "$hidden_snapshot" &&
       grep -Fq "The deterministic tool example is complete." "$hidden_snapshot"; then
       break
@@ -3192,7 +3600,8 @@ JSON
   do
     assert_contains "$(cat "$hidden_snapshot")" "$near_miss" "/calm hid the genuine operational near miss $near_miss"
   done
-  assert_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm removed assistant conversation before a tool"
+  # Assistant narration remains conversation even when it precedes a tool call.
+  assert_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm removed assistant text before a tool call"
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-diagnostic-e2e"
@@ -3219,8 +3628,6 @@ JSON
   do
     kind=${fixture%%|*}
     needle=${fixture#*|}
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_before_snapshot"
-    error_count_before=$(grep -Fc " Error:" "$active_before_snapshot" || true)
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e $kind"
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
     active_wait=0
@@ -3232,18 +3639,7 @@ JSON
     grep -F '"role":"user"' "$session_file" |
       grep -Fq "$needle" \
       || fail "current operational kind $kind did not retain user-role delivery while Calm was active"
-    active_wait=0
-    while [ "$active_wait" -lt 120 ]; do
-      tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_hidden_snapshot"
-      error_count=$(grep -Fc " Error:" "$active_hidden_snapshot" || true)
-      if [ "$error_count" -gt "$error_count_before" ] &&
-        ! grep -Fq "/calm-inject-e2e" "$active_hidden_snapshot" &&
-        ! grep -Fq "escape to interrupt" "$active_hidden_snapshot"; then
-        break
-      fi
-      sleep 0.05
-      active_wait=$((active_wait + 1))
-    done
+    sleep 0.1
   done
   node - "$session_file" <<'JS' || fail "native Pi did not preserve every exact current operational kind"
 const fs = require("node:fs");
@@ -3315,20 +3711,8 @@ JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  # Pi 0.84 coalesces consecutive status rows in place, so Calm's own
-  # post-export tools-expansion refresh overwrites the "Session exported to:"
-  # status before a paint can happen. The exported artifact is the completion
-  # contract instead: exportToHtml writes the whole document in one write,
-  # closed by </html>.
-  export_wait=0
-  while [ "$export_wait" -lt 200 ]; do
-    grep -Fq '</html>' "$export_file" 2>/dev/null && break
-    sleep 0.05
-    export_wait=$((export_wait + 1))
-  done
-  if [ ! -s "$export_file" ] || ! grep -Fq '</html>' "$export_file" 2>/dev/null; then
-    fail "/export did not complete while calm mode was on"
-  fi
+  wait_for_text "$export_snapshot" "Session exported to: $export_file" \
+    || fail "/export did not complete while calm mode was on"
   node - "$export_file" <<'JS' || fail "calm-mode HTML export lost tool data or persisted synthetic provenance"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);
@@ -3345,36 +3729,9 @@ const synthetic = entries.find((entry) => entry.type === "custom_message" && ent
 if (!synthetic || synthetic.display) process.exit(1);
 JS
   chrome=$(find_chrome) \
-    || fail "Chrome or Chromium is required for rendered export DOM assertions"
-  "$chrome" \
-    --headless=new \
-    --disable-gpu \
-    --no-sandbox \
-    --user-data-dir="$TMP_ROOT/chrome-profile" \
-    --virtual-time-budget=2000 \
-    --dump-dom \
-    "file://$export_file" >"$export_dom" 2>"$TMP_ROOT/chrome.stderr" &
-  chrome_pid=$!
-  chrome_wait=0
-  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 100 ]; do
-    grep -Fq '</html>' "$export_dom" 2>/dev/null && break
-    sleep 0.1
-    chrome_wait=$((chrome_wait + 1))
-  done
-  kill "$chrome_pid" 2>/dev/null || true
-  # Chrome can retain --headless=new after --dump-dom completes and ignore TERM,
-  # so an unbounded wait can hang after the complete DOM has been captured.
-  chrome_reap_wait=0
-  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_reap_wait" -lt 20 ]; do
-    sleep 0.1
-    chrome_reap_wait=$((chrome_reap_wait + 1))
-  done
-  if kill -0 "$chrome_pid" 2>/dev/null; then
-    kill -9 "$chrome_pid" 2>/dev/null || true
-  fi
-  wait "$chrome_pid" 2>/dev/null || true
-  grep -Fq '</html>' "$export_dom" 2>/dev/null \
-    || fail "could not render calm-mode HTML export DOM: $(cat "$TMP_ROOT/chrome.stderr")"
+    || fail "Chrome or Chromium is required for rendered export DOM assertions; set FM_CHROME_BIN to one"
+  chrome_report=$(render_export_dom "$chrome" "$export_file" "$export_dom" "$version") \
+    || fail "could not render calm-mode HTML export DOM: $chrome_report"
   node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
 const dom = require("node:fs").readFileSync(process.argv[2], "utf8");
 const messages = dom.match(/<div id="messages">([\s\S]*?)<\/main>/)?.[1];
@@ -3389,6 +3746,38 @@ for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_A
 }
 if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.status")) process.exit(1);
 JS
+  # Calm returns the transcript to its own presentation once the export has been
+  # rendered. That repaint runs on the macrotask right after Pi prints the export
+  # confirmation, so it must not overwrite it: the captain has to keep seeing where
+  # their export landed. The export-data assertions above take seconds of real time,
+  # so this snapshot is taken well after that repaint has settled rather than racing it.
+  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$export_settled_snapshot"
+  assert_contains "$(cat "$export_settled_snapshot")" "Session exported to: $export_file" \
+    "Calm's post-export repaint overwrote Pi's export confirmation"
+  assert_not_contains "$(cat "$export_settled_snapshot")" "fm_watch_arm_pi" \
+    "/export left the Firstmate watcher tool call shell in the Calm transcript"
+  assert_not_contains "$(cat "$export_settled_snapshot")" "watcher: started Pi extension arm child" \
+    "/export left the Firstmate watcher tool result in the Calm transcript"
+  assert_not_contains "$(cat "$export_settled_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" \
+    "/export left a synthetic Firstmate user-role presentation in the Calm transcript"
+  assert_not_contains "$(cat "$export_settled_snapshot")" "Thinking..." \
+    "/export left collapsed thinking labels in the Calm transcript"
+  assert_contains "$(cat "$export_settled_snapshot")" "I will run one command." \
+    "/export removed assistant text before a tool call"
+  for hidden in \
+    CURRENT_WATCHER_E2E \
+    CURRENT_TURN_END_E2E \
+    CURRENT_AWAY_E2E \
+    CURRENT_FROM_FIRSTMATE_E2E \
+    CURRENT_LAUNCH_BRIEF_E2E
+  do
+    assert_not_contains "$(cat "$export_settled_snapshot")" "$hidden" \
+      "/export left operational input $hidden in the Calm transcript"
+  done
+  assert_contains "$(cat "$export_settled_snapshot")" "Show a deterministic tool example." \
+    "/export removed a genuine user prompt from the Calm transcript"
+  assert_contains "$(cat "$export_settled_snapshot")" "The deterministic tool example is complete." \
+    "/export removed genuine assistant conversation from the Calm transcript"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
@@ -3411,6 +3800,7 @@ JS
   assert_contains "$(cat "$restored_snapshot")" " Error:" "second /calm dropped the synthetic delivery diagnostic"
   assert_not_contains "$(cat "$restored_snapshot")" "Navigated to selected point" "second /calm added a navigation status row"
   assert_contains "$(cat "$restored_snapshot")" "Thinking..." "second /calm did not restore Pi's collapsed thinking labels"
+  assert_contains "$(cat "$restored_snapshot")" "I will run one command." "second /calm did not restore the mid-turn assistant working note"
   assert_contains "$(cat "$restored_snapshot")" "escape to interrupt" "/calm changed the active Ctrl+O expansion state"
 
   hash_after=$(shasum -a 256 "$session_file" | awk '{print $1}')
@@ -3447,7 +3837,7 @@ JS
   done
   cp "$working_snapshot" "$boat_frame_one"
   assert_contains "$(cat "$boat_frame_one")" '\__/' "Calm did not show the working ship during a real provider wait"
-  assert_not_contains "$(cat "$boat_frame_one")" "Working..." "Calm left Pi's stock working row visible while the ship was shown"
+  assert_not_contains "$(cat "$boat_frame_one")" "Working" "Calm left Pi's stock working row visible while the ship was shown"
   assert_not_contains "$(cat "$boat_frame_one")" "calm transcript" "the real provider wait showed a persistent Calm status row"
   assert_not_contains "$(cat "$boat_frame_one")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "the real provider wait restored a hidden operational row"
   boat_hull_line=$(grep -F '\__/' "$boat_frame_one" | head -1)
@@ -3611,12 +4001,18 @@ JS
     || fail "freeze frame never left the left edge (column '${boat_freeze_column:-empty}')"
 
   # Escape aborts the run, and the abort path removes the ship with no residue.
+  # Escape can land while the just-started run is not yet abortable, so retry
+  # until pi records the abort instead of assuming one keypress sufficed.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_cleared_snapshot"
-    if ! grep -Fq '\__/' "$boat_cleared_snapshot"; then
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$boat_cleared_snapshot"
+    if ! grep -Fq '\__/' "$boat_cleared_snapshot" &&
+      [ "$(grep -Fc 'Operation aborted' "$boat_cleared_snapshot" || true)" -ge 1 ]; then
       break
+    fi
+    if [ "$((active_screen_wait % 20))" -eq 19 ]; then
+      tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
     fi
     sleep 0.05
     active_screen_wait=$((active_screen_wait + 1))
@@ -3653,16 +4049,22 @@ JS
     || fail "the second working period reset the boat from column $boat_freeze_column to $boat_resume_column instead of resuming"
   [ "$boat_resume_sail" = "$boat_freeze_sail" ] \
     || fail "the second working period changed sail from $boat_freeze_sail to $boat_resume_sail"
-  assert_not_contains "$(cat "$boat_resume_snapshot")" "Working..." \
+  assert_not_contains "$(cat "$boat_resume_snapshot")" "Working" \
     "the second working period left Pi's stock working row visible"
 
-  # Clear the resumed run before the Calm-off stock-row probe.
+  # Clear the resumed run before the Calm-off stock-row probe, with the same
+  # abort-recorded retry as the first boat so a swallowed Escape cannot leave
+  # the long-delay run occupying the agent.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_cleared_snapshot"
-    if ! grep -Fq '\__/' "$boat_cleared_snapshot"; then
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$boat_cleared_snapshot"
+    if ! grep -Fq '\__/' "$boat_cleared_snapshot" &&
+      [ "$(grep -Fc 'Operation aborted' "$boat_cleared_snapshot" || true)" -ge 2 ]; then
       break
+    fi
+    if [ "$((active_screen_wait % 20))" -eq 19 ]; then
+      tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
     fi
     sleep 0.05
     active_screen_wait=$((active_screen_wait + 1))
@@ -3686,13 +4088,13 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
-    if grep -Fq "Working..." "$working_snapshot"; then
+    if grep -Eq "Working(\\.\\.\\.)?([[:space:]]|─|$)" "$working_snapshot"; then
       break
     fi
     sleep 0.025
     active_screen_wait=$((active_screen_wait + 1))
   done
-  assert_contains "$(cat "$working_snapshot")" "Working..." "Calm off did not keep Pi's stock working row"
+  assert_contains "$(cat "$working_snapshot")" "Working" "Calm off did not keep Pi's stock working row"
   assert_not_contains "$(cat "$working_snapshot")" '\__/' "Calm off showed the working ship"
   wait_for_text "$working_response_snapshot" "CALM_WORKING_E2E_RESPONSE" \
     || fail "the deterministic provider did not settle after proving Pi's stock working row"
@@ -3762,4 +4164,5 @@ test_rendering_and_session_lifecycle
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
 test_working_ship_geometry_and_lifecycle
+test_export_dom_render_guard
 test_interactive_terminal_e2e

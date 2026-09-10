@@ -336,9 +336,14 @@ fm_backend_required_tool_available() {  # <backend> <tool>
 # errors) if the file or key is absent. Mirrors the ad hoc `grep '^key=' |
 # tail -1 | cut -d= -f2-` snippet every fm-*.sh script used to repeat inline.
 fm_meta_get() {  # <meta-file> <key>
-  local meta=$1 key=$2
+  local meta=$1 key=$2 line value=''
   [ -f "$meta" ] || return 0
-  grep "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value=${line#*=} ;;
+    esac
+  done < "$meta" 2>/dev/null || true
+  printf '%s' "$value"
 }
 
 # fm_meta_optional_exact_value: the one non-empty value of `key=` in
@@ -919,8 +924,9 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   unverified - this backend has no recovery classifier.
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
-# exact window; the Herdr adapter reuses its husk
-# classifier. Zellij remains unverified because its secondmate ghost-tab and
+# exact window; the Herdr adapter reuses its strict husk classifier, then maps
+# a positively stopped session server to `missing` only in this recovery-grade
+# view. Zellij remains unverified because its secondmate ghost-tab and
 # agent-process recovery path has not been empirically validated. Orca and cmux
 # do not support secondmate spawns.
 fm_backend_agent_state() {  # <backend> <target>

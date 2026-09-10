@@ -11,4 +11,5 @@ __pycache__/
 *.pyc
 .env
 config/
-/fleet-dashboard.html
+
+.tools/

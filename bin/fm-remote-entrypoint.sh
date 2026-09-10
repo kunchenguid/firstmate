@@ -31,7 +31,7 @@
 set -eu
 
 PROTOCOL=1
-DOCTOR_SHA256=bd9c7b9ab943f190783136d1fc5f1ecaf279efa1dd862f04bd1b285f279dc5bd
+DOCTOR_SHA256=658c98e7e910abf7db59f32a443b958e26f66975c9fccdb372deb2e5c4047651
 REAL_SOURCE=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}" 2>/dev/null) ||
   REAL_SOURCE=$(realpath "${BASH_SOURCE[0]}" 2>/dev/null) ||
   REAL_SOURCE=${BASH_SOURCE[0]}
@@ -103,11 +103,9 @@ entrypoint_caller_connected() {
 
 # shellcheck disable=SC2329 # Invoked through the EXIT trap below.
 entrypoint_cleanup() {
-  local cancel_id=${JOB_ID:-${FM_REMOTE_JOB_ID:-}}
   rm -rf -- "$TMP"
-  if [ -n "$cancel_id" ] && [ "$JOB_COMPLETED" -eq 0 ] && [ -n "$ACCOUNT_HOME" ]; then
-    fm_remote_job_cancel "$ACCOUNT_HOME" "$cancel_id" 2>/dev/null \
-      || printf 'error: remote job %s cancellation remains unconfirmed; its record is retained for retry\n' "$cancel_id" >&2
+  if [ -n "$JOB_ID" ] && [ "$JOB_COMPLETED" -eq 0 ] && [ -n "$ACCOUNT_HOME" ]; then
+    fm_remote_job_cancel "$ACCOUNT_HOME" "$JOB_ID" 2>/dev/null || true
   fi
 }
 trap entrypoint_cleanup EXIT
@@ -177,16 +175,11 @@ fi
 if ! fm_remote_job_ensure_worker "$ROOT" "$ACCOUNT_HOME"; then
   die "${FM_REMOTE_JOB_ERROR:-remote job worker is unavailable; run fm-on.sh <route> fm-remote-doctor.sh --fix}"
 fi
-FM_REMOTE_JOB_DISCONNECT_PROBE=entrypoint_caller_connected
-if ! fm_remote_job_stage "$ACCOUNT_HOME" "$ROOT" "$HOME_PATH" "$COMMAND" "${ARGV[@]:1}" >/dev/null; then
-  if [ "${FM_REMOTE_JOB_PUBLISHED:-0}" -eq 1 ]; then
-    JOB_ID=${FM_REMOTE_JOB_ID:-}
-  else
-    JOB_ID=
-  fi
+if ! JOB_ID=$(fm_remote_job_stage "$ACCOUNT_HOME" "$ROOT" "$HOME_PATH" "$COMMAND" "${ARGV[@]:1}"); then
+  JOB_ID=
   die "${FM_REMOTE_JOB_ERROR:-cannot stage remote job}" 70
 fi
-JOB_ID=$FM_REMOTE_JOB_ID
+FM_REMOTE_JOB_DISCONNECT_PROBE=entrypoint_caller_connected
 if ! fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID"; then
   die "${FM_REMOTE_JOB_ERROR:-remote job did not complete}" 70
 fi

@@ -14,7 +14,7 @@ The away-mode stub in AGENTS.md section 8 is the always-loaded trust pointer and
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, Cursor |
+| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
 Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
@@ -82,6 +82,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Grok | Nudge | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project hook runs when the checkout is trusted, but Grok currently discards hook stdout from model context, so this path is intentionally fail-open and cannot use the run tier. |
 | Kimi | Uncovered | None. | Session-start and post-compaction delivery remain outside the current tracked transport family. |
 | Cursor | Run | `.cursor/hooks.json` registers `sessionStart`, anchored through `$CURSOR_PROJECT_DIR` with a 180s timeout, invoking `bin/fm-sessionstart-cursor.sh`. | Cursor's payload has no `source` field, so the registration supplies `--source` itself, and the adapter returns the digest as `additional_context`. Project hooks load only when the workspace is launched with `--trust`. |
+| omp | Run | `.omp/extensions/fm-primary-turnend-guard.ts`, auto-discovered from the home with no trust gate, starts the wrapper at `session_start` and has `before_agent_start` await it and return one persistent context message before the first provider call, exactly as Pi's does; `session_compact` is the compaction equivalent. | omp's `session_start` carries no reason field (verified 18.1.11), so the source is derived following the Cursor precedent: the first start of the process is `startup`, or `resume` when the launch line carried `--continue`/`-c` or `--resume`/`-r`; a later in-process start (`/new`, `/resume`, `/fork`) is `clear`, which re-emits only when this lock owner completed a full startup. `before_agent_start` message delivery was verified to reach model context on 18.1.11. |
 | Cursor compaction | Uncovered | None. | Cursor's `preCompact` response can return only `user_message` and is absent from Cursor's `additional_context` step set, so it cannot inject a re-emit digest. Delivering one needs its own design and is deliberately deferred to a follow-up; a Cursor primary does not re-emit its digest after a compaction. |
 
 Cursor's `sessionStart` fires at every session open with no source distinction, including a resumed session, so a resume re-runs the full digest; that is redundant and idempotent rather than a lost helm.

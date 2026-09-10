@@ -51,8 +51,8 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
-#          treehouse is also MISSING when its installed version lacks
-#          "treehouse get --lease" support.
+#          treehouse is also MISSING when its installed version lacks the
+#          complete JSON task-lease acquisition and conditional-return surface.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
@@ -103,7 +103,7 @@
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          secondmate homes, pending handoff outboxes,
+#          secondmate homes, pending handoff outboxes and receiver wakes,
 #          X-mode artifacts, project clones, or repair instructions.
 #          Unset/0 (the default) runs all six sweeps - this flag is purely
 #          additive.
@@ -181,10 +181,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timing-lib.sh"
-# shellcheck source=bin/fm-crew-dispatch-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-crew-dispatch-lib.sh"
-# shellcheck source=bin/fm-slack-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-slack-lib.sh"
 
 # Network-phase selection (see the header). An unrecognized value resolves to
 # `all` so a malformed override runs every step rather than silently dropping a
@@ -576,7 +572,6 @@ secondmate_sync() {
   # live agent does not keep applying stale defaults. Spawn/respawn already
   # re-reads at launch and needs no redundant nudge unless files changed after launch.
   local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
-  fm_config_inherit_primary_preflight "$CONFIG" >/dev/null 2>&1 || true
   propagated_homes=""
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
@@ -869,7 +864,7 @@ secondmate_liveness_one() {  # <meta> <id>
   [ -n "$target" ] || target="$window"
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;
     *)
       case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
       ;;
@@ -1022,14 +1017,14 @@ x_mode_write_if_changed() {
   [ "$parent" != "$dest" ] || return 1
   [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
   if [ "$(uname)" = Darwin ]; then
-    parent_device=$(stat -f %d "$parent" 2>/dev/null) || return 1
+    parent_device=$(/usr/bin/stat -f %d "$parent" 2>/dev/null) || return 1
   else
     parent_device=$(stat -c %d "$parent" 2>/dev/null) || return 1
   fi
   if [ -e "$dest" ] || [ -L "$dest" ]; then
     fmx_single_link_file_valid "$dest" "$parent_device" || return 1
     if [ "$(uname)" = Darwin ]; then
-      current_mode=$(stat -f %Lp "$dest" 2>/dev/null) || return 1
+      current_mode=$(/usr/bin/stat -f %Lp "$dest" 2>/dev/null) || return 1
     else
       current_mode=$(stat -c %a "$dest" 2>/dev/null) || return 1
     fi
@@ -1175,176 +1170,6 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
-# Slack captain channel (opt-in): when this home's .env carries a non-empty
-# FM_SLACK_BOT_TOKEN and config/slack-captain-channel names one valid channel id,
-# wire the captain-channel poll into the authenticated watcher dispatch.
-# Drops two idempotent, gitignored artifacts:
-#   state/slack-watch.check.sh - byte-static identity shim; the watcher validates
-#                                its bytes and invokes bin/fm-slack-poll.sh directly
-#   config/slack-captain.env   - exports FM_SLACK_CHECK_INTERVAL for watcher processes,
-#                                set from operator-owned config/slack-captain-cadence
-#                                (seconds) or the built-in default; bootstrap preserves
-#                                that operator value across regeneration, and adopts a
-#                                pre-convention value from an existing slack-captain.env
-#                                into config/slack-captain-cadence on the first run
-# On opt-out it removes any such artifacts. Absent token or channel id AND with no
-# leftover artifacts it is a complete no-op.
-slack_captain_setup() {
-  local env_file token channel_file channel_id shim cadence shim_body cadence_body tool missing shim_home
-  local cadence_file cadence_value default_cadence existing valid adopted cadence_source_body
-  env_file="$FM_HOME/.env"
-  channel_file="$CONFIG/slack-captain-channel"
-  cadence_file="$CONFIG/slack-captain-cadence"
-  shim="$STATE/slack-watch.check.sh"
-  cadence="$CONFIG/slack-captain.env"
-  default_cadence=15
-
-  token=
-  [ -f "$env_file" ] && token=$(fmx_env_get FM_SLACK_BOT_TOKEN "$env_file")
-  channel_id=$(fms_config_value_read "$channel_file")
-
-  slack_remove_artifacts() {
-    local failed=0
-    x_mode_remove_artifact "$shim" || failed=1
-    x_mode_remove_artifact "$cadence" || failed=1
-    [ "$failed" -eq 0 ]
-  }
-
-  if [ -z "$token" ] || [ -z "$channel_id" ] || ! fms_channel_id_valid "$channel_id"; then
-    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
-      if slack_remove_artifacts; then
-        echo "FMS: Slack captain channel off - removed poll shim and Slack cadence"
-      else
-        echo "FMS: Slack captain channel off - failed to remove poll shim or Slack cadence"
-      fi
-    fi
-    return 0
-  fi
-
-  missing=0
-  for tool in curl jq; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-      echo "MISSING: $tool (install: $(install_cmd "$tool"))"
-      missing=1
-    fi
-  done
-  if [ "$missing" -ne 0 ]; then
-    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
-      if slack_remove_artifacts; then
-        echo "FMS: Slack captain channel off - missing poll dependencies; install them and rerun bootstrap"
-      else
-        echo "FMS: Slack captain channel off - failed to remove poll shim after missing dependencies"
-      fi
-    fi
-    return 0
-  fi
-
-  fms_arm_failed() {
-    if slack_remove_artifacts; then
-      echo "FMS: Slack captain channel off - failed to arm poll shim or Slack cadence"
-    else
-      echo "FMS: Slack captain channel off - failed to arm poll shim or Slack cadence; stale artifacts remain"
-    fi
-  }
-
-  mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { fms_arm_failed; return 0; }
-
-  case "$FM_HOME" in
-    /*) shim_home=$FM_HOME ;;
-    *)
-      shim_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) \
-        || { fms_arm_failed; return 0; }
-      ;;
-  esac
-  shim_body=$(fms_poll_shim_content "$shim_home" "$FM_ROOT")
-  x_mode_write_if_changed "$shim" "$shim_body" 700 || { fms_arm_failed; return 0; }
-  fms_poll_shim_valid "$shim" "$shim_home" "$FM_ROOT" \
-    || { fms_arm_failed; return 0; }
-
-  # config/slack-captain-cadence is the sole operator-owned source after this
-  # convention. The operator's prior decision may still live only in a
-  # pre-convention generated config/slack-captain.env (no mention of the new
-  # source file); adopt that recorded value into the new source on the first
-  # regeneration so the decision is never silently reverted. Skip the adoption
-  # when the recorded value equals the default (nothing to preserve) and warn
-  # when it is present but unparseable, since regenerating the default there is
-  # still a quiet shape of the reported defect. A post-convention env already
-  # names the new source in its comment, so a later deleted source file falls
-  # through to the default instead of re-adopting a stale value.
-  cadence_value=$(fms_positive_int_config_read "$cadence_file")
-  adopted=0
-  if [ -z "$cadence_value" ] && [ -f "$cadence" ] \
-    && ! grep -q 'slack-captain-cadence' "$cadence" 2>/dev/null; then
-    existing=$(fmx_env_get FM_SLACK_CHECK_INTERVAL "$cadence")
-    if [ -n "$existing" ]; then
-      valid=$(fms_positive_int_emit "$existing")
-      if [ -n "$valid" ] && [ "$valid" -ne "$default_cadence" ]; then
-        cadence_value=$valid
-        adopted=1
-      elif [ -z "$valid" ]; then
-        echo "FMS: Slack captain cadence in config/slack-captain.env is not a positive integer (\"$existing\"); using the built-in default ${default_cadence}s. Set config/slack-captain-cadence to correct it."
-      fi
-    fi
-  fi
-  [ -n "$cadence_value" ] || cadence_value=$default_cadence
-
-  # One-time adoption: persist the carried-forward decision into the new sole
-  # source before regenerating the derived env, so the value survives even if the
-  # env write later fails. If the source write fails, leave the existing env
-  # untouched and retry on the next bootstrap rather than destroying it.
-  if [ "$adopted" -eq 1 ]; then
-    cadence_source_body=$(printf '# Adopted from config/slack-captain.env by fm-bootstrap.sh\n# on first regeneration under the operator-owned cadence convention; the prior\n# cadence decision is preserved here. Edit this value (seconds); bootstrap reads\n# but never overwrites this file.\n%s\n' "$cadence_value")
-    if ! x_mode_write_if_changed "$cadence_file" "$cadence_source_body" 600 2>/dev/null; then
-      echo "FMS: Slack captain cadence adoption skipped - could not write config/slack-captain-cadence; existing config/slack-captain.env left unchanged"
-      return 0
-    fi
-  fi
-
-  cadence_body=$(cat <<EOF
-# Auto-generated by fm-bootstrap.sh - Slack captain channel watcher cadence.
-# Source this before the active harness protocol starts a watcher process so
-# fm-watch.sh runs the Slack check on this watcher cycle. The value below is the
-# operator-set cadence from config/slack-captain-cadence (seconds) or the
-# built-in default when that file is absent; edit the source file, not this one,
-# since bootstrap regenerates this file and preserves the operator value.
-export FM_SLACK_CHECK_INTERVAL=$cadence_value
-EOF
-)
-  x_mode_write_if_changed "$cadence" "$cadence_body" 600 || { fms_arm_failed; return 0; }
-
-  echo "FMS: Slack captain channel on - poll armed via state/slack-watch.check.sh; ${cadence_value}s Slack cadence in config/slack-captain.env"
-  if [ "$adopted" -eq 1 ]; then
-    echo "FMS: Slack captain cadence adopted ${cadence_value}s from existing config/slack-captain.env into config/slack-captain-cadence; edit the source file going forward"
-  fi
-}
-
-# Socket Mode push transport (opt-in alongside the poll). It becomes eligible
-# only when the app token and pinned captain user id are present in addition to
-# the poll's bot token and channel id. The generic process-event registry owns
-# the worker and makes every supervision model reconcile its liveness.
-slack_socket_setup() {
-  local source="$STATE/procevent/slack-captain-socket.source" tool missing=0
-  fms_load_config
-  for tool in node curl jq; do
-    command -v "$tool" >/dev/null 2>&1 || missing=1
-  done
-  if ! fms_socket_configured || [ "$missing" -ne 0 ]; then
-    if [ -e "$source" ]; then
-      if FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-slack-socket.sh" retire >/dev/null 2>&1; then
-        echo "FMS: Slack Socket Mode off - retired supervised socket consumer; poll unchanged"
-      else
-        echo "FMS: Slack Socket Mode off - failed to retire supervised socket consumer; poll unchanged"
-      fi
-    fi
-    return 0
-  fi
-  if FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-slack-socket.sh" arm >/dev/null 2>&1; then
-    echo "FMS: Slack Socket Mode on - supervised socket consumer armed alongside poll"
-  else
-    echo "FMS: Slack Socket Mode off - failed to arm supervised socket consumer; poll unchanged"
-  fi
-}
-
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -1358,16 +1183,18 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","cursor-agent","muse"] | index($h);
-    def effort_ok($h; $e):
+    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","cursor-agent","muse","rovo","omp"] | index($h);
+    def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
+      elif $e == "ultra" then (($h == "pi" or $h == "pi-signed") and (($m | type) == "string") and ($m | startswith("codex-native/")) and ($m | length) > 13)
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
       elif $h == "grok" then (["low","medium","high"] | index($e))
-      elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "cursor-agent" then (["low","medium","high","xhigh"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "rovo" then (["low","medium","high","max"] | index($e))
       elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
       else true
       end;
@@ -1384,10 +1211,10 @@ crew_dispatch_validate() {
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
     def bad_efforts:
       configured_profiles
-      | map({h: .harness, e: .effort})
+      | map({h: .harness, m: .model, e: .effort})
       | map(select(.e != null))
       | map(select((.h | type) == "string" and verified(.h)))
-      | map(select(. as $p | effort_ok($p.h; $p.e) | not))
+      | map(select(. as $p | effort_ok($p.h; $p.m; $p.e) | not))
       | map("\(.h):\(.e)")
       | unique;
     if type != "object" then "top-level value must be an object"
@@ -1882,11 +1709,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     fi
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
-  if local_phase; then
-    x_mode_setup
-    slack_captain_setup
-    slack_socket_setup
-  fi
+  local_phase && x_mode_setup
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"

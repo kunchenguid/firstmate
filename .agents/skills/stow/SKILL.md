@@ -193,7 +193,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
    Autonomously relocate it only by adding it to an already-existing allowed JIT note, or by routing it through a project's established delivery path to its existing owning `AGENTS.md`, then confirming that destination holds the quoted entry before removing the memory entry.
    A destination that needs creation, uncompleted project delivery, or any other future work is not live and cannot count as relief, so continue with the next archival or eviction rung instead of leaving an over-budget proposal pending.
 2. Propose pinned relocation only.
-   For a pinned candidate, append a `proposed-offload` section with the same fields to the completion receipt and create or refresh one durable captain-held backlog item using `tasks-axi add`, `tasks-axi hold`, `tasks-axi show <id> --full`, and `tasks-axi update <id> --body-file <path>` as appropriate.
+   For a pinned candidate, append a `proposed-offload` section with the same fields to the completion receipt, create or refresh one durable backlog item with `tasks-axi add`, `tasks-axi show <id> --full`, and `tasks-axi update <id> --body-file <path>` as appropriate, then hold it through `bin/fm-captain-hold.sh hold`.
    Preserve each candidate's approval state in that item, and require explicit plain-chat approval for that named item before any migration.
    If the captain never answers, nothing migrates and the held item persists, but it is never treated as budget relief.
 3. Migrate an approved pinned candidate outside this pass.

@@ -20,9 +20,39 @@ command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
+  # A build starts a listener for the board it publishes. Registered with
+  # tests/lib.sh, not with a shell array: make_home runs inside a command
+  # substitution, where an array append never reaches the caller.
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
   mkdir -p "$home/state" "$home/data"
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" lavish-axi
+  # The build proves the board session is live before it arms anything, so the
+  # stub reports the opened shape the real lavish-axi emits. This suite is about
+  # what the template renders, not about session liveness, which
+  # tests/fm-bearings-board.test.sh owns.
+  cat > "$fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1-}" in
+  --version) printf '0.1.61\n' ;;
+  '')
+    printf 'sessions[1]{file,status,url,pending_prompts}:\n'
+    [ ! -s "$FM_HOME/lavish-open" ] \
+      || printf '  %s,open,"http://127.0.0.1/session/render",0\n' "$(cat "$FM_HOME/lavish-open")"
+    ;;
+  poll)
+    # Bounded, so a listener that escapes its test stops on its own.
+    while [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 1; done
+    exit 75
+    ;;
+  *)
+    real=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
+    printf '%s\n' "$real" > "$FM_HOME/lavish-open"
+    printf 'session:\n  status: opened\n'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/lavish-axi"
   printf '%s\n' "$home"
 }
 

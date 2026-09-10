@@ -7,12 +7,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   classifyFirstmateCurrentOperationalText,
   encodeFirstmateOperationalInput,
+  firstmateShellInvocation,
 } from "./lib/fm-operational-input.ts";
 
 let guardFollowupActive = false;
-let triggerText = "";
-let replyText = "";
-let replyID = "";
 
 type LockOwnership = "owned" | "missing" | "other";
 
@@ -255,19 +253,26 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
     };
     const supervised = process.platform !== "win32";
     const runner = `${root}/bin/fm-sessionstart-run.sh`;
+    const invocation = supervised
+      ? {
+          command: "node",
+          args: [
+            `${extensionDir}/lib/fm-sessionstart-supervisor.mjs`,
+            runner,
+            "--source",
+            generation.source,
+            "--pi-prerequisite",
+          ],
+        }
+      : firstmateShellInvocation(
+          runner,
+          ["--source", generation.source, "--pi-prerequisite"],
+        );
     let child: ChildProcess;
     try {
       child = spawn(
-        supervised ? "node" : runner,
-        supervised
-          ? [
-              `${extensionDir}/lib/fm-sessionstart-supervisor.mjs`,
-              runner,
-              "--source",
-              generation.source,
-              "--pi-prerequisite",
-            ]
-          : ["--source", generation.source, "--pi-prerequisite"],
+        invocation.command,
+        invocation.args,
         {
           detached: supervised,
           stdio: supervised
@@ -448,96 +453,26 @@ async function claimSessionstartMessage(
   return sessionstartMessage(generation, result);
 }
 
-function runGuard(payload: Record<string, unknown>): Promise<{ code: number; stdout: string; stderr: string }> {
+function runGuard(): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const harness = process.env.FM_PI_HARNESS === "pi-signed" ? "pi-signed" : "pi";
-    const child = spawn(`${root}/bin/fm-turnend-guard.sh`, ["--stow-harness", harness], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", () => resolveResult({ code: 0, stdout: "", stderr: "" }));
-    child.on("close", (code) => resolveResult({ code: code ?? 0, stdout, stderr }));
-    child.stdin.end(JSON.stringify({ stop_hook_active: false, ...payload }));
-  });
-}
-
-function assistantText(message: unknown): string {
-  if (!message || typeof message !== "object") return "";
-  const content = (message as { content?: unknown }).content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((part): part is { type: "text"; text: string } =>
-      part?.type === "text" && typeof part.text === "string")
-    .map((part) => part.text)
-    .join("");
-}
-
-function sessionIDFromContext(ctx: unknown): string {
-  const manager = (ctx as { sessionManager?: { getSessionId?: () => unknown } } | undefined)?.sessionManager;
-  const sessionID = manager?.getSessionId?.();
-  return typeof sessionID === "string" && sessionID ? sessionID : "unknown";
-}
-
-function guardPayload(sessionID: string): Record<string, unknown> {
-  if (!replyText || !replyID) return {};
-  return {
-    fm_reply_text: replyText,
-    fm_reply_id: replyID,
-    fm_trigger_text: triggerText,
-    session_id: sessionID,
-  };
-}
-
-// The guard declares the envelope kind, so routing never depends on the
-// message's wording. An envelope without the discriminator is an ordinary
-// turn-end notice.
-function deliverSystemMessages(pi: ExtensionAPI, ctx: unknown, stdout: string): void {
-  if (!stdout) return;
-  for (const line of stdout.split("\n")) {
-    if (!line.trim()) continue;
+    const invocation = firstmateShellInvocation(`${root}/bin/fm-turnend-guard.sh`, []);
+    let child: ChildProcess;
     try {
-      const parsed = JSON.parse(line) as { systemMessage?: unknown; kind?: unknown };
-      if (typeof parsed.systemMessage !== "string" || !parsed.systemMessage) continue;
-      const isCaptainWarning = parsed.kind === "captain-comms-warning";
-      if (isCaptainWarning) {
-        const notify = (ctx as { ui?: { notify?: (message: string, type: string) => void } } | undefined)?.ui?.notify;
-        if (typeof notify === "function") notify(parsed.systemMessage, "warning");
-        continue;
-      }
-      pi.sendMessage({
-        customType: "firstmate-turnend-guard-notice",
-        content: parsed.systemMessage,
-        display: true,
-        details: { kind: "turn-end-guard" },
+      child = spawn(invocation.command, invocation.args, {
+        stdio: ["pipe", "ignore", "pipe"],
       });
     } catch {
+      resolveResult({ code: 0, stderr: "" });
+      return;
     }
-  }
-}
-
-// Only the supervision banner belongs in a forced continuation; the guard's
-// advisory diagnostics reach their audience on their own channel.
-function bannerOnly(stderr: string): string {
-  return (stderr ?? "")
-    .split("\n")
-    .filter((line) => line.startsWith("\u25cf"))
-    .join("\n");
-}
-
-function recordStowCadenceActivity(activity: "busy" | "idle", invocation?: string): void {
-  const harness = process.env.FM_PI_HARNESS === "pi-signed" ? "pi-signed" : "pi";
-  const args = ["activity", activity, "--harness", harness];
-  if (invocation !== undefined) args.push("--invocation-stdin");
-  spawnSync(`${root}/bin/fm-stow-cadence-lab.sh`, args, {
-    input: invocation,
-    stdio: ["pipe", "ignore", "ignore"],
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", () => resolveResult({ code: 0, stderr: "" }));
+    child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+    child.stdin?.on("error", () => {});
+    child.stdin?.end('{"stop_hook_active":false}');
   });
 }
 
@@ -550,11 +485,21 @@ function recordStowCadenceActivity(activity: "busy" | "idle", invocation?: strin
 // script owns its own decision and is inert outside the real primary checkout.
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
-    const child = spawn(`${root}/bin/${script}`, ["--command", command], {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
+    const invocation = firstmateShellInvocation(
+      `${root}/bin/${script}`,
+      ["--command", command],
+    );
+    let child: ChildProcess;
+    try {
+      child = spawn(invocation.command, invocation.args, {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch {
+      resolveResult({ code: 0, stderr: "" });
+      return;
+    }
     let stderr = "";
-    child.stderr.on("data", (chunk) => {
+    child.stderr?.on("data", (chunk) => {
       stderr += chunk.toString();
     });
     child.on("error", () => resolveResult({ code: 0, stderr: "" }));
@@ -616,8 +561,7 @@ export default function (pi: ExtensionAPI) {
     );
   });
 
-  pi.on?.("before_agent_start", async (event, ctx) => {
-    recordStowCadenceActivity("busy", event.prompt);
+  pi.on?.("before_agent_start", async (_event, ctx) => {
     const generation = sessionstartGeneration;
     if (!generation) return;
     const message = await claimSessionstartMessage(generation, ctx);
@@ -650,25 +594,6 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("input", (event) => {
-    triggerText = String((event as { text?: unknown }).text ?? "");
-    replyText = "";
-    replyID = "";
-  });
-
-  pi.on("turn_end", (event, ctx) => {
-    const message = (event as { message?: unknown }).message;
-    const text = assistantText(message);
-    if (!text) return;
-    const timestamp = (message as { timestamp?: unknown } | undefined)?.timestamp;
-    const turnIndex = (event as { turnIndex?: unknown }).turnIndex;
-    const suffix = typeof timestamp === "number" || typeof timestamp === "string"
-      ? String(timestamp)
-      : String(turnIndex ?? "unknown");
-    replyText = text;
-    replyID = `${sessionIDFromContext(ctx)}:${suffix}`;
-  });
-
   pi.on("tool_call", async (event) => {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
     const command = String((event.input as { command?: unknown })?.command ?? "");
@@ -682,15 +607,13 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
+  pi.on("agent_settled", async () => {
     if (guardFollowupActive) {
       guardFollowupActive = false;
-      recordStowCadenceActivity("idle");
       return;
     }
 
-    const result = await runGuard(guardPayload(sessionIDFromContext(ctx)));
-    deliverSystemMessages(pi, ctx, result.stdout);
+    const result = await runGuard();
     if (result.code !== 2) return;
 
     guardFollowupActive = true;
@@ -699,12 +622,11 @@ export default function (pi: ExtensionAPI) {
         "turn-end-guard",
         "TURN WOULD END BLIND - supervision is off. " +
           "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-          bannerOnly(result.stderr),
+          result.stderr,
       );
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch {
       guardFollowupActive = false;
-      recordStowCadenceActivity("idle");
     }
   });
 

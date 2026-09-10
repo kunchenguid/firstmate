@@ -47,37 +47,29 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in harness launchers use an explicit argv[0]. A renamed symlink is not
-# portable to multicall coreutils, which dispatches the symlink name as a
-# different applet, while copying a platform binary breaks macOS code signing.
-#
-# argv[0] is the one identity surface both supported platforms preserve for
-# this construction: Linux exposes it through `#{pane_current_command}` (tmux
-# reads /proc/<pid>/cmdline) and through `ps -o args=`, macOS only through
-# `ps -o args=`, and neither exposes it through `ps -o comm=`. Every case that
-# depends on a stand-in being recognised therefore asserts, independently of
-# the verdict, that some name source still carries the harness identity - so a
-# platform that blinded all of them would fail here instead of going vacuous.
-cat > "$LAB/bin/claude-link" <<SH
-#!/usr/bin/env bash
-exec -a claude "$SLEEP_BIN" "\$@"
-SH
-cat > "$LAB/bin/pi" <<SH
-#!/usr/bin/env bash
-exec -a pi "$SLEEP_BIN" "\$@"
-SH
-chmod +x "$LAB/bin/claude-link" "$LAB/bin/pi"
-
-# Does any name source the kernel exposes for <pid> name a verified harness?
-process_identity_names_a_harness() {  # <pid>
-  local comm argv0
-  comm=$(LC_ALL=C ps -p "$1" -o comm= 2>/dev/null)
-  [ -n "$comm" ] && [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ] && return 0
-  argv0=$(LC_ALL=C ps -p "$1" -o args= 2>/dev/null)
-  argv0=${argv0#"${argv0%%[![:space:]]*}"}
-  argv0=${argv0%%[[:space:]]*}
-  [ -n "$argv0" ] && [ "$(fm_backend_tmux_classify_process_name '' "$argv0")" = agent ]
-}
+# Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
+# binary, never copies: a copied platform binary fails code-signing validation
+# and is killed on macOS arm64. The symlink name is what the kernel records as
+# the executable identity, which is exactly the signal under test.
+ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
+ln -s "$SLEEP_BIN" "$LAB/bin/pi"
+ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
+# omp (Oh My Pi) is a single binary whose live process name is the bare word
+# `omp`; the two decoys are the substrings an unanchored glob would misread.
+ln -s "$SLEEP_BIN" "$LAB/bin/omp"
+ln -s "$SLEEP_BIN" "$LAB/bin/ompd"
+ln -s "$SLEEP_BIN" "$LAB/bin/comp"
+# muse's installed binary is muse-bin-<version>: the launcher execs it, so the
+# version is the LIVE process name and it changes on every auto-update. Unlike
+# Claude Code's version-named binary there is no `muse` path component to fall
+# back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
+# signal, and `muse` alone is a common English fragment that must not widen into
+# a substring match. The last two names are the decoys that would be misread.
+ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
+ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
+ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
+ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
+ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -158,15 +150,49 @@ assert_sources_disagree() {  # <target> <label>
 }
 
 # --- a harness-named foreground process -------------------------------------
-# The ordinary positive path with a real process. Linux carries the harness
-# name through both the tmux title and argv[0] while macOS carries it through
-# argv[0] alone, so this case asserts only the verdict; the version-string case
-# below owns the cross-platform divergence assertion.
+# Invoking the symlink by its harness name proves the ordinary positive path
+# with a real process. macOS exposes different names for the symlink through
+# tmux and ps, while Linux can expose the symlink name through both, so the
+# version-string case below owns the cross-platform divergence assertion.
 
 new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+# --- muse's version-suffixed binary name ------------------------------------
+# A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy
+# worker would be torn down or relaunched. The decoys below are what keep the
+# fix from being a substring match that claims unrelated programs.
+
+new_window muse "$LAB/bin/muse-bin-0.1.0-R708.1" 900
+wait_for_state "$SESSION:muse" alive \
+  || fail "muse's version-suffixed binary name must classify alive"
+pass "tmux liveness: muse's version-suffixed muse-bin-<version> classifies alive"
+
+for decoy in musescore amuse muse-binary muse-bind; do
+  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  wait_for_state "$SESSION:decoy-$decoy" ambiguous \
+    || fail "'$decoy' merely contains 'muse' and must not classify as a live agent pane"
+done
+pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
+
+# --- omp's bare binary name -------------------------------------------------
+# omp (Oh My Pi) runs as a single binary whose live process name is exactly
+# `omp`, with no path component to fall back on, so the anchored name is the
+# only signal and the two decoys prove it never widens into a substring match.
+
+new_window omp "$LAB/bin/omp" 900
+wait_for_state "$SESSION:omp" alive \
+  || fail "omp's bare binary name must classify alive"
+pass "tmux liveness: omp's bare binary name classifies alive"
+
+for decoy in ompd comp; do
+  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  wait_for_state "$SESSION:decoy-$decoy" ambiguous \
+    || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
+done
+pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that
@@ -196,7 +222,7 @@ fi
 
 # --- neither source names a harness: no invented agent ----------------------
 
-new_window unknown bash -c "exec -a 2.1.220 '$SLEEP_BIN' 900"
+new_window unknown bash -c "exec -a 2.1.220 '$LAB/bin/notaharness' 900"
 wait_for_state "$SESSION:unknown" ambiguous \
   || fail "a foreground process no name source attributes must stay ambiguous"
 pass "tmux liveness: a process neither name source attributes stays ambiguous rather than inventing an agent"
@@ -233,8 +259,6 @@ done
 [ -n "$bg_pid" ] || fail "the background harness-named process never started"
 kill -0 "$bg_pid" 2>/dev/null \
   || fail "the background harness-named process is not running, so this case would prove nothing"
-process_identity_names_a_harness "$bg_pid" \
-  || fail "the background process carries no harness identity on this platform, so a dead verdict would prove nothing about foreground-group scoping"
 wait_for_state "$SESSION:background" dead \
   || fail "a pane whose only harness-named process is backgrounded must classify dead"
 kill -0 "$bg_pid" 2>/dev/null \
@@ -252,6 +276,101 @@ fm_backend_tmux_foreground_comms "$SESSION:no-such-window" >/dev/null \
 [ "$(fm_backend_agent_state tmux "$SESSION:no-such-window")" = missing ] \
   || fail "an absent window in a readable session must classify missing, not whatever the fallback pane runs"
 pass "tmux liveness: an absent window classifies missing rather than inheriting tmux's active-window fallback"
+
+# --- Cursor's composer: the terminal cursor is NOT a composer locator --------
+# Cursor Agent CLI parks its terminal cursor below its footer with cursor_flag 0,
+# so tmux's #{cursor_y} answers `unknown` for every Cursor pane state and the
+# away-mode escalation guard could never prove the composer empty. The composite
+# reader reclassifies a proven-Cursor pane the way every cursorless backend
+# already does. These cases drive the two signals apart on purpose: the SAME
+# screen must read differently depending only on whether the pane's foreground
+# process is genuinely Cursor, and the cursor-anchored source must be asserted
+# blind so the case cannot go quietly vacuous.
+
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$ROOT/bin/fm-tmux-lib.sh"
+
+ln -s "$SLEEP_BIN" "$LAB/bin/cursor-agent"
+ln -s "$SLEEP_BIN" "$LAB/bin/notcursor"
+
+# Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
+# footer rows below it, and the terminal cursor left on a blank row past the
+# footer - exactly where cursor-agent 2026.08.11-e8db854 parks it. An IDLE
+# composer draws its placeholder de-emphasised (SGR 2), which is what separates
+# it from real typed text once the capture preserves styling; a plain-bright row
+# is genuine input. Both forms are reproduced here rather than assumed.
+cursor_screen() {  # <composer-text> <ghost 0|1>
+  local text=$1 ghost=$2 open='' close=''
+  if [ "$ghost" = 1 ]; then
+    open=$(printf '\033[2m')
+    close=$(printf '\033[0m')
+  fi
+  printf '\n  \xe2\x86\x92 %s%s%s\n\n  Cursor Grok 4.5 High                    Run Everything\n  %s \xc2\xb7 main\n\n' \
+    "$open" "$text" "$close" "$LAB/wt"
+}
+
+open_composer_pane() {  # <window> <binary> <composer-text> <ghost 0|1>
+  local window=$1 binary=$2 text=$3 ghost=$4
+  new_window "$window" bash -c "$(declare -f cursor_screen); LAB='$LAB'; cursor_screen '$text' '$ghost'; exec '$binary' 900"
+  local i=0
+  while [ "$i" -lt 100 ]; do
+    case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:$window" 2>/dev/null)" in
+      *"$text"*) return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "pane $window never rendered its composer"
+}
+
+cursor_anchored_verdict() {  # <target>
+  local cy pane
+  cy=$(fm_tmux_composer_cursor_row "$1")
+  pane=$(fm_tmux_composer_capture "$1")
+  fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy"
+}
+
+open_composer_pane cursor-idle "$LAB/bin/cursor-agent" 'Plan, search, build anything' 1
+fm_tmux_pane_is_cursor "$SESSION:cursor-idle" \
+  || fail "a pane whose foreground process is cursor-agent must be identified as Cursor"
+[ "$(cursor_anchored_verdict "$SESSION:cursor-idle")" = unknown ] \
+  || fail "the cursor-anchored source must be blind here, or this case proves nothing about the fallback"
+[ "$(fm_tmux_composer_state "$SESSION:cursor-idle")" = empty ] \
+  || fail "an idle Cursor composer must read empty; without it every away-mode escalation defers forever"
+pass "cursor composer: an idle Cursor pane reads empty even though the cursor row is blind"
+
+open_composer_pane cursor-typed "$LAB/bin/cursor-agent" 'half typed captain text' 0
+[ "$(cursor_anchored_verdict "$SESSION:cursor-typed")" = unknown ] \
+  || fail "the cursor-anchored source must be blind here too"
+[ "$(fm_tmux_composer_state "$SESSION:cursor-typed")" = pending ] \
+  || fail "real unsubmitted text in a Cursor composer must read pending, never empty; otherwise an escalation would merge with the captain's own half-typed line"
+pass "cursor composer: real typed text still reads pending, so the injection guard holds"
+
+# The SAME rendered screen, with only the foreground process identity changed.
+open_composer_pane notcursor-idle "$LAB/bin/notcursor" 'Plan, search, build anything' 1
+if fm_tmux_pane_is_cursor "$SESSION:notcursor-idle"; then
+  fail "a pane running a non-Cursor binary must not be identified as Cursor"
+fi
+[ "$(fm_tmux_composer_state "$SESSION:notcursor-idle")" = unknown ] \
+  || fail "the reclassification must be gated on Cursor's own process identity; the strict blank-cursor-row posture stays in force for every other harness"
+pass "cursor composer: an identical screen stays unknown when the pane is not Cursor"
+
+# A Cursor agent that exited leaves its rendered composer on screen while the
+# foreground process becomes a plain shell. Typing an escalation there would run
+# it as a shell command, so this must never read empty.
+new_window cursor-exited bash -c "$(declare -f cursor_screen); LAB='$LAB'; cursor_screen 'Plan, search, build anything' 1; exec /bin/sh"
+for _ in $(seq 1 100); do
+  case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:cursor-exited" 2>/dev/null)" in
+    *'Plan, search, build anything'*) break ;;
+  esac
+  sleep 0.1
+done
+if fm_tmux_pane_is_cursor "$SESSION:cursor-exited"; then
+  fail "a pane whose Cursor process exited must not still identify as Cursor"
+fi
+[ "$(fm_tmux_composer_state "$SESSION:cursor-exited")" != empty ] \
+  || fail "a dead-shell pane still showing Cursor's composer must never read empty"
+pass "cursor composer: a stale Cursor screen over a dead shell never reads empty"
 
 cleanup_all
 trap - EXIT

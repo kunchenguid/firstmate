@@ -224,6 +224,7 @@ fm_cursor_process_matches() {  # <comm> <args> [argv0]
   local comm=$1 argv0=${3:-} base
   [ -n "$comm" ] || [ -n "$argv0" ] || return 1
   argv0=${argv0:-$comm}
+  fm_cursor_argv0_is_cursor "$argv0" && return 0
   base=$(basename -- "$comm")
   base=${base#-}
   case "$base" in

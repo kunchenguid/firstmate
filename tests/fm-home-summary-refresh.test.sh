@@ -14,6 +14,10 @@ TMP_ROOT=$(fm_test_tmproot fm-home-summary-refresh)
 HOME_DIR="$TMP_ROOT/mate-home"
 CADENCE_HOME="$TMP_ROOT/cadence-home"
 PARENT_HOME="$TMP_ROOT/parent-home"
+LARGE_HOME="$TMP_ROOT/large-home"
+STATELESS_HOME="$TMP_ROOT/stateless-home"
+LARGE_CHILD_HOME="$TMP_ROOT/large-child-home"
+LARGE_PARENT_HOME="$TMP_ROOT/large-parent-home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 WATCH_PID=
 SLOW_WRITER_PID=
@@ -157,6 +161,101 @@ jq -S 'del(.generated, .generated_epoch)' "$TMP_ROOT/fresh-summary.json" \
 cmp -s "$TMP_ROOT/published-normalized.json" "$TMP_ROOT/fresh-normalized.json" \
   || fail "the status-triggered ledger differed from the real fresh producer"
 pass "watcher-carried status append publishes the real home summary"
+
+# A structured in-flight inventory above Linux MAX_ARG_STRLEN must remain
+# publishable through both fleet snapshot modes and the real home-summary writer.
+mkdir -p "$LARGE_HOME/state" "$LARGE_HOME/data" "$LARGE_HOME/config" \
+  "$LARGE_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$LARGE_HOME/AGENTS.md"
+printf 'large\n' > "$LARGE_HOME/.fm-secondmate-home"
+large_id_suffix=$(printf 'i%.0s' $(seq 1 110))
+{
+  printf '%s\n' '## In flight'
+  i=1
+  while [ "$i" -le 1200 ]; do
+    printf '%s\n' "- [ ] orphan-$i-$large_id_suffix - Missing metadata (repo: firstmate) (kind: ship)"
+    i=$((i + 1))
+  done
+  printf '%s\n' '' '## Queued' '' '## Done'
+} > "$LARGE_HOME/data/backlog.md"
+[ "$(wc -c < "$LARGE_HOME/data/backlog.md")" -gt 131072 ] \
+  || fail "large in-flight fixture did not exceed the per-argument limit"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --json > "$TMP_ROOT/large-snapshot.json" \
+  || fail "fleet snapshot json mode failed for a large backlog"
+jq -e '.schema == "fm-fleet-snapshot.v1"
+  and (.backlog.records | length) == 1200
+  and (.main_inventory.orphan_in_flight | length) == 1200' \
+  "$TMP_ROOT/large-snapshot.json" >/dev/null \
+  || fail "large fleet snapshot did not preserve the orphan inventory"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/large-summary.json" \
+  || fail "secondmate home-summary mode failed for a large backlog"
+jq -e '.schema == "fm-secondmate-home-summary.v1"' "$TMP_ROOT/large-summary.json" \
+  >/dev/null || fail "large secondmate home-summary output was not valid"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "home-summary writer failed for a large backlog"
+jq -e '.schema == "fm-secondmate-home-summary.v1"' \
+  "$LARGE_HOME/state/home-summary.json" >/dev/null \
+  || fail "large secondmate home-summary was not published"
+pass "large backlog snapshots and home-summary publication stay within exec limits"
+
+mkdir -p "$STATELESS_HOME/data" "$STATELESS_HOME/config" \
+  "$STATELESS_HOME/projects"
+printf '%s\n' '## In flight' '' '## Queued' '' '## Done' \
+  > "$STATELESS_HOME/data/backlog.md"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STATELESS_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --json > "$TMP_ROOT/stateless-snapshot.json" \
+  || fail "fleet snapshot json mode failed without a state directory"
+jq -e '.schema == "fm-fleet-snapshot.v1" and (.tasks | length) == 0' \
+  "$TMP_ROOT/stateless-snapshot.json" >/dev/null \
+  || fail "stateless fleet snapshot output was not valid"
+[ ! -e "$STATELESS_HOME/state" ] \
+  || fail "fleet snapshot created operational state for transport files"
+pass "fleet snapshot transport does not require or mutate operational state"
+
+mkdir -p "$LARGE_CHILD_HOME/state" "$LARGE_CHILD_HOME/data" \
+  "$LARGE_CHILD_HOME/config" "$LARGE_CHILD_HOME/projects" "$LARGE_CHILD_HOME/bin"
+printf '# Seeded Firstmate home\n' > "$LARGE_CHILD_HOME/AGENTS.md"
+printf 'large-child\n' > "$LARGE_CHILD_HOME/.fm-secondmate-home"
+{
+  printf '%s\n' '## In flight'
+  i=1
+  while [ "$i" -le 600 ]; do
+    printf '%s\n' "- [ ] orphan-$i-$large_id_suffix - Missing metadata (repo: firstmate) (kind: ship)"
+    i=$((i + 1))
+  done
+  printf '%s\n' '' '## Queued' '' '## Done'
+} > "$LARGE_CHILD_HOME/data/backlog.md"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_CHILD_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "large child home-summary publication failed"
+large_child_bytes=$(wc -c < "$LARGE_CHILD_HOME/state/home-summary.json")
+[ "$large_child_bytes" -gt 131072 ] && [ "$large_child_bytes" -le 262144 ] \
+  || fail "large child ledger did not cross only the per-argument limit: $large_child_bytes"
+mkdir -p "$LARGE_PARENT_HOME/state" "$LARGE_PARENT_HOME/data" \
+  "$LARGE_PARENT_HOME/config" "$LARGE_PARENT_HOME/projects"
+printf -- '- large-child - fixture domain (home: %s; scope: fixture work; projects: firstmate; added 2026-08-28)\n' \
+  "$LARGE_CHILD_HOME" > "$LARGE_PARENT_HOME/data/secondmates.md"
+printf '%s\n' '## In flight' '' '## Queued' '' '## Done' \
+  > "$LARGE_PARENT_HOME/data/backlog.md"
+fm_write_secondmate_meta "$LARGE_PARENT_HOME/state/large-child.meta" \
+  "$LARGE_CHILD_HOME" "fmtest:fm-large-child" firstmate claude
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_PARENT_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --json > "$TMP_ROOT/large-parent-snapshot.json" \
+  || fail "parent fleet snapshot failed for a large child ledger"
+jq -e '.secondmate_current.records[0]
+  | .provenance.summary_source == "local-ledger"
+    and .invalidity.kind == "orphan_in_flight"
+    and (.invalidity.ids | length) == 600' \
+  "$TMP_ROOT/large-parent-snapshot.json" >/dev/null \
+  || fail "parent fleet snapshot did not preserve the large child invalidity"
+pass "parent snapshot consumes large child ledgers without argument transport"
 
 mkdir -p "$CADENCE_HOME/state" "$CADENCE_HOME/data" "$CADENCE_HOME/config" \
   "$CADENCE_HOME/projects"

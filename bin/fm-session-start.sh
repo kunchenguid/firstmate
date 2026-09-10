@@ -6,12 +6,10 @@
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
 # data/captain.md, data/captain-shared.md, data/learnings.md, then run
-# fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md and every state/*.meta,
-# and locate every state/*.status for an on-demand pointer (or read a bounded
-# tail when FM_SESSION_START_STATUS_TAIL is positive).
-# The inventory remains unconditional at every session start while status-log
-# contents stay on demand by default, so both belong in one script rather than
-# N agent turns.
+# fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
+# and every state/*.status.
+# Every one of those reads is UNCONDITIONAL at every session start, so they
+# belong in a script, not in N agent turns.
 #
 # COMPOSITION, NOT DUPLICATION: this script calls fm-lock.sh, fm-bootstrap.sh,
 # fm-wake-drain.sh, and fm-startup-network.sh as real subprocesses and prints
@@ -46,13 +44,11 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, one on-demand status pointer per
-#                       task (or a bounded state/*.status tail when
-#                       FM_SESSION_START_STATUS_TAIL is positive), one bounded
-#                       line of checks without matching task metadata,
-#                       state/.afk, a cheap per-task endpoint-liveness read, and
-#                       a bounded contradiction-only comparison of those same
-#                       records plus recorded PR reality: read-only, always runs.
+#                       every state/*.meta, a bounded state/*.status tail,
+#                       the away posture (state/.afk-contract and the legacy
+#                       state/.afk daemon flag), and a cheap per-task
+#                       endpoint-liveness read:
+#                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -108,16 +104,12 @@
 # tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
 # reminder line when one is missing.
 #
-# The fleet digest also prints one bounded weekly quota-utilization block
-# owned by bin/fm-quota-utilization.sh. A missing or failed reader prints one
-# skip line and the digest continues.
-#
 # Why lock first: the old documented order (bootstrap, THEN lock) let a
 # SECOND concurrent session run bootstrap's mutating sweeps - converging
-# secondmate homes, retrying pending handoff outboxes, writing X-mode artifacts,
-# and fetching or fast-forwarding every project clone - before ever discovering
-# another session already holds the lock. Two sessions racing those sweeps is
-# exactly the hazard the lock exists to prevent, so locking first closes the
+# secondmate homes, retrying pending handoff outboxes and receiver wakes, writing
+# X-mode artifacts, and fetching or fast-forwarding every project clone - before
+# ever discovering another session already holds the lock. Two sessions racing
+# those sweeps is exactly the hazard the lock exists to prevent, so locking first closes the
 # hole outright: only the session that actually wins the lock ever touches
 # shared mutable state.
 #
@@ -347,12 +339,6 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh
-. "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-check-lib.sh
-. "$SCRIPT_DIR/fm-check-lib.sh"
-# shellcheck source=bin/fm-record-contradictions-lib.sh
-. "$SCRIPT_DIR/fm-record-contradictions-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
@@ -367,17 +353,11 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 # agent's environment.
 if fm_tasks_axi_compatible; then TASKS_AXI_COMPATIBLE=1; else TASKS_AXI_COMPATIBLE=0; fi
 
-# STATUS TAIL: state/<id>.status is wake-EVENT history, not current state, and
-# bin/fm-crew-state.sh owns current-state reconciliation, so the default digest
-# prints one on-demand pointer line per task instead of projecting every log
-# tail into startup load. FM_SESSION_START_STATUS_TAIL=<n> (n > 0) restores the
-# bounded, line-capped tail rendering.
-STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-0}
-case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=0 ;; esac
+STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
+case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
 QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
 case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
-STANDING_CHECK_LIMIT=20
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -543,89 +523,17 @@ print_backlog_compact() {
   fi
 }
 
-status_tail_projection_enabled() {
-  [ "$STATUS_TAIL" -gt 0 ]
-}
-
-# print_status_line <status> [<crew-state-id>]: the per-task status surface.
-# Default: one pointer line naming the full wake-event log and, when task
-# metadata exists, the bin/fm-crew-state.sh read that answers current state on
-# demand (without metadata that reader reports unknown, so an orphan log gets
-# the path only). With the tail knob set, the bounded tail renders as before.
-print_status_line() {
-  local status=$1 id=${2:-}
-  if status_tail_projection_enabled; then
-    local line
-    printf 'status tail (last %s line(s), each capped at %s characters, wake-EVENT history, not current state; full log: %s):\n' \
-      "$STATUS_TAIL" "$FM_LINE_CAP_DEFAULT" "$status"
-    while IFS= read -r line || [ -n "$line" ]; do
-      fm_cap_line "$line"
-    done < <(tail -n "$STATUS_TAIL" "$status")
-  elif [ -n "$id" ]; then
-    printf 'status: wake-event log on demand (full log: %s); current state: bin/fm-crew-state.sh %s\n' "$status" "$id"
-  else
-    printf 'status: wake-event log on demand (full log: %s)\n' "$status"
-  fi
-}
-
-file_mtime_epoch() {
-  # Keyed on uname, never a BSD-then-GNU fallback chain: GNU stat reads -f as
-  # --file-system and %m as another operand, so `stat -f %m <path>` prints a
-  # whole filesystem report on stdout and the `||` branch then appends the epoch
-  # to it - a value every numeric comparison downstream rejects.
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
-  else
-    stat -c %Y "$1" 2>/dev/null
-  fi
-}
-
-compact_age() {
-  local path=$1 now mtime seconds
-  now=$(date +%s)
-  mtime=$(file_mtime_epoch "$path") || { printf 'unknown'; return; }
-  seconds=$((now - mtime))
-  [ "$seconds" -ge 0 ] || seconds=0
-  if [ "$seconds" -ge 86400 ]; then
-    printf '%sd' "$((seconds / 86400))"
-  elif [ "$seconds" -ge 3600 ]; then
-    printf '%sh' "$((seconds / 3600))"
-  elif [ "$seconds" -ge 60 ]; then
-    printf '%sm' "$((seconds / 60))"
-  else
-    printf '%ss' "$seconds"
-  fi
-}
-
-first_check_comment() {
-  local check=$1 comment
-  comment=$(LC_ALL=C awk '/^#[[:space:]]/ { sub(/^#[[:space:]]*/, ""); print; exit }' "$check" 2>/dev/null)
-  [ -n "$comment" ] || comment='no comment'
-  printf '%s' "$comment" | LC_ALL=C cut -c 1-80
-}
-
-print_standing_check_inventory() {
-  local check id age comment shown=0 total=0 entries=''
-  for check in "$STATE"/*.check.sh; do
-    [ -f "$check" ] && [ ! -L "$check" ] || continue
-    id=$(basename "$check" .check.sh)
-    [ "$id" != x-watch ] || continue
-    [ "$id" != slack-watch ] || continue
-    [ ! -f "$STATE/$id.meta" ] || continue
-    fm_custom_check_registered "$STATE" "$id" || continue
-    total=$((total + 1))
-    [ "$shown" -lt "$STANDING_CHECK_LIMIT" ] || continue
-    age=$(compact_age "$check")
-    comment=$(first_check_comment "$check")
-    [ -z "$entries" ] || entries="$entries; "
-    entries="$entries$id [age=$age; comment=$comment]"
-    shown=$((shown + 1))
-  done
-  [ "$total" -gt 0 ] || return 0
-  if [ "$total" -gt "$shown" ]; then
-    entries="$entries; +$((total - shown)) more"
-  fi
-  printf 'Standing checks without task metadata: %s\n' "$entries"
+print_status_tail() {
+  local status=$1 line
+  printf 'status tail (last %s line(s), each capped at %s characters, wake-EVENT history, not current state; full log: %s):\n' \
+    "$STATUS_TAIL" "$FM_LINE_CAP_DEFAULT" "$status"
+  # A crewmate writes its own status lines, so their length is unbounded: one
+  # observed line ran 865 characters. Cap each one the way the wake digest's
+  # OPEN DECISIONS section does; the lede carries the state word and the key,
+  # and the full log path above reaches the rest.
+  while IFS= read -r line || [ -n "$line" ]; do
+    fm_cap_line "$line"
+  done < <(tail -n "$STATUS_TAIL" "$status")
 }
 
 hash_file_sha256() {
@@ -859,6 +767,24 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
   fi
 fi
+# omp (Oh My Pi) has no project-trust gate: it auto-discovers <cwd>/.omp/extensions
+# with no dialog, so the only ways both tracked primary extensions fail to load
+# are a session started outside this home, an extension disabled in the omp
+# config, or a build older than the tracked file. The markers carry the loaded
+# build plus the loading pid, exactly as the Pi ones do (bin/fm-wake-lib.sh).
+if [ "$PRIMARY_HARNESS" = omp ]; then
+  OMP_EXT="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
+  OMP_TURNEND_EXT="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
+  OMP_WATCH_MARKER="$STATE/.omp-watch-extension-loaded"
+  OMP_TURNEND_MARKER="$STATE/.omp-turnend-extension-loaded"
+  OMP_LOCK="$STATE/.lock"
+  OMP_WATCH_VERSION=$(fm_pi_extension_version "$OMP_EXT" || printf '')
+  OMP_TURNEND_VERSION=$(fm_pi_extension_version "$OMP_TURNEND_EXT" || printf '')
+  if ! fm_pi_extension_loaded "$OMP_WATCH_MARKER" "$OMP_WATCH_VERSION" "$OMP_LOCK" \
+    || ! fm_pi_extension_loaded "$OMP_TURNEND_MARKER" "$OMP_TURNEND_VERSION" "$OMP_LOCK"; then
+    printf 'OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory so %s and %s auto-load from .omp/extensions/ for turn-end guard and background wake coverage; pass -e %s -e %s only when omp must start from another directory, never together with auto-discovery (omp loads a file named both ways twice)\n' "$OMP_TURNEND_EXT" "$OMP_EXT" "$OMP_TURNEND_EXT" "$OMP_EXT"
+  fi
+fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
@@ -874,21 +800,10 @@ fi
 stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
-Everything below is represented for this session start: every state/*.meta,
-a compact data/backlog.md listing,
-EOF
-if status_tail_projection_enabled; then
-  cat <<'EOF'
-a bounded tail of every state/*.status,
-EOF
-else
-  cat <<'EOF'
-an on-demand pointer for every state/*.status (each task's status line names its full log path),
-EOF
-fi
-cat <<'EOF'
-and the full data/projects.md, data/secondmates.md, data/captain.md,
-data/captain-shared.md, and data/learnings.md.
+Everything below is printed in full for this session start: every state/*.meta,
+a compact data/backlog.md listing, a bounded tail of every state/*.status,
+data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
+and data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -897,7 +812,8 @@ Go to a source directly only when:
   - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
   - its contents looked unparseable or corrupt,
   - an individual full status log is needed for older wake-event history, or a
-    projected status line was capped and its tail matters,
+    status line was capped and its tail matters (each task's full log path is
+    printed with its tail),
   - a full task body is needed (tasks-axi show <id> --full, or data/backlog.md),
   - the backlog listing disclosed omitted queued items and this turn needs them,
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
@@ -911,7 +827,6 @@ EOF
 # truncated tail must never take.
 stage fleet-state
 section "FLEET STATE"
-fm_record_contradictions_init "$DATA"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
 subsection "Work under way (state/*.meta)"
@@ -925,15 +840,12 @@ for meta in "$STATE"/*.meta; do
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
-  endpoint=unknown
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-      endpoint=alive
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-      endpoint=dead
     fi
   else
     printf 'endpoint: unknown (no window recorded)\n'
@@ -941,15 +853,12 @@ for meta in "$STATE"/*.meta; do
 
   status="$STATE/$id.status"
   if [ -f "$status" ]; then
-    print_status_line "$status" "$id"
+    print_status_tail "$status"
   else
-    printf 'status: (no status file yet: %s); current state: bin/fm-crew-state.sh %s\n' "$status" "$id"
+    printf 'status tail: (no status file yet: %s)\n' "$status"
   fi
-  fm_record_contradictions_observe_meta "$meta" "$id" "$endpoint" "$STATE"
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
-
-print_standing_check_inventory
 
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0
@@ -959,29 +868,23 @@ for status in "$STATE"/*.status; do
   [ -f "$STATE/$id.meta" ] && continue
   ORPHAN_STATUS_FOUND=1
   printf '\n--- %s ---\n' "$id"
-  print_status_line "$status"
-  fm_record_contradictions_observe_orphan "$status" "$id"
+  print_status_tail "$status"
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
-fm_record_contradictions_observe_backlog "$STATE"
-RECORD_CONTRADICTIONS=$(fm_record_contradictions_format 2>/dev/null) || RECORD_CONTRADICTIONS=
-if [ -n "$RECORD_CONTRADICTIONS" ]; then
-  printf '\n%s\n' "$RECORD_CONTRADICTIONS"
-fi
-
-subsection "Quota utilization"
-QUOTA_UTILIZATION=$("$SCRIPT_DIR/fm-quota-utilization.sh" report 2>/dev/null) || \
-  QUOTA_UTILIZATION='quota: check skipped: utilization reader failed'
-if [ -n "$QUOTA_UTILIZATION" ]; then
-  printf '%s\n' "$QUOTA_UTILIZATION"
-else
-  printf '%s\n' '(none)'
-fi
-
 subsection "AFK"
-if [ -e "$STATE/.afk" ]; then
-  printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
+# The away posture is the record (bin/fm-afk-contract.sh); the legacy flag
+# still marks a running daemon on the harnesses that launch one.
+if [ -f "$STATE/.afk-contract" ]; then
+  printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
+    "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
+  if [ -e "$STATE/.afk" ]; then
+    printf '; the away daemon owns the watcher.\n'
+  else
+    printf '; no daemon runs, the ordinary supervision session continues.\n'
+  fi
+elif [ -e "$STATE/.afk" ]; then
+  printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'
 else
   printf 'absent\n'
 fi
