@@ -88,11 +88,12 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 The current table is generated from the runner's retained maxima, which now cover every script in the lane.
 Those weights are conservative only relative to the runs they were measured from: each is that script's slowest observed duration across those four runs, so a shard's predicted total covers any of them.
 It does not bound a slower runner.
-In the first real CI run on this table the worst shard measured 20.78 min against 18.11 min of assignment weight, so a shard can and does exceed its predicted weight.
+In the first real CI run on this table the worst shard measured 20.53 min of suite wall time against 18.11 min of assignment weight, so a shard can and does exceed its predicted weight.
 The table was validated against a held-out run rather than fitted to the runs that produced it: rebuilding the hints from the four runs above and scoring that partition against [run 34447627189](https://github.com/kunchenguid/firstmate/actions/runs/34447627189), which contributed nothing to the table, puts its worst shard at 16.99 min against 18.11 min of assignment weight, with the five shards spanning 14.47 to 16.99 min.
 The same held-out run under the previous hints spanned 13.24 to 21.93 min.
 That replay is a prediction, not a bound: it reuses one run's per-script durations and so cannot model another run's runner-speed spread.
-The first real CI run on the refreshed table, [run 34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299), came in higher at 13.51 to 20.78 min.
+The first real CI run on the refreshed table, [run 34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299), measured a higher worst suite wall time of 20.53 min.
+Its whole-job times ranged from 13.51 to 20.78 min, including steps outside the suite.
 Prefer a figure measured by an actual run over a replayed one whenever both are available.
 
 The single longest script, `tests/fm-watch-triage.test.sh` at 592748 ms, is the floor for any shard count.
@@ -153,7 +154,7 @@ The margin the bound leaves, in minutes:
 
 | | minutes | share of the 30-minute cap |
 |---|---:|---:|
-| worst shard measured by CI on the refreshed hints ([run 34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299)) | 20.78 | 68.4% |
+| worst shard suite wall time measured by CI on the refreshed hints ([run 34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299)) | 20.53 | 68.4% |
 | guard fails above | 21.60 | 72% |
 | job is cancelled at | 30.00 | 100% |
 
