@@ -95,6 +95,16 @@ normalize_joined_path() {
 
 canonical_path_for_check() {
   local path=$1 probe tail prefix parent base
+  local converted
+  case "$path" in
+    [A-Za-z]:[\\/]*)
+      # A Windows drive path is absolute despite lacking a leading slash; the
+      # relative join below would otherwise prefix it with the caller's cwd.
+      if command -v cygpath >/dev/null 2>&1; then
+        converted=$(cygpath -u "$path" 2>/dev/null) && [ -n "$converted" ] && path=$converted
+      fi
+      ;;
+  esac
   case "$path" in
     /*) probe=$path ;;
     *) probe="$(pwd -P)/$path" ;;
@@ -398,6 +408,9 @@ acquire_treehouse_home() {
     return 1
   }
   [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
+  # MSYS hosts: treehouse may print a Windows drive-form path. Normalize once so
+  # verification, the safety gates, and rollback all see one absolute POSIX form.
+  home=$(canonical_path_for_check "$home")
   printf '%s\n' "$home"
 }
 
