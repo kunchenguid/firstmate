@@ -39,7 +39,7 @@ The brief submitted itself with no extra Enter, the turn ran, and the reply rend
 A second launch into the same directory answered a fresh prompt the same way, so the shape is repeatable, not a first-run accident.
 The footer rendered `Gemini 3.8 Flash · low`, proving both flags were accepted together.
 
-## Trust dialog: answered by the spawn, then gated on a busy turn
+## Trust dialog: pre-registered before launch, gated on a busy turn as the backstop
 
 A first launch in a fresh worktree shows this dialog:
 
@@ -55,17 +55,20 @@ Antigravity CLI requires permission to read, edit, and execute files here.
 > Yes, I trust this folder
   No, exit
 ```
-`agy --help` (1.2.0) lists no trust flag, pre-registration command, or add-dir style grant, so there is no pre-launch way to suppress it, and firstmate does not pre-write the captain's settings file.
+`agy --help` (1.2.0) lists no trust flag or pre-registration command, but agy honours a `trustedWorkspaces` entry written to `~/.gemini/antigravity-cli/settings.json` ahead of launch.
+Verified under a throwaway `HOME` holding a copy of `~/.gemini` (the real settings file was never written): a folder appended to that array by hand launched `--prompt-interactive` straight into its turn and rendered the reply with no dialog, while an unregistered sibling folder launched the same way parked on the dialog.
+agy compares the pane's logical working directory, not its resolved path: a symlinked cwd whose real path alone was registered still parked on the dialog, so `bin/fm-agy-trust.sh` records both the logical path and its resolved form when they differ.
+`bin/fm-spawn.sh` runs that helper before launch at the same point it pre-registers claude trust; the helper applies the same structural scope test (a linked worktree of the spawning project, never a primary checkout, a subdirectory, a plain directory, or the home directory), preserves every other key in the store, and writes atomically with a fingerprint check.
+A failed registration is a stderr warning rather than a refusal, because agy's dialog preselects the safe answer and the gate below can answer it.
 Two supervised Herdr runs in treehouse worktrees completed file-writing turns while the dialog was still unanswered at observation time (worker file and `done:` status line both verified on disk before Enter was ever sent to those panes).
 Isolated runs in untrusted `/tmp` directories never reached the workspace until Enter: the turn spun through exploratory tool calls in agy's own scratch directory instead, and only the queued prompt ran after the answer.
 One run left unanswered for several minutes wrote its file to agy's scratch directory instead of the workspace once finally answered.
 The mechanism behind the difference was not established; path, backend, and latency were all varied across runs without isolating a single cause.
-The spawn therefore does not depend on it: `bin/fm-spawn.sh` runs a post-launch readiness gate (`agy_wait_for_working`) in the rovo/kimi launch-then-confirm shape.
+The spawn therefore does not depend on it: after pre-registration, `bin/fm-spawn.sh` runs a post-launch readiness gate (`agy_wait_for_working`) in the rovo/kimi launch-then-confirm shape as the backstop.
 It polls the pane capture, answers the dialog with a single Enter the first time the `Do you trust the contents of this project?` text renders, and reports success only once `fm_busy_classify` returns a busy verdict for the pane (Herdr's native `working` status or the pinned `esc to cancel` status row).
-When neither the dialog nor a busy turn appears within the window, or the answered dialog never turns busy, the spawn fails, records `failed:` in the task status, and closes the endpoint so no orphan worker survives outside task control.
-A reused path shows no dialog and passes the gate on the busy verdict alone with no extra Enter.
-Answering appended the worktree to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`, which firstmate never writes.
-`tests/fm-agy-harness.test.sh` drives a fake pane through launch, dialog, and busy row, pinning the single Enter, the busy-before-success order, the no-dialog reused path, and the fail-and-close path.
+Because Herdr's native `working` verdict is known to coexist with an unanswered dialog, the gate is strict about order: a busy verdict counts as ready only when the worktree was pre-registered before launch or the dialog has already been seen and answered; on an unregistered path it keeps polling for the dialog instead of accepting the early busy verdict.
+When the brief cannot be confirmed to run within the window (an answered dialog never turns busy, a pre-trusted pane never turns busy, or an unregistered pane never shows the dialog), the spawn fails, records `failed:` in the task status, and closes the endpoint so no orphan worker survives outside task control.
+`tests/fm-agy-harness.test.sh` covers the helper's registration and scope refusals against a throwaway store, and drives a fake pane whose dialog decision reads the store the spawn just wrote: the pre-trusted launch with no dialog, a dialog that renders anyway answered exactly once, the premature busy verdict on an unregistered path waiting for the dialog, and both fail-and-close paths.
 
 ## Model and effort
 
