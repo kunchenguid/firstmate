@@ -1,0 +1,8 @@
+FM_TEST_BEGIN 2026-09-10T20:04:36Z tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh family=real-herdr-gated expected_gate_skip=herdr
+ok - agent get distinguishes leftover-shell (dead/no-agent) from live idle Pi
+ok - pane get agent_status lag cannot keep an exited occupant classified alive
+FM_TEST_END 2026-09-10T20:04:45Z tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh exit=0 duration_ms=8344 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=8416
+FM_TEST_SUMMARY_FAMILY family=real-herdr-gated count=1 duration_ms=8344 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh duration_ms=8344
+fm-test-run: wrote timing artifact: /Users/kunchen/.no-mistakes/evidence/01M26EMGKJYHDYEF0VSAVW8APE/herdr-agent-exit-shell-run.json
