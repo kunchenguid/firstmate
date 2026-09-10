@@ -297,6 +297,8 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
+  local container_helper="$FM_BACKEND_LIB_DIR/fm-bench-lifecycle.py" container_state
+  local -a container_pids=()
   local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
@@ -374,6 +376,21 @@ EOF
   done <<EOF
 $(fm_backend_tmux_foreground_args "$target")
 EOF
+
+  if [ -n "${STATE:-${FM_STATE_OVERRIDE:-}}" ] && [ -f "$container_helper" ]; then
+    while IFS= read -r pid; do
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      container_pids+=("$pid")
+    done <<EOF
+$(fm_backend_tmux_foreground_pids "$target")
+EOF
+    container_state=$(python3 "$container_helper" --agent-state "${STATE:-$FM_STATE_OVERRIDE}" \
+      "${container_pids[@]}" 2>/dev/null) || container_state=
+    if [ "$container_state" = alive ]; then
+      printf 'alive'
+      return 0
+    fi
+  fi
 
   comm=$(fm_backend_tmux_current_command "$target") || {
     printf 'unreadable'
