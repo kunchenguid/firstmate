@@ -1224,7 +1224,7 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   case "$phase" in
     delivery_unknown) kind=delivery-unknown ;;
-    recovery_failed|recovery_unknown) kind=recovery-delivery ;;
+    recovery_failed|recovery_unknown) kind='recovery-delivery' ;;
     *) kind=missed ;;
   esac
   payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || return 1
