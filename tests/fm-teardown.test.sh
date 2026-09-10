@@ -3703,7 +3703,10 @@ test_recorded_e2e_stack_is_released_before_the_worktree_return() {
   # Snapshot, at the moment the destructive worktree return runs, whether the
   # stack was already released. Causal proof of ordering from observed state,
   # not a source-text correlation. Fix 4 must precede every destructive step
-  # because the record's fallback copy lives under the tasktmp this removes.
+  # because its `down` reads compose_file entries - including the generated
+  # override file - from the per-task tasktmp that a later step removes; the
+  # state record itself (state/<id>.e2e-stack) is never removed by anything
+  # else in this script, only by this hook's own successful `down`.
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
 if [ ! -f "$case_dir/state/task-x1.e2e-stack" ]; then
