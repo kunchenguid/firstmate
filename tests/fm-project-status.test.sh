@@ -169,18 +169,30 @@ test_projection_resolution_and_authority() {
 }
 
 test_projection_source_failures_are_explicit() {
-  local fixture runner arg_log out started elapsed mode reason
-  fixture="$TMP_ROOT/failure-fixture.json"
-  arg_log="$TMP_ROOT/failure.args"
-  write_projection_fixture "$fixture"
-  runner=$(make_projection_runner source-failures "$fixture")
+  local home injector out started elapsed mode reason bytes
+  home="$TMP_ROOT/source-failure-home"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  injector="$TMP_ROOT/source-failure-injector.sh"
+  cat > "$injector" <<'SH'
+if [ "$0" = fm-project-status ]; then
+  case "${LIVE_SOURCE_MODE:-}" in
+    bad-schema) printf 'not-json\n' ;;
+    oversized) awk 'BEGIN { for (i=0;i<4194305;i++) printf "x" }' ;;
+    failure) exit 9 ;;
+    timeout) sleep 30 ;;
+  esac
+fi
+SH
   for mode in bad-schema oversized failure; do
     case "$mode" in
       bad-schema) reason=incompatible_source ;;
       oversized) reason=source_too_large ;;
       failure) reason=source_unreadable ;;
     esac
-    out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" FAKE_SNAPSHOT_MODE="$mode" "$runner" --json AlphaProject)
+    out=$(BASH_ENV="$injector" LIVE_SOURCE_MODE="$mode" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      "$PROJECT_STATUS" --json AlphaProject)
+    bytes=$(printf '%s' "$out" | LC_ALL=C wc -c | tr -d ' ')
+    [ "$bytes" -le 65536 ] || fail "$mode unavailable result exceeded 64 KiB: $bytes"
     printf '%s' "$out" | jq -e --arg reason "$reason" '
       .schema == "fm-project-status.v1" and .match.status == "unavailable"
         and .current.state == "unavailable" and .current.reason_code == $reason
@@ -188,13 +200,16 @@ test_projection_source_failures_are_explicit() {
     ' >/dev/null || fail "$mode source failure was not explicit: $out"
   done
   started=$(date +%s)
-  out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" FAKE_SNAPSHOT_MODE=timeout "$runner" --json AlphaProject)
+  out=$(BASH_ENV="$injector" LIVE_SOURCE_MODE=timeout FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$PROJECT_STATUS" --json AlphaProject)
   elapsed=$(( $(date +%s) - started ))
+  bytes=$(printf '%s' "$out" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$bytes" -le 65536 ] || fail "timeout unavailable result exceeded 64 KiB: $bytes"
   printf '%s' "$out" | jq -e '.match.status == "unavailable" and .current.reason_code == "source_timeout"' >/dev/null \
     || fail "snapshot timeout was not explicit: $out"
   [ "$elapsed" -ge 7 ] && [ "$elapsed" -le 12 ] \
     || fail "snapshot timeout did not honor the eight-second bound: ${elapsed}s"
-  pass "project status exposes bad schema, oversized output, process failure, and timeout"
+  pass "live project status exposes bounded bad schema, oversized output, process failure, and timeout"
 }
 
 test_projection_bounds_and_counts() {
