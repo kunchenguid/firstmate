@@ -1025,6 +1025,23 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
+On Herdr 0.9.0, `herdr agent get` is live detection of the pane occupant, not a spawn-time registration that can outlive the process.
+A Pi launched as a child of the pane shell (not via `exec`) that then `/quit`s or is SIGKILL'd leaves the pane and shell in place, and `agent get` returns `agent_not_found`.
+A sibling live idle Pi stays `agent=pi` with `agent_status=idle`.
+`fm_backend_herdr_pane_agent_state` maps that `agent_not_found` leftover shell to `no-agent` and `fm_backend_herdr_agent_state` maps it to `dead` (relaunch-allowed), while the live idle pane stays `alive`.
+`herdr pane get` `.agent_status` can still read `idle` after the occupant is gone; liveness is `agent get`, never that pane field.
+
+```sh
+tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh
+```
+
+Refresh that live pair after every Herdr upgrade. Observed 2026-09-10 on Herdr 0.9.0 / protocol 22 with Pi 0.82.0 in an isolated `fm-lab-` session:
+
+```text
+ok - agent get distinguishes leftover-shell (dead/no-agent) from live idle Pi
+ok - pane get agent_status lag cannot keep an exited occupant classified alive
+```
+
 ### Endpoint recovery classification
 
 Measured 2026-09-10 on macOS aarch64 against Herdr 0.9.0 (protocol 22) in an isolated `fm-lab-` session.
