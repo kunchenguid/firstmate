@@ -84,7 +84,7 @@ Exercise backlog dispatch for $id.
 Verify the atomic backlog transition.
 
 # Definition of done
-Delivery contract: mode=no-mistakes
+Delivery contract: mode=direct-PR
 EOF
   done
 
@@ -95,7 +95,7 @@ case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes
+  fm_fake_exit0 "$fakebin" treehouse gh gh-axi
 
   fm_git_init_commit "$case_dir/project"
   fm_git_add_origin "$case_dir/project" "$case_dir/project.origin.git"
@@ -606,7 +606,7 @@ run_spawn() {  # <case-dir> <args...>
 
 run_ship_spawn() {  # <case-dir> <id>
   local case_dir=$1 id=$2
-  run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off
+  run_spawn "$case_dir" "$id" "$case_dir/project" --mode direct-PR --yolo off
 }
 
 # Teardown against a recorded worktree that no longer exists: the landed-work and
@@ -1483,7 +1483,7 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
     FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" CLAUDE_CONFIG_DIR='' \
     FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
     timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
-    --mode no-mistakes --yolo off 2>&1) || rc=$?
+    --mode direct-PR --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
   case "$rc" in
     124|137) fail "the verification hung on the unresponsive start instead of timing out: $out" ;;
@@ -1509,7 +1509,7 @@ test_dispatch_interruption_during_kimi_readiness_fails_before_commit() {
 
   out=$(HOME="$home" FM_KIMI_READY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     run_spawn "$case_dir" "$id" "$case_dir/project" --harness kimi \
-      --mode no-mistakes --yolo off) || rc=$?
+      --mode direct-PR --yolo off) || rc=$?
   [ "$rc" -ne 0 ] || fail "Kimi readiness interruption was reported as success"
   assert_absent "$home/state/$id.meta" \
     "Kimi readiness interruption retained an unconfirmed task record"
@@ -1913,7 +1913,7 @@ test_recovery_reports_an_owned_row_read_failure() {
   id=atomic-heal-read-failure-b8
   case_dir=$(make_home heal-owned-read-failure)
   add_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes
+  write_task_meta "$case_dir" "$id" ship direct-PR
   break_verb "$case_dir" show
 
   out=$(run_bootstrap "$case_dir")
@@ -1955,7 +1955,7 @@ test_recovery_marks_an_owned_record_in_flight() {
   id=atomic-heal-b8
   case_dir=$(make_home heal-queued)
   add_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes
+  write_task_meta "$case_dir" "$id" ship direct-PR
 
   out=$(run_bootstrap "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
@@ -1970,7 +1970,7 @@ test_recovery_rejects_an_internal_worker_record_symlink() {
   case_dir=$(make_home heal-internal-symlink)
   home=$(home_of "$case_dir")
   add_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$target_id" ship no-mistakes "spawn_gen=internal-target"
+  write_task_meta "$case_dir" "$target_id" ship direct-PR "spawn_gen=internal-target"
   ln -s "$target_id.meta" "$home/state/$id.meta"
 
   out=$(run_bootstrap "$case_dir") || rc=$?
@@ -2082,7 +2082,7 @@ test_recovery_retry_preserves_incomplete_cleanup_warning() {
   home=$(home_of "$case_dir")
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-warning"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=spawn-warning"
   marker="$home/state/$id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-warning\narg=--note\narg=local%%20main\n' \
     "$id" "$home/data" > "$marker"
@@ -2109,7 +2109,7 @@ test_recovery_finishes_a_close_for_the_same_meta_incarnation() {
   case_dir=$(make_home heal-same-incarnation)
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-one"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=spawn-one"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-one\narg=--note\narg=local%%20main\n' \
     "$id" "$(home_of "$case_dir")/data" \
     > "$(home_of "$case_dir")/state/$id.backlog-close"
@@ -2131,7 +2131,7 @@ test_recovery_preserves_a_close_for_ambiguous_incarnation_metadata() {
   home=$(home_of "$case_dir")
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes \
+  write_task_meta "$case_dir" "$id" ship direct-PR \
     "spawn_gen=spawn-old" "spawn_gen=spawn-current"
   marker="$home/state/$id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-current\narg=--note\narg=local%%20main\n' \
@@ -2155,7 +2155,7 @@ test_recovery_preserves_both_records_when_meta_removal_fails() {
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
   meta="$(home_of "$case_dir")/state/$id.meta"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-one"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=spawn-one"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-one\narg=--note\narg=local%%20main\n' \
     "$id" "$(home_of "$case_dir")/data" \
     > "$(home_of "$case_dir")/state/$id.backlog-close"
@@ -2212,7 +2212,7 @@ test_recovery_rejects_a_marker_for_another_task_identity() {
   case_dir=$(make_home marker-identity-mismatch)
   add_item "$case_dir" "$target_id"
   start_item "$case_dir" "$target_id"
-  write_task_meta "$case_dir" "$target_id" ship no-mistakes "spawn_gen=spawn-marker-target"
+  write_task_meta "$case_dir" "$target_id" ship direct-PR "spawn_gen=spawn-marker-target"
   marker="$(home_of "$case_dir")/state/$locked_id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-marker-target\narg=--note\narg=local%%20main\n' \
     "$target_id" "$(home_of "$case_dir")/data" > "$marker"
@@ -2235,7 +2235,7 @@ test_recovery_rejects_a_foreign_data_directory() {
   start_item "$case_dir" "$id"
   add_item "$foreign_case" "$id"
   start_item "$foreign_case" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-foreign-data"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=spawn-foreign-data"
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-foreign-data\narg=--note\narg=local%%20main\n' \
     "$id" "$(home_of "$foreign_case")/data" > "$marker"
@@ -2257,7 +2257,7 @@ test_recovery_rejects_an_unterminated_unknown_field() {
   case_dir=$(make_home marker-unterminated-field)
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-unterminated-field"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=spawn-unterminated-field"
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-unterminated-field\narg=--note\narg=local%%20main\nunknown=value' \
     "$id" "$(home_of "$case_dir")/data" > "$marker"
@@ -2277,7 +2277,7 @@ test_recovery_rejects_lexical_data_traversal() {
   case_dir=$(make_home marker-data-traversal)
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-data-traversal"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=spawn-data-traversal"
   data="$(home_of "$case_dir")/data"
   mkdir -p "$data/sub"
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
@@ -2299,7 +2299,7 @@ test_recovery_rejects_raw_control_bytes() {
   case_dir=$(make_home marker-nul-byte)
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-nul-byte"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=spawn-nul-byte"
   data="$(home_of "$case_dir")/data"
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
   printf 'id=%s\ndata=%s\0\nspawn_gen=spawn-nul-byte\narg=--note\narg=local%%20main\n' \
@@ -2354,7 +2354,7 @@ test_failed_close_replay_is_not_started_as_live_work() {
   id=atomic-pending-close-not-started-b12
   case_dir=$(make_home pending-close-not-started)
   add_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-pending-close"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=spawn-pending-close"
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-pending-close\narg=--pr\narg=https://\n' \
     "$id" "$(home_of "$case_dir")/data" > "$marker"
@@ -2414,7 +2414,7 @@ test_recovery_drops_a_close_for_a_newer_meta_incarnation() {
   case_dir=$(make_home heal-new-incarnation)
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-two"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=spawn-two"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-one\narg=--note\narg=local%%20main\n' \
     "$id" "$(home_of "$case_dir")/data" \
     > "$(home_of "$case_dir")/state/$id.backlog-close"
@@ -2435,7 +2435,7 @@ test_recovery_rejects_a_legacy_close_without_an_incarnation() {
   case_dir=$(make_home heal-legacy-close)
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-two"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=spawn-two"
   printf 'id=%s\ndata=%s\narg=--note\narg=local%%20main\n' \
     "$id" "$(home_of "$case_dir")/data" \
     > "$(home_of "$case_dir")/state/$id.backlog-close"
@@ -2458,8 +2458,8 @@ test_bootstrap_rechecks_worker_record_boundary_after_locking() {
   home=$(home_of "$case_dir")
   foreign_state="$(home_of "$foreign_case")/state"
   add_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=local-worker"
-  write_task_meta "$foreign_case" "$id" ship no-mistakes "spawn_gen=foreign-worker"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=local-worker"
+  write_task_meta "$foreign_case" "$id" ship direct-PR "spawn_gen=foreign-worker"
   real_ln=$(command -v ln)
   cat > "$case_dir/fakebin/ln" <<SH
 #!/usr/bin/env bash
@@ -2539,7 +2539,7 @@ test_same_home_state_override_remains_supported() {
   home=$(home_of "$case_dir")
   state="$home/runtime-state"
   add_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=same-home-override"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=same-home-override"
   mv "$home/state" "$state"
 
   out=$(FM_STATE_OVERRIDE="$state" run_bootstrap "$case_dir") \
@@ -2557,7 +2557,7 @@ test_bootstrap_refuses_a_symlinked_state_directory_before_reconciliation() {
   home=$(home_of "$case_dir")
   foreign_state="$(home_of "$foreign_case")/state"
   add_item "$case_dir" "$id"
-  write_task_meta "$foreign_case" "$id" ship no-mistakes "spawn_gen=foreign-worker"
+  write_task_meta "$foreign_case" "$id" ship direct-PR "spawn_gen=foreign-worker"
   rm -rf "$home/state"
   ln -s "$foreign_state" "$home/state"
 
@@ -2585,7 +2585,7 @@ test_bootstrap_stops_when_data_disappears_before_reconciliation() {
   case_dir=$(make_home bootstrap-data-race)
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-bootstrap-race"
+  write_task_meta "$case_dir" "$id" ship direct-PR "spawn_gen=spawn-bootstrap-race"
   remove_data_during_startup_budget_check "$case_dir"
   saved="$case_dir/bootstrap-data"
 
@@ -2630,7 +2630,7 @@ test_recovery_leaves_a_captain_held_item_alone() {
   add_item "$case_dir" "$id"
   tasks-axi hold "$id" --reason "captain decision pending" --kind captain \
     --file "$(backlog_of "$case_dir")" >/dev/null
-  write_task_meta "$case_dir" "$id" ship no-mistakes
+  write_task_meta "$case_dir" "$id" ship direct-PR
 
   out=$(run_bootstrap "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = queued ] \
@@ -2779,7 +2779,7 @@ test_spawn_refuses_a_special_file_tasks_config() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
-    timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
+    timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode direct-PR --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 124 ] || fail "spawn hung reading a special-file tasks-axi config"
   [ "$rc" -ne 0 ] || fail "spawn accepted a special-file tasks-axi config"
   assert_contains "$out" "tasks-axi config is not a regular file" \

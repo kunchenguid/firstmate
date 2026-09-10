@@ -58,4 +58,4 @@ A missed-reply escalation includes the complete first sighting path and line num
 
 ## Live verification
 
-[`verification/secondmate-parent-channel.md`](verification/secondmate-parent-channel.md) records the dated live run: real tmux panes, both real watchers re-armed after each wake, and no model, with every delivered parent line and the parent wake it produced.
+[`verification/secondmate-parent-channel.md`](verification/secondmate-parent-channel.md) records why the historical transcript was retired and points to the current portable regression owners; no replacement live experiment has been run.

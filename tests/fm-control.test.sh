@@ -178,8 +178,16 @@ add_task() {
     echo "project=$proj"
     echo "harness=$harness"
     echo "kind=$kind"
-    echo "mode=no-mistakes"
-    echo "yolo=off"
+    case "$kind" in
+      ship)
+        echo "mode=direct-PR"
+        echo "yolo=off"
+        ;;
+      secondmate)
+        echo "mode=secondmate"
+        echo "yolo=off"
+        ;;
+    esac
     echo "model=default"
     echo "effort=default"
     [ "$backend" = tmux ] || echo "backend=$backend"

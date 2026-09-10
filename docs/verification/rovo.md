@@ -1,7 +1,7 @@
 # Verification: the rovo (Atlassian Rovo CLI) crewmate/scout adapter
 
 Active empirical evidence for firstmate's rovo adapter.
-The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.agents/skills/harness-adapters/references/harness/rovo.md) owns the operating facts; this record owns how they were established and what is still unproven.
+The [Rovo harness reference](../../.agents/skills/harness-adapters/references/harness/rovo.md) owns the operating facts; this record owns how they were established and what is still unproven.
 
 ## Subject
 
@@ -209,15 +209,11 @@ Herdr has not shipped agent detection for rovo, so the classifier that recovery 
 This is recorded as a known Herdr-side integration gap rather than a firstmate bug, and is deliberately left unpatched here: no herdr-scoped workaround is safe to add without risking a false-positive `alive` verdict for some unrelated idle shell, so `backend=herdr` remains usable for launching a rovo crewmate/scout but unverified for automatic dead/husk recovery until Herdr ships rovo detection (or `bin/backends/herdr.sh` gains an independent process-based fallback the way `bin/backends/tmux.sh` already has).
 `/exit` returned the pane to an idle shell prompt rather than closing it, unlike tmux which closes the whole window, so `fm_backend_agent_state` reading `dead` after exit is the textually correct verdict for an agent-less-but-present pane; it is only the ready/busy/idle misclassification while rovo was actually running that is the real finding above.
 
-## Skill-loading interop gap (documented, not fixed)
+## Skill-loading interop
 
-```
-⚠ Invalid skill definition in .../.agents/skills/bootstrap-diagnostics/SKILL.md: 'metadata -> internal': Input should be a valid string
-```
-
-rovo's skill loader rejects every firstmate skill because `metadata.internal` is a boolean in firstmate's frontmatter and rovo's schema wants a string.
-This blocks `/no-mistakes` and every other firstmate skill invocation inside a rovo worker until firstmate's `SKILL.md` frontmatter is made rovo-compatible, a separate deferred follow-up that touches every skill file and the installer contract (`.agents/skills/firstmate-coding-guidelines/SKILL.md`).
-A `no-mistakes`-mode rovo ship crewmate is blocked by this gap; a rovo scout, which invokes no skill, is unaffected.
+This record does not claim current live verification for Rovo skill loading.
+The [Rovo harness reference](../../.agents/skills/harness-adapters/references/harness/rovo.md) owns current invocation syntax and compatibility limits.
+The portable and live Rovo adapter regressions below cover launch, permissions, signaling, and lifecycle, but they do not prove the vendor-side skill schema.
 
 ## quota-axi provider mapping: not established
 

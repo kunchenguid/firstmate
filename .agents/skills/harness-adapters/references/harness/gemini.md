@@ -13,7 +13,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Turn end | `AfterAgent` fires once per turn after the final response, carrying `cwd`, `session_id`, `prompt`, `prompt_response`, `stop_hook_active`, and `transcript_path`. On a cancelled turn `prompt_response` is `[no response text]`. |
 | Exit | `/quit` (alias `/exit`), one Enter, exit status 0; prints `To resume this session: gemini --resume <session-id>`. `Ctrl+C` cancels or quits on empty input and `Ctrl+D` exits on an empty buffer. |
 | Interrupt | Single `Escape`, which prints `ℹ Request cancelled.` and leaves the agent running. The composer does not repollute; it returns to its `Type your message or @path/to/file` placeholder. |
-| Skill | `/<skill>`, for example `/no-mistakes`; ONE Enter submits, with no popup swallow, and the turn opens with an `Activate Skill` tool call. |
+| Skill | `/<skill>`; ONE Enter submits, with no popup swallow, and the turn opens with an `Activate Skill` tool call. |
 | Autonomy | `-y` / `--yolo`, footer ` YOLO Ctrl+Y`, verified unattended on a real file write with no approval gate; `--approval-mode yolo` is the equivalent long form. |
 | Marker | `GEMINI_CLI=1` on child and tool processes. `AI_AGENT` is NOT a Gemini identity - see Detection below. |
 | Resume | `gemini --resume <session-id>` restores full history; `--resume latest` and an index are also accepted, and `--list-sessions` enumerates them per project. |
@@ -52,7 +52,7 @@ So never drive lifecycle text into a gemini pane that is showing this dialog.
 Treat it as a credential blocker under `../../../../../AGENTS.md` section 9, fix the environment, and retire the endpoint rather than typing into it.
 
 Do NOT give a worker an isolated `GEMINI_CLI_HOME`.
-It hides `~/.agents/skills`, so `/no-mistakes` and every other user skill silently disappear from that worker.
+It hides `~/.agents/skills`, so every user skill silently disappears from that worker.
 
 ## Detection
 
@@ -97,7 +97,6 @@ While a hook runs, the status row shows `Executing Hook: <name>` and the `(esc t
 ## Skills
 
 Gemini discovers user skills from `~/.gemini/skills/` or `~/.agents/skills/` and workspace skills from `.gemini/skills/` or `.agents/skills/`.
-`~/.agents/skills/no-mistakes` is therefore discovered as a user skill and loads even in an untrusted folder, which is what keeps firstmate's delivery path available.
 Workspace skills need the workspace trust the launch already grants, which is what makes a firstmate-repo task's own `.agents/skills` reachable.
 Gemini does NOT read `.claude/skills`.
 

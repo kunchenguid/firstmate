@@ -96,15 +96,6 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/no-mistakes"
   printf '%s\n' manual > "${fakebin%/*}/home-placeholder" 2>/dev/null || true
 }
 
@@ -723,7 +714,7 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
 
-  printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
+  printf '%s\n' '- demo [direct-PR] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"
   # secondmates.md, captain-shared.md, and learnings.md deliberately absent
 
@@ -736,7 +727,7 @@ EOF
   ' "$home/state/home-summary.json" >/dev/null \
     || fail "a locked session start did not publish the home summary ledger"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
-  assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
+  assert_contains "$out" "- demo [direct-PR] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
@@ -1495,7 +1486,7 @@ EOF
   world=${root%/root}
   worktree="$world/child-worktree"
   crew_state="$world/slow-crew-state.sh"
-  calls="$world/no-mistakes-state.calls"
+  calls="$world/current-state.calls"
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
@@ -1503,51 +1494,35 @@ EOF
 
   release_gate="$world/slow-state-read.release"
   read_finished="$world/slow-state-read.finished"
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-set -u
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z'
-  exit 0
-fi
-if [ "${1:-} ${2:-}" = 'axi status' ]; then
-  if [ "${FM_BOOTSTRAP_NETWORK:-}" = only ]; then
-    printf '%s\n' 'deferred' >> "${FM_FAKE_NM_CALLS:?}"
-  else
-    printf '%s\n' 'blocking' >> "${FM_FAKE_NM_CALLS:?}"
-  fi
-  # Stay outstanding until the case releases this read. A caller that waits for
-  # it therefore waits indefinitely rather than for a fixed interval a loaded
-  # host could out-run. The tick bound only stops a broken case hanging forever.
-  ticks=0
-  while [ ! -e "${FM_FAKE_NM_RELEASE:?}" ] && [ "$ticks" -lt 300 ]; do
-    sleep 0.1
-    ticks=$((ticks + 1))
-  done
-  : > "${FM_FAKE_NM_READ_FINISHED:?}"
-  printf '%s\n' 'slow validation state answered'
-fi
-exit 0
-SH
   cat > "$crew_state" <<'SH'
 #!/usr/bin/env bash
 set -u
-no-mistakes axi status >/dev/null
-printf '%s\n' 'state: done · source: run-step · passed'
+if [ "${FM_BOOTSTRAP_NETWORK:-}" = only ]; then
+  printf '%s\n' 'deferred' >> "${FM_FAKE_STATE_CALLS:?}"
+else
+  printf '%s\n' 'blocking' >> "${FM_FAKE_STATE_CALLS:?}"
+fi
+ticks=0
+while [ ! -e "${FM_FAKE_STATE_RELEASE:?}" ] && [ "$ticks" -lt 300 ]; do
+  sleep 0.1
+  ticks=$((ticks + 1))
+done
+: > "${FM_FAKE_STATE_READ_FINISHED:?}"
+printf '%s\n' 'state: done · source: status-log · passed'
 SH
-  chmod +x "$fakebin/no-mistakes" "$crew_state"
+  chmod +x "$crew_state"
 
   fm_write_meta "$home/state/slow-child.meta" \
     'window=firstmate:fm-slow-child' "worktree=$worktree" 'project=firstmate' \
-    'harness=pi' 'kind=scout' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=slow-child.1'
+    'harness=pi' 'kind=scout' 'spawn_gen=slow-child.1'
   printf '%s\n' 'working: validating' > "$home/state/slow-child.status"
   : > "$home/state/slow-child.turn-ended"
   touch -t 202001010000 "$home/state/slow-child.meta" \
     "$home/state/slow-child.status" "$home/state/slow-child.turn-ended"
 
   out=$(FM_BACKEND=tmux FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
-    FM_FAKE_NM_CALLS="$calls" FM_FAKE_NM_RELEASE="$release_gate" \
-    FM_FAKE_NM_READ_FINISHED="$read_finished" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_FAKE_STATE_CALLS="$calls" FM_FAKE_STATE_RELEASE="$release_gate" \
+    FM_FAKE_STATE_READ_FINISHED="$read_finished" FM_INACTIVE_RECONCILE_SECS=60 \
     FM_INACTIVE_RECONCILE_BUDGET_SECS=30 FM_INACTIVE_CREW_STATE_BIN="$crew_state" \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 

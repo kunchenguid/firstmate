@@ -33,8 +33,8 @@
 #     by the branch extension's generation-activation cleanup.
 #
 # THREAT MODEL (deliberate, captain-decided): these guards are
-# CONFUSED-AGENT-GRADE, the same grade bin/fm-gate-refuse-lib.sh documents
-# for the gate refusal. They stop non-deliberate misuse - the injected actor
+# CONFUSED-AGENT-GRADE, the deliberate grade for every in-process guard in
+# this library. They stop non-deliberate misuse - the injected actor
 # identity, the loud refusals, and the session-bound staleness make every
 # accidental cross-actor mutation fail loudly. A deliberately forging shell
 # running as the same uid inside the same pi process can evade any in-process

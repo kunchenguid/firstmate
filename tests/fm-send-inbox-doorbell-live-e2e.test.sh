@@ -35,7 +35,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 fm_live_gate opt-in FM_SEND_INBOX_LIVE_E2E tmux
 
-unset NO_MISTAKES_GATE
 
 SOCKET="fm-inbox-live-$$"
 SESSION="inboxlive"

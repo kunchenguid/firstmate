@@ -1523,7 +1523,7 @@ PYEOF
 }
 
 test_poll_retry_unfetchable_window_advances_with_new_mail() {
-  # Greptile P1 / no-mistakes retry-pos-not-out-stalls-mixed: when every
+  # Regression retry-pos-not-out-stalls-mixed: when every
   # retry uid in the current window is unfetchable while new mail fills the
   # poll output, the durable position must still advance. Gating persist on
   # an empty `out` re-scans the same failed prefix forever and strands a

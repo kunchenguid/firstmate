@@ -13,7 +13,7 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 | Busy state | `../../../bin/fm-busy-lib.sh` folds the per-conversation transcript as `cursor-transcript`: `role:user` opens and typed `turn_ended` closes success or abort, covering manual interrupt; nothing is armed or seeded, and this backend-agnostic source was identical on tmux and Herdr. |
 | Exit command | `/exit`. |
 | Interrupt | Single Escape returns the placeholder with no clear key; control makes no cancellation claim because an aborted transcript close appeared within seconds in some runs and not within twenty in others. |
-| Skill invocation | `/<skill>`, for example `/no-mistakes`; Cursor discovers Firstmate's user skills. |
+| Skill invocation | `/<skill>`; Cursor discovers Firstmate's user skills. |
 | Resume | No verified native pane resume; use deterministic relaunch. |
 | Autonomy | `--yolo`, documented alias for `--force`; footer `Run Everything`. |
 | Trust | `--trust` suppresses the dialog; `--yolo` does not, and every task has a fresh path. |

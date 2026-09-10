@@ -83,7 +83,7 @@ write_child() { # <home> <id> <status> [spawn-gen]
   local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM}
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
-    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=off' \
     "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1'
   printf '%s\n' "$status" > "$home/state/$id.status"
   : > "$home/state/$id.turn-ended"
@@ -176,7 +176,7 @@ test_local_secondmate_delivers_terminal_ledger_line() {
   write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   key=$(reported_outcome_key "$MATE" child 'done') || fail "ledger receipt did not retain its collision-resistant key"
-  expected="done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off"
+  expected="done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=direct-PR yolo=off"
   grep -Fxq "$expected" "$MAIN/state/mate.status" \
     || fail "secondmate did not deliver the child's ledger line on a plain poll: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
   [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "ledger delivery receipt was not durable"
@@ -240,11 +240,11 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   scout_key=$(reported_outcome_key "$MATE" scout 'done') || fail "scout receipt key missing"
   boom_key=$(reported_outcome_key "$MATE" boom failed) || fail "failed receipt key missing"
   replaced_key=$(reported_outcome_key "$MATE" replaced-pr 'done') || fail "replacement PR receipt key missing"
-  grep -Fxq "done [key=$scout_key]: child scout done: report written pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off report=data/scout/report.md" \
+  grep -Fxq "done [key=$scout_key]: child scout done: report written pr=https://example.test/owner/repo/pull/1 mode=direct-PR yolo=off report=data/scout/report.md" \
     "$MAIN/state/mate.status" || fail "scout delivery lost its report pointer: $(cat "$MAIN/state/mate.status")"
-  grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
+  grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=direct-PR yolo=off" \
     "$MAIN/state/mate.status" || fail "failed line was not delivered under the failed verb: $(cat "$MAIN/state/mate.status")"
-  grep -Fxq "done [key=$replaced_key]: child replaced-pr done: replacement PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
+  grep -Fxq "done [key=$replaced_key]: child replaced-pr done: replacement PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=direct-PR yolo=off" \
     "$MAIN/state/mate.status" || fail "ledger fallback did not prefer the terminal line PR: $(cat "$MAIN/state/mate.status")"
   printf 'working: retrying\ndone: fixed on retry\n' >> "$MATE/state/boom.status"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
@@ -669,7 +669,7 @@ test_watcher_poll_delivers_child_ledger_line_to_parent() {
   done
   reap "$pid"
   key=$(reported_outcome_key "$MATE" child 'done') || fail "watcher ledger receipt key missing"
-  grep -Fxq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
+  grep -Fxq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=direct-PR yolo=off" \
     "$MAIN/state/mate.status" \
     || fail "the watcher poll did not deliver the child's ledger line to the parent: $(cat "$MAIN/state/mate.status" 2>/dev/null; cat "$WORLD/mate-watch.out")"
   [ ! -s "$WORLD/forge.log" ] || fail "ledger delivery invoked a forge command"

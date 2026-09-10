@@ -7,12 +7,11 @@
 # own ask plus the context needed to read it, including the substance of any
 # report, decision, or PR the ask refers to) and `{FIRSTMATE_SPEC}`
 # under `## Firstmate spec` (build instructions, which are never the captain's
-# intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
-# subsections feed; bin/fm-spawn.sh refuses leftover placeholders. Secondmate
-# charters still use a single `{TASK}` charter fill. Firstmate may adjust other
-# sections when the task genuinely deviates (e.g. working an existing external
-# PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# intent). bin/fm-spawn.sh refuses leftover placeholders. Secondmate charters
+# still use a single `{TASK}` charter fill. Firstmate may adjust other sections
+# when the task genuinely deviates (e.g. working an existing external PR instead
+# of shipping a new one).
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <direct-PR|local-only> [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -37,12 +36,10 @@
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
+#   direct-PR    implement -> push + open PR via gh-axi -> project CI green -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
-# no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
-# the three concrete modes at intake before calling this script.
+# Only direct-PR and local-only are accepted delivery modes and registry policies.
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
@@ -155,15 +152,12 @@ done
 # missing or invalid value stops the scaffold rather than silently defaulting.
 if [ "$KIND" = ship ]; then
   [ "$MODE_SET" -eq 1 ] || {
-    echo "error: ship briefs require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+    echo "error: ship briefs require --mode <direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
     exit 1
   }
   case "$MODE" in
-    no-mistakes|direct-PR|local-only) ;;
-    no-mistakes-prod-only)
-      echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
-      exit 1 ;;
-    *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+    direct-PR|local-only) ;;
+    *) echo "error: --mode must be one of direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
   esac
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
@@ -184,11 +178,6 @@ fi
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
-
-ASK_USER_BLOCK=
-if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-  ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
-fi
 
 shell_quote() {
   printf "'"
@@ -391,18 +380,6 @@ The report is the only thing that survives, so anything worth keeping must be in
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
-   manages the daemon.
-   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
-   \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
-   \`blocked: {the daemon error}\` and stop even when the local run record still says running or
-   fixing, because that record can be stale after the daemon exits. A run record failed with a
-   daemon error is also a real block.
-   Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
-   going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
-   the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
-   timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
 
@@ -425,17 +402,10 @@ fi
 # bin/fm-spawn.sh checks against its own explicit --mode before launching.
 case "$MODE" in
   direct-PR)
-    SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     ;;
   local-only)
-    SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    ;;
-  *)  # no-mistakes
-    SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
@@ -454,7 +424,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID\`
 
 # Rules
 $RULE1
@@ -479,21 +449,8 @@ $RULE1
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
-$ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
-7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
-   every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
-   manages the daemon.
-   Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
-   \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
-   \`blocked: {the daemon error}\` and stop even when the local run record still says running or
-   fixing, because that record can be stale after the daemon exits. A run record failed with a
-   daemon error is also a real block.
-   Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
-   going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
-   the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
-   timed-out call was only waiting for a read while the run kept working.
 
 $INBOX_SECTION
 

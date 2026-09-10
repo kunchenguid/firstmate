@@ -216,56 +216,56 @@ test_missing_command_is_reported() {
 
 test_announced_update_is_reported_from_the_tool_itself() {
   local home dir out report
-  # no-mistakes already announces its own update on stderr; read that rather
+  # This tool announces its own update on stderr; read that rather
   # than reimplementing its version lookup.
   home=$(make_home announce)
   dir="$TMP_ROOT/announce/bin"
   mkdir -p "$dir"
-  cat > "$dir/no-mistakes-fixture" <<'SH'
+  cat > "$dir/sample-tool-fixture" <<'SH'
 #!/usr/bin/env bash
 printf '1.46.0\n'
-printf 'A new version of no-mistakes is available: v1.46.0 -> v1.47.0\n' >&2
+printf 'A new version of sample-tool is available: v1.46.0 -> v1.47.0\n' >&2
 SH
-  chmod 0755 "$dir/no-mistakes-fixture"
-  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  chmod 0755 "$dir/sample-tool-fixture"
+  write_config "$home" '{"tools":[{"name":"sample-tool","command":"sample-tool-fixture","announce_pattern":"A new version of sample-tool is available: [^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$dir")" "$out"
   report=$(cat "$out")
-  assert_contains "$report" "no-mistakes update available: A new version of no-mistakes is available: v1.46.0 -> v1.47.0" "the tool's own update announcement was not reported"
+  assert_contains "$report" "sample-tool update available: A new version of sample-tool is available: v1.46.0 -> v1.47.0" "the tool's own update announcement was not reported"
   assert_not_contains "$report" "not in effect" "a published update must not be reported as PATH skew"
   pass "a tool's own update announcement is read from its output"
 }
 
 test_announcement_is_read_from_a_second_command() {
   local home dir out report quiet_home
-  # The real no-mistakes prints its version for --version but announces a new
+  # The fixture prints its version for --version but announces a new
   # release only on its other commands, so the announcement has to be asked of a
   # command of its own while the version probe keeps reporting the version.
   home=$(make_home announce-args)
   dir="$TMP_ROOT/announce-args/bin"
   mkdir -p "$dir"
-  cat > "$dir/no-mistakes-fixture" <<'SH'
+  cat > "$dir/sample-tool-fixture" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--version" ]; then
-  printf 'no-mistakes version v1.46.0\n'
+  printf 'sample-tool version v1.46.0\n'
   exit 0
 fi
-printf 'A new version of no-mistakes is available: v1.46.0 -> v1.53.0\n' >&2
-printf 'Usage: no-mistakes <command>\n'
+printf 'A new version of sample-tool is available: v1.46.0 -> v1.53.0\n' >&2
+printf 'Usage: sample-tool <command>\n'
 SH
-  chmod 0755 "$dir/no-mistakes-fixture"
+  chmod 0755 "$dir/sample-tool-fixture"
   out="$home/out.txt"
 
-  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  write_config "$home" '{"tools":[{"name":"sample-tool","command":"sample-tool-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of sample-tool is available: [^ ]+ -> [^ ]+"}]}'
   run_check "$home" "$(fixture_path "$dir")" "$out"
   report=$(cat "$out")
-  assert_contains "$report" "no-mistakes update available: A new version of no-mistakes is available: v1.46.0 -> v1.53.0" "the announcement was not read from the command that carries it"
+  assert_contains "$report" "sample-tool update available: A new version of sample-tool is available: v1.46.0 -> v1.53.0" "the announcement was not read from the command that carries it"
   assert_not_contains "$report" "check failed" "the version probe stopped reporting this copy's version"
 
   # Control: the same tool watched without announce_args sees only the version
   # probe, which never carries the announcement, so the update is missed.
   quiet_home=$(make_home announce-args-control)
-  write_config "$quiet_home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  write_config "$quiet_home" '{"tools":[{"name":"sample-tool","command":"sample-tool-fixture","version_args":["--version"],"announce_pattern":"A new version of sample-tool is available: [^ ]+ -> [^ ]+"}]}'
   run_check "$quiet_home" "$(fixture_path "$dir")" "$quiet_home/out.txt"
   [ ! -s "$quiet_home/out.txt" ] || fail "the control home reported without a second command, so this test proves nothing: $(cat "$quiet_home/out.txt")"
   pass "an announcement carried by another command is read from that command"
@@ -278,11 +278,11 @@ test_unusable_announce_pattern_is_reported_not_read_as_silence() {
   # prevent. It is reported as that tool's own check failure.
   home=$(make_home bad-pattern)
   dir="$TMP_ROOT/bad-pattern/bin"
-  make_copy "$dir" no-mistakes-fixture 'no-mistakes version v1.46.0'
-  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","announce_pattern":"A new version of no-mistakes is available: ([^ ]+ -> [^ ]+"}]}'
+  make_copy "$dir" sample-tool-fixture 'sample-tool version v1.46.0'
+  write_config "$home" '{"tools":[{"name":"sample-tool","command":"sample-tool-fixture","announce_pattern":"A new version of sample-tool is available: ([^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$dir")" "$out"
-  assert_contains "$(cat "$out")" "no-mistakes check failed: announce_pattern is not a usable extended regular expression" "a pattern that cannot be used was read as nothing to announce"
+  assert_contains "$(cat "$out")" "sample-tool check failed: announce_pattern is not a usable extended regular expression" "a pattern that cannot be used was read as nothing to announce"
 
   # Arming is a deliberate operator action, so the same registry refuses it
   # rather than arming a check with a source that can never fire.
@@ -304,13 +304,13 @@ test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep() {
   dir="$TMP_ROOT/pattern-blind/announce/bin"
   make_copy "$stale" "$TOOL" 'herdr 0.8.0'
   make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
-  make_copy "$dir" no-mistakes-fixture 'no-mistakes version v1.46.0'
-  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"},{\"name\":\"no-mistakes\",\"command\":\"no-mistakes-fixture\",\"announce_pattern\":\"A new version of no-mistakes is available: ([^ ]+ -> [^ ]+\"}]}"
+  make_copy "$dir" sample-tool-fixture 'sample-tool version v1.46.0'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"},{\"name\":\"sample-tool\",\"command\":\"sample-tool-fixture\",\"announce_pattern\":\"A new version of sample-tool is available: ([^ ]+ -> [^ ]+\"}]}"
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$stale:$fresh:$dir")" "$out"
   report=$(cat "$out")
   assert_contains "$report" "herdr update not in effect: PATH resolves 0.8.0 at $stale/$TOOL" "a broken pattern on another tool suppressed the PATH skew report"
-  assert_contains "$report" "no-mistakes check failed: announce_pattern is not a usable extended regular expression" "the tool whose pattern cannot be used was not named"
+  assert_contains "$report" "sample-tool check failed: announce_pattern is not a usable extended regular expression" "the tool whose pattern cannot be used was not named"
   [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "the report must stay exactly one line"
   pass "a broken pattern is reported for its own tool and the rest of the sweep still reports"
 }
@@ -324,17 +324,17 @@ test_an_unchecked_announcement_source_is_not_read_as_current() {
   home=$(make_home announce-budget)
   dir="$TMP_ROOT/announce-budget/bin"
   mkdir -p "$dir"
-  cat > "$dir/no-mistakes-fixture" <<'SH'
+  cat > "$dir/sample-tool-fixture" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--version" ]; then
-  printf 'no-mistakes version v1.46.0\n'
+  printf 'sample-tool version v1.46.0\n'
   sleep 30
   exit 0
 fi
-printf 'A new version of no-mistakes is available: v1.46.0 -> v1.53.0\n' >&2
+printf 'A new version of sample-tool is available: v1.46.0 -> v1.53.0\n' >&2
 SH
-  chmod 0755 "$dir/no-mistakes-fixture"
-  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  chmod 0755 "$dir/sample-tool-fixture"
+  write_config "$home" '{"tools":[{"name":"sample-tool","command":"sample-tool-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of sample-tool is available: [^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
   # The deadline is whole-second granular (real_epoch is `date +%s`), so a
   # budget of 1 leaves headroom anywhere in (0, 1] seconds: when the sweep
@@ -346,32 +346,32 @@ SH
   # still exhausts the budget before the announcement check.
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
   report=$(cat "$out")
-  assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
+  assert_contains "$report" "sample-tool check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
   pass "an announcement source the budget could not reach is reported, not read as current"
 }
 
 test_an_announcement_probe_that_does_not_answer_is_reported() {
   local home dir out report
-  # no-mistakes learns about a new release from the network, so the command that
+  # A tool may learn about a new release from the network, so the command that
   # carries the announcement is exactly the one that stalls on a flaky link. A
   # source that was asked and never answered must not read as a clean sweep.
   home=$(make_home announce-mute)
   dir="$TMP_ROOT/announce-mute/bin"
   mkdir -p "$dir"
-  cat > "$dir/no-mistakes-fixture" <<'SH'
+  cat > "$dir/sample-tool-fixture" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--version" ]; then
-  printf 'no-mistakes version v1.46.0\n'
+  printf 'sample-tool version v1.46.0\n'
   exit 0
 fi
 sleep 30
 SH
-  chmod 0755 "$dir/no-mistakes-fixture"
-  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  chmod 0755 "$dir/sample-tool-fixture"
+  write_config "$home" '{"tools":[{"name":"sample-tool","command":"sample-tool-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of sample-tool is available: [^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "no-mistakes check failed: $dir/no-mistakes-fixture did not answer when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
+  assert_contains "$report" "sample-tool check failed: $dir/sample-tool-fixture did not answer when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
   pass "an announcement probe that does not answer is reported, not read as current"
 }
 
@@ -379,8 +379,8 @@ test_quiet_tool_with_announce_pattern_is_silent() {
   local home dir out
   home=$(make_home announce-quiet)
   dir="$TMP_ROOT/announce-quiet/bin"
-  make_copy "$dir" no-mistakes-fixture '1.46.0'
-  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  make_copy "$dir" sample-tool-fixture '1.46.0'
+  write_config "$home" '{"tools":[{"name":"sample-tool","command":"sample-tool-fixture","announce_pattern":"A new version of sample-tool is available: [^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$dir")" "$out"
   [ ! -s "$out" ] || fail "a tool announcing nothing produced a report: $(cat "$out")"

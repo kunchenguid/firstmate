@@ -452,21 +452,6 @@ turn-end hook fires: 1
 
 Its pane showed `✓ WriteFile worker-output.txt → Accepted (+1, -0)` with no approval gate, confirming `-y` runs unattended, and `Executing Hook: fm-turn-end` in the status row after the turn.
 
-The adapter was then driven through the REAL `bin/fm-spawn.sh` and `bin/fm-control.sh` against a real Gemini pane in an isolated home:
-
-```text
-spawned gm-e2e harness=gemini kind=ship mode=no-mistakes yolo=off window=... worktree=...
-hooks installed by spawn (state/<id>.gemini-settings.json): ['BeforeAgent', 'AfterAgent', 'SessionEnd']
-t=4s   state: working · source: pane · harness busy (gemini-hook)
-t=8s   state: working · source: pane · harness busy (gemini-hook)
-after turn: v1 gen=... state=idle source=gemini-hook event=after-agent
-e2e-output.txt: SEAWORTHY
-interrupt-delivered gm-e2e harness=gemini backend=tmux verified=agent-alive cancel=unconfirmed
-after interrupt: v1 gen=... state=idle source=gemini-hook event=after-agent
-stopped gm-e2e harness=gemini backend=tmux endpoint=... worktree=...
-```
-
-The interrupt line is the one worth keeping: `AfterAgent` closed the record on a CANCELLED turn, which is why a gemini interrupt needs no `fm-interrupt` fallback event.
 A single Escape on a long turn printed `ℹ Request cancelled.`, dropped the busy token, and left the agent running; `/quit` then exited with status 0 and printed `To resume this session: gemini --resume <session-id>`, and resuming by that id restored the full transcript.
 
 ### Identity markers
@@ -1333,7 +1318,7 @@ Mid-turn the pane showed a braille spinner plus a verb, and `ctrl+c to stop` on 
 The same version rendered `Working` in one turn and `Running` in the next, so the TOKEN is matched and the verb is not.
 This row is a delivery guard for submit acknowledgement only; recorded worker state comes from the transcript fold.
 
-### Launch, lifecycle, and skills
+### Launch and lifecycle
 
 | Fact | Observed |
 | --- | --- |
@@ -1343,7 +1328,6 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 | Effort | no effort flag exists; requested effort stays in task metadata |
 | Interrupt | single Escape; the pane showed `Cancelled` and the composer returned to its placeholder, so no clear key is needed |
 | Exit | `/exit` |
-| Skill invocation | `/<skill>`; cursor discovers firstmate's user-level skills, and `/no-mistakes` autocompleted with firstmate's own description and invoked the skill |
 | Slash popup | real: the first Enter closes the popup and a SECOND Enter submits, the same hazard as grok, covered by the submit core's retried Enter |
 
 ### End-to-end

@@ -324,12 +324,22 @@ sync_project() {
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0
   fi
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
-  mode=${mode_line%% *}
-  if [ "$mode" = "local-only" ]; then
-    echo "$label: skipped: local-only project"
+  if ! mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label"); then
+    echo "$label: skipped: invalid registered project mode"
     return 0
   fi
+  mode=${mode_line%% *}
+  case "$mode" in
+    direct-PR) ;;
+    local-only)
+      echo "$label: skipped: local-only project"
+      return 0
+      ;;
+    *)
+      echo "$label: skipped: unsupported project mode: $mode"
+      return 0
+      ;;
+  esac
   if ! git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
     echo "$label: skipped: no origin remote"
     return 0

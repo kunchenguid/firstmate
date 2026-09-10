@@ -11,8 +11,8 @@
 #   GUARD 2 (detection)  - fm-guard and fm-bootstrap alarm when the primary is on
 #            a feature branch, and stay silent on the default branch or detached.
 # These cases pin: the shared lib's branch classification, the fm-guard banner,
-# the fm-bootstrap problem line, the brief assertion ordering, and the fm-spawn
-# abort - all hermetic over temp git repos and fakebins.
+# the fm-bootstrap problem line, and the fm-spawn abort - all hermetic over temp
+# git repos and fakebins.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -120,34 +120,6 @@ test_bootstrap_line() {
   pass "fm-bootstrap: TANGLE problem line fires only for a feature branch and suppresses repair commands in detect-only mode"
 }
 
-# --- GUARD 1a: brief isolation assertion ------------------------------------
-
-# The generated ship brief must carry the isolation assertion AHEAD of the
-# `git checkout -b` step, so the crewmate verifies its worktree before branching.
-test_brief_assertion_precedes_branch() {
-  local home brief iso br
-  home="$TMP_ROOT/brief-home"
-  mkdir -p "$home/data"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tangle-brief-cc3 alpha --mode no-mistakes >/dev/null 2>&1
-  brief="$home/data/tangle-brief-cc3/brief.md"
-  assert_present "$brief" "brief was not scaffolded"
-  assert_grep "blocked: launched in primary checkout, not an isolated worktree" "$brief" \
-    "brief is missing the isolation blocked-status contract"
-  assert_grep "The path check is authoritative" "$brief" \
-    "brief must make the path check authoritative"
-  assert_no_grep "A reliable test that you are in a linked worktree" "$brief" \
-    "brief must not present git-dir/common-dir as decisive"
-  assert_no_grep "they are identical in the primary checkout" "$brief" \
-    "brief must not claim the primary checkout has identical git dirs"
-  iso=$(grep -n 'launched in primary checkout, not an isolated worktree' "$brief" | head -1 | cut -d: -f1)
-  br=$(grep -n 'git checkout -b fm/' "$brief" | head -1 | cut -d: -f1)
-  if [ -z "$iso" ] || [ -z "$br" ]; then
-    fail "brief missing assertion ($iso) or branch step ($br)"
-  fi
-  [ "$iso" -lt "$br" ] || fail "isolation assertion (line $iso) must precede the branch step (line $br)"
-  pass "fm-brief: ship brief asserts worktree isolation before the branch step"
-}
-
 # --- GUARD 1b: fm-spawn isolation abort -------------------------------------
 
 # Spawn isolation uses the shared spawn fakebin (pane path + window ops).
@@ -155,7 +127,7 @@ run_spawn() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
   fm_test_spawn_brief "$home" "$id" brief
   fm_test_run_spawn "$home" "$pane" "$fakebin" \
-    "$id" "$proj" codex --mode no-mistakes --yolo off
+    "$id" "$proj" codex --mode direct-PR --yolo off
 }
 
 test_spawn_isolation_abort() {
@@ -247,7 +219,7 @@ run_spawn_record() {
   fm_test_spawn_brief "$home" "$id" brief
   FM_TMUX_REC="$rec" \
     fm_test_run_spawn "$home" "$pane" "$fakebin" \
-    "$id" "$proj" codex --mode no-mistakes --yolo off
+    "$id" "$proj" codex --mode direct-PR --yolo off
 }
 
 test_spawn_tmux_window_construction() {
@@ -289,6 +261,5 @@ test_spawn_tmux_window_construction() {
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
-test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_tmux_window_construction

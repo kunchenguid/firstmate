@@ -5,7 +5,7 @@
 # worktree. Its restart supervisor sits above the serving child, so killing the
 # recorded worker pid only makes the supervisor respawn, and nothing else ever
 # stops it. Observed 2026-08-07 as 29 workers at ppid 1, 1-2 days old, each
-# still appending to a log in a pruned no-mistakes gate worktree.
+# still appending to a log in a pruned delivery-gate worktree.
 #
 # bin/fm-remote-job-reap-orphans.sh is a machine-wide sweep by design, so these
 # cases assert only about their own fixture processes. Any other worker it

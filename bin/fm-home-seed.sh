@@ -15,10 +15,10 @@
 #       project list, and omitting both still fails loudly. A project-less seed
 #       refuses a home with project clones or project-registry entries, so it
 #       never converts populated homes in place. The charter brief
-#       is copied to data/charter.md, newly cloned no-mistakes projects are
-#       initialized, an ignored .fm-secondmate-parent binding is published before
-#       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
-#       Seeding is transactional: on validation, clone, init, or registry failure,
+#       is copied to data/charter.md, an ignored .fm-secondmate-parent binding is
+#       published before the .fm-secondmate-home identity marker, and
+#       data/secondmates.md is updated.
+#       Seeding is transactional: on validation, clone, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
 #       target is safe; a failed return warns because the lease may still be held.
@@ -457,18 +457,26 @@ EOF
 }
 
 clone_project() {
-  local project=$1 home=$2 src dst url dst_url mode
+  local project=$1 home=$2 src dst url dst_url mode mode_line
   src="$PROJECTS/$project"
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
+  mode_line=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project") || return 1
   read -r mode _ <<EOF
-$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$mode_line
 EOF
-  if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
-    return 1
-  fi
+  case "$mode" in
+    direct-PR) ;;
+    local-only)
+      echo "error: project $project is local-only; secondmate routes support only direct-PR projects" >&2
+      return 1
+      ;;
+    *)
+      echo "error: project $project has unsupported delivery mode: $mode" >&2
+      return 1
+      ;;
+  esac
   if [ -e "$dst" ]; then
     [ -d "$dst" ] || { echo "error: seeded project $project exists at $dst but is not a directory" >&2; return 1; }
     git -C "$dst" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: seeded project $project at $dst is not a git repo" >&2; return 1; }
@@ -485,17 +493,25 @@ EOF
 }
 
 validate_seed_project() {
-  local project=$1 src mode url
+  local project=$1 src mode mode_line url
   src="$PROJECTS/$project"
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
+  mode_line=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project") || return 1
   read -r mode _ <<EOF
-$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$mode_line
 EOF
-  if [ "$mode" = local-only ]; then
-    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
-    return 1
-  fi
+  case "$mode" in
+    direct-PR) ;;
+    local-only)
+      echo "error: project $project is local-only; secondmate routes support only direct-PR projects" >&2
+      return 1
+      ;;
+    *)
+      echo "error: project $project has unsupported delivery mode: $mode" >&2
+      return 1
+      ;;
+  esac
   url=$(git -C "$src" remote get-url origin 2>/dev/null || true)
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
 }
@@ -616,13 +632,6 @@ seed_remove_created_project() {
   rm -rf -- "$abs_project" 2>/dev/null || true
 }
 
-seed_project_was_created() {
-  local project_path=$1
-  [ -n "${SEED_CREATED_PROJECTS_FILE:-}" ] || return 1
-  [ -f "$SEED_CREATED_PROJECTS_FILE" ] || return 1
-  grep -Fx -- "$project_path" "$SEED_CREATED_PROJECTS_FILE" >/dev/null 2>&1
-}
-
 seed_rollback() {
   local project_path
   [ "${SEED_ROLLBACK_ACTIVE:-0}" = 1 ] || return 0
@@ -670,14 +679,6 @@ registry_line_for_project() {
   printf '%s\n' "$line"
 }
 
-project_mode_in_home() {
-  local home=$1 project=$2 mode
-  read -r mode _ <<EOF
-$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
-EOF
-  printf '%s\n' "$mode"
-}
-
 sync_project_registry() {
   local home=$1 sub_reg tmp project line today names
   shift
@@ -704,28 +705,6 @@ sync_project_registry() {
     printf '%s\n' "$line" >> "$tmp"
   done
   mv "$tmp" "$sub_reg"
-}
-
-initialize_no_mistakes_project() {
-  local home=$1 project=$2 created=$3 mode dst
-  mode=$(project_mode_in_home "$home" "$project")
-  [ "$mode" = no-mistakes ] || return 0
-  dst=$(validate_project_destination "$home" "$project") || return 1
-  if git -C "$dst" remote get-url no-mistakes >/dev/null 2>&1; then
-    return 0
-  fi
-  if [ "$created" != 1 ]; then
-    echo "error: seeded project $project at $dst is not initialized for no-mistakes; refusing to mutate preexisting clone" >&2
-    return 1
-  fi
-  command -v no-mistakes >/dev/null 2>&1 || {
-    echo "error: no-mistakes command not found; cannot initialize $project in $home" >&2
-    return 1
-  }
-  ( cd "$dst" && no-mistakes init && no-mistakes doctor ) || {
-    echo "error: failed to initialize no-mistakes for $project at $dst" >&2
-    return 1
-  }
 }
 
 write_registry() {
@@ -934,14 +913,6 @@ seed_home() {
     clone_project "$project" "$home"
   done
   sync_project_registry "$home" "$@"
-  for project in "$@"; do
-    project_dst=$(validate_project_destination "$home" "$project") || return 1
-    if seed_project_was_created "$project_dst"; then
-      initialize_no_mistakes_project "$home" "$project" 1
-    else
-      initialize_no_mistakes_project "$home" "$project" 0
-    fi
-  done
 
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
 

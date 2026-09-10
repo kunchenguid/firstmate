@@ -59,7 +59,7 @@ new_world() {
   git init -q -b main "$w/main"
   # Mirror the real repo: the gitignored operational dirs never dirty a worktree,
   # so a secondmate home's data/state/projects can never block its fast-forward.
-  printf 'projects/\nstate/\ndata/\n.no-mistakes/\nconfig/crew-harness\nscratchpad*\n' > "$w/main/.gitignore"
+  printf 'projects/\nstate/\ndata/\nconfig/crew-harness\nscratchpad*\n' > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
   mkdir -p "$w/main/bin" "$w/main/.agents/skills"
@@ -367,15 +367,6 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.46.0 (fake)'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/no-mistakes"
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -915,7 +906,7 @@ new_remote_world() {
   w="$TMP_ROOT/$name"
   mkdir -p "$w/home/state" "$w/home/data"
   git init -q -b main "$w/main"
-  printf 'projects/\nstate/\ndata/\nconfig/\n.no-mistakes/\n.fm-secondmate-home\n' > "$w/main/.gitignore"
+  printf 'projects/\nstate/\ndata/\nconfig/\n.fm-secondmate-home\n' > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   mkdir -p "$w/main/bin" "$w/main/.agents/skills"
   printf 'echo a\n' > "$w/main/bin/tool.sh"

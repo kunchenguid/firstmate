@@ -661,7 +661,7 @@ prefetch_task_observations() {  # <meta> <id>
 }
 
 # Current-state and endpoint reads are independent observations. Start each
-# task's pair together so five local workers pay one slow no-mistakes response
+# task's pair together so five local workers pay one slow current-state response
 # window rather than five in series, while every command bound remains owned by
 # fm-timeout-lib.sh.
 prefetch_task_current_states() {

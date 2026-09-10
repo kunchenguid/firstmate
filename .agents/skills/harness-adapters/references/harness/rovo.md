@@ -66,8 +66,8 @@ Treat the ~1h access-token lifetime as an ordinary operational fact, not a non-n
 ## Skill-loading interop gap
 
 rovo's skill loader rejects every firstmate skill: `Invalid skill definition in .../SKILL.md: 'metadata -> internal': Input should be a valid string`, because firstmate's `metadata.internal` is a boolean and rovo's schema wants a string.
-This blocks `/no-mistakes` and every other firstmate skill invocation inside a rovo worker until firstmate's `SKILL.md` frontmatter is made rovo-compatible (a separate, deferred follow-up - it touches every skill file and the installer contract, per `../../firstmate-coding-guidelines/SKILL.md`).
-A `no-mistakes`-mode rovo ship crewmate is blocked by this gap; a rovo scout, which invokes no skill, is unaffected.
+This blocks every firstmate skill invocation inside a rovo worker until firstmate's `SKILL.md` frontmatter is made rovo-compatible (a separate, deferred follow-up - it touches every skill file and the installer contract, per `../../firstmate-coding-guidelines/SKILL.md`).
+A ship crewmate that needs a firstmate skill is blocked by this gap, while a rovo scout, which invokes no skill, is unaffected.
 
 ## ACP as a future upgrade
 

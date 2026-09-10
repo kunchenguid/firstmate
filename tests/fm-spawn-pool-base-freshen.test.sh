@@ -169,7 +169,7 @@ test_stale_pool_base_refreshes_before_branching() {
   rec=$(make_case current-base "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should refresh a stale pooled worktree"
   assert_contains "$out" "spawned $id" "spawn did not report success"
@@ -185,7 +185,7 @@ test_stale_pool_base_refreshes_before_branching() {
 
   id='pool-current-base-repeat-r1'
   fm_test_spawn_brief "$HOME_DIR" "$id"
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "repeating the base refresh should be idempotent"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
@@ -205,7 +205,7 @@ test_non_main_default_branch_refreshes_before_branching() {
   rec=$(make_case current-trunk "$id" trunk)
   read_case_record "$rec"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should refresh a stale pooled worktree on a non-main default branch"
   current=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
@@ -247,7 +247,7 @@ test_originless_pool_launches_without_a_freshness_fetch() {
     || fail "fixture unexpectedly configured an origin remote"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should launch a local-only pooled worktree with no origin"$'\n'"$out"
   assert_contains "$out" "spawned $id" "spawn did not report success for the origin-less pool"
@@ -270,7 +270,7 @@ test_originless_dirty_pool_refuses_without_discarding_work() {
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty origin-less pooled worktree"
   assert_contains "$out" "is not clean" \
@@ -290,7 +290,7 @@ test_origin_config_without_url_refuses_pool() {
   git -C "$POOL_DIR" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an origin configuration with no URL"
   assert_contains "$out" "could not fetch origin" \
@@ -310,7 +310,7 @@ test_empty_origin_config_section_refuses_pool() {
   printf '\n[remote "origin"]\n' >> "$config"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an empty origin configuration section"
   assert_contains "$out" "could not fetch origin" \
@@ -332,7 +332,7 @@ test_empty_only_included_origin_config_section_launches_pool() {
   git -C "$POOL_DIR" config include.path "$(basename "$included")"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should proceed when an included empty origin section is not enumerable"$'\n'"$out"
   assert_contains "$out" "spawned $id" "spawn did not report success for the undetectable included section"
@@ -354,7 +354,7 @@ test_inactive_conditional_origin_include_launches_pool() {
   git -C "$POOL_DIR" config 'includeIf.gitdir:/never/matches/this/worktree/.path' "$included"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should ignore an inactive conditional origin include"$'\n'"$out"
   assert_contains "$out" "spawned $id" "spawn did not report success with an inactive origin include"
@@ -371,7 +371,7 @@ test_unreachable_origin_refuses_stale_pool_base() {
   git -C "$POOL_DIR" remote set-url origin "file://$CASE_DIR/missing-origin.git"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unreachable origin"
   assert_contains "$out" "could not fetch origin" \
@@ -417,7 +417,7 @@ test_dirty_pool_refuses_without_discarding_work() {
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty pooled worktree"
   assert_contains "$out" "is not clean" "spawn did not clearly refuse a dirty pooled worktree"
@@ -440,7 +440,7 @@ test_unresolved_remote_default_refuses_pool() {
   git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/missing-default
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unresolved remote default branch"
   assert_contains "$out" "could not resolve origin's current default branch" \
@@ -520,7 +520,7 @@ EOF
 strand_submodule_pin_via_spawn() {  # <seed-id>
   local id=$1 out status
   fm_test_spawn_brief "$HOME_DIR" "$id"
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" "the spawn that moves the submodule pin should succeed"
   assert_contains "$out" "spawned $id" "the spawn that moves the submodule pin did not report success"
@@ -540,7 +540,7 @@ test_stale_submodule_pin_explains_itself() {
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   before_sub=$(git -C "$POOL_DIR/ui" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "the second spawn launched from a slot carrying a stale submodule pin"
   assert_contains "$out" "stale submodule checkout" \
@@ -587,7 +587,7 @@ test_unpushed_submodule_commit_is_still_uncommitted_work() {
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   before_sub=$unpushed
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched from a slot holding an unpushed submodule commit"
   assert_contains "$out" "refusing to discard uncommitted work" \
@@ -618,7 +618,7 @@ test_work_inside_submodule_is_still_uncommitted_work() {
   git -C "$POOL_DIR/ui" checkout --quiet "$SUBPIN2"
   printf 'work that must survive\n' > "$POOL_DIR/ui/keep-me.txt"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched from a slot holding work inside a submodule"
   assert_contains "$out" "refusing to discard uncommitted work" \
@@ -640,7 +640,7 @@ test_stale_pin_carrying_real_work_is_not_called_stale() {
   # the refusal must stay the conservative one.
   printf 'work that must survive\n' > "$POOL_DIR/ui/keep-me.txt"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched from a slot with a stale pin and work inside it"
   assert_contains "$out" "refusing to discard uncommitted work" \
@@ -662,7 +662,7 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   # The conservative verdict must not arrive contradicted by a stale-pin line.
   printf 'notes the operator still wants\n' > "$POOL_DIR/zz-notes.txt"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched from a slot with a stale pin beside an untracked file"
   assert_contains "$out" "refusing to discard uncommitted work" \

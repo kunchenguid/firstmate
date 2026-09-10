@@ -2,44 +2,10 @@
 # Behavior tests for bin/fm-crew-state.sh - the deterministic crew-current-state
 # helper.
 #
-# The status file (state/<id>.status) is a best-effort append-only EVENT LOG, so
-# `tail -1` of it reports the last event, not the current state. fm-crew-state
-# reads the AUTHORITATIVE source (a matching no-mistakes run-step, else the
-# semantic busy-state contract) and reconciles the possibly-stale log against it. These
-# cases pin every branch of that logic, hermetically, over real throwaway git
-# repos with a fake `no-mistakes` (run-step source) and a fake `tmux` (pane
-# source):
-#   (a) active run-step is authoritative                          -> run-step
-#   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
-#   (b2) blocked log claiming the daemon/timeout while the run is fixing with
-#       fresh activity = superseded BECAUSE THE RUN IS ALIVE; the same claim
-#       a genuine socket-refusal claim over a stale or terminal run record
-#       remains blocked, and an ordinary blocked log over a live run keeps the generic
-#       superseded reading
-#   (c) genuine parked run + needs-decision log = NOT superseded  -> run-step
-#   (d) terminal run-step (passed/failed) is authoritative        -> run-step
-#   (d2) terminal failed run whose only failure is an orphaned ci monitor
-#       after checks read green                                   -> done
-#   (e) cross-branch attribution: this branch's own run found via list lookup
-#   (e2) several runs bound to one worktree: the live one outranks the corpse
-#        (an unclassifiable status word keeps the ledger's newest-first order)
-#   (e3) the live sibling's head was never fetched into the task copy: it still
-#        outranks a terminal row sitting at the worktree's exact commit
-#   (f) no run + semantic busy                                    -> pane
-#   (g) no run + semantic idle falls to the status-log verb       -> status-log
-#   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
-#   (i) kind=scout skips the run lookup                           -> pane/status-log
-#   (j) torn-down worktree / missing meta                         -> unknown/none
-#   (k) crew_is_provably_working end-to-end over the REAL helper (not a canned
-#       fake fm-crew-state.sh verdict): cross-branch attribution via the runs
-#       list -> absorbed; genuinely no run anywhere + idle pane -> surfaced.
-#       This is the direct regression pair for the 2026-07-02 herdr incident,
-#       proving the watcher's own absorb-only-when-provably-working predicate
-#       benefits from the fix in both directions.
-#   (l) coarse runs-ledger fallback: a terminal failed record with the daemon
-#       provably down (explicit daemon-status probe fails) reads unknown -
-#       "unverified", never failed; the same record with the daemon up stays
-#       failed.
+# Current state comes from the semantic busy-state contract and endpoint
+# liveness, with status-log fallback only when the crew is known idle.
+# These cases preserve declared waits, generic captain decisions, and the
+# distinction between an unreachable backend and a proved-dead endpoint.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -51,55 +17,19 @@ CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
 fm_git_identity fmtest fmtest@example.invalid
 
-# A real git repo checked out on <branch>, so the helper's branch attribution
-# (git symbolic-ref) resolves like it would for a live crew worktree.
+# A real git repo checked out on the crew's task branch.
 make_repo_on_branch() {  # <dir> <branch>
   local dir=$1 branch=$2
   mkdir -p "$dir"
   git -C "$dir" init -q
   git -C "$dir" commit -q --allow-empty -m init
   git -C "$dir" checkout -q -b "$branch"
-  # Real worktree HEAD for run head-binding (fixtures read FM_FAKE_RUN_HEAD).
-  FM_FAKE_RUN_HEAD=$(git -C "$dir" rev-parse HEAD)
-  export FM_FAKE_RUN_HEAD
 }
 
-# A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
-# fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
-# command surface the helper uses: `axi status`, `axi status --run <id>` (the
-# `axi` surface - no runs-listing subcommand exists under it, verified against
-# the real CLI), and the actual top-level run-listing command, `no-mistakes
-# runs --limit N`, which is plain text - no run id, no quoting - serving
-# FM_FAKE_RUNS_LIST verbatim.
+# Backend fakes serve busy, idle, missing, and unreadable endpoint states.
 make_fakebin() {  # <dir> -> echoes fakebin path
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  axi)
-    shift
-    case "${1:-}" in
-      status)
-        shift
-        if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
-        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
-      logs)
-        printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
-    esac
-    ;;
-  runs)
-    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
-  daemon)
-    # FM_FAKE_DAEMON_DOWN: the explicit down-probe fails, as the real
-    # `no-mistakes daemon status` does when the daemon is not running.
-    [ "${FM_FAKE_DAEMON_DOWN:-0}" = 1 ] && exit 1
-    printf '%s\n' 'daemon running (pid 4242)'
-    exit 0 ;;
-esac
-exit 0
-SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -168,22 +98,11 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/tmux" "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
-make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
-  local dir=$1 tb="$1/notimeoutbin" tool real
-  mkdir -p "$tb"
-  for tool in bash git grep sed head cut tail dirname perl; do
-    real=$(command -v "$tool" || true)
-    [ -n "$real" ] || fail "missing tool for no-timeout path: $tool"
-    ln -s "$real" "$tb/$tool"
-  done
-  printf '%s\n' "$tb"
-}
-
-# Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
+# Run the helper for one case dir. FM_FAKE_* busy and endpoint flags are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
@@ -206,9 +125,6 @@ arm_idle_record() {  # <state-dir> <id>
 # assignments below stay exported into the fakes without an `export VAR=$(...)`
 # command-substitution assignment (SC2155).
 reset_fakes() {
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_AXI_STATUS_RUN=""
-  FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
@@ -218,1149 +134,8 @@ reset_fakes() {
   FM_FAKE_HERDR_READ_FAIL=0
   FM_FAKE_HERDR_HUSK=0
   FM_FAKE_HERDR_AGENT_STATUS=""
-  FM_FAKE_CI_LOGS=""
-  FM_FAKE_DAEMON_DOWN=0
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_DAEMON_DOWN
-}
-
-# --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
-
-run_running() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: running
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: ""
-  findings: none
-  steps[2]{step,status,findings,duration_ms}:
-    intent,completed,0,0
-    review,running,0,0
-EOF
-}
-
-run_fixing() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: fixing
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: ""
-  findings: none
-EOF
-}
-
-# A fixing run whose active step reports FRESH activity. `axi status` emits the
-# active_steps table only while a step is running or fixing, and leaves
-# last_activity unprefixed while step-log or agent lifecycle events keep
-# arriving - that is the client's own recency verdict.
-run_fixing_active_recent() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: fixing
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: ""
-  findings: none
-  active_steps[1]{step,active_for,last_activity,agent_pid,round}:
-    review,12m3s,8s,44121,"auto-fix 1/3"
-EOF
-}
-
-# The same run gone QUIET: the client prefixes last_activity with `quiet` once
-# nothing has arrived for longer than its configured quiet warning. This is the
-# shape a run record keeps when the daemon really did die under it.
-run_fixing_active_quiet() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: fixing
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: ""
-  findings: none
-  active_steps[1]{step,active_for,last_activity,agent_pid,round}:
-    review,42m8s,"quiet 31m2s",44121,"auto-fix 1/3"
-EOF
-}
-
-run_top_level_ci() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: ci
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/2"
-  findings: none
-EOF
-}
-
-run_parked() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: awaiting_approval
-  awaiting_agent: parked 2m10s
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: ""
-  findings[2]{id,severity,file,line,action,description}:
-    r1,warning,a.go,,auto-fix,ignored error
-    r2,error,b.go,,ask-user,changes product behavior
-gate: review
-EOF
-}
-
-run_parked_scalar_gate_running() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: running
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: ""
-  findings[1]{id,severity,file,line,action,description}:
-    r1,error,b.go,,ask-user,changes product behavior
-gate: review
-EOF
-}
-
-run_parked_in_gate_block() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: running
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: ""
-  findings[1]{id,severity,file,line,action,description}:
-    r1,error,b.go,,ask-user,changes product behavior
-gate:
-  step: review
-  status: fix_review
-steps[3]{step,status,findings,duration_ms}:
-  intent,completed,0,0
-  review,fix_review,1,0
-  test,pending,0,0
-EOF
-}
-
-run_passed() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: completed
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/1"
-  findings: none
-outcome: passed
-EOF
-}
-
-run_failed() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: completed
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: ""
-  findings: none
-outcome: failed
-EOF
-}
-
-# The 2026-09-05 jr-voice orphaned-CI-monitor shape: every substantive step
-# completed, only ci failed (after the shared daemon restarted under its
-# merge poll), and GitHub read the PR green and mergeable.
-run_failed_ci_orphan() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: failed
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/203"
-  findings: none
-outcome: failed
-steps[9]{step,status,findings,duration_ms}:
-  intent,completed,0,0
-  rebase,completed,0,0
-  review,completed,0,0
-  test,completed,0,0
-  document,completed,0,0
-  lint,completed,0,0
-  push,completed,0,0
-  pr,completed,0,0
-  ci,failed,0,76127890
-EOF
-}
-
-# Same shape but with no outcome line: only top-level status reads failed.
-run_failed_ci_orphan_status_only() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: failed
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/203"
-  findings: none
-steps[9]{step,status,findings,duration_ms}:
-  intent,completed,0,0
-  rebase,completed,0,0
-  review,completed,0,0
-  test,completed,0,0
-  document,completed,0,0
-  lint,completed,0,0
-  push,completed,0,0
-  pr,completed,0,0
-  ci,failed,0,76127890
-EOF
-}
-
-# A second failed step (lint) disqualifies the orphaned-monitor reclassification.
-run_failed_ci_orphan_second_failure() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: failed
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/203"
-  findings: none
-steps[9]{step,status,findings,duration_ms}:
-  intent,completed,0,0
-  rebase,completed,0,0
-  review,completed,0,0
-  test,completed,0,0
-  document,completed,0,0
-  lint,failed,0,0
-  push,completed,0,0
-  pr,completed,0,0
-  ci,failed,0,76127890
-EOF
-}
-
-run_ci_monitoring() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: running
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/2"
-  findings: none
-  steps[4]{step,status,findings,duration_ms}:
-    intent,completed,0,0
-    review,completed,0,0
-    push,completed,0,0
-    ci,running,0,0
-EOF
-}
-
-run_fixing_ci_running() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: fixing
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/2"
-  findings: none
-  steps[4]{step,status,findings,duration_ms}:
-    intent,completed,0,0
-    review,completed,0,0
-    push,completed,0,0
-    ci,running,0,0
-EOF
-}
-
-run_ci_fixing() {  # <branch>
-  cat <<EOF
-run:
-  id: "01RUN"
-  branch: $1
-  status: fixing
-  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
-  pr: "https://github.com/o/r/pull/2"
-  findings: none
-  steps[4]{step,status,findings,duration_ms}:
-    intent,completed,0,0
-    review,completed,0,0
-    push,completed,0,0
-    ci,fixing,0,0
-EOF
-}
-
-# ---------------------------------------------------------------------------
-# (a) active run-step is authoritative
-test_active_run_is_authoritative() {
-  reset_fakes
-  local d; d=$(new_case active)
-  make_repo_on_branch "$d/wt" fm/feat-a
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-a.meta" "window=fm:fm-feat-a" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/feat-a)"
-  local out; out=$(run_crew_state "$d" feat-a)
-  assert_contains "$out" "state: working" "active run -> working"
-  assert_contains "$out" "source: run-step" "active run -> run-step source"
-  assert_contains "$out" "validating (running)" "active run reports the step"
-  pass "active run-step is authoritative"
-}
-
-# (b) needs-decision log + a resumed (running/fixing) run = SUPERSEDED
-test_stale_needs_decision_superseded() {
-  reset_fakes
-  local d; d=$(new_case superseded)
-  make_repo_on_branch "$d/wt" fm/feat-b
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-b.meta" "window=fm:fm-feat-b" "worktree=$d/wt" "kind=ship"
-  printf 'working: started\nneeds-decision: pick A or B\n' > "$d/state/feat-b.status"
-  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-b)"
-  local out; out=$(run_crew_state "$d" feat-b)
-  assert_contains "$out" "state: working" "resumed run -> working despite needs-decision log"
-  assert_contains "$out" "source: run-step" "resumed run -> run-step source"
-  assert_contains "$out" "superseded" "stale needs-decision log flagged superseded"
-  pass "stale needs-decision over active run is superseded"
-}
-
-# blocked log + a resumed run is also superseded
-test_stale_blocked_superseded() {
-  reset_fakes
-  local d; d=$(new_case superseded-blocked)
-  make_repo_on_branch "$d/wt" fm/feat-bb
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-bb.meta" "window=fm:fm-feat-bb" "worktree=$d/wt" "kind=ship"
-  printf 'blocked: waiting on review answer\n' > "$d/state/feat-bb.status"
-  FM_FAKE_AXI_STATUS="$(run_running fm/feat-bb)"
-  local out; out=$(run_crew_state "$d" feat-bb)
-  assert_contains "$out" "state: working" "resumed run -> working despite blocked log"
-  assert_contains "$out" "superseded" "stale blocked log flagged superseded"
-  pass "stale blocked over active run is superseded"
-}
-
-# A crew whose drive call timed out or was killed by its harness command limit
-# routinely blocks claiming the pipeline died. The daemon accepts `respond`
-# immediately and runs the fix round in the background, so such a claim over a
-# run that is fixing WITH fresh activity is contradicted by the run itself: the
-# supervisor answer is to steer a reattach, not to escalate a dead pipeline.
-test_daemon_claim_over_live_run_reads_run_alive() {
-  reset_fakes
-  local d; d=$(new_case daemon-claim-live)
-  make_repo_on_branch "$d/wt" fm/feat-dl
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dl.meta" "window=fm:fm-feat-dl" "worktree=$d/wt" "kind=ship"
-  printf 'blocked: no-mistakes daemon unreachable, drive run: read response: i/o timeout\n' \
-    > "$d/state/feat-dl.status"
-  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-dl)"
-  local out; out=$(run_crew_state "$d" feat-dl)
-  assert_contains "$out" "state: working" "live run beats the crew's death claim"
-  assert_contains "$out" "source: run-step" "live run -> run-step source"
-  assert_contains "$out" "run alive" "daemon claim over a live run is named as run alive"
-  assert_contains "$out" "reattach" "the reading names the reattach steer"
-  assert_not_contains "$out" "superseded by active run" \
-    "the daemon claim gets the sharper reading, not the generic one"
-  pass "daemon/timeout blocked claim over a live fixing run reads as run alive"
-}
-
-# A genuine refused socket outranks the persisted fixing record, which can
-# survive after the daemon exits.
-test_socket_refusal_over_stale_fixing_run_reports_blocked() {
-  reset_fakes
-  local d; d=$(new_case daemon-socket-refused)
-  make_repo_on_branch "$d/wt" fm/feat-dq
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dq.meta" "window=fm:fm-feat-dq" "worktree=$d/wt" "kind=ship"
-  printf 'blocked: no-mistakes daemon socket refused connections\n' \
-    > "$d/state/feat-dq.status"
-  FM_FAKE_AXI_STATUS="$(run_fixing_active_quiet fm/feat-dq)"
-  local out; out=$(run_crew_state "$d" feat-dq)
-  assert_contains "$out" "state: blocked" "socket refusal outranks a stale fixing record"
-  assert_contains "$out" "source: status-log" "socket refusal remains status-log evidence"
-  assert_contains "$out" "socket refused connections" "socket failure is preserved"
-  assert_not_contains "$out" "run alive" "stale fixing record is not reported alive"
-
-  # Exercise the exact alternate wordings emitted by the generated crew rule.
-  printf 'blocked: no-mistakes daemon socket refuses connections\n' \
-    > "$d/state/feat-dq.status"
-  out=$(run_crew_state "$d" feat-dq)
-  assert_contains "$out" "state: blocked" "socket-refuses wording outranks a stale fixing record"
-  assert_not_contains "$out" "state: working" "socket-refuses wording cannot be suppressed by a stale active record"
-
-  printf 'blocked: no-mistakes daemon socket is missing\n' \
-    > "$d/state/feat-dq.status"
-  out=$(run_crew_state "$d" feat-dq)
-  assert_contains "$out" "state: blocked" "missing socket outranks a stale fixing record"
-  assert_contains "$out" "source: status-log" "missing socket remains status-log evidence"
-  assert_not_contains "$out" "state: working" "missing socket cannot be suppressed by a stale active record"
-  pass "socket refusal or missing socket over a stale fixing run reports blocked"
-}
-
-# A terminal run record can be the final persisted state after the daemon exits.
-# Positive socket-failure evidence must not be discarded merely because that
-# attributed record no longer has an active status.
-test_socket_refusal_over_terminal_run_reports_blocked() {
-  reset_fakes
-  local d; d=$(new_case daemon-socket-refused-terminal)
-  make_repo_on_branch "$d/wt" fm/feat-dqt
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dqt.meta" "window=fm:fm-feat-dqt" "worktree=$d/wt" "kind=ship"
-  printf 'blocked: no-mistakes daemon socket refused connections\n' \
-    > "$d/state/feat-dqt.status"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-dqt)"
-  local out; out=$(run_crew_state "$d" feat-dqt)
-  assert_contains "$out" "state: blocked" "socket refusal outranks a terminal run record"
-  assert_contains "$out" "source: status-log" "terminal run cannot suppress socket-failure evidence"
-  assert_not_contains "$out" "state: failed" "terminal run state is not emitted over socket-failure evidence"
-  pass "socket refusal over a terminal attributed run reports blocked"
-}
-
-# And the claim half: an ordinary blocked line over the same live run keeps the
-# generic reading, so the sharper one cannot fire on every superseded block.
-test_ordinary_blocked_over_live_run_keeps_plain_superseded() {
-  reset_fakes
-  local d; d=$(new_case ordinary-blocked-live)
-  make_repo_on_branch "$d/wt" fm/feat-ob
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ob.meta" "window=fm:fm-feat-ob" "worktree=$d/wt" "kind=ship"
-  printf 'blocked: database upload failed with broken pipe\n' > "$d/state/feat-ob.status"
-  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-ob)"
-  local out; out=$(run_crew_state "$d" feat-ob)
-  assert_contains "$out" "state: working" "ordinary blocked log over an active run -> working"
-  assert_contains "$out" "superseded by active run" "ordinary blocked keeps the generic reading"
-  assert_not_contains "$out" "run alive" "broken pipe is not a pipeline-unreachable alias"
-  pass "broken-pipe blocker over a live run keeps the plain superseded reading"
-}
-
-# The genuine daemon-down case still reaches the supervisor as blocked: the
-# socket refused connections and no run is executing anywhere.
-test_genuine_daemon_down_reports_blocked() {
-  reset_fakes
-  local d; d=$(new_case daemon-down)
-  make_repo_on_branch "$d/wt" fm/feat-dd
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dd.meta" "window=fm:fm-feat-dd" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'blocked: no-mistakes daemon socket refused connections\n' > "$d/state/feat-dd.status"
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" feat-dd
-  local out; out=$(run_crew_state "$d" feat-dd)
-  assert_contains "$out" "state: blocked" "a genuine daemon-down claim with no run stays blocked"
-  assert_contains "$out" "source: status-log" "no run -> status-log source"
-  assert_not_contains "$out" "run alive" "nothing is alive to report"
-  pass "genuine daemon-down blocked line still reports blocked"
-}
-
-# (c) genuine parked run + needs-decision log AGREE -> parked, NOT superseded
-test_genuine_parked_not_superseded() {
-  reset_fakes
-  local d; d=$(new_case parked)
-  make_repo_on_branch "$d/wt" fm/feat-c
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-c.meta" "window=fm:fm-feat-c" "worktree=$d/wt" "kind=ship"
-  printf 'needs-decision: review gate\n' > "$d/state/feat-c.status"
-  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-c)"
-  local out; out=$(run_crew_state "$d" feat-c)
-  assert_contains "$out" "state: parked" "genuine parked run -> parked"
-  assert_contains "$out" "source: run-step" "parked -> run-step source"
-  assert_contains "$out" "2 finding(s)" "parked includes gate finding count"
-  assert_contains "$out" "ask-user" "parked surfaces ask-user finding"
-  assert_not_contains "$out" "superseded" "agreeing parked+needs-decision not flagged stale"
-  pass "genuine parked run is not flagged superseded"
-}
-
-test_scalar_gate_parked_not_superseded() {
-  reset_fakes
-  local d; d=$(new_case parked-scalar-gate)
-  make_repo_on_branch "$d/wt" fm/feat-cs
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cs.meta" "window=fm:fm-feat-cs" "worktree=$d/wt" "kind=ship"
-  printf 'needs-decision: review gate\n' > "$d/state/feat-cs.status"
-  FM_FAKE_AXI_STATUS="$(run_parked_scalar_gate_running fm/feat-cs)"
-  local out; out=$(run_crew_state "$d" feat-cs)
-  assert_contains "$out" "state: parked" "scalar gate wait -> parked"
-  assert_contains "$out" "source: run-step" "scalar gate wait -> run-step source"
-  assert_contains "$out" "parked at review" "scalar gate wait names the gate"
-  assert_contains "$out" "1 finding(s)" "scalar gate wait includes finding count"
-  assert_not_contains "$out" "superseded" "scalar gate wait not flagged stale"
-  pass "scalar gate parked run is not flagged superseded"
-}
-
-test_gate_block_parked_not_superseded() {
-  reset_fakes
-  local d; d=$(new_case parked-gate-block)
-  make_repo_on_branch "$d/wt" fm/feat-cb
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cb.meta" "window=fm:fm-feat-cb" "worktree=$d/wt" "kind=ship"
-  printf 'needs-decision: review gate\n' > "$d/state/feat-cb.status"
-  FM_FAKE_AXI_STATUS="$(run_parked_in_gate_block fm/feat-cb)"
-  local out; out=$(run_crew_state "$d" feat-cb)
-  assert_contains "$out" "state: parked" "gate block wait -> parked"
-  assert_contains "$out" "source: run-step" "gate block wait -> run-step source"
-  assert_contains "$out" "parked at review" "gate block wait names the gate"
-  assert_contains "$out" "1 finding(s)" "gate block wait includes finding count"
-  assert_not_contains "$out" "superseded" "gate block wait not flagged stale"
-  pass "gate block parked run is not flagged superseded"
-}
-
-test_ci_ready_done_log_beats_monitoring_run() {
-  reset_fakes
-  local d; d=$(new_case ci-ready)
-  make_repo_on_branch "$d/wt" fm/feat-ci
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ci.meta" "window=fm:fm-feat-ci" "worktree=$d/wt" "kind=ship"
-  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
-  local out; out=$(run_crew_state "$d" feat-ci)
-  assert_contains "$out" "state: done" "ci-ready status log -> done"
-  assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
-  assert_contains "$out" "checks green" "ci-ready detail preserves the report"
-  assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
-  pass "ci-ready status log beats monitoring run"
-}
-
-# Regression for the PR #252 incident: the crew's own status log never got a
-# "done: ... checks green" line (log_reports_ci_ready above does not apply),
-# but the ci step's log tail shows CI is actually green and only waiting on
-# merge/close. fm-crew-state must surface this as done, not "validating
-# (running)", so a green PR is never silently absorbed as still-in-progress.
-test_ci_monitoring_checks_green_surfaces_done() {
-  reset_fakes
-  local d; d=$(new_case ci-green)
-  make_repo_on_branch "$d/wt" fm/feat-cigreen
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cigreen.meta" "window=fm:fm-feat-cigreen" "worktree=$d/wt" "kind=ship"
-  # No status-log line at all: the crew never reported its own checks-green line.
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cigreen)"
-  FM_FAKE_CI_LOGS=$(cat <<'EOF'
-CI checks running, waiting for results...
-all CI checks passed - still monitoring until merged or closed
-EOF
-)
-  local out; out=$(run_crew_state "$d" feat-cigreen)
-  assert_contains "$out" "state: done" "green ci-monitor run -> done"
-  assert_contains "$out" "source: run-step" "green ci-monitor -> run-step source"
-  assert_contains "$out" "checks green" "green ci-monitor detail mentions checks green"
-  assert_not_contains "$out" "state: working" "green ci-monitor must not read as still validating"
-  pass "ci-monitoring run with checks already green surfaces done"
-}
-
-test_top_level_ci_checks_green_surfaces_done() {
-  reset_fakes
-  local d; d=$(new_case top-level-ci-green)
-  make_repo_on_branch "$d/wt" fm/feat-topcigreen
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-topcigreen.meta" "window=fm:fm-feat-topcigreen" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_top_level_ci fm/feat-topcigreen)"
-  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
-  local out; out=$(run_crew_state "$d" feat-topcigreen)
-  assert_contains "$out" "state: done" "top-level ci with green log -> done"
-  assert_contains "$out" "source: run-step" "top-level ci green -> run-step source"
-  assert_contains "$out" "checks green" "top-level ci green detail mentions checks green"
-  assert_not_contains "$out" "state: working" "top-level ci green must not stay working"
-  pass "top-level ci status uses ci log green marker"
-}
-
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
-  reset_fakes
-  local d; d=$(new_case ci-nochecks)
-  make_repo_on_branch "$d/wt" fm/feat-cinochecks
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cinochecks.meta" "window=fm:fm-feat-cinochecks" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
-  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
-  local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
-}
-
-test_ci_monitoring_green_then_rearm_stays_working() {
-  reset_fakes
-  local d; d=$(new_case ci-green-then-rearm)
-  make_repo_on_branch "$d/wt" fm/feat-cirearm
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cirearm.meta" "window=fm:fm-feat-cirearm" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cirearm)"
-  FM_FAKE_CI_LOGS=$(cat <<'EOF'
-all CI checks passed - still monitoring until merged or closed
-base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
-EOF
-)
-  local out; out=$(run_crew_state "$d" feat-cirearm)
-  assert_contains "$out" "state: working" "base-advance rearm marker -> working"
-  assert_not_contains "$out" "state: done" "base-advance rearm marker must not read as done"
-  assert_not_contains "$out" "checks green" "base-advance rearm marker must not read as checks green"
-  pass "base-advance rearm after green stays working"
-}
-
-test_ci_monitoring_no_checks_yet_stays_working() {
-  reset_fakes
-  local d; d=$(new_case ci-nochecks-yet)
-  make_repo_on_branch "$d/wt" fm/feat-cinochecksyet
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cinochecksyet.meta" "window=fm:fm-feat-cinochecksyet" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecksyet)"
-  FM_FAKE_CI_LOGS=$(cat <<'EOF'
-no CI checks reported - still monitoring until merged or closed
-base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
-no CI checks reported yet, waiting for checks to register...
-EOF
-)
-  local out; out=$(run_crew_state "$d" feat-cinochecksyet)
-  assert_contains "$out" "state: working" "pending no-checks marker -> working"
-  assert_not_contains "$out" "state: done" "pending no-checks marker must not read as done"
-  assert_not_contains "$out" "checks green" "pending no-checks marker must not read as checks green"
-  pass "pending no-checks ci-monitor marker stays working"
-}
-
-test_ci_monitoring_still_waiting_stays_working() {
-  reset_fakes
-  local d; d=$(new_case ci-waiting)
-  make_repo_on_branch "$d/wt" fm/feat-ciwait
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ciwait.meta" "window=fm:fm-feat-ciwait" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciwait)"
-  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
-  local out; out=$(run_crew_state "$d" feat-ciwait)
-  assert_contains "$out" "state: working" "ci step still red -> working"
-  assert_not_contains "$out" "checks green" "no green marker present -> no checks-green detail"
-  pass "ci-monitoring run with checks not yet green stays working"
-}
-
-# A later merge-conflict auto-fix round after an earlier green reading must
-# not be masked: the MOST RECENT marker in the log tail wins.
-test_ci_monitoring_green_then_new_issue_stays_working() {
-  reset_fakes
-  local d; d=$(new_case ci-green-then-issue)
-  make_repo_on_branch "$d/wt" fm/feat-cirelapse
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cirelapse.meta" "window=fm:fm-feat-cirelapse" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cirelapse)"
-  FM_FAKE_CI_LOGS=$(cat <<'EOF'
-all CI checks passed - still monitoring until merged or closed
-base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
-issues detected: merge conflict - auto-fixing (attempt 2/10)...
-EOF
-)
-  local out; out=$(run_crew_state "$d" feat-cirelapse)
-  assert_contains "$out" "state: working" "a later relapse marker must win over an earlier green one"
-  assert_not_contains "$out" "state: done" "relapsed ci run must not read as done"
-  pass "a fresh issue after an earlier green reading is not masked"
-}
-
-test_ci_ready_done_log_relapse_stays_working() {
-  reset_fakes
-  local d; d=$(new_case ci-ready-then-relapse)
-  make_repo_on_branch "$d/wt" fm/feat-cireadyrelapse
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cireadyrelapse.meta" "window=fm:fm-feat-cireadyrelapse" "worktree=$d/wt" "kind=ship"
-  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cireadyrelapse.status"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cireadyrelapse)"
-  FM_FAKE_CI_LOGS=$(cat <<'EOF'
-all CI checks passed - still monitoring until merged or closed
-base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
-CI checks running, waiting for results...
-EOF
-)
-  local out; out=$(run_crew_state "$d" feat-cireadyrelapse)
-  assert_contains "$out" "state: working" "a stale ready status must not mask a later CI relapse"
-  assert_contains "$out" "source: run-step" "relapsed ci run remains run-step sourced"
-  assert_not_contains "$out" "state: done" "relapsed ci run with stale done log must not read as done"
-  pass "stale checks-green status log does not mask CI relapse"
-}
-
-test_ci_fixing_after_green_stays_working() {
-  reset_fakes
-  local d; d=$(new_case ci-fixing-after-green)
-  make_repo_on_branch "$d/wt" fm/feat-cifixing
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cifixing.meta" "window=fm:fm-feat-cifixing" "worktree=$d/wt" "kind=ship"
-  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-cifixing.status"
-  FM_FAKE_AXI_STATUS="$(run_ci_fixing fm/feat-cifixing)"
-  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
-  local out; out=$(run_crew_state "$d" feat-cifixing)
-  assert_contains "$out" "state: working" "ci fixing step must stay working"
-  assert_contains "$out" "source: run-step" "ci fixing remains run-step sourced"
-  assert_not_contains "$out" "state: done" "ci fixing must not read as checks-green done"
-  pass "ci fixing is not overridden by an earlier green marker"
-}
-
-test_top_level_fixing_ci_running_after_green_stays_working() {
-  reset_fakes
-  local d; d=$(new_case top-level-fixing-ci-running)
-  make_repo_on_branch "$d/wt" fm/feat-topfixingci
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-topfixingci.meta" "window=fm:fm-feat-topfixingci" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_fixing_ci_running fm/feat-topfixingci)"
-  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
-  local out; out=$(run_crew_state "$d" feat-topfixingci)
-  assert_contains "$out" "state: working" "top-level fixing with ci running must stay working"
-  assert_contains "$out" "source: run-step" "top-level fixing with ci running remains run-step sourced"
-  assert_contains "$out" "validating (fixing)" "top-level fixing keeps fixing detail"
-  assert_not_contains "$out" "state: done" "top-level fixing must not use stale green marker"
-  pass "top-level fixing is not overridden by a stale ci running row"
-}
-
-test_top_level_fixing_done_log_stays_working() {
-  reset_fakes
-  local d; d=$(new_case top-level-fixing-done-log)
-  make_repo_on_branch "$d/wt" fm/feat-topfixing
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-topfixing.meta" "window=fm:fm-feat-topfixing" "worktree=$d/wt" "kind=ship"
-  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-topfixing.status"
-  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-topfixing)"
-  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
-  local out; out=$(run_crew_state "$d" feat-topfixing)
-  assert_contains "$out" "state: working" "top-level fixing must stay working"
-  assert_contains "$out" "source: run-step" "top-level fixing remains run-step sourced"
-  assert_contains "$out" "validating (fixing)" "top-level fixing keeps fixing detail"
-  assert_not_contains "$out" "state: done" "top-level fixing must not read as stale checks-green done"
-  pass "top-level fixing is not overridden by a stale done log"
-}
-
-# (d) terminal run-step is authoritative
-test_terminal_passed() {
-  reset_fakes
-  local d; d=$(new_case passed)
-  make_repo_on_branch "$d/wt" fm/feat-d
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-d)"
-  local out; out=$(run_crew_state "$d" feat-d)
-  assert_contains "$out" "state: done" "passed run -> done"
-  assert_contains "$out" "source: run-step" "passed -> run-step source"
-  pass "terminal passed run is authoritative"
-}
-
-test_terminal_failed() {
-  reset_fakes
-  local d; d=$(new_case failed)
-  make_repo_on_branch "$d/wt" fm/feat-e
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-e.meta" "window=fm:fm-feat-e" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-e)"
-  local out; out=$(run_crew_state "$d" feat-e)
-  assert_contains "$out" "state: failed" "failed run -> failed"
-  assert_contains "$out" "source: run-step" "failed -> run-step source"
-  pass "terminal failed run is authoritative"
-}
-
-test_terminal_failed_ci_orphan_after_green_reads_done() {
-  reset_fakes
-  local d; d=$(new_case failed-ci-orphan)
-  make_repo_on_branch "$d/wt" fm/feat-ci-orphan
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ci-orphan.meta" "window=fm:fm-feat-ci-orphan" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/feat-ci-orphan)"
-  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed
-daemon shutting down"
-  local out; out=$(run_crew_state "$d" feat-ci-orphan)
-  assert_contains "$out" "state: done" "orphaned ci monitor after green must read done, not failed"
-  assert_contains "$out" "source: run-step" "reclassified held run stays run-step sourced"
-  assert_contains "$out" "https://github.com/o/r/pull/203" "PR URL surfaced from the run"
-  assert_not_contains "$out" "state: failed" "monitor death must not read as a failed run"
-  pass "orphaned ci monitor after green reads as held-for-merge done"
-}
-
-test_terminal_failed_ci_orphan_status_only_reads_done() {
-  reset_fakes
-  local d; d=$(new_case failed-ci-orphan-status-only)
-  make_repo_on_branch "$d/wt" fm/feat-ci-orphan2
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ci-orphan2.meta" "window=fm:fm-feat-ci-orphan2" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan_status_only fm/feat-ci-orphan2)"
-  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed
-daemon shutting down"
-  local out; out=$(run_crew_state "$d" feat-ci-orphan2)
-  assert_contains "$out" "state: done" "status-only failed orphaned monitor after green reads done"
-  assert_contains "$out" "https://github.com/o/r/pull/203" "PR URL surfaced from the run"
-  pass "status-only failed orphaned ci monitor after green reads done"
-}
-
-test_terminal_failed_ci_genuine_red_stays_failed() {
-  reset_fakes
-  local d; d=$(new_case failed-ci-genuine-red)
-  make_repo_on_branch "$d/wt" fm/feat-ci-red
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ci-red.meta" "window=fm:fm-feat-ci-red" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/feat-ci-red)"
-  FM_FAKE_CI_LOGS="CI checks running
-checks failed: 1 of 2 checks red
-daemon shutting down"
-  local out; out=$(run_crew_state "$d" feat-ci-red)
-  assert_contains "$out" "state: failed" "a genuinely red check keeps the run failed"
-  assert_not_contains "$out" "state: done" "genuine CI failure must not reclassify to done"
-  pass "genuinely failing CI keeps the failed verdict"
-}
-
-test_terminal_failed_ci_orphan_second_failed_step_stays_failed() {
-  reset_fakes
-  local d; d=$(new_case failed-ci-second-failure)
-  make_repo_on_branch "$d/wt" fm/feat-ci-2fail
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ci-2fail.meta" "window=fm:fm-feat-ci-2fail" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan_second_failure fm/feat-ci-2fail)"
-  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed
-daemon shutting down"
-  local out; out=$(run_crew_state "$d" feat-ci-2fail)
-  assert_contains "$out" "state: failed" "a second failed step keeps the run failed"
-  assert_not_contains "$out" "state: done" "a second failed step must not reclassify to done"
-  pass "a second failed step disqualifies the orphaned-monitor reclassification"
-}
-
-# (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
-# routine case once more than one crew validates the same underlying repo
-# concurrently - they share ONE no-mistakes repo registration), so the helper
-# falls back to the real top-level `no-mistakes runs` listing to learn whether
-# THIS branch has an active run of its own. Regression coverage for the
-# 2026-07-02 herdr incident: the old fallback shelled out to `no-mistakes axi`
-# (bare) expecting a `runs[N]{...}:` TOON table that the real CLI never emits
-# (verified against the installed v1.32.2 - the `axi` surface has no
-# runs-listing subcommand at all), so attribution silently failed every time
-# the repo-wide answer was not this crew's own branch.
-test_cross_branch_attribution_via_runs_list() {
-  reset_fakes
-  local d short; d=$(new_case crossbranch)
-  make_repo_on_branch "$d/wt" fm/feat-f
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-f.meta" "window=fm:fm-feat-f" "worktree=$d/wt" "kind=ship"
-  # The repo-wide active/most-recent run belongs to a different crew's branch.
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  # Real `no-mistakes runs` shape: plain text, newest-first, no run id, no
-  # quoting - "<status> <branch> <short-sha> <date> [<pr-url>]".
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-f ${short}  2026-07-02 22:05
-EOF
-)"
-  local out; out=$(run_crew_state "$d" feat-f)
-  assert_contains "$out" "state: working" "this branch's own run attributed via the runs list"
-  assert_contains "$out" "source: run-step" "runs-list-resolved run -> run-step source"
-  pass "cross-branch run is attributed via the real runs list"
-}
-
-# The runs list is newest-first; a branch with an OLDER completed run must not
-# shadow its own newer active one - the first (topmost) matching row wins.
-test_coarse_socket_refusal_reports_blocked() {
-  reset_fakes
-  local d short; d=$(new_case coarse-socket-refused)
-  make_repo_on_branch "$d/wt" fm/feat-coarse-down
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-coarse-down.meta" "window=fm:fm-feat-coarse-down" "worktree=$d/wt" "kind=ship"
-  printf 'blocked: no-mistakes daemon connection refused\n' > "$d/state/feat-coarse-down.status"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-coarse-down ${short}  2026-07-02 22:05
-EOF
-)"
-  local out; out=$(run_crew_state "$d" feat-coarse-down)
-  assert_contains "$out" "state: blocked" "socket refusal outranks a coarse active record"
-  assert_contains "$out" "source: status-log" "coarse socket refusal remains status-log evidence"
-  assert_not_contains "$out" "state: working" "coarse active record cannot suppress socket refusal"
-  pass "socket refusal over a coarse active run reports blocked"
-}
-
-# The coarse fallback has no steps table and no ci log, so the 2026-09-05
-# orphaned-monitor shape (every substantive step completed, only the ci
-# monitor failed after the daemon restarted under its merge poll) cannot be
-# recognized there. With the daemon provably down, that terminal failed
-# record is unverified evidence from a dead instrument and must read unknown,
-# never failed - the fleet rule from #3785. The fallback is reached while the
-# daemon is answering for another branch, so the probe proves the daemon
-# went down after that answer (a flapping daemon under incident load) - the
-# two calls are separate socket connections. With the daemon up, the same
-# record keeps its failure verdict.
-test_coarse_failed_ledger_with_daemon_down_reports_unknown() {
-  reset_fakes
-  local d short; d=$(new_case coarse-daemon-down-failed)
-  make_repo_on_branch "$d/wt" fm/feat-coarsedown
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-coarsedown.meta" "window=fm:fm-feat-coarsedown" "worktree=$d/wt" "kind=ship"
-  # The primary `axi status` call answers (another crew's run - the shared
-  # daemon serves the whole repo), so attribution falls to the coarse runs
-  # ledger, whose newest row for this branch is terminal failed at this
-  # worktree's own head.
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-coarsedown ${short}  2026-09-05 21:00"
-  FM_FAKE_DAEMON_DOWN=1
-  local out; out=$(run_crew_state "$d" feat-coarsedown)
-  assert_contains "$out" "state: unknown" "daemon down + failed ledger record -> unknown"
-  assert_contains "$out" "no-mistakes daemon unreachable; last ledger record failed - unverified" \
-    "the unverified detail names the dead instrument"
-  assert_not_contains "$out" "state: failed" "an instrument failure never reads as work failure"
-  assert_contains "$out" "source: run-step" "the ledger row is still this branch's attributed run"
-
-  # Daemon provably up again: the same row stays a failure.
-  FM_FAKE_DAEMON_DOWN=0
-  out=$(run_crew_state "$d" feat-coarsedown)
-  assert_contains "$out" "state: failed" "daemon up keeps the failed verdict over the failed record"
-  assert_not_contains "$out" "unverified" "no unverified qualifier while the daemon answers"
-  pass "failed ledger record reads unknown only when the daemon is provably down"
-}
-
-test_cross_branch_attribution_picks_most_recent_row() {
-  reset_fakes
-  local d short; d=$(new_case crossbranch-mostrecent)
-  make_repo_on_branch "$d/wt" fm/feat-fq
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-fq.meta" "window=fm:fm-feat-fq" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-fq ${short}  2026-07-02 21:50
-  completed  fm/feat-fq bbbbbbb  2026-07-02 20:00  https://github.com/o/r/pull/1
-EOF
-)"
-  local out; out=$(run_crew_state "$d" feat-fq)
-  assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
-  assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
-  pass "cross-branch attribution picks the branch's most recent row"
-}
-
-# Live-over-terminal selection (bin/fm-nm-run-lib.sh). Reproduces the proven
-# 2026-08 case: a crashed validation daemon left a FAILED run at the worktree's
-# exact commit, while the live run that replaced it validates a descendant
-# commit on the same branch. Both bind - the corpse by the equal-commit rule,
-# the live run by the ancestor rule - and bare `axi status` answers with the
-# corpse, so every recomputation read a healthy task as failed.
-test_terminal_corpse_loses_to_live_run_on_same_branch() {
-  reset_fakes
-  local d base_head live_head short_base short_live out
-  d=$(new_case live-beats-corpse)
-  make_repo_on_branch "$d/wt" fm/feat-corpse
-  base_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" commit -q --allow-empty -m 'live run advanced the tip'
-  live_head=$(git -C "$d/wt" rev-parse HEAD)
-  # Worktree stays at the commit the dead run recorded; the live run is ahead.
-  git -C "$d/wt" reset -q --hard "$base_head"
-  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
-  short_live=$(git -C "$d/wt" rev-parse --short=7 "$live_head")
-  [ "$short_base" != "$short_live" ] || fail "live run head did not advance past the worktree"
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/corpse.meta" "window=fm:fm-corpse" "worktree=$d/wt" "kind=ship"
-  # The corpse is the most-recently-touched run, so it is what `axi status`
-  # reports, at this worktree's own commit.
-  FM_FAKE_RUN_HEAD="$base_head"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-corpse)"
-  # It is also the newest row in the listing (the crash marked it after the
-  # live run started), so row order alone still selects the corpse.
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  failed     fm/feat-corpse ${short_base}  2026-08-05 11:20
-  running    fm/feat-corpse ${short_live}  2026-08-05 10:05
-EOF
-)"
-  out=$(run_crew_state "$d" corpse)
-  assert_contains "$out" "state: working" "the live run outranks the terminal corpse bound to the same worktree"
-  assert_contains "$out" "source: run-step" "the live run is still an attributed run-step verdict"
-  assert_not_contains "$out" "state: failed" "a dead run at the worktree commit must not report a healthy task as failed"
-  pass "a live run outranks a terminal run bound to the same worktree"
-}
-
-# The same preference on the runs-list path itself: `axi status` answers for
-# another crew's branch, and this branch's newest row is terminal while an older
-# row is still live.
-test_runs_list_live_row_outranks_newer_terminal_row() {
-  reset_fakes
-  local d base_head live_head short_base short_live out
-  d=$(new_case live-row-beats-terminal-row)
-  make_repo_on_branch "$d/wt" fm/feat-liverow
-  base_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" commit -q --allow-empty -m 'live run advanced the tip'
-  live_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" reset -q --hard "$base_head"
-  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
-  short_live=$(git -C "$d/wt" rev-parse --short=7 "$live_head")
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/liverow.meta" "window=fm:fm-liverow" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-08-05 11:30
-  failed     fm/feat-liverow ${short_base}  2026-08-05 11:20
-  running    fm/feat-liverow ${short_live}  2026-08-05 10:05
-EOF
-)"
-  out=$(run_crew_state "$d" liverow)
-  assert_contains "$out" "state: working" "an older live row outranks the branch's newest terminal row"
-  assert_not_contains "$out" "state: failed" "the terminal row must not win while a live row binds"
-  pass "runs-list selection prefers a live row over a newer terminal one"
-}
-
-# The routine production shape of the same case: the live run's fix-round
-# commits live only in the gate repo, so its head is not a git object in the
-# task copy and can never bind by the head rule. The terminal row sitting at
-# the worktree's EXACT commit is the anchor that proves the unfetched live row
-# is this worktree's own continuation, so the live run still wins.
-test_unfetched_live_sibling_outranks_terminal_row_at_exact_head() {
-  reset_fakes
-  local d base_head short_base unfetched out
-  d=$(new_case unfetched-live-sibling)
-  make_repo_on_branch "$d/wt" fm/feat-unfetched
-  base_head=$(git -C "$d/wt" rev-parse HEAD)
-  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
-  unfetched=0123abc
-  git -C "$d/wt" rev-parse --verify --quiet "${unfetched}^{commit}" >/dev/null 2>&1 \
-    && fail "the unfetched head must not resolve in the task copy"
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/unfetched.meta" "window=fm:fm-unfetched" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_RUN_HEAD="$base_head"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-unfetched)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  failed     fm/feat-unfetched ${short_base}  2026-08-05 11:20
-  running    fm/feat-unfetched ${unfetched}  2026-08-05 10:05
-EOF
-)"
-  out=$(run_crew_state "$d" unfetched)
-  assert_contains "$out" "state: working" "an unfetched live row anchored by the exact-head terminal row outranks it"
-  assert_not_contains "$out" "state: failed" "the corpse at the worktree commit must not report a healthy task as failed"
-  pass "an unfetched live sibling outranks a terminal row at the worktree's exact commit"
-}
-
-# The preference must not widen: candidates of the SAME liveness class keep the
-# listing's existing newest-first precedence, so two terminal rows still resolve
-# to the newer one rather than to whichever the scan happens to reach last.
-test_only_terminal_rows_keep_newest_first_precedence() {
-  reset_fakes
-  local d base_head older_head short_base short_older out
-  d=$(new_case only-terminal-rows)
-  make_repo_on_branch "$d/wt" fm/feat-allterminal
-  base_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" commit -q --allow-empty -m 'an earlier terminal run advanced the tip'
-  older_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" reset -q --hard "$base_head"
-  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
-  short_older=$(git -C "$d/wt" rev-parse --short=7 "$older_head")
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/allterminal.meta" "window=fm:fm-allterminal" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-08-05 11:30
-  cancelled  fm/feat-allterminal ${short_base}  2026-08-05 11:20
-  completed  fm/feat-allterminal ${short_older}  2026-08-05 10:05
-EOF
-)"
-  out=$(run_crew_state "$d" allterminal)
-  assert_contains "$out" "state: failed" "the newest terminal row still wins when no live row binds"
-  assert_contains "$out" "run cancelled" "the newer cancelled row, not the older completed one"
-  pass "two terminal rows keep the existing newest-first precedence"
-}
-
-# An unclassifiable status word keeps the ledger's own newest-first precedence:
-# the live-over-terminal preference only ever reorders rows whose liveness is
-# known, so an unexpected newest row is answered as-is instead of being
-# displaced by an older running row and reported as working.
-test_unknown_status_row_keeps_newest_first_precedence() {
-  reset_fakes
-  local d base_head live_head short_base short_live out
-  d=$(new_case unknown-status-row)
-  make_repo_on_branch "$d/wt" fm/feat-unknownrow
-  base_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" commit -q --allow-empty -m 'an older run advanced the tip'
-  live_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" reset -q --hard "$base_head"
-  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
-  short_live=$(git -C "$d/wt" rev-parse --short=7 "$live_head")
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/unknownrow.meta" "window=fm:fm-unknownrow" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-08-05 11:30
-  quarantined fm/feat-unknownrow ${short_base}  2026-08-05 11:20
-  running    fm/feat-unknownrow ${short_live}  2026-08-05 10:05
-EOF
-)"
-  out=$(run_crew_state "$d" unknownrow)
-  assert_contains "$out" "runs list status: quarantined" "the newest row's unclassifiable status is answered as-is"
-  assert_not_contains "$out" "state: working" "an older live row must not displace an unclassifiable newer row"
-  pass "an unclassifiable status row keeps the ledger's newest-first precedence"
-}
-
-# The other half of the no-widening criterion: a terminal `axi status` run with
-# no live sibling on this worktree keeps reporting its own terminal outcome, in
-# full run-step detail rather than degraded to the coarse listing.
-test_terminal_run_without_live_sibling_is_unchanged() {
-  reset_fakes
-  local d base_head other_head short_base short_other out
-  d=$(new_case terminal-no-live-sibling)
-  make_repo_on_branch "$d/wt" fm/feat-nosibling
-  base_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" commit -q --allow-empty -m 'a second terminal run advanced the tip'
-  other_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" reset -q --hard "$base_head"
-  short_base=$(git -C "$d/wt" rev-parse --short=7 "$base_head")
-  short_other=$(git -C "$d/wt" rev-parse --short=7 "$other_head")
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/nosibling.meta" "window=fm:fm-nosibling" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_RUN_HEAD="$base_head"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-nosibling)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  failed     fm/feat-nosibling ${short_base}  2026-08-05 11:20
-  completed  fm/feat-nosibling ${short_other}  2026-08-05 10:05
-EOF
-)"
-  out=$(run_crew_state "$d" nosibling)
-  assert_contains "$out" "state: failed" "a terminal run with no live sibling still reports its outcome"
-  assert_contains "$out" "source: run-step" "terminal outcome stays an attributed run-step verdict"
-  assert_contains "$out" "run failed" "the full axi-status detail is kept, not degraded to the listing"
-  pass "a terminal run with no live sibling is unchanged"
-}
-
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
-  reset_fakes
-  local d short; d=$(new_case coarse-ready-other-log)
-  make_repo_on_branch "$d/wt" fm/feat-coarseready
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-coarseready.meta" "window=fm:fm-feat-coarseready" "worktree=$d/wt" "kind=ship"
-  printf 'done: PR https://github.com/o/r/pull/4 checks green\n' > "$d/state/feat-coarseready.status"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-coarseready ${short}  2026-07-02 22:05
-EOF
-)"
-  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
-  local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
-  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
-  pass "coarse run does not probe another branch's ci log"
-}
-
-# A different-branch run with NO matching runs-list row must NOT be
-# misattributed, and must not be treated as a false "working" verdict either.
-test_other_branch_run_ignored() {
-  reset_fakes
-  local d; d=$(new_case otherbranch)
-  make_repo_on_branch "$d/wt" fm/feat-g
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-g.meta" "window=fm:fm-feat-g" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'done: implemented, ready to validate\n' > "$d/state/feat-g.status"
-  FM_FAKE_AXI_STATUS="$(run_running fm/some-other)"
-  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
-  running    fm/some-other aaaaaaa  2026-07-02 22:10
-EOF
-)"
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" feat-g
-  local out; out=$(run_crew_state "$d" feat-g)
-  assert_not_contains "$out" "source: run-step" "another branch's run not misattributed"
-  assert_contains "$out" "source: status-log" "no own run -> falls back to status-log"
-  assert_contains "$out" "state: done" "falls back to the log verb"
-  pass "another branch's run is ignored, falls back"
+  export FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS
 }
 
 # (f) no run for this crew + a busy pane -> working via pane
@@ -1372,8 +147,6 @@ test_no_run_busy_pane() {
   fm_write_meta "$d/state/feat-h.meta" "window=fm:fm-feat-h" "worktree=$d/wt" "kind=ship" "harness=claude"
   # No matching run anywhere. The busy verdict comes from the crew's own
   # semantic lifecycle record (bin/fm-busy-lib.sh), not from rendered text.
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-h)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-h busy --gen "$gen" \
@@ -1394,8 +167,6 @@ test_no_run_footer_text_alone_is_not_working() {
   make_repo_on_branch "$d/wt" fm/feat-h2
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-h2.meta" "window=fm:fm-feat-h2" "worktree=$d/wt" "kind=ship" "harness=claude"
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
   printf 'done: stale completion event\n' > "$d/state/feat-h2.status"
   local out; out=$(run_crew_state "$d" feat-h2)
@@ -1414,8 +185,6 @@ test_no_run_grok_uses_isolated_fallback() {
   make_repo_on_branch "$d/wt" fm/feat-h3
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-h3.meta" "window=fm:fm-feat-h3" "worktree=$d/wt" "kind=ship" "harness=grok"
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
   FM_FAKE_BUSY_TEXT='Ctrl+c:cancel'
   export FM_FAKE_BUSY_TEXT
@@ -1433,8 +202,6 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
     "backend=herdr" "harness=claude"
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_BUSY=1
   FM_FAKE_HERDR_AGENT_STATUS=working
@@ -1471,8 +238,6 @@ SH
   chmod +x "$d/fakebin/herdr"
   fm_write_meta "$d/state/feat-herdr-cli.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
     "backend=herdr" "harness=claude"
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   local out; out=$(run_crew_state "$d" feat-herdr-cli)
   assert_contains "$out" "state: unknown" "a failed herdr CLI must stay unknown"
@@ -1493,8 +258,6 @@ test_no_run_herdr_alive_with_failed_read_stays_live() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr-alive.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
     "backend=herdr" "harness=claude"
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   # The 200-line scrollback read fails while the cheap pane get / agent get
   # pair answers: the pane is present and its agent is working.
@@ -1518,8 +281,6 @@ test_no_run_herdr_husk_dead_still_reads_gone() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr-husk.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
     "backend=herdr" "harness=claude"
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   # The pane exists and answers pane get, but no agent is registered in it,
   # and the scrollback read fails besides.
@@ -1537,7 +298,7 @@ test_no_run_herdr_husk_dead_still_reads_gone() {
 # herdr's agent.get reports generation state ("working" only while the model is
 # actively streaming - docs/herdr-backend.md "Busy state"), not "this crew's
 # turn is still in progress". A crew blocked on its own long-running foreground
-# `no-mistakes axi run` (no --yes; blocks until a gate or outcome) is not
+# project command is not
 # generating for that whole span, so agent.get reads idle. The crew's own
 # semantic lifecycle record still says busy for the whole turn, and it outranks
 # the narrower native verdict - so the crew is no longer misread as not-working.
@@ -1549,11 +310,7 @@ test_no_run_herdr_idle_agent_status_outranked_by_record() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr-idle.meta" "window=default:w1:p3" "worktree=$d/wt" "kind=ship" \
     "backend=herdr" "harness=claude"
-  # No run attributable (mirrors a no-mistakes run-step lookup that found no
-  # matching row within the configured runs-list window): the crew's semantic
-  # busy state is the only remaining signal.
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_RUNS_LIST=""
+  # The semantic busy record spans the whole tool call.
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_AGENT_STATUS=idle
   FM_FAKE_HERDR_BUSY=0
@@ -1577,8 +334,6 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle() {
   fm_write_meta "$d/state/feat-herdr-stopped.meta" "window=default:w1:p4" "worktree=$d/wt" "kind=ship" \
     "backend=herdr" "harness=claude"
   printf 'working: implementing\n' > "$d/state/feat-herdr-stopped.status"
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_AGENT_STATUS=idle
   FM_FAKE_HERDR_BUSY=0
@@ -1599,7 +354,6 @@ test_no_run_idle_pane_uses_log() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-i.meta" "window=fm:fm-feat-i" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'needs-decision: which database?\n' > "$d/state/feat-i.status"
-  FM_FAKE_AXI_STATUS=""
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-i
   local out; out=$(run_crew_state "$d" feat-i)
@@ -1615,7 +369,6 @@ test_no_run_idle_pane_uses_keyed_log() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-keyed.meta" "window=fm:fm-feat-keyed" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'needs-decision [key=q1]: which database?\n' > "$d/state/feat-keyed.status"
-  FM_FAKE_AXI_STATUS=""
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-keyed
   local out; out=$(run_crew_state "$d" feat-keyed)
@@ -1634,7 +387,6 @@ test_no_run_idle_pane_paused() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-pause.meta" "window=fm:fm-feat-pause" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'paused: holding for the upstream tool release\n' > "$d/state/feat-pause.status"
-  FM_FAKE_AXI_STATUS=""
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-pause
   local out; out=$(run_crew_state "$d" feat-pause)
@@ -1651,7 +403,6 @@ test_no_run_idle_pane_custom_paused_verb() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-custom-pause.meta" "window=fm:fm-feat-custom-pause" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'awaiting: vendor maintenance window\n' > "$d/state/feat-custom-pause.status"
-  FM_FAKE_AXI_STATUS=""
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-custom-pause
   local out; out=$(FM_CLASSIFY_PAUSED_VERB=awaiting run_crew_state "$d" feat-custom-pause)
@@ -1679,7 +430,6 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "home=$d/wt"
   printf 'needs-decision [key=race]: pick subscribe order\n' > "$d/state/mate.status"
   printf 'resolved [key=race]: went with subscribe-before-write\n' >> "$d/state/mate.status"
-  FM_FAKE_AXI_STATUS=""
   FM_FAKE_BUSY=0
   local out; out=$(run_crew_state "$d" mate)
   assert_contains "$out" "state: unknown" "resolved-then-idle secondmate is not a spurious run-state"
@@ -1705,8 +455,6 @@ test_dead_window_ignores_stale_status_log() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-dead.meta" "window=fm:fm-feat-dead" "worktree=$d/wt" "kind=ship"
   printf 'done: old completion event\n' > "$d/state/feat-dead.status"
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   local out; out=$(run_crew_state "$d" feat-dead)
   assert_contains "$out" "state: unknown" "dead window -> unknown"
@@ -1734,8 +482,6 @@ test_no_run_tmux_unreadable_reads_unreachable_not_gone() {
   fm_write_meta "$d/state/feat-tmux-unread.meta" "window=fm:fm-feat-tmux-unread" \
     "worktree=$d/wt" "kind=ship"
   printf 'done: old completion event\n' > "$d/state/feat-tmux-unread.status"
-  FM_FAKE_AXI_STATUS=""
-  FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_UNREADABLE=1
   local out; out=$(run_crew_state "$d" feat-tmux-unread)
   assert_contains "$out" "state: unknown" "an unreadable tmux must stay unknown"
@@ -1745,93 +491,20 @@ test_no_run_tmux_unreadable_reads_unreachable_not_gone() {
   pass "a tmux that fails to answer reads unknown/unreachable, never gone"
 }
 
-# A closed/unreadable pane must NOT mask an authoritative run-step: judge by the
-# run-step, not the shell. The common case is a finished crew whose agent has
-# exited and closed its window (the normal gap between completion and teardown) -
-# it must still report its terminal run-step state (e.g. done), never unknown.
-test_dead_window_still_reports_terminal_run_step() {
-  reset_fakes
-  local d; d=$(new_case dead-window-done)
-  make_repo_on_branch "$d/wt" fm/feat-dead-done
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dead-done.meta" "window=fm:fm-feat-dead-done" "worktree=$d/wt" "kind=ship"
-  printf 'done: PR https://github.com/o/r/pull/3 checks green\n' > "$d/state/feat-dead-done.status"
-  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-dead-done)"
-  FM_FAKE_TMUX_MISSING=1   # the crew's window has closed
-  local out; out=$(run_crew_state "$d" feat-dead-done)
-  assert_contains "$out" "state: done" "closed pane still reports terminal run-step done"
-  assert_contains "$out" "source: run-step" "closed pane does not mask the run-step"
-  assert_not_contains "$out" "state: unknown" "closed pane with a run must never be unknown"
-  pass "closed pane still reports a terminal run-step"
-}
-
-# The same for an active run: an agent pane that crashed mid-validation while the
-# daemon-backed run continues must report the live run-step, not unknown.
-test_dead_window_still_reports_active_run_step() {
-  reset_fakes
-  local d; d=$(new_case dead-window-active)
-  make_repo_on_branch "$d/wt" fm/feat-dead-act
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-dead-act.meta" "window=fm:fm-feat-dead-act" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/feat-dead-act)"
-  FM_FAKE_TMUX_MISSING=1
-  local out; out=$(run_crew_state "$d" feat-dead-act)
-  assert_contains "$out" "state: working" "closed pane still reports active run-step"
-  assert_contains "$out" "source: run-step" "closed pane does not mask the active run-step"
-  assert_not_contains "$out" "state: unknown" "closed pane with an active run must never be unknown"
-  pass "closed pane still reports an active run-step"
-}
-
-test_no_timeout_uses_perl_bound() {
-  reset_fakes
-  local d toolbin out start elapsed calls_file calls
-  d=$(new_case no-timeout)
-  make_repo_on_branch "$d/wt" fm/feat-timeout
-  make_fakebin "$d" >/dev/null
-  calls_file="$d/no-mistakes.calls"
-  : > "$calls_file"
-  cat > "$d/fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "${FM_FAKE_NM_CALLS:-/dev/null}"
-while :; do :; done
-SH
-  chmod +x "$d/fakebin/no-mistakes"
-  toolbin=$(make_no_timeout_toolbin "$d")
-  fm_write_meta "$d/state/feat-timeout.meta" "window=fm:fm-feat-timeout" "worktree=$d/wt" "kind=ship" \
-    "harness=claude"
-  FM_FAKE_BUSY=1
-  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-timeout)
-  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
-    --source claude-hook --event user-prompt-submit
-  start=$SECONDS
-  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
-  elapsed=$((SECONDS - start))
-  assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
-  assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"
-  [ "$elapsed" -lt 5 ] || fail "perl timeout did not bound no-mistakes calls (elapsed ${elapsed}s)"
-  calls=$(awk 'END { print NR + 0 }' "$calls_file" 2>/dev/null || echo 0)
-  [ "$calls" -eq 1 ] || fail "empty no-mistakes status triggered extra lookups ($calls calls)"
-  pass "no timeout command uses perl bound"
-}
-
-# (i) kind=scout skips the run lookup entirely (its deliverable is a report).
-test_scout_skips_run_lookup() {
+test_scout_reads_semantic_busy_state() {
   reset_fakes
   local d; d=$(new_case scout)
   make_repo_on_branch "$d/wt" fm/scout-j
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/scout-j.meta" "window=fm:fm-scout-j" "worktree=$d/wt" "kind=scout" \
     "harness=claude"
-  # Even if a run existed on this branch, a scout must not read it.
-  FM_FAKE_AXI_STATUS="$(run_running fm/scout-j)"
   FM_FAKE_BUSY=1
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" scout-j)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" scout-j busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
   local out; out=$(run_crew_state "$d" scout-j)
-  assert_not_contains "$out" "source: run-step" "scout ignores no-mistakes run-step"
   assert_contains "$out" "source: pane" "scout reads its semantic busy state"
-  pass "scout skips the run lookup"
+  pass "scout reads its semantic busy state"
 }
 
 # (j) torn-down worktree and missing meta are graceful (unknown/none, exit 0)
@@ -1959,48 +632,16 @@ test_missing_meta() {
   pass "missing meta is handled gracefully"
 }
 
-# (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
-# canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
-# coverage). This is the direct regression pair for the 2026-07-02 herdr
-# incident: a validating crew whose bare `axi status` answer belongs to
-# another branch must still be absorbed by the watcher via the runs-list
-# fallback (working), while a crew with genuinely no run anywhere and an idle
-# pane must still surface (the safety property the fix must never widen away).
-test_provably_working_via_runs_list_fallback() {
-  reset_fakes
-  local d short; d=$(new_case provably-working-crossbranch)
-  make_repo_on_branch "$d/wt" fm/feat-provable
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-provable ${short}  2026-07-02 22:05
-EOF
-)"
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
-    || fail "cross-branch attribution via the runs list was not treated as provably working"
-  pass "crew_is_provably_working absorbs a validating crew found only via the runs-list fallback"
-}
-
 test_not_provably_working_when_stopped() {
   reset_fakes
   local d; d=$(new_case provably-working-stopped)
   make_repo_on_branch "$d/wt" fm/feat-stopped
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-stopped.meta" "window=fm:fm-feat-stopped" "worktree=$d/wt" "kind=ship"
-  # Repo-wide run belongs to someone else, and this branch has no row in the
-  # runs list either (it never validated, or genuinely finished/stopped) - the
-  # only remaining signal is the pane, which is idle.
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-EOF
-)"
+  # An idle endpoint alone cannot prove that work is in progress.
   FM_FAKE_BUSY=0
   PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-stopped \
-    && fail "a stopped crew with no run anywhere and an idle pane was treated as provably working"
+    && fail "a stopped crew with an idle pane was treated as provably working"
   pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
 }
 
@@ -2013,456 +654,6 @@ test_usage_error() {
   pass "usage error exits 2"
 }
 
-# Head-binding: same branch name with a rewritten/diverged worktree tip must not
-# attribute a historical no-mistakes run (multi-stage branch reuse incident).
-test_historical_same_branch_rewritten_head_not_current() {
-  reset_fakes
-  local d old_head new_head out
-  d=$(new_case rewritten-head)
-  make_repo_on_branch "$d/wt" fm/todo-flag
-  old_head=$(git -C "$d/wt" rev-parse HEAD)
-  # Simulate a rebase rewrite: orphan new history on the same branch name.
-  git -C "$d/wt" checkout -q --orphan tmp-rewrite
-  git -C "$d/wt" commit -q --allow-empty -m 'rewritten tip'
-  git -C "$d/wt" branch -q -M fm/todo-flag
-  new_head=$(git -C "$d/wt" rev-parse HEAD)
-  [ "$old_head" != "$new_head" ] || fail "rewrite did not produce a new head"
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/wishlist.meta" "window=fm:fm-wishlist" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'working: stage 2 setup complete rebased onto merged #76\n' > "$d/state/wishlist.status"
-  # Historical run still reports the pre-rewrite head on the reused branch.
-  FM_FAKE_RUN_HEAD="$old_head"
-  FM_FAKE_AXI_STATUS="$(run_parked fm/todo-flag)"
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" wishlist
-  out=$(run_crew_state "$d" wishlist)
-  assert_not_contains "$out" "source: run-step" "historical rewritten head must not use run-step"
-  assert_not_contains "$out" "parked at" "historical parked run must not mask current state"
-  assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
-  assert_contains "$out" "state: working" "status-log working: remains current"
-  pass "historical same-branch rewritten head is not attributed as current"
-}
-
-# Head-binding: an active pipeline whose run head is a descendant of the local
-# tip (fix commits on the same history) remains current.
-test_active_run_descendant_fix_head_remains_current() {
-  reset_fakes
-  local d base_head fix_head out
-  d=$(new_case pipeline-descendant)
-  make_repo_on_branch "$d/wt" fm/feat-pipeline
-  base_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix commit'
-  fix_head=$(git -C "$d/wt" rev-parse HEAD)
-  # Worktree still at the pre-fix tip; run reports the pipeline fix head.
-  git -C "$d/wt" reset -q --hard "$base_head"
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/pipe.meta" "window=fm:fm-pipe" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_RUN_HEAD="$fix_head"
-  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-pipeline)"
-  out=$(run_crew_state "$d" pipe)
-  assert_contains "$out" "source: run-step" "descendant pipeline fix head remains run-step"
-  assert_contains "$out" "state: working" "active fixing run remains working"
-  pass "active run with valid descendant fix head remains current"
-}
-
-# Head-binding: local work that advanced past the run head invalidates the run.
-test_local_advanced_past_run_head_invalidates() {
-  reset_fakes
-  local d run_head out
-  d=$(new_case local-advanced)
-  make_repo_on_branch "$d/wt" fm/feat-adv
-  run_head=$(git -C "$d/wt" rev-parse HEAD)
-  git -C "$d/wt" commit -q --allow-empty -m 'local stage-2 work after prior run'
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/adv.meta" "window=fm:fm-adv" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'working: stage 2 implementation in progress\n' > "$d/state/adv.status"
-  FM_FAKE_RUN_HEAD="$run_head"
-  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-adv)"
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" adv
-  out=$(run_crew_state "$d" adv)
-  assert_not_contains "$out" "source: run-step" "local-advanced tip must not use historical run"
-  assert_contains "$out" "source: status-log" "falls back after local advanced past run"
-  assert_contains "$out" "state: working" "status-log working: is current"
-  pass "local work advanced past run head invalidates attribution"
-}
-
-# --- Run-attribution precedence for pipeline-owned lane heads ----------------
-# A live run whose pipeline OWNS the branch (branch_sync.state=pipeline_owned)
-# can report a lane head that is not a git object in the task worktree.
-# Every fixture head is deliberately unresolvable so only the top-level
-# branch_sync exemption - never an accidental nested-field match - attributes
-# the run.
-run_running_pipeline_owned() {  # <branch> <head> [<sync-state>]
-  cat <<EOF
-run:
-  id: "01RUNLIVE"
-  branch: $1
-  status: running
-  head: "$2"
-  pr: ""
-  findings: none
-  steps[2]{step,status,findings,duration_ms}:
-    intent,completed,0,0
-    review,running,0,0
-branch_sync:
-  state: ${3:-pipeline_owned}
-  changed: false
-  local:
-    branch: $1
-    head: "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
-    clean: true
-  next_action:
-    code: continue_active_run
-    command: no-mistakes axi status
-EOF
-}
-
-# T1 direction 1: the daemon-attributed ACTIVE pipeline-owned run binds without
-# head equality and wins over the older superseded failed row.
-test_pipeline_owned_active_run_beats_superseded_failed_row() {
-  reset_fakes
-  local d short; d=$(new_case f10-pipeline-owned)
-  make_repo_on_branch "$d/wt" fm/feat-f10
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-f10.meta" "window=fm:fm-feat-f10" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/feat-f10 f0f0f0f0)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/feat-f10 f0f0f0f0  2026-08-27 13:53
-  failed     fm/feat-f10 ${short}  2026-08-27 12:09
-EOF
-)"
-  local out; out=$(run_crew_state "$d" feat-f10)
-  assert_contains "$out" "state: working" "pipeline-owned live run -> working"
-  assert_contains "$out" "source: run-step" "pipeline-owned live run -> run-step source"
-  assert_not_contains "$out" "state: failed" "superseded failed row must not surface over the live run"
-  pass "pipeline-owned active run binds without head equality and beats the failed row"
-}
-
-# T1 direction 2: a genuinely-failed run with NO later run on the branch still
-# surfaces as failed - hiding real failures is equally wrong.
-test_failed_run_with_no_later_run_still_surfaces() {
-  reset_fakes
-  local d short; d=$(new_case f10-genuine-failure)
-  make_repo_on_branch "$d/wt" fm/feat-f10b
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-f10b.meta" "window=fm:fm-feat-f10b" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-f10b)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-f10b ${short}  2026-08-27 12:09"
-  local out; out=$(run_crew_state "$d" feat-f10b)
-  assert_contains "$out" "state: failed" "a genuinely failed run with no later run still reports failed"
-  assert_contains "$out" "source: run-step" "the genuine failure is run-step sourced"
-  pass "a genuinely failed run with no later run is not hidden"
-}
-
-# The coarse runs-list rows: the branch's newest row is ACTIVE at an
-# unresolvable head and the row immediately before it ended at exactly this
-# worktree's head - the ledger proves this is this crew's own pipeline-owned
-# fix round (axi status answers another branch here, so attribution can only
-# go through the coarse list). The anchored active run answers via the
-# run-step, and the older failed row never surfaces.
-test_coarse_unresolvable_active_row_never_falls_to_older_row() {
-  reset_fakes
-  local d short; d=$(new_case f10-coarse-guard)
-  make_repo_on_branch "$d/wt" fm/feat-f10c
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-f10c.meta" "window=fm:fm-feat-f10c" "worktree=$d/wt" "kind=ship" "harness=claude"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-08-27 14:00
-  running    fm/feat-f10c f0f0f0f0  2026-08-27 13:53
-  failed     fm/feat-f10c ${short}  2026-08-27 12:09
-EOF
-)"
-  FM_FAKE_BUSY=1
-  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-f10c)
-  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-f10c busy --gen "$gen" \
-    --source claude-hook --event user-prompt-submit
-  local out; out=$(run_crew_state "$d" feat-f10c)
-  assert_not_contains "$out" "state: failed" "an unresolvable active row must not fall to the older failed row"
-  assert_contains "$out" "source: run-step" "the ledger-anchored continuation binds via the runs list"
-  assert_contains "$out" "state: working" "the anchored active fix round reads working"
-  assert_contains "$out" "validating (background run)" "coarse resolution keeps coarse run detail"
-  pass "coarse scan anchors the unresolvable active row instead of falling to an older one"
-}
-
-# Coarse negative control: the anchor must end at EXACTLY this worktree's
-# head. The newest same-branch row is active at an unresolvable head, but the
-# row immediately before it sits at an OLDER local commit, so the ledger
-# proves nothing - unknown attribution stops the scan, never falls to the
-# older failed row, and the busy pane answers instead.
-test_coarse_mismatched_anchor_falls_to_pane_not_older_row() {
-  reset_fakes
-  local d old_short; d=$(new_case f10-coarse-no-anchor)
-  make_repo_on_branch "$d/wt" fm/feat-f10g
-  git -C "$d/wt" commit -q --allow-empty -m 'second local commit'
-  old_short=$(git -C "$d/wt" rev-parse --short=8 HEAD~1)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-f10g.meta" "window=fm:fm-feat-f10g" "worktree=$d/wt" "kind=ship" "harness=claude"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-08-27 14:00
-  running    fm/feat-f10g f0f0f0f0  2026-08-27 13:53
-  failed     fm/feat-f10g ${old_short}  2026-08-27 12:09
-EOF
-)"
-  FM_FAKE_BUSY=1
-  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-f10g)
-  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-f10g busy --gen "$gen" \
-    --source claude-hook --event user-prompt-submit
-  local out; out=$(run_crew_state "$d" feat-f10g)
-  assert_not_contains "$out" "state: failed" "a mismatched anchor must not fall to the older failed row"
-  assert_not_contains "$out" "source: run-step" "unknown attribution must not bind a run"
-  assert_contains "$out" "state: working" "the busy crew still reads working through the pane fallback"
-  assert_contains "$out" "source: pane" "without an exact anchor the pane answers, not the runs rows"
-  pass "coarse scan with a mismatched anchor stays unknown and lets the pane answer"
-}
-
-# Negative control: the exemption is gated on pipeline_owned specifically - any
-# other branch_sync state keeps the strict head rule.
-test_non_pipeline_owned_unresolvable_head_not_attributed() {
-  reset_fakes
-  local d; d=$(new_case f10-not-owned)
-  make_repo_on_branch "$d/wt" fm/feat-f10d
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-f10d.meta" "window=fm:fm-feat-f10d" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'working: implementing\n' > "$d/state/feat-f10d.status"
-  FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/feat-f10d f0f0f0f0 synced)"
-  FM_FAKE_RUNS_LIST=""
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" feat-f10d
-  local out; out=$(run_crew_state "$d" feat-f10d)
-  assert_not_contains "$out" "source: run-step" "a non-pipeline-owned unresolvable head must not bind"
-  assert_contains "$out" "source: status-log" "falls back to the status log without the exemption"
-  pass "the exemption requires branch_sync.state=pipeline_owned"
-}
-
-# Negative control: the exemption also requires an ACTIVE run - a terminal run
-# released the branch, so an inconsistent pipeline_owned label must not bind a
-# terminal run by branch name alone.
-test_pipeline_owned_terminal_run_not_exempt() {
-  reset_fakes
-  local d; d=$(new_case f10-terminal-not-exempt)
-  make_repo_on_branch "$d/wt" fm/feat-f10e
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-f10e.meta" "window=fm:fm-feat-f10e" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'working: stage 2 in progress\n' > "$d/state/feat-f10e.status"
-  FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/feat-f10e f0f0f0f0)
-outcome: failed"
-  FM_FAKE_RUNS_LIST=""
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" feat-f10e
-  local out; out=$(run_crew_state "$d" feat-f10e)
-  assert_not_contains "$out" "source: run-step" "a terminal run must not bind through the exemption"
-  assert_contains "$out" "source: status-log" "falls back to the status log for a terminal unresolvable head"
-  pass "the exemption never applies to a terminal run"
-}
-
-test_missing_run_head_falls_back_to_current_state() {
-  reset_fakes
-  local d out
-  d=$(new_case missing-run-head)
-  make_repo_on_branch "$d/wt" fm/feat-no-head
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/no-head.meta" "window=fm:fm-no-head" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'working: current stage still in progress\n' > "$d/state/no-head.status"
-  FM_FAKE_AXI_STATUS=$(run_parked fm/feat-no-head | grep -v '^  head:')
-  FM_FAKE_RUNS_LIST=""
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" no-head
-  out=$(run_crew_state "$d" no-head)
-  assert_not_contains "$out" "source: run-step" "missing run head must not permit branch-only attribution"
-  assert_contains "$out" "source: status-log" "missing run head falls back to current state sources"
-  assert_contains "$out" "state: working" "status-log remains current after missing run head"
-  pass "missing run head falls back instead of matching by branch"
-}
-
-# Mint a descendant of <repo>'s HEAD in a separate clone, echoing its full sha.
-# The task copy never receives the new object, which is exactly the incident
-# shape: the pipeline committed its fix round in its own checkout, so the run
-# head advanced beyond the submitted head while the task copy lacks the commit.
-mint_unfetched_fix_head() {  # <worktree>
-  local wt=$1 h2
-  rm -rf "$wt.pipe"
-  git clone -q "$wt" "$wt.pipe"
-  git -C "$wt.pipe" commit -q --allow-empty -m 'pipeline fix round commit'
-  h2=$(git -C "$wt.pipe" rev-parse HEAD)
-  if git -C "$wt" cat-file -e "$h2" 2>/dev/null; then
-    fail "fixture broken: fix head object leaked into the task copy"
-  fi
-  printf '%s' "$h2"
-}
-
-# Head-binding regression (model-routing-benchmark-hardening incident): the
-# active run's head advanced beyond the submitted head through a pipeline fix
-# round whose commit object never reached the task copy. The reader must
-# attribute the active run through the pipeline's own ledger - its newest row
-# for the branch is active with a locally unverifiable head, and the row
-# immediately before it ended at exactly this worktree's head - instead of
-# rejecting the active row and letting the older failed row answer.
-test_active_fix_round_unfetched_pipeline_head_reports_current() {
-  reset_fakes
-  local d h1 h2 out
-  d=$(new_case unfetched-fix-head)
-  make_repo_on_branch "$d/wt" fm/feat-unfetched
-  h1=$(git -C "$d/wt" rev-parse HEAD)
-  h2=$(mint_unfetched_fix_head "$d/wt")
-  [ "$h1" != "$h2" ] || fail "fix head did not advance past the submitted head"
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/unfetched.meta" "window=fm:fm-unfetched" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_RUN_HEAD="$h2"
-  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-unfetched)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other aaaaaaa  2026-07-30 22:10
-  running    fm/feat-unfetched $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
-  failed     fm/feat-unfetched $(git -C "$d/wt" rev-parse --short=7 HEAD)  2026-07-29 20:00
-EOF
-)"
-  out=$(run_crew_state "$d" unfetched)
-  assert_contains "$out" "source: run-step" "active run with an unfetched pipeline head still attributes"
-  assert_contains "$out" "state: working" "active fix round reads working, not the older failed row"
-  assert_contains "$out" "validating (fixing)" "full run detail survives the unfetched pipeline head"
-  assert_not_contains "$out" "state: failed" "the older failed row must never answer for the active run"
-  pass "active fix round with an unfetched pipeline head reads working"
-}
-
-# Negative control for the ledger continuation rule: without the anchor row
-# ending at exactly this worktree's head, an active row with an unverifiable
-# head is branch-name coincidence and must stay unattributed - the historical
-# status-log fallback answers instead, never the runs rows.
-test_unanchored_unfetched_active_row_does_not_match() {
-  reset_fakes
-  local d h2 out
-  d=$(new_case unfetched-no-anchor)
-  make_repo_on_branch "$d/wt" fm/feat-noanchor
-  # A second commit gives the ledger a resolvable anchor row (HEAD~1) that is
-  # NOT this worktree's head - the exact-equality anchor must fail on it.
-  git -C "$d/wt" commit -q --allow-empty -m 'second local commit'
-  h2=$(mint_unfetched_fix_head "$d/wt")
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/noanchor.meta" "window=fm:fm-noanchor" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'failed: earlier stage run\n' > "$d/state/noanchor.status"
-  FM_FAKE_RUN_HEAD="$h2"
-  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-noanchor)"
-  # The row before the active one is an OLDER commit, not this worktree's
-  # head: the ledger proves nothing about whose run the active row is.
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other aaaaaaa  2026-07-30 22:10
-  running    fm/feat-noanchor $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
-  failed     fm/feat-noanchor $(git -C "$d/wt" rev-parse --short=7 HEAD~1)  2026-07-29 20:00
-EOF
-)"
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" noanchor
-  out=$(run_crew_state "$d" noanchor)
-  assert_not_contains "$out" "source: run-step" "an unanchored unverifiable active row must not match"
-  assert_contains "$out" "source: status-log" "historical fallback preserved when no active run is proven"
-  assert_contains "$out" "state: failed" "status-log answers, not the runs rows"
-  pass "unanchored unverifiable active row is never attributed"
-}
-
-# Negative control: a TERMINAL row whose commit object is gone from the task
-# copy is history even when it is the branch's newest row - an ancient or
-# rewritten run whose commit was pruned must never read as current state.
-test_unresolved_terminal_row_is_history_not_current() {
-  reset_fakes
-  local d h_old out
-  d=$(new_case unresolved-terminal)
-  make_repo_on_branch "$d/wt" fm/feat-hist
-  # Mint the historical run head outside the task copy, then orphan-rewrite
-  # the worktree tip, so the run head can never resolve locally.
-  h_old=$(mint_unfetched_fix_head "$d/wt")
-  git -C "$d/wt" checkout -q --orphan tmp-rewrite
-  git -C "$d/wt" commit -q --allow-empty -m 'rewritten tip'
-  git -C "$d/wt" branch -q -M fm/feat-hist
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/hist.meta" "window=fm:fm-hist" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'working: stage 2 in progress\n' > "$d/state/hist.status"
-  FM_FAKE_RUN_HEAD="$h_old"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-hist)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  failed     fm/feat-hist $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-01 20:00
-EOF
-)"
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" hist
-  out=$(run_crew_state "$d" hist)
-  assert_not_contains "$out" "source: run-step" "an unresolvable terminal row is history, not current state"
-  assert_contains "$out" "source: status-log" "historical fallback answers after an unresolvable terminal row"
-  assert_contains "$out" "state: working" "the rewritten worktree's own log stays current"
-  pass "unresolvable terminal row never reads as current"
-}
-
-# The same continuation recognition must work when bare `axi status` answers
-# with ANOTHER branch's run: this branch's own active run is then visible only
-# in the ledger, with coarse (status-word) detail.
-test_runs_list_continuation_found_when_axi_answers_other_branch() {
-  reset_fakes
-  local d h1 h2 out
-  d=$(new_case unfetched-coarse)
-  make_repo_on_branch "$d/wt" fm/feat-coarsefix
-  h1=$(git -C "$d/wt" rev-parse HEAD)
-  h2=$(mint_unfetched_fix_head "$d/wt")
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/coarsefix.meta" "window=fm:fm-coarsefix" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-30 22:10
-  running    fm/feat-coarsefix $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
-  failed     fm/feat-coarsefix $(git -C "$d/wt" rev-parse --short=7 HEAD)  2026-07-29 20:00
-EOF
-)"
-  out=$(run_crew_state "$d" coarsefix)
-  assert_contains "$out" "source: run-step" "ledger continuation attributes via the runs list too"
-  assert_contains "$out" "state: working" "coarse continuation reads working"
-  assert_contains "$out" "validating (background run)" "coarse resolution keeps coarse detail, not the other branch's run"
-  pass "runs-list continuation attribution works when axi answers another branch"
-}
-
-test_active_run_is_authoritative
-test_stale_needs_decision_superseded
-test_stale_blocked_superseded
-test_daemon_claim_over_live_run_reads_run_alive
-test_socket_refusal_over_stale_fixing_run_reports_blocked
-test_socket_refusal_over_terminal_run_reports_blocked
-test_ordinary_blocked_over_live_run_keeps_plain_superseded
-test_genuine_daemon_down_reports_blocked
-test_genuine_parked_not_superseded
-test_scalar_gate_parked_not_superseded
-test_gate_block_parked_not_superseded
-test_ci_ready_done_log_beats_monitoring_run
-test_ci_monitoring_checks_green_surfaces_done
-test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
-test_ci_monitoring_green_then_rearm_stays_working
-test_ci_monitoring_no_checks_yet_stays_working
-test_ci_monitoring_still_waiting_stays_working
-test_ci_monitoring_green_then_new_issue_stays_working
-test_ci_ready_done_log_relapse_stays_working
-test_ci_fixing_after_green_stays_working
-test_top_level_fixing_ci_running_after_green_stays_working
-test_top_level_fixing_done_log_stays_working
-test_terminal_passed
-test_terminal_failed
-test_terminal_failed_ci_orphan_after_green_reads_done
-test_terminal_failed_ci_orphan_status_only_reads_done
-test_terminal_failed_ci_genuine_red_stays_failed
-test_terminal_failed_ci_orphan_second_failed_step_stays_failed
-test_cross_branch_attribution_via_runs_list
-test_coarse_socket_refusal_reports_blocked
-test_coarse_failed_ledger_with_daemon_down_reports_unknown
-test_cross_branch_attribution_picks_most_recent_row
-test_terminal_corpse_loses_to_live_run_on_same_branch
-test_runs_list_live_row_outranks_newer_terminal_row
-test_unfetched_live_sibling_outranks_terminal_row_at_exact_head
-test_only_terminal_rows_keep_newest_first_precedence
-test_unknown_status_row_keeps_newest_first_precedence
-test_terminal_run_without_live_sibling_is_unchanged
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
-test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
@@ -2479,32 +670,14 @@ test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_dead_window_ignores_stale_status_log
 test_no_run_tmux_unreadable_reads_unreachable_not_gone
-test_dead_window_still_reports_terminal_run_step
-test_dead_window_still_reports_active_run_step
-test_no_timeout_uses_perl_bound
-test_scout_skips_run_lookup
+test_scout_reads_semantic_busy_state
 test_torn_down_worktree
 test_remote_alive_with_log_uses_status_log
 test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta
-test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
 test_usage_error
-test_historical_same_branch_rewritten_head_not_current
-test_active_run_descendant_fix_head_remains_current
-test_local_advanced_past_run_head_invalidates
-test_pipeline_owned_active_run_beats_superseded_failed_row
-test_failed_run_with_no_later_run_still_surfaces
-test_coarse_unresolvable_active_row_never_falls_to_older_row
-test_coarse_mismatched_anchor_falls_to_pane_not_older_row
-test_non_pipeline_owned_unresolvable_head_not_attributed
-test_pipeline_owned_terminal_run_not_exempt
-test_missing_run_head_falls_back_to_current_state
-test_active_fix_round_unfetched_pipeline_head_reports_current
-test_unanchored_unfetched_active_row_does_not_match
-test_unresolved_terminal_row_is_history_not_current
-test_runs_list_continuation_found_when_axi_answers_other_branch
 
 echo "all fm-crew-state tests passed"

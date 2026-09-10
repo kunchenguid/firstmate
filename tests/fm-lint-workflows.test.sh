@@ -2,7 +2,7 @@
 # GitHub workflow lint gate owned by bin/fm-lint-workflows.sh.
 #
 # A malformed .github/workflows/*.yml, including a self-broken ci.yml, must fail
-# in the local/no-mistakes lint path before merge. Regression origin: #2512 put
+# in the local lint path before merge. Regression origin: #2512 put
 # a column-0 heredoc body inside a `run: |` block in ci.yml; there was no
 # workflow YAML lint, and the broken workflow could not report its own breakage.
 set -u
@@ -459,7 +459,7 @@ test_installer_rejects_unsupported_platform() {
   pass "actionlint installer rejects an unsupported OS or architecture"
 }
 
-# Prove the no-mistakes/local owner (bin/fm-lint.sh with no paths) catches a
+# Prove the local owner (bin/fm-lint.sh with no paths) catches a
 # self-broken ci.yml. Copy the lint scripts into a fake repo so the default
 # workflow root is the fixture, not this worktree.
 test_fm_lint_default_path_catches_broken_ci_yml() {

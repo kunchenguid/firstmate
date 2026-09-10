@@ -155,30 +155,6 @@ test_any_of_several_entry_points_turns_a_guard_on() {
   assert_contains "$result" ran "a secondary entry point must also turn the guard on"
 }
 
-test_gate_lets_a_guard_drive_the_real_fleet_scripts_under_a_gate_marker() {
-  # The nine live guards that never sourced the shared helpers used to be
-  # refused by bin/fm-gate-refuse-lib.sh whenever the pipeline ran them, because
-  # the gate marker is set for every no-mistakes gate agent. Opening with the
-  # shared gate is what carries the test-suite bypass into them.
-  local path out rc
-  path="$TMP_ROOT/bypass.test.sh"
-  {
-    printf '#!/usr/bin/env bash\nset -u\n'
-    printf '. "%s/tests/lib.sh"\n' "$ROOT"
-    printf 'fm_live_gate default-on FM_FAKE_LIVE fmfakeharness\n'
-    printf '. "%s/bin/fm-gate-refuse-lib.sh"\n' "$ROOT"
-    printf 'if fm_is_gate_agent; then printf "refused\\n"; else printf "allowed\\n"; fi\n'
-  } > "$path"
-  chmod +x "$path"
-  set +e
-  out=$(clean_env NO_MISTAKES_GATE=1 PATH="$BIN:/usr/bin:/bin" "$path" 2>&1)
-  rc=$?
-  set -e
-  expect_code 0 "$rc" "a guard opened with the shared gate must not be refused"
-  assert_contains "$out" allowed \
-    "the shared gate must carry the test-suite bypass so a live guard can drive the real fleet scripts"
-}
-
 test_every_live_guard_is_wired_to_the_shared_gate() {
   local script out listing checked=0
   listing=$("$ROOT/bin/fm-test-run.sh" --family live-harness-optin --list) \
@@ -215,6 +191,4 @@ test_a_guards_own_variable_wins_over_fm_live
 pass "a guard's own setting wins over FM_LIVE"
 test_any_of_several_entry_points_turns_a_guard_on
 pass "any entry point of a multi-mode guard turns it on"
-test_gate_lets_a_guard_drive_the_real_fleet_scripts_under_a_gate_marker
-pass "the shared gate carries the gate-refusal bypass into every live guard"
 test_every_live_guard_is_wired_to_the_shared_gate

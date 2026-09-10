@@ -39,10 +39,6 @@
       "target": "docs/documentation-audiences.md"
     },
     {
-      "source": ".no-mistakes.yaml",
-      "target": "docs/documentation-audiences.md"
-    },
-    {
       "source": "CONTRIBUTING.md",
       "target": "docs/documentation-audiences.md"
     },
@@ -114,10 +110,6 @@
     },
     {
       "path": ".agents/skills/ahoy/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/ask-user-authority/SKILL.md",
       "audience": "agent-runtime"
     },
     {

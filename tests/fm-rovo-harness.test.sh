@@ -176,7 +176,7 @@ run_spawn() {
     FM_FAKE_ROVO_DELIVERY="${FM_FAKE_ROVO_DELIVERY:-yes}" \
     FM_ROVO_READY_POLLS=3 FM_ROVO_DELIVERY_POLLS=3 FM_ROVO_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness rovo --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness rovo --mode direct-PR --yolo off "$@" 2>&1
 }
 
 test_rovo_launch_then_send_is_verified() {

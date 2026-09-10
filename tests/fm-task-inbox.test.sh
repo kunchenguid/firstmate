@@ -111,7 +111,7 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   shift 3
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_TASK_INBOX_GRACE_SECS=1 \
     env "$@" "$WATCH" > "$out" 2>/dev/null &

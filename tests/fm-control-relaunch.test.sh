@@ -157,7 +157,7 @@ EOF
     echo "project=$proj"
     echo "harness=$harness"
     echo "kind=ship"
-    echo "mode=no-mistakes"
+    echo "mode=direct-PR"
     echo "yolo=off"
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
@@ -1400,6 +1400,33 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
+test_spawn_relaunch_refuses_persisted_removed_delivery_modes_before_endpoint_mutation() {
+  local mode id dir meta rc
+  for mode in no-mistakes no-mistakes-prod-only; do
+    case "$mode" in
+      no-mistakes) id=rl43 ;;
+      no-mistakes-prod-only) id=rl44 ;;
+    esac
+    dir=$(new_case "removed-mode-$id" "$id")
+    add_ship_task "$dir" "$id" claude
+    meta="$dir/home/state/$id.meta"
+    sed "s/^mode=direct-PR$/mode=$mode/" "$meta" > "$meta.tmp"
+    mv "$meta.tmp" "$meta"
+    cp "$meta" "$dir/meta.before"
+    printf 'zsh' > "$dir/fake/command"
+
+    run_spawn "$dir" "$id" --relaunch --harness claude >/dev/null 2>&1; rc=$?
+    expect_code 1 "$rc" "relaunch should refuse a persisted removed delivery mode: $mode"
+    [ "$(cat "$dir/fake/command")" = zsh ] \
+      || fail "removed mode $mode started an agent in the existing endpoint"
+    [ ! -s "$dir/fake/literal" ] && [ ! -s "$dir/fake/keys" ] \
+      || fail "removed mode $mode sent lifecycle input to the existing endpoint"
+    cmp -s "$dir/meta.before" "$meta" \
+      || fail "removed mode $mode rewrote the persisted task record"
+  done
+  pass "fm-spawn --relaunch: persisted removed delivery modes refuse before endpoint mutation"
+}
+
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   local dir meta target out rc
   dir=$(new_case symlink-meta rl37)
@@ -1603,6 +1630,7 @@ test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
+test_spawn_relaunch_refuses_persisted_removed_delivery_modes_before_endpoint_mutation
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close

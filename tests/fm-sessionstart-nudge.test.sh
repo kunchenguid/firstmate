@@ -26,7 +26,6 @@ fi
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-unset NO_MISTAKES_GATE
 
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
@@ -71,28 +70,6 @@ test_genuine_primary_nudges() {
   pass "fm-sessionstart-nudge: a genuine primary gets one explicitly marked instruction line"
 }
 
-test_gate_env_is_silent() {
-  local root="$TMP_ROOT/gate-env"
-  make_primary "$root"
-  expect_silent_zero "gate env nudge" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
-  pass "fm-sessionstart-nudge: NO_MISTAKES_GATE is silent"
-}
-
-test_gate_common_dir_is_silent() {
-  local source="$TMP_ROOT/gate-source" bare="$TMP_ROOT/.no-mistakes/repos/gate.git"
-  local root="$TMP_ROOT/gate-worktree"
-  fm_git_init_commit "$source"
-  mkdir -p "$(dirname "$bare")"
-  git clone --quiet --bare "$source" "$bare"
-  git --git-dir="$bare" worktree add --quiet -b gate-test "$root" HEAD
-  mkdir -p "$root/bin" "$root/state"
-  : > "$root/AGENTS.md"
-  printf 'gate-test\n' > "$root/.fm-secondmate-home"
-  expect_silent_zero "gate common-dir nudge" env FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
-  pass "fm-sessionstart-nudge: .no-mistakes gate common-dir is silent"
-}
 
 test_unmarked_linked_worktree_is_silent() {
   local base="$TMP_ROOT/worktree-base" root="$TMP_ROOT/worktree-child"
@@ -135,7 +112,7 @@ test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
   cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+    "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
   out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
@@ -891,8 +868,7 @@ test_pi_large_sessionstart_digest_is_delivered_loudly() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
     "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
-    "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
-    "$ROOT/bin/fm-hook-host-lib.sh" \
+    "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-hook-host-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
   cat > "$fixture/bin/fm-session-start.sh" <<'SH'
 #!/usr/bin/env bash
@@ -978,24 +954,13 @@ test_run_unknown_source_takes_the_helm() {
   pass "run wrapper: an unrecognized or absent source takes the helm rather than skipping it"
 }
 
-test_run_gate_and_scope_are_silent() {
-  local root="$TMP_ROOT/run-gate" base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
+test_run_ineligible_scope_is_silent() {
+  local base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
   local out status=0
-  make_run_primary "$root"
-  expect_silent_zero "gate env run" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" --source startup
-  assert_absent "$root/state/.lock" "a gate agent's session open still took the fleet lock"
-  out=$(env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" \
-    "$RUN" --source startup --pi-prerequisite 2>&1) || status=$?
-  expect_code 3 "$status" "gate env Pi prerequisite stand-down"
-  [ -z "$out" ] || fail "gate env Pi prerequisite stand-down must be silent, got: $out"
-
   fm_git_worktree "$base" "$linked" fm/run-linked
   mkdir -p "$linked/bin" "$linked/state"
   : > "$linked/AGENTS.md"
   expect_silent_zero "linked worktree run" run_hook "$linked" --source startup
-  status=0
   out=$(run_hook "$linked" --source startup --pi-prerequisite 2>&1) || status=$?
   expect_code 3 "$status" "linked worktree Pi prerequisite stand-down"
   [ -z "$out" ] || fail "linked worktree Pi prerequisite stand-down must be silent, got: $out"
@@ -1015,8 +980,6 @@ test_run_reports_a_failed_session_start_as_digest_text() {
 }
 
 test_genuine_primary_nudges
-test_gate_env_is_silent
-test_gate_common_dir_is_silent
 test_unmarked_linked_worktree_is_silent
 test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
@@ -1031,7 +994,7 @@ test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
-test_run_gate_and_scope_are_silent
+test_run_ineligible_scope_is_silent
 test_run_reports_a_failed_session_start_as_digest_text
 test_pi_startup_classifies_cli_continuations
 test_pi_sessionstart_generation_prerequisite

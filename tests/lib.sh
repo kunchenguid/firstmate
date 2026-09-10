@@ -33,15 +33,6 @@ FM_TEST_LIB_SOURCED=1
 # suite's fixtures were written against.
 umask 022
 
-# Exempt firstmate's own test suite from the gate-lifecycle refusal
-# (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
-# worktree - the exact environment that guard refuses - so without this every
-# test that drives the real fm-spawn/fm-send/fm-teardown would be refused during
-# firstmate's own validation. A confused gate agent never sources this helper, so
-# the boundary against the real hazard is unaffected. tests/fm-gate-refuse.test.sh
-# strips this to verify real refusal.
-export FM_GATE_REFUSE_BYPASS=1
-
 # Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
@@ -246,11 +237,6 @@ fi
 # skip, which is how "run it after a harness upgrade" keeps proving the guard
 # actually ran. Setting one to 0 (or FM_LIVE=0) turns it off; a guard's own
 # variable wins over FM_LIVE.
-#
-# Sourcing this library also exports FM_GATE_REFUSE_BYPASS=1, which is what
-# lets a live guard drive the real fm-spawn/fm-send/fm-teardown from inside a
-# no-mistakes gate worktree instead of being refused by
-# bin/fm-gate-refuse-lib.sh.
 
 fm_live_gate() {
   local policy=$1 vars=$2

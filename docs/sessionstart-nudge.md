@@ -50,9 +50,8 @@ The deferred startup stage deliberately runs in its own process group under its 
 
 ## Shared wrapper and safety
 
-`bin/fm-sessionstart-run.sh` and `bin/fm-sessionstart-nudge.sh` share the same two eligibility owners.
-They source `bin/fm-gate-refuse-lib.sh` and stay silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
-They share `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so every hook uses one primary-detection owner.
+`bin/fm-sessionstart-run.sh` and `bin/fm-sessionstart-nudge.sh` share `bin/fm-primary-scope-lib.sh` as their eligibility owner.
+That owner is also shared with `bin/fm-turnend-guard.sh`, so every hook uses one primary-detection contract.
 The Guard Predicates section of [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns marker validation, plain-checkout detection, and required Firstmate-shaped paths.
 
 The nudge payload starts with U+2063 and the stable `FIRSTMATE_OP: ` label, carries the current `session-start` protocol kind, and retains exactly ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.`` as its body.
@@ -61,7 +60,7 @@ The Ahoy skill owns the rule that this marked operational input is never a capta
 Before printing, the nudge wrapper reads `state/.lock` and walks at most eight parents from its own pid in its own separate, hard-coded loop, independent of `bin/fm-lock.sh`'s ancestry walk (`fm_harness_ancestry_pid()` in `bin/fm-session-lock-lib.sh`, which now walks up to sixteen parents and can extend past a claude-named match to a still-more-ancestral one) and of Pi's `lockOwnership()`.
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
 Every ordinary transport path in both wrappers exits 0, including malformed state and adapter errors, because a Claude SessionStart exit 2 blocks session initialization.
-The run wrapper's internal `--pi-prerequisite` mode uses silent exit 3 only for an intentional gate or scope stand-down, letting Pi distinguish ineligibility from an eligible empty native result without changing any harness hook's exit contract.
+The run wrapper's internal `--pi-prerequisite` mode uses silent exit 3 only for an intentional scope stand-down, letting Pi distinguish ineligibility from an eligible empty native result without changing any harness hook's exit contract.
 A lock another session holds and a truncated digest therefore surface as digest text, while broken GitHub auth surfaces through the deferred network result inline or as a wake; none becomes a refusal to open the session.
 
 ## Harness transports
@@ -85,7 +84,7 @@ Pi is the only adapter that injects a message rather than hook stdout, so whatev
 For `session_start`, the extension activates a session-id and monotonic-generation owner synchronously, starts the wrapper once, and makes `before_agent_start` await that same promise before returning Pi's persistent `message` result.
 Replacement or shutdown stops the matching process group, and stale generations cannot deliver into the active session.
 An eligible native failure or empty result settles before the extension returns the existing exact manual instruction, so native and manual startup never run concurrently.
-An intentional gate or non-primary stand-down returns no message, and context-preserving sources retain their existing silent result when the current process already holds the lock.
+An intentional non-primary stand-down returns no message, and context-preserving sources retain their existing silent result when the current process already holds the lock.
 Manual and automatic compaction retain the existing persistent delivery path because an automatic retry may have no new `before_agent_start`, but that path shares the same generation cancellation and exactly-once claim.
 The extension encodes an unencoded digest or fallback as `session-start` operational input and leaves an already-encoded nudge alone.
 It streams the hook to completion and retains at most 512 KiB for message delivery; this approved containment keeps the prefix and appends a loud `PI SESSION-START DELIVERY TRUNCATED` marker with direct-inspection guidance whenever the digest is incomplete.
@@ -98,8 +97,8 @@ That alternative expands trust and writes outside this repository, so Firstmate 
 
 ## Regression coverage
 
-`tests/fm-sessionstart-nudge.test.sh` proves the nudge wrapper's silence for both gate signals, an unmarked linked worktree, a missing state directory, and an already-owned lock, plus its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
-It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree, including the internal Pi prerequisite's explicit silent stand-down.
+`tests/fm-sessionstart-nudge.test.sh` proves the nudge wrapper's silence for an unmarked linked worktree, a missing state directory, and an already-owned lock, plus its exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
+It separately proves the run wrapper's silence for an unmarked linked worktree, including the internal Pi prerequisite's explicit scope stand-down.
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including completion-gated `--reemit` selection, resume delegation, Pi CLI continuation classification, an unrecognized source falling through to the full digest, and bounded loud delivery of an oversized Pi digest.
 The same portable suite proves provider exclusion until settlement, exactly-one execution and context delivery, interruption, process-tree retirement, two rapid replacements, stale completion, eligible empty output, spawn error, wrapper timeout output, truncation, ineligible stand-down, and compaction cancellation through the extension's public event surface.
 `tests/fm-session-start.test.sh` proves the runtime bound through the forced pure-Bash fallback: a TERM-resistant digest that exceeds its budget is force-killed with its grandchild, still emits its completed stages, names the incomplete stage and every stage it never reached, leaves no completion proof, and exits 0.

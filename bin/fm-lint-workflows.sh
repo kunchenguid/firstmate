@@ -2,11 +2,11 @@
 # fm-lint-workflows.sh - owner of firstmate's GitHub workflow lint.
 #
 # Runs pinned actionlint on every .github/workflows/*.{yml,yaml} so a malformed
-# workflow, including a self-broken ci.yml, fails in the local and no-mistakes
-# lint lane before merge. A broken ci.yml cannot report its own breakage, so
+# workflow, including a self-broken ci.yml, fails in the lint lane before
+# merge. A broken ci.yml cannot report its own breakage, so
 # this check must not live only as a step inside that workflow. bin/fm-lint.sh
-# invokes this owner on its default (no explicit-path) path, which CI and
-# commands.lint both use.
+# invokes this owner on its default (no explicit-path) path, which CI and a
+# by-hand run both use.
 #
 # Usage:
 #   fm-lint-workflows.sh                 lint workflows under this repo
@@ -122,7 +122,7 @@ if [ "$resolved" != "$REQUIRED_ACTIONLINT" ]; then
 fi
 
 # fm-lint.sh owns ShellCheck of the canonical shell set. Disable actionlint's
-# extra shell and Python subprocess linters so this gate is the named workflow
+# extra shell and Python subprocess linters so this check is the named workflow
 # linter, not a second shell lint of `run:` blocks.
 set +e
 "$ACTIONLINT_BIN" -no-color -shellcheck= -pyflakes= -- "${FILES[@]}"

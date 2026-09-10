@@ -321,7 +321,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
     || fail "could not seed the held backlog"
   contract_in "$dir" propose --words 'merge the windows fix when green, then cut a prerelease' \
     --action merge --object 'task fix-windows PR' --when 'checks green' \
-    --action prerelease --object 'repo no-mistakes' --when 'after clause 1' \
+    --action prerelease --object 'repo sample-app' --when 'after clause 1' \
     --action merge --object everything >/dev/null 2>&1 || true
   contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the away-posture record"
   # Two live blockers, one on a task with a captain-verdict outcome and one on a
@@ -360,7 +360,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
   [ "$health_line" -lt "$clauses_line" ] && [ "$clauses_line" -lt "$waiting_line" ] && [ "$waiting_line" -lt "$failed_line" ] \
     || fail "the brief sections are out of order (health $health_line, clauses $clauses_line, waiting $waiting_line, failed $failed_line)"
   assert_contains "$out" '1. merge task fix-windows PR when checks green - recorded, not executed by this release' "the accepted clause was not listed as recorded-only"
-  assert_contains "$out" '2. prerelease repo no-mistakes when after clause 1 - recorded, not executed by this release' "the second clause was not listed"
+  assert_contains "$out" '2. prerelease repo sample-app when after clause 1 - recorded, not executed by this release' "the second clause was not listed"
   assert_contains "$out" '3. "action=merge object=everything when=(none)" - refused at entry: missing when' "the refused clause was not listed with its missing part"
   assert_contains "$out" 'merge the windows fix when green, then cut a prerelease' "the captain's verbatim words were not carried into the brief"
   assert_contains "$out" 'fix-windows,queued,task' "the held backlog item was not listed under waiting on you"

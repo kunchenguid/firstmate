@@ -22,7 +22,7 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 WATCH_PID=
 SLOW_WRITER_PID=
 SLOW_WORKER_PGID=
-SLOW_NM_PID=
+SLOW_PROBE_PID=
 LOCK_HOLDER_PID=
 
 cleanup() {
@@ -31,7 +31,7 @@ cleanup() {
     ''|*[!0-9]*) ;;
     *) kill -KILL -- "-$SLOW_WORKER_PGID" >/dev/null 2>&1 || true ;;
   esac
-  for pid in "$WATCH_PID" "$SLOW_WRITER_PID" "$SLOW_NM_PID" "$LOCK_HOLDER_PID"; do
+  for pid in "$WATCH_PID" "$SLOW_WRITER_PID" "$SLOW_PROBE_PID" "$LOCK_HOLDER_PID"; do
     [ -n "$pid" ] || continue
     kill -KILL "$pid" >/dev/null 2>&1 || true
   done
@@ -45,21 +45,17 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 cat > "$FAKEBIN/tmux" <<'SH'
 #!/usr/bin/env bash
+if [ -n "${FM_TEST_STATE_MARKER:-}" ]; then
+  printf '%s\n' "$$" > "$FM_TEST_STATE_MARKER"
+  sleep "${FM_TEST_STATE_SLEEP:-30}"
+fi
 case "${1:-}" in
   display-message) printf '%%1\n' ;;
   capture-pane) printf 'fixture pane\n> \n' ;;
 esac
 exit 0
 SH
-cat > "$FAKEBIN/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ -n "${FM_TEST_NM_MARKER:-}" ]; then
-  printf '%s\n' "$$" > "$FM_TEST_NM_MARKER"
-  sleep "${FM_TEST_NM_SLEEP:-30}"
-fi
-exit 0
-SH
-chmod +x "$FAKEBIN/tmux" "$FAKEBIN/no-mistakes"
+chmod +x "$FAKEBIN/tmux"
 
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/config" \
   "$HOME_DIR/projects/task" "$HOME_DIR/bin"
@@ -82,7 +78,7 @@ fm_write_meta "$HOME_DIR/state/ledger-task.meta" \
   "project=firstmate" \
   "harness=claude" \
   "kind=ship" \
-  "mode=no-mistakes" \
+  "mode=direct-PR" \
   "spawn_gen=fm.ledger123456"
 busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" ledger-task)
 "$ROOT/bin/fm-busy-event.sh" apply "$HOME_DIR/state" ledger-task idle \
@@ -346,17 +342,17 @@ jq -e '
 pass "fleet snapshot consumes the published local ledger by default"
 
 # Restore the established ledger, then stop a real writer while its real producer
-# is blocked in a current-state read. The prior ledger must remain byte-identical
+# is blocked in a backend state probe. The prior ledger must remain byte-identical
 # and valid because no partial producer output is ever published at its path.
 run_writer "$NOW_TWO" "$EPOCH_TWO" || fail "could not restore the real ledger"
 printf 'working: replacement summary is being computed\n' \
   >> "$HOME_DIR/state/ledger-task.status"
 cp "$HOME_DIR/state/home-summary.json" "$TMP_ROOT/prior-ledger.json"
-SLOW_MARKER="$TMP_ROOT/slow-no-mistakes.pid"
+SLOW_MARKER="$TMP_ROOT/slow-state-probe.pid"
 PATH="$FAKEBIN:$PATH" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
-  FM_TEST_NM_MARKER="$SLOW_MARKER" FM_TEST_NM_SLEEP=30 \
+  FM_TEST_STATE_MARKER="$SLOW_MARKER" FM_TEST_STATE_SLEEP=30 \
   "$WRITER" > "$TMP_ROOT/killed-writer.out" 2> "$TMP_ROOT/killed-writer.err" &
 SLOW_WRITER_PID=$!
 i=0
@@ -365,10 +361,10 @@ while [ ! -s "$SLOW_MARKER" ] && [ "$i" -lt 100 ]; do
   sleep 0.05
   i=$((i + 1))
 done
-[ -s "$SLOW_MARKER" ] || fail "the real producer did not reach the controlled slow current-state read"
-SLOW_NM_PID=$(cat "$SLOW_MARKER" 2>/dev/null || true)
+[ -s "$SLOW_MARKER" ] || fail "the real producer did not reach the controlled slow backend state probe"
+SLOW_PROBE_PID=$(cat "$SLOW_MARKER" 2>/dev/null || true)
 writer_pgid=$(ps -o pgid= -p "$SLOW_WRITER_PID" 2>/dev/null | tr -d '[:space:]')
-ancestor=$SLOW_NM_PID
+ancestor=$SLOW_PROBE_PID
 child_pgid=
 i=0
 while [ "$i" -lt 20 ]; do
@@ -396,7 +392,7 @@ kill -KILL -- "-$SLOW_WORKER_PGID" >/dev/null 2>&1 \
 wait "$SLOW_WRITER_PID" >/dev/null 2>&1 || true
 SLOW_WRITER_PID=
 SLOW_WORKER_PGID=
-SLOW_NM_PID=
+SLOW_PROBE_PID=
 jq -e . "$HOME_DIR/state/home-summary.json" >/dev/null \
   || fail "killing the writer exposed invalid JSON at the ledger path"
 cmp -s "$TMP_ROOT/prior-ledger.json" "$HOME_DIR/state/home-summary.json" \
@@ -405,11 +401,11 @@ cmp -s "$TMP_ROOT/prior-ledger.json" "$HOME_DIR/state/home-summary.json" \
 # Observe the ledger continuously through one successful replacement. Every read
 # must parse, and the final document must be the newly computed complete summary.
 READER_FAILURE="$TMP_ROOT/reader-failure"
-SUCCESS_MARKER="$TMP_ROOT/success-no-mistakes.pid"
+SUCCESS_MARKER="$TMP_ROOT/success-state-probe.pid"
 PATH="$FAKEBIN:$PATH" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
-  FM_TEST_NM_MARKER="$SUCCESS_MARKER" FM_TEST_NM_SLEEP=1 \
+  FM_TEST_STATE_MARKER="$SUCCESS_MARKER" FM_TEST_STATE_SLEEP=1 \
   "$WRITER" > "$TMP_ROOT/success-writer.out" 2> "$TMP_ROOT/success-writer.err" &
 SLOW_WRITER_PID=$!
 while kill -0 "$SLOW_WRITER_PID" 2>/dev/null; do
@@ -638,7 +634,7 @@ fm_write_meta "$COST_HOME/state/cost-task.meta" \
   "project=firstmate" \
   "harness=claude" \
   "kind=ship" \
-  "mode=no-mistakes" \
+  "mode=direct-PR" \
   "spawn_gen=fm.cost123456"
 cost_busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$COST_HOME/state" cost-task)
 "$ROOT/bin/fm-busy-event.sh" apply "$COST_HOME/state" cost-task idle \
@@ -822,7 +818,7 @@ fm_write_meta "$RESTART_HOME/state/restart-task.meta" \
   "project=firstmate" \
   "harness=claude" \
   "kind=ship" \
-  "mode=no-mistakes" \
+  "mode=direct-PR" \
   "spawn_gen=fm.restart123456"
 RESTART_LOCK_MARKER="$TMP_ROOT/restart-lock-held"
 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" bash -c '

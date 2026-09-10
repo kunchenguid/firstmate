@@ -80,7 +80,7 @@ EOF
   while IFS='|' read -r label flags expect; do
     [ -n "$label" ] || continue
     n=$((n + 1))
-    write_brief "$home" "delivery-required-$n" no-mistakes
+    write_brief "$home" "delivery-required-$n" direct-PR
     # shellcheck disable=SC2086  # flags is an intentional word-split arg list
     out=$(run_spawn "$home" "$fakebin" "delivery-required-$n" "$proj" claude $flags)
     status=$?
@@ -89,11 +89,12 @@ EOF
     assert_absent "$home/state/delivery-required-$n.meta" "$label: refused spawn wrote task metadata"
   done <<'ROWS'
 missing both flags||ship spawns require --mode
-missing --yolo|--mode no-mistakes|ship spawns require --yolo
+missing --yolo|--mode direct-PR|ship spawns require --yolo
 missing --mode|--yolo off|ship spawns require --mode
-unknown mode|--mode nope --yolo off|must be one of no-mistakes, direct-PR, local-only
-unknown yolo|--mode no-mistakes --yolo maybe|--yolo must be on or off
-conditional policy as a task mode|--mode no-mistakes-prod-only --yolo off|classify this task's surface
+unknown mode|--mode nope --yolo off|--mode
+unknown yolo|--mode direct-PR --yolo maybe|--yolo must be on or off
+removed mode|--mode no-mistakes --yolo off|--mode
+removed conditional policy|--mode no-mistakes-prod-only --yolo off|--mode
 ROWS
   pass "fm-spawn: a ship spawn requires a valid explicit mode and yolo before anything is created"
 }
@@ -118,7 +119,7 @@ EOF
   [ "$status" -ne 0 ] || fail "a scout spawn carrying --yolo should exit non-zero"
   assert_contains "$out" "--yolo applies only to ship spawns" "scout spawn did not refuse --yolo"
 
-  out=$(run_spawn "$home" "$fakebin" delivery-sm-a2 "$home" --secondmate --mode no-mistakes --yolo off)
+  out=$(run_spawn "$home" "$fakebin" delivery-sm-a2 "$home" --secondmate --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a secondmate spawn carrying delivery flags should exit non-zero"
   assert_contains "$out" "applies only to ship spawns" "secondmate spawn did not refuse the delivery flags"
@@ -134,12 +135,12 @@ test_spawn_refuses_a_brief_mode_mismatch() {
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
-  write_brief "$home" delivery-mismatch-b1 no-mistakes
+  write_brief "$home" delivery-mismatch-b1 local-only
   out=$(run_spawn "$home" "$fakebin" delivery-mismatch-b1 "$proj" claude --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a brief/spawn mode mismatch should exit non-zero"
   assert_contains "$out" "delivery mismatch for delivery-mismatch-b1" "mismatch refusal did not name the task"
-  assert_contains "$out" "the brief says mode=no-mistakes but this spawn passed --mode direct-PR" \
+  assert_contains "$out" "the brief says mode=local-only but this spawn passed --mode direct-PR" \
     "mismatch refusal did not show both sides of the disagreement"
   assert_absent "$home/state/delivery-mismatch-b1.meta" "mismatched spawn wrote task metadata"
 
@@ -156,62 +157,10 @@ EOF
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
 }
 
-# The registry is the captain's standing posture, so dropping below its rigor is
-# allowed but never silent, while matching or exceeding it stays quiet. An
-# unregistered project resolves to the same no-mistakes standing default
-# (AGENTS.md section 7), so a downgrade there is announced too. A conditional
-# policy is excluded because both of its legs are legitimate classifications.
-test_spawn_notices_a_rigor_downgrade_against_the_registry() {
-  local rec home proj fakebin out label mode registry expect registered n=0
-  while IFS='|' read -r label registry mode expect registered; do
-    [ -n "$label" ] || continue
-    n=$((n + 1))
-    rec=$(make_home "deviation-$n" "$registry")
-    IFS='|' read -r home proj fakebin <<EOF
-$rec
-EOF
-    write_brief "$home" "delivery-dev-$n" "$mode"
-    out=$(run_spawn "$home" "$fakebin" "delivery-dev-$n" "$proj" claude --mode "$mode" --yolo off)
-    case "$expect" in
-      notice)
-        assert_contains "$out" "less rigor than the captain's standing posture" \
-          "$label: no deviation notice for a rigor downgrade"
-        assert_contains "$out" "the standing posture for proj is $registered" \
-          "$label: notice did not name the standing posture it compared against" ;;
-      quiet)
-        assert_not_contains "$out" "less rigor than the captain's standing posture" \
-          "$label: printed a deviation notice that is not a downgrade" ;;
-    esac
-  done <<'ROWS'
-no-mistakes project shipped direct-PR|- proj [no-mistakes] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes
-no-mistakes project shipped local-only|- proj [no-mistakes] - fixture (added 2026-01-01)|local-only|notice|no-mistakes
-no-mistakes project shipped no-mistakes|- proj [no-mistakes] - fixture (added 2026-01-01)|no-mistakes|quiet|no-mistakes
-local-only project shipped no-mistakes|- proj [local-only] - fixture (added 2026-01-01)|no-mistakes|quiet|local-only
-conditional policy shipped direct-PR|- proj [no-mistakes-prod-only] - fixture (added 2026-01-01)|direct-PR|quiet|no-mistakes-prod-only
-unregistered project resolves to the no-mistakes standing default|- other [no-mistakes] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes
-ROWS
-  pass "fm-spawn: a rigor downgrade against the registered posture is announced, never blocked"
-}
-
-# A scout's deliverable is a report, so it records no delivery posture at all;
-# teardown already treats an absent mode as the most protective one.
-test_scout_records_no_delivery_posture() {
-  local rec home proj fakebin out
-  rec=$(make_home scout-meta "- proj [direct-PR] - fixture (added 2026-01-01)")
-  IFS='|' read -r home proj fakebin <<EOF
-$rec
-EOF
-  write_brief "$home" delivery-scoutmeta-c1
-  out=$(run_spawn "$home" "$fakebin" delivery-scoutmeta-c1 "$proj" claude --scout)
-  assert_not_contains "$out" "less rigor" "a scout spawn consulted the registered delivery posture"
-  assert_not_contains "$out" "delivery mismatch" "a scout spawn checked a delivery contract it does not carry"
-  pass "fm-spawn: a scout spawn resolves no delivery posture from the registry"
-}
-
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta out status blocked_data instructions_path
+  local home meta meta_before out status blocked_data instructions_path mode
   home="$TMP_ROOT/promote/home"
   mkdir -p "$home/state"
   meta="$home/state/promote-d1.meta"
@@ -222,6 +171,8 @@ test_promote_requires_and_records_the_delivery_contract() {
   }
 
   write_scout_meta
+  meta_before="$home/state/promote-d1.meta.before"
+  cp "$meta" "$meta_before"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion without --mode should exit non-zero"
@@ -233,10 +184,13 @@ test_promote_requires_and_records_the_delivery_contract() {
   [ "$status" -ne 0 ] || fail "promotion without --yolo should exit non-zero"
   assert_contains "$out" "promotion requires --yolo" "promote refusal did not name the missing merge posture"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode no-mistakes-prod-only --yolo off 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "promotion on a conditional policy should exit non-zero"
-  assert_contains "$out" "classify this task's surface" "promote did not refuse the conditional policy as a task mode"
+  for mode in no-mistakes no-mistakes-prod-only; do
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode "$mode" --yolo off 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "promotion with removed mode $mode should exit non-zero"
+    cmp -s "$meta_before" "$meta" \
+      || fail "$mode: refused promotion changed the task record"
+  done
 
   blocked_data="$home/data-blocked"
   printf 'not a directory\n' > "$blocked_data"
@@ -244,9 +198,8 @@ test_promote_requires_and_records_the_delivery_contract() {
     "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion without writable instruction storage should exit non-zero"
-  assert_grep 'kind=scout' "$meta" "failed instruction publication still promoted the task"
-  assert_no_grep '^mode=' "$meta" "failed instruction publication recorded a delivery mode"
-  assert_no_grep '^yolo=' "$meta" "failed instruction publication recorded a merge posture"
+  cmp -s "$meta_before" "$meta" \
+    || fail "failed instruction publication changed the task record"
 
   instructions_path="$home/data/promote-d1/ship-instructions.md"
   mkdir -p "$instructions_path"
@@ -256,9 +209,8 @@ test_promote_requires_and_records_the_delivery_contract() {
   [ "$status" -ne 0 ] || fail "promotion over an instruction directory should exit non-zero"
   assert_contains "$out" "ship instructions path is a directory" \
     "promotion did not explain the invalid instruction destination"
-  assert_grep 'kind=scout' "$meta" "invalid instruction destination still promoted the task"
-  assert_no_grep '^mode=' "$meta" "invalid instruction destination recorded a delivery mode"
-  assert_no_grep '^yolo=' "$meta" "invalid instruction destination recorded a merge posture"
+  cmp -s "$meta_before" "$meta" \
+    || fail "invalid instruction destination changed the task record"
   rmdir "$instructions_path"
 
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
@@ -300,12 +252,8 @@ test_promote_refuses_a_symlinked_task_record() {
   pass "fm-promote: a symlinked task record is refused and its target is left untouched"
 }
 
-# The delivery contract only protects a worker that actually receives it. A promoted
-# scout used to get a free-form hint instead of the mode-specific Definition of done,
-# so it never saw the ask-user escalation rule or the --yes ban that every briefed
-# no-mistakes worker gets. This drives the real promotion path, then runs the delivery command it
-# prints against a capturing fm-send.sh, and asserts on the message the worker would
-# actually receive - for every supported mode.
+# Exercise the actual delivery command and compare both public generation paths,
+# so a promoted worker receives the same mode-specific contract as a ship spawn.
 test_promotion_delivers_the_real_definition_of_done() {
   local home meta out sendroot payload mode id brief_dod delivered_dod
   home="$TMP_ROOT/promote-dod/home"
@@ -318,7 +266,7 @@ printf '%s' "$2" > "$FM_TEST_CAPTURE"
 STUB
   chmod +x "$sendroot/bin/fm-send.sh"
 
-  for mode in no-mistakes direct-PR local-only; do
+  for mode in direct-PR local-only; do
     id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     meta="$home/state/$id.meta"
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
@@ -340,20 +288,6 @@ STUB
 
     grep -qx "Delivery contract: mode=$mode" "$payload" \
       || fail "$mode: promoted worker did not receive the machine-readable delivery contract"
-    assert_grep "# Definition of done" "$payload" \
-      "$mode: promoted worker did not receive a Definition of done"
-    assert_grep "pwd -P" "$payload" \
-      "$mode: promoted worker was not told to verify its physical worktree"
-    assert_grep "git rev-parse --show-toplevel" "$payload" \
-      "$mode: promoted worker was not told to verify its repository root"
-    assert_grep "If either does not resolve to the worktree you were launched in, stop and escalate to firstmate" "$payload" \
-      "$mode: promoted worker was not told to stop for any wrong worktree"
-    assert_grep "git checkout -b fm/$id" "$payload" \
-      "$mode: promoted worker was not told to leave the scratch base for its ship branch"
-    assert_grep "## Captain's intent" "$payload" \
-      "$mode: promoted worker did not receive the Captain's intent subsection"
-    assert_grep "## Firstmate spec" "$payload" \
-      "$mode: promoted worker did not receive the Firstmate spec subsection"
 
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
@@ -369,82 +303,51 @@ STUB
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
   done
 
-  payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
-  assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
-    "promoted no-mistakes worker did not receive the ask-user escalation rule"
-  assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$payload" \
-    "promoted no-mistakes worker did not receive the ask-user-only snapshot contract"
-  assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/promote-dod-no-mistakes/nm-<run>-findings.txt" "$payload" \
-    "promoted no-mistakes worker did not receive the structured escalation event"
-  assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \
-    "promoted no-mistakes worker did not receive the --yes prohibition"
-  assert_grep "It is banned fleet-wide" "$payload" \
-    "promoted no-mistakes worker did not receive the fleet-wide ban wording"
-
-  payload="$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr"
-  assert_grep "supersede the scout delivery rules and report-based Definition of done" "$payload" \
-    "promoted worker retained the scout delivery contract"
-  assert_grep "status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule" "$payload" \
-    "promoted worker lost the scout protocols and safety rules that still apply"
-
-  # The faster paths keep their own contracts rather than inheriting the pipeline's.
-  assert_grep "Do NOT run /no-mistakes" "$payload" \
-    "promoted direct-PR worker lost its no-pipeline contract"
-  assert_grep "Do NOT push, do NOT open a PR, do NOT merge" "$TMP_ROOT/promote-dod/payload-promote-dod-local-only" \
-    "promoted local-only worker lost its no-remote contract"
-  assert_no_grep "no-mistakes axi respond" "$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr" \
-    "promoted direct-PR worker received the pipeline gate contract"
   pass "fm-promote: a promoted worker receives the same mode-specific delivery contract a briefed one does"
 }
 
-# The registry parser survives for the mechanical consumers only. It accepts the
-# conditional policy, maps it to its most rigorous leg for them, and exposes the
-# raw annotation for the one caller that must tell a policy from a flat mode.
-test_project_mode_maps_the_conditional_policy() {
-  local home out err
+# Registry policies are a closed set; invalid entries must never become defaults.
+test_project_mode_accepts_current_policies_and_refuses_obsolete_values() {
+  local home out mode status
   home="$TMP_ROOT/project-mode/home"
   mkdir -p "$home/data"
   cat > "$home/data/projects.md" <<'EOF'
-- prodproj [no-mistakes-prod-only] - fixture (added 2026-01-01)
-- yoloproj [no-mistakes-prod-only +yolo] - fixture (added 2026-01-01)
-- flatproj [direct-PR] - fixture (added 2026-01-01)
-- typoproj [no-mistakez] - fixture (added 2026-01-01)
+- remoteproj [direct-PR] - fixture (added 2026-01-01)
+- localproj [local-only +yolo] - fixture (added 2026-01-01)
 EOF
-  out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
-  [ "$out" = "no-mistakes off" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
-  err=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>&1 >/dev/null)
-  [ -z "$err" ] || fail "a registered conditional policy still warned as unknown: $err"
-
-  out=$(FM_HOME="$home" "$PROJECT_MODE" yoloproj 2>/dev/null)
-  [ "$out" = "no-mistakes on" ] || fail "conditional policy dropped its +yolo posture (got '$out')"
-
-  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw prodproj 2>/dev/null)
-  [ "$out" = "no-mistakes-prod-only off" ] || fail "--raw did not expose the registered annotation (got '$out')"
-
-  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw flatproj 2>/dev/null)
-  [ "$out" = "direct-PR off" ] || fail "--raw altered a flat registered mode (got '$out')"
-
-  out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
-  [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
-  err=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>&1 >/dev/null)
-  assert_contains "$err" "unknown mode" "a typo'd registry mode stopped warning"
-  pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" remoteproj 2>/dev/null) \
+    || fail "registered direct-PR mode was refused"
+  [ "$out" = "direct-PR off" ] || fail "direct-PR policy changed: $out"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" localproj 2>/dev/null) \
+    || fail "registered local-only mode was refused"
+  [ "$out" = "local-only on" ] || fail "local-only policy lost its yolo posture: $out"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" unregistered 2>/dev/null) \
+    || fail "unregistered project did not resolve"
+  [ "$out" = "direct-PR off" ] || fail "unregistered project default changed: $out"
+  for mode in no-mistakes no-mistakes-prod-only nope; do
+    printf -- '- invalid [%s] - fixture (added 2026-01-01)\n' "$mode" > "$home/data/projects.md"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" invalid 2>/dev/null)
+    status=$?
+    [ "$status" -ne 0 ] || fail "invalid registered mode $mode was accepted"
+    [ -z "$out" ] || fail "invalid registered mode $mode emitted a usable policy: $out"
+  done
+  pass "fm-project-mode: supported policies resolve, invalid registered modes fail closed"
 }
 
 # Spawn and promotion refuse leftover Task-subsection placeholders through the
 # public brief/spawn/promote path. Filling both subsections lets the spawn
 # delivery checks proceed (the fake tmux still fails later).
 test_spawn_and_promote_require_filled_task_subsections() {
-  local rec home proj fakebin out status id brief meta intent_body spec_body authorized
+  local rec home proj fakebin out status id brief meta original_body spec_body
   rec=$(make_home subsections)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
 
   id=delivery-unfilled-ship
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "unfilled ship brief should still scaffold"
-  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn of an unfilled ship brief should exit non-zero"
   assert_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
@@ -489,89 +392,6 @@ EOF
   assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
     "fenced example headings made a filled legacy Task look unfilled"
 
-  id=delivery-legacy-no-mistakes
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
-# Task
-Captain: Fix the legacy dispatch boundary.
-Do not copy this Firstmate-authored constraint into intent.
-
-# Definition of done
-Delivery contract: mode=no-mistakes
-Pass the entire Task as --intent.
-EOF
-  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
-  assert_not_contains "$out" "has no provenance-marked captain words" \
-    "legacy no-mistakes spawn rejected explicitly marked captain words"
-  assert_present "$home/data/$id/launch-brief.md" \
-    "marked legacy spawn did not render a current launch contract"
-  assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
-    "$home/data/$id/launch-brief.md" \
-    "marked legacy spawn did not override its stale intent instruction"
-  assert_grep "plus any later words the captain actually supplied" \
-    "$home/data/$id/launch-brief.md" \
-    "marked legacy launch contract excluded later captain clarifications"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
-  assert_contains "$authorized" "Fix the legacy dispatch boundary." \
-    "marked legacy launch contract omitted captain words"
-  assert_not_contains "$authorized" "Firstmate-authored constraint" \
-    "marked legacy launch contract included mixed Task specification"
-
-  id=delivery-migrated-stale-no-mistakes
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
-# Task
-## Captain's intent
-Fix the migrated dispatch boundary.
-
-## Firstmate spec
-Preserve the existing compatibility path.
-
-# Definition of done
-Delivery contract: mode=no-mistakes
-Pass the entire Task and every Firstmate requirement as --intent.
-EOF
-  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
-  assert_present "$home/data/$id/launch-brief.md" \
-    "migrated subsection brief did not receive the current launch contract"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
-  assert_contains "$authorized" "Fix the migrated dispatch boundary." \
-    "migrated launch contract omitted Captain's intent"
-  assert_not_contains "$authorized" "Preserve the existing compatibility path." \
-    "migrated launch contract included Firstmate spec in intent"
-  assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
-    "$home/data/$id/launch-brief.md" \
-    "migrated launch contract did not supersede its stale mixed-Task DoD"
-  assert_grep "plus any later words the captain actually supplied" \
-    "$home/data/$id/launch-brief.md" \
-    "migrated launch contract excluded later captain clarifications"
-  assert_grep "The Definition of done's rule that \`--intent\` must be self-sufficient still governs" \
-    "$home/data/$id/launch-brief.md" \
-    "migrated launch contract's overlay dropped the self-sufficiency pointer"
-
-  id=delivery-legacy-unmarked-no-mistakes
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
-# Task
-Fix the legacy dispatch boundary.
-Do not copy this Firstmate-authored constraint into intent.
-
-# Definition of done
-Delivery contract: mode=no-mistakes
-
-# Notes
-## Captain's intent
-Unrelated notes must not become task intent.
-## Firstmate spec
-Unrelated notes must not satisfy task validation.
-EOF
-  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
-  status=$?
-  [ "$status" -ne 0 ] || fail "unmarked legacy no-mistakes spawn should require provenance"
-  assert_contains "$out" "has no provenance-marked captain words" \
-    "unmarked legacy no-mistakes spawn did not explain the missing intent provenance"
-  assert_absent "$home/state/$id.meta" "unmarked legacy no-mistakes spawn wrote task metadata"
-
   id=delivery-unfilled-scout
   FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
     || fail "unfilled scout brief should still scaffold"
@@ -602,10 +422,6 @@ EOF
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion of an unfilled scout brief should exit non-zero"
-  assert_contains "$out" "preserve the original ask in ## Captain's intent" \
-    "unfilled promotion did not preserve the original captain ask boundary"
-  assert_contains "$out" "promotion generates a separate ship-time spec" \
-    "unfilled promotion did not distinguish scout and ship Firstmate specs"
   assert_grep 'kind=scout' "$meta" "unfilled promotion still changed the task record"
 
   id=promote-missing-brief
@@ -637,12 +453,18 @@ Unrelated notes are not the task specification.
 EOF
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "promotion without provenance-marked captain intent should fail"
-  assert_contains "$out" "has no provenance-marked Captain's intent" \
-    "unmarked legacy promotion did not explain the missing intent provenance"
-  assert_absent "$home/data/$id/ship-instructions.md" \
-    "unmarked legacy promotion published empty captain intent"
-  assert_grep 'kind=scout' "$meta" "unmarked legacy promotion changed the task record"
+  expect_code 0 "$status" "promotion of a complete legacy Task should succeed"
+  grep -Fxq 'kind=ship' "$meta" || fail "legacy promotion did not restore ship protection"
+  brief="$home/data/$id/ship-instructions.md"
+  original_body=$(awk '$0 == "## Original task" { emit=1; next } emit && /^## / { exit } emit { print }' "$brief")
+  assert_contains "$original_body" "Investigate the unmarked legacy failure." \
+    "legacy promotion dropped the original task"
+  assert_contains "$original_body" "Keep this Firstmate constraint out of captain intent." \
+    "legacy promotion dropped mixed-task requirements"
+  ! grep -Fxq "## Captain's intent" "$brief" \
+    || fail "legacy promotion relabeled mixed task content as captain words"
+  assert_no_grep "Unrelated notes" "$brief" \
+    "legacy promotion copied notes outside the Task section"
 
   id=promote-filled-e2
   meta="$home/state/$id.meta"
@@ -652,7 +474,7 @@ EOF
   fill_brief_subsections "$home/data/$id/brief.md" \
     "Investigate why the identity check is failing." \
     "Ship the identity-check fix without adding a classifier."
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "promotion of a filled scout brief should succeed"
   assert_grep 'kind=ship' "$meta" "filled promotion did not restore ship teardown protection"
@@ -729,14 +551,18 @@ EOF
   status=$?
   expect_code 0 "$status" "promotion of a pre-subsection scout brief should succeed"
   brief="$home/data/$id/ship-instructions.md"
-  intent_body=$(awk '$0 == "## Captain'\''s intent" { emit=1; next } emit && /^## / { exit } emit { print }' "$brief")
+  original_body=$(awk '$0 == "## Original task" { emit=1; next } emit && /^## / { exit } emit { print }' "$brief")
   spec_body=$(awk '$0 == "## Firstmate spec" { emit=1; next } emit && /^# / { exit } emit { print }' "$brief")
-  assert_contains "$intent_body" "Investigate the fold's session-floor refusal." \
-    "legacy promotion discarded provenance-marked captain words"
-  assert_contains "$intent_body" "Preserve the existing successful session behavior." \
-    "legacy promotion truncated multiline provenance-marked captain words"
-  assert_not_contains "$intent_body" "Reproduce the refusal" \
-    "legacy promotion classified unmarked mixed Task text as captain intent"
+  assert_contains "$original_body" "Captain's words: Investigate the fold's session-floor refusal." \
+    "legacy promotion changed the original marked task content"
+  assert_contains "$original_body" "Captain: Preserve the existing successful session behavior." \
+    "legacy promotion truncated multiline task content"
+  assert_contains "$original_body" "Reproduce the refusal before changing code." \
+    "legacy promotion dropped the original mixed-task requirement"
+  assert_contains "$original_body" "Ship the narrow session-floor fix with a regression test." \
+    "legacy promotion dropped the original acceptance criterion"
+  ! grep -Fxq "## Captain's intent" "$brief" \
+    || fail "legacy promotion relabeled the mixed Task as captain words"
   assert_not_contains "$spec_body" "Reproduce the refusal before changing code." \
     "legacy promotion reused the scout-time mixed Task as ship instructions"
   assert_not_contains "$spec_body" "Ship the narrow session-floor fix with a regression test." \
@@ -748,7 +574,7 @@ EOF
   pass "fm-spawn/fm-promote: leftover Task placeholders are refused until both subsections are filled"
 }
 
-test_spawn_refreshes_legacy_worker_roles() {
+test_spawn_preserves_project_instruction_files() {
   local rec home proj fakebin kind id out brief project_kind
   rec=$(make_home worker-roles)
   IFS='|' read -r home proj fakebin <<EOF
@@ -765,7 +591,7 @@ EOF
     fi
     printf '@AGENTS.md\n' > "$proj/CLAUDE.md"
     cp "$proj/AGENTS.md" "$proj/agents-before"
-    for kind in no-mistakes direct-PR local-only scout; do
+    for kind in direct-PR local-only scout; do
       id="roles-$project_kind-$kind"
       write_brief "$home" "$id"
       if [ "$kind" = scout ]; then
@@ -776,29 +602,22 @@ EOF
       assert_not_contains "$out" 'could not render' "worker role rendering failed"
       brief="$home/data/$id/launch-brief.md"
       assert_present "$brief" "$project_kind $kind did not refresh the legacy launch brief"
-      assert_grep 'follow this brief instead of that supervisor contract' "$brief" "$project_kind $kind omitted worker authority"
-      assert_grep 'When this task works on Firstmate itself' "$brief" "$project_kind $kind made the exception unconditional"
-      assert_grep 'Other projects retain their own instructions unchanged' "$brief" "$project_kind $kind displaced project guidance"
-      ! grep -q '^This section supersedes every earlier brief instruction about your role' "$brief" ||
-        fail "$project_kind $kind revoked the brief's own role for a task that is not Firstmate"
       assert_no_grep '# Current worker role contract' "$home/data/$id/brief.md" "spawn rewrote the source brief"
       cmp -s "$proj/agents-before" "$proj/AGENTS.md" || fail "spawn changed project AGENTS.md"
       [ "$(cat "$proj/CLAUDE.md")" = '@AGENTS.md' ] || fail "spawn changed the project import"
     done
   done
   cmp -s "$ROOT/AGENTS.md" "$home/AGENTS.md" || fail "worker spawn changed the primary contract"
-  pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
+  pass "fm-spawn: launch preparation leaves project and primary instruction files unchanged"
 }
 
-test_spawn_refreshes_legacy_worker_roles
+test_spawn_preserves_project_instruction_files
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
-test_spawn_notices_a_rigor_downgrade_against_the_registry
-test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
-test_project_mode_maps_the_conditional_policy
+test_project_mode_accepts_current_policies_and_refuses_obsolete_values
 test_spawn_and_promote_require_filled_task_subsections
 echo "# all fm-task-delivery tests passed"

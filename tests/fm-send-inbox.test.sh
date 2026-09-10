@@ -191,14 +191,14 @@ test_harness_invocations_stay_typed() {
   local dir err typed
   # A slash command must reach the harness's own parser, on any harness.
   dir=$(setup_case slash); err="$dir/send.err"
-  run_send "$dir" "$err" -- t1 "/no-mistakes" || fail "a slash send should succeed"
+  run_send "$dir" "$err" -- t1 "/bearings" || fail "a slash send should succeed"
   typed=$(cat "$dir/send.log")
-  assert_contains "$typed" "/no-mistakes" "the slash command should be typed literally"
+  assert_contains "$typed" "/bearings" "the slash command should be typed literally"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "a slash command must not be routed to the inbox"
   # A codex `$<skill>` invocation likewise stays typed.
   dir=$(setup_case codexskill codex); err="$dir/send.err"
-  run_send "$dir" "$err" -- t1 '$no-mistakes' || fail "a codex \$skill send should succeed"
-  assert_contains "$(cat "$dir/send.log")" '$no-mistakes' "the codex \$skill should be typed literally"
+  run_send "$dir" "$err" -- t1 '$bearings' || fail "a codex \$skill send should succeed"
+  assert_contains "$(cat "$dir/send.log")" '$bearings' "the codex \$skill should be typed literally"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "a codex \$skill must not be routed to the inbox"
   # The same `$` message to a non-codex harness is plain text: inbox plane.
   dir=$(setup_case dollartext claude); err="$dir/send.err"

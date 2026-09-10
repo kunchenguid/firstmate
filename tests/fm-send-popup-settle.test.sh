@@ -3,7 +3,7 @@
 #
 # Some TUIs open a completion popup when the composer's first character triggers
 # it: codex (and others) for a leading `/` slash command, and codex specifically
-# for a leading `$<skill>` invocation (e.g. `$no-mistakes`). Submitting before the
+# for a leading `$<skill>` invocation (e.g. `$bearings`). Submitting before the
 # popup settles lets it swallow the Enter, so the line never submits. fm-send
 # absorbs this by pausing `settle` seconds AFTER typing and BEFORE the (retried)
 # Enter - the first sleep fm_tmux_submit_core makes. These tests pin the
@@ -138,15 +138,15 @@ rides_inbox() {  # <label> <harness> <message>
 }
 
 # Codex `$<skill>` gets the long settle so its `$` popup clears (the fix).
-first_settle 1.2 'codex $skill -> long settle' codex '$no-mistakes'
+first_settle 1.2 'codex $skill -> long settle' codex '$bearings'
 
 # The same Codex `$<skill>` path must work when the target is addressed by exact
 # task id, not only by the legacy `fm-<id>` window label.
-first_settle 1.2 'codex $skill exact task id -> long settle' codex '$no-mistakes' exact
+first_settle 1.2 'codex $skill exact task id -> long settle' codex '$bearings' exact
 
 # Same `$` message to claude is ordinary text there: it rides the inbox and
 # only the fast doorbell touches the terminal.
-rides_inbox 'claude $-message' claude '$no-mistakes'
+rides_inbox 'claude $-message' claude '$bearings'
 
 # `$`-prefixed plain text to claude (a price) is likewise ordinary text - the
 # regression the codex scoping exists to prevent can no longer slow it.
@@ -154,11 +154,11 @@ rides_inbox 'claude "$5/month"' claude '$5/month is cheap'
 
 # An explicit session:window target has no meta, so the harness is unknown and
 # treated as non-codex: the safe default keeps the fast path even for a `$` message.
-first_settle 0.3 'explicit target $message -> fast path (unknown harness)' --explicit '$no-mistakes'
+first_settle 0.3 'explicit target $message -> fast path (unknown harness)' --explicit '$bearings'
 
 # The `/` slash case stays universal and unchanged: long settle regardless of
 # harness (here a non-codex claude target).
-first_settle 1.2 'claude /command -> long settle (slash unchanged)' claude '/no-mistakes'
+first_settle 1.2 'claude /command -> long settle (slash unchanged)' claude '/bearings'
 
 # A `/` to codex is likewise still the long settle (slash path untouched).
 first_settle 1.2 'codex /command -> long settle (slash unchanged)' codex '/help'

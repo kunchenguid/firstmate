@@ -134,16 +134,16 @@ test_never_set_flags_without_refusing_and_never_over_matches() {
 # No parser reads the object or precondition: any text the captain gives is
 # recorded verbatim, including wording a grammar would have judged.
 test_fields_record_the_captain_wording_verbatim() {
-  compile_accept '1. merge task nm-windows-fix-r1 PR when checks green' 'green merge' \
-    --action merge --object 'task nm-windows-fix-r1 PR' --when 'checks green'
+  compile_accept '1. merge task windows-fix-r1 PR when checks green' 'green merge' \
+    --action merge --object 'task windows-fix-r1 PR' --when 'checks green'
   compile_accept "1. merge task x's PR when checks green" 'possessive PR role' \
     --action merge --object "task x's PR" --when 'checks green'
-  compile_accept '1. merge task y PR when red on nm-ci-windows' 'red merge with the failing check named' \
-    --action Merge --object 'task y PR' --when 'red on nm-ci-windows'
-  compile_accept '1. merge task y PR when even if nm-ci-windows is red stop the captain returns' 'stop field' \
-    --action merge --object 'task y PR' --when 'even if nm-ci-windows is red' --stop 'the captain returns'
-  compile_accept '1. abort-run no-mistakes run for task nm-ci-windows-git-shard-split-r1 when install deadlocks' 'named event' \
-    --action abort-run --object 'no-mistakes run for task nm-ci-windows-git-shard-split-r1' --when 'install deadlocks'
+  compile_accept '1. merge task y PR when red on ci-windows' 'red merge with the failing check named' \
+    --action Merge --object 'task y PR' --when 'red on ci-windows'
+  compile_accept '1. merge task y PR when even if ci-windows is red stop the captain returns' 'stop field' \
+    --action merge --object 'task y PR' --when 'even if ci-windows is red' --stop 'the captain returns'
+  compile_accept '1. abort-run CI run for task ci-windows-git-shard-split-r1 when install deadlocks' 'named event' \
+    --action abort-run --object 'CI run for task ci-windows-git-shard-split-r1' --when 'install deadlocks'
   compile_accept '1. wake-me task fix-windows when at 2026-09-08T08:00Z' 'time precondition' \
     --action wake-me --object 'task fix-windows' --when 'at 2026-09-08T08:00Z'
   compile_accept '1. discard the worktree of task w when its rerun fails twice' 'named discard' \

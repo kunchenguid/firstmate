@@ -44,7 +44,7 @@
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
-# no longer match, and a pipeline rebase can leave the local worktree diverged from
+# no longer match, and a rebased PR branch can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
 # cherry, and merge-tree containment each fail to prove content landed without also
 # accepting unlanded edits to the same paths. Teardown still accepts a merged PR
@@ -168,35 +168,9 @@
 #
 # Pre-teardown cleanup sequence (runs once every landed/discard-work safety
 # refusal above has already passed, and BEFORE any worktree return, branch
-# delete, or backend kill below - a still-active run or a leaked process may
-# own live work in that worktree):
-#   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
-#     be torn down while its no-mistakes pipeline run is still PARKED at a gate
-#     (awaiting_approval/fix_review/any awaiting_agent field), with no worker
-#     left to ever answer it - the run then sits there holding a fleet slot
-#     indefinitely (observed 2026-08-03: runs parked 7h39m and parked at a
-#     post-CI approval gate after the worker was already cleaned up). A run
-#     with an autonomous step still under way (running/fixing/ci) is left
-#     alone: no-mistakes drives those against its own gate-repo clone, not the
-#     crew's worktree, so they are not orphaned by removing the worktree.
-#     conclude_task_no_mistakes_run attributes the active-or-most-recent run to
-#     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
-#     strict fm_nm_head_matches_worktree rule) both match this worktree, then
-#     runs `no-mistakes axi abort --run <id>` for that verified run instance.
-#     When the run head is absent from this copy's object store - the pipeline
-#     committed its fix round in its own repo and the task copy never fetched
-#     it - attribution falls to the same lib's shared
-#     fm_nm_runs_status_for_worktree ledger rule, whose anchored continuation
-#     recognition is the only remaining path, which refuses every row shape
-#     it cannot prove, and which authorizes the abort only for an explicitly
-#     active (`running`) proved continuation - a terminal newest word is
-#     finished history, never an abort authorization (observed 2026-09-03: a
-#     run parked at a post-CI gate after fix rounds advanced its head past
-#     the submitted head stayed parked forever once the task was cleaned up).
-#     A run already terminal
-#     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
-#     an already-aborted run reads back terminal and is skipped on retry.
-#   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
+# delete, or backend kill below - a leaked process may own live work in that
+# worktree):
+#   Fix 1 - reap leaked descendant processes. A backgrounded/disowned process
 #     started under the worktree (or its per-task tasktmp) does not receive the
 #     SIGHUP/SIGTERM that closing the backend pane sends to its own foreground
 #     process group, so it survives reparented to init (observed 2026-08-03:
@@ -210,12 +184,12 @@
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
-#   Fix 3 - sweep abandoned remote job workers. A remote job worker started
+#   Fix 2 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
-#     being reachable by Fix 2, because its working directory is wherever it
+#     being reachable by Fix 1, because its working directory is wherever it
 #     was launched rather than the task worktree (observed 2026-08-07: 29
 #     workers at ppid 1, 1-2 days old, each still polling and appending to a
-#     log in a pruned no-mistakes gate worktree). bin/fm-remote-job-reap-orphans.sh
+#     log in a pruned validation worktree). bin/fm-remote-job-reap-orphans.sh
 #     owns that sweep and its safety rule; it never touches a worker whose code
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
@@ -243,8 +217,6 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
@@ -255,8 +227,6 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
-# shellcheck source=bin/fm-nm-run-lib.sh
-. "$SCRIPT_DIR/fm-nm-run-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -392,9 +362,6 @@ fm_lock_try_acquire "$CONTROL_LOCK" || {
   exit 1
 }
 CONTROL_LOCK_HELD=1
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
-# down a worktree (see bin/fm-gate-refuse-lib.sh).
-fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
 fm_backlog_record_present "$META" "task record" "$STATE" || {
@@ -941,7 +908,16 @@ elif [ "$TREEHOUSE_SLOT_LOCK_REQUIRED" = 1 ]; then
   exit 1
 fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
-[ -n "$MODE" ] || MODE=no-mistakes
+[ -n "$MODE" ] || MODE=direct-PR
+if [ "$KIND" = ship ]; then
+  case "$MODE" in
+    direct-PR|local-only) ;;
+    *)
+      echo "REFUSED: task $ID has unsupported delivery mode '$MODE'; expected direct-PR or local-only. Nothing was changed." >&2
+      exit 1
+      ;;
+  esac
+fi
 
 # A record accepted as a legacy incarnation (no spawn_gen, --legacy-record
 # given) may be torn down only when its recorded endpoint is confidently gone
@@ -1707,119 +1683,6 @@ validate_worktree_teardown_safety() {
   fi
 }
 
-# Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
-# worktree $1 belong to THIS task, and is it parked at a gate awaiting an agent
-# that is about to be removed? Prints nothing; returns 0 only on a genuine
-# match so the caller knows it is safe to abort - never a guess. Identity
-# binds through the strict object-local head rule, with bin/fm-nm-run-lib.sh's
-# shared ledger-anchored continuation rule as the only recognition for a head
-# this copy cannot resolve at all.
-NM_TEARDOWN_TIMEOUT=${FM_TEARDOWN_NM_TIMEOUT:-10}
-case "$NM_TEARDOWN_TIMEOUT" in ''|*[!0-9]*) NM_TEARDOWN_TIMEOUT=10 ;; esac
-# How many of the most recent `no-mistakes runs` rows the parked-run
-# continuation proof may scan, mirroring bin/fm-crew-state.sh's limit posture
-# (generous: rows of other branches interleave freely in the real ledger).
-NM_TEARDOWN_RUNS_LIMIT=${FM_TEARDOWN_NM_RUNS_LIMIT:-200}
-case "$NM_TEARDOWN_RUNS_LIMIT" in ''|*[!0-9]*) NM_TEARDOWN_RUNS_LIMIT=200 ;; esac
-TASK_RUN_ID=
-task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
-  local wt=$1 out=$2 branch run_id run_branch run_head status outcome awaiting has_gate ledger
-  TASK_RUN_ID=
-  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
-  [ -n "$branch" ] || return 1
-  [ -n "$out" ] || return 1
-  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
-  [ -n "$run_id" ] || return 1
-  run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
-  [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
-  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
-  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
-  [ -z "$outcome" ] || return 1
-  status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
-  [ -n "$status" ] || return 1
-  case "$status" in
-    completed|failed|cancelled|passed|checks-passed|running|fixing|ci) return 1 ;;
-  esac
-  if ! fm_nm_head_matches_worktree "$wt" "$run_head"; then
-    # The strict object-local rule rejected this run head. That rejection is
-    # final when the head object resolves in this copy (diverged or rewritten
-    # tips are genuine mismatches), but when the object is absent entirely -
-    # the pipeline committed its fix round in its own repo and this copy
-    # never fetched it - the ONE shared runs-ledger rule in
-    # bin/fm-nm-run-lib.sh owns the only remaining recognition, and it prints
-    # nothing for any ledger shape it cannot prove, so the run stays
-    # untouched unless the ledger proves this exact continuation. Cleanup
-    # consumes only an explicitly active (`running`) proved word: a terminal
-    # newest row is finished history, never this parked run's abort
-    # authorization (the read path classifies the same owner's answer; the
-    # abort here must never fire for a run that already ended).
-    [ -n "$run_head" ] || return 1
-    [ -z "$(fm_nm_resolve_commit "$wt" "$run_head")" ] || return 1
-    ledger=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" runs --limit "$NM_TEARDOWN_RUNS_LIMIT")
-    [ "$(fm_nm_runs_status_for_worktree "$wt" "$branch" "$ledger" "$run_head")" = running ] || return 1
-  fi
-  awaiting=$(printf '%s\n' "$out" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
-  has_gate=$(printf '%s\n' "$out" | grep -Eq '^[[:space:]]*gate:[[:space:]]*' && echo 1 || echo 0)
-  case "$status" in
-    awaiting_approval|fix_review) TASK_RUN_ID=$run_id; return 0 ;;
-  esac
-  if [ -n "$awaiting" ] || [ "$has_gate" = 1 ]; then
-    TASK_RUN_ID=$run_id
-    return 0
-  fi
-  return 1
-}
-
-task_run_is_own_parked_run() {  # <worktree>
-  local wt=$1 out
-  # Accepted best-effort residual: query failures stay fail-open because making
-  # no-mistakes availability a prerequisite would block ship tasks with no run.
-  out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
-  task_status_is_own_parked_run "$wt" "$out"
-}
-
-task_status_is_terminal_run() {  # <axi-status-output> <run-id>
-  local out=$1 expected_id=$2 run_id outcome
-  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
-  [ "$run_id" = "$expected_id" ] || return 1
-  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
-  case "$outcome" in
-    cancelled|failed|passed|checks-passed) return 0 ;;
-  esac
-  return 1
-}
-
-task_status_is_run_not_found() {  # <status-error> <run-id>
-  local actual expected
-  actual=$(fm_nm_trim "$1")
-  expected=$(printf 'error: "run \\"%s\\" not found"' "$2")
-  [ "$actual" = "$expected" ]
-}
-
-# Abort THIS task's own parked no-mistakes run before the worker that would
-# have answered its gate is removed, so no run is left orphaned holding a
-# fleet slot. Only KIND=ship drives a no-mistakes validation of its own
-# worktree (scouts and secondmates never do, mirroring bin/fm-crew-state.sh);
-# a run not attributed to this exact branch+head is left completely alone.
-conclude_task_no_mistakes_run() {  # <worktree>
-  local wt=$1 out run_id
-  [ "$KIND" = ship ] || return 0
-  [ -d "$wt" ] || return 0
-  command -v no-mistakes >/dev/null 2>&1 || return 0
-  task_run_is_own_parked_run "$wt" || return 0
-  run_id=$TASK_RUN_ID
-  echo "teardown: no-mistakes run for $ID is parked at a gate; aborting before the worker is removed" >&2
-  # Accepted best-effort residual: abort supports run-id targeting but no atomic
-  # live-state condition; fully closing the resume race needs upstream compare-and-cancel.
-  fm_nm_run_checked "$wt" "$NM_TEARDOWN_TIMEOUT" axi abort --run "$run_id" >/dev/null 2>&1 || true
-  if out=$(fm_nm_run_bounded "$wt" "$NM_TEARDOWN_TIMEOUT" axi status --run "$run_id" 2>&1); then
-    task_status_is_terminal_run "$out" "$run_id" && return 0
-  elif task_status_is_run_not_found "$out" "$run_id"; then
-    return 0
-  fi
-  echo "REFUSED: no-mistakes run for $ID is still parked after axi abort; confirm it stopped (no-mistakes axi status) or abort it manually (no-mistakes axi abort --run <id>) before retrying teardown." >&2
-  return 1
-}
 
 # Fix 2 (see script header): pids of every process whose CURRENT WORKING
 # DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
@@ -1871,7 +1734,8 @@ task_process_identity() {  # <pid>
     return 0
   fi
   value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
-  value=$(fm_nm_trim "$value")
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf 'lstart=%s\n' "$value"
@@ -3178,18 +3042,16 @@ else
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
-# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
-# dedicated process-event and firstmate-home removal machinery further below,
+# it). Reap leaked task processes here before ANY destructive step below,
+# because they may still own live work in this exact worktree.
+# This does not run for kind=secondmate: a secondmate home's runtime lifecycle
+# is owned by the dedicated process-event and firstmate-home removal machinery,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
-  conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
-# Fix 3 (see script header): sweep remote job workers abandoned by an already
+# Fix 2 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 

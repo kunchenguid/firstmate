@@ -3,10 +3,9 @@
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
 # The no-verb signal and stale path is absorb-only-on-positive-evidence: a wake
-# is absorbed only when the crew shows it is still working through an actively
-# running no-mistakes step or a backend busy signal. A home that opts in with
-# config/turnend-churn-absorb lets a bare turn-end also use bounded pane churn
-# since the previous poll. Every other no-verb wake surfaces, so a crew
+# is absorbed only when the crew has an exact backend busy verdict. A home that
+# opts in with config/turnend-churn-absorb lets a bare turn-end use bounded
+# pane churn since the previous poll. Every other no-verb wake surfaces, so a crew
 # that finishes (or stops and waits) is never silently swallowed. A declared wait,
 # either a paused: external wait or a verified captain-held transfer, is the
 # separate idle absorb case and re-surfaces only on its long bounded cadence,
@@ -21,12 +20,13 @@
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          span has a captain-relevant event OR a no-verb signal lacks
 #                          positive execution evidence, unless afk is active
-#   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
-#                          timer) regardless of what the status log says - an active
-#                          run-step or busy pane outranks even a captain-relevant log
-#                          line, since the crew's own log gets no new entry once
-#                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause or verified captain-held transfer is
+#   stale: <window>        a provably-working stale is initially absorbed (with
+#                          a wedge timer) regardless of what the status log says.
+#                          An exact backend busy verdict outranks even a
+#                          captain-relevant event because the sparse status log
+#                          can stay unchanged throughout a long-running turn.
+#                          A declared external-wait pause or verified
+#                          captain-held transfer is
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
 #                          human the wait is on. Only when neither absorb class
@@ -205,14 +205,14 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
-# Always-on wake triage: most wakes during a long crew validation are benign (a
-# working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
+# Always-on wake triage: most wakes during a long crew turn are benign, such as
+# a working: note or turn-end while the backend remains busy, or a no-change heartbeat. Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
 # and ABSORBS the benign majority - it advances the suppression marker, logs to a
 # debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
-# / stale path is absorb-only-on-positive-evidence. The shared proof is an actively
-# running no-mistakes step or a busy pane via crew_is_provably_working over
-# fm-crew-state.sh; where config/turnend-churn-absorb opts in, a bare turn-end alone
+# / stale path is absorb-only-on-positive-evidence. The shared proof is an exact
+# backend busy verdict, read by crew_is_provably_working through fm-crew-state.sh;
+# where config/turnend-churn-absorb opts in, a bare turn-end alone
 # may also use bounded pane churn since the previous poll.
 # Every other crew that stopped its turn is SURFACED, so a finish reported
 # only through interactive pane menus (no done: status) is never swallowed. An
@@ -472,15 +472,15 @@ inbox_steer_check() {  # <window> <task>
 # evidence; 1 otherwise. Each task may satisfy the authoritative working proof,
 # or an eligible bare turn-end may use the opt-in pane-churn proof below.
 #
-# OFF unless the home creates config/turnend-churn-absorb. The first two proofs
-# read a verdict the harness itself vouches for; this one infers execution from
-# rendered bytes, which is weaker, so widening the absorb is a home's choice to
-# make rather than a default every fleet inherits. With the flag absent this
-# delegates to the unchanged all-tasks authoritative proof.
+# OFF unless the home creates config/turnend-churn-absorb. The authoritative
+# proof is a verdict the harness itself vouches for; pane churn infers execution
+# from rendered bytes, which is weaker, so widening the absorb is a home's choice
+# rather than a default every fleet inherits. With the flag absent this delegates
+# to the unchanged all-tasks authoritative proof.
 #
-# It exists because the first two are unreachable for a harness whose semantic
-# busy state has no verified source: bin/fm-crew-state.sh can only answer unknown
-# for such an adapter, crew_is_provably_working is therefore never satisfiable,
+# It exists because the authoritative proof is unreachable for a harness whose
+# semantic busy state has no verified source: bin/fm-crew-state.sh can only answer
+# unknown for such an adapter, so crew_is_provably_working is never satisfiable,
 # and every worker turn boundary surfaced a wake with nothing to act on - the cost
 # scaling with the number of workers in flight. Pane churn needs no harness
 # cooperation, so it restores the absorb branch for those adapters without
@@ -820,7 +820,7 @@ EOF
 
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
 # (default 3): a pane that keeps re-wedging on the SAME stale hash - each
-# escalation gets absorbed again as "still validating" one poll later, since the
+# escalation gets absorbed again as "still working" one poll later, since the
 # hash never changes - can otherwise repeat forever with no signal that this is
 # no longer a one-off. At the threshold, wedge_timer_check appends a
 # "demand-deep-inspection" marker to the wake payload so the wake reason itself
@@ -896,7 +896,7 @@ clear_write_tracking() {  # <window-key>
 # state (the costly check already ran once, at classification time). Shared by
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# line that an exact backend busy verdict outranked).
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
@@ -922,7 +922,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the backend busy state alone)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
@@ -2031,8 +2031,8 @@ EOF
     #     classified (its whole new span, not merely its last line);
     #   - or it is a no-verb wake (a bare turn-end, a working: note) with no
     #     positive evidence the crew is still executing - the crew stopped its turn
-    #     with no actively-running pipeline and no busy pane, so it may be done
-    #     (even via an interactive menu that wrote no done: status), waiting on a
+    #     with no exact busy verdict, so it may be done (even via an interactive
+    #     menu that wrote no done: status), waiting on a
     #     decision, or wedged. Absorbing such a turn-end is exactly the
     #     swallowed-finish this change guards against.
     # Positive evidence is either an authoritative provably-working verdict or, in a
@@ -2045,9 +2045,9 @@ EOF
     # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
     # whose crew is still executing) in always-on mode -> advance the markers so it
     # will not re-fire, log, and keep blocking without enqueuing. Both evidence
-    # checks are costly (a bounded no-mistakes call, then a pane capture), so the ||
-    # ordering evaluates them ONLY for a non-afk signal with no captain-relevant
-    # status span, and the capture only once the authoritative verdict comes up short.
+    # checks can capture backend state, so the || ordering evaluates them ONLY for
+    # a non-afk signal with no captain-relevant status span, and the churn capture
+    # runs only once the authoritative verdict comes up short.
     FM_SIGNAL_SURFACE_ENDPOINTS=''
     FM_SIGNAL_NEEDS_DECISION_FILES=''
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
@@ -2191,20 +2191,11 @@ EOF
             wake "stale: $w"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
-          # The log's last line is captain-relevant - but that alone is not
-          # proof the crew is actually done: a crew's own status log gets no
-          # new entry once firstmate hands it to a no-mistakes validation
-          # (AGENTS.md's sparse status-reporting contract), so the log can
-          # keep showing a "done:"/needs-decision/blocked leftover from
-          # BEFORE that validation started for the run's entire (possibly
-          # many-minutes) duration, while stale_is_terminal - which has no
-          # run-step awareness - keeps reporting it as still-current on every
-          # poll. Root cause of the 2026-07 herdr false-surface incidents: a
-          # validating crew was surfaced as stale every few minutes despite an
-          # actively-running pipeline, purely because of this stale leftover
-          # line. On a NEW hash, give an active run/busy pane (the same
-          # authoritative source fm-crew-state.sh itself already prioritizes
-          # over the log) a chance to override before trusting the log.
+          # The log's last line is captain-relevant, but it is an event and can
+          # be stale while the crew remains inside the same long-running turn.
+          # On a NEW hash, let the exact backend busy verdict (the authoritative
+          # source fm-crew-state.sh prioritizes over the log) override that stale
+          # event before trusting it.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
@@ -2252,13 +2243,13 @@ EOF
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
           # Decided once per distinct stale hash (the costly state reads run only
           # on first sight, never every poll) via pause_state_class, which returns:
-          #   - working: an actively-running pipeline legitimately sits on a static
-          #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
-          #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
+          #   - working: an exact semantic busy verdict can remain on a static
+          #     pane (e.g. while waiting on CI), so absorb and start the wedge
+          #     timer so a genuinely frozen turn still escalates past STALE_ESCALATE_SECS;
           #   - paused: a declared wait pause_state_class admits (its header owns which
           #     liveness evidence each kind of crew must supply), so absorb on the long
           #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
-          #   - none: no running pipeline, no exact busy verdict, no admitted declared wait.
+          #   - none: no exact busy verdict and no admitted declared wait.
           #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to

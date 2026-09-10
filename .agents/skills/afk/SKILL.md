@@ -54,7 +54,7 @@ Hold-for-return is the default and the only reach profile this release records: 
 - The record exists, so the watcher never rechecks an item held for the captain, in either supervision shape; the return brief lists it instead.
   Declared external waits keep their condition-aware, hours-long recheck cadence (`bin/fm-watch.sh`, `bin/fm-classify-lib.sh`).
 - Recorded clauses are not executed by this release.
-  Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, no recorded clause is authority by itself, and merge authority plus ask-user findings keep exactly the rules they have when attended (`AGENTS.md` section 7 and `ask-user-authority`); anything that needs the captain holds for their return.
+  Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, no recorded clause is authority by itself, and every action that needs captain approval keeps exactly the rules it has when attended under `AGENTS.md` section 7; anything that needs the captain holds for their return.
 - The session-start digest reports the posture under its AFK subsection, so a restart re-enters the posture from the record, not from memory.
 
 ## How to exit: the return
@@ -78,7 +78,7 @@ Bias ambiguous cases toward exit: a present captain beats token savings, and a f
 
 afk changes how the captain is informed and what happens at a captain-owned decision point, **not who approves what**.
 "Away" never means "approves more" or "approves less."
-A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy; anything requiring the captain still waits for the captain's explicit word.
+A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and every other needs-decision item follows the normal captain-approval rules; anything requiring the captain still waits for the captain's explicit word.
 A mandate clause is the captain's explicit instruction given before leaving, recorded with its named object and condition; a clause is never inferred, never applied by analogy, and expires at return.
 Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.
 This release records clauses and does not execute them.

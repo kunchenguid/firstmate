@@ -187,7 +187,7 @@ add_repo_backed_mate() {  # <case-dir> <id> [harness] [backend]
     printf 's1\n' > "$dir/seed/.agents/skills/note.md"
     # The operational dirs a live home carries are gitignored in a real firstmate
     # checkout; without that the home would read as dirty and be skipped.
-    printf '/data/\n/state/\n/config/\n/projects/\n/.no-mistakes/\n.fm-secondmate-home\n' \
+    printf '/data/\n/state/\n/config/\n/projects/\n.fm-secondmate-home\n' \
       > "$dir/seed/.gitignore"
     git -C "$dir/seed" add -A
     git -C "$dir/seed" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm c1

@@ -394,7 +394,7 @@ test_refused_spawn_leaves_no_task_state() {
   fm_test_spawn_brief "$home" "$id"
   out=$(FM_TEST_CLAUDE_CONFIG_DIR="$config" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" claude \
-    --mode no-mistakes --yolo off)
+    --mode direct-PR --yolo off)
   expect_code 1 $? "a spawn whose trust registration is refused must fail: $out"
   assert_contains "$out" "workspace trust" "the spawn did not report the trust refusal"
   [ ! -e "$home/state/$id.busy-state" ] \
@@ -424,7 +424,7 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
   fm_test_spawn_brief "$home" trustspawn
   out=$(FM_TEST_CLAUDE_CONFIG_DIR="$config" FM_FAKE_LAUNCH_LOG="$launch_log" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" trustspawn "$proj" claude \
-    --mode no-mistakes --yolo off)
+    --mode direct-PR --yolo off)
   expect_code 0 $? "the claude spawn must succeed: $out"
   assert_trusted "$config/.claude.json" "$wt" \
     "the claude spawn did not pre-register trust for its worktree"

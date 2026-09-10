@@ -8,20 +8,20 @@
 # default-branch base, the fm/<task-id> branch, and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
-# delivery contract as a briefed one, including the no-mistakes mode's ask-user
-# escalation rule and --yes ban. The instructions also carry `# Task` with
-# `## Captain's intent` preserved from the scout brief and promotion's ship-time
-# instructions under `## Firstmate spec`; the scout-time spec remains context but
-# is not relabeled as the ship spec. Promotion refuses leftover `{TASK}` /
-# `{FIRSTMATE_SPEC}` placeholders (bin/fm-dod-lib.sh). A pre-subsection scout
-# brief contributes only Task lines explicitly marked as captain words to intent.
-# A scout records no delivery posture, so promotion is where this task's delivery
-# contract is decided: --mode and --yolo are REQUIRED and written into the meta
-# alongside the kind= flip. Firstmate resolves both at promotion time, having just
-# read the scout's report (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never looks it up.
-# no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# delivery contract as a briefed one. The instructions also carry `# Task`.
+# A structured scout brief preserves `## Captain's intent`, while a legacy
+# brief carries its complete `# Task` body under `## Original task` so mixed
+# scout-time material is never relabeled as captain words. Promotion's ship-time
+# instructions live under `## Firstmate spec`; the scout-time spec remains
+# context and is not relabeled as the ship spec. Promotion refuses leftover
+# `{TASK}` / `{FIRSTMATE_SPEC}` placeholders and validates the general Task
+# structure through bin/fm-dod-lib.sh. A scout records no delivery posture, so promotion is
+# where this task's delivery contract is decided: --mode and --yolo are REQUIRED
+# and written into the meta alongside the kind= flip. Firstmate resolves both at
+# promotion time, having just read the scout's report (AGENTS.md section 7);
+# data/projects.md holds the captain's standing posture as context, and this
+# script never looks it up.
+# Usage: fm-promote.sh <task-id> --mode <direct-PR|local-only> --yolo <on|off>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -74,9 +74,9 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
-[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
+[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
-  echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
+  echo "error: promotion requires --mode <direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
   exit 1
 }
 [ "$YOLO_SET" -eq 1 ] || {
@@ -84,11 +84,8 @@ done
   exit 1
 }
 case "$MODE" in
-  no-mistakes|direct-PR|local-only) ;;
-  no-mistakes-prod-only)
-    echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR" >&2
-    exit 1 ;;
-  *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+  direct-PR|local-only) ;;
+  *) echo "error: --mode must be one of direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
 esac
 case "$YOLO" in
   on|off) ;;
@@ -135,34 +132,30 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
-  echo "error: $SCOUT_BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; preserve the original ask in ## Captain's intent and fill the scout-time ## Firstmate spec; promotion generates a separate ship-time spec" >&2
+  echo "error: $SCOUT_BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; replace the placeholders with the scout task content before promotion generates a separate ship-time spec" >&2
   exit 1
 fi
 if ! fm_brief_task_content_valid "$SCOUT_BRIEF"; then
   echo "error: $SCOUT_BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before promotion" >&2
   exit 1
 fi
+TASK_CONTEXT_HEADING=
+TASK_CONTEXT_BODY=
 if fm_brief_task_heading_present "$SCOUT_BRIEF" "## Captain's intent"; then
-  INTENT_BODY=$(fm_brief_task_heading_body "$SCOUT_BRIEF" "## Captain's intent")
+  TASK_CONTEXT_HEADING="## Captain's intent"
+  TASK_CONTEXT_BODY=$(fm_brief_task_heading_body "$SCOUT_BRIEF" "## Captain's intent")
 else
-  TASK_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "# Task")
-  INTENT_BODY=$(fm_brief_marked_captain_words "$TASK_BODY")
+  TASK_CONTEXT_HEADING="## Original task"
+  TASK_CONTEXT_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "# Task")
 fi
-if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
-  echo "error: $SCOUT_BRIEF has no provenance-marked Captain's intent; add the captain's actual words before promotion" >&2
+if [ -z "$(printf '%s' "$TASK_CONTEXT_BODY" | tr -d '[:space:]')" ]; then
+  echo "error: $SCOUT_BRIEF has no Task content to carry into the ship instructions" >&2
   exit 1
 fi
 
-# The promoted worker must receive the same delivery contract an ordinary ship
-# brief carries, so the mode-specific Definition of done is rendered from its
-# single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
-# promoted no-mistakes worker that never received the ask-user escalation rule or
-# the --yes ban is the delivery hole this file used to leave open.
+# The promoted worker receives the same delivery contract as an ordinary ship
+# brief, rendered from its single owner in bin/fm-dod-lib.sh.
 INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
-PROMOTION_ASK_USER_BLOCK=
-if [ "$MODE" = no-mistakes ]; then
-  PROMOTION_ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
-fi
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
 TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
@@ -171,9 +164,9 @@ TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
 Your scout task has been promoted to a ship task, mode=$MODE. Your window, worktree, and context stay as they are; only the contract below changes.
 
 # Task
-## Captain's intent
 EOF
-  printf '%s\n' "$INTENT_BODY"
+  printf '%s\n' "$TASK_CONTEXT_HEADING"
+  printf '%s\n' "$TASK_CONTEXT_BODY"
   cat <<EOF
 
 ## Firstmate spec
@@ -182,9 +175,8 @@ EOF
 3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`.
 4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
 5. If you reproduced a bug, turn that reproduction into a regression test.
-6. These ship instructions supersede the scout delivery rules and report-based Definition of done. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule.
-$PROMOTION_ASK_USER_BLOCK
-7. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or ship-time instructions.
+6. These ship instructions supersede the scout delivery rules and report-based Definition of done. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules; and every safety rule.
+7. Treat the scout-time Firstmate spec as investigation context, not ship-time instructions.
 EOF
   printf '\n'
   fm_dod_block "$MODE" "$ID"

@@ -12,7 +12,7 @@ Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
 | Busy state | Standalone Kimi is unknown pending a live-verified semantic source, preferring Wire's `prompt` lifetime then documented hooks including `Interrupt`; Kimi behind Pi uses Pi lifecycle, and the moon-phase spinner is never a state source. |
 | Exit command | `/exit`. |
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
-| Skill invocation | `/<skill>`, for example `/no-mistakes`; Firstmate skills are discovered. |
+| Skill invocation | `/<skill>`; Firstmate skills are discovered. |
 | Autonomy | `--auto`; `-y` and `--yolo` are weaker and are not used. |
 | Trust dialog | None observed on a clean first launch in a fresh pooled worktree. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |

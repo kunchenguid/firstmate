@@ -138,7 +138,7 @@ git -C "$PROJECT" commit -q -m "test: initial instruction contract" || fail "cou
 printf '%s\n' '{"compaction":{"keepRecentTokens":200}}' > "$PROJECT/.pi/settings.json"
 
 tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -c "$PROJECT" -x 220 -y 55 \
-  -e "FM_HOME=$HOME_DIR" -e "FM_ROOT_OVERRIDE=$PROJECT" -e "FM_GATE_REFUSE_BYPASS=1" \
+  -e "FM_HOME=$HOME_DIR" -e "FM_ROOT_OVERRIDE=$PROJECT" \
   pi --no-tools -e "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts" \
   || fail "could not start isolated Pi session"
 

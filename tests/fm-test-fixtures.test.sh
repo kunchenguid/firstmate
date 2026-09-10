@@ -28,46 +28,6 @@ test_touch_epoch_preserves_repeated_dst_hour() {
   pass "fm_touch_epoch preserves both epochs in the repeated DST hour"
 }
 
-test_no_mistakes_version_constant() {
-  local fakebin out
-  fakebin=$(fm_fakebin "$TMP_ROOT/nm")
-  fm_test_fake_no_mistakes "$fakebin"
-  out=$("$fakebin/no-mistakes" --version)
-  [ "$out" = "$FM_TEST_NO_MISTAKES_FAKE_VERSION" ] || \
-    fail "fake no-mistakes --version should be the shared constant, got '$out'"
-  out=$(FM_FAKE_NO_MISTAKES_VERSION="$FM_TEST_NO_MISTAKES_FAKE_VERSION_TS" \
-    "$fakebin/no-mistakes" --version)
-  [ "$out" = "$FM_TEST_NO_MISTAKES_FAKE_VERSION_TS" ] || \
-    fail "timestamped banner override should round-trip, got '$out'"
-  case "$out" in
-    "$FM_TEST_NO_MISTAKES_FAKE_VERSION "*) ;;
-    *) fail "timestamped banner '$out' is not the shared constant plus a suffix" ;;
-  esac
-  out=$(FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v9.9.9 (fake)' \
-    "$fakebin/no-mistakes" --version)
-  [ "$out" = 'no-mistakes version v9.9.9 (fake)' ] || \
-    fail "FM_FAKE_NO_MISTAKES_VERSION should override the default banner, got '$out'"
-  "$fakebin/no-mistakes" doctor
-  expect_code 0 $? "fake no-mistakes non-version verbs should exit 0"
-  pass "fake no-mistakes --version is the shared constant and overridable"
-}
-
-test_no_mistakes_init_doctor_markers() {
-  local fakebin dir rc
-  dir="$TMP_ROOT/nm-init"
-  mkdir -p "$dir"
-  fakebin=$(fm_fakebin "$dir")
-  fm_test_fake_no_mistakes_init_doctor "$fakebin"
-  ( cd "$dir" && "$fakebin/no-mistakes" init )
-  assert_present "$dir/.no-mistakes-init" "init did not touch the marker"
-  ( cd "$dir" && "$fakebin/no-mistakes" doctor )
-  assert_present "$dir/.no-mistakes-doctor" "doctor did not touch the marker"
-  rc=0
-  ( cd "$dir" && "$fakebin/no-mistakes" axi ) || rc=$?
-  expect_code 2 "$rc" "unknown no-mistakes verb should exit 2"
-  pass "init/doctor no-mistakes stub touches markers and refuses other verbs"
-}
-
 test_fake_gh_and_gh_axi() {
   local fakebin out
   fakebin=$(fm_fakebin "$TMP_ROOT/gh")
@@ -140,8 +100,6 @@ test_spawn_home_layout() {
 }
 
 test_touch_epoch_preserves_repeated_dst_hour
-test_no_mistakes_version_constant
-test_no_mistakes_init_doctor_markers
 test_fake_gh_and_gh_axi
 test_spawn_tmux_and_fakebin
 test_send_stubs_and_ssh

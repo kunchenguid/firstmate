@@ -7,13 +7,8 @@
 #
 # Generic reporters, temp roots, git fixtures, and fail/pass/fm_test_cleanup
 # come from tests/lib.sh, pulled in below. This file owns the shared fake
-# no-mistakes, gh, gh-axi, tmux, ssh, and spawn-world helpers. Wake-queue mocks
-# stay in wake-helpers.sh; secondmate-lifecycle mocks stay in
-# secondmate-helpers.sh.
-#
-# FM_TEST_NO_MISTAKES_VERSION is the single default version for the shared fake
-# no-mistakes banner. Override a single case with FM_FAKE_NO_MISTAKES_VERSION
-# rather than editing a stub body.
+# gh, gh-axi, tmux, ssh, and spawn-world helpers. Wake-queue mocks stay in
+# wake-helpers.sh; secondmate-lifecycle mocks stay in secondmate-helpers.sh.
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -23,48 +18,7 @@ if [ -n "${FM_TEST_FIXTURES_SOURCED:-}" ]; then
 fi
 FM_TEST_FIXTURES_SOURCED=1
 
-# Production floor lives in bin/fm-bootstrap.sh (NO_MISTAKES_MIN). Keep this
-# equal to that floor so a bump is one constant here plus that production pin.
-export FM_TEST_NO_MISTAKES_VERSION=1.46.0
-export FM_TEST_NO_MISTAKES_FAKE_VERSION="no-mistakes version v${FM_TEST_NO_MISTAKES_VERSION} (fake)"
-export FM_TEST_NO_MISTAKES_FAKE_VERSION_TS="${FM_TEST_NO_MISTAKES_FAKE_VERSION} 2026-06-27T00:02:18Z"
 export FM_TEST_GH_AXI_VERSION=0.1.29
-
-# --- fake no-mistakes -------------------------------------------------------
-
-# fm_test_fake_no_mistakes <fakebin>
-# Drops a no-mistakes stub that answers --version with
-# FM_TEST_NO_MISTAKES_FAKE_VERSION (or FM_FAKE_NO_MISTAKES_VERSION when set)
-# and exits 0 for every other invocation.
-fm_test_fake_no_mistakes() {
-  local fakebin=$1
-  cat > "$fakebin/no-mistakes" <<SH
-#!/usr/bin/env bash
-if [ "\${1:-}" = --version ]; then
-  printf '%s\\n' "\${FM_FAKE_NO_MISTAKES_VERSION:-$FM_TEST_NO_MISTAKES_FAKE_VERSION}"
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/no-mistakes"
-}
-
-# fm_test_fake_no_mistakes_init_doctor <fakebin>
-# Secondmate-lifecycle stub: init/doctor touch marker files; other verbs exit 2.
-# Does not answer --version (those suites never probe the floor).
-fm_test_fake_no_mistakes_init_doctor() {
-  local fakebin=$1
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-set -eu
-case "${1:-}" in
-  init) touch .no-mistakes-init ;;
-  doctor) touch .no-mistakes-doctor ;;
-  *) exit 2 ;;
-esac
-SH
-  chmod +x "$fakebin/no-mistakes"
-}
 
 # --- fake gh / gh-axi -------------------------------------------------------
 

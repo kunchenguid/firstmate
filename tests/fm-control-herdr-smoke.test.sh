@@ -87,7 +87,7 @@ EOF
   echo "project=$PROJ"
   echo "harness=claude"
   echo "kind=ship"
-  echo "mode=no-mistakes"
+  echo "mode=direct-PR"
   echo "yolo=off"
   echo "model=default"
   echo "effort=default"

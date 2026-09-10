@@ -22,7 +22,6 @@ set -u
 fm_live_gate opt-in FM_OMP_LIVE_E2E omp node jq
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-unset NO_MISTAKES_GATE
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2

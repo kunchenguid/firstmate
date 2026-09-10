@@ -15,10 +15,6 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 make_fakebin() {  # <dir>
   local fb
   fb=$(fm_fakebin "$1")
-  cat > "$fb/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -52,7 +48,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux"
+  chmod +x "$fb/tmux"
   printf '%s\n' "$fb"
 }
 
@@ -93,7 +89,7 @@ EOF
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=ship" \
+    "mode=direct-PR" \
     "yolo=off" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'needs-decision: choose an API shape\n' > "$home/state/ship-task.status"
@@ -108,9 +104,7 @@ EOF
     "worktree=$home/projects/scout-worktree" \
     "project=alpha" \
     "harness=codex" \
-    "kind=scout" \
-    "mode=scout" \
-    "yolo=off"
+    "kind=scout"
   printf 'done: report ready\n' > "$home/state/scout-task.status"
   fm_write_meta "$home/state/secondmate-task.meta" \
     "window=firstmate:fm-secondmate-task" \
@@ -129,7 +123,7 @@ EOF
     "project=alpha" \
     "harness=codex" \
     "kind=ship" \
-    "mode=ship"
+    "mode=direct-PR"
 }
 
 test_empty_fleet_json() {
@@ -278,7 +272,7 @@ EOF
     "project=alpha" \
     "harness=codex" \
     "kind=ship" \
-    "mode=ship"
+    "mode=direct-PR"
   printf 'working: visible\n' > "$home/state/visible-ship.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
@@ -306,7 +300,7 @@ EOF
     "project=alpha" \
     "harness=codex" \
     "kind=ship" \
-    "mode=ship"
+    "mode=direct-PR"
   printf 'working: orphan now live\n' > "$home/state/orphan-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
@@ -338,7 +332,7 @@ test_normalized_roles_and_plural_blocker_readiness() {
 EOF
   fm_write_meta "$home/state/worker.meta" \
     "window=firstmate:fm-worker" "worktree=$home/projects/worker" "project=alpha" \
-    "harness=codex" "kind=ship" "mode=ship"
+    "harness=codex" "kind=ship" "mode=direct-PR"
   printf 'working: preparing canary\n' > "$home/state/worker.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
@@ -426,7 +420,7 @@ test_event_hints_follow_reconciled_current_state() {
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=ship"
+    "mode=direct-PR"
   record_claude_idle "$home/state" active-decision
   printf 'needs-decision: choose an API shape\n' > "$home/state/active-decision.status"
   fm_write_meta "$home/state/active-blocked.meta" \
@@ -435,7 +429,7 @@ test_event_hints_follow_reconciled_current_state() {
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=ship"
+    "mode=direct-PR"
   record_claude_idle "$home/state" active-blocked
   printf 'blocked: waiting on access\n' > "$home/state/active-blocked.status"
   fm_write_meta "$home/state/stale-decision.meta" \
@@ -444,7 +438,7 @@ test_event_hints_follow_reconciled_current_state() {
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=ship"
+    "mode=direct-PR"
   hint_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" stale-decision)
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-decision busy --gen "$hint_gen" \
     --source claude-hook --event user-prompt-submit
@@ -455,7 +449,7 @@ test_event_hints_follow_reconciled_current_state() {
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=ship"
+    "mode=direct-PR"
   hint_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" stale-blocked)
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-blocked busy --gen "$hint_gen" \
     --source claude-hook --event user-prompt-submit
@@ -529,8 +523,7 @@ EOF
     "worktree=$projects/bold-worktree" \
     "project=alpha" \
     "harness=claude" \
-    "kind=scout" \
-    "mode=scout"
+    "kind=scout"
   record_claude_idle "$home/state" bold-task
   printf 'done: report ready\n' > "$home/state/bold-task.status"
   fakebin=$(make_fakebin "$home")
@@ -901,8 +894,7 @@ test_completed_scout_report_is_pointer_not_pending() {
     "worktree=$home/projects/scout-wt" \
     "project=firstmate" \
     "harness=claude" \
-    "kind=scout" \
-    "mode=scout"
+    "kind=scout"
   record_claude_idle "$home/state" lavish-103
   # Stale needs-decision, then the scout finished (done). No keyed resolution.
   printf 'needs-decision: adopt approach A or B for Lavish issue 103\n' > "$home/state/lavish-103.status"
@@ -933,8 +925,7 @@ test_parked_scout_decision_stays_pending() {
     "worktree=$home/projects/scout-wt2" \
     "project=firstmate" \
     "harness=claude" \
-    "kind=scout" \
-    "mode=scout"
+    "kind=scout"
   record_claude_idle "$home/state" parked-scout
   printf 'needs-decision [key=q1]: adopt approach A or B\n' > "$home/state/parked-scout.status"
   fakebin=$(make_fakebin "$home")
@@ -1006,7 +997,7 @@ EOF
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   record_claude_idle "$home/state" unowned-ship
   printf 'needs-decision [key=unowned-ship]: choose a route\n' > "$home/state/unowned-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
@@ -1032,7 +1023,7 @@ EOF
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   record_claude_idle "$home/state" terminal-ship
   printf 'done: complete\n' > "$home/state/terminal-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)

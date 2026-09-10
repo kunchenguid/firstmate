@@ -160,12 +160,14 @@ PROJECT_INDEX=0
 for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
-  MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
+  if ! MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project"); then
+    die "project $project has invalid registered delivery mode"
+  fi
   read -r MODE _ <<EOF
 $MODE_LINE
 EOF
   case "$MODE" in
-    no-mistakes|direct-PR) ;;
+    direct-PR) ;;
     local-only) die "project $project is local-only and cannot be provisioned remotely" ;;
     *) die "project $project has unsupported delivery mode: $MODE" ;;
   esac

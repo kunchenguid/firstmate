@@ -28,7 +28,7 @@ run_grok_spawn() {
   local home=$1 proj=$2 wt=$3 fakebin=$4 grok_home=$5 id=$6
   GROK_HOME="$grok_home" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" \
-    "$id" "$proj" grok --mode no-mistakes --yolo off
+    "$id" "$proj" grok --mode direct-PR --yolo off
 }
 
 test_grok_hook_requires_registered_token() {
