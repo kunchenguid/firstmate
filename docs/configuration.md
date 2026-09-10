@@ -877,9 +877,18 @@ Scope is the owning state root and one runner generation, never a script or proc
 `FM_PROCEVENT_LAUNCH_FLOOR_SECONDS` (default 1, range 1..3600) is the minimum time between consecutive launches of one registration generation's stored command, bounding the launch rate of an immediately returning source during that lease window.
 The generation's first launch is immediate, later launches share its monotonic pacing timestamp, a timestamp from before a reboot is treated as expired, and replacing the registration starts a fresh pacing generation.
 
-`FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS` (default 10, range 1..600) bounds how long `reconcile` waits for the runners it just started to prove they are running.
-Starting a runner is detached and its errors are not visible to the caller, so `reconcile` reports a start only after the source is observed owned or its runner record has moved, and reports every unconfirmed launch as `failed=` and a non-zero exit instead.
+`FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS` (default 3, range 1..600) bounds how long `reconcile` waits for the runners it just started to prove they are running.
+Starting a runner is detached and its errors are not visible to the caller, so `reconcile` reports a start only after the source is observed owned or its launch-pacing stamp has advanced or appeared, and reports every unconfirmed launch as `failed=` and a non-zero exit instead.
+Both signals are durable evidence a runner claimed: ownership is the only evidence a runner still blocked on its source ever shows, and the stamp - written after the claim and before the source command runs, and removed only by registration replacement - covers a runner that claimed, ran and exited between two polls.
+A healthy launch therefore confirms on the first poll and the window only bounds a launch that never got going.
 All of a cycle's launches share one window, so a home full of sources that cannot start costs the same bounded wait as one.
+
+Keep this window well below `FM_POLL`.
+`bin/fm-watch.sh` runs `reconcile` once per supervision cycle, so a source that cannot start makes every cycle wait up to the confirm window before the rest of that cycle runs.
+Raising the confirm window lengthens every supervision cycle and delays wake delivery by up to that much.
+
+A source that can never start is reported as `failed=` with a non-zero exit on every `reconcile`, rather than counted as `started` and retried silently as though it were healthy, so a wedged source stays visible instead of presenting as armed.
+The report reaches an operator who runs the command: `bin/fm-watch.sh` discards `reconcile`'s output and exit status, so the supervision cycle itself does not yet surface a persistent arming failure.
 
 `FM_PROCEVENT_MAX_OUTPUT_BYTES` (default 1048576) bounds a single captured result while the source runs; oversized output is drained but truncated with a stderr notice rather than staged or published whole or dropped.
 
@@ -974,7 +983,7 @@ FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; defaul
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no activity in its owning home; 1..86400
 FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # a runner guard's detection interval, read twice per interval; 1..3600
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of one registration generation's source command; 1..3600
-FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=10  # how long reconcile waits for the runners it started to prove they are running; 1..600
+FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=3   # how long reconcile waits for the runners it started to prove they are running; 1..600, keep well below FM_POLL
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh

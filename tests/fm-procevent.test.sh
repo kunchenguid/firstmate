@@ -1344,6 +1344,78 @@ uf_owner=$(pe "$HUF" list | awk '$1 == "unstartable-src" { print $3 }')
 pe "$HUF" retire unstartable-src >/dev/null 2>&1 || true
 pass "reconcile reports a launch it could not confirm instead of counting it as a start"
 
+# --- a launch that finished before the first poll is still confirmed ---------
+# Confirmation has to read evidence a finished runner leaves behind. A runner
+# removes its own runner record on the way out, so a source that claims, runs
+# and exits before confirmation looks at it once returns every transient signal
+# to exactly what it was before the launch - and a good run gets reported as a
+# failure, on every cycle, for a source that is working perfectly.
+#
+# The second registration is what makes that deterministic rather than a race:
+# reconcile launches the fast source first, then blocks acquiring the held
+# lock of the second source, and the holder is released only once the fast
+# runner has captured its result and let go of both its claim and its runner
+# record. Confirmation therefore starts strictly after the fast runner is gone.
+HFC="$TMP_ROOT/hfc"; new_home "$HFC"
+FC_FAST="$TMP_ROOT/fast-source.sh"
+cat > "$FC_FAST" <<'SH'
+#!/usr/bin/env bash
+printf 'fast payload\n'
+SH
+chmod +x "$FC_FAST"
+FC_TRIGGER="$TMP_ROOT/fast-hold-trigger"
+pe_register "$HFC" lavish aa-fast-src -- "$FC_FAST" >/dev/null
+pe_register "$HFC" lavish zz-hold-src -- "$BLOCKER" "$FC_TRIGGER" "held" >/dev/null
+FC_READY="$TMP_ROOT/fast-hold-ready"; FC_RELEASE="$TMP_ROOT/fast-hold-release"
+hold_source_lock zz-hold-src "$FC_READY" "$FC_RELEASE"
+wait_for "$FC_READY" || fail "the fast-source fixture could not hold a source lock"
+(
+  for _ in $(seq 1 600); do
+    if first_result "$HFC" aa-fast-src >/dev/null 2>&1 \
+      && [ ! -e "$HFC/state/procevent/aa-fast-src.runner" ] \
+      && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/aa-fast-src.claim" ]; then
+      break
+    fi
+    sleep 0.05
+  done
+  : > "$FC_RELEASE"
+) &
+FC_RELEASER=$!
+fc_rc=0
+fc_out=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=2 pe "$HFC" reconcile) || fc_rc=$?
+wait "$FC_RELEASER" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+first_result "$HFC" aa-fast-src >/dev/null \
+  || fail "fixture invalid: the fast source never produced a result: $fc_out"
+assert_contains "$fc_out" "started=2" \
+  "reconcile did not report both launches as started: $fc_out"
+assert_contains "$fc_out" "failed=0" \
+  "reconcile reported a launch that ran to completion as a failure: $fc_out"
+[ "$fc_rc" -eq 0 ] || fail "reconcile exited non-zero with every launch confirmed: $fc_out"
+: > "$FC_TRIGGER"
+pe "$HFC" retire aa-fast-src >/dev/null 2>&1 || true
+pe "$HFC" retire zz-hold-src >/dev/null 2>&1 || true
+pass "a launch that finished before confirmation looked is still reported as started"
+
+# --- a zero-padded confirm window is read as base 10 -------------------------
+# The window's validator reads base 10, so `08` is a value it accepts. Read as
+# octal in arithmetic it is not a number at all, which under `set -u` takes the
+# confirmation down with it and turns every launch of the cycle - including a
+# perfectly healthy one - into a reported failure and a non-zero exit.
+HZP="$TMP_ROOT/hzp"; new_home "$HZP"
+ZP_TRIGGER="$TMP_ROOT/zeropad-trigger"
+pe_register "$HZP" lavish zeropad-src -- "$BLOCKER" "$ZP_TRIGGER" "zeropad" >/dev/null
+zp_rc=0
+zp_out=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=08 pe "$HZP" reconcile 2>/dev/null) || zp_rc=$?
+assert_contains "$zp_out" "started=1" \
+  "a zero-padded confirm window lost the launch reconcile started: $zp_out"
+assert_contains "$zp_out" "failed=0" \
+  "a zero-padded confirm window reported a healthy launch as failed: $zp_out"
+[ "$zp_rc" -eq 0 ] || fail "a zero-padded confirm window made reconcile exit non-zero: $zp_out"
+: > "$ZP_TRIGGER"
+pe "$HZP" retire zeropad-src >/dev/null 2>&1 || true
+pass "a zero-padded launch confirm window is honored as base 10"
+
 # --- a dead generation's untidyable leftovers never wedge ownership ----------
 # The same wedge as the state-root case above, reached through the sibling
 # cleanups in the stale-claim branch rather than the capture reservation. Every

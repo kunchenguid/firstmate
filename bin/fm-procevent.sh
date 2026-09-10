@@ -52,9 +52,9 @@
 #            start would otherwise be counted exactly like one that is
 #            listening, and a wedged source would go on presenting as armed.
 #            Every launch is counted as `started` only after the source is
-#            observed owned or its runner record has moved, `failed` otherwise,
-#            and any failure also makes this command exit non-zero. One bounded
-#            window covers a whole cycle's launches
+#            observed owned or its launch-pacing stamp has moved, `failed`
+#            otherwise, and any failure also makes this command exit non-zero.
+#            One bounded window covers a whole cycle's launches
 #            (FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS; docs/configuration.md).
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
@@ -1205,7 +1205,8 @@ detach_runner() {  # <source-id>
 }
 
 cmd_reconcile() {
-  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state launch_mark
+  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state
+  local launch_identity launch_stamp launch_mark
   local -a launched=()
   owner_lease_refresh
   published=$(publish_pending)
@@ -1277,10 +1278,21 @@ cmd_reconcile() {
             fm_procevent_source_lock_release "$id"
             continue
           fi
-          launch_mark=$(cat -- "$(runner_file "$id")" 2>/dev/null || true)
+          # Snapshot the launch-pacing stamp for the registration generation
+          # this launch will run under, while the source lock still keeps that
+          # registration from being replaced underneath it. The runner writes
+          # this stamp after it claims and before it runs the source command,
+          # and nothing removes it on the way out, so an advanced or newly
+          # appeared value is durable evidence the launch got going.
+          launch_identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) || launch_identity=
+          launch_mark=
+          if [ -n "$launch_identity" ] \
+            && launch_stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$launch_identity"); then
+            launch_mark=$(cat -- "$launch_stamp" 2>/dev/null || true)
+          fi
           fm_procevent_source_lock_release "$id"
           detach_runner "$id"
-          launched+=("$id"$'\t'"$launch_mark")
+          launched+=("$id"$'\t'"$launch_identity"$'\t'"$launch_mark")
           continue
         elif [ "$claim_state" -eq 4 ]; then
           owner=$FM_PROCEVENT_CLAIM_HOME
@@ -1322,25 +1334,34 @@ cmd_reconcile() {
 # this every failure inside _start - a refused claim above all - was still
 # counted and reported as a start. That made a source that CANNOT start
 # indistinguishable from one that had, which is exactly how a wedged review
-# board goes on presenting as armed while collecting nothing. A runner takes its
-# claim before it blocks on its source, so ownership appearing is the earliest
-# honest evidence that it is listening, and its absence within this window is
-# the earliest honest evidence that it is not.
+# board goes on presenting as armed while collecting nothing.
+#
+# Two signals confirm a launch, and each covers what the other cannot see:
+# ownership covers the runner still blocked on its source, which is the only
+# evidence such a runner ever shows; the launch-pacing stamp covers the runner
+# that claimed, ran and exited between two polls, because the runner writes that
+# stamp after claiming and before running the source command and nothing removes
+# it on the way out - only registration replacement does, which also changes the
+# snapshotted identity this reads under. A runner that dies BEFORE claiming
+# reaches neither, and that is the case this confirmation exists to catch.
 #
 # Every launch shares ONE window rather than taking a window each, so a whole
 # fleet of failing sources costs a watcher cycle the same bounded wait as one.
-confirm_launched_runners() {  # <source-id><TAB><runner-record-before>...
-  local deadline window entry id before state mark
+confirm_launched_runners() {  # <source-id><TAB><registration-identity><TAB><launch-stamp-before>...
+  local deadline window entry id rest identity before state stamp mark
   local -a pending=("$@") remaining=()
   window=$(fm_procevent_launch_confirm_seconds) || return 1
-  deadline=$((SECONDS + window))
+  # A zero-padded window is a valid value to its validator, which reads base 10;
+  # reading it as octal here would silently shorten the window or abort this
+  # subshell under `set -u` and report every launch as failed.
+  deadline=$((SECONDS + 10#$window))
   while :; do
     remaining=()
     for entry in "${pending[@]+"${pending[@]}"}"; do
       id=${entry%%$'\t'*}
-      before=${entry#*$'\t'}
-      # Owning the source is the strongest evidence and the only one a runner
-      # blocked on its source ever shows.
+      rest=${entry#*$'\t'}
+      identity=${rest%%$'\t'*}
+      before=${rest#*$'\t'}
       state=1
       if fm_procevent_source_lock_try_acquire "$id"; then
         fm_procevent_claim_state_locked "$id"
@@ -1350,15 +1371,15 @@ confirm_launched_runners() {  # <source-id><TAB><runner-record-before>...
       if [ "$state" -eq 0 ]; then
         continue
       fi
-      # A source that completes quickly can finish and release its claim between
-      # two polls, so ownership alone would report a good run as a failure. The
-      # runner writes its own pid into the source's runner record right after it
-      # claims and nothing removes it on the way out, so a record that has moved
-      # is durable proof that a runner got going even after it is gone. A runner
-      # that dies BEFORE claiming never reaches that write, which is the case
-      # this whole confirmation exists to catch.
-      mark=$(cat -- "$(runner_file "$id")" 2>/dev/null || true)
-      [ "$mark" != "$before" ] || remaining+=("$entry")
+      mark=
+      if [ -n "$identity" ] \
+        && stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
+        mark=$(cat -- "$stamp" 2>/dev/null || true)
+      fi
+      if [ -n "$mark" ] && [ "$mark" != "$before" ]; then
+        continue
+      fi
+      remaining+=("$entry")
     done
     pending=("${remaining[@]+"${remaining[@]}"}")
     [ "${#pending[@]}" -gt 0 ] || break

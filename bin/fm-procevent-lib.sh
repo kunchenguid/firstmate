@@ -212,12 +212,12 @@ fm_procevent_launch_floor_seconds() {
 }
 
 # How long reconcile waits for a runner it just detached to prove it took the
-# source's claim. A runner claims before it blocks on its source, so the wait is
-# a process launch, not a source round trip; the default is generous enough for
-# a loaded machine and short enough that a whole fleet of failing sources cannot
-# stall a watcher cycle, because reconcile confirms every launch in ONE shared
-# window rather than one window each.
-FM_PROCEVENT_LAUNCH_CONFIRM_DEFAULT_SECONDS=10
+# source's claim. Confirmation reads durable evidence, so a healthy launch
+# settles on the first poll and only a launch that never got going spends the
+# window. The default stays well below FM_POLL because bin/fm-watch.sh runs
+# reconcile once per supervision cycle, and every launch of a cycle shares ONE
+# window rather than taking a window each.
+FM_PROCEVENT_LAUNCH_CONFIRM_DEFAULT_SECONDS=3
 FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS=1
 FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS=600
 
@@ -233,22 +233,28 @@ fm_procevent_launch_confirm_seconds() {
   printf '%s\n' "$value"
 }
 
-fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registration-identity>
+# The one place the launch-pacing stamp's name is constructed. Every writer,
+# pruner and reader goes through here so the naming rule is stated once.
+fm_procevent_launch_floor_stamp_path() {  # <state-root> <source-id> <registration-identity>
   local reg identity
   case "$3" in *:*) ;; *) return 1 ;; esac
   case "$3" in ''|*[!0-9:]*) return 1 ;; esac
+  fm_procevent_source_id_valid "$2" || return 1
   reg=$(fm_procevent_registry_dir "$1") || return 1
   identity=${3//:/-}
-  rm -f -- "$reg/$2.$identity.last-launch"
+  printf '%s\n' "$reg/$2.$identity.last-launch"
+}
+
+fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registration-identity>
+  local stamp
+  stamp=$(fm_procevent_launch_floor_stamp_path "$1" "$2" "$3") || return 1
+  rm -f -- "$stamp"
 }
 
 fm_procevent_launch_floor_prune_locked() {  # <state-root> <source-id> <registration-identity>
-  local reg identity keep stamp
-  case "$3" in *:*) ;; *) return 1 ;; esac
-  case "$3" in ''|*[!0-9:]*) return 1 ;; esac
+  local reg keep stamp
+  keep=$(fm_procevent_launch_floor_stamp_path "$1" "$2" "$3") || return 1
   reg=$(fm_procevent_registry_dir "$1") || return 1
-  identity=${3//:/-}
-  keep="$reg/$2.$identity.last-launch"
   for stamp in "$reg/$2".*.last-launch "$reg/$2.last-launch"; do
     [ "$stamp" = "$keep" ] && continue
     [ -e "$stamp" ] || [ -L "$stamp" ] || continue
@@ -257,12 +263,9 @@ fm_procevent_launch_floor_prune_locked() {  # <state-root> <source-id> <registra
 }
 
 fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-identity> <seconds>
-  local state=$1 id=$2 expected=$3 floor=$4 reg stamp identity registration current_identity status=0
-  case "$expected" in *:*) ;; *) return 1 ;; esac
-  case "$expected" in ''|*[!0-9:]*) return 1 ;; esac
+  local state=$1 id=$2 expected=$3 floor=$4 reg stamp registration current_identity status=0
+  stamp=$(fm_procevent_launch_floor_stamp_path "$state" "$id" "$expected") || return 1
   reg=$(fm_procevent_registry_dir "$state") || return 1
-  identity=${expected//:/-}
-  stamp="$reg/$id.$identity.last-launch"
   [ ! -L "$stamp" ] || return 1
   [ ! -e "$stamp" ] || [ -f "$stamp" ] || return 1
   perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -e '
