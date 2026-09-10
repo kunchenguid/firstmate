@@ -51,8 +51,6 @@ Bảy label `fm::*` phải được tạo ở **cấp group**, không tạo lạ
 Tạo ở cấp group thì mọi project trong group và trong các subgroup đều dùng chung một bộ, và thêm project mới về sau không phải tạo lại label.
 
 Tên có dạng `fm::<trạng thái>` để dùng được cơ chế scoped label của GitLab, khi đó một issue chỉ giữ được một label `fm::` tại một thời điểm.
-Scoped label là tính năng của gói trả phí (Premium trở lên), không phải tính năng theo phiên bản, nên nâng phiên bản của một instance Free sẽ không bật nó lên.
-Bộ label vẫn hoạt động như một máy trạng thái kể cả khi instance của bạn không có cơ chế đó, vì phía first mate luôn gỡ label cũ và đặt label mới trong cùng một thao tác.
 
 Tạo từng label bằng API group labels:
 
@@ -77,6 +75,7 @@ Tập bảy tên này không phải do tài liệu này định nghĩa.
 Nơi định nghĩa duy nhất là biến `FM_LABEL_VOCABULARY` trong [`bin/fm-gitlab-issue.sh`](../bin/fm-gitlab-issue.sh).
 Script đó từ chối mọi tên `fm::` nằm ngoài tập này trước khi gửi request, nên gõ sai một tên sẽ không vô tình tạo ra label mới trên GitLab.
 Nếu bạn cần đổi hoặc thêm tên, sửa ở đó chứ không phải ở đây.
+Nhưng trang này giữ hai bản sao của bộ tên, danh sách bảy tên ở trên và bảng ở mục "Ba label người dùng cần biết", nên một thay đổi bộ label buộc phải cập nhật cả hai chỗ đó trong tài liệu này chứ không chỉ sửa script.
 
 ## Bước 3: viết cấu hình
 
@@ -92,7 +91,6 @@ Một cấu hình đủ dùng cho luồng này:
   "group": "<group>",
   "projects": ["api-service", "web-app"],
   "intake_labels": ["fm::todo", "fm::human-replied", "fm::accepted"],
-  "label_prefix": "fm::",
   "max_in_flight": 3
 }
 ```
@@ -166,7 +164,7 @@ Nếu bạn thấy một issue im lặng nhiều giờ, đó là bình thường
 
 **Comment phân loại và kế hoạch.**
 Đăng một lần khi nhận việc.
-Nó nêu loại issue (`bug`, `feature`, `chore`, `docs`, `question`), cỡ (`S`, `M`, `L`), làm theo hướng ra merge request hay chỉ điều tra, mức kiểm định sẽ áp dụng, kèm một checklist các việc con.
+Nó nêu loại issue (`bug`, `feature`, `chore`, `docs`, `question`), cỡ (`S`, `M`, `L`), làm theo hướng `ship` (ra merge request) hay `scout` (chỉ điều tra), mức kiểm định sẽ áp dụng (`no-mistakes`, `direct-PR` hoặc `local-only`), kèm một checklist các việc con.
 Mỗi việc con được chia nhỏ để làm trong khoảng 2 đến 5 phút và ra một merge request nhỏ, đủ để bạn đọc hết trong một lượt review.
 
 Comment này không bị thay bằng comment mới khi có tiến triển: first mate sửa tại chỗ chính comment đó.
@@ -225,7 +223,7 @@ Quyết định cuối là của bạn: bạn đóng issue nếu đồng ý.
 
 Thêm một project vào luồng không cần sửa code.
 
-1. Clone project vào home đang chạy luồng này và đăng ký nó với delivery mode mặc định của bạn, và phải để `yolo` tắt cho project đó.
+1. Clone project vào home đang chạy luồng này và đăng ký nó với delivery mode mặc định của bạn (`no-mistakes`, `direct-PR` hoặc `local-only`), và phải để `yolo` tắt cho project đó.
    `yolo` tắt là điều kiện bắt buộc của luồng này, vì tiêu chí đã chốt là người thật merge từng merge request; `yolo` bật cho phép first mate tự merge và phá mất tiền đề đó.
    Nhờ first mate làm bước này; nó có quy trình riêng cho việc thêm project.
 2. Thêm đường dẫn project vào danh sách `projects` trong `config/gitlab-issues.json`.
