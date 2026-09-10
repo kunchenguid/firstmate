@@ -1384,6 +1384,17 @@ procevent_surfaced_marker() {  # <queue-key>
   printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
 }
 
+inbox_surfaced_marker() {  # <queue-key>
+  printf '%s/.seen-inbox-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
+}
+
+# Row payload of one queued check key, read under the caller's queue lock.
+# fm_wake_clean_field keeps tabs out of every field, so the payload is $5.
+queued_check_payload() {  # <queue-key>
+  awk -F '\t' -v key="$1" 'NF >= 5 && $3 == "check" && $4 == key { print $5; exit }' \
+    "$FM_WAKE_QUEUE" 2>/dev/null || true
+}
+
 procevent_surface_after_output() {
   local output_status=$1 key marker tmp status=0
   if [ "$output_status" -eq 0 ]; then
@@ -1395,26 +1406,61 @@ procevent_surface_after_output() {
         status=1
       fi
     done
+    for key in $INBOX_SURFACED; do
+      marker=$(inbox_surfaced_marker "$key")
+      tmp=$(umask 077; mktemp "$STATE/.seen-inbox.XXXXXX") || { status=1; continue; }
+      if ! mv -f -- "$tmp" "$marker"; then
+        rm -f -- "$tmp"
+        status=1
+      fi
+    done
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 
 procevent_surface_queued() {
-  local key reason
+  local key reason payload
   PROCEVENT_SURFACED=
+  INBOX_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   while IFS= read -r key; do
-    case "$key" in procevent:*) ;; *) continue ;; esac
-    [ -e "$(procevent_surfaced_marker "$key")" ] && continue
-    PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
+    case "$key" in
+      procevent:*)
+        [ -e "$(procevent_surfaced_marker "$key")" ] && continue
+        PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
+        ;;
+      inbox:*)
+        # A captain-inbox note wake carries no owning sweep; without this
+        # surface the queued row never closes a watcher cycle and an idle
+        # main session is never woken for the note.
+        [ -e "$(inbox_surfaced_marker "$key")" ] && continue
+        INBOX_SURFACED="$INBOX_SURFACED $key"
+        ;;
+      *) continue ;;
+    esac
   done < <(fm_wake_queued_keys_locked check)
-  if [ -z "$PROCEVENT_SURFACED" ]; then
+  if [ -z "$PROCEVENT_SURFACED" ] && [ -z "$INBOX_SURFACED" ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
   fi
-  reason="check: process-event result captured:$PROCEVENT_SURFACED"
+  reason=""
+  if [ -n "$PROCEVENT_SURFACED" ]; then
+    reason="check: process-event result captured:$PROCEVENT_SURFACED"
+  fi
+  if [ -n "$INBOX_SURFACED" ]; then
+    payload=""
+    for key in $INBOX_SURFACED; do
+      payload=$(queued_check_payload "$key")
+      [ -n "$payload" ] && break
+    done
+    if [ -n "$payload" ]; then
+      reason="$reason${reason:+ }$payload"
+    else
+      reason="$reason${reason:+ }check: captain inbox notes waiting:$INBOX_SURFACED"
+    fi
+  fi
   # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
   FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output
   wake "$reason"

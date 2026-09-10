@@ -207,6 +207,8 @@ state_root_bind() {  # [create]
   if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
     [ "${1-}" = create ] || return 1
     (umask 077; mkdir -p "$STATE") || return 1
+  elif [ -d "$STATE" ] && [ ! -L "$STATE" ]; then
+    chmod go-w "$STATE" 2>/dev/null || true
   fi
   STATE=$(fm_procevent_state_root_resolve "$STATE") || return 1
   REG=$(fm_procevent_registry_dir "$STATE")

@@ -727,6 +727,28 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
+test_discord_workspace_pending_final_refuses_cleanup() {
+  local case_dir rc
+  case_dir=$(make_case discord-workspace-pending-final)
+  write_meta "$case_dir" no-mistakes ship
+  mkdir -p "$case_dir/state/discord-workspace/pending-followups"
+  cat > "$case_dir/state/discord-workspace/pending-followups/task-x1.json" <<'JSON'
+{"schema":"fm-discord-workspace-pending-followup.v1","task_id":"task-x1","request_id":"discord:111111111111111111:222222222222222222:333333333333333333","profile":"proapplis","status":"pending"}
+JSON
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "discord-workspace-pending-final: teardown should refuse"
+  grep -q 'private Discord workspace final reply' "$case_dir/stderr" \
+    || fail "discord-workspace-pending-final: refusal did not name the pending final reply"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "discord-workspace-pending-final: teardown removed task state despite a pending final reply"
+  pass "teardown refuses while a private Discord workspace final reply is pending"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -3668,6 +3690,7 @@ EOF
 
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_discord_workspace_pending_final_refuses_cleanup
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

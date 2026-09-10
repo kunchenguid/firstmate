@@ -136,6 +136,18 @@ assert_contains "$out" "published=0 started=0" "reconcile is a no-op with nothin
 [ -z "$(ls -A "$IDLE/state" 2>/dev/null)" ] || fail "an unconfigured home generated state: $(ls -A "$IDLE/state")"
 pass "no configured source means no generated state and no process"
 
+HMODE="$TMP_ROOT/hmode"
+mkdir -p "$HMODE/state"
+chmod 775 "$HMODE/state"
+out=$(pe "$HMODE" list)
+assert_contains "$out" "no sources registered" "process-event tolerates a same-user state dir created under a group-writable umask"
+mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
+  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$HMODE/state")
+case "$mode" in ''|*[!0-7]*) fail "process-event produced an unreadable state-root mode: $mode" ;; esac
+[ $((8#$mode & 8#022)) -eq 0 ] \
+  || fail "process-event left the state root group/other writable: $mode"
+pass "process-event normalizes an ambient-umask state directory before validating it"
+
 sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
   '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$IDLE/state")
 assert_contains "$sup" no "an unconfigured home does not need supervision"
@@ -326,6 +338,7 @@ assert_absent "$HRACE/state/.wake-queue" "an acknowledged result was appended af
 pass "publication cannot race a handled acknowledgement"
 
 HPRIVATE="$TMP_ROOT/hprivate"; new_home "$HPRIVATE"
+chmod 700 "$HPRIVATE/state"
 mkdir -p "$HPRIVATE/state/procevent-inbox"
 printf 'private result\n' > "$HPRIVATE/state/procevent-inbox/private-src.1.result"
 printf 'lavish\n' > "$HPRIVATE/state/procevent-inbox/private-src.1.adapter"

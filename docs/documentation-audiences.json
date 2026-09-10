@@ -317,6 +317,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/discord-workspace.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
     },

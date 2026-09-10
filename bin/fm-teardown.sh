@@ -3021,6 +3021,18 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+if [ "$FORCE" != "--force" ] \
+  && { [ -e "$STATE/discord-workspace/pending-followups/$ID.json" ] \
+    || [ -L "$STATE/discord-workspace/pending-followups/$ID.json" ]; }; then
+  if ! DISCORD_WORKSPACE_BLOCKING=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-discord-workspace.sh" guard-work "$ID" 2>&1); then
+    echo "REFUSED: task $ID still owes a private Discord workspace final reply." >&2
+    printf '%s\n' "$DISCORD_WORKSPACE_BLOCKING" >&2
+    echo "Deliver it with bin/fm-discord-workspace.sh followup $ID --final --text-file <file>, or use --force after explicit discard approval." >&2
+    exit 1
+  fi
+fi
+
 # A public commitment is not kept until its final reply lands in the ORIGINAL
 # thread, and this cleanup removes the task records that make the promise
 # reconcilable. Refuse while this home still owes a public reply for exactly this

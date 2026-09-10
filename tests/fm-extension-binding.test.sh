@@ -133,6 +133,7 @@ new_home() {
 make_package() {  # <dir> <id> <adapter> [fixed-scenario] [required-consent]
   local dir=$1 id=$2 adapter=$3 fixed=${4:-good} consent=${5:-} required
   mkdir -p "$dir"
+  chmod 0755 "$dir"
   if [ -n "$consent" ]; then
     required=$(printf '["%s"]' "$consent")
   else

@@ -19,7 +19,8 @@
 #           fleet work and must not become fleet work.
 #
 # Usage:
-#   fm-inbox.sh note <text>...          | fm-inbox.sh note -   (body from stdin)
+#   fm-inbox.sh note [--source <name> --external-id <id> [--metadata-file <json>]] <text>...
+#   fm-inbox.sh note [--source <name> --external-id <id> [--metadata-file <json>]] -
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
@@ -54,10 +55,12 @@
 # `note` is also the queueing half of the spoken interface: when the voice agent
 # in bin/fm-voice-relay.py hands real work over to firstmate, it runs this
 # subcommand rather than carrying a second queue of its own. Keep the `note`
-# contract stable for that caller. `status` is the HUMAN view of the records;
-# bin/fm_voice_records.py owns the scope-controlled machine view the voice agent
-# reads, because the voice agent must be able to answer without record free text
-# ever reaching a model.
+# contract stable for that caller. A trusted external intake may add
+# `--source`, `--external-id`, and `--metadata-file`; replaying the same source
+# and upstream id returns the first note id and appends no second wake. `status`
+# is the HUMAN view of the records; bin/fm_voice_records.py owns the
+# scope-controlled machine view the voice agent reads, because the voice agent
+# must be able to answer without record free text ever reaching a model.
 set -euo pipefail
 
 # A non-interactive `ssh host fm-inbox.sh ...` does NOT get a login shell, so it
@@ -134,6 +137,23 @@ need_ask_model() {
 
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 
+source_wake_lib() {
+  local lib="$FM_ROOT/bin/fm-wake-lib.sh"
+  [ -r "$lib" ] || return 1
+  # shellcheck source=/dev/null
+  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
+}
+
+sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  else
+    die "no SHA-256 tool is available"
+  fi
+}
+
 # The profile's credential_process (`ada`) costs a MEASURED ~1030ms on every
 # single call, which is about half the wall time of `say` and `ask`. If real
 # credentials are already in the environment, skip --profile entirely and let the
@@ -154,21 +174,61 @@ aws_call() {
 # disk, so we report the wake failure and still exit non-zero loudly.
 wake_for() {
   local id=$1 summary=$2 lib="$FM_ROOT/bin/fm-wake-lib.sh"
-  if [ ! -r "$lib" ]; then
+  if ! source_wake_lib; then
     printf 'fm-inbox: note saved but NOT announced (missing %s)\n' "$lib" >&2
     return 1
   fi
-  # shellcheck source=/dev/null
-  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
   fm_wake_append check "inbox:$id" "check: captain inbox note $id - $summary"
 }
 
-queue_note() {
-  local source=$1 body=$2 extra=${3:-}
-  [ -n "${body//[[:space:]]/}" ] || die "refusing to queue an empty note"
-  mkdir -p "$INBOX"
+validate_note_source() {
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*) die "note source must be path-safe" ;;
+  esac
+}
 
-  local tmp id summary staging_name
+validate_external_id() {
+  case "$1" in
+    ''|*[!A-Za-z0-9._:-]*) die "external id must be a bounded non-secret id" ;;
+  esac
+  [ "${#1}" -le 256 ] || die "external id is too long"
+}
+
+validate_metadata_file() {
+  local path=$1 bytes
+  [ -f "$path" ] && [ ! -L "$path" ] || die "metadata file is unavailable or unsafe: $path"
+  bytes=$(wc -c < "$path" | tr -d ' ')
+  case "$bytes" in ''|*[!0-9]*) die "metadata file size is unreadable: $path" ;; esac
+  [ "$bytes" -le 16384 ] || die "metadata file is too large: $path"
+  need python3
+  python3 - "$path" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+if not isinstance(data, dict):
+    raise SystemExit("metadata root must be a JSON object")
+PY
+}
+
+external_map_path() {  # <source> <external-id>
+  local digest
+  digest=$(sha256_text "$1:$2") || return 1
+  printf '%s/external/%s.map\n' "$INBOX" "$digest"
+}
+
+rewrite_external_map_announced() {  # <map-path> <0|1>
+  local map=$1 announced=$2 tmp
+  tmp=$(mktemp "${map%/*}/.map-XXXXXX") || return 1
+  {
+    sed -n '/^announced=/!p' "$map"
+    printf 'announced=%s\n' "$announced"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv "$tmp" "$map"
+}
+
+queue_note_file() {  # <source> <body> <extra>
+  local source=$1 body=$2 extra=${3:-} tmp id staging_name
   tmp=$(mktemp "$INBOX/.staging-XXXXXX")
   staging_name=$(basename "$tmp")
   id="$(date +%s)-${staging_name#.staging-}"
@@ -180,11 +240,107 @@ queue_note() {
     printf -- '--\n'
     printf '%s\n' "$body"
   } >"$tmp"
-
-  # Publish the completed note atomically.
   mv "$tmp" "$INBOX/$id.note"
+  printf '%s\n' "$id"
+}
 
-  # One-line summary for the wake payload; the full body stays in the file.
+queue_note() {
+  local source=$1 body=$2 extra=${3:-} external_id=${4:-} metadata_file=${5:-}
+  [ -n "${body//[[:space:]]/}" ] || die "refusing to queue an empty note"
+  mkdir -p "$INBOX"
+
+  if [ -n "$external_id" ]; then
+    validate_note_source "$source"
+    validate_external_id "$external_id"
+    [ -z "$metadata_file" ] || validate_metadata_file "$metadata_file"
+  fi
+
+  local id summary map lock lock_held=0 metadata_dst tmp_map existing
+  if [ -n "$external_id" ]; then
+    mkdir -p "$INBOX/external"
+    chmod 700 "$INBOX/external" 2>/dev/null || true
+    map=$(external_map_path "$source" "$external_id")
+    lock="$INBOX/.external.lock"
+    source_wake_lib || die "missing wake/lock library: $FM_ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$lock" || die "cannot lock external inbox map"
+    lock_held=1
+    # shellcheck disable=SC2064
+    trap "[ '$lock_held' -eq 0 ] || fm_lock_release '$lock'" RETURN
+    die_locked() { fm_lock_release "$lock"; lock_held=0; trap - RETURN; die "$1"; }
+    if [ -f "$map" ] && [ ! -L "$map" ]; then
+      existing=$(sed -n 's/^note_id=//p' "$map" | head -1)
+      [ -n "$existing" ] || die_locked "external inbox map is malformed: $map"
+      if [ "$(sed -n 's/^announced=//p' "$map" | head -1)" = "0" ]; then
+        # The original note exists but its announcement failed earlier.
+        # Retry announcing that same note; never create a duplicate.
+        existing_summary=$(sed -n 's/^summary=//p' "$map" | head -1)
+        if wake_for "$existing" "$existing_summary"; then
+          rewrite_external_map_announced "$map" 1 || die_locked "cannot update external inbox map: $map"
+          printf 'queued %s\n' "$existing"
+          printf '  announcement retried and delivered; no new note was created.\n'
+        else
+          printf 'queued %s\n' "$existing"
+          printf '  announcement retry FAILED; the original note stays saved at %s/%s.note.\n' "$INBOX" "$existing" >&2
+          fm_lock_release "$lock"
+          lock_held=0
+          trap - RETURN
+          return 1
+        fi
+      else
+        printf 'queued %s\n' "$existing"
+        printf '  duplicate external id; no new wake was appended.\n'
+      fi
+      fm_lock_release "$lock"
+      lock_held=0
+      trap - RETURN
+      return 0
+    fi
+    [ ! -e "$map" ] && [ ! -L "$map" ] || die_locked "external inbox map is unsafe: $map"
+    metadata_dst=""
+    if [ -n "$metadata_file" ]; then
+      metadata_dst="${map%.map}.metadata.json"
+      cp "$metadata_file" "$metadata_dst" || die_locked "cannot copy metadata file"
+      chmod 600 "$metadata_dst" || die_locked "cannot protect metadata file"
+      extra="${extra}${extra:+$'\n'}external_metadata=$metadata_dst"
+    fi
+    extra="${extra}${extra:+$'\n'}external_source=$source
+external_id=$external_id"
+    id=$(queue_note_file "$source" "$body" "$extra")
+    tmp_map=$(mktemp "$INBOX/external/.map-XXXXXX")
+    summary=$(printf '%s' "$body" | tr '\n\t' '  ' | cut -c1-100)
+    {
+      printf 'schema=fm-inbox-external-map.v2\n'
+      printf 'source=%s\n' "$source"
+      printf 'external_id=%s\n' "$external_id"
+      printf 'note_id=%s\n' "$id"
+      printf 'announced=0\n'
+      printf 'summary=%s\n' "$summary"
+      [ -z "$metadata_dst" ] || printf 'metadata=%s\n' "$metadata_dst"
+    } > "$tmp_map"
+    chmod 600 "$tmp_map" || die_locked "cannot protect external inbox map"
+    mv "$tmp_map" "$map" || die_locked "cannot publish external inbox map"
+    printf 'queued %s\n' "$id"
+    printf '  %s\n' "$summary"
+    if wake_for "$id" "$summary"; then
+      rewrite_external_map_announced "$map" 1 || die_locked "cannot update external inbox map: $map"
+      printf '  firstmate will pick this up at its next check.\n'
+    else
+      # Keep the note and its external mapping (announced=0) so a replay of
+      # the same source/external-id re-announces the original note instead of
+      # creating a duplicate.
+      printf '  announcement FAILED; replay the same source/external-id to retry. Note stays at %s/%s.note.\n' "$INBOX" "$id" >&2
+      fm_lock_release "$lock"
+      lock_held=0
+      trap - RETURN
+      die "note $id is saved at $INBOX/$id.note but firstmate was NOT woken"
+    fi
+    fm_lock_release "$lock"
+    lock_held=0
+    trap - RETURN
+    return 0
+  fi
+
+  id=$(queue_note_file "$source" "$body" "$extra")
   summary=$(printf '%s' "$body" | tr '\n\t' '  ' | cut -c1-100)
   printf 'queued %s\n' "$id"
   printf '  %s\n' "$summary"
@@ -196,15 +352,44 @@ queue_note() {
 }
 
 cmd_note() {
-  local body
+  local body source=text external_id='' metadata_file=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source)
+        [ "$#" -ge 2 ] || die "--source needs a value"
+        source=$2
+        shift 2
+        ;;
+      --external-id)
+        [ "$#" -ge 2 ] || die "--external-id needs a value"
+        external_id=$2
+        shift 2
+        ;;
+      --metadata-file)
+        [ "$#" -ge 2 ] || die "--metadata-file needs a value"
+        metadata_file=$2
+        shift 2
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -|*)
+        break
+        ;;
+    esac
+  done
+  if [ -z "$external_id" ] && { [ "$source" != text ] || [ -n "$metadata_file" ]; }; then
+    die "--source or --metadata-file requires --external-id"
+  fi
   if [ "$#" -eq 0 ]; then
-    die "usage: fm-inbox.sh note <text>...   (or: note - to read stdin)"
+    die "usage: fm-inbox.sh note [--source <name> --external-id <id> [--metadata-file <json>]] <text>..."
   elif [ "$1" = "-" ]; then
     body=$(cat)
   else
     body="$*"
   fi
-  queue_note text "$body"
+  queue_note "$source" "$body" "" "$external_id" "$metadata_file"
 }
 
 # ---------------------------------------------------------------- say
