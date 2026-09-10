@@ -165,7 +165,15 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  cat > "$fakebin/prime-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list ] && [ "${2:-}" = --json ]; then
+  printf '%s\n' '{"sessions":[]}'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" \
+    "$fakebin/no-mistakes" "$fakebin/prime-agent"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -632,6 +640,19 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
+add_failing_prime_agent_listing() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/prime-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list ] && [ "${2:-}" = --json ]; then
+  echo "prime-agent list unavailable" >&2
+  exit 23
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/prime-agent"
+}
+
 # Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
 # has a row to close. Uses the real tasks-axi (the fixture's default fakebin has
 # no tasks-axi stub, so PATH resolves the installed one).
@@ -656,7 +677,7 @@ backlog_row_state() {
 make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id jq ln \
     mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
@@ -3666,6 +3687,68 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_prime_retirement_failure_preserves_task_worktree() {
+  local case_dir rc
+  case_dir=$(make_case prime-retirement-task-refusal)
+  write_meta "$case_dir" local-only ship
+  land_shippable_commit "$case_dir"
+  add_failing_prime_agent_listing "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 75 "$rc" "task retirement uncertainty must propagate its distinct status"
+  assert_grep "prime-agent list --json failed with exit 23" "$case_dir/stderr" \
+    "task retirement refusal did not report the concrete listing failure"
+  assert_present "$case_dir/wt" "task retirement uncertainty removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "task retirement uncertainty removed task metadata"
+  pass "unconfirmed Prime Agent retirement preserves a task worktree"
+}
+
+test_prime_retirement_failure_preserves_firstmate_home() {
+  local case_dir home rc
+  case_dir=$(make_case prime-retirement-home-refusal)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf 'home=%s\n' "$home" >> "$case_dir/state/task-x1.meta"
+  add_failing_prime_agent_listing "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 75 "$rc" "home retirement uncertainty must propagate its distinct status"
+  assert_grep "prime-agent list --json failed with exit 23" "$case_dir/stderr" \
+    "home retirement refusal did not report the concrete listing failure"
+  assert_present "$home" "home retirement uncertainty removed the firstmate home"
+  assert_present "$case_dir/state/task-x1.meta" "home retirement uncertainty removed parent metadata"
+  pass "unconfirmed Prime Agent retirement preserves a firstmate home"
+}
+
+test_prime_retirement_failure_preserves_child_worktree() {
+  local case_dir home rc child
+  case_dir=$(make_case prime-retirement-child-refusal)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  add_failing_prime_agent_listing "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 75 "$rc" "child retirement uncertainty must propagate its distinct status"
+  assert_grep "prime-agent list --json failed with exit 23" "$case_dir/stderr" \
+    "child retirement refusal did not report the concrete listing failure"
+  for child in child-a child-b; do
+    assert_present "$case_dir/$child-wt" "child retirement uncertainty removed $child's worktree"
+    assert_present "$home/state/$child.meta" "child retirement uncertainty removed $child's metadata"
+  done
+  assert_present "$home" "child retirement uncertainty removed the containing firstmate home"
+  assert_present "$case_dir/state/task-x1.meta" "child retirement uncertainty removed parent metadata"
+  pass "unconfirmed Prime Agent retirement preserves child worktrees"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -3750,3 +3833,6 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_prime_retirement_failure_preserves_task_worktree
+test_prime_retirement_failure_preserves_firstmate_home
+test_prime_retirement_failure_preserves_child_worktree

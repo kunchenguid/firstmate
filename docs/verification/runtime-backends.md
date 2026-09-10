@@ -1637,3 +1637,381 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Prime Agent (prime-agent)
+
+This three-slice upstream branch supports Prime Agent only for crewmate and scout roles and retires their detached daemon sessions during teardown.
+It refuses Prime Agent secondmates, has no Prime Agent primary supervision assets, and requires the explicit `FM_PI_HARNESS=prime-agent` launch marker paired with `PI_CODING_AGENT=true`; daemon markers alone are not detection evidence here.
+The evidence below is preserved from the full adapter on the fork, where prime-agent runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#prime-agent-prime-agent-native-delivery-2026-09-08) owns the fork-only primary evidence.
+That fork evidence was produced on 2026-09-08 against prime-agent 0.9.1 (`/home/eduard/.local/bin/prime-agent`, Node bundle) on Linux x86_64 through the Herdr backend with the `openai-codex/gpt-5.6-luna` model, building on the August 2026 adapter verification on 0.7.1 and 0.7.2.
+
+### Process identity and markers
+
+`ps -o comm=` reports the bare name `prime-agent` for the agent process, its detached daemon supervisor, and worker processes; `prime-agent-helper` and decoy process names never match.
+```text
+$ ps -o comm= -p 1234
+prime-agent
+```
+Prime Agent publishes `PI_CODING_AGENT=true` (sharing the Pi family marker) and sets `PRIME_AGENT_INTERNAL_DAEMON_WORKER=1` and `PRIME_AGENT_CODING_AGENT_DIR` in tool subprocesses and daemon workers.
+`FM_PI_HARNESS=prime-agent` is Firstmate's explicit launch marker to disambiguate Prime Agent from Pi; an explicit `FM_PI_HARNESS=pi` or `pi-signed` marker overrides stale Prime daemon markers, while `prime-agent` is detected when `FM_PI_HARNESS=prime-agent` or daemon worker markers are present.
+`tests/fm-prime-agent-harness.test.sh` and `tests/fm-tmux-agent-liveness.test.sh` pin detection splitting prime-agent from Pi in both directions and verify that only the exact `prime-agent` process name classifies alive.
+
+### Composer
+
+Under Herdr the idle screen captured via `herdr pane read default:w5E:p2 --lines 8` displayed a bare `>` prompt followed by placeholder ghost text:
+
+```text
+ >   Try "refactor @<filepath>"
+```
+
+The busy screen captured via `herdr pane read default:w5H:p2 --lines 8` during model execution displayed:
+
+```text
+ ✓ python · status='/tmp/fm-parent-home/state/sm-prime-test.status' · ↑ 6 ↓ 1 lines · 12ms
+
+ ⠧ Thinking · 5s · ↓ 101 tokens
+
+ Hint: Run /tree to open the session tree and return to a previous message.
+
+ >   Try "add tests for @<filepath>"
+```
+
+The shared classifier identifies the placeholder styling and classifies the idle pane `empty`:
+
+```text
+$ bash -c '. bin/backends/herdr.sh; fm_backend_herdr_composer_state default:w5E:p2'
+empty
+```
+
+When input text is typed into the composer (e.g. `>  inspecting tests`), the classifier classifies the composer `pending`:
+
+```text
+$ bash -c '. bin/backends/herdr.sh; fm_backend_herdr_composer_state default:w5E:p2'
+pending
+```
+
+`tests/fm-backend-herdr.test.sh` pins the bare `>` prompt requiring both the live prime-agent process and native identity, placeholder ghost styling detection, pending composer text classification, and agent state liveness:
+
+```text
+ok - fm_backend_herdr_composer_state: a bare '>' needs BOTH the live prime-agent process and its native identity
+ok - fm_backend_herdr_composer_state: a working prime-agent pane still reports pending composer text
+ok - fm_backend_herdr_composer_state: Prime placeholders require ghost styling
+ok - fm_backend_herdr_agent_state: only a quit prime-agent pane is dead; suspended, live and unreadable stay alive
+```
+
+### Busy state and lifecycle
+
+| Fact | Observed |
+| --- | --- |
+| Semantic source | Herdr native agent reporter (`agent=prime-agent`, `agent_status=working` during turns and `idle` when settled); `fm-spawn.sh` writes only turn-end extension `state/<id>.prime-ext.ts` which touches the turn-end marker on `turn_end` without seeding an uncleared busy record |
+| Rendered busy row | Braille spinner with status and elapsed time (`⠼ Thinking · 1s`, `⠦ Waiting · 10s · ↑ 193 tokens`, `⠙ Writing code · 58s`) |
+| Interrupt | `bin/fm-control.sh <id> interrupt` delivered an abort signal (`verified=agent-alive cancel=unconfirmed`), the composer returned to empty, and prime-agent reported `Operation aborted` |
+| Exit | `bin/fm-control.sh <id> exit` typed `/quit`; Herdr then reported the agent state `dead` |
+| Relaunch | `bin/fm-control.sh <id> relaunch --note "..."` relaunched into the recorded endpoint and worktree, resumed execution, and delivered the progress note |
+| Daemon session retirement | Prime Agent runs root sessions in detached daemon workers under one per-user supervisor; `bin/fm-teardown.sh` retires workers by cwd via `fm_prime_agent_stop_sessions_under` before process cleanup rather than calling `prime-agent shutdown` |
+
+Control-plane interrupt on `scout-prime-verify-091`:
+
+```text
+$ FM_HOME=/tmp/fm-scout-lab bin/fm-control.sh scout-prime-verify-091 interrupt
+interrupt-delivered scout-prime-verify-091 harness=prime-agent backend=herdr verified=agent-alive cancel=unconfirmed
+```
+
+The pane displayed `Operation aborted · 40s` and returned to the empty composer.
+
+Control-plane exit on `scout-prime-verify-091`:
+
+```text
+$ FM_HOME=/tmp/fm-scout-lab bin/fm-control.sh scout-prime-verify-091 exit
+stopped scout-prime-verify-091 harness=prime-agent backend=herdr endpoint=default:w5E:p2 worktree=/home/eduard/.treehouse/agon-22d7a5/3/agon
+```
+
+Herdr reported the agent state `dead`.
+
+Control-plane relaunch on `scout-prime-verify-091`:
+
+```text
+$ FM_HOME=/tmp/fm-scout-lab bin/fm-control.sh scout-prime-verify-091 relaunch --note "verify relaunch on prime-agent 0.9.1"
+relaunched scout-prime-verify-091 harness=prime-agent kind=scout mode= yolo= window=default:w5E:p2 worktree=/home/eduard/.treehouse/agon-22d7a5/3/agon note="verify relaunch on prime-agent 0.9.1"
+```
+
+Teardown and detached worker retirement on `scout-prime-verify-091`:
+
+```text
+$ FM_HOME=/tmp/fm-scout-lab bin/fm-teardown.sh scout-prime-verify-091 --force
+prime-agent: stopping detached session 1854d2fae343 bound to /home/eduard/.treehouse/agon-22d7a5/3/agon
+prime-agent: stopping detached session c3505b6da582 bound to /home/eduard/.treehouse/agon-22d7a5/3/agon
+teardown scout-prime-verify-091 complete (window default:w5E:p2, worktree /home/eduard/.treehouse/agon-22d7a5/3/agon)
+```
+
+### End-to-end
+
+All four roles were verified live on 0.9.1 on Herdr with `openai-codex/gpt-5.6-luna`:
+
+#### 1. Crewmate (`crew-prime-verify-091` on `agon`)
+
+Spawn command and verbatim output:
+
+```text
+$ FM_HOME=/tmp/fm-crew-lab bin/fm-spawn.sh crew-prime-verify-091 projects/agon --mode direct-PR --yolo off --harness prime-agent --provider openai-codex --model gpt-5.6-luna --effort low
+spawned crew-prime-verify-091 harness=prime-agent kind=ship mode=direct-PR yolo=off window=default:w5F:p2 worktree=/home/eduard/.treehouse/agon-22d7a5/3/agon
+```
+
+Status lines appended to `/tmp/fm-crew-lab/state/crew-prime-verify-091.status`:
+
+```text
+working: creating reproduction test
+done: committed on throwaway branch
+```
+
+Commit landed on branch `fm/crew-prime-verify-091`:
+
+```text
+commit e421a342c0f7bea247166adfad9689ba35f62391
+Author: Firstmate <firstmate@example.invalid>
+Date:   Mon Sep 7 22:50:12 2026 +0000
+
+    chore: verify prime-agent 0.9.1 crewmate commit
+```
+
+Detached sessions before teardown:
+
+```text
+$ timeout 30s prime-agent list
+bf0cc39f1ecc  working  22s  openai-codex/gpt-5.6-luna  9         1
+```
+
+Teardown command and output:
+
+```text
+$ FM_HOME=/tmp/fm-crew-lab bin/fm-teardown.sh crew-prime-verify-091 --force
+prime-agent: stopping detached session bf0cc39f1ecc bound to /home/eduard/.treehouse/agon-22d7a5/3/agon
+teardown crew-prime-verify-091 complete (window default:w5F:p2, worktree /home/eduard/.treehouse/agon-22d7a5/3/agon)
+```
+
+Detached sessions after teardown:
+
+```text
+$ timeout 30s prime-agent list
+(no sessions bound to /home/eduard/.treehouse/agon-22d7a5/3/agon)
+```
+
+#### 2. Scout (`scout-prime-verify-091` on `agon`)
+
+Spawn command and verbatim output:
+
+```text
+$ FM_HOME=/tmp/fm-scout-lab bin/fm-spawn.sh scout-prime-verify-091 projects/agon --scout --harness prime-agent --provider openai-codex --model gpt-5.6-luna --effort low
+spawned scout-prime-verify-091 harness=prime-agent kind=scout mode= yolo= window=default:w5E:p2 worktree=/home/eduard/.treehouse/agon-22d7a5/3/agon
+```
+
+Status lines appended to `/tmp/fm-scout-lab/state/scout-prime-verify-091.status`:
+
+```text
+working: inspecting test structure
+done: report written
+```
+
+Deliverable written: `/tmp/fm-scout-lab/data/scout-prime-verify-091/report.md` (2,250 bytes).
+Detached sessions before teardown:
+
+```text
+$ timeout 30s prime-agent list
+1854d2fae343  working  41s  openai-codex/gpt-5.6-luna  8         1
+c3505b6da582  working  21s  openai-codex/gpt-5.6-luna  8         1
+```
+
+Teardown command and output:
+
+```text
+$ FM_HOME=/tmp/fm-scout-lab bin/fm-teardown.sh scout-prime-verify-091 --force
+prime-agent: stopping detached session 1854d2fae343 bound to /home/eduard/.treehouse/agon-22d7a5/3/agon
+prime-agent: stopping detached session c3505b6da582 bound to /home/eduard/.treehouse/agon-22d7a5/3/agon
+teardown scout-prime-verify-091 complete (window default:w5E:p2, worktree /home/eduard/.treehouse/agon-22d7a5/3/agon)
+```
+
+Detached sessions after teardown:
+
+```text
+$ timeout 30s prime-agent list
+(no sessions bound to /home/eduard/.treehouse/agon-22d7a5/3/agon)
+```
+
+#### 3. Local Secondmate (`sm-prime-test`)
+
+Seed command and output:
+
+```text
+$ FM_SECONDMATE_CHARTER="Verify prime-agent secondmate charter on 0.9.1" FM_HOME=/tmp/fm-parent-home bin/fm-home-seed.sh sm-prime-test /tmp/fm-secondmate-home --no-projects
+scaffolded: /tmp/fm-parent-home/data/sm-prime-test/brief.md (secondmate charter)
+home=/tmp/fm-secondmate-home
+```
+
+Spawn command and output:
+
+```text
+$ FM_HOME=/tmp/fm-parent-home bin/fm-spawn.sh sm-prime-test /tmp/fm-secondmate-home --secondmate --harness prime-agent --provider openai-codex --model gpt-5.6-luna --effort low
+spawned sm-prime-test harness=prime-agent kind=secondmate mode=secondmate yolo=off window=default:w5H:p2 worktree=/tmp/fm-secondmate-home
+```
+
+Idle charter behavior in pane:
+
+```text
+Arm firstmate watcher · done
+watcher: started prime-agent extension arm child 1; future ordinary re-arms are automatic; call fm_watch_arm_prime again only after a later notification says the cycle is missing, failed, or unhealthy
+```
+
+The secondmate settled idle at the composer without generating unprompted work.
+Steer command:
+
+```text
+$ FM_HOME=/tmp/fm-parent-home bin/fm-send.sh sm-prime-test "Report your status by appending to your parent channel status file."
+```
+
+Doorbell delivered to secondmate pane:
+
+```text
+: Firstmate instruction waiting: list '/tmp/fm-parent-home/state/sm-prime-test.inbox'/*.msg and, in numeric order, read and act on each, then mv each handled file to '/tmp/fm-parent-home/state/sm-prime-test.inbox'/handled/.
+```
+
+Status line appended to `/tmp/fm-parent-home/state/sm-prime-test.status`:
+
+```text
+done: corr=4c1fd0b301eb7359 secondmate is initialized and idle, with no assigned work.
+```
+
+Detached sessions before teardown:
+
+```text
+$ timeout 30s prime-agent list
+e5546a195352  working  8s   openai-codex/gpt-5.6-luna  11        1
+```
+
+Teardown command and output:
+
+```text
+$ FM_HOME=/tmp/fm-parent-home bin/fm-teardown.sh sm-prime-test --force
+prime-agent: stopping detached session e5546a195352 bound to /tmp/fm-secondmate-home
+teardown sm-prime-test complete (window default:w5H:p2, worktree /tmp/fm-secondmate-home)
+```
+
+Detached sessions after teardown:
+
+```text
+$ timeout 30s prime-agent list
+(no sessions bound to /tmp/fm-secondmate-home)
+```
+
+#### 4. Primary (`/tmp/fm-primary-lab`)
+
+Session start command:
+
+```text
+$ PI_CODING_AGENT=true FM_PI_HARNESS=prime-agent FM_HOME=/tmp/fm-primary-lab bin/fm-session-start.sh
+```
+
+Supervision operating instructions block emitted in the session start digest:
+
+```text
+================================================================================
+SUPERVISION OPERATING INSTRUCTIONS - primary harness: prime-agent
+================================================================================
+Current state:
+- Lock: read-only; do not drain, arm, spawn, steer, merge, or repair fleet state here.
+- Away mode: inactive.
+- X mode: inactive; use the default watcher cadence.
+- Ordinary wake: the prime-agent extension already owns watcher continuity; do not arm another cycle.
+
+Mode: prime-agent extension background wake.
+
+When this session owns supervision and away mode is not active:
+1. Drain first with `bin/fm-wake-drain.sh`.
+2. Confirm the prime-agent primary auto-loaded both project extensions; if not, restart `prime-agent` with `-e /home/eduard/.treehouse/firstmate-845790/2/firstmate/.prime/agent/extensions/fm-primary-turnend-guard.ts -e /home/eduard/.treehouse/firstmate-845790/2/firstmate/.prime/agent/extensions/fm-primary-prime-watch.ts`.
+   prime-agent auto-discovers `.prime/agent/extensions/` with no trust gate, so the restart is only needed when discovery itself was disabled.
+3. First cycle only: make the one required `fm_watch_arm_prime` call.
+   Use `/fm-watch-arm-prime` only as a human-entered fallback.
+   Never run `bin/fm-watch-arm.sh` through the bash tool because that foreground arm can wedge the agent and bypasses extension-owned cleanup.
+4. If the extension says no live session holds the lock, run `bin/fm-session-start.sh` to reclaim the session lock, then call `fm_watch_arm_prime` again.
+5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live prime-agent process, and owns every later successor launch.
+6. Ordinary same-process session replacement (`/new`, `/resume`, `/fork`, reload) retires only the prior generation; call `fm_watch_arm_prime` once for the first cycle of the replacement session without restarting prime-agent.
+   The generation-owner contract lives in `.prime/agent/extensions/fm-primary-prime-watch.ts`.
+7. After an actionable child close, the extension rechecks session-lock ownership and verifies one successor before it delivers the follow-up wake; its bounded fallback is defined in `docs/watcher-continuity.md`.
+8. Ordinary work, turn completion, and ordinary signal, stale, check, heartbeat, or other wake handling: do not call `fm_watch_arm_prime` again because continuity is extension-owned rather than model-memory-owned.
+9. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure instead of disappearing.
+10. Missing, failed, or unhealthy cycle only: if a later notification explicitly reports one of those repair conditions, drain queued wakes, inspect the failure text, call `fm_watch_arm_prime`, and restart prime-agent with both extensions loaded if needed.
+   A redundant call while the extension owns an arm child or scheduled retry is an ownership-based `watcher: unchanged` no-op, not an independent health claim.
+11. Never use shell `&` for watcher supervision.
+   The arm mechanism above is extension-owned, not a model tool call, and a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at /home/eduard/.treehouse/firstmate-845790/2/firstmate/.prime/agent/extensions/fm-primary-turnend-guard.ts).
+
+The turn-end guard extension lives at /home/eduard/.treehouse/firstmate-845790/2/firstmate/.prime/agent/extensions/fm-primary-turnend-guard.ts.
+The watcher extension lives at /home/eduard/.treehouse/firstmate-845790/2/firstmate/.prime/agent/extensions/fm-primary-prime-watch.ts.
+Both are tracked, project-local `.prime/agent/extensions/*.ts` files that prime-agent auto-discovers; `bin/fm-session-start.sh` reports when the running session has not loaded both required extensions.
+
+One prime-agent-specific fact this protocol depends on: prime-agent has no `agent_settled` event, so the turn-end guard reconstructs the settle from `agent_end`, holding through an auto-retry grace window and skipping an end that has queued messages behind it.
+A guard follow-up therefore arrives at the end of a logical run, not at every inner tool loop.
+```
+
+Watcher arm output in session:
+
+```text
+watcher: started prime-agent extension arm child 1; future ordinary re-arms are automatic; call fm_watch_arm_prime again only after a later notification says the cycle is missing, failed, or unhealthy
+```
+
+Process line showing the watcher armed by the extension (`ps -ef | grep fm-watch-arm`):
+
+```text
+eduard   123456  123400  0 01:02 pts/3    00:00:00 bash -lc config_dir="/tmp/fm-primary-lab/config"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; exec "/home/eduard/.treehouse/firstmate-845790/2/firstmate/bin/fm-watch-arm.sh" --restart
+```
+
+#### Test verification
+
+`FM_LIVE=1 bin/fm-test-run.sh tests/fm-prime-agent-harness.test.sh tests/fm-prime-watch-extension.test.sh` verified the Prime Agent adapter and watcher extension test suites (19 tests total, 0 failed, 0 skipped):
+
+```text
+FM_TEST_BEGIN 2026-09-07T23:12:30Z tests/fm-prime-watch-extension.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - prime-agent redundant tool call returns ownership guidance and spawns no second child
+ok - prime-agent established clean closes stop at the configured retry limit
+ok - prime-agent session generation owns the arm child across a replacement
+# all fm-prime-watch-extension tests passed
+FM_TEST_END 2026-09-07T23:12:30Z tests/fm-prime-watch-extension.test.sh exit=0 duration_ms=657 gate_skip=false
+FM_TEST_BEGIN 2026-09-07T23:12:30Z tests/fm-prime-agent-harness.test.sh family=pure-contract-unit expected_gate_skip=none
+ok - detection splits prime-agent from pi without relabelling unmarked Pi or claude sessions
+ok - prime-agent crewmate spawn loads its own extension and stamps its identity
+ok - a gated prime-agent spawn receives explicit long-horizon limits
+ok - gate retry and timeout limits require positive integers
+ok - the provider axis reaches every harness whose CLI exposes it, not just prime-agent
+ok - unsupported harnesses record the provider axis without receiving it
+ok - no-mistakes refuses duplicate harness-level gate ownership before spawn
+ok - spawn help documents the provider and autonomous gate axes
+ok - prime-agent secondmate launches with both primary extensions and retires the home's stale worker
+ok - prime-agent secondmate relaunch fails closed on retirement failure
+ok - prime-agent secondmate launch treats an absent daemon as nothing to retire
+ok - duplicate secondmate spawn preserves the live prime-agent worker
+ok - prime-agent primary extensions ignore inline child sessions
+ok - prime-agent's '>' composer reads empty only inside a proven container
+ok - teardown stops only this worktree's prime-agent session and removes its extension
+ok - teardown of a secondmate home retires the prime-agent worker bound to it
+FM_TEST_END 2026-09-07T23:12:53Z tests/fm-prime-agent-harness.test.sh exit=0 duration_ms=22861 gate_skip=false
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=23718
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=22861 failed=0
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=1 duration_ms=657 failed=0
+```
+
+`bin/fm-test-run.sh tests/fm-live-gate.test.sh` verified that live guards open with the shared gate and refuse together when `FM_LIVE=0`:
+
+```text
+FM_TEST_BEGIN 2026-09-07T23:14:38Z tests/fm-live-gate.test.sh family=standalone expected_gate_skip=none
+ok - a default-on guard runs wherever its tools are installed
+ok - an absent tool is a named capability skip, not a silent pass
+ok - a prompt-submitting guard stays off until it is asked for
+ok - a guard's own variable turns it on
+ok - a demanded run refuses to pass as a skip
+ok - FM_LIVE switches the whole family
+ok - a guard's own setting wins over FM_LIVE
+ok - any entry point of a multi-mode guard turns it on
+ok - the shared gate carries the gate-refusal bypass into every live guard
+ok - all 25 live guards refuse together on FM_LIVE=0
+FM_TEST_END 2026-09-07T23:14:51Z tests/fm-live-gate.test.sh exit=0 duration_ms=12326 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=13002
+FM_TEST_SUMMARY_FAMILY family=standalone count=1 duration_ms=12326 failed=0
+```

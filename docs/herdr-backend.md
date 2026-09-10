@@ -252,10 +252,13 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape - bordered boxes, bare agent-glyph rows (including muse's `⟩`, which the adapter's retired local pattern silently omitted), opencode's left bar, and the Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle or done.
+The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape - bordered boxes, bare agent-glyph rows (including muse's `⟩`, which the adapter's retired local pattern silently omitted), opencode's left bar, the Pi separator region this adapter pioneered, and the prime-agent `>` row.
+The Pi region is admitted only when native `agent get` identity is exactly Pi and state is idle or done.
 A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's; that state defers instead of proving emptiness.
+The prime-agent row is admitted only when Herdr's foreground-process capability and native identity both report prime-agent.
+The classifier also requires Prime Agent's open ANSI background surface at the glyph, so a plain `>` left by a shell remains unknown.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
-Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
+Identity stays a lazy second read, consulted only when an identity-gated shape could change the verdict.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
@@ -282,6 +285,10 @@ The generic Herdr agent-liveness probe reuses the same pane classifier, then app
 A structurally gone pane or a pane read from a session positively reported as having no running server becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and every other unexpected read becomes `unreadable`.
 The stopped-server exception does not widen husk detection or any close authority; those paths still refuse an unreadable pane.
 Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
+Prime-agent registration survives `/quit`, so native identity alone does not prove that a prime-agent process still occupies the pane.
+A registered prime-agent pane is demoted to `dead` only when the foreground probe first proves that the pane returned to its shell and the subtree probe then proves that no prime-agent process remains under that shell.
+A Ctrl+Z-suspended prime-agent remains alive in the subtree even after it leaves the foreground.
+Either probe being unreadable keeps the registered verdict rather than licensing closure.
 
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.

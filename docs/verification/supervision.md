@@ -55,6 +55,68 @@ Both tracked `.omp/extensions/*.ts` files loaded by auto-discovery alone (no `-e
 omp's `session_start` payload carries no reason field, so the adapter derives the source: the first start of the process is `startup` (or `resume` from a `--continue`/`--resume` launch line) and a later in-process start is `clear`; `tests/fm-omp-harness.test.sh` pins that mapping over a fake omp API.
 A file named both by `-e` and by auto-discovery loads twice (two factory calls, doubled `session_stop` continuations), which is why the secondmate launch names no `-e` and the per-task worker extension lives in `state/`.
 
+### Prime Agent (prime-agent) native delivery, 2026-09-08
+
+This is fork-only evidence for the full adapter and does not describe the three-slice upstream branch, which refuses Prime Agent secondmates and has no Prime Agent primary supervision assets.
+The full adapter on the fork was verified on 2026-09-08 with prime-agent 0.9.1 and the openai-codex `gpt-5.6-luna` model across crewmate, scout, local secondmate, and primary roles on Linux x86_64 through the Herdr backend.
+Both tracked `.prime/agent/extensions/*.ts` files auto-load (`fm-primary-prime-watch.ts` and `fm-primary-turnend-guard.ts`), registering the `fm_watch_arm_prime` watcher arm tool and the PreToolUse seatbelt check.
+Because prime-agent emits `agent_end` rather than `agent_settled`, the turn-end guard reconstructs settle from `agent_end` with an auto-retry grace window.
+Prime Agent runs detached daemon workers under a per-user supervisor, so teardown retires sessions by cwd via `fm_prime_agent_stop_sessions_under` rather than stopping the daemon.
+
+Running `PI_CODING_AGENT=true FM_PI_HARNESS=prime-agent FM_HOME=/tmp/fm-primary-lab bin/fm-session-start.sh` against an isolated home emitted the Prime supervision protocol:
+
+```text
+================================================================================
+SUPERVISION OPERATING INSTRUCTIONS - primary harness: prime-agent
+================================================================================
+Current state:
+- Lock: read-only; do not drain, arm, spawn, steer, merge, or repair fleet state here.
+- Away mode: inactive.
+- X mode: inactive; use the default watcher cadence.
+- Ordinary wake: the prime-agent extension already owns watcher continuity; do not arm another cycle.
+
+Mode: prime-agent extension background wake.
+
+When this session owns supervision and away mode is not active:
+1. Drain first with `bin/fm-wake-drain.sh`.
+2. Confirm the prime-agent primary auto-loaded both project extensions; if not, restart `prime-agent` with `-e /home/eduard/.treehouse/firstmate-845790/2/firstmate/.prime/agent/extensions/fm-primary-turnend-guard.ts -e /home/eduard/.treehouse/firstmate-845790/2/firstmate/.prime/agent/extensions/fm-primary-prime-watch.ts`.
+   prime-agent auto-discovers `.prime/agent/extensions/` with no trust gate, so the restart is only needed when discovery itself was disabled.
+3. First cycle only: make the one required `fm_watch_arm_prime` call.
+   Use `/fm-watch-arm-prime` only as a human-entered fallback.
+   Never run `bin/fm-watch-arm.sh` through the bash tool because that foreground arm can wedge the agent and bypasses extension-owned cleanup.
+4. If the extension says no live session holds the lock, run `bin/fm-session-start.sh` to reclaim the session lock, then call `fm_watch_arm_prime` again.
+5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live prime-agent process, and owns every later successor launch.
+6. Ordinary same-process session replacement (`/new`, `/resume`, `/fork`, reload) retires only the prior generation; call `fm_watch_arm_prime` once for the first cycle of the replacement session without restarting prime-agent.
+   The generation-owner contract lives in `.prime/agent/extensions/fm-primary-prime-watch.ts`.
+7. After an actionable child close, the extension rechecks session-lock ownership and verifies one successor before it delivers the follow-up wake; its bounded fallback is defined in `docs/watcher-continuity.md`.
+8. Ordinary work, turn completion, and ordinary signal, stale, check, heartbeat, or other wake handling: do not call `fm_watch_arm_prime` again because continuity is extension-owned rather than model-memory-owned.
+9. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure instead of disappearing.
+10. Missing, failed, or unhealthy cycle only: if a later notification explicitly reports one of those repair conditions, drain queued wakes, inspect the failure text, call `fm_watch_arm_prime`, and restart prime-agent with both extensions loaded if needed.
+   A redundant call while the extension owns an arm child or scheduled retry is an ownership-based `watcher: unchanged` no-op, not an independent health claim.
+11. Never use shell `&` for watcher supervision.
+   The arm mechanism above is extension-owned, not a model tool call, and a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at /home/eduard/.treehouse/firstmate-845790/2/firstmate/.prime/agent/extensions/fm-primary-turnend-guard.ts).
+
+The turn-end guard extension lives at /home/eduard/.treehouse/firstmate-845790/2/firstmate/.prime/agent/extensions/fm-primary-turnend-guard.ts.
+The watcher extension lives at /home/eduard/.treehouse/firstmate-845790/2/firstmate/.prime/agent/extensions/fm-primary-prime-watch.ts.
+Both are tracked, project-local `.prime/agent/extensions/*.ts` files that prime-agent auto-discovers; `bin/fm-session-start.sh` reports when the running session has not loaded both required extensions.
+
+One prime-agent-specific fact this protocol depends on: prime-agent has no `agent_settled` event, so the turn-end guard reconstructs the settle from `agent_end`, holding through an auto-retry grace window and skipping an end that has queued messages behind it.
+A guard follow-up therefore arrives at the end of a logical run, not at every inner tool loop.
+```
+
+In the session, the `fm_watch_arm_prime` tool call returned:
+
+```text
+watcher: started prime-agent extension arm child 1; future ordinary re-arms are automatic; call fm_watch_arm_prime again only after a later notification says the cycle is missing, failed, or unhealthy
+```
+
+The process table confirms the extension-managed watcher child attached to prime-agent (`ps -ef | grep fm-watch-arm`):
+
+```text
+eduard   123456  123400  0 01:02 pts/3    00:00:00 bash -lc config_dir="/tmp/fm-primary-lab/config"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; exec "/home/eduard/.treehouse/firstmate-845790/2/firstmate/bin/fm-watch-arm.sh" --restart
+```
+
+
 ### Run-tier source vocabulary and context-reset injection
 
 The run tier depends on three facts only the vendor can supply: the session-open source it reports, whether hook stdout reaches model context on a context-RESET open rather than only a cold one, and whether a worker the hook detaches survives the hook returning.
@@ -212,6 +274,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | --- | --- | --- | --- |
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
 | omp | 18.1.11 | Extension `agent_start` / `agent_end` without `willContinue` | Live Herdr scout on `openai-codex/gpt-6-astra` (2026-09-05): the spawn seed `busy source=fm-spawn`, then `busy source=omp-ext event=agent-start`, then `idle source=omp-ext event=agent-end` at the natural end of the brief; a steer through `fm-send` reopened `busy … agent-start`, and a control-plane interrupt closed it with `idle … agent-end` (omp fires `agent_end` on an interrupted turn). `ctx.isIdle()` is deliberately not consulted because it reads false at a natural TUI `agent_end`. |
+| Prime Agent | 0.9.1 | Herdr native agent reporter (`agent_status`) plus turn-end extension `prime-ext` | Live Herdr scout and crewmate on `openai-codex/gpt-5.6-luna` (2026-09-08): Herdr reports `agent_status=working` during execution and `idle` when settled; task extension `state/<id>.prime-ext.ts` touches the turn-end marker on `turn_end`. |
 | OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
@@ -240,7 +303,7 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-09-05, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Cursor's stop-hook park validated on 2026-08-13, and omp's blocking `session_stop` hook validated on 2026-09-05.
+The blocking and bounded-follow-up mechanisms were validated across eight harnesses on 2026-07-08 through 2026-09-08, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Cursor's stop-hook park validated on 2026-08-13, omp's blocking `session_stop` hook validated on 2026-09-05, and Prime Agent's passive `agent_end` callback validated on 2026-09-08.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
@@ -249,6 +312,7 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | omp | 18.1.11 | Blocking `session_stop` hook returning `{ continue: true, additionalContext }` | In the isolated rpc lab (2026-09-05), the successor watcher was frozen with `SIGSTOP` until its beacon passed the lab `FM_GUARD_GRACE` of 20s while its arm child stayed attached (a killed watcher closes its arm child and the extension re-arms before the guard can fire); the next turn end raised the guard, the guard spy recorded `rc=2` followed by a stop carrying `stop_hook_active: true`, omp compelled a continuation carrying the `turn-end-guard` operational text, the `fm_watch_arm_omp` invocation count then rose to at least two, and a live watcher held the home lock after the thaw; the flagged stop was allowed, so exactly one continuation ran. `session_stop` never fired for an interrupted turn. |
+| Prime Agent | 0.9.1 | Tracked `.prime/agent/extensions/fm-primary-turnend-guard.ts` passive `agent_end` callback | Settle reconstructed from `agent_end` with auto-retry grace window; PreToolUse hook denies manual background arms (`bin/fm-arm-pretool-check.sh`); extension starts and owns background watcher arm via `fm_watch_arm_prime`. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
 
