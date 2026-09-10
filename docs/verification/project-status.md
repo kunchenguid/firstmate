@@ -9,7 +9,8 @@ Date: 2026-09-10.
 Tree: this change's branch on macOS with Bash 3.2 and jq 1.8.2.
 Command: `bash tests/fm-project-status.test.sh`.
 
-The fixture invokes the project-status executable through a sibling fake snapshot producer for deterministic resolution and failure boundaries, then invokes the real fleet snapshot against isolated local and remote-home records for its project-status source behavior.
+The projection cases invoke the project-status executable through a sibling fake snapshot producer for deterministic resolution and collection bounds.
+The source-failure case invokes the public project-status CLI and injects malformed, oversized, failed, and timed-out output at its real snapshot subprocess boundary.
 The remote cache case uses a valid pre-existing `fm-secondmate-home-summary.v1` record and a failing SSH transport, proving that the no-write path can select the cache without changing its digest.
 The no-cache case proves that the same mode neither creates its configured cache directory nor invokes a terminal backend, CI-log reader, or parent status event, while retaining attributable structured current-run fields.
 
@@ -17,7 +18,7 @@ The no-cache case proves that the same mode neither creates its configured cache
 
 ```text
 ok - project status resolves exact local and secondmate owners without trusting parent history
-ok - project status exposes bad schema, oversized output, process failure, and timeout
+ok - live project status exposes bounded bad schema, oversized output, process failure, and timeout
 ok - project status caps all collections, disclosures, and final JSON while preserving totals
 ok - project-status source reads cache without writes or terminal observation
 All fm-project-status tests passed.

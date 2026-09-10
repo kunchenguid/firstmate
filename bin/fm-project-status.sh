@@ -6,6 +6,21 @@
 # 4 MiB source cap, then emits exactly one
 # fm-project-status.v1 object no larger than 64 KiB. It never collects fleet
 # state independently.
+# Output fields:
+#   schema, generated, query: contract id, observation time, and input.
+#   match: {status,project,candidates[]} where status is exact, unknown,
+#     ambiguous, or unavailable.
+#   owner: null or {kind,id}; kind is main or secondmate.
+#   current: {state,reason_code,reason_ids[]}.
+#   underway[], captain_calls[], queued[], recently_landed[]: independently
+#     supported project rows, capped at 5, 5, 5, and 3 respectively.
+#   counts: totals before this projection's display caps for those collections.
+#   provenance: {source,trust,freshness,observed_at,age_seconds}.
+#   warnings[], omitted[]: bounded uncertainty and truncation disclosures, with
+#     at most ten entries combined.
+# Unknown, ambiguous, or unavailable matches keep every work collection empty
+# rather than filling gaps from historical evidence. Source and projection failures are
+# successful JSON responses with explicit current.reason_code values.
 # Project lookup is exact, ASCII case-insensitive, and unique across the main
 # project registry and secondmate_projects.
 # Parent status events and terminal or conversation text are never current-state
