@@ -8,6 +8,10 @@
 # Stale-owner cases instead leave a dead recorded pid for the hook to reclaim
 # through the real fm-lock.sh path. The arm wrapper is a per-test fixture, so no
 # real watcher, model, or fleet state is touched.
+# One case is the exception to "everything lives under $TMPDIR": the
+# mode-incapable home needs a filesystem that reverts chmod, which no temp root
+# can simulate, so it places its fixture on a real host mount under a single
+# tracked root and skips when the host offers none (see mode_incapable_root).
 # shellcheck disable=SC2016 # single quotes are deliberate: $FM_HOME expands inside the fake harness child, and grep needles are literal strings
 set -u
 
