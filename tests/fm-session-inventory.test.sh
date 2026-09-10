@@ -491,7 +491,7 @@ EOF
 }
 
 test_stale_lock_pid_is_not_attributed() {
-  local home json owner
+  local home json owner out rendered
   home=$(make_home stale-lock)
   finish_backlog "$home"
   write_lavish_stub "$FAKEBIN"
@@ -502,8 +502,28 @@ test_stale_lock_pid_is_not_attributed() {
   [ "$owner" = stale ] || fail "a dead recorded lock pid must read as stale, got '$owner'"
   [ "$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")] | length')" = 0 ] \
     || fail "a home whose lock names no live harness must claim no sessions"
-  [ "$(printf '%s' "$json" | jq -r '.sources[] | select(.name == "harness-sessions") | .ok')" = false ] \
-    || fail "an unscopable harness must be disclosed as an unreadable source"
+
+  # A DETERMINED VERDICT IS NOT AN UNREADABLE SOURCE. Everything this collector
+  # needed was read; it concluded that the lock names no live harness, and
+  # lock_owner carries exactly that. Booking it as a failed source would spend
+  # the unasked session-start line on a check that did complete, and would state
+  # the same fact twice in the view.
+  [ "$(printf '%s' "$json" | jq -r '.sources[] | select(.name == "harness-sessions") | .ok')" = true ] \
+    || fail "a collector that reached a verdict must not be reported as unreadable"
+  [ -n "$(printf '%s' "$json" | jq -r '.sources[] | select(.name == "harness-sessions") | .reason // ""')" ] \
+    || fail "the verdict must still travel with the source as its reason"
+
+  out=$(FM_SESSION_STALE_DAYS=0 run_inventory "$home" --stale-lines) \
+    || fail "--stale-lines failed for a stale lock"
+  assert_not_contains "$out" "could not check everything" \
+    "a completed check must not claim it could not check everything"
+
+  # And the view states it once, in the words that name the actual condition.
+  rendered=$(COLUMNS=110 run_view "$home" --color never)
+  assert_contains "$rendered" "no longer a live harness process" \
+    "the view must still say plainly that the recorded lock is stale"
+  assert_not_contains "$rendered" "harness-sessions unreadable" \
+    "the view must not also report that determined verdict as an unreadable source"
 
   pass "inventory: a stale lock pid is disclosed instead of attributed"
 }
@@ -1496,6 +1516,45 @@ test_an_unreadable_source_says_so_on_the_unasked_line() {
   pass "inventory: an unreadable source is named on the unasked line, and the readable rows survive"
 }
 
+# ONE MACHINE-WIDE FAILURE, SAID ONCE. Lavish keeps a single list for the whole
+# machine, so a listing that cannot be read is one condition, not one per home.
+# The review ROWS already follow a main-home-only rule for exactly that reason;
+# the disclosure about them has to follow it too, or every firstmate home on the
+# machine prints the same line at every session start. The home-local collectors
+# are about THIS home and keep reporting from every home.
+test_a_machine_wide_source_failure_is_not_repeated_by_every_home() {
+  local main mate out
+  main=$(make_home lavish-fail-main)
+  mate=$(make_home lavish-fail-mate)
+  finish_backlog "$main"
+  finish_backlog "$mate"
+  printf 'mate-three\n' > "$mate/.fm-secondmate-home"
+  cat > "$FAKEBIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+echo "error: the listing is unavailable" >&2
+exit 1
+SH
+  chmod +x "$FAKEBIN/lavish-axi"
+
+  out=$(run_inventory "$main" --stale-lines) || fail "--stale-lines failed for the main home"
+  assert_contains "$out" "could not check everything - lavish unreadable" \
+    "the main home must say that the machine-wide listing could not be read"
+
+  out=$(run_inventory "$mate" --stale-lines) || fail "--stale-lines failed for a secondmate home"
+  assert_not_contains "$out" "lavish" \
+    "a secondmate home must not repeat the machine-wide listing failure the main home already names"
+
+  # A home-local collector is a different matter: it concerns THIS home, so every
+  # home reports its own.
+  out=$(FM_SNAPSHOT_BUDGET=not-a-number run_inventory "$mate" --stale-lines) \
+    || fail "--stale-lines failed for a secondmate home with an unreadable snapshot"
+  assert_contains "$out" "could not check everything - fleet-snapshot unreadable" \
+    "a home-local source failure must still be reported by the home it concerns"
+
+  write_lavish_stub "$FAKEBIN"
+  pass "inventory: a machine-wide source failure is named once, by the main home"
+}
+
 test_an_unreadable_fleet_snapshot_withholds_the_session_verdict() {
   local home spec daemon json rendered out
   home=$(make_home fleet-unreadable)
@@ -1610,5 +1669,6 @@ test_a_workers_own_process_is_not_a_second_background_session
 test_secondmate_suppression_follows_the_shared_marker_rule
 test_inventory_does_not_rewrite_the_busy_classifier_cache
 test_an_unreadable_source_says_so_on_the_unasked_line
+test_a_machine_wide_source_failure_is_not_repeated_by_every_home
 test_an_unreadable_fleet_snapshot_withholds_the_session_verdict
 test_inventory_closes_nothing_it_reports

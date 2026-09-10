@@ -68,6 +68,11 @@
 #                     every session close command for that reason.
 #   sources[]         {name, ok, reason} - one per collector, so an unreadable
 #                     source is disclosed instead of silently reported as zero.
+#                     `ok` is false ONLY when the collector could not read its
+#                     input. One that read everything and reached a definite
+#                     answer stays ok and carries that answer as its reason -
+#                     because false is what spends the unasked session-start
+#                     line, and a completed check may never spend it.
 #
 # Row fields:
 #   kind          worker | review | service | harness-session.
@@ -863,9 +868,15 @@ collect_harness_sessions() {
     note_source harness-sessions 1 'this home records no session lock, so no harness is scoped to it'
     return 0
   fi
+  # A DETERMINED ANSWER, NOT AN UNREADABLE ONE. This collector read everything it
+  # needed and reached a verdict: the lock names a process that is not a live
+  # harness. lock_owner carries that verdict and the view states it in words, so
+  # booking it as a failed source would report the same fact twice and, worse,
+  # spend the unasked session-start line on a check that did in fact complete.
+  # The `absent` branch above is the same shape for the same reason.
   if ! ps_alive "$lock_pid" || ! is_harness_pid "$lock_pid"; then
     HARNESS_LOCK_OWNER=stale
-    note_source harness-sessions 0 "recorded session lock pid $lock_pid is not a live harness process"
+    note_source harness-sessions 1 "recorded session lock pid $lock_pid is not a live harness process"
     return 0
   fi
   root=$(harness_root_of "$lock_pid")
@@ -1075,7 +1086,13 @@ printf '%s\n' "$JSON" | jq -r --argjson cap 8 --argjson reviews "$REVIEW_LINES" 
     else "service \($r.label // $r.id)" end;
   # Oldest first across every kind, so the cap below can only ever drop the
   # least overdue lines.
-  ([.sources[] | select(.ok | not) | .name] | join(", ")) as $unreadable
+  # The same main-home-only rule the review rows follow, and for the same reason:
+  # Lavish is the one MACHINE-WIDE collector here, so its failure is a single
+  # condition that every firstmate home on this machine would otherwise repeat on
+  # every session start. The home-local collectors are about THIS home and keep
+  # reporting from every home.
+  ([.sources[] | select(.ok | not)
+    | select($reviews == 1 or .name != "lavish") | .name] | join(", ")) as $unreadable
   | [.rows[] | select(.notify) | select($reviews == 1 or .kind != "review")]
   | sort_by(-(.age_seconds // 0)) as $stale
   | (if $unreadable == "" then empty
