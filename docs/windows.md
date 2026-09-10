@@ -50,11 +50,14 @@ Run every step from Git Bash, not from PowerShell or `cmd`.
 2. Confirm `MSYS=winsymlinks:sys` is live, using the probe under "The one setting you must get right" below.
    Nothing else on this page holds if that probe returns empty.
 
-3. Install the pinned tools, under "Toolchain" below, into one directory, and add that directory to `PATH`.
+3. Restore the `.claude/skills` link, under "The other link" below.
+   A first mate loads none of its skills without it, and reports nothing.
 
-4. Point Herdr's default pane shell at Git Bash, under "Herdr pane shell" below.
+4. Install the pinned tools, under "Toolchain" below, into one directory, and add that directory to `PATH`.
 
-5. Select Herdr as the runtime backend by writing `herdr` into `config/backend`.
+5. Point Herdr's default pane shell at Git Bash, under "Herdr pane shell" below.
+
+6. Select Herdr as the runtime backend by writing `herdr` into `config/backend`.
    [`configuration.md`](configuration.md) owns that file and every other configuration knob.
 
 ### Or hand the setup to Claude Code
@@ -66,6 +69,7 @@ Set up firstmate on this Windows machine, natively under Git Bash, without WSL.
 Treat docs/windows.md in the cloned repository as the authoritative source and do not improvise around it.
 Clone the windows branch specifically: git clone -b windows https://github.com/nathan-rosquist/firstmate - the upstream kunchenguid repository does not carry Windows support yet, so do not substitute it.
 Set core.autocrlf=false locally, and verify MSYS=winsymlinks:sys is live with that page's symlink probe before continuing.
+Then restore the .claude/skills junction exactly as that page's "The other link" section describes, because Windows checks that path out as a plain text file and every skill silently fails to load.
 Install the pinned tools with bin/fm-install-herdr.sh, bin/fm-install-treehouse.sh, bin/fm-install-shellcheck.sh, and bin/fm-install-actionlint.sh into one directory, then tell me the PATH line to add.
 Set Herdr's default pane shell to Git Bash in %APPDATA%/herdr/config.toml, and select the herdr backend in config/backend.
 Stop and ask me before installing anything outside that list.
@@ -122,6 +126,39 @@ Empty output means they do not, whatever the exit status said.
 
 Do not use `winsymlinks:nativestrict`.
 Without Windows Developer Mode enabled it aborts the shell rather than degrading.
+
+## The other link: `.claude/skills`
+
+`.claude/skills` is tracked as a symbolic link to `.agents/skills`, which is where this repository keeps the skills a first mate loads.
+Git for Windows sets `core.symlinks=false`, so a clone checks that path out as a 17-byte text file containing `../.agents/skills` instead of as a link.
+A harness then opens `.claude/skills/`, receives `Not a directory`, and loads none of the repository's skills.
+
+The failure is silent in exactly the way the previous section describes.
+No error is printed, the skills are simply never offered, and the session answers as though they had never been written.
+
+Replace the file with a directory junction, which needs no administrator rights.
+Run this once per clone, from PowerShell, substituting your own clone path:
+
+```powershell
+New-Item -ItemType Junction -Path "C:\path\to\firstmate\.claude\skills" -Target "C:\path\to\firstmate\.agents\skills"
+```
+
+Then stop git from tracking the working-tree copy, so the junction is not reported as a deletion:
+
+```sh
+git update-index --skip-worktree .claude/skills
+```
+
+Confirm it from Git Bash:
+
+```sh
+test -d .claude/skills && ls .claude/skills/ | wc -l
+```
+
+A count greater than zero means the harness can read them.
+`Not a directory`, or no output, means it still has the plain file.
+
+Re-check after a fresh clone, and after any `git checkout` that touches that path.
 
 ## Line endings
 
@@ -221,6 +258,10 @@ Update the checkout rather than working around the refusal.
 **Supervision reports a quiet fleet while work is clearly outstanding.**
 Check the symbolic-link probe under "The one setting you must get right".
 A supervision checkpoint cannot distinguish a completed quiet cycle from a cycle that never started, so a broken lock layer presents as silence.
+
+**A first mate does not offer its own skills, or a slash command does nothing.**
+Check `.claude/skills` under "The other link".
+On Windows that path checks out as a plain text file rather than a link, no skill loads, and nothing reports it.
 
 **The linter reports failures on files you did not touch.**
 Check for CRLF line endings first, under "Line endings".
