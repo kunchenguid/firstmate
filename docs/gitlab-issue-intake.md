@@ -75,7 +75,8 @@ Tập bảy tên này không phải do tài liệu này định nghĩa.
 Nơi định nghĩa duy nhất là biến `FM_LABEL_VOCABULARY` trong [`bin/fm-gitlab-issue.sh`](../bin/fm-gitlab-issue.sh).
 Script đó từ chối mọi tên `fm::` nằm ngoài tập này trước khi gửi request, nên gõ sai một tên sẽ không vô tình tạo ra label mới trên GitLab.
 Nếu bạn cần đổi hoặc thêm tên, sửa ở đó chứ không phải ở đây.
-Nhưng trang này chép lại tên label ở bốn chỗ, danh sách bảy tên ở trên, bảng ở mục "Ba label người dùng cần biết", dòng `intake_labels` trong khối cấu hình mẫu ở "Bước 3", và câu nêu mặc định của `intake_labels` ngay dưới khối đó, nên một thay đổi bộ label buộc phải cập nhật cả bốn chỗ trong tài liệu này chứ không chỉ sửa script.
+Nhưng mọi tên `fm::` xuất hiện ở bất kỳ đâu trong trang này đều chỉ là bản sao của biến đó.
+Vì vậy khi đổi tên một trạng thái, bạn phải quét lại toàn bộ trang và sửa mọi chỗ mang tên đó, kể cả tên nằm trong câu lệnh tạo label và tên nằm trong khối cấu hình mẫu, và đừng coi bất kỳ danh sách chỗ nào là đã đủ.
 
 ## Bước 3: viết cấu hình
 
@@ -120,18 +121,7 @@ bin/fm-gitlab-issues.sh disarm
 Sau khi bật, poll chạy theo nhịp `FM_CHECK_INTERVAL` của watcher (mặc định 300 giây), không có lịch riêng nào khác; xem [`docs/configuration.md`](configuration.md) nếu bạn muốn đổi nhịp đó.
 Một home đã bật poll sẽ giữ watcher chạy ngay cả khi không còn việc nào, và `disarm` là cách kết thúc nhu cầu đó.
 Chi tiết về việc `arm` và `disarm` ghi và xóa những gì thuộc về header của [`bin/fm-gitlab-issues.sh`](../bin/fm-gitlab-issues.sh).
-
-Xem thử poll đang thấy gì mà không cần chờ watcher:
-
-```sh
-bin/fm-gitlab-issues.sh check
-bin/fm-gitlab-issues.sh pending
-```
-
-`check` im lặng khi không có gì mới, đó là hành vi đúng chứ không phải lỗi.
-
-Một lưu ý khi chạy `check` bằng tay: nó ghi luôn các cặp (issue, label) vừa thấy vào sổ đã báo, nên watcher sẽ không đánh thức first mate về những issue đó nữa.
-Chi tiết của chúng vẫn nằm trong danh sách `pending` để first mate đọc, nhưng nếu bạn muốn chắc chắn không cắt mất một lượt đánh thức thì hãy để watcher tự chạy và chỉ dùng `pending` để xem.
+Muốn xem poll đang thấy gì, đọc header của script đó về `check` và `pending`, và nhớ rằng chạy `check` bằng tay sẽ tiêu mất lượt đánh thức tương ứng.
 
 ## Ba label người dùng cần biết
 
@@ -160,7 +150,8 @@ Khi cần hỏi bạn, first mate chuyển sang `fm::needs-human` và dừng l�
 ## Cách đọc comment của first mate
 
 First mate chỉ đăng ba loại comment và không bao giờ comment tiến độ.
-Nếu bạn thấy một issue im lặng nhiều giờ, đó là bình thường: im lặng nghĩa là đang chạy và chưa có gì cần bạn.
+Nếu bạn thấy một issue im lặng nhiều giờ, im lặng đó chỉ có nghĩa là không có comment tiến độ, chứ không phải bằng chứng rằng việc đang tiến triển.
+Khi poll hỏng thì không có gì được ghi lên issue cả, nên nếu bạn đã chờ lâu bất thường thì xem mục [Sự cố thường gặp](#sự-cố-thường-gặp).
 
 **Comment phân loại và kế hoạch.**
 Đăng một lần khi nhận việc.
