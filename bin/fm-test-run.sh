@@ -71,9 +71,9 @@
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
 #                   record it as exit 124 (0 disables, the default). The
-#                   --changed applies 900s automatically: no real script
-#                   approaches it, so it only converts a HUNG
-#                   script into a bounded failure. --max-wall-ms is checked
+#                   --changed applies 900s automatically to bound hung scripts;
+#                   a slow but progressing script can also exceed it.
+#                   --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
 #                   External interruption cleanup is outside this runner's
 #                   guarantee; configured per-script bounds remain authoritative.
@@ -173,15 +173,8 @@ JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
-# Bound applied automatically on the automatic --changed path, derived from
-# measured healthy runtimes with margin rather than picked: the slowest measured
-# behavior test is the 341s Herdr presentation E2E, and the slowest script in a
-# runner-file changed selection is tests/fm-calm-pi-extension.test.sh at 77s
-# once its Chrome reap terminates. 900s leaves roughly 2.6x headroom over the
-# slowest real script, so this can only ever fire on a script that is genuinely
-# stuck. It is a guard, not a speed control: a HUNG script becomes a bounded
-# failure instead of an unbounded suite, which is the shape that silently
-# outruns a caller's invocation budget.
+# Bound for the automatic --changed path so a hung script cannot run indefinitely.
+# docs/fm-test-portable-shards.md owns portable timing evidence and variance limits.
 CHANGED_DEFAULT_TIMEOUT_SECS=900
 
 # How many separate-runner shards the portable serial remainder splits into.
@@ -194,11 +187,8 @@ PORTABLE_SERIAL_SHARDS=5
 PORTABLE_SERIAL_DEFAULT_WEIGHT_MS=27000
 
 # Largest share of the serial lane allowed to run on the default weight above.
-# Hints are what keep the shards balanced, so once too much of the lane is
-# unmeasured the balance is guesswork and one shard can reach its CI job cap
-# while another sits idle. The coverage guard refuses past this share, which
-# leaves room for newly added tests while making a stale hint table fail loudly
-# instead of silently. docs/fm-test-portable-shards.md owns the refresh.
+# Allow room for newly added tests without relying too heavily on guesses.
+# docs/fm-test-portable-shards.md#coverage-guard owns the guard's limits.
 PORTABLE_SERIAL_MAX_UNHINTED_PERCENT=15
 
 usage() {
@@ -637,12 +627,8 @@ list_portable_serial() {
   done < <(all_repo_tests)
 }
 
-# Measured portable-serial script durations in milliseconds, from the CI timing
-# artifacts recorded in docs/fm-test-portable-shards.md. Each value is the
-# slowest of several green runs, so the balance holds on a slow runner rather
-# than only on the fastest one measured. These are balance hints only: the shard
-# partition stays complete and disjoint whatever they say, so a stale hint costs
-# balance rather than coverage. That doc owns the refresh procedure.
+# Portable-serial assignment weights in milliseconds.
+# docs/fm-test-portable-shards.md owns provenance, limits, and the refresh procedure.
 portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-contract.test.sh 10942
@@ -1058,11 +1044,7 @@ run_coverage_guard() {
     return 1
   fi
 
-  # Hint drift is what makes a balanced-looking partition run unbalanced: the
-  # shards are packed from hints, so every unmeasured script is balanced on a
-  # guess and enough of them let one shard reach its CI job cap while another
-  # runner sits idle. Bound the unmeasured share here rather than waiting for a
-  # shard to time out.
+  # Only missing hints count toward this limit; duration drift is unchecked.
   portable_serial_unhinted >"$tmp/unhinted"
   unhinted=$(wc -l <"$tmp/unhinted" | tr -d ' ')
   serial_total=$(wc -l <"$tmp/serial" | tr -d ' ')
