@@ -2327,6 +2327,43 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
   done
 }
 
+test_forced_secondmate_treehouse_preflight_accepts_empty_lock_list_on_bash32() {
+  local case_dir home child_wt rc=0 bash_version
+  bash_version=$(/bin/bash -c 'printf "%s.%s\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"')
+  if [ "$bash_version" != 3.2 ]; then
+    echo "skip: /bin/bash is Bash $bash_version, not Bash 3.2 (empty-array nounset regression)"
+    return 0
+  fi
+
+  case_dir=$(make_case descendant-treehouse-empty-lock-list)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  child_wt="$case_dir/pool/1/project"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$(dirname "$child_wt")"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  git -C "$case_dir/project" worktree add -q -b fm/child-pool "$child_wt" main
+  printf '%s\n' '{}' > "$case_dir/pool/treehouse-state.json"
+  fm_write_meta "$home/state/child-pool.meta" \
+    "window=firstmate:fm-child-pool" \
+    "endpoint_task_id=child-pool" \
+    "worktree=$child_wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:$PATH" \
+    /bin/bash -u "$TEARDOWN" task-x1 --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" \
+    "descendant-treehouse-empty-lock-list: forced teardown failed under Bash 3.2: $(cat "$case_dir/stderr")"
+  pass "forced secondmate Treehouse preflight accepts an initially empty lock list under Bash 3.2 nounset"
+}
+
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
   local case_dir home lock ready release holder_pid rc waited=0 child
   case_dir=$(make_case descendant-locks)
@@ -3674,6 +3711,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_forced_secondmate_treehouse_preflight_accepts_empty_lock_list_on_bash32
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
