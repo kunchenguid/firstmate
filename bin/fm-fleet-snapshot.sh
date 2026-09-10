@@ -82,7 +82,10 @@
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
 #     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. provenance.summary_source
+#     queued, landed, endpoints, counts, and omitted. Rows in the first five
+#     collections carry a nullable project field; older v1 producers without it
+#     remain valid, and consumers must treat those rows as project-unidentifiable.
+#     provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
@@ -997,13 +1000,15 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
                     | any($tasks[]; .id == $id and .current_state.state == "working") | not)))) ]) as $queued_all
     | ([ $queued_all[]
          | select(.captain_actionable == true)
-         | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
+         | {id,key:.id,project:((.repo // null) | if . == null then null else trunc(120) end),
+            verb:"captain-hold",summary:(.title | trunc(160)),
             reason:(.hold_reason | trunc(160)),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
             hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
+            project:((.repo // null) | if . == null then null else trunc(120) end),
             kind:((.kind // null) | if . == null then null else trunc(40) end),
             hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
@@ -1048,15 +1053,20 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,
+            project:(($work.repo // null) | if . == null then null else trunc(120) end),
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
             source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
-            | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
+            | {id:$t.id,key,
+               project:(([ $owned_in_flight[] | select(.id == $t.id) | .repo ][0] // null)
+                 | if . == null then null else trunc(120) end),
+               verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
     | ([ $queued_all[]
          | select((.unresolved_blocker_ids | length) > 0 or (.hold_reason != null and .hold_kind != null))
          | {id:(.id | trunc(120)),title:(.title | trunc(90)),
+            project:((.repo // null) | if . == null then null else trunc(120) end),
             blocked_by:((.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
@@ -1065,7 +1075,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
            | select(($work.hold_reason != null and $work.hold_kind != null) | not)
-           | {id,title:((.backlog.title // .id) | trunc(90)),blocked_by:null,
+           | {id,title:((.backlog.title // .id) | trunc(90)),
+              project:(($work.repo // null) | if . == null then null else trunc(120) end),blocked_by:null,
               blocked_by_ids:[],unresolved_blocker_ids:[],
               reason:((.current_state.detail // .current_state.state) | trunc(120)),source:"child-state"} ]) as $holds_all
     | ($backlog.present == true
@@ -1104,6 +1115,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
         queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
+          project:((.repo // null) | if . == null then null else trunc(120) end),
           blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
           blocked_by_ids:((.blocked_by_ids // []) | map(trunc(120))),
           unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),

@@ -48,6 +48,8 @@ write_projection_fixture() {  # <file>
         current_state:{state:"working",source:"run-step",detail:"tests"},pr:{url:null},paths:{report:{path:null}}},
        {id:"dofumax",kind:"secondmate",project:"/homes/dofumax",secondmate_projects:["DofuMax"],
         current_state:{state:"unknown"},pr:{url:null},paths:{report:{path:null}}},
+       {id:"portfolio",kind:"secondmate",project:"/homes/portfolio",secondmate_projects:["AlphaMate","BetaMate"],
+        current_state:{state:"unknown"},pr:{url:null},paths:{report:{path:null}}},
        {id:"mate-one",kind:"secondmate",project:"/homes/one",secondmate_projects:["Shared"],
         current_state:{state:"unknown"},pr:{url:null},paths:{report:{path:null}}},
        {id:"mate-two",kind:"secondmate",project:"/homes/two",secondmate_projects:["Shared"],
@@ -60,15 +62,24 @@ write_projection_fixture() {  # <file>
         freshness:{status:"fresh",observed_at:"2026-09-10T18:05:59Z",age_seconds:86},
         active_children:[],decisions_open:[],
         queued:[
-          {id:"rpc-a",title:"RPC A",kind:"ship",repo:"DofuMax",unresolved_blocker_ids:["dofumax-rpc-contract-v1"],blocked_reason:"blocked"},
-          {id:"rpc-b",title:"RPC B",kind:"ship",repo:"DofuMax",unresolved_blocker_ids:["dofumax-rpc-contract-v1"],blocked_reason:"blocked"}
+          {id:"rpc-a",title:"RPC A",project:"DofuMax",kind:"ship",repo:"DofuMax",unresolved_blocker_ids:["dofumax-rpc-contract-v1"],blocked_reason:"blocked"},
+          {id:"rpc-b",title:"RPC B",project:"DofuMax",kind:"ship",repo:"DofuMax",unresolved_blocker_ids:["dofumax-rpc-contract-v1"],blocked_reason:"blocked"}
         ],
         landed:[
-          {id:"scout-new",title:"New scout",kind:"scout",completion:{verb:"reported",date:"2026-09-10"}},
-          {id:"scout-old",title:"Old scout",kind:"scout",completion:{verb:"reported",date:"2026-09-09"}}
+          {id:"scout-new",title:"New scout",project:"DofuMax",kind:"scout",completion:{verb:"reported",date:"2026-09-10"}},
+          {id:"scout-old",title:"Old scout",project:"DofuMax",kind:"scout",completion:{verb:"reported",date:"2026-09-09"}}
         ],
         counts:{active_children:0,decisions_open:0,holds:0,queued:2,landed:2,endpoints:1},omitted:[],
-        parent_event:{raw:"working: delivery ready",note:"delivery ready"},contradiction:true}
+        parent_event:{raw:"working: delivery ready",note:"delivery ready"},contradiction:true},
+       {id:"portfolio",current:{state:"active_child_work"},invalidity:{kind:null,ids:[]},
+        provenance:{selected:"structured-home",trust:"complete"},
+        freshness:{status:"fresh",observed_at:"2026-09-10T18:05:59Z",age_seconds:86},
+        active_children:[{id:"alpha-secret",title:"Alpha secret",project:"AlphaMate",kind:"ship",state:"working",source:"run-step",doing:"private alpha work"}],
+        decisions_open:[{id:"alpha-call",project:"AlphaMate",key:"alpha-call",summary:"Alpha secret decision",source:"status"}],
+        holds:[],
+        queued:[{id:"alpha-queue",title:"Alpha secret queue",project:"AlphaMate",repo:"AlphaMate"},{id:"beta-queue",title:"Beta queue",project:"BetaMate",repo:"BetaMate"},{id:"legacy",title:"Unidentified legacy row"}],
+        landed:[{id:"alpha-landed",title:"Alpha secret landed",project:"AlphaMate"},{id:"beta-landed",title:"Beta landed",project:"BetaMate"}],
+        counts:{active_children:1,decisions_open:1,holds:0,queued:3,landed:2,endpoints:1},omitted:[],contradiction:false}
      ]}}
   ' > "$1"
 }
@@ -108,6 +119,17 @@ test_projection_resolution_and_authority() {
   ' >/dev/null || fail "partial DofuMax projection did not preserve structured facts: $out"
   printf '%s' "$out" | jq -e '.current.state != "working"' >/dev/null \
     || fail "contradictory parent history replaced structured current state"
+
+  out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" "$runner" --json BetaMate)
+  printf '%s' "$out" | jq -e '
+    .current.state == "no_active_work"
+      and .underway == [] and .captain_calls == []
+      and [.queued[].id] == ["beta-queue"]
+      and [.recently_landed[].id] == ["beta-landed"]
+      and .counts == {underway:0,captain_calls:0,queued:1,landed:1}
+      and (.omitted | any(.surface == "queued" and .reason == "project identity unavailable"))
+      and ([.queued[].title,.recently_landed[].title] | all(contains("Alpha secret") | not))
+  ' >/dev/null || fail "multi-project secondmate projection leaked or misattributed another project: $out"
 
   out=$(ARG_LOG="$arg_log" SNAPSHOT_FIXTURE="$fixture" "$runner" --json Shared)
   printf '%s' "$out" | jq -e '
@@ -162,10 +184,10 @@ test_projection_bounds_and_counts() {
   write_projection_fixture "$fixture"
   jq '
     .secondmate_current.records[0]
-      |= (.active_children = [range(0;7) | {id:("active-" + tostring),kind:"ship",state:"working",source:"run-step",doing:"bounded"}]
-          | .decisions_open = [range(0;7) | {id:("call-" + tostring),key:("call-" + tostring),verb:"needs-decision",summary:"choose",source:"status"}]
-          | .queued = [range(0;7) | {id:("queue-" + tostring),title:"queued",kind:"ship",repo:"DofuMax",unresolved_blocker_ids:[]}]
-          | .landed = [range(0;5) | {id:("landed-" + tostring),title:"landed",kind:"ship",completion:{verb:"done",date:"2026-09-10"}}]
+      |= (.active_children = [range(0;7) | {id:("active-" + tostring),project:"DofuMax",kind:"ship",state:"working",source:"run-step",doing:"bounded"}]
+          | .decisions_open = [range(0;7) | {id:("call-" + tostring),project:"DofuMax",key:("call-" + tostring),verb:"needs-decision",summary:"choose",source:"status"}]
+          | .queued = [range(0;7) | {id:("queue-" + tostring),title:"queued",project:"DofuMax",kind:"ship",repo:"DofuMax",unresolved_blocker_ids:[]}]
+          | .landed = [range(0;5) | {id:("landed-" + tostring),title:"landed",project:"DofuMax",kind:"ship",completion:{verb:"done",date:"2026-09-10"}}]
           | .counts = {active_children:7,decisions_open:7,holds:0,queued:7,landed:5,endpoints:7}
           | .omitted = [range(0;12) | {surface:("source-" + tostring),count:1}])
   ' "$fixture" > "$bounded"

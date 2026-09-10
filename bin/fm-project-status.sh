@@ -8,9 +8,9 @@
 # Project lookup is exact, ASCII case-insensitive, and unique across the main
 # project registry, structured backlog repo fields, and secondmate_projects.
 # Parent status events and terminal or conversation text are never current-state
-# authority. A secondmate-owned project uses only its secondmate_current record;
-# partial structured records retain independently trustworthy bounded surfaces
-# while current state remains explicitly unknown.
+# authority. A secondmate-owned project uses only its secondmate_current record
+# and filters every collection by project identity. Unidentifiable rows are
+# omitted and disclosed; partial or truncated current surfaces remain unknown.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -97,6 +97,7 @@ OUTPUT_JSON="$TMP_STATUS/status.json"
 jq -n --arg query "$QUERY" --slurpfile snapshot "$SOURCE_JSON" '
   ($snapshot[0]) as $s
   | def lower: ascii_downcase;
+  def belongs($project): (.project | type) == "string" and (.project | lower) == ($project | lower);
   def text($n):
       if . == null then null
       else (tostring | gsub("[[:space:]]+"; " ") | if length > $n then .[:$n] + "…" else . end)
@@ -183,24 +184,48 @@ jq -n --arg query "$QUERY" --slurpfile snapshot "$SOURCE_JSON" '
            provenance:{source:"fm-fleet-snapshot.v1/secondmate_current",trust:"unavailable",freshness:($record.freshness.status // "unavailable"),observed_at:($record.freshness.observed_at // null),age_seconds:($record.freshness.age_seconds // null)},
            warnings:["the owning secondmate has no authoritative structured-home record"],omitted:[]}
         else
-          ([if $record.provenance.trust == "partial-structured" then "current state is incomplete; independently reliable structured fields were retained" else empty end,
-            if $record.contradiction == true then "historical parent evidence contradicts the structured home and was not used as current state" else empty end,
-            if $record.freshness.status == "cached" then "the structured home was read from an existing cache" else empty end]) as $warnings
-          | ([if ($record.counts.active_children // 0) > 5 then {surface:"underway",count:(($record.counts.active_children // 0) - 5)} else empty end,
-                if ($record.counts.decisions_open // 0) > 5 then {surface:"captain_calls",count:(($record.counts.decisions_open // 0) - 5)} else empty end,
-                if ($record.counts.queued // 0) > 5 then {surface:"queued",count:(($record.counts.queued // 0) - 5)} else empty end,
-                if ($record.counts.landed // 0) > 3 then {surface:"recently_landed",count:(($record.counts.landed // 0) - 3)} else empty end]) as $omitted
+          ([ $record.active_children[]? | select(belongs($project)) ]) as $active
+          | ([ $record.decisions_open[]? | select(belongs($project)) ]) as $decisions
+          | ([ $record.holds[]? | select(belongs($project)) ]) as $holds
+          | ([ $record.queued[]? | select(belongs($project)) ]) as $queued
+          | ([ $record.landed[]? | select(belongs($project)) ]) as $landed
+          | ([{surface:"underway",rows:[$record.active_children[]?]},
+              {surface:"captain_calls",rows:[$record.decisions_open[]?]},
+              {surface:"current_holds",rows:[$record.holds[]?]},
+              {surface:"queued",rows:[$record.queued[]?]},
+              {surface:"recently_landed",rows:[$record.landed[]?]}]
+             | map({surface,count:([.rows[] | select((.project | type) != "string" or .project == "")] | length)})
+             | map(select(.count > 0) | . + {reason:"project identity unavailable"})) as $unidentified
+          | ([ $record.omitted[]?
+               | select(.surface == "active_children" or .surface == "decisions_open" or
+                        .surface == "holds" or .surface == "queued" or .surface == "landed") ]) as $source_omitted
+          | (($source_omitted | any(.surface == "active_children" or .surface == "decisions_open" or .surface == "holds"))) as $current_incomplete
+          | ([if $record.provenance.trust == "partial-structured" then "current state is incomplete; independently reliable structured fields were retained" else empty end,
+              if $current_incomplete then "project current state may be incomplete because the structured home was truncated" else empty end,
+              if ($unidentified | length) > 0 then "structured rows without project identity were omitted" else empty end,
+              if $record.contradiction == true then "historical parent evidence contradicts the structured home and was not used as current state" else empty end,
+              if $record.freshness.status == "cached" then "the structured home was read from an existing cache" else empty end]) as $warnings
+          | ($unidentified + ($source_omitted | map({surface:(if .surface == "active_children" then "underway" elif .surface == "decisions_open" then "captain_calls" elif .surface == "landed" then "recently_landed" else .surface end),count,reason:"structured home truncation"}))
+              + [if ($active | length) > 5 then {surface:"underway",count:(($active | length) - 5)} else empty end,
+                 if ($decisions | length) > 5 then {surface:"captain_calls",count:(($decisions | length) - 5)} else empty end,
+                 if ($queued | length) > 5 then {surface:"queued",count:(($queued | length) - 5)} else empty end,
+                 if ($landed | length) > 3 then {surface:"recently_landed",count:(($landed | length) - 3)} else empty end]) as $omitted
+          | (($record.provenance.trust == "partial-structured") or $current_incomplete or
+             any($unidentified[]; .surface == "underway" or .surface == "captain_calls" or .surface == "current_holds")) as $unknown_current
           | {schema:"fm-project-status.v1",generated:$s.generated,query:$query,
              match:{status:"exact",project:$project,candidates:[]},owner:{kind:"secondmate",id:$owner_id},
-             current:{state:($record.current.state // "unknown"),
-               reason_code:(if ($record.current.state // "unknown") == "unknown" then ($record.invalidity.kind // "structured_home_unknown") else null end),
-               reason_ids:($record.invalidity.ids // [])[:10]},
-             underway:([$record.active_children[]? | active_row][:5]),
-             captain_calls:([$record.decisions_open[]? | decision_row][:5]),
-             queued:([$record.queued[]? | queued_row][:5]),
-             recently_landed:([$record.landed[]? | landed_row][:3]),
-             counts:{underway:($record.counts.active_children // 0),captain_calls:($record.counts.decisions_open // 0),
-               queued:($record.counts.queued // 0),landed:($record.counts.landed // 0)},
+             current:(if $unknown_current then
+                 {state:"unknown",reason_code:(if $current_incomplete or any($unidentified[]; .surface == "underway" or .surface == "captain_calls" or .surface == "current_holds") then "project_projection_incomplete" else ($record.invalidity.kind // "structured_home_unknown") end),reason_ids:($record.invalidity.ids // [])[:10]}
+               elif ($decisions | length) > 0 then {state:"captain_decision",reason_code:null,reason_ids:[]}
+               elif ($active | length) > 0 then {state:"active_child_work",reason_code:null,reason_ids:[]}
+               elif ($holds | length) > 0 then {state:"externally_held",reason_code:null,reason_ids:[]}
+               else {state:"no_active_work",reason_code:null,reason_ids:[]} end),
+             underway:([$active[] | active_row][:5]),
+             captain_calls:([$decisions[] | decision_row][:5]),
+             queued:([$queued[] | queued_row][:5]),
+             recently_landed:([$landed[] | landed_row][:3]),
+             counts:{underway:($active | length),captain_calls:($decisions | length),
+               queued:($queued | length),landed:($landed | length)},
              provenance:{source:"fm-fleet-snapshot.v1/secondmate_current",trust:$record.provenance.trust,
                freshness:$record.freshness.status,observed_at:$record.freshness.observed_at,age_seconds:($record.freshness.age_seconds // null)}}
             | finish($warnings; $omitted)

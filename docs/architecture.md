@@ -99,7 +99,8 @@ The script header owns the exact JSON schema.
 It resolves an exact ASCII case-insensitive project name across the snapshot's main registry names, structured backlog repo fields, and secondmate project declarations, and it refuses unknown, fuzzy, or multiply owned matches.
 The projection caps active work, captain calls, queued work, recent deliveries, warnings and omissions, source bytes, final JSON bytes, and subprocess duration; its header owns the exact bounds and output contract.
 For a secondmate-owned project, the selected `secondmate_current` structured-home record is the only current-state authority.
-A partial structured record keeps independently reliable collections and counts while reporting current state as unknown, and neither parent events nor terminal or conversation text can replace it.
+The backward-compatible home-summary schema carries a nullable project identity on active, decision, hold, queued, and landed rows; project status filters every collection to the exact matched project and discloses rather than attributes rows from older producers whose identity is unavailable.
+A partial structured record keeps independently reliable project-filtered collections while reporting current state as unknown, and neither parent events nor terminal or conversation text can replace it.
 [`verification/project-status.md`](verification/project-status.md) records the current behavioral verification.
 
 On a Pi primary, supervision is default-on: the watcher extension can hand eligible task-local rows from an ordinary actionable wake, plus selected fleet-wide heartbeat reviews, to a persistent in-process supervision conversation while main-only rows remain on the captain-facing path.
