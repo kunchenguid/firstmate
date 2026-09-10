@@ -39,9 +39,10 @@
 #   model, and effort may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
-#   or herdr), refuses unless the endpoint's shell is sitting in the recorded
-#   worktree, and clears the previous harness's per-task wiring before arming
-#   the new incarnation.
+#   or herdr), and clears the previous harness's per-task wiring before arming
+#   the new incarnation. The replacement still never starts outside the copy
+#   holding the work: a shell that has drifted out of the recorded worktree is
+#   told once to return, and only a shell that will not go refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -3033,15 +3034,33 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # than wherever the pane happened to drift.
   relaunch_wt_real=$(real_path_or_raw "$WT")
   relaunch_seen=
-  for _ in $(seq 1 10); do
-    relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+  relaunch_rehomed=0
+  while :; do
+    for _ in $(seq 1 10); do
+      relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+      [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
+      sleep 0.5
+    done
     [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
-    sleep 0.5
+    # Drift is recoverable, not disqualifying. An agent's own exit leaves an
+    # ordinary shell behind and that shell wanders - the harness's exit, a `cd`
+    # the previous worker ran, or a login shell that re-homed on restart all
+    # move it out of the worktree while the work itself sits untouched on disk.
+    # Refusing outright left such a task with no sanctioned way back, so the
+    # shell is told once to return and only a shell that will not go refuses.
+    if [ "$relaunch_rehomed" -eq 1 ]; then
+      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and did not return to its recorded worktree '$WT' when told to; refusing to relaunch an agent outside the copy holding its work" >&2
+      exit 1
+    fi
+    relaunch_rehomed=1
+    # Single-quote the path and escape any embedded quote, so a worktree path
+    # with a space or a quote in it cannot become two words in the pane's shell.
+    relaunch_cd_path=${WT//\'/\'\\\'\'}
+    spawn_send_text_line "$WT_TARGET" "cd -- '$relaunch_cd_path'" || {
+      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and could not be told to return to its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
+      exit 1
+    }
   done
-  if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-    echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
-    exit 1
-  fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
