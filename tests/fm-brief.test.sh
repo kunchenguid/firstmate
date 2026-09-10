@@ -249,6 +249,10 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
       "$mode existing-PR brief did not update the remote-tracking head from origin"
     assert_grep "git clone --quiet --no-checkout --filter=blob:none" "$brief" \
       "$mode existing-PR brief did not isolate forge head resolution"
+    assert_grep "trap 'rm -rf -- \"\$PR_PROBE_ROOT\"' EXIT INT TERM HUP" "$brief" \
+      "$mode existing-PR brief did not clean an interrupted probe"
+    assert_grep "\${TMPDIR:-/tmp}/fm-existing-pr-probe.XXXXXX" "$brief" \
+      "$mode existing-PR brief placed its disposable probe in the project worktree"
     assert_grep "git checkout \"\$PR_BRANCH\"" "$brief" \
       "$mode existing-PR brief did not use Git's linked-worktree-safe checkout"
     assert_no_grep "--ignore-other-worktrees" "$brief" \
@@ -502,6 +506,9 @@ Existing PR base branch: main
 ## Firstmate spec
 Verify that copied metadata cannot mask the real delivery contract.
 
+# Setup
+Query --base '{EXISTING_PR_BASE_BRANCH}'.
+
 # Definition of done
 Delivery contract: mode=no-mistakes
 Existing PR: https://github.com/o/r/pull/1
@@ -513,6 +520,9 @@ EOF
     || fail "ordinary no-mistakes prose mentioning an existing PR was treated as delivery metadata"
   fm_brief_existing_pr_base_invalid "$existing" \
     || fail "existing-PR delivery metadata did not reject its unfilled base branch"
+  sed -i.bak 's/^Existing PR base branch: {EXISTING_PR_BASE_BRANCH}$/Existing PR base branch: release\/2.x/' "$existing"
+  fm_brief_existing_pr_base_invalid "$existing" \
+    || fail "existing-PR validation ignored an operational base placeholder"
   sed -i.bak 's/{EXISTING_PR_BASE_BRANCH}/release\/2.x/' "$existing"
   ! fm_brief_existing_pr_base_invalid "$existing" \
     || fail "existing-PR delivery metadata rejected a valid filled base branch"

@@ -63,9 +63,14 @@ fm_brief_existing_pr_branch_placeholder_present() {  # <file>
 
 # Return 0 when an existing-PR no-mistakes brief lacks a valid base branch.
 fm_brief_existing_pr_base_invalid() {  # <file>
-  local file=$1 dod record base tab
+  local file=$1 setup rules dod record base tab
   [ -f "$file" ] || return 1
+  setup=$(fm_brief_heading_body "$file" "# Setup")
+  rules=$(fm_brief_heading_body "$file" "# Rules")
   dod=$(fm_brief_heading_body "$file" "# Definition of done")
+  case "$setup$rules$dod" in
+    *'{EXISTING_PR_BASE_BRANCH}'*) return 0 ;;
+  esac
   tab=$(printf '\t')
   record=$(printf '%s\n' "$dod" | awk '
     $0 == "Delivery contract: mode=no-mistakes" {
@@ -83,6 +88,7 @@ fm_brief_existing_pr_base_invalid() {  # <file>
   base=${record#*"$tab"}
   [ -n "$base" ] && [ "$base" != '{EXISTING_PR_BASE_BRANCH}' ] || return 0
   git check-ref-format "refs/heads/$base" >/dev/null 2>&1 || return 0
+  git check-ref-format --branch "$base" >/dev/null 2>&1 || return 0
   return 1
 }
 
