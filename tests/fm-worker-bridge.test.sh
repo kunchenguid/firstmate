@@ -13,6 +13,8 @@ with tempfile.TemporaryDirectory(prefix='fm-bridge-test-') as temp:
         binary.write_text('''#!/usr/bin/env python3
 import json, os, signal, subprocess, sys, time
 with open(os.environ['BRIDGE_CALLS'], 'a') as log: log.write(json.dumps(sys.argv) + '\\n')
+if os.environ.get('BRIDGE_HERDR_FAIL') and sys.argv[0].endswith('herdr'):
+    print('herdr refused the publication', file=sys.stderr); sys.exit(3)
 if os.environ.get('BRIDGE_CHILD_PID'):
     with open(os.environ['BRIDGE_CHILD_PID'], 'w') as marker: marker.write(str(os.getpid()))
 if os.environ.get('BRIDGE_DESCENDANT'):
@@ -148,5 +150,43 @@ print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','res
         assert process.returncode == 0, error
         status = subprocess.run(['ps','-p',str(descendant_pid),'-o','stat='],capture_output=True,text=True).stdout.strip()
         assert not status or status.startswith('Z'), 'live descendant survived cancellation: '+status
+        if harness == 'antigravity':
+            (state/'probe.turn-ended').unlink()
+            late = state/'late.pid'
+            process = subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=dict(env,BRIDGE_DESCENDANT=str(late)))
+            for _ in range(200):
+                if late.exists(): break
+                time.sleep(.05)
+            else: raise AssertionError('late-interrupt descendant never started')
+            late_pid = int(late.read_text())
+            time.sleep(.3)
+            process.send_signal(signal.SIGINT)
+            output,error = process.communicate('/exit\n',timeout=25)
+            assert process.returncode == 0, error
+            assert 'BRIDGE_OK' in output, output
+            assert 'cancelled' not in output, output
+            assert 'state=idle' in (state/'probe.busy-state').read_text()
+            assert (state/'probe.turn-ended').exists()
+            status = subprocess.run(['ps','-p',str(late_pid),'-o','stat='],capture_output=True,text=True).stdout.strip()
+            assert not status or status.startswith('Z'), 'live descendant survived a completed turn: '+status
+            orphan = state/'orphan.pid'
+            process = subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=dict(env,BRIDGE_DESCENDANT=str(orphan)))
+            for _ in range(200):
+                if orphan.exists(): break
+                time.sleep(.05)
+            else: raise AssertionError('interrupted-drain descendant never started')
+            orphan_pid = int(orphan.read_text())
+            time.sleep(.3)
+            process.terminate()
+            process.communicate(timeout=25)
+            status = subprocess.run(['ps','-p',str(orphan_pid),'-o','stat='],capture_output=True,text=True).stdout.strip()
+            assert not status or status.startswith('Z'), 'interrupted drain left a live descendant: '+status
+            (state/'probe.turn-ended').unlink()
+            unreported = subprocess.run(command + ['--backend','herdr'],input='/exit\n',capture_output=True,text=True,env=dict(herdr_env,BRIDGE_HERDR_FAIL='1'),timeout=20)
+            assert unreported.returncode == 0, unreported.stderr
+            assert 'BRIDGE_OK' in unreported.stdout, unreported.stdout
+            assert 'Herdr lifecycle publication failed' in unreported.stdout, unreported.stdout
+            assert 'state=idle' in (state/'probe.busy-state').read_text()
+            assert (state/'probe.turn-ended').exists()
     print('PASS: both bridges preserve session identity, turn state, failures, cancellation and exit')
 PY

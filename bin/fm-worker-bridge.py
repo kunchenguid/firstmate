@@ -11,6 +11,7 @@ secondmate supervision is provided. Python 3 standard library only.
 """
 import argparse
 import atexit
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -55,24 +56,29 @@ def main():
     if args.backend == 'herdr' and not herdr_pane:
         raise RuntimeError('Herdr bridge has no inherited pane identity')
     herdr_session = env.get('HERDR_SESSION')
+    if herdr_pane and not herdr_session:
+        raise RuntimeError('Herdr bridge requires explicit HERDR_SESSION')
     herdr_source = 'firstmate:bridge:' + args.gen
     native_agent = 'agy' if args.harness == 'antigravity' else 'hermes'
 
     def herdr_report(value=None):
         if not herdr_pane:
             return
-        if not herdr_session:
-            raise RuntimeError('Herdr bridge requires explicit HERDR_SESSION')
         command = [env.get('HERDR_BIN_PATH') or 'herdr', 'pane',
                    'report-agent' if value is not None else 'release-agent',
                    herdr_pane, '--source', herdr_source, '--agent', native_agent,
                    '--seq', str(time.time_ns()), '--session', herdr_session]
         if value is not None:
             command += ['--state', 'working' if value == 'busy' else value]
-        result = subprocess.run(command, stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE, text=True, timeout=3)
-        if result.returncode and value is not None:
-            raise RuntimeError('Herdr lifecycle publication failed: ' + result.stderr)
+        try:
+            result = subprocess.run(command, stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, text=True, timeout=3)
+        except (OSError, subprocess.SubprocessError) as error:
+            failure = str(error)
+        else:
+            failure = result.stderr if result.returncode else ''
+        if failure and value is not None:
+            print('Herdr lifecycle publication failed: ' + failure, flush=True)
 
     atexit.register(herdr_report)
 
@@ -87,28 +93,20 @@ def main():
     def terminate(process):
         if process is None or getattr(process, "_fm_drained", False):
             return
-        process._fm_drained = True
         # The session leader may already have exited while a tool descendant
         # still owns the group. Never use leader.poll() as group-liveness proof.
+        deadline = time.monotonic() + 5
         try:
             os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            process.wait()
-            return
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            process.poll()
-            try:
+            while time.monotonic() < deadline:
+                process.poll()
                 os.killpg(process.pid, 0)
-            except ProcessLookupError:
-                process.wait()
-                return
-            time.sleep(.05)
-        try:
+                time.sleep(.05)
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         process.wait()
+        process._fm_drained = True
 
     spawning = False
     pending_signal = None
@@ -121,6 +119,14 @@ def main():
         if signum == signal.SIGINT:
             raise KeyboardInterrupt
         raise SystemExit(128 + signum)
+
+    @contextlib.contextmanager
+    def uninterrupted():
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            yield
+        finally:
+            signal.signal(signal.SIGINT, terminated)
 
     def antigravity_result(output):
         nonlocal conversation
@@ -178,37 +184,37 @@ def main():
                 pending_signal = None
                 terminated(interrupted, None)
             process.communicate(payload)
-            terminate(process)
-            output_file.seek(0)
-            error_file.seek(0)
-            raw_output = output_file.read(PROTOCOL_LIMIT + 1)
-            raw_errors = error_file.read(PROTOCOL_LIMIT + 1)
-            overflow = len(raw_output) > PROTOCOL_LIMIT or len(raw_errors) > PROTOCOL_LIMIT
-            output = raw_output[:PROTOCOL_LIMIT].decode(errors='replace')
-            errors = raw_errors[:PROTOCOL_LIMIT].decode(errors='replace')
-            if errors:
-                print(errors, flush=True)
-            if overflow:
-                print('CLI output exceeded the 1 MiB protocol limit', flush=True)
-            success = process.returncode == 0 and not overflow
-            if args.harness == 'hermes':
-                success = success and bool(re.search(r'^session_id: \S+$', errors, re.M)) and bool(output.strip())
-            if args.harness == 'antigravity' and success:
-                success, response = antigravity_result(output)
-                print(response, flush=True)
-                success = success and ANTIGRAVITY_TRUNCATION_NOTE not in errors
-            else:
-                print(output, flush=True)
-            if not success:
-                with (state / (args.id + '.status')).open('a') as status:
-                    status.write('blocked: ' + args.harness + ' worker turn failed; inspect endpoint output\n')
-                print('Firstmate worker turn failed', flush=True)
-            event('idle', 'turn-end' if success else 'turn-failed')
-            # Apply rejects stale generations before we emit the completion wake.
-            (state / (args.id + '.turn-ended')).touch()
+            with uninterrupted():
+                terminate(process)
+                output_file.seek(0)
+                error_file.seek(0)
+                raw_output = output_file.read(PROTOCOL_LIMIT + 1)
+                raw_errors = error_file.read(PROTOCOL_LIMIT + 1)
+                overflow = len(raw_output) > PROTOCOL_LIMIT or len(raw_errors) > PROTOCOL_LIMIT
+                output = raw_output[:PROTOCOL_LIMIT].decode(errors='replace')
+                errors = raw_errors[:PROTOCOL_LIMIT].decode(errors='replace')
+                if errors:
+                    print(errors, flush=True)
+                if overflow:
+                    print('CLI output exceeded the 1 MiB protocol limit', flush=True)
+                success = process.returncode == 0 and not overflow
+                if args.harness == 'hermes':
+                    success = success and bool(re.search(r'^session_id: \S+$', errors, re.M)) and bool(output.strip())
+                if args.harness == 'antigravity' and success:
+                    success, response = antigravity_result(output)
+                    print(response, flush=True)
+                    success = success and ANTIGRAVITY_TRUNCATION_NOTE not in errors
+                else:
+                    print(output, flush=True)
+                if not success:
+                    with (state / (args.id + '.status')).open('a') as status:
+                        status.write('blocked: ' + args.harness + ' worker turn failed; inspect endpoint output\n')
+                    print('Firstmate worker turn failed', flush=True)
+                event('idle', 'turn-end' if success else 'turn-failed')
+                # Apply rejects stale generations before we emit the completion wake.
+                (state / (args.id + '.turn-ended')).touch()
         except KeyboardInterrupt:
-            signal.signal(signal.SIGINT, signal.SIG_IGN)
-            try:
+            with uninterrupted():
                 if process is not None and process.poll() is None:
                     try:
                         os.killpg(process.pid, signal.SIGINT)
@@ -226,8 +232,6 @@ def main():
                 event('idle', 'turn-cancelled')
                 (state / (args.id + '.turn-ended')).touch()
                 print('\nFirstmate worker cancelled', flush=True)
-            finally:
-                signal.signal(signal.SIGINT, terminated)
         except (OSError, ValueError) as error:
             print('Firstmate worker error: ' + str(error), flush=True)
             event('unknown', 'turn-error')
