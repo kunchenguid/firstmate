@@ -207,6 +207,8 @@ Firstmate's skills live in two separate places with different audiences:
   Each one is a self-contained skill with no dependency on firstmate's paths, tools, or vocabulary.
   Today that is `skills/stow`, a generic session-knowledge-sweep skill that routes findings by explicit instruction first, then existing local conventions, then a private `.stow-notes.md` fallback, and curates tiered entries through decay, local archival, and user-approved on-demand offload proposals.
   It intentionally shares no code with the firstmate-internal `.agents/skills/stow` it is named after, so the two can evolve independently.
+  Also `skills/revocall-e2e-provision` and `skills/revocall-e2e-teardown`, a pair that brings up a task-scoped local docker stack for one named end-to-end test scenario across the RevoCall-family repos and then removes exactly what it started.
+  Their firstmate-coupled half is `bin/fm-e2e-stack.sh`, which owns the durable record and the ownership gates, and the pre-teardown release in `bin/fm-teardown.sh`; the skills themselves run standalone against `--task` when no firstmate home is present.
 
 ## Documentation
 

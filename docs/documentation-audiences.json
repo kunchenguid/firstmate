@@ -441,6 +441,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/local-e2e-infra.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/muse.md",
       "audience": "maintainer-verification"
     },
@@ -494,6 +498,26 @@
     },
     {
       "path": "skills/stow/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/revocall-e2e-provision/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/revocall-e2e-provision/references/profiles.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/revocall-e2e-provision/scenarios/ai-handler/README.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/revocall-e2e-provision/scenarios/revcaf/README.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/revocall-e2e-teardown/SKILL.md",
       "audience": "public-product"
     }
   ]

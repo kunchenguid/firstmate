@@ -624,6 +624,7 @@ tests/fm-cursor-primary-live-e2e.test.sh 21
 tests/fm-cursor-primary.test.sh 54947
 tests/fm-daemon.test.sh 26870
 tests/fm-documentation-audiences.test.sh 732
+tests/fm-e2e-stack.test.sh 2970
 tests/fm-extension-binding.test.sh 7398
 tests/fm-fleet-snapshot-view.test.sh 8547
 tests/fm-fleet-sync.test.sh 37749
@@ -1417,6 +1418,13 @@ families_for_changed_path() {
       printf '%s\n' live-harness-optin
       ;;
     .agents/skills/*/SKILL.md)
+      printf '%s\n' pure-contract-unit
+      ;;
+    skills/*)
+      # The public, installer-facing skill tier. Its behavior lives in the
+      # scripts each skill points at, but every tracked *.md under it must be
+      # classified in the audience inventory, and the repo-wide check that
+      # enforces that runs inside fm-documentation-audiences.test.sh.
       printf '%s\n' pure-contract-unit
       ;;
     .github/workflows/ci.yml|.no-mistakes.yaml)

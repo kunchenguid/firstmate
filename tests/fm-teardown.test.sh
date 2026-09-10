@@ -3666,6 +3666,106 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+# --- Fix 4: local end-to-end test infrastructure -------------------------------
+# A hermetic `docker` for the Fix 4 cases. It reports an empty inventory, so
+# the ownership gates pass and the post-removal residue check is satisfied,
+# and it logs every compose invocation so a case can prove the removal ran.
+add_e2e_docker() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/docker" <<EOF
+#!/usr/bin/env bash
+case "\${1-}" in
+  compose) printf '%s\n' "\$*" >> "$case_dir/compose.log" ;;
+esac
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/docker"
+}
+
+# Record one provisioned stack for task-x1 in the case's own state directory.
+record_e2e_stack() {  # <case-dir> [project]
+  local case_dir=$1 project=${2:-fm-task-x1-revcaf}
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-e2e-stack.sh" record task-x1 \
+      --project "$project" --stack revcaf-db --repo Conversational-AI-Framework \
+      --scenario org-scope-write-path --worktree "$case_dir/wt" \
+      --compose-file "$case_dir/dc.yaml" --service db >/dev/null
+}
+
+test_recorded_e2e_stack_is_released_before_the_worktree_return() {
+  local case_dir rc
+  case_dir=$(make_case e2e-stack-released)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  add_e2e_docker "$case_dir"
+  record_e2e_stack "$case_dir"
+
+  # Snapshot, at the moment the destructive worktree return runs, whether the
+  # stack was already released. Causal proof of ordering from observed state,
+  # not a source-text correlation. Fix 4 must precede every destructive step
+  # because the record's fallback copy lives under the tasktmp this removes.
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$case_dir/state/task-x1.e2e-stack" ]; then
+  echo "e2e-release-already-happened" >> "$case_dir/order.log"
+fi
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "e2e-stack-released: teardown should succeed"
+  assert_grep 'down -v --remove-orphans' "$case_dir/compose.log" \
+    "e2e-stack-released: teardown never released the recorded stack"
+  assert_absent "$case_dir/state/task-x1.e2e-stack" \
+    "e2e-stack-released: the stack record survived a successful release"
+  assert_present "$case_dir/order.log" \
+    "e2e-stack-released: the destructive worktree return was never invoked"
+  assert_grep "e2e-release-already-happened" "$case_dir/order.log" \
+    "e2e-stack-released: the stack was still recorded when the worktree return ran"
+  pass "a recorded local end-to-end stack is released before the destructive worktree return"
+}
+
+test_e2e_stack_refusal_never_blocks_teardown() {
+  local case_dir rc
+  case_dir=$(make_case e2e-stack-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  add_e2e_docker "$case_dir"
+  record_e2e_stack "$case_dir"
+  # A second task record claiming the same project makes the ownership gate
+  # refuse. Cleanup must then leave the stack alone and still finish teardown:
+  # the stack is reported by the next session start instead.
+  cp "$case_dir/state/task-x1.e2e-stack" "$case_dir/state/other-task.e2e-stack"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "e2e-stack-refusal: a refused stack release must not block teardown"
+  assert_absent "$case_dir/compose.log" \
+    "e2e-stack-refusal: a refused release still invoked compose"
+  assert_present "$case_dir/state/task-x1.e2e-stack" \
+    "e2e-stack-refusal: a refused release removed its own record"
+  assert_grep 'was not released' "$case_dir/stderr" \
+    "e2e-stack-refusal: teardown did not report the stack it left behind"
+  pass "a refused end-to-end stack release is reported and never blocks teardown"
+}
+
+test_teardown_without_an_e2e_record_never_calls_docker() {
+  local case_dir rc
+  case_dir=$(make_case e2e-stack-absent)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  add_e2e_docker "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "e2e-stack-absent: teardown should succeed"
+  assert_absent "$case_dir/compose.log" \
+    "e2e-stack-absent: teardown invoked compose for a task that provisioned nothing"
+  pass "a task that provisioned no local infrastructure reaches no container tooling"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -3750,3 +3850,6 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_recorded_e2e_stack_is_released_before_the_worktree_return
+test_e2e_stack_refusal_never_blocks_teardown
+test_teardown_without_an_e2e_record_never_calls_docker

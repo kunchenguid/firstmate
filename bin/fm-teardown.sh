@@ -220,6 +220,21 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+#   Fix 4 - release local end-to-end test infrastructure. A crewmate that
+#     provisions a docker stack for a local end-to-end test and then dies
+#     leaves containers, volumes and a network running with no live record of
+#     who owns them (observed 2026-09-10: 15 containers removed by hand, some
+#     5+ days old, most carrying no compose project label at all, plus ~2.0 GB
+#     of dangling volumes and a 55-day-old empty network). Recovering that
+#     ownership by hand costs a forensic session. bin/fm-e2e-stack.sh owns the
+#     record format, the four ownership gates, and the removal; this teardown
+#     only invokes its `down`, and only for THIS task's own record. It runs
+#     here rather than later because both the record it reads
+#     (state/<id>.e2e-stack) and the standalone fallback copy a worker may have
+#     written under the per-task tasktmp are removed further down. Best effort: a
+#     stopped docker daemon, an absent record, or a gate that cannot be proved
+#     leaves the stack in place and says so, and never blocks this teardown -
+#     the stack is reported by the next session start instead.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -3192,6 +3207,14 @@ fi
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+
+# Fix 4 (see script header): release this task's recorded local end-to-end test
+# infrastructure while its record and tasktmp still exist. Best effort - a
+# refusal or a stopped docker daemon never blocks this teardown.
+if [ "$KIND" != secondmate ] && [ -f "$STATE/$ID.e2e-stack" ]; then
+  "$SCRIPT_DIR/fm-e2e-stack.sh" down "$ID" >&2 \
+    || echo "NOTE: local end-to-end test infrastructure for $ID was not released; run bin/fm-e2e-stack.sh gate $ID to see why." >&2
+fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
