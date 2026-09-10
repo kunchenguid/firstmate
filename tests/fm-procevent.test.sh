@@ -1277,8 +1277,20 @@ sr4_out=$(pe "$HSR4" reconcile)
 sleep 0.5
 [ "$(wc -l < "$SR4_LOG" | tr -d ' ')" = 1 ] \
   || fail "reconcile started a replacement beside a reused pid's live group: $sr4_out"
+# Ownership cannot move here by design, so a replacement could only die on the
+# claim it cannot take - once per reconcile cycle, forever.
+assert_contains "$sr4_out" "started=0" \
+  "reconcile reported a start into a claim nothing can take: $sr4_out"
+assert_contains "$sr4_out" "uncertain=1" \
+  "reconcile did not report the claim it could not settle: $sr4_out"
 [ "$(sed -n '2p' "$sr4_claim")" = "$sr4_leader" ] \
   || fail "reconcile replaced the reused-pid generation's claim"
+# Nothing can take this source, so reporting it as unowned reads like an idle
+# source waiting to be started - the reassuring answer this surface gave while a
+# review board collected nothing.
+sr4_owner=$(pe "$HSR4" list | awk '$1 == "reused-group-src" { print $3 }')
+[ "$sr4_owner" = orphaned ] \
+  || fail "a source no caller can claim is listed as '$sr4_owner'"
 set +e
 sr4_retire=$(pe "$HSR4" retire reused-group-src 2>&1)
 sr4_rc=$?
@@ -1298,6 +1310,85 @@ pe "$HSR4" retire reused-group-src >/dev/null \
 kill -0 -"$sr4_leader" 2>/dev/null \
   && fail "retirement left the restored reused-group fixture running"
 pass "a reused pid never makes its surviving process group reclaimable"
+
+# --- reconcile reports only launches it actually confirmed -------------------
+# The reported incident. A review board the captain had answered sat collecting
+# nothing while `reconcile` reported a start on every run: `detach_runner` is
+# fire-and-forget with the child's stderr discarded, so a runner that died
+# before it could claim was counted exactly like one that is listening. A
+# surface that presents as armed while being a dead drop is worse than one that
+# visibly fails, because the answers look recorded.
+#
+# The damaged registration below makes the runner die BEFORE it claims, which
+# is what keeps this deterministic: a runner that claims and then dies would
+# race the confirmation either way, and the next reconcile cycle is what covers
+# that case.
+HUF="$TMP_ROOT/huf"; new_home "$HUF"
+UF_TRIGGER="$TMP_ROOT/unstartable-trigger"
+pe_register "$HUF" lavish unstartable-src -- "$BLOCKER" "$UF_TRIGGER" "unstartable" >/dev/null
+UF_SOURCE="$HUF/state/procevent/unstartable-src.source"
+if ! awk '/^argv:$/ { print; exit } { print }' "$UF_SOURCE" > "$UF_SOURCE.tmp"; then
+  fail "could not damage the unstartable registration"
+fi
+mv "$UF_SOURCE.tmp" "$UF_SOURCE" || fail "could not damage the unstartable registration"
+chmod 0600 "$UF_SOURCE"
+uf_rc=0
+uf_out=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=2 pe "$HUF" reconcile) || uf_rc=$?
+assert_contains "$uf_out" "started=0" \
+  "reconcile counted a runner that never started as a start: $uf_out"
+assert_contains "$uf_out" "failed=1" \
+  "reconcile did not report the launch it could not confirm: $uf_out"
+[ "$uf_rc" -ne 0 ] || fail "reconcile reported success while a source could not start: $uf_out"
+uf_owner=$(pe "$HUF" list | awk '$1 == "unstartable-src" { print $3 }')
+[ "$uf_owner" = none ] || fail "the unstartable source reports an owner: $uf_owner"
+pe "$HUF" retire unstartable-src >/dev/null 2>&1 || true
+pass "reconcile reports a launch it could not confirm instead of counting it as a start"
+
+# --- a dead generation's untidyable leftovers never wedge ownership ----------
+# The same wedge as the state-root case above, reached through the sibling
+# cleanups in the stale-claim branch rather than the capture reservation. Every
+# one of them tidies leftovers keyed by the DEAD generation's claim token, so
+# none can collide with the replacement, yet a failure in any of them used to
+# refuse the claim outright - permanently, because the condition never clears on
+# its own. Here the recorded registry directory no longer resolves to a
+# directory at all, which is what a claim recorded before its home was replaced
+# looks like.
+HUW="$TMP_ROOT/huw"; new_home "$HUW"
+UW_TRIGGER="$TMP_ROOT/untidyable-trigger"
+UW_LOG="$TMP_ROOT/untidyable-executions"
+pe_register "$HUW" lavish untidyable-src -- "$RACE_BLOCKER" "$UW_LOG" "$UW_TRIGGER" >/dev/null
+UW_REG_FILE="$TMP_ROOT/untidyable-recorded-registry"
+: > "$UW_REG_FILE"
+uw_identity=$(bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_identity "$2"' _ \
+  "$ROOT" "$HUW/state/procevent/untidyable-src.source") \
+  || fail "could not read the untidyable fixture registration identity"
+UW_CLAIM="$FM_PROCEVENT_CLAIM_ROOT/untidyable-src.claim"
+{
+  printf '%s\n%s\nuntidyable-token\nuntidyable-identity\n' "$HUW" 999999
+  printf '%s\n%s\nactive\n' "$UW_REG_FILE" "$uw_identity"
+  printf '%s\n%s\n%s\n%s\n%s\n' "$HUW/state" \
+    "$(bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_device "$2"' _ "$ROOT" "$HUW/state")" \
+    "$(bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_inode "$2"' _ "$ROOT" "$HUW/state")" \
+    "$(id -u)" 755
+} > "$UW_CLAIM"
+chmod 0600 "$UW_CLAIM"
+kill -0 999999 2>/dev/null && fail "fixture invalid: the untidyable claim names a live pid"
+kill -0 -999999 2>/dev/null && fail "fixture invalid: the untidyable claim's process group is alive"
+uw_rc=0
+uw_out=$(pe "$HUW" reconcile) || uw_rc=$?
+[ "$uw_rc" -eq 0 ] || fail "reconcile could not repair a provably dead generation: $uw_out"
+# Reporting a start is not the same fact as listening, so prove the listening
+# half first: before this fix reconcile reported exactly this start on every run
+# while the dead generation kept the claim and nothing ever attached.
+wait_for "$UW_LOG" || fail "reconcile reported a start but no replacement source ever ran: $uw_out"
+uw_new=$(sed -n '2p' "$UW_CLAIM")
+[ "$uw_new" != 999999 ] || fail "the dead generation kept owning the source: $uw_out"
+kill -0 "$uw_new" 2>/dev/null || fail "the replacement runner did not take ownership: $uw_out"
+assert_contains "$uw_out" "started=1" "reconcile did not report the replacement it started: $uw_out"
+assert_contains "$uw_out" "failed=0" "reconcile could not confirm the replacement: $uw_out"
+: > "$UW_TRIGGER"
+pe "$HUW" retire untidyable-src >/dev/null
+pass "a dead generation whose leftovers cannot be tidied never keeps owning its source"
 
 HJ="$TMP_ROOT/hj"; new_home "$HJ"
 TORN_TRIGGER="$TMP_ROOT/torn-trigger"

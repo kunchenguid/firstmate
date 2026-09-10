@@ -47,6 +47,15 @@
 #            start a runner for any registered source that has no live owner.
 #            This is liveness repair only - it never discovers results by
 #            polling the source, because the child blocks on the source itself.
+#            A start is REPORTED only once it is confirmed: starting a runner is
+#            detached and its errors reach no caller, so a source that cannot
+#            start would otherwise be counted exactly like one that is
+#            listening, and a wedged source would go on presenting as armed.
+#            Every launch is counted as `started` only after the source is
+#            observed owned or its runner record has moved, `failed` otherwise,
+#            and any failure also makes this command exit non-zero. One bounded
+#            window covers a whole cycle's launches
+#            (FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS; docs/configuration.md).
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -1196,7 +1205,8 @@ detach_runner() {  # <source-id>
 }
 
 cmd_reconcile() {
-  local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
+  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state launch_mark
+  local -a launched=()
   owner_lease_refresh
   published=$(publish_pending)
 
@@ -1251,15 +1261,26 @@ cmd_reconcile() {
       if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
         fm_procevent_claim_state_locked "$id"
         claim_state=$?
-        if [ "$claim_state" -eq 1 ]; then
+        if [ "$claim_state" -eq 1 ] \
+          && [ -e "$(fm_procevent_claim_path "$id")" ] \
+          && ! fm_procevent_claim_generation_gone_locked; then
+          # A stale claim whose process group still has members. Ownership
+          # cannot move here by design, so a replacement could only die on the
+          # claim it cannot take - once per cycle, forever, for a source that
+          # will never come back on its own. Preserve the claim and say the
+          # cycle could not settle it, which is what this command already
+          # promises for the leaderless variant below.
+          uncertain=$((uncertain + 1))
+        elif [ "$claim_state" -eq 1 ]; then
           if ! cleanup_extension_registration_invocations_locked "$id"; then
             uncertain=$((uncertain + 1))
             fm_procevent_source_lock_release "$id"
             continue
           fi
+          launch_mark=$(cat -- "$(runner_file "$id")" 2>/dev/null || true)
           fm_procevent_source_lock_release "$id"
           detach_runner "$id"
-          started=$((started + 1))
+          launched+=("$id"$'\t'"$launch_mark")
           continue
         elif [ "$claim_state" -eq 4 ]; then
           owner=$FM_PROCEVENT_CLAIM_HOME
@@ -1285,7 +1306,66 @@ cmd_reconcile() {
       fm_procevent_source_lock_release "$id"
     done
   fi
-  printf 'reconciled: published=%s started=%s stopped=%s uncertain=%s\n' "$published" "$started" "$stopped" "$uncertain"
+  if [ "${#launched[@]}" -gt 0 ]; then
+    failed=$(confirm_launched_runners "${launched[@]}") || failed=${#launched[@]}
+    started=$(( ${#launched[@]} - failed ))
+  fi
+  printf 'reconciled: published=%s started=%s stopped=%s uncertain=%s failed=%s\n' \
+    "$published" "$started" "$stopped" "$uncertain" "$failed"
+  [ "$failed" -eq 0 ]
+}
+
+# Bounded confirmation that every runner just detached actually took its
+# source's claim, printing how many did not.
+#
+# detach_runner is fire-and-forget and discards the child's stderr, so before
+# this every failure inside _start - a refused claim above all - was still
+# counted and reported as a start. That made a source that CANNOT start
+# indistinguishable from one that had, which is exactly how a wedged review
+# board goes on presenting as armed while collecting nothing. A runner takes its
+# claim before it blocks on its source, so ownership appearing is the earliest
+# honest evidence that it is listening, and its absence within this window is
+# the earliest honest evidence that it is not.
+#
+# Every launch shares ONE window rather than taking a window each, so a whole
+# fleet of failing sources costs a watcher cycle the same bounded wait as one.
+confirm_launched_runners() {  # <source-id><TAB><runner-record-before>...
+  local deadline window entry id before state mark
+  local -a pending=("$@") remaining=()
+  window=$(fm_procevent_launch_confirm_seconds) || return 1
+  deadline=$((SECONDS + window))
+  while :; do
+    remaining=()
+    for entry in "${pending[@]+"${pending[@]}"}"; do
+      id=${entry%%$'\t'*}
+      before=${entry#*$'\t'}
+      # Owning the source is the strongest evidence and the only one a runner
+      # blocked on its source ever shows.
+      state=1
+      if fm_procevent_source_lock_try_acquire "$id"; then
+        fm_procevent_claim_state_locked "$id"
+        state=$?
+        fm_procevent_source_lock_release "$id"
+      fi
+      if [ "$state" -eq 0 ]; then
+        continue
+      fi
+      # A source that completes quickly can finish and release its claim between
+      # two polls, so ownership alone would report a good run as a failure. The
+      # runner writes its own pid into the source's runner record right after it
+      # claims and nothing removes it on the way out, so a record that has moved
+      # is durable proof that a runner got going even after it is gone. A runner
+      # that dies BEFORE claiming never reaches that write, which is the case
+      # this whole confirmation exists to catch.
+      mark=$(cat -- "$(runner_file "$id")" 2>/dev/null || true)
+      [ "$mark" != "$before" ] || remaining+=("$entry")
+    done
+    pending=("${remaining[@]+"${remaining[@]}"}")
+    [ "${#pending[@]}" -gt 0 ] || break
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 0.05
+  done
+  printf '%s\n' "${#pending[@]}"
 }
 
 # Stop a runner and the child it is blocked on. A runner started by reconcile is
@@ -1653,7 +1733,7 @@ cmd_sweep_home() {
 }
 
 cmd_list() {
-  local rec id adapter owner pending
+  local rec id adapter owner pending claim_state
   owner_lease_refresh
   if ! fm_procevent_any_registered "$STATE"; then
     printf 'no sources registered\n'
@@ -1666,7 +1746,24 @@ cmd_list() {
     adapter=$(read_adapter "$id" 2>/dev/null || echo '?')
     fm_procevent_source_lock_acquire "$id" || continue
     fm_procevent_claim_state_locked "$id"
-    case "$?" in 0) owner=live ;; 1) owner=none ;; 3) owner=orphaned ;; *) owner=uncertain ;; esac
+    claim_state=$?
+    # A stale claim whose process group still has members is exactly as
+    # undisplaceable as the leaderless group state 3 already reports, and a
+    # reused PID reaches it through state 1 rather than state 3. Reporting that
+    # as `none` reads like an idle source waiting to be started, which is the
+    # reassuring answer this whole surface gave while a board collected nothing.
+    case "$claim_state" in
+      0) owner=live ;;
+      1)
+        owner=none
+        if [ -e "$(fm_procevent_claim_path "$id")" ] \
+          && ! fm_procevent_claim_generation_gone_locked; then
+          owner=orphaned
+        fi
+        ;;
+      3) owner=orphaned ;;
+      *) owner=uncertain ;;
+    esac
     fm_procevent_source_lock_release "$id"
     pending=$(fm_procevent_pending "$STATE" | grep -c "/$id\." || true)
     printf '%-28s %-12s %-10s %s\n' "$id" "$adapter" "$owner" "$pending"

@@ -836,8 +836,9 @@ This proof belongs only to that stop's own escalation and cannot authorize anoth
 A claim counts as reclaimable only when its owner is stale and an independent process-group check finds no members; a crashed leader or reused pid whose process group still has members cannot relax ownership cleanup, so reconcile preserves the claim without signalling the ambiguous group or starting a replacement.
 If the leader dies to anything other than the stop's own signal, `retire`, `reconcile`, `sweep-home`, and the guard all refuse its surviving group permanently, and the source silently stops listening.
 Whether that group may ever be signalled remains an open decision; the repaired guard does not close this gap.
-Reclaiming a generation that IS gone is not gated on tidying its capture-reservation records.
-Those records are keyed by claim token and every replacement claims a fresh one, so a leftover that can no longer be located - a state-root identity a claim recorded before its home was re-created, for example - is stale bytes rather than an ownership hazard.
+Reclaiming a generation that IS gone is not gated on tidying anything that generation left behind: its capture-reservation records, its staging file, or the registry directory a claim recorded for them.
+Every one of those is keyed by claim token and every replacement claims a fresh one, so a leftover that can no longer be located or removed - a state-root identity a claim recorded before its home was re-created, or a recorded registry directory that no longer resolves to a directory - is stale bytes rather than an ownership hazard.
+Making any of them a precondition is what leaves a provably dead runner owning its source permanently, because none of those conditions clears on its own.
 Ordinary release and reclamation still attempt reservation cleanup and require it unless both owner staleness and whole-group absence prove the generation gone.
 The narrow live-owner terminal-self-retirement path also attempts cleanup but tolerates its own still-in-flight reservation, which the runner removes on the normal end-of-capture path; exact home, PID, and claim-token ownership remains mandatory before the claim is released.
 If identity cannot be established before the first signal, or a surviving owned group cannot be proved stopped, the operation preserves the registration and claim for safe retry rather than adding a second owner.
@@ -875,6 +876,10 @@ Scope is the owning state root and one runner generation, never a script or proc
 `FM_PROCEVENT_OWNER_LEASE_SECONDS` (default 600, range 1..86400) is how long a runner keeps going with no sign of activity in its owning home, and `FM_PROCEVENT_OWNER_CHECK_SECONDS` (default 15, range 1..3600) is the guard's detection interval: it re-reads the lease and the recorded state-root identity twice within each interval, half an interval apart, so the two reads its debounce needs fit inside one interval rather than costing two.
 `FM_PROCEVENT_LAUNCH_FLOOR_SECONDS` (default 1, range 1..3600) is the minimum time between consecutive launches of one registration generation's stored command, bounding the launch rate of an immediately returning source during that lease window.
 The generation's first launch is immediate, later launches share its monotonic pacing timestamp, a timestamp from before a reboot is treated as expired, and replacing the registration starts a fresh pacing generation.
+
+`FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS` (default 10, range 1..600) bounds how long `reconcile` waits for the runners it just started to prove they are running.
+Starting a runner is detached and its errors are not visible to the caller, so `reconcile` reports a start only after the source is observed owned or its runner record has moved, and reports every unconfirmed launch as `failed=` and a non-zero exit instead.
+All of a cycle's launches share one window, so a home full of sources that cannot start costs the same bounded wait as one.
 
 `FM_PROCEVENT_MAX_OUTPUT_BYTES` (default 1048576) bounds a single captured result while the source runs; oversized output is drained but truncated with a stderr notice rather than staged or published whole or dropped.
 
@@ -969,6 +974,7 @@ FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; defaul
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no activity in its owning home; 1..86400
 FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # a runner guard's detection interval, read twice per interval; 1..3600
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of one registration generation's source command; 1..3600
+FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=10  # how long reconcile waits for the runners it started to prove they are running; 1..600
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh

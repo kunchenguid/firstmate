@@ -211,6 +211,28 @@ fm_procevent_launch_floor_seconds() {
   printf '%s\n' "$value"
 }
 
+# How long reconcile waits for a runner it just detached to prove it took the
+# source's claim. A runner claims before it blocks on its source, so the wait is
+# a process launch, not a source round trip; the default is generous enough for
+# a loaded machine and short enough that a whole fleet of failing sources cannot
+# stall a watcher cycle, because reconcile confirms every launch in ONE shared
+# window rather than one window each.
+FM_PROCEVENT_LAUNCH_CONFIRM_DEFAULT_SECONDS=10
+FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS=1
+FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS=600
+
+fm_procevent_launch_confirm_seconds() {
+  local value=${FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS-}
+  if [ -z "$value" ]; then
+    printf '%s\n' "$FM_PROCEVENT_LAUNCH_CONFIRM_DEFAULT_SECONDS"
+    return 0
+  fi
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS" ] || return 1
+  [ "$value" -le "$FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS" ] || return 1
+  printf '%s\n' "$value"
+}
+
 fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registration-identity>
   local reg identity
   case "$3" in *:*) ;; *) return 1 ;; esac
@@ -707,6 +729,26 @@ fm_procevent_claim_acquire_locked() {
           if [ "$status" -eq 0 ]; then
             fm_procevent_claim_capture_reservation_reclaim_locked || status=1
           fi
+          # Every cleanup above tidies leftovers that belong to the DEAD
+          # generation - its staging file and its capture reservation, both keyed
+          # by ITS claim token - and a replacement always claims a fresh token,
+          # so nothing a failed tidy-up leaves behind can collide with the
+          # generation that replaces it.
+          # fm_procevent_claim_capture_reservation_reclaim_locked already states
+          # that rule for the reservation record; the staging file takes the same
+          # rule here, and so does the shape check on the registry directory
+          # recorded to hold it, which only decides whether that removal is safe
+          # to attempt. Once the stale owner and the
+          # independently absent process group prove the whole generation gone,
+          # the documented ownership promise is already granted, so a failed
+          # tidy-up may leave litter and nothing more. Vetoing the claim instead
+          # is what leaves a provably dead runner owning the source permanently,
+          # where no reconcile, no retire and no fresh arm can displace it.
+          if [ "$status" -ne 0 ] && fm_procevent_claim_generation_gone_locked; then
+            status=0
+          fi
+          # Two owners is the one outcome worse than none: never proceed on a
+          # claim record that is still there.
           [ "$status" -ne 0 ] || rm -f -- "$claim" || status=1
         else
           status=1
