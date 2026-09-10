@@ -229,22 +229,38 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
 
   for mode in direct-PR no-mistakes; do
     id="brief-existing-${mode}"
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode "$mode" \
-      --existing-pr "$url" --branch bookie/existing-head >/dev/null 2>&1 \
-      || fail "existing-PR $mode brief should scaffold"
+    if [ "$mode" = no-mistakes ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode "$mode" \
+        --existing-pr "$url" --branch bookie/existing-head --base-branch release/2.x >/dev/null 2>&1 \
+        || fail "existing-PR $mode brief should scaffold"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode "$mode" \
+        --existing-pr "$url" --branch bookie/existing-head >/dev/null 2>&1 \
+        || fail "existing-PR $mode brief should scaffold"
+    fi
     brief="$home/data/$id/brief.md"
     assert_grep "Existing PR: $url" "$brief" \
       "$mode existing-PR brief did not record the canonical PR URL"
-    assert_grep "git fetch origin '+refs/heads/bookie/existing-head:refs/remotes/origin/bookie/existing-head'" "$brief" \
+    assert_grep "gh-axi pr checkout 2460" "$brief" \
+      "$mode existing-PR brief did not resolve the forge-reported PR head"
+    assert_grep "git fetch origin \"+refs/heads/\$PR_BRANCH:refs/remotes/origin/\$PR_BRANCH\"" "$brief" \
       "$mode existing-PR brief did not update the remote-tracking head from origin"
-    assert_grep "git checkout -B 'bookie/existing-head' 'origin/bookie/existing-head'" "$brief" \
+    assert_grep "git checkout -B \"\$PR_BRANCH\" \"origin/\$PR_BRANCH\"" "$brief" \
       "$mode existing-PR brief did not check out the existing origin head"
-    assert_grep "git push origin 'HEAD:bookie/existing-head'" "$brief" \
+    assert_grep "[ \"\$PR_BRANCH\" = 'bookie/existing-head' ]" "$brief" \
+      "$mode existing-PR brief did not assert the caller-supplied head branch"
+    assert_grep "git config --get \"branch.\$PR_BRANCH.remote\"" "$brief" \
+      "$mode existing-PR brief did not reject a fork-hosted head"
+    assert_grep "git push origin \"HEAD:\$PR_BRANCH\"" "$brief" \
       "$mode existing-PR brief did not push back to the same branch"
     assert_grep "Never force-push, never open a second PR" "$brief" \
       "$mode existing-PR brief lost its force-push and duplicate-PR prohibitions"
-    assert_grep "supports only a PR head branch hosted on origin" "$brief" \
-      "$mode existing-PR brief did not fail visibly for an unsupported fork-hosted head"
+    if [ "$mode" = no-mistakes ]; then
+      assert_grep "Existing PR base branch: release/2.x" "$brief" \
+        "no-mistakes existing-PR brief did not record its base branch"
+      assert_grep "--base-branch" "$brief" \
+        "no-mistakes existing-PR brief did not target the recorded PR base"
+    fi
     assert_grep "done: PR $url head <sha> checks green" "$brief" \
       "$mode existing-PR brief did not bind done to the existing PR head and green checks"
     assert_no_grep "git checkout -b fm/$id" "$brief" \
@@ -256,14 +272,14 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
   id="brief-existing-placeholder"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode direct-PR \
     --existing-pr "$url" >/dev/null 2>&1 \
-    || fail "existing-PR brief without --branch should scaffold for later filling"
-  assert_grep "origin/{EXISTING_PR_BRANCH}" "$home/data/$id/brief.md" \
-    "existing-PR brief without --branch did not retain a guarded branch placeholder"
+    || fail "existing-PR brief without --branch should scaffold for forge resolution"
+  assert_no_grep "{EXISTING_PR_BRANCH}" "$home/data/$id/brief.md" \
+    "existing-PR brief without --branch retained unsafe shell-substitution text"
   pass "fm-brief.sh: existing-PR ship briefs replace new-branch and new-PR contracts"
 }
 
 test_existing_pr_setup_checks_out_a_new_origin_branch() {
-  local root remote source work home brief setup_command source_head
+  local root remote source work home brief setup_command setup_out source_head fakebin real_git
   root="$TMP_ROOT/existing-pr-checkout"
   remote="$root/remote.git"
   source="$root/source"
@@ -286,6 +302,29 @@ test_existing_pr_setup_checks_out_a_new_origin_branch() {
   source_head=$(git -C "$source" rev-parse HEAD)
   git clone --single-branch --branch main "$remote" "$work" >/dev/null 2>&1 \
     || fail "could not clone existing-PR checkout fixture"
+  git -C "$work" remote set-url origin https://github.com/kunchenguid/firstmate
+  git -C "$work" config url."$remote".insteadOf https://github.com/kunchenguid/firstmate
+  fakebin="$root/bin"
+  mkdir -p "$fakebin"
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = remote ] && [ "\${2:-}" = get-url ] && [ "\${3:-}" = origin ]; then
+  printf '%s\n' https://github.com/kunchenguid/firstmate
+  exit 0
+fi
+exec '$real_git' "\$@"
+EOF
+  chmod +x "$fakebin/git"
+  cat > "$fakebin/gh-axi" <<'EOF'
+#!/bin/sh
+[ "$1" = pr ] && [ "$2" = checkout ] && [ "$3" = 2460 ] || exit 2
+git fetch origin '+refs/heads/existing/head:refs/remotes/origin/existing/head' || exit
+git checkout -B existing/head origin/existing/head || exit
+git config branch.existing/head.remote origin
+git config branch.existing/head.merge refs/heads/existing/head
+EOF
+  chmod +x "$fakebin/gh-axi"
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" checkout-existing firstmate --mode direct-PR \
     --existing-pr https://github.com/kunchenguid/firstmate/pull/2460 \
@@ -294,13 +333,43 @@ test_existing_pr_setup_checks_out_a_new_origin_branch() {
   # shellcheck disable=SC2016 # The sed expression is a literal parser for the generated Markdown command.
   setup_command=$(sed -n 's/^1\. First action:.*: `\(.*\)`\.$/\1/p' "$brief")
   [ -n "$setup_command" ] || fail "could not read the generated existing-PR setup command"
-  (cd "$work" && eval "$setup_command") >/dev/null 2>&1 \
-    || fail "generated existing-PR setup could not check out a previously unfetched origin branch"
+  setup_out=$(cd "$work" && PATH="$fakebin:$PATH" eval "$setup_command" 2>&1) \
+    || fail "generated existing-PR setup could not check out a previously unfetched origin branch: $setup_out"
   [ "$(git -C "$work" branch --show-current)" = existing/head ] \
     || fail "generated existing-PR setup checked out the wrong local branch"
   [ "$(git -C "$work" rev-parse HEAD)" = "$source_head" ] \
     || fail "generated existing-PR setup did not check out the current origin head"
   pass "fm-brief.sh: existing-PR setup fetches and checks out a previously unknown origin branch"
+}
+
+test_existing_pr_base_validation_is_scoped_to_delivery_metadata() {
+  local ordinary existing
+  ordinary="$TMP_ROOT/ordinary-no-mistakes-brief"
+  existing="$TMP_ROOT/existing-no-mistakes-brief"
+  cat > "$ordinary" <<'EOF'
+# Task
+Existing PR: this is captain-provided context, not delivery metadata.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+The task ships a new PR.
+EOF
+  cat > "$existing" <<'EOF'
+# Definition of done
+Delivery contract: mode=no-mistakes
+Existing PR: https://github.com/o/r/pull/1
+Existing PR base branch: {EXISTING_PR_BASE_BRANCH}
+EOF
+  # shellcheck source=bin/fm-dod-lib.sh
+  . "$ROOT/bin/fm-dod-lib.sh"
+  ! fm_brief_existing_pr_base_invalid "$ordinary" \
+    || fail "ordinary no-mistakes prose mentioning an existing PR was treated as delivery metadata"
+  fm_brief_existing_pr_base_invalid "$existing" \
+    || fail "existing-PR delivery metadata did not reject its unfilled base branch"
+  sed -i.bak 's/{EXISTING_PR_BASE_BRANCH}/release\/2.x/' "$existing"
+  ! fm_brief_existing_pr_base_invalid "$existing" \
+    || fail "existing-PR delivery metadata rejected a valid filled base branch"
+  pass "fm-dod-lib: existing-PR base validation is scoped to adjacent delivery metadata"
 }
 
 test_ship_and_scout_briefs_name_the_absolute_firstmate_home() {
@@ -398,7 +467,9 @@ mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode 
 branch without existing PR|brief-refused-b5 some-proj --mode direct-PR --branch existing/head|--branch requires --existing-pr
 existing PR in local-only mode|brief-refused-b6 some-proj --mode local-only --existing-pr https://github.com/o/r/pull/1|--existing-pr cannot be combined with local-only mode
 existing PR on a scout brief|brief-refused-b7 some-proj --scout --existing-pr https://github.com/o/r/pull/1|--existing-pr applies only to ship briefs
-malformed existing PR URL|brief-refused-b8 some-proj --mode direct-PR --existing-pr not-a-pr|--existing-pr requires a canonical GitHub pull request or GitLab merge request URL
+malformed existing PR URL|brief-refused-b8 some-proj --mode direct-PR --existing-pr not-a-pr|--existing-pr requires a canonical GitHub pull request URL
+base branch without existing PR no-mistakes|brief-refused-b9 some-proj --mode no-mistakes --base-branch release/2.x|--base-branch applies only to an existing-PR no-mistakes brief
+base branch on existing PR direct-PR|brief-refused-b10 some-proj --mode direct-PR --existing-pr https://github.com/o/r/pull/1 --base-branch main|--base-branch applies only to an existing-PR no-mistakes brief
 ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
@@ -984,6 +1055,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_existing_pr_ship_briefs_replace_new_pr_contract
 test_existing_pr_setup_checks_out_a_new_origin_branch
+test_existing_pr_base_validation_is_scoped_to_delivery_metadata
 test_ship_and_scout_briefs_name_the_absolute_firstmate_home
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
