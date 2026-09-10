@@ -1447,9 +1447,9 @@ families_for_changed_path() {
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
-      # bin/fm-watch.sh runs bin/fm-pr-check-migrate.sh before it takes the
-      # watcher lock, and the watcher suites depend on that binary's marker
-      # short-circuit leaving their planted locks alone.
+      # bin/fm-watch.sh sources bin/fm-pr-lib.sh and runs its PR-poll
+      # retirement recovery before it takes the watcher lock, so the watcher
+      # suites exercise this code too.
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-nm-run-lib.sh)

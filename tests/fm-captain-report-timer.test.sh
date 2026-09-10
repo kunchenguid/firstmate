@@ -223,18 +223,6 @@ test_missing_stamp_leaves_the_check_silent() {
   pass "a timer check with no stamp stays silent instead of waking on every sweep"
 }
 
-test_legacy_pr_check_migration_keeps_the_timer_armed() {
-  local dir state
-  dir=$(make_home migration); state="$dir/state"
-  timer "$state" arm --interval 60 >/dev/null || fail "arm failed"
-  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-pr-check-migrate.sh" >/dev/null 2>&1 \
-    || fail "the legacy PR-check migration failed on a home with an armed timer"
-  assert_present "$state/captain-report.check.sh" "the migration quarantined the armed timer check"
-  assert_absent "$state/.pr-check-quarantine/captain-report.check.sh" \
-    "the migration moved the armed timer check into quarantine"
-  pass "the legacy PR-check migration leaves a registered timer check armed"
-}
-
 # Start a real watcher over <state> with a tight poll and check cadence, and no
 # heartbeat, so the only thing it can wake for is the due timer.
 watch_bg() {  # <state> <fakebin> <out>
@@ -278,5 +266,4 @@ test_rearming_at_a_new_interval_is_what_the_watcher_runs
 test_invalid_interval_is_refused_without_arming
 test_tampered_check_stops_being_trusted
 test_missing_stamp_leaves_the_check_silent
-test_legacy_pr_check_migration_keeps_the_timer_armed
 test_due_timer_surfaces_as_a_check_wake
