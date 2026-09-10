@@ -44,8 +44,10 @@ Show everything running in one overview: this home's workers, its background
 services, and the concurrent harness background sessions working in it, plus
 every open Lavish review page on this machine (that listing is machine-wide, not
 scoped to one home). Anything at or over the stale threshold (3 days, see
-FM_SESSION_STALE_DAYS) is marked with a leading "!". The background session you
-are reading this from is marked "(yours)" and is never offered as one to close.
+FM_SESSION_STALE_DAYS) is marked with a leading "!". The captain's own
+background session is marked "(yours)" and is never offered as one to close; a
+session whose owner cannot be established from here says "(owner unknown)" and
+is not offered either, since ending the wrong one is worse than ending none.
 
 --watch          redraw in place forever; for a pane you leave open.
 --interval N     seconds between redraws with --watch (default 60, minimum 15).
@@ -146,7 +148,10 @@ render_once() {
     def age_text: age_of(.age_seconds; .age_days);
     def what:
       if .kind == "harness-session" then
-        "\(.id) live session" + (if .self then " (yours)" else "" end)
+        "\(.id) live session"
+        + (if .self then " (yours)"
+           elif (.self_known | not) then " (owner unknown)"
+           else "" end)
       elif .kind == "worker" then "\(.id) (\(.label // "task")\(if .held then ", held" else "" end))"
       else (.label // .id) end;
     def task_age_text:
@@ -190,6 +195,10 @@ render_once() {
          else
            dim("background sessions: \($h.lock_owner)")
          end),
+      (.harness_sessions as $h
+       | if $h.self_resolution == "unresolved" and ($h.sessions // 0) > 0 then
+           dim("which of these is your own session cannot be told from here, so none is offered for closing")
+         else empty end),
       ([.sources[] | select(.ok | not)] | .[]? | warn("! \(.name) unreadable: \(.reason)")),
       "",
       (if ($shown | length) == 0 then

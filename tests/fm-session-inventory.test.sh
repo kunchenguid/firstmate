@@ -229,6 +229,63 @@ start_daemon_tree() {  # <home> <child-argv-file>
   DAEMON_PID=$daemon_pid
 }
 
+# Run a command from a process with NO harness anywhere in its ancestry, which
+# is the shape the overview's primary surface has: a pane the captain leaves
+# open is a child of the terminal, not of any background session. Double-forking
+# orphans the runner, so the kernel reparents it to init and the ancestry walk
+# ends at once - whatever this suite itself happens to be running inside, which
+# is what makes both ownership branches below deterministic rather than a
+# property of the machine the tests run on.
+DETACHED_BODY="$TMP_ROOT/fm-detached-run.sh"
+cat > "$DETACHED_BODY" <<'SH'
+#!/usr/bin/env bash
+out=$1
+shift
+waited=0
+while [ "$waited" -lt 200 ]; do
+  parent=$(ps -o ppid= -p "$$" 2>/dev/null | tr -d ' ')
+  case "$parent" in ''|0|1) break ;; esac
+  sleep 0.05
+  waited=$((waited + 1))
+done
+"$@" > "$out.body" 2> "$out.err"
+printf '%s\n' "$?" > "$out.rc"
+: > "$out"
+SH
+chmod +x "$DETACHED_BODY"
+
+DETACHED_BODY_FILE=
+run_detached() {  # <label> <cmd...>
+  local out="$TMP_ROOT/detached-$1" waited=0
+  shift
+  rm -f "$out" "$out.body" "$out.err" "$out.rc"
+  ( "$DETACHED_BODY" "$out" "$@" </dev/null >/dev/null 2>&1 & )
+  while [ "$waited" -lt 900 ]; do
+    if [ -e "$out" ]; then
+      DETACHED_BODY_FILE="$out.body"
+      [ "$(cat "$out.rc" 2>/dev/null)" = 0 ] || return 1
+      return 0
+    fi
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
+# The same two commands the captain runs, but from that pane-shaped process.
+run_inventory_detached() {  # <label> <home> <mode...>
+  local label=$1 home=$2
+  shift 2
+  run_detached "$label" env FM_HOME="$home" FM_SESSION_INVENTORY_NOW_EPOCH="$NOW_EPOCH" \
+    PATH="$FAKEBIN:$PATH" "$INVENTORY" "$@"
+}
+run_view_detached() {  # <label> <home> <args...>
+  local label=$1 home=$2
+  shift 2
+  run_detached "$label" env FM_HOME="$home" FM_SESSION_INVENTORY_NOW_EPOCH="$NOW_EPOCH" \
+    COLUMNS=110 PATH="$FAKEBIN:$PATH" "$VIEW" "$@"
+}
+
 # --- cases -------------------------------------------------------------------
 
 test_two_concurrent_sessions_are_ambiguous() {
@@ -254,10 +311,13 @@ EOF
     || fail "two live sessions under one shared daemon must read as ambiguous, got '$owner'"
   [ "$sessions" = 2 ] || fail "expected 2 live sessions, got '$sessions'"
 
+  # Every session row leads with the ambiguity. What follows it is the ownership
+  # clause, which depends on whether this suite itself runs inside a harness, so
+  # only the part under test is asserted here.
   rows=$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")
-    | .detail] | sort | unique | join(" ")')
-  [ "$rows" = "drives this home: ambiguous" ] \
-    || fail "each live session must say it cannot be told apart: $rows"
+    | (.detail | startswith("drives this home: ambiguous"))] | unique | join(" ")')
+  [ "$rows" = "true" ] \
+    || fail "each live session must say it cannot be told apart: $(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session") | .detail] | join(" | ")')"
   # The idle pool process is not this home's session and is not listed as one;
   # it is only counted, so nothing is claimed on another home's behalf.
   [ "$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')" = 1 ] \
@@ -295,8 +355,10 @@ EOF
   owner=$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')
   [ "$owner" = single ] || fail "one live session under the daemon must read as single, got '$owner'"
   drives=$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "harness-session") | .detail')
-  [ "$drives" = "drives this home: yes" ] \
-    || fail "the only live session under the lock-owning daemon drives this home, got '$drives'"
+  case "$drives" in
+    "drives this home: yes"*) ;;
+    *) fail "the only live session under the lock-owning daemon drives this home, got '$drives'" ;;
+  esac
   # The two idle pool processes are working outside this home, so they are
   # counted as belonging elsewhere rather than listed as this home's sessions.
   [ "$(printf '%s' "$json" | jq -r '.harness_sessions.elsewhere')" = 2 ] \
@@ -363,9 +425,10 @@ EOF
     || fail "a pool process working in this home is a live session, whatever argv it kept"
   [ "$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")] | length')" = 1 ] \
     || fail "the live session must be listed, and the still-idle one must not be"
-  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "harness-session") | .detail')" \
-    = "drives this home: yes" ] \
-    || fail "a session working in this home drives it"
+  case "$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "harness-session") | .detail')" in
+    "drives this home: yes"*) ;;
+    *) fail "a session working in this home drives it" ;;
+  esac
 
   kill_spawned
   pass "inventory: a claimed pool process working in this home counts as a live session"
@@ -643,16 +706,24 @@ test_stale_rows_carry_their_exact_close_command() {
 # captain asking for it, so it has to name the one thing that identifies it: its
 # pid, which is also what the close command below it kills.
 test_stale_session_line_names_the_pid() {
-  local home spec daemon out
+  local home spec daemon out owner_pid
   home=$(make_home stale-session-line)
   finish_backlog "$home"
   write_lavish_stub "$FAKEBIN"
   spec="$home/children"
-  printf '%s|sess-a --session-id aaaa --agent claude --permission-mode bypassPermissions\n' \
-    "$home" > "$spec"
+  cat > "$spec" <<EOF
+$home|sess-a --session-id aaaa --agent claude --permission-mode bypassPermissions
+$home|sess-b --session-id bbbb --agent claude --permission-mode bypassPermissions
+EOF
   start_daemon_tree "$home" "$spec"
   daemon=$DAEMON_PID
-  printf '%s\n' "$daemon" > "$home/state/.lock"
+  # The lock names one of the two sessions rather than the daemon above them, so
+  # which session is the captain's own is answerable here whether or not this
+  # suite itself happens to run inside a harness. The other session is therefore
+  # closeable in both cases, and it is the one this case asserts on.
+  owner_pid=$(pgrep -P "$daemon" 2>/dev/null | head -1)
+  [ -n "$owner_pid" ] || fail "the fixture did not produce a session to record as the lock owner"
+  printf '%s\n' "$owner_pid" > "$home/state/.lock"
 
   # A fixture session is seconds old, so the threshold comes down to it instead.
   out=$(FM_SESSION_STALE_DAYS=0 run_inventory "$home" --stale-lines) \
@@ -660,7 +731,7 @@ test_stale_session_line_names_the_pid() {
 
   local pid
   pid=$(FM_SESSION_STALE_DAYS=0 run_inventory "$home" --json \
-    | jq -r '.rows[] | select(.kind == "harness-session") | .id')
+    | jq -r '.rows[] | select(.kind == "harness-session") | select(.close != null) | .id' | head -1)
   [ -n "$pid" ] || fail "the fixture session was not listed as this home's"
   assert_contains "$out" "SESSIONS_STALE: background session $pid" \
     "the unasked line must name the session by the pid its close command kills"
@@ -732,6 +803,12 @@ EOF
     || fail "an old task with a fresh worker must not be flagged as overdue"
   [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "fresh-worker") | .task_age_days')" = 30 ] \
     || fail "the task age must still be reported, separately from running time"
+  # The very process that supplied that running time works in a worktree INSIDE
+  # this home, so a bare containment test would report it a second time as a
+  # standalone background session carrying a raw kill - alongside the worker row
+  # whose own close command refuses rather than discarding unlanded work.
+  [ "$(printf '%s' "$json" | jq -r '.counts.by_kind.harness_session')" = 0 ] \
+    || fail "a worker's own process must not also be listed as a standalone background session"
 
   local out
   out=$(run_inventory "$home" --stale-lines) || fail "--stale-lines failed"
@@ -1190,6 +1267,183 @@ test_inventory_does_not_rewrite_the_busy_classifier_cache() {
   pass "inventory: a pass writes nothing, the busy classifier's own cache included"
 }
 
+# The pane the captain leaves open is the surface this overview was asked for,
+# and it has no harness ancestry at all - so the signal that marks his own
+# session on the session-start path finds nothing there. What the pane can still
+# read is the lock: when it records one of the sessions working in this home,
+# that session is the one driving it, and therefore his.
+test_a_pane_recognises_the_captains_session_from_the_recorded_lock() {
+  local home spec daemon json owner_pid other_pid rendered
+  home=$(make_home pane-lock-owner)
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  spec="$home/children"
+  cat > "$spec" <<EOF
+$home|sess-a --session-id aaaa --agent claude
+$home|sess-b --session-id bbbb --agent claude
+EOF
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
+  owner_pid=$(pgrep -P "$daemon" 2>/dev/null | head -1)
+  [ -n "$owner_pid" ] || fail "the fixture produced no session to record as the lock owner"
+  printf '%s\n' "$owner_pid" > "$home/state/.lock"
+
+  run_inventory_detached pane-lock "$home" --json \
+    || fail "inventory failed from a pane-shaped process: $(cat "$TMP_ROOT/detached-pane-lock.err" 2>/dev/null)"
+  json=$(cat "$DETACHED_BODY_FILE")
+
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.self_resolution')" = session-lock ] \
+    || fail "with no harness ancestry the lock must be what answers ownership, got '$(printf '%s' "$json" | jq -r '.harness_sessions.self_resolution')'"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "'"$owner_pid"'") | "\(.self) \(.close) \(.close_safety)"')" \
+    = "true null manual" ] \
+    || fail "the session the lock names must be marked as the captain's own and carry no close command"
+
+  other_pid=$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "harness-session")
+    | select(.id != "'"$owner_pid"'") | .id')
+  [ -n "$other_pid" ] || fail "the second session was not listed"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "'"$other_pid"'") | "\(.self) \(.close)"')" \
+    = "false kill $other_pid" ] \
+    || fail "a session that is demonstrably not the captain's own must stay closeable"
+
+  run_view_detached pane-lock-view "$home" --color never || fail "the view failed from a pane-shaped process"
+  rendered=$(cat "$DETACHED_BODY_FILE")
+  assert_contains "$rendered" "$owner_pid live session (yours)" \
+    "the pane must mark the captain's own session"
+  assert_not_contains "$rendered" "kill $owner_pid" \
+    "the pane must not offer to close the captain's own session"
+  assert_contains "$rendered" "kill $other_pid" \
+    "the pane must still offer to close the session that is not his"
+
+  kill_spawned
+  pass "inventory: a pane with no harness ancestry recognises the captain's session from the lock"
+}
+
+# And when neither signal answers - a harness that records its outermost daemon
+# rather than the session pid, read from that same pane - every session here is
+# equally likely to be the captain's. Guessing is the one outcome worse than
+# saying nothing, so the rows say so and none is offered for closing.
+test_a_pane_that_cannot_tell_whose_session_offers_none_for_closing() {
+  local home spec daemon json rendered out
+  home=$(make_home pane-unknown-owner)
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  spec="$home/children"
+  cat > "$spec" <<EOF
+$home|sess-a --session-id aaaa --agent claude
+$home|sess-b --session-id bbbb --agent claude
+EOF
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
+  # The real Claude shape: the lock names the shared daemon above the sessions,
+  # and the daemon is not itself working in this home.
+  printf '%s\n' "$daemon" > "$home/state/.lock"
+
+  run_inventory_detached pane-unknown "$home" --json \
+    || fail "inventory failed from a pane-shaped process: $(cat "$TMP_ROOT/detached-pane-unknown.err" 2>/dev/null)"
+  json=$(cat "$DETACHED_BODY_FILE")
+
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.self_resolution')" = unresolved ] \
+    || fail "neither signal can answer here, and the output must say so"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.sessions')" = 2 ] \
+    || fail "both sessions must still be reported; only the close offer is withheld"
+  [ "$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")
+    | "\(.self) \(.self_known) \(.close)"] | unique | join(" ")')" = "false false null" ] \
+    || fail "an unattributable session must be marked unknown and carry no close command"
+
+  # And it must not reach the unasked session-start line at any age either.
+  run_inventory_detached pane-unknown-stale "$home" --stale-lines \
+    || fail "--stale-lines failed from a pane-shaped process"
+  out=$(cat "$DETACHED_BODY_FILE")
+  assert_not_contains "$out" "background session" \
+    "a session nobody can attribute must not be proposed unasked either"
+
+  run_view_detached pane-unknown-view "$home" --color never \
+    || fail "the view failed from a pane-shaped process"
+  rendered=$(cat "$DETACHED_BODY_FILE")
+  assert_contains "$rendered" "live session (owner unknown)" \
+    "the pane must say plainly that it cannot tell which session is the captain's"
+  assert_not_contains "$rendered" "kill " \
+    "the pane must offer no kill at all when it cannot tell them apart"
+
+  kill_spawned
+  pass "inventory: a pane that cannot attribute a session offers no way to close it"
+}
+
+# A worker's worktree lives inside the home, so a plain containment test claims
+# the worker's own process a second time as a standalone background session -
+# with a raw kill next to the worker row's own refusing close command, and, with
+# two of them, the "several sessions at once" alarm this feature exists to raise
+# firing for something that is not that at all.
+test_a_workers_own_process_is_not_a_second_background_session() {
+  local home spec daemon json
+  home=$(make_home worker-not-a-session)
+  write_worker "$home" alpha-task 1
+  write_worker "$home" beta-task 1
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  spec="$home/children"
+  cat > "$spec" <<EOF
+$home/projects/alpha-task-worktree|worker-a --session-id aaaa --agent claude
+$home/projects/beta-task-worktree|worker-b --session-id bbbb --agent claude
+EOF
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
+  printf '%s\n' "$daemon" > "$home/state/.lock"
+
+  json=$(run_inventory "$home" --json) || fail "inventory failed for two running workers"
+
+  [ "$(printf '%s' "$json" | jq -r '.counts.by_kind.harness_session')" = 0 ] \
+    || fail "two workers' own processes were listed a second time as background sessions"
+  [ "$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')" != ambiguous ] \
+    || fail "two running workers must never raise the several-sessions-at-once alarm"
+  # Both are still workers, aged by those very processes, and closeable the one
+  # way that refuses rather than discarding unlanded work.
+  [ "$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "worker") | .age_source] | unique | join(" ")')" \
+    = process ] \
+    || fail "the processes must still age their own workers"
+  [ "$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "worker") | .close] | length')" = 2 ] \
+    || fail "both workers must keep their own close command"
+  assert_not_contains "$(COLUMNS=110 run_view "$home" --color never)" \
+    "background sessions are working in this home at once" \
+    "the view must not raise the concurrent-session alarm for two ordinary workers"
+
+  kill_spawned
+  pass "inventory: a worker's own process is a worker, never a second background session"
+}
+
+# Which home is a secondmate home has one owner in this fleet. A marker that is
+# a symlink is not a seeded secondmate marker to it, and the review lines this
+# home would otherwise leave to the main home must not be suppressed on the
+# strength of a weaker local reading.
+test_secondmate_suppression_follows_the_shared_marker_rule() {
+  local home artifact out
+  home=$(make_home marker-rule)
+  finish_backlog "$home"
+  printf 'mate-two\n' > "$TMP_ROOT/marker-source"
+  ln -s "$TMP_ROOT/marker-source" "$home/.fm-secondmate-home" \
+    || fail "could not build the symlinked marker fixture"
+
+  artifact="$TMP_ROOT/marker-rule-project/plan.html"
+  mkdir -p "$(dirname "$artifact")"
+  printf '<html></html>\n' > "$artifact"
+  touch -t "$(date -u -r "$((NOW_EPOCH - 30 * DAY))" +%Y%m%d%H%M 2>/dev/null \
+    || date -u -d "@$((NOW_EPOCH - 30 * DAY))" +%Y%m%d%H%M)" "$artifact"
+  write_lavish_stub "$FAKEBIN" "$artifact" open 0
+
+  out=$(run_inventory "$home" --stale-lines) || fail "--stale-lines failed for a symlinked marker"
+  assert_contains "$out" "review page plan.html" \
+    "a symlinked marker is not a seeded secondmate home, so this home still names the pages"
+
+  # Replaced by a genuine seeded marker, the same home does leave them to the main home.
+  rm -f "$home/.fm-secondmate-home"
+  printf 'mate-two\n' > "$home/.fm-secondmate-home"
+  out=$(run_inventory "$home" --stale-lines) || fail "--stale-lines failed for a seeded marker"
+  assert_not_contains "$out" "plan.html" \
+    "a genuine secondmate home must leave the machine-wide pages to the main home"
+
+  pass "inventory: secondmate suppression follows the fleet's own marker rule"
+}
+
 test_inventory_closes_nothing_it_reports() {
   local home spec daemon children pid pool
   home=$(make_home read-only)
@@ -1248,5 +1502,9 @@ test_a_home_reached_through_a_symlink_still_finds_what_runs_in_it
 test_the_session_running_the_command_is_never_offered_for_closing
 test_a_secondmate_home_leaves_the_unasked_review_lines_to_the_main_home
 test_a_listener_close_command_survives_an_id_that_needs_quoting
+test_a_pane_recognises_the_captains_session_from_the_recorded_lock
+test_a_pane_that_cannot_tell_whose_session_offers_none_for_closing
+test_a_workers_own_process_is_not_a_second_background_session
+test_secondmate_suppression_follows_the_shared_marker_rule
 test_inventory_does_not_rewrite_the_busy_classifier_cache
 test_inventory_closes_nothing_it_reports

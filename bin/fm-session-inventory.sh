@@ -35,11 +35,19 @@
 #   stale_after_days  the age at or above which a row is marked stale.
 #   rows[]            uniform rows, ordered kind-then-age, described below.
 #   counts            {total, stale, notify, by_kind{worker,review,service,harness_session}}.
-#   harness_sessions  {root_pid, lock_pid, lock_owner, sessions, elsewhere}.
+#   harness_sessions  {root_pid, lock_pid, lock_owner, self_resolution,
+#                     sessions, elsewhere}.
 #                     `sessions` counts the live harness sessions working in THIS
 #                     home; `elsewhere` counts the other harness processes under
-#                     the same harness - pool machinery and other homes'
-#                     sessions - which are neither listed nor claimed.
+#                     the same harness - pool machinery, other homes' sessions,
+#                     and this home's own workers, which are reported as worker
+#                     rows instead - which are neither listed nor claimed here.
+#                     self_resolution says which signal answered "which of these
+#                     is the captain's own session": "ancestry", "session-lock",
+#                     "unresolved" when neither could, and "not_applicable" when
+#                     there is no session to ask it about. See WHOSE SESSION IS
+#                     THIS below; "unresolved" is why a row can be a live session
+#                     and still carry no close command.
 #                     lock_owner is the honest answer to "which background
 #                     session drives this home": "single" when exactly one
 #                     session under the recorded lock's harness works in this
@@ -75,10 +83,13 @@
 #                 reported, so a running worker shows its running time and the
 #                 age of its task side by side.
 #   held          true when the captain is deliberately holding this work.
-#   self          true for the one row that IS the process running this command:
-#                 the harness session the captain is talking to. It carries no
-#                 close command, because an overview that offers to end the
-#                 conversation it is being read in is worse than no overview.
+#   self          true for a harness-session row proven to be the captain's own
+#                 session. It carries no close command, because an overview that
+#                 offers to end the conversation it is being read in is worse
+#                 than no overview.
+#   self_known    false when ownership of a harness-session row could not be
+#                 established at all, which also withholds its close command.
+#                 Both fields carry meaning only on harness-session rows.
 #   notify        true when the row is stale, has a close command, and is not
 #                 held. A row with no single safe close command is not something
 #                 a human can act on by age, so long-lived shared infrastructure
@@ -152,6 +163,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
+# shellcheck source=bin/fm-primary-scope-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"  # fm_root_is_secondmate_home: the one main-vs-secondmate owner
 
 STALE_DAYS=${FM_SESSION_STALE_DAYS:-3}
 case "$STALE_DAYS" in
@@ -371,16 +385,32 @@ file_age_seconds() {  # <path>
 # one.
 WORKER_PROCS="$WORK/worker-procs.tsv"
 : > "$WORKER_PROCS"
+# The worktrees this home's workers occupy, resolved once. They are recorded
+# separately from the process scan because the harness-session collector needs
+# them too: a worker's worktree lives INSIDE the home (bin/fm-spawn.sh puts them
+# under $FM_HOME/projects), so a bare containment test would claim a worker's
+# own process a second time as a standalone background session - offering a bare
+# `kill` for work whose real close command refuses rather than discarding
+# unlanded work, and, with two such workers, raising the "several sessions in
+# this home at once" alarm for something that is not that condition at all.
+WORKER_DIRS="$WORK/worker-dirs.tsv"
+: > "$WORKER_DIRS"
 collect_worker_processes() {  # <worktree>...
   local pid cwd age dir saved keep
   local -a dirs=()
   [ "$#" -gt 0 ] || return 0
-  [ -s "$PSTABLE" ] || return 0
   # Physical on both sides, for the reason physical_path states: a worktree
   # reached through a symlink would match none of its own running processes.
+  # The home itself is never subtracted: a task whose recorded path IS this home
+  # would otherwise erase every session working in it.
   for dir in "$@"; do
-    dirs+=("$(physical_path "$dir")")
+    dir=$(physical_path "$dir")
+    [ "$dir" != "$FM_HOME" ] || continue
+    dirs+=("$dir")
+    printf '%s\n' "$dir" >> "$WORKER_DIRS"
   done
+  [ "${#dirs[@]}" -gt 0 ] || return 0
+  [ -s "$PSTABLE" ] || return 0
   saved=$CWDMAP
   CWDMAP="$WORK/worker-cwd.tsv"
   if read_all_cwds; then
@@ -398,6 +428,20 @@ collect_worker_processes() {  # <worktree>...
     done < "$CWDMAP"
   fi
   CWDMAP=$saved
+}
+
+# True when <cwd> lies in one of this home's worker worktrees, which makes the
+# process a worker's own - already reported as a worker row, with the close
+# command that refuses rather than discarding unlanded work - and never a
+# standalone background session.
+within_a_worker_worktree() {  # <cwd>
+  local dir
+  [ -s "$WORKER_DIRS" ] || return 1
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    path_within "$1" "$dir" && return 0
+  done < "$WORKER_DIRS"
+  return 1
 }
 
 # Longest-running harness process working in <dir>. Longest rather than newest
@@ -716,32 +760,68 @@ HARNESS_LOCK_PID=
 HARNESS_LOCK_OWNER=not_checked
 HARNESS_OTHER=0
 
-# The session asking the question is one of the sessions in this home, and
-# handing the captain a `kill` for the conversation he is having is worse than
-# telling him nothing. bin/fm-session-lock-lib.sh already owns "which harness
-# pids am I running inside", so that answer is reused rather than re-derived:
-# every pid in this process's own contiguous harness ancestry is self. The row
-# still appears - a session working here is a fact of the overview - but it is
-# marked as the captain's own and carries no close command, which is what keeps
-# it out of both the "To close" block and the unasked session-start line.
+# WHOSE SESSION IS THIS? Handing the captain a `kill` for the conversation he is
+# having is worse than telling him nothing, so no row may carry one until that
+# question has an answer. Two signals answer it, in order:
+#
+#   1. ANCESTRY. bin/fm-session-lock-lib.sh already owns "which harness pids am I
+#      running inside", so that answer is reused rather than re-derived: every
+#      pid in this process's own contiguous harness ancestry is self. This is the
+#      session-start path, where the bootstrap runs inside the session itself.
+#      When it resolves it is conclusive in both directions - if none of this
+#      home's sessions is in that ancestry, the captain is demonstrably talking
+#      to something else, and every row here is genuinely closeable.
+#   2. THE RECORDED SESSION LOCK. The overview's primary home is a pane the
+#      captain leaves open, and that pane is a child of the terminal, not of any
+#      harness, so signal 1 finds nothing there at all. What the pane can still
+#      read is this home's lock: when the pid it records is itself one of the
+#      sessions working in this home, that session is the one driving this home
+#      and therefore his.
+#
+# NEITHER RESOLVING IS NOT A LICENCE TO OFFER A KILL. A harness that records its
+# outermost daemon rather than the session pid leaves both signals silent, and
+# then every session here is equally likely to be his. Those rows say ownership
+# is unknown and carry no close command: the pid is still printed, so ending one
+# deliberately stays possible, but the overview stops proposing it.
 SELF_HARNESS_PIDS=
-resolve_self_harness_pids() {
+SELF_RESOLUTION=not_applicable
+resolve_session_ownership() {  # <session-pid>...
   local pid pids
-  [ -z "$SELF_HARNESS_PIDS" ] || return 0
   SELF_HARNESS_PIDS=' '
-  pids=$(fm_harness_ancestry_pids 2>/dev/null) || return 0
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    SELF_HARNESS_PIDS="$SELF_HARNESS_PIDS$pid "
-  done <<EOF
+  if pids=$(fm_harness_ancestry_pids 2>/dev/null); then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      SELF_HARNESS_PIDS="$SELF_HARNESS_PIDS$pid "
+    done <<EOF
 $pids
 EOF
+    SELF_RESOLUTION=ancestry
+    return 0
+  fi
+  for pid in "$@"; do
+    if [ -n "$HARNESS_LOCK_PID" ] && [ "$pid" = "$HARNESS_LOCK_PID" ]; then
+      SELF_HARNESS_PIDS=" $HARNESS_LOCK_PID "
+      SELF_RESOLUTION=session-lock
+      return 0
+    fi
+  done
+  SELF_RESOLUTION=unresolved
 }
 is_self_harness_pid() {  # <pid>
   case "$SELF_HARNESS_PIDS" in
     *" $1 "*) return 0 ;;
   esac
   return 1
+}
+
+session_detail() {  # <self:1|0|?>
+  local drives=yes
+  [ "$HARNESS_LOCK_OWNER" != ambiguous ] || drives=ambiguous
+  case "$1" in
+    1) printf 'drives this home: %s; this is your own session' "$drives" ;;
+    '?') printf 'drives this home: %s; whose session this is could not be established here' "$drives" ;;
+    *) printf 'drives this home: %s' "$drives" ;;
+  esac
 }
 
 collect_harness_sessions() {
@@ -785,7 +865,7 @@ collect_harness_sessions() {
 
   for pid in "${candidates[@]}"; do
     cwd=$(cwd_of "$pid")
-    if path_within "$cwd" "$FM_HOME"; then
+    if path_within "$cwd" "$FM_HOME" && ! within_a_worker_worktree "$cwd"; then
       mine+=("$pid")
     else
       HARNESS_OTHER=$((HARNESS_OTHER + 1))
@@ -798,11 +878,16 @@ collect_harness_sessions() {
     *) HARNESS_LOCK_OWNER=ambiguous ;;
   esac
 
-  [ "${#mine[@]}" -eq 0 ] || resolve_self_harness_pids
+  [ "${#mine[@]}" -eq 0 ] || resolve_session_ownership ${mine[@]+"${mine[@]}"}
 
   for pid in ${mine[@]+"${mine[@]}"}; do
     age=$(ps_field "$pid" 2)
-    if is_self_harness_pid "$pid"; then
+    if [ "$SELF_RESOLUTION" = unresolved ]; then
+      self='?'
+      close=''
+      safety=manual
+      cnote='which of this home'"'"'s sessions is your own could not be established from here, so none is offered for closing; the pid above is what you would end yourself'
+    elif is_self_harness_pid "$pid"; then
       self=1
       close=''
       safety=manual
@@ -813,8 +898,7 @@ collect_harness_sessions() {
       safety=confirm
       cnote='a live session: closing it can lose an unfinished turn'
     fi
-    emit_row harness-session "$pid" session "harness $root" \
-      "drives this home: $(if [ "$HARNESS_LOCK_OWNER" = ambiguous ]; then printf ambiguous; else printf yes; fi)$(if [ "$self" = 1 ]; then printf '; this is your own session'; fi)" \
+    emit_row harness-session "$pid" session "harness $root" "$(session_detail "$self")" \
       "$pid" "$age" process "$close" "$safety" "$cnote" 0 '' "$self"
   done
 }
@@ -834,6 +918,7 @@ JSON=$(
     --arg harness_root "$HARNESS_ROOT" \
     --arg lock_pid "$HARNESS_LOCK_PID" \
     --arg lock_owner "$HARNESS_LOCK_OWNER" \
+    --arg self_resolution "$SELF_RESOLUTION" \
     --argjson other "$HARNESS_OTHER" \
     --rawfile sources_raw "$SOURCES" \
     '
@@ -854,7 +939,8 @@ JSON=$(
          close_note: (.[10] | blank_null),
          held: (.[11] == "1"),
          task_age_seconds: (.[12] | as_num),
-         self: (.[13] == "1")}
+         self: (.[13] == "1"),
+         self_known: (.[13] != "?")}
         | .task_age_days = (if .task_age_seconds == null then null
                             else (.task_age_seconds / 86400 | floor) end)
         | .age_days = (if .age_seconds == null then null else (.age_seconds / 86400 | floor) end)
@@ -890,6 +976,7 @@ JSON=$(
          root_pid: ($harness_root | as_num),
          lock_pid: ($lock_pid | as_num),
          lock_owner: $lock_owner,
+         self_resolution: $self_resolution,
          sessions: ([$ordered[] | select(.kind == "harness-session")] | length),
          elsewhere: $other
        },
@@ -912,8 +999,14 @@ fi
 # review lines at every session start. The main home says them; a secondmate
 # home leaves them to it. The pages themselves stay in --json for every home,
 # and in the view, unchanged.
+#
+# Which home is which is bin/fm-primary-scope-lib.sh's decision, not a second
+# reading of the marker file here. A local `-e` test would call a symlinked
+# marker a secondmate home where that owner does not, and would call a dangling
+# one a main home where bin/fm-bootstrap.sh does not - and disagreeing about
+# that is precisely how every home ends up repeating these lines again.
 REVIEW_LINES=1
-[ ! -e "$FM_HOME/.fm-secondmate-home" ] || REVIEW_LINES=0
+fm_root_is_secondmate_home "$FM_HOME" && REVIEW_LINES=0
 printf '%s\n' "$JSON" | jq -r --argjson cap 8 --argjson reviews "$REVIEW_LINES" '
   def row_label($r):
     if $r.kind == "harness-session" then "background session \($r.id)"

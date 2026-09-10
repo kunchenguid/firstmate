@@ -262,7 +262,9 @@ Workers, services, and sessions are scoped to the home; the review pages are not
 It renders `bin/fm-session-inventory.sh --json`, which is the structured owner of that inventory; both are read-only and neither ever closes, kills, or signals anything it reports.
 Close commands are printed for you to run - one for every row that has one, whatever its age - and a row that could lose work in progress says so on the line below its command.
 The stale threshold below governs the `!` marks and the unasked session-start lines, not what you are offered a way to close.
-The one row that never carries a close command is the background session you are reading the overview from: it is marked `(yours)` and is yours to end, not something the overview offers to kill for you.
+The one row that never carries a close command is the captain's own background session: it is marked `(yours)` and is his to end, not something the overview offers to kill for him.
+It is recognised from the harness ancestry the overview runs in, and - in a pane, which has no harness ancestry at all - from the session this home's lock records as its owner.
+When neither answers, every session row says `(owner unknown)` and none is offered for closing; the pids are still shown, so ending one deliberately stays possible.
 
 Anything at or over the stale threshold is marked with a leading `!`.
 The age it is measured against is how long a worker has been RUNNING whenever a live process is working in its own local copy, and the age of the work itself when nothing is running, so abandoned work still holding a local copy is surfaced rather than hidden.
