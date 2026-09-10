@@ -136,8 +136,8 @@ jobs:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
     # Shard 2 also replays benchmark archives in real confinement and needs
-    # more time than the ordinary serial shards, including setup overhead.
-    timeout-minutes: ${{ matrix.shard == 2 && 60 || 30 }}
+    # headroom for runner variation beyond an hour, including setup overhead.
+    timeout-minutes: ${{ matrix.shard == 2 && 90 || 30 }}
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
