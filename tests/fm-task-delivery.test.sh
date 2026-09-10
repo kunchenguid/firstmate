@@ -51,12 +51,27 @@ write_brief() {  # <home> <id> [<recorded-mode>]
   } > "$home/data/$id/brief.md"
 }
 
+write_base_contract() {  # <brief> <base-branch>
+  local brief=$1 base=$2
+  cat >> "$brief" <<EOF
+<!-- fm-generated-contract-boundary -->
+<!-- fm-generated-contract -->
+# Definition of done
+Base branch contract: base_branch=$base
+<!-- fm-generated-contract-end -->
+EOF
+}
+
 fill_brief_subsections() {  # <file> <intent> <spec>
   local file=$1 intent=$2 spec=$3 content
   content=$(cat "$file")
   content=${content//'{TASK}'/$intent}
   content=${content//'{FIRSTMATE_SPEC}'/$spec}
   printf '%s\n' "$content" > "$file"
+}
+
+extract_dod_contract() {  # <generated-public-output>
+  awk '/^# Definition of done$/ { emit=1 } emit && $0 !~ /^<!-- fm-generated-contract/ { print }' "$1"
 }
 
 run_spawn() {  # <home> <fakebin> <spawn-args...>
@@ -165,7 +180,7 @@ test_spawn_refuses_a_brief_base_mismatch() {
 $rec
 EOF
   write_brief "$home" base-mismatch-e1 no-mistakes
-  printf 'Base branch contract: base_branch=develop\n' >> "$home/data/base-mismatch-e1/brief.md"
+  write_base_contract "$home/data/base-mismatch-e1/brief.md" develop
   out=$(run_spawn "$home" "$fakebin" base-mismatch-e1 "$proj" claude --mode no-mistakes --yolo off --base-branch release)
   status=$?
   [ "$status" -ne 0 ] || fail "a brief/spawn base mismatch should exit non-zero"
@@ -175,7 +190,7 @@ EOF
   assert_absent "$home/state/base-mismatch-e1.meta" "mismatched base spawn wrote task metadata"
 
   write_brief "$home" base-omitted-e2 no-mistakes
-  printf 'Base branch contract: base_branch=develop\n' >> "$home/data/base-omitted-e2/brief.md"
+  write_base_contract "$home/data/base-omitted-e2/brief.md" develop
   out=$(run_spawn "$home" "$fakebin" base-omitted-e2 "$proj" claude --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a brief with a recorded base and no --base-branch should exit non-zero"
@@ -184,7 +199,7 @@ EOF
   assert_absent "$home/state/base-omitted-e2.meta" "omitted-flag base mismatch wrote task metadata"
 
   write_brief "$home" base-agree-e3 no-mistakes
-  printf 'Base branch contract: base_branch=develop\n' >> "$home/data/base-agree-e3/brief.md"
+  write_base_contract "$home/data/base-agree-e3/brief.md" develop
   out=$(run_spawn "$home" "$fakebin" base-agree-e3 "$proj" claude --mode no-mistakes --yolo off --base-branch develop)
   assert_not_contains "$out" "base mismatch" "an agreeing base was reported as a mismatch"
 
@@ -402,8 +417,8 @@ STUB
       || fail "$mode: ordinary ship brief generation should succeed"
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
     delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
-    awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$brief_dod"
-    awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
+    extract_dod_contract "$home/data/$id/brief.md" > "$brief_dod"
+    extract_dod_contract "$payload" > "$delivered_dod"
     cmp -s "$brief_dod" "$delivered_dod" \
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
   done

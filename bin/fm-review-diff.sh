@@ -3,7 +3,7 @@
 #
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# the default branch, and local-only projects against the local landing base.
 # When state/<id>.meta records base_branch=, that name is the compare base
 # instead of the default; when the field is absent the default path is unchanged.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
