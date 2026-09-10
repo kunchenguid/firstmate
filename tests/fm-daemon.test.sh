@@ -1562,6 +1562,50 @@ EOF
   pass "a decision-owned queued row escalates once as the decision, then suppresses until the status changes"
 }
 
+# The watcher also marks a row decision-owned when its only new line is a
+# captain-held transfer, which ordinary signal classification self-handles as
+# routine. The daemon must still surface that row once as the held decision,
+# stay quiet while the status is unchanged, and leave ordinary signal: rows alone.
+test_captain_held_decision_owned_row_escalates_once_as_the_decision() {
+  local dir state fakebin status_file held out
+  dir=$(make_supercase captain-held-decision-owned-row)
+  state="$dir/state"
+  fakebin="$dir/daemon-bin"
+  mkdir -p "$fakebin"
+  held='captain-held [key=route]: tracked by task-decision-route'
+  status_file="$state/held-task.status"
+  printf '%s\n' "$held" > "$status_file"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then exit 0; fi
+printf '1\t1\tsignal\theld-task.status\t%s\n' "needs-decision: $status_file"
+printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+
+  FM_DAEMON_DIR="$fakebin" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999 \
+    handle_durable_wakes fallback "$state" \
+    || fail "the captain-held decision-owned row was not handled"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  [ "$out" = "captain-held decision: held-task.status: $held" ] \
+    || fail "a captain-held decision-owned row did not escalate once as the decision: $out"
+
+  : > "$state/.subsuper-escalations"
+  FM_DAEMON_DIR="$fakebin" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999 \
+    handle_durable_wakes fallback "$state" \
+    || fail "an unchanged captain-held decision-owned repeat was not handled"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an unchanged captain-held decision re-escalated: $(cat "$state/.subsuper-escalations")"
+
+  printf '%s\n' "$held" > "$state/held-ordinary.status"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-ordinary.status" "$state" \
+    || fail "an ordinary captain-held signal was not handled"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an ordinary signal: row escalated a captain-held transfer: $(cat "$state/.subsuper-escalations")"
+
+  pass "a captain-held decision-owned row escalates once as the decision; ordinary signal rows stay self-handled"
+}
+
 test_inject_skip_forces_self() {
   local dir state
   dir=$(make_supercase skip)
@@ -2787,6 +2831,7 @@ test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_needs_decision_queued_row_escalates_once_as_the_decision
+test_captain_held_decision_owned_row_escalates_once_as_the_decision
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
