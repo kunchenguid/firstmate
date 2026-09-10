@@ -118,6 +118,31 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+test_agy_model_effort_and_worker_boundary() {
+  local rec id launch effort
+  for effort in low high xhigh; do
+    id="agy-$effort"
+    rec=$(make_spawn_case "$id" agy "$id")
+    read_case_record "$rec"
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness agy --model gemini-3.8-flash-low --effort "$effort" >/dev/null \
+      || fail "agy $effort launch refused"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" agy gemini-3.8-flash-low "$effort"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" 'agy --dangerously-skip-permissions' 'agy autonomy flag missing'
+    assert_contains "$launch" "--model 'gemini-3.8-flash-low'" 'agy model missing'
+    assert_contains "$launch" '--prompt-interactive' 'agy initial prompt missing'
+    if [ "$effort" = xhigh ]; then
+      [[ "$launch" != *--effort* ]] || fail 'agy unsupported effort passed through'
+    else
+      assert_contains "$launch" "--effort '$effort'" 'agy supported effort omitted'
+    fi
+    [ ! -e "$WT_DIR/.gemini/settings.json" ] || fail 'agy wrote project Gemini settings'
+    [ ! -e "$HOME_DIR/state/$id.gemini-settings.json" ] || fail 'agy inherited Gemini hooks'
+  done
+  pass 'agy launch carries model and supported effort without Gemini settings'
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -1297,6 +1322,7 @@ test_non_claude_harness_ignores_claude_permission_mode() {
 }
 
 test_worker_launch_delivers_role_scope
+test_agy_model_effort_and_worker_boundary
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
