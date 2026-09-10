@@ -49,7 +49,7 @@ Never add an agent name as a commit co-author.
 
 ## 2. Layout and state
 
-`docs/configuration.md` is the single owner of the operational-home layout and every configuration schema; each producing script's header and help own exact child fields and mutation mechanics.
+`docs/configuration.md` owns the top-level operational-home layout and the configuration schemas it documents, while each producing script's header and help own exact child fields and mutation mechanics, and each per-feature doc owns its own schema.
 Read those owners when a concrete path, field, or configuration knob matters rather than working from a remembered file list.
 
 `FM_HOME` selects an instance's private `data/`, `state/`, `config/`, and `projects/`, while scripts continue to come from their tracked code root.
