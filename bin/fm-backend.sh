@@ -382,6 +382,11 @@ fm_backend_meta_exact_value() {  # <meta-file> <key>
   printf '%s' "$value"
 }
 
+# fm_backend_endpoint_atom_valid: the shared, deliberately narrow character
+# class for one endpoint atom (a session, workspace, tab, pane, surface, or
+# terminal handle). Do NOT widen it for a backend whose runtime issues a
+# richer id: that backend's adapter owns its own id shape and validates it
+# there, as bin/backends/orca.sh does with fm_backend_orca_worktree_id_valid.
 fm_backend_endpoint_atom_valid() {  # <value>
   case "$1" in
     ''|*[!A-Za-z0-9._@%+-]*) return 1 ;;
@@ -506,9 +511,13 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         echo "REFUSED: missing orca_worktree_id in $meta; cannot remove Orca worktree; preserving task state." >&2
         return 1
       }
+      fm_backend_source orca || {
+        echo "REFUSED: cannot load the Orca backend adapter to validate task $id; preserving task state." >&2
+        return 1
+      }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
