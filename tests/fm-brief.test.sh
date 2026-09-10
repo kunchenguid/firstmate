@@ -245,14 +245,18 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
       "$mode existing-PR brief did not resolve the forge-reported PR head"
     assert_grep "git fetch origin \"+refs/heads/\$PR_BRANCH:refs/remotes/origin/\$PR_BRANCH\"" "$brief" \
       "$mode existing-PR brief did not update the remote-tracking head from origin"
-    assert_grep "git checkout -B \"\$PR_BRANCH\" \"origin/\$PR_BRANCH\"" "$brief" \
-      "$mode existing-PR brief did not check out the existing origin head"
+    assert_grep "git clone --quiet --no-checkout --filter=blob:none" "$brief" \
+      "$mode existing-PR brief did not isolate forge head resolution"
+    assert_grep "git checkout --ignore-other-worktrees \"\$PR_BRANCH\"" "$brief" \
+      "$mode existing-PR brief did not support an existing linked-worktree branch"
     assert_grep "[ \"\$PR_BRANCH\" = 'bookie/existing-head' ]" "$brief" \
       "$mode existing-PR brief did not assert the caller-supplied head branch"
-    assert_grep "git config --get \"branch.\$PR_BRANCH.remote\"" "$brief" \
+    assert_grep "config --get \"branch.\$PR_BRANCH.remote\"" "$brief" \
       "$mode existing-PR brief did not reject a fork-hosted head"
     assert_grep "git remote get-url --push origin" "$brief" \
       "$mode existing-PR brief did not validate origin's effective push target"
+    assert_grep "existing PR head is the origin default branch" "$brief" \
+      "$mode existing-PR brief did not refuse a default-branch head"
     assert_grep "$home/data/$id/existing-pr-branch" "$brief" \
       "$mode existing-PR brief did not preserve the forge-resolved head branch"
     assert_grep "Never force-push, never open a second PR" "$brief" \
@@ -288,7 +292,7 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
 }
 
 test_existing_pr_setup_checks_out_a_new_origin_branch() {
-  local root remote source work home brief setup_command setup_out source_head fakebin real_git
+  local root remote source work holder home brief setup_command setup_out source_head fakebin real_git default_brief default_command default_out
   root="$TMP_ROOT/existing-pr-checkout"
   remote="$root/remote.git"
   source="$root/source"
@@ -304,6 +308,7 @@ test_existing_pr_setup_checks_out_a_new_origin_branch() {
   git -C "$source" branch -M main
   git -C "$source" remote add origin "$remote"
   git -C "$source" push origin main >/dev/null 2>&1
+  git --git-dir="$remote" symbolic-ref HEAD refs/heads/main
   git -C "$source" switch -c existing/head >/dev/null 2>&1
   printf 'head\n' >> "$source/file"
   git -C "$source" commit -am head >/dev/null
@@ -313,6 +318,11 @@ test_existing_pr_setup_checks_out_a_new_origin_branch() {
     || fail "could not clone existing-PR checkout fixture"
   git -C "$work" remote set-url origin https://github.com/kunchenguid/firstmate
   git -C "$work" config url."$remote".insteadOf https://github.com/kunchenguid/firstmate
+  git -C "$work" fetch origin '+refs/heads/existing/head:refs/remotes/origin/existing/head' >/dev/null 2>&1
+  git -C "$work" branch existing/head origin/existing/head >/dev/null 2>&1
+  holder="$root/holder"
+  git -C "$work" worktree add "$holder" existing/head >/dev/null 2>&1 \
+    || fail "could not put the existing PR branch in a linked worktree"
   fakebin="$root/bin"
   mkdir -p "$fakebin"
   real_git=$(command -v git)
@@ -327,16 +337,20 @@ if [ "\${1:-}" = remote ] && [ "\${2:-}" = get-url ] \
   fi
   exit 0
 fi
+if [ "\${1:-}" = clone ]; then
+  exec '$real_git' clone --quiet --no-checkout --filter=blob:none "\$FM_TEST_PR_REMOTE" "\${6:-}"
+fi
 exec '$real_git' "\$@"
 EOF
   chmod +x "$fakebin/git"
   cat > "$fakebin/gh-axi" <<'EOF'
 #!/bin/sh
 [ "$1" = pr ] && [ "$2" = checkout ] && [ "$3" = 2460 ] || exit 2
-git fetch origin '+refs/heads/existing/head:refs/remotes/origin/existing/head' || exit
-git checkout -B existing/head origin/existing/head || exit
-git config branch.existing/head.remote origin
-git config branch.existing/head.merge refs/heads/existing/head
+pr_branch=${FM_TEST_PR_BRANCH:-existing/head}
+git fetch origin "+refs/heads/$pr_branch:refs/remotes/origin/$pr_branch" || exit
+git checkout -B "$pr_branch" "origin/$pr_branch" || exit
+git config "branch.$pr_branch.remote" origin
+git config "branch.$pr_branch.merge" "refs/heads/$pr_branch"
 EOF
   chmod +x "$fakebin/gh-axi"
   mkdir -p "$home/data"
@@ -347,13 +361,26 @@ EOF
   # shellcheck disable=SC2016 # The sed expression is a literal parser for the generated Markdown command.
   setup_command=$(sed -n 's/^1\. First action:.*: `\(.*\)`\.$/\1/p' "$brief")
   [ -n "$setup_command" ] || fail "could not read the generated existing-PR setup command"
-  setup_out=$(cd "$work" && PATH="$fakebin:$PATH" eval "$setup_command" 2>&1) \
-    || fail "generated existing-PR setup could not check out a previously unfetched origin branch: $setup_out"
+  setup_out=$(cd "$work" && FM_TEST_PR_REMOTE="$remote" PATH="$fakebin:$PATH" eval "$setup_command" 2>&1) \
+    || fail "generated existing-PR setup could not check out a branch held by another worktree: $setup_out"
   [ "$(git -C "$work" branch --show-current)" = existing/head ] \
     || fail "generated existing-PR setup checked out the wrong local branch"
   [ "$(git -C "$work" rev-parse HEAD)" = "$source_head" ] \
     || fail "generated existing-PR setup did not check out the current origin head"
-  pass "fm-brief.sh: existing-PR setup fetches and checks out a previously unknown origin branch"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" checkout-default firstmate --mode direct-PR \
+    --existing-pr https://github.com/kunchenguid/firstmate/pull/2460 \
+    --branch main >/dev/null 2>&1
+  default_brief="$home/data/checkout-default/brief.md"
+  # shellcheck disable=SC2016 # The sed expression is a literal parser for the generated Markdown command.
+  default_command=$(sed -n 's/^1\. First action:.*: `\(.*\)`\.$/\1/p' "$default_brief")
+  [ -n "$default_command" ] || fail "could not read the generated default-branch setup command"
+  if default_out=$(cd "$work" && FM_TEST_PR_REMOTE="$remote" FM_TEST_PR_BRANCH=main PATH="$fakebin:$PATH" eval "$default_command" 2>&1); then
+    fail "generated existing-PR setup accepted the origin default branch"
+  fi
+  assert_contains "$default_out" "existing PR head is the origin default branch" \
+    "generated existing-PR setup did not explain its default-branch refusal"
+  pass "fm-brief.sh: existing-PR setup handles linked worktrees and refuses the default branch"
 }
 
 test_existing_pr_base_validation_is_scoped_to_delivery_metadata() {

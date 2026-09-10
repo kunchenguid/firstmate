@@ -305,10 +305,11 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 Each task's mode and `yolo` merge posture are firstmate's decision at intake.
 The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed explicitly to `bin/fm-spawn.sh` and `bin/fm-promote.sh`; each command refuses to guess the values it consumes.
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.
-An existing-PR ship brief additionally records the canonical PR URL, resolves its head through `gh-axi`, verifies that the head is origin-hosted, and replaces new-branch and new-PR instructions with same-branch checkout and non-force push rules.
+An existing-PR ship brief additionally records the canonical PR URL, resolves its head through `gh-axi` in a disposable probe clone, verifies that the head is origin-hosted and not the default branch, and replaces new-branch and new-PR instructions with same-branch checkout and non-force push rules.
 An optional `--branch` is a checked assertion against the forge-reported head rather than manually substituted shell text, and an existing-PR no-mistakes brief is refused at spawn until it records a valid base branch for the pipeline's `--base-branch` target.
 The resolved head name is preserved in the task's absolute Firstmate artifact directory so direct pushes and no-mistakes entry both re-check the current branch against that identity; direct-PR pushes it explicitly, while no-mistakes remains the sole owner of its mode's push.
-Fork-hosted heads are refused before any origin fetch or push because the brief contract never redirects a push away from origin.
+The disposable probe prevents a linked worktree that already holds the PR branch from blocking forge resolution, while the task worktree may attach the synchronized local branch explicitly.
+Fork-hosted and default-branch heads are refused before any task-worktree origin fetch or push because the brief contract never redirects a push away from origin or permits updating the default branch.
 Every generated ship or scout brief records the absolute Firstmate home and task-artifact directory so a home-relative report or evidence path cannot be mistaken for a path inside the project worktree.
 `bin/fm-dod-lib.sh` is the one owner of that mode's definition of done, rendered both into a generated ship brief and into the ship instructions a promoted scout receives, so a promoted worker cannot be handed a weaker contract than a briefed one.
 It is also the one owner of the no-mistakes `--intent` contract those workers follow.
