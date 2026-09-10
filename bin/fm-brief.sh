@@ -269,10 +269,9 @@ shell_quote() {
 }
 
 if [ "$EXISTING_PR_SET" -eq 1 ]; then
-  EXPECTED_ORIGIN_HTTPS=$(shell_quote "https://github.com/$FM_PR_OWNER/$FM_PR_REPO")
-  EXPECTED_ORIGIN_HTTPS_GIT=$(shell_quote "https://github.com/$FM_PR_OWNER/$FM_PR_REPO.git")
-  EXPECTED_ORIGIN_SSH=$(shell_quote "git@github.com:$FM_PR_OWNER/$FM_PR_REPO.git")
-  EXPECTED_ORIGIN_SSH_URL=$(shell_quote "ssh://git@github.com/$FM_PR_OWNER/$FM_PR_REPO.git")
+  EXPECTED_ORIGIN=$(printf 'https://github.com/%s/%s' "$FM_PR_OWNER" "$FM_PR_REPO" | tr '[:upper:]' '[:lower:]')
+  EXPECTED_ORIGIN_QUOTED=$(shell_quote "$EXPECTED_ORIGIN")
+  EXISTING_PR_BRANCH_FILE=$(shell_quote "$DATA/$ID/existing-pr-branch")
   if [ "$BRANCH_SET" -eq 1 ]; then
     EXPECTED_BRANCH_QUOTED=$(shell_quote "$BRANCH")
     BRANCH_ASSERT=" && [ \"\$PR_BRANCH\" = $EXPECTED_BRANCH_QUOTED ] || { echo 'error: forge-reported PR head branch does not match --branch' >&2; exit 1; }"
@@ -519,15 +518,17 @@ fi
 # The block opens with the fixed "Delivery contract: mode=<mode>" line that
 # bin/fm-spawn.sh checks against its own explicit --mode before launching.
 if [ "$EXISTING_PR_SET" -eq 1 ]; then
-  SETUP1="1. First action: resolve the existing PR head through gh-axi, verify its repository and upstream are origin, then refresh and check out that exact origin branch: \`case \"\$(git remote get-url origin)\" in $EXPECTED_ORIGIN_HTTPS|$EXPECTED_ORIGIN_HTTPS_GIT|$EXPECTED_ORIGIN_SSH|$EXPECTED_ORIGIN_SSH_URL) ;; *) echo 'error: origin fetch URL does not match the existing PR repository' >&2; exit 1 ;; esac; case \"\$(git remote get-url --push origin)\" in $EXPECTED_ORIGIN_HTTPS|$EXPECTED_ORIGIN_HTTPS_GIT|$EXPECTED_ORIGIN_SSH|$EXPECTED_ORIGIN_SSH_URL) ;; *) echo 'error: origin push URL does not match the existing PR repository' >&2; exit 1 ;; esac; gh-axi pr checkout $FM_PR_NUMBER && PR_BRANCH=\$(git branch --show-current) && git check-ref-format \"refs/heads/\$PR_BRANCH\" >/dev/null$BRANCH_ASSERT; [ \"\$(git config --get \"branch.\$PR_BRANCH.remote\")\" = origin ] || { echo 'error: existing PR head is not hosted on origin' >&2; exit 1; }; git fetch origin \"+refs/heads/\$PR_BRANCH:refs/remotes/origin/\$PR_BRANCH\" && git checkout -B \"\$PR_BRANCH\" \"origin/\$PR_BRANCH\"\`.
+  SETUP1="1. First action: resolve the existing PR head through gh-axi, verify its repository and upstream are origin, then refresh and check out that exact origin branch: \`fm_pr_normalize_origin() { printf '%s\\n' \"\$1\" | sed -E -e 's#^git@github\\.com:#https://github.com/#' -e 's#^ssh://git@github\\.com/#https://github.com/#' -e 's#^git://github\\.com/#https://github.com/#' -e 's#/*\$##' -e 's#\\.git\$##' | tr '[:upper:]' '[:lower:]'; }; [ \"\$(fm_pr_normalize_origin \"\$(git remote get-url origin)\")\" = $EXPECTED_ORIGIN_QUOTED ] || { echo 'error: origin fetch URL does not match the existing PR repository' >&2; exit 1; }; [ \"\$(fm_pr_normalize_origin \"\$(git remote get-url --push origin)\")\" = $EXPECTED_ORIGIN_QUOTED ] || { echo 'error: origin push URL does not match the existing PR repository' >&2; exit 1; }; gh-axi pr checkout $FM_PR_NUMBER && PR_BRANCH=\$(git branch --show-current) && git check-ref-format \"refs/heads/\$PR_BRANCH\" >/dev/null$BRANCH_ASSERT; [ \"\$(git config --get \"branch.\$PR_BRANCH.remote\")\" = origin ] || { echo 'error: existing PR head is not hosted on origin' >&2; exit 1; }; git fetch origin \"+refs/heads/\$PR_BRANCH:refs/remotes/origin/\$PR_BRANCH\" && git checkout -B \"\$PR_BRANCH\" \"origin/\$PR_BRANCH\" && printf '%s\\n' \"\$PR_BRANCH\" > $EXISTING_PR_BRANCH_FILE\`.
    If the PR head is fork-hosted, origin lacks the branch, or you cannot push it, append \`blocked: existing PR head branch is not writable on origin\` and stop; never redirect the push to another remote."
   if [ "$MODE" = no-mistakes ]; then
     SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`. If its configured push target is not this exact origin repository and recorded PR head branch, append \`blocked: no-mistakes is not configured for the existing PR head branch\` and stop."
+    RULE1="1. Commit only on the checked-out existing PR branch. Before starting /no-mistakes, verify it is still the resolved head with \`EXPECTED_PR_BRANCH=\$(cat $EXISTING_PR_BRANCH_FILE); [ \"\$(git branch --show-current)\" = \"\$EXPECTED_PR_BRANCH\" ] && [ \"\$(git config --get \"branch.\$EXPECTED_PR_BRANCH.remote\")\" = origin ]\`; if either check fails, stop and report the branch mismatch. Never push directly: no-mistakes alone owns the push to that branch. Never force-push, never open a second PR, and never merge the existing PR."
   else
     SETUP2=""
+    RULE1="1. Commit on the checked-out existing PR branch and push only to that recorded origin branch with \`EXPECTED_PR_BRANCH=\$(cat $EXISTING_PR_BRANCH_FILE); [ \"\$(git branch --show-current)\" = \"\$EXPECTED_PR_BRANCH\" ] && [ \"\$(git config --get \"branch.\$EXPECTED_PR_BRANCH.remote\")\" = origin ] || { echo 'error: current branch is not the resolved existing PR head' >&2; exit 1; }; git push origin \"HEAD:\$EXPECTED_PR_BRANCH\"\`. Never force-push, never open a second PR, and never merge the existing PR."
   fi
-  RULE1="1. Commit on the checked-out existing PR branch and push only to that same origin branch with \`PR_BRANCH=\$(git branch --show-current) && git push origin \"HEAD:\$PR_BRANCH\"\`. Never force-push, never open a second PR, and never merge the existing PR."
+  RULE2="2. Stay inside this worktree; outside it, write only the status file and the Firstmate-owned branch-identity artifact at $EXISTING_PR_BRANCH_FILE."
 else
   SETUP1="1. First action: create your branch: \`git checkout -b fm/$ID\`"
   case "$MODE" in
@@ -545,6 +546,7 @@ else
       RULE1='1. Never push to the default branch. Never merge a PR.'
       ;;
   esac
+  RULE2="2. Stay inside this worktree; modify nothing outside it."
 fi
 DOD=$(fm_dod_block "$MODE" "$ID" "$EXISTING_PR" "$BASE_BRANCH") || exit 1
 
@@ -568,7 +570,7 @@ $SETUP1$SETUP2
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+$RULE2
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

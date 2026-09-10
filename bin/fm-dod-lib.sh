@@ -273,7 +273,6 @@ When you believe it is complete, append \`done: {summary}\` to the status file a
 Firstmate will then instruct you to run /no-mistakes to validate and update that existing PR.
 When starting that run, pass the existing PR base branch recorded above as \`--base-branch\` so rebase, PR lookup, and CI target the PR's actual base.
 Never open a second PR, and never allow the pipeline to replace the existing PR branch with a new branch.
-After the pipeline reports the existing PR ready with green checks, append \`done: PR $existing_pr head <sha> checks green\`, replacing \`<sha>\` with the pushed commit's full SHA.
 EOF
       else
       cat <<EOF

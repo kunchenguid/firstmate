@@ -253,8 +253,8 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
       "$mode existing-PR brief did not reject a fork-hosted head"
     assert_grep "git remote get-url --push origin" "$brief" \
       "$mode existing-PR brief did not validate origin's effective push target"
-    assert_grep "git push origin \"HEAD:\$PR_BRANCH\"" "$brief" \
-      "$mode existing-PR brief did not push back to the same branch"
+    assert_grep "$home/data/$id/existing-pr-branch" "$brief" \
+      "$mode existing-PR brief did not preserve the forge-resolved head branch"
     assert_grep "Never force-push, never open a second PR" "$brief" \
       "$mode existing-PR brief lost its force-push and duplicate-PR prohibitions"
     if [ "$mode" = no-mistakes ]; then
@@ -262,6 +262,13 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
         "no-mistakes existing-PR brief did not record its base branch"
       assert_grep "--base-branch" "$brief" \
         "no-mistakes existing-PR brief did not target the recorded PR base"
+      assert_grep "Never push directly: no-mistakes alone owns the push to that branch." "$brief" \
+        "no-mistakes existing-PR brief bypassed the selected delivery pipeline"
+      assert_no_grep "git push origin \"HEAD:" "$brief" \
+        "no-mistakes existing-PR brief retained a direct push command"
+    else
+      assert_grep "git push origin \"HEAD:\$EXPECTED_PR_BRANCH\"" "$brief" \
+        "direct-PR existing brief did not push back to the recorded head branch"
     fi
     assert_grep "done: PR $url head <sha> checks green" "$brief" \
       "$mode existing-PR brief did not bind done to the existing PR head and green checks"
@@ -313,7 +320,11 @@ test_existing_pr_setup_checks_out_a_new_origin_branch() {
 #!/bin/sh
 if [ "\${1:-}" = remote ] && [ "\${2:-}" = get-url ] \
   && { [ "\${3:-}" = origin ] || { [ "\${3:-}" = --push ] && [ "\${4:-}" = origin ]; }; }; then
-  printf '%s\n' https://github.com/kunchenguid/firstmate
+  if [ "\${3:-}" = --push ]; then
+    printf '%s\n' ssh://git@github.com/kunchenguid/firstmate.git/
+  else
+    printf '%s\n' git@github.com:kunchenguid/firstmate
+  fi
   exit 0
 fi
 exec '$real_git' "\$@"
