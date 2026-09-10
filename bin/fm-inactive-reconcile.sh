@@ -42,8 +42,11 @@
 # deadline path is not racing its own backstop.
 #
 # It considers only a direct ordinary crewmate whose newest meta, status, or
-# turn-ended mtime is older than that interval and whose last status is not
-# captain-held. In a secondmate home a child whose ledger already ends in a
+# turn-ended mtime is older than that interval. After those cheap eligibility
+# checks and before any endpoint or current-state read, a successful
+# `fm-captain-hold.sh open <id>` excludes the task even when its status ledger
+# ends in done or resolved; an unreadable or non-open hold does not suppress
+# reconciliation. In a secondmate home a child whose ledger already ends in a
 # terminal done or failed line belongs to the ledger-first path above and is
 # skipped here, so one outcome is never reported twice. It then uses
 # fm-crew-state.sh as the sole current-state source.
@@ -75,8 +78,9 @@
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
 #
-# The scan reads only durable local state and fm-crew-state.sh; it never invokes
-# gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
+# The scan reads only durable local state, the read-only captain-hold predicate,
+# and fm-crew-state.sh; it never invokes gh, gh-axi, curl, fm-pr-check.sh,
+# fm-pr-poll.sh, or a state *.check.sh.
 set -u
 export LC_ALL=C
 
