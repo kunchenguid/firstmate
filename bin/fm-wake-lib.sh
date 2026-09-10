@@ -340,8 +340,8 @@ fm_afk_daemon_owns_supervision() {
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns. A stale or absent beacon is still
 # healthy while fm_autoarm_midturn_healthy proves a Claude auto-arm generation
-# explains the gap (open arming claim, or a rewake handling turn with no
-# exhausted-failure marker and a live session lock), because turn-end re-arms.
+# explains the gap (a rewake bound to the current recovery generation and
+# live session lock), because turn-end re-arms.
 # Without that proof a stale or absent beacon is a genuine lapse.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
 # genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
@@ -1336,7 +1336,8 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
 }
 
 # Parse the current ledger claim. Sets FM_AUTOARM_GEN, FM_AUTOARM_OWNER,
-# FM_AUTOARM_OUTCOME, and FM_AUTOARM_IDENTITY (line 2 of the entry, and ONLY
+# FM_AUTOARM_OUTCOME, FM_AUTOARM_SESSION, FM_AUTOARM_RECOVERY, and
+# FM_AUTOARM_IDENTITY (line 2 of the entry, and ONLY
 # line 2 - identity is never substituted from a lock, so a transient
 # micro-mutex hold or a reused pid can never authenticate a stale entry).
 fm_autoarm_ledger_read() {  # <state-dir>
@@ -1345,10 +1346,14 @@ fm_autoarm_ledger_read() {  # <state-dir>
   FM_AUTOARM_GEN=
   FM_AUTOARM_OWNER=
   FM_AUTOARM_OUTCOME=
+  FM_AUTOARM_SESSION=
+  FM_AUTOARM_RECOVERY=
   FM_AUTOARM_IDENTITY=
   FM_AUTOARM_GEN=$(_fm_autoarm_epoch_field "$epoch" epoch) || return 1
   FM_AUTOARM_OWNER=$(_fm_autoarm_epoch_field "$epoch" owner_pid) || return 1
   FM_AUTOARM_OUTCOME=$(_fm_autoarm_epoch_field "$epoch" outcome) || return 1
+  FM_AUTOARM_SESSION=$(_fm_autoarm_epoch_field "$epoch" session_pid 2>/dev/null || true)
+  FM_AUTOARM_RECOVERY=$(_fm_autoarm_epoch_field "$epoch" recovery_generation 2>/dev/null || true)
   case "$FM_AUTOARM_GEN" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -1389,30 +1394,34 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
 # auto-arm generation, so the pull guard must not cry supervision-off.
 # The watcher runs only between turns; turn-end re-arms.
 #
-# Healthy means any of:
-#   - an OPEN generation claim (fm_autoarm_claim_open): arming is in progress
-#     and not stuck
-#   - outcome=rewake, no exhausted-failure marker
-#     (state/.claude-autoarm-failure-notified or
-#     state/.claude-autoarm-failure-alarmed), and a live pid in state/.lock,
-#     proving a session is still in the handling turn that rewake started
+# Healthy means outcome=rewake with no exhausted-failure marker, bound to the
+# current session-lock pid and current watcher recovery generation. The rewake
+# ledger must also be at least as new as the last watcher beacon: a later beacon
+# proves another between-turns watcher cycle has begun, so the rewake belongs to
+# an earlier handling turn.
 #
-# A missing generation, a failed or exhausted episode, a stuck arming claim,
-# or a dead session lock all fail it, so a genuine lapse stays loud.
-# Cursor autoarm homes have no Claude epoch ledger and fail this, keeping
-# their existing fresh-beacon-only pull-guard contract.
-# This predicate is deliberately not a freshness check on the rewake epoch:
-# a legitimate handling turn can outrun grace, which is the false alarm this
+# A missing generation, a failed or exhausted episode, an open arming claim, a
+# changed or dead session lock, a moved recovery generation, or an absent/later
+# beacon all fail it, so a genuine lapse stays loud. Cursor autoarm homes have no
+# Claude epoch ledger and fail this, keeping their existing fresh-beacon-only
+# pull-guard contract. The rewake and beacon may both be older than grace: a
+# legitimate handling turn can outrun grace, which is the false alarm this
 # exists to stop.
 fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock_pid
+  local state=$1 lock_pid recovery epoch_mtime beacon_mtime
   [ -e "$state/.claude-autoarm-failure-notified" ] && return 1
   [ -e "$state/.claude-autoarm-failure-alarmed" ] && return 1
-  fm_autoarm_claim_open "$state" "$grace" && return 0
   fm_autoarm_ledger_read "$state" || return 1
   [ "$FM_AUTOARM_OUTCOME" = rewake ] || return 1
   lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
-  fm_pid_alive "$lock_pid"
+  [ -n "$FM_AUTOARM_SESSION" ] && [ "$FM_AUTOARM_SESSION" = "$lock_pid" ] || return 1
+  fm_pid_alive "$lock_pid" || return 1
+  fm_recovery_marker_read "$state/.watcher-down" || return 1
+  recovery=${FM_RECOVERY_MARKER_TOKEN##*:}
+  [ -n "$FM_AUTOARM_RECOVERY" ] && [ "$FM_AUTOARM_RECOVERY" = "$recovery" ] || return 1
+  epoch_mtime=$(fm_path_mtime "$state/.claude-autoarm-epoch") || return 1
+  beacon_mtime=$(fm_path_mtime "$state/.last-watcher-beat") || return 1
+  [ "$epoch_mtime" -ge "$beacon_mtime" ]
 }
 
 # Atomically publish this process as the owner of generation N+1, under one
@@ -1463,8 +1472,8 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
 # ordering could permanently suppress a notice whose ledger write never won.
 # Returns 0 committed, 2 refused (superseded or required-marker failure), and 1
 # unable (bounded contention or ledger-write failure).
-fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
-  local state=$1 gen=$2 outcome=$3 marker=${4:-} lock epoch pid identity tmp i
+fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session-pid] [recovery-generation]
+  local state=$1 gen=$2 outcome=$3 marker=${4:-} session=${5:-} recovery=${6:-} lock epoch pid identity tmp i
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   pid=${BASHPID:-$$}
@@ -1482,8 +1491,11 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
   identity=$FM_AUTOARM_IDENTITY
   tmp="$epoch.tmp.$pid"
   if ! {
-      printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
+      printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s' \
         "$gen" "$pid" "$outcome" "$(date +%s)"
+      [ -z "$session" ] || printf ' session_pid=%s' "$session"
+      [ -z "$recovery" ] || printf ' recovery_generation=%s' "$recovery"
+      printf '\n'
       [ -z "$identity" ] || printf '%s\n' "$identity"
     } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
