@@ -2511,7 +2511,10 @@ freshen_spawn_worktree_base() {  # <worktree>
     has_origin=1
   fi
   if [ -n "${BASE_BRANCH:-}" ]; then
-    if [ "$has_origin" -eq 1 ]; then
+    if [ "${MODE:-}" = local-only ] \
+      && git -C "$worktree" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
+      target="refs/heads/$BASE_BRANCH"
+    elif [ "$has_origin" -eq 1 ]; then
       remote_status=0
       git -C "$worktree" ls-remote --exit-code --heads origin "refs/heads/$BASE_BRANCH" >/dev/null 2>&1 || remote_status=$?
       case "$remote_status" in

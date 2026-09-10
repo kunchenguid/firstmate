@@ -811,6 +811,39 @@ test_local_only_and_scout_base_branch_use_local_when_origin_lacks_it() {
   pass "scout --base-branch uses a local branch when origin lacks it"
 }
 
+test_local_only_base_branch_prefers_local_over_origin() {
+  local rec id out status local_sha remote_sha
+  id='pool-base-branch-local-preferred-r8'
+  rec=$(make_case base-branch-local-preferred "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" checkout --quiet -B develop "$INITIAL_SHA"
+  printf 'local develop\n' > "$POOL_DIR/local-develop.txt"
+  git -C "$POOL_DIR" add local-develop.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm local-develop
+  local_sha=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'remote develop\n' > "$CASE_DIR/publisher/remote-develop.txt"
+  git -C "$CASE_DIR/publisher" add remote-develop.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm remote-develop
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  remote_sha=$(git -C "$CASE_DIR/publisher" rev-parse HEAD)
+  git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
+  scaffold_ship_brief "$id" local-only develop
+
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should use its local named base when origin also has it"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_sha" ] \
+    || fail "local-only spawn did not reset to the local named base"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$remote_sha" ] \
+    || fail "local-only spawn reset to the remote named base"
+  assert_grep 'local develop' "$POOL_DIR/local-develop.txt" \
+    "local-only spawn omitted content from the local named base"
+  pass "local-only spawn prefers the local named base over origin"
+}
+
 test_pr_modes_refuse_base_missing_from_origin() {
   local rec id out status before mode slug
   for mode in no-mistakes direct-PR; do
@@ -1062,6 +1095,7 @@ test_stale_pin_beside_other_dirt_reports_one_verdict
 test_base_branch_resets_to_named_origin_tip
 test_absent_base_branch_leaves_default_freshen_and_meta
 test_local_only_and_scout_base_branch_use_local_when_origin_lacks_it
+test_local_only_base_branch_prefers_local_over_origin
 test_pr_modes_refuse_base_missing_from_origin
 test_base_branch_ref_fetch_failure_refuses_local_fallback
 test_missing_base_branch_refuses_without_default_fallback
