@@ -1356,7 +1356,9 @@ content_in_default() {
   if [ -z "$name" ]; then
     name=$(default_branch) || return 1
   fi
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+  if [ "$MODE" = local-only ] && git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+    ref="refs/heads/$name"
+  elif git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then

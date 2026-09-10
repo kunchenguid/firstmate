@@ -45,7 +45,8 @@ test_recorded_custom_branch_merges() {
   commit_on "$project" feature/custom custom.txt
   git -C "$project" checkout -q main
   printf '%s\n' '# Task' 'User text' '# Definition of done' 'Crew branch: branch=main' \
-    '# Setup' 'Generated setup' '# Definition of done' 'Crew branch: branch=feature/custom' \
+    '# Setup' 'Generated setup' '<!-- fm-generated-contract -->' '# Definition of done' \
+    'Crew branch: branch=feature/custom' \
     > "$case_dir/home/data/$id/brief.md"
   run_merge "$case_dir" "$id" >/dev/null \
     || fail "merge-local refused the recorded custom crew branch"
@@ -75,7 +76,7 @@ test_last_recorded_crew_branch_wins() {
   git -C "$project" checkout -q main
   commit_on "$project" feature/last last.txt
   git -C "$project" checkout -q main
-  printf '%s\n' '# Definition of done' 'Crew branch: branch=feature/first' 'Crew branch: branch=feature/last' \
+  printf '%s\n' '<!-- fm-generated-contract -->' '# Definition of done' 'Crew branch: branch=feature/first' 'Crew branch: branch=feature/last' \
     > "$case_dir/home/data/$id/brief.md"
   run_merge "$case_dir" "$id" >/dev/null \
     || fail "merge-local refused the last recorded crew branch"
