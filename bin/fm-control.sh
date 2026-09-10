@@ -451,7 +451,7 @@ do_exit() {
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
-    dead)
+    dead|stale-idle)
       printf 'already-stopped'
       return 0
       ;;

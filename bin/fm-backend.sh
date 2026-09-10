@@ -881,12 +881,16 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   alive      - a verified harness agent is running.
 #   dead       - the endpoint exists but confidently has no agent.
 #   missing    - the recorded endpoint is authoritatively absent.
+#   stale-idle - herdr only: an idle registration strictly proved detached
+#                from its agent. Not one of the two values that license
+#                generic recovery; bin/fm-spawn.sh's --relaunch path owns its
+#                dedicated, revalidated replacement flow.
 #   ambiguous  - the endpoint exists but its process cannot be attributed.
 #   unreadable - a target or inventory read failed or contradicted itself.
 #   unverified - this backend has no recovery classifier.
-# Only `dead` and `missing` license recovery. The tmux adapter requires a
-# successful session inventory and returns `missing` only when it omits the
-# exact window; the Herdr adapter reuses its husk
+# Only `dead` and `missing` license generic recovery. The tmux adapter
+# requires a successful session inventory and returns `missing` only when it
+# omits the exact window; the Herdr adapter reuses its husk
 # classifier. Zellij remains unverified because its secondmate ghost-tab and
 # agent-process recovery path has not been empirically validated. Orca and cmux
 # do not support secondmate spawns.
