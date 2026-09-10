@@ -204,6 +204,19 @@ meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
 
+# The watcher runs a task's merge poll only while its artifacts still validate
+# against the task record (bin/fm-pr-lib.sh); a record the identity parser
+# refuses is what the watcher reports as an unauthenticated state check. This
+# asks that gate the same question the watcher does, in a subshell so the
+# library's globals never leak into the suite.
+poll_authenticated() {  # <case-dir> <id>
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_poll_artifacts_valid "$1/home/state" "$2" "$ROOT/bin/fm-pr-poll.sh"
+  )
+}
+
 journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
 }
@@ -384,6 +397,32 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# A relaunch rewrites the task record, and bin/fm-pr-lib.sh's identity parser
+# refuses a record carrying an unknown line after pr=. So the rewrite's field
+# ORDER, not just its content, decides whether the armed merge poll still
+# authenticates: a spawn-owned field emitted after the preserved ones lands
+# after pr= and silently disarms the watcher's merge notification.
+test_relaunch_keeps_the_armed_merge_poll_authenticated() {
+  local dir out rc
+  dir=$(new_case pr-poll-auth rl20)
+  add_ship_task "$dir" rl20 claude
+
+  out=$(env FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-pr-check.sh" rl20 https://github.com/example/repo/pull/20 2>&1); rc=$?
+  expect_code 0 "$rc" "arming the merge poll should succeed"$'\n'"$out"
+  poll_authenticated "$dir" rl20 \
+    || fail "the merge poll must authenticate before the relaunch, or this case proves nothing"
+
+  out=$(run_control "$dir" rl20 relaunch --note "continuing the review"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
+
+  [ "$(meta_field "$dir" rl20 pr)" = "https://github.com/example/repo/pull/20" ] \
+    || fail "the task PR must survive relaunch"
+  poll_authenticated "$dir" rl20 \
+    || fail "the armed merge poll stopped authenticating after relaunch, so the merge would go unnoticed"
+  pass "fm-control relaunch: the armed merge poll still authenticates after the record is rewritten"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1561,6 +1600,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_the_armed_merge_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

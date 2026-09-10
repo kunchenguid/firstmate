@@ -315,7 +315,13 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
+      # Fields whose writers append to a record that may already carry pr=:
+      # the Relay binding (bin/fm-x-lib.sh) and the captain-hold completion
+      # attestation (bin/fm-captain-hold.sh). Both rewrite by appending, so
+      # they legitimately land after pr= and must not disarm the merge poll.
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+        ;;
+      decisions_reviewed=*|decision_keys=*)
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
