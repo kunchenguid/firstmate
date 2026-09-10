@@ -14,8 +14,8 @@
 # cases that are meant to get past them, so no window or worktree is ever created.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
@@ -23,8 +23,9 @@ PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
-# A home with one registered project, one project directory, and a fake tmux that
-# refuses, so a spawn that clears the delivery checks still creates nothing.
+# A home with one registered project, account pins that pass their sign-in
+# check, one project directory, and a fake tmux that refuses, so a spawn that
+# clears the delivery checks still creates nothing.
 # Echoes "<home>|<project-dir>|<fakebin>".
 make_home() {  # <name> [<registry-line>...]
   local name=$1 home projects fakebin
@@ -36,6 +37,8 @@ make_home() {  # <name> [<registry-line>...]
   git -C "$projects/proj" init -q || fail "could not initialize project fixture"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
+  fm_test_account_pins "$home"
+  fm_test_fake_account_auth "$fakebin"
   if [ "$#" -gt 0 ]; then
     printf '%s\n' "$@" > "$home/data/projects.md"
   fi

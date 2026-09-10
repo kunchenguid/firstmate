@@ -45,6 +45,12 @@
 # its own Codex login, so an openai-codex candidate reads as unknown quota here
 # and is never selected on this host; its runway is disclosed uncertainty for
 # the agent-side gates, not measured headroom.
+#
+# Account pins are separate pools (bin/fm-account-pin-lib.sh), and a snapshot
+# is read under at most one pin (bin/fm-quota-snapshot.sh). A candidate list
+# naming two different pinned runners (claude beside pi or pi-signed) is
+# therefore refused with exit 2 rather than scored from one snapshot.
+# Unpinned runners read the same ambient rows under any pin and may share it.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +59,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-account-pin-lib.sh
+. "$SCRIPT_DIR/fm-account-pin-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 usage() {
@@ -356,6 +364,14 @@ for c in "${CANDIDATES[@]}"; do
     omp) die "omp quota mapping covers only the openai-codex and claude-bridge prefixes: $model" ;;
     *) die "unknown harness: $harness" ;;
   esac
+done
+
+pin_var=
+for c in "${CANDIDATES[@]}"; do
+  var=$(fm_account_pin_var "${c%%:*}") || continue
+  [ -z "$pin_var" ] || [ "$pin_var" = "$var" ] \
+    || die "candidates span two account pins ($pin_var, $var); score each pin's candidates from its own snapshot (bin/fm-quota-snapshot.sh <harness>)"
+  pin_var=$var
 done
 
 chosen="none"

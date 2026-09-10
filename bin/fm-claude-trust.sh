@@ -150,10 +150,10 @@
 # file this uid owns; every unrelated key and project entry is preserved, and
 # both entries land in one atomic replacement. In secondmate-home mode: the
 # single projects entry for the registered home path, same store, same atomic
-# replacement. fm-spawn.sh forwards CLAUDE_CONFIG_DIR onto the claude launch
-# verbatim rather than resolving it, and the pane starts in the registered
-# directory, so only an absolute value names the same store on both sides; a
-# relative one is refused below rather than guessed at.
+# replacement. fm-spawn.sh passes the home's resolved Claude account pin as
+# CLAUDE_CONFIG_DIR both here and onto the claude launch, and the pane starts
+# in the registered directory, so only an absolute value names the same store
+# on both sides; a relative one is refused below rather than guessed at.
 set -u
 # Path resolution here must answer from the filesystem, never from the caller's
 # environment, because the refusals below are the safety property. CDPATH would
@@ -229,17 +229,18 @@ fi
 CONFIG_DIR=${CLAUDE_CONFIG_DIR:-${HOME:-}}
 [ -n "$CONFIG_DIR" ] || refuse "neither CLAUDE_CONFIG_DIR nor HOME is set, so the store cannot be located"
 # A relative value resolves against this process's cwd here but against the
-# worker's own cwd once fm-spawn.sh forwards it verbatim onto the launch, so the
-# two sides can name different stores and the registration would report a
-# success the worker never sees. Refuse rather than guess at the worker's cwd.
+# worker's own cwd once it reaches the launch, so the two sides can name
+# different stores and the registration would report a success the worker never
+# sees. Refuse rather than guess at the worker's cwd.
 case ${CLAUDE_CONFIG_DIR:-} in
   '' | /*) ;;
   *) refuse "CLAUDE_CONFIG_DIR '$CLAUDE_CONFIG_DIR' is a relative path, so the store the worker reads cannot be guaranteed to be the one written here; set it to an absolute path" ;;
 esac
-# fm-spawn forwards a set CLAUDE_CONFIG_DIR onto the launch without requiring it
-# to exist, because claude creates its own store directory. Create it here for
-# the same reason, and refuse only when it genuinely cannot be written, since a
-# store this cannot reach means the worker meets the dialog after all.
+# claude creates its own store directory on first use, so a direct caller may
+# name one that does not exist yet (fm-spawn.sh already requires its pin to
+# exist). Create it here for the same reason, and refuse only when it genuinely
+# cannot be written, since a store this cannot reach means the worker meets the
+# dialog after all.
 CONFIG_DIR_REAL=$(real_dir "$CONFIG_DIR") || true
 if [ -z "$CONFIG_DIR_REAL" ]; then
   mkdir -p "$CONFIG_DIR" 2>/dev/null || true

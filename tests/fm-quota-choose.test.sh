@@ -259,6 +259,22 @@ fi
 [ "$err" = "error: invalid candidate: claude:" ] || fail "trailing empty model returned: $err"
 ok "all candidates are validated before selection"
 
+# Account pins are separate pools: one snapshot is read under one pin, so it
+# can never score a claude candidate beside a Pi one, whatever their order.
+for pair in 'claude:default pi:gpt-5' 'pi-signed:gpt-5 claude:default'; do
+  # shellcheck disable=SC2086  # The pair is two candidate words by design.
+  if err=$(call_choose --snapshot "$LAB/captured.json" $pair 2>&1); then
+    fail "candidates on two account pins were ranked together: $pair"
+  fi
+  case "$err" in
+    "error: candidates span two account pins"*) ;;
+    *) fail "cross-pin candidates ($pair) returned: $err" ;;
+  esac
+done
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:gpt-5 --candidate pi-signed:gpt-5 --candidate codex:gpt-5)
+[ -n "$out" ] || fail "one pin plus an unpinned runner should be ranked together"
+ok "ranking never crosses account pins"
+
 printf '{"schemaVersion":5,"providers":{"provider":"claude","quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":50,"runway":{"status":"through_reset"}}]}}}\n' > "$MALFORMED"
 if err=$(call_choose --snapshot "$MALFORMED" --candidate claude:default 2>&1); then
   fail "malformed provider collection unexpectedly dispatched"

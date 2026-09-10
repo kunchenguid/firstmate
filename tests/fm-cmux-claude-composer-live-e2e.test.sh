@@ -36,6 +36,9 @@ cmux ping >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but the cmux s
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-cmux-claude-composer.XXXXXX") || fail "could not create an isolated cmux Claude lab"
 trap cleanup EXIT
 mkdir -p "$LAB/config" "$LAB/data/$TASK" "$LAB/projects/comms" "$LAB/state"
+# A scout launches only on its home's Claude pin: use the Claude account this
+# test runs under.
+printf '%s\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" > "$LAB/config/claude-config-dir"
 printf 'cmux\n' > "$LAB/config/backend"
 
 git -C "$LAB/projects/comms" init -q -b main || fail "could not initialize the isolated probe repository"

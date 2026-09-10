@@ -31,8 +31,8 @@
 #     compatibility verdict is paid for once per session start
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
@@ -562,6 +562,7 @@ EOF
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
+  fm_test_account_pins "$home"
   printf '%s\n' pi > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
   touch "$home/state/.last-watcher-beat"
@@ -574,7 +575,7 @@ EOF
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  fm_fake_exit0 "$fakebin" pi
+  fm_test_fake_pi_runner "$fakebin" pi
   make_fake_tmux_secondmate_recovery "$fakebin"
   : > "$log"
   printf '%s|%s|%s|%s|%s|%s\n' "$root" "$home" "$fakebin" "$mate" "$log" "$spawned"
@@ -603,6 +604,7 @@ EOF
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
+  fm_test_account_pins "$home"
   printf '%s\n' herdr > "$home/config/backend"
   printf '%s\n' pi > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
@@ -621,7 +623,7 @@ EOF
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  fm_fake_exit0 "$fakebin" pi
+  fm_test_fake_pi_runner "$fakebin" pi
   make_fake_herdr_secondmate_recovery "$fakebin"
   : > "$log"
   printf '%s|%s|%s|%s|%s|%s\n' "$root" "$home" "$fakebin" "$mate" "$log" "$state"

@@ -1831,7 +1831,7 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 
 ## Pi account-root selection
 
-Verified on 2026-09-08 with Pi 0.85.1 and its installed SDK.
+The real-runtime evidence below was verified on 2026-09-08 with Pi 0.85.1 and its installed SDK.
 The configuration contract is owned by [Pi configuration root](../configuration.md#pi-configuration-root-configpi-agent-dir--pi_coding_agent_dir), and `bin/fm-spawn.sh` owns the launch implementation.
 No real credentials were inspected or copied and no paid inference was performed.
 
@@ -1842,9 +1842,9 @@ bin/fm-test-run.sh --jobs 1 tests/fm-spawn-dispatch-profile.test.sh tests/fm-con
 ```
 
 These suites execute emitted launch commands in independent `sh`, Bash, and Zsh processes where installed, with conflicting caller/destination roots, ordinary and filtered environments, and literal paths containing spaces, quotes, and shell syntax.
-They cover ship, scout, initial secondmate, and control-plane relaunch on both Pi identities, invalid/unreadable pins, unchanged absent-pin behavior, and pin preservation through config push and startup convergence.
+They cover ship, scout, initial secondmate, and control-plane relaunch on both Pi identities, invalid/unreadable pins, the absent-pin and failed-sign-in refusals, and pin preservation through config push and startup convergence.
 The account tests keep supervisor model/medium, monitoring model/low, and worker model/xhigh independent; they do not change live profiles.
-All three suites passed with `FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0`.
+All three suites passed with `FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0` on 2026-09-10.
 
 Real-runtime verification, with the npm package matching the selected CLI:
 

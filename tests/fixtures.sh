@@ -234,6 +234,64 @@ fm_test_spawn_home() {
   if [ -n "$harness" ]; then
     printf '%s\n' "$harness" > "$home/config/crew-harness"
   fi
+  fm_test_account_pins "$home"
+}
+
+# fm_test_account_pins <home>
+# Pins Claude and Pi launches from <home> to throwaway account roots under it,
+# because bin/fm-spawn.sh refuses a claude, pi, or pi-signed launch without a
+# pin (bin/fm-account-pin-lib.sh). Pins are home-local: a worker reads its own
+# home's, and a secondmate launch reads the launching home's. The Pi root names
+# a default provider so a launch without --model has something to preflight. A
+# test that exercises a missing or invalid pin removes or rewrites the file
+# afterwards.
+fm_test_account_pins() {
+  local home=$1
+  mkdir -p "$home/config" "$home/accounts/claude" "$home/accounts/pi"
+  printf '{"defaultProvider":"fake"}\n' > "$home/accounts/pi/settings.json"
+  printf '%s\n' "$home/accounts/claude" > "$home/config/claude-config-dir"
+  printf '%s\n' "$home/accounts/pi" > "$home/config/pi-agent-dir"
+}
+
+# fm_test_fake_account_auth <fakebin>
+# Installs the two authentication checks the spawn preflight runs under a pin:
+# a quota-axi answering `auth --json --provider claude`, and fm-fake-pi-auth
+# for a fake pi to exec on `auth check`. The preflight scrubs its environment,
+# so each answers from a .fake-auth file inside the pinned root, holding the
+# status to report; absent means authenticated. Like real Pi, the Pi check
+# reports ready whenever ANTHROPIC_API_KEY is set, whatever the root holds.
+fm_test_fake_account_auth() {
+  local fakebin=$1
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/bin/sh
+status=$(cat "${CLAUDE_CONFIG_DIR:-/nonexistent}/.fake-auth" 2>/dev/null) || status=available
+printf '{"schemaVersion":1,"auth":[{"provider":"claude","sources":[{"source":"keychain","status":"%s"}]}]}\n' "$status"
+SH
+  chmod +x "$fakebin/quota-axi"
+  fm_test_fake_pi_runner "$fakebin"
+}
+
+# fm_test_fake_pi_runner <fakebin> [runner...]
+# Installs fm-fake-pi-auth plus each named Pi runner (pi, pi-signed) as a fake
+# that answers `auth check` through it and exits 0 for anything else.
+fm_test_fake_pi_runner() {
+  local fakebin=$1 runner
+  shift
+  cat > "$fakebin/fm-fake-pi-auth" <<'SH'
+#!/bin/sh
+status=$(cat "${PI_CODING_AGENT_DIR:-/nonexistent}/.fake-auth" 2>/dev/null) || status=ready
+[ -z "${ANTHROPIC_API_KEY:-}" ] || status=ready
+printf '{"status":"%s","provider":"fake"}\n' "$status"
+[ "$status" = ready ]
+SH
+  chmod +x "$fakebin/fm-fake-pi-auth"
+  for runner in "$@"; do
+    cat > "$fakebin/$runner" <<'SH'
+#!/bin/sh
+[ "${1:-} ${2:-}" != "auth check" ] || exec fm-fake-pi-auth "$@"
+SH
+    chmod +x "$fakebin/$runner"
+  done
 }
 
 # fm_test_spawn_brief <home> <id> [captain-intent]
@@ -254,11 +312,17 @@ EOF
 # Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, and any
 # extra exit-0 tools. Echoes the fakebin path.
 fm_test_make_spawn_fakebin() {
-  local dir=$1 fakebin
+  local dir=$1 fakebin tool
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
+  fm_test_fake_account_auth "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse "$@"
+  for tool in "$@"; do
+    case "$tool" in
+      pi|pi-signed) fm_test_fake_pi_runner "$fakebin" "$tool" ;;
+    esac
+  done
   printf '%s\n' "$fakebin"
 }
 
@@ -275,16 +339,13 @@ make_spawn_fakebin() {
 fm_test_run_spawn() {
   local home=$1 pane=$2 fakebin=$3
   shift 3
-  # A claude spawn pre-registers workspace trust in the launching user's own
-  # store (bin/fm-claude-trust.sh), so every spawn here runs against a throwaway
-  # HOME; without it the suite would write the developer's real ~/.claude.json.
-  # CLAUDE_CONFIG_DIR must be pinned too, and pinned EMPTY: the script resolves
-  # the store as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so a value inherited from the
-  # developer's shell would beat the throwaway HOME and the sandbox would not
-  # hold, while an empty value falls through to it. Empty rather than a path
-  # because bin/fm-spawn.sh prefixes the launch only when the value is non-empty,
-  # so every launch-shape assertion in the suite keeps reading the same command.
-  # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
+  # Every spawn here runs against a throwaway HOME, so nothing a spawn touches
+  # outside its pinned account root can reach the developer's real one.
+  # CLAUDE_CONFIG_DIR is pinned EMPTY: a secondmate launch ranks an ambient
+  # value above the launching home's config/claude-config-dir
+  # (fm_test_account_pins), so a value inherited from the developer's shell
+  # would point that launch at the developer's real Claude store. A test that
+  # needs the ambient case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
   local spawn_home=$home/user-home
   mkdir -p "$spawn_home"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \

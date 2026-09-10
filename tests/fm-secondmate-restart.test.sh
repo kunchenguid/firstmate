@@ -24,8 +24,8 @@
 #      its agent left running.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 RESTART="$ROOT/bin/fm-secondmate-restart.sh"
 
@@ -137,6 +137,8 @@ new_case() {
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   make_stub "$dir"
+  fm_test_account_pins "$dir/home"
+  fm_test_fake_account_auth "$dir/fakebin"
   printf '%s\n' "$dir"
 }
 
@@ -147,7 +149,7 @@ add_local_mate() {
   local dir=$1 id=$2 harness=${3:-claude} backend=${4:-}
   local home="$dir/home" smhome="$dir/$id-home"
   fm_git_worktree "$dir/$id-repo" "$smhome" "sm-$id"
-  mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin" "$home/data/$id"
+  mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin" "$smhome/config" "$home/data/$id"
   printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
   printf '# agents\n' > "$smhome/AGENTS.md"
   printf '# charter\n' > "$home/data/$id/brief.md"
@@ -237,7 +239,7 @@ arm_answer() {
 run_restart() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_PERSIST_POLL=1 \
+    CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_PERSIST_POLL=1 \
     FM_SECONDMATE_PERSIST_WAIT="${FM_TEST_PERSIST_WAIT:-30}" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
@@ -557,7 +559,11 @@ test_native_ultra_restart_keeps_local_and_remote_profiles() {
   arm_answer "$dir" sm1
   printf 'pi codex-native/gpt-6-astra ultra\n' > "$dir/home/config/secondmate-harness"
   printf 'pi' > "$dir/fake/becomes"
-  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+  cat > "$dir/fakebin/pi" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-} ${2:-}" != "auth check" ] || exec fm-fake-pi-auth "$@"
+printf "Options: --tui-mode\n"
+SH
   chmod +x "$dir/fakebin/pi"
   out=$(run_restart "$dir" sm1); rc=$?
   expect_code 0 "$rc" "native local restart failed: $out"

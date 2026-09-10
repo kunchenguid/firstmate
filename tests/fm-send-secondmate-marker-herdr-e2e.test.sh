@@ -6,7 +6,9 @@
 # It exercises the end-user command shape against metadata written by a real
 # fm-spawn.sh --secondmate launch, captures Pi's before_agent_start prompt bytes,
 # and proves both sides of the routing boundary:
-#   - exact task id through explicit FM_HOME receives exactly one marker;
+#   - an exact task id through explicit FM_HOME is delivered as a durable inbox
+#     record carrying exactly one marker and the parent's correlation, while Pi
+#     receives only the constant, unmarked doorbell line;
 #   - direct terminal input remains unmarked.
 #
 # Every Herdr call, including calls made inside the production backend adapter,
@@ -19,6 +21,10 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pending-reply-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-task-inbox-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
@@ -49,6 +55,16 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$SENDER_HOME/state" "$SENDER_HOME/data" "$SENDER_HOME/config" "$SENDER_HOME/projects" "$FAKEBIN"
+
+# A second mate launches on the launching home's Pi pin. This throwaway root
+# holds a fake API key so Pi's own auth check passes, and the capture extension
+# aborts before any provider request could use it.
+PI_ROOT="$TMP_ROOT/pi-account"
+mkdir -p "$PI_ROOT"
+printf '{"defaultProvider":"anthropic"}\n' > "$PI_ROOT/settings.json"
+printf '{"anthropic":{"type":"api_key","key":"sk-ant-fm-marker-capture"}}\n' > "$PI_ROOT/auth.json"
+chmod 600 "$PI_ROOT/auth.json"
+printf '%s\n' "$PI_ROOT" > "$SENDER_HOME/config/pi-agent-dir"
 
 # Route production adapter invocations through the same guarded helper as every
 # explicit E2E probe. The helper itself runs with the original PATH, preventing
@@ -90,7 +106,8 @@ EOF
 # A separate explicit Pi extension grants session-only project trust, records
 # before_agent_start prompt bytes, and aborts before any provider request.
 # The PATH wrapper adds only that test resource while preserving the production
-# secondmate launch and its own extension arguments unchanged.
+# secondmate launch and its own extension arguments unchanged. It passes Pi's
+# own auth commands through untouched, because they reject -e.
 CAPTURE_JSON=$(printf '%s' "$CAPTURE" | jq -Rs .)
 CAPTURE_EXTENSION="$TMP_ROOT/fm-send-marker-capture.ts"
 cat > "$CAPTURE_EXTENSION" <<EOF
@@ -104,7 +121,9 @@ export default function (pi: any) {
   });
 }
 EOF
-printf '#!/usr/bin/env bash\nexec %q -e %q "$@"\n' "$REAL_PI" "$CAPTURE_EXTENSION" > "$FAKEBIN/pi"
+# shellcheck disable=SC2016  # The wrapper's own expansions are literal text.
+printf '#!/usr/bin/env bash\n[ "${1:-}" != auth ] || exec %q "$@"\nexec %q -e %q "$@"\n' \
+  "$REAL_PI" "$REAL_PI" "$CAPTURE_EXTENSION" > "$FAKEBIN/pi"
 chmod +x "$FAKEBIN/pi"
 
 "$LAB_HELPER" provision "$SESSION"
@@ -158,13 +177,26 @@ wait_for_idle || fail "real Pi did not become idle after the startup capture"
 
 PATH="$FAKEBIN:$ORIGINAL_PATH" FM_GATE_REFUSE_BYPASS=1 FM_HOME="$SENDER_HOME" \
   "$ROOT/bin/fm-send.sh" "$ID" "$REQUEST" >/dev/null
-wait_for_prompt "$REQUEST" || fail "real Pi did not receive the exact-id fm-send request"
-GOT=$(jq -r --arg needle "$REQUEST" 'select(.prompt | contains($needle)) | .prompt' "$CAPTURE" | tail -1)
-[ "$GOT" = "${FM_FROMFIRST_MARK}${REQUEST}" ] \
-  || fail "real Pi exact-id prompt did not contain exactly one terminal-safe marker"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$GOT" | od -An -tx1)"
-printf 'evidence: exact-id received-hex=%s\n' "$(printf '%s' "$GOT" | od -An -tx1 | tr -d ' \n')"
-pass "real Pi/Herdr: exact-id FM_HOME send delivers exactly one from-firstmate marker"
-wait_for_idle || fail "real Pi did not become idle after the exact-id capture"
+# Text for a task recorded in this home is delivered as a durable inbox record
+# carrying the marker and the parent's correlation; the terminal receives only
+# the constant doorbell line, which stays unmarked.
+REC="$SENDER_HOME/state/$ID.inbox/001.msg"
+[ -f "$REC" ] || fail "exact-id fm-send left no durable inbox record"
+BODY=$(fm_task_inbox_body "$REC")
+CORR=$(fm_pending_reply_extract_corr "$BODY")
+[ -n "$CORR" ] && [ "$BODY" = "${FM_FROMFIRST_MARK}corr=${CORR} ${REQUEST}" ] \
+  || fail "the exact-id inbox record did not carry exactly one marker, its correlation, and the request"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$BODY" | od -An -tx1)"
+printf 'evidence: exact-id record-hex=%s\n' "$(printf '%s' "$BODY" | od -An -tx1 | tr -d ' \n')"
+DOORBELL=$(fm_task_inbox_doorbell_line "$REC")
+wait_for_prompt "$DOORBELL" || fail "real Pi did not receive the doorbell for the exact-id request"
+GOT=$(jq -r --arg needle "$DOORBELL" 'select(.prompt | contains($needle)) | .prompt' "$CAPTURE" | tail -1)
+[ "$GOT" = "$DOORBELL" ] \
+  || fail "the doorbell Pi received was changed or marked"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$GOT" | od -An -tx1)"
+if fm_message_from_firstmate "$GOT"; then
+  fail "the doorbell was classified as from-firstmate"
+fi
+pass "real Pi/Herdr: exact-id FM_HOME send records exactly one from-firstmate marker and rings Pi with the unmarked doorbell"
+wait_for_idle || fail "real Pi did not become idle after the doorbell capture"
 
 # Direct terminal input bypasses fm-send's metadata-routed transformation and
 # therefore remains conversational captain input.

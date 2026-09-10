@@ -387,7 +387,11 @@ make_project() {  # <dir>
   mkdir -p "$dir"
   git -C "$dir" init -q
   printf '# Herdr projection E2E fixture\n' > "$dir/README.md"
-  git -C "$dir" add README.md
+  # Without a project config, Treehouse takes the operator's user config whole,
+  # and a max_trees below its default of 16 stops the later spawns, which hold
+  # eleven worktrees at once. Pin the default here.
+  printf 'max_trees = 16\n' > "$dir/treehouse.toml"
+  git -C "$dir" add README.md treehouse.toml
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
   git clone --quiet --bare "$dir" "$dir.origin.git"
   git -C "$dir" remote add origin "file://$dir.origin.git"

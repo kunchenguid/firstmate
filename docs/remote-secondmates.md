@@ -39,6 +39,7 @@ A caller that disconnects or whose caller-side wait expires before its job compl
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
 A worker stops itself once its configured code root stops being a Firstmate checkout, so a worker started from a worktree cannot outlive that worktree, and `bin/fm-remote-job-reap-orphans.sh` clears any worker already left behind that way without ever touching one whose checkout still exists.
 The remote account must provide the required toolchain, the selected worker runtime, the selected session backend, and credentials that work on that host.
+A Claude or Pi second mate launches on the supervisor account pinned in the code root's `config/claude-config-dir` or `config/pi-agent-dir`, never on the remote home's own worker pins; [Account pins](configuration.md#account-pins) owns the contract.
 The origin URL named for each project must be reachable from the remote account because projects are cloned on that host rather than copied from the primary.
 
 ## Non-interactive tool contract

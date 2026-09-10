@@ -23,6 +23,7 @@ Deterministic shell owns only schema, configuration, and version validation plus
 
 The canonical shell helper for a worker that has already performed its model-selection reasoning and now needs to pick the first viable candidate is `bin/fm-quota-choose.sh`.
 Pass it the intake's already-captured default TOON or permitted JSON fallback through stdin or `--snapshot`; it never takes another quota snapshot, so it selects from the same quota state as the intake.
+Because one snapshot is read under one account pin, it refuses a candidate list naming `claude` beside `pi` or `pi-signed`; pass each pin's candidates with that pin's snapshot.
 Pass each candidate as `harness:model`, with earlier candidates preferred.
 The helper maps each harness to its primary provider family and applies the provider-wide scopes plus the exact model or product scopes for the model.
 An `exhausted_now` runway vetoes the candidate.
@@ -37,7 +38,8 @@ The opt-in `bin/fm-dispatch-resolve.sh` (`docs/configuration.md` "Typed dispatch
 
 ## Read the default TOON
 
-Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate.
+Start each intake by reading `quota-axi`'s default TOON with no `--json`, once per distinct account pin among the candidates, through `bin/fm-quota-snapshot.sh <harness>`, and reuse each pin's TOON for every candidate on that pin.
+An unpinned runner's rows are ambient and read the same from any of those snapshots, so an array with no pinned candidate needs one read.
 Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
 Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
 Sparse `attention[]` names auth, stale, and unmeasurable facts.
@@ -45,14 +47,21 @@ Sparse `attention[]` names auth, stale, and unmeasurable facts.
 It already computes the economics that older instructions reconstructed by hand from headroom, pace, reserve, and window-id lists; do not recompute those.
 Do not read `--json` on the normal path, and do not reach for `--full` to rebuild that economics.
 
-After reading the TOON, fall back to one `quota-axi --json` call only when that TOON is genuinely ambiguous for the decision, or when the installed quota-axi is somehow below the floor so its TOON lacks `spendPriority`.
+After reading the TOON, fall back to one `--json` read through the same helper for the affected pin only when that TOON is genuinely ambiguous for the decision, or when the installed quota-axi is somehow below the floor so its TOON lacks `spendPriority`.
 Ambiguous means a candidate's `spendPriority` is the literal `unknown` or unmeasurable, a real tie still needs extra evidence, or a candidate's eligibility is unclear from `quota[]` plus `attention[]`.
 The fallback therefore has an explicit TOON-then-JSON call sequence; reuse its JSON result and do not take any further quota snapshots.
 Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN` and normally reports `MISSING` before dispatch; if an intake somehow reaches an older build whose TOON lacks `spendPriority`, use the defensive `--json` fallback rather than treating the missing scalar as healthy.
 `--json` is a defensive belt, not a habit; never reach for it because it feels more complete.
-Read `quota-axi auth --json` only when a candidate's credential surface is in question.
+Read `auth --json` through the same helper only when a candidate's credential surface is in question.
 
 For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
+
+## Account pins are separate pools
+
+`docs/configuration.md` "Account pins" owns what a pin is and which runners carry one.
+Rank a candidate only against candidates on the same pin, never across pins, so `spendPriority` never moves work onto another pin's account; a higher scalar on another account is not a reason to spend it.
+When a matched array spans pins, the array's order between pins is the configured preference: run the procedure below within the first pin that has an eligible candidate, reach the next pin only when none does, and say so in the accounting.
+An unpinned runner has no pool Firstmate can see; rank it as before and disclose that the account it bills is unknown.
 
 ## Three gates, then spendPriority
 
@@ -76,6 +85,7 @@ A candidate authenticates through its own tuple's surface; another harness's CLI
 `quota-axi auth --json` lists each provider's credential sources independently, so read the one source the candidate actually uses rather than collapsing a provider to a single status.
 A provider can carry a healthy source beside a missing or expired one; the unused source's state is not the candidate's state.
 A Pi-hosted family may authenticate through the vendor's own store with no `pi:`-prefixed source at all, which is normal and never evidence against the candidate.
+Under a Pi pin, `quota-axi` reads the pin only for its `pi:xai` and `pi:kimi-coding` sources; any other row a Pi candidate maps to, such as `codex` for an `openai-codex` model, describes that provider's ambient store rather than the pinned account, so its quota is disclosed uncertainty, not measured headroom.
 
 Uncertainty and ineligibility are different findings:
 

@@ -19,8 +19,8 @@
 #      agent exited.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
@@ -141,6 +141,8 @@ new_case() {
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   make_tmux_stub "$dir"
+  fm_test_account_pins "$dir/home"
+  fm_test_fake_account_auth "$dir/fakebin"
   printf '%s\n' "$dir"
 }
 
@@ -321,15 +323,18 @@ test_pi_relaunch_keeps_home_account() {
         mkdir -p "$dir/wt/state" "$dir/wt/data" "$dir/wt/bin" "$dir/wt/config"
         printf 'root1\n' > "$dir/wt/.fm-secondmate-home"
         printf '# Synthetic Firstmate\n' > "$dir/wt/AGENTS.md"
-        printf '%s\n' "$pin" > "$dir/wt/config/pi-agent-dir"
-        printf '%s\n' "$dir/default root" > "$cfg"
+        # The secondmate home's own pin is for its workers; the supervisor
+        # relaunch must stay on the launching home's pin.
+        printf '%s\n' "$dir/default root" > "$dir/wt/config/pi-agent-dir"
         printf '%s sentinel/model medium\n' "$harness" > "$dir/home/config/secondmate-harness"
         awk '!/^(kind|mode|home)=/' "$dir/home/state/root1.meta" > "$dir/prior.meta"
         { cat "$dir/prior.meta"; printf 'kind=secondmate\nmode=secondmate\nhome=%s\n' "$dir/wt"; } > "$dir/home/state/root1.meta"
       fi
       printf 'PI_CODING_AGENT_DIR\n' > "$dir/home/config/launch-env-allowlist"
+      printf '{"defaultProvider":"fake"}\n' > "$pin/settings.json"
       cat > "$dir/fakebin/$harness" <<'SH'
 #!/bin/sh
+[ "${1:-} ${2:-}" != "auth check" ] || exec fm-fake-pi-auth "$@"
 [ "${1:-}" != --help ] || { printf '%s\n' '--tui-mode'; exit; }
 printf '%s|%s\n' "$PI_CODING_AGENT_DIR" "$FM_PI_HARNESS"
 SH
@@ -340,9 +345,9 @@ SH
       expect_code 0 "$rc" "Pi $kind relaunch failed: $out"
       launch=$(tail -1 "$dir/fake/literal")
       result=$(env -i HOME="$dir" PATH="$PATH" PI_CODING_AGENT_DIR="$dir/default root" /bin/sh -c "$launch")
-      [ "$result" = "$pin|$harness" ] || fail "Pi relaunch lost the lane root or executable identity: $result"
+      [ "$result" = "$pin|$harness" ] || fail "Pi relaunch lost the home's account root or executable identity: $result"
       [ "$(meta_field "$dir" root1 worktree)" = "$dir/wt" ] || fail "Pi root relaunch changed the worktree"
-      pass "$harness $kind relaunch reads the correct home pin despite caller and destination roots"
+      pass "$harness $kind relaunch reads the launching home's pin despite caller, destination, and secondmate-home roots"
     done
   done
 }
@@ -725,7 +730,11 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   add_ship_task "$dir" "$id" pi
   printf pi > "$dir/fake/command"
   printf pi > "$dir/fake/becomes"
-  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+  cat > "$dir/fakebin/pi" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-} ${2:-}" != "auth check" ] || exec fm-fake-pi-auth "$@"
+printf "Options: --tui-mode\n"
+SH
   chmod +x "$dir/fakebin/pi"
   sed 's|^model=default$|model=codex-native/gpt-6-astra|; s/^effort=default$/effort=ultra/' \
     "$dir/home/state/$id.meta" > "$dir/home/state/$id.meta.tmp"

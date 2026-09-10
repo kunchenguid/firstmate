@@ -29,21 +29,25 @@
 # kill) lives in tests/fm-backend-tmux-smoke.test.sh.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
-# A claude spawn writes workspace trust into the launching user's own store,
-# and the script resolves it as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so the value
-# is pinned EMPTY beside the throwaway HOME: an inherited one would beat that
-# HOME and reach the developer's real store, while empty falls through to it
-# and adds no launch prefix, since fm-spawn only prefixes a non-empty value.
+# A claude spawn requires an account pin and writes workspace trust into it
+# (bin/fm-account-pin-lib.sh, bin/fm-claude-trust.sh). Every case pins its
+# config/claude-config-dir to this throwaway root beside a throwaway HOME, so
+# nothing reaches the developer's real store.
 SPAWN_HOME="$TMP_ROOT/user-home"
-mkdir -p "$SPAWN_HOME"
+CLAUDE_ROOT="$TMP_ROOT/claude-account"
+mkdir -p "$SPAWN_HOME" "$CLAUDE_ROOT"
+pin_claude() {  # <config-dir>
+  mkdir -p "$1"
+  printf '%s\n' "$CLAUDE_ROOT" > "$1/claude-config-dir"
+}
 
 write_spawn_brief() {  # <file> <id>
   cat > "$1" <<EOF
@@ -794,6 +798,7 @@ test_peek_conformance_old_vs_new() {
 make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
   local dir=$1 wt=$2 fb="$1/fakebin"
   mkdir -p "$fb"
+  fm_test_fake_account_auth "$fb"
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
 set -u
@@ -813,9 +818,10 @@ SH
 
 run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> -- <spawn args...>
   local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 proj=$7; shift 7
+  pin_claude "$config"
   [ "${1:-}" = -- ] && shift
   : > "$log"
-  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" HOME="$SPAWN_HOME" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TMUX_LOG="$log" \
@@ -855,6 +861,7 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -> echoes fakebin dir
   local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count"
   mkdir -p "$fb"
+  fm_test_fake_account_auth "$fb"
   : > "$counter"
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
@@ -1069,7 +1076,8 @@ test_spawn_default_backend_writes_no_meta_field() {
   state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
   mkdir -p "$state" "$config"
 
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
+  pin_claude "$config"
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
@@ -1093,7 +1101,8 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
 
   # HERDR_ENV=1 is present (as if firstmate itself were running under herdr),
   # but an explicit --backend tmux flag must still win outright.
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
+  pin_claude "$config"
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
@@ -1120,7 +1129,8 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   # (tmux nested inside a herdr pane) - the full fm-spawn.sh pipeline, not just
   # fm_backend_name, must resolve this to tmux and stay completely silent about
   # it (today's default path, byte-identical).
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
+  pin_claude "$config"
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
     FM_TMUX_LOG="$TMP_ROOT/nest.log" \

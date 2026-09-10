@@ -19,6 +19,7 @@ make_spawn_pi_probe() {
   cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ "${1:-} ${2:-}" != "auth check" ] || exec fm-fake-pi-auth "$@"
 if [ "${1:-}" = --help ]; then
   if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
     printf '%s\n' 'Pi 0.82.0' 'Options: --help'
@@ -36,6 +37,7 @@ make_spawn_fakebin() {
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != -k ] || shift 2
 shift
 exec "$@"
 SH
@@ -79,6 +81,9 @@ enable_dispatch_profile() {
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
+  # The secondmate home's own pins are its workers' accounts, which its
+  # supervisor launch must never use (fm_test_account_pins).
+  fm_test_account_pins "$home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
@@ -88,10 +93,10 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
+  # An ambient CLAUDE_CONFIG_DIR outranks the home's Claude pin, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
-  # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
+  # A test opts in to the ambient case via FM_TEST_CLAUDE_CONFIG_DIR.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
@@ -132,7 +137,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="$(. "$ROOT/bin/fm-account-pin-lib.sh"; fm_account_pin_shed_prefix claude) CLAUDE_CONFIG_DIR='$HOME_DIR/accounts/claude' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -866,40 +871,53 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
-test_claude_forwards_firstmate_config_dir_when_set() {
+test_claude_worker_ignores_spawning_config_dir() {
   local rec id out status launch
   id=profile-claude-cfgdir-z17
   rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
   read_case_record "$rec"
 
-  # A creatable path: this spawn now pre-registers workspace trust in that store
-  # (bin/fm-claude-trust.sh), so an unwritable directory is a genuine blocker.
-  # The forwarding assertion below is what this case proves and is unchanged.
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+  # Inside a secondmate the spawning CLAUDE_CONFIG_DIR is the supervisor's own
+  # account, so a worker must still launch on its home's pin.
+  mkdir -p "$CASE_DIR/supervisor-account"
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/supervisor-account" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
+  expect_code 0 "$status" "claude spawn beside another CLAUDE_CONFIG_DIR should succeed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}'" \
-    "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
-  pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$HOME_DIR/accounts/claude' env -u CURSOR_AGENT" \
+    "a claude worker did not launch on its home's pin"
+  assert_not_contains "$launch" "$CASE_DIR/supervisor-account" \
+    "a claude worker launched on the spawning CLAUDE_CONFIG_DIR"
+  pass "a claude worker launches on its home's pin even when the spawning CLAUDE_CONFIG_DIR names another account"
 }
 
-test_claude_omits_config_dir_prefix_when_unset() {
-  local rec id out status launch
-  id=profile-claude-nocfgdir-z18
-  rec=$(make_spawn_case profile-claude-nocfgdir claude "$id")
+# A Claude launch runs with its pin and without the environment credentials
+# Claude ranks above the pinned /login, so a key the caller or the destination
+# shell carries cannot silently bill another account. Executing the launch
+# proves the shell actually drops them.
+test_claude_launch_sheds_environment_credentials() {
+  local rec id out status launch result
+  id=profile-claude-shed-z18
+  rec=$(make_spawn_case profile-claude-shed claude "$id")
   read_case_record "$rec"
 
-  # run_spawn pins CLAUDE_CONFIG_DIR empty by default, exercising the single-store
-  # default path where fm-spawn adds no prefix.
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(ANTHROPIC_API_KEY=caller-key run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "claude spawn without CLAUDE_CONFIG_DIR should succeed"
+  expect_code 0 "$status" "pinned claude spawn should succeed: $out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
-    "claude launch must not add a config-dir prefix when firstmate has no CLAUDE_CONFIG_DIR set"
-  pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
+  cat > "$FAKEBIN_DIR/claude" <<'SH'
+#!/bin/sh
+printf '%s|%s|%s|%s|%s\n' "${CLAUDE_CONFIG_DIR:-unset}" "${ANTHROPIC_API_KEY:-unset}" \
+  "${CLAUDE_CODE_OAUTH_TOKEN:-unset}" "${CLAUDE_CODE_USE_BEDROCK:-unset}" "${ANTHROPIC_BASE_URL:-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/claude"
+  result=$(env -i HOME="$CASE_DIR" PATH="$FAKEBIN_DIR:$PATH" CLAUDE_CONFIG_DIR="$CASE_DIR/elsewhere" \
+    ANTHROPIC_API_KEY=shell-key CLAUDE_CODE_OAUTH_TOKEN=shell-token CLAUDE_CODE_USE_BEDROCK=1 \
+    ANTHROPIC_BASE_URL=https://proxy.invalid /bin/sh -c "$launch") || fail "pinned claude launch did not run"
+  [ "$result" = "$HOME_DIR/accounts/claude|unset|unset|unset|https://proxy.invalid" ] \
+    || fail "pinned claude launch kept an outranking credential or lost its pin: $result"
+  pass "a claude launch carries its pin and sheds the credentials that outrank it"
 }
 
 test_non_claude_harness_ignores_config_dir() {
@@ -992,6 +1010,7 @@ test_claude_secondmate_launch_carries_the_attribution_policy() {
   read_case_record "$rec"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
+  mkdir -p "$CASE_DIR/claude-work"
 
   out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
@@ -1032,7 +1051,7 @@ test_launch_environment_allowlist() {
     rec=$(make_spawn_case "$id" codex "$id")
     read_case_record "$rec"
     case "$setting" in
-      missing-config) rm "$HOME_DIR/config/crew-harness"; rmdir "$HOME_DIR/config" ;;
+      missing-config) rm -r "$HOME_DIR/config" ;;
       enabled) printf '# Synthetic credential name\nFM_TEST_ALLOWED\nFM_TEST_EMPTY\nFM_TEST_UNSET\n' > "$HOME_DIR/config/launch-env-allowlist" ;;
       empty) : > "$HOME_DIR/config/launch-env-allowlist" ;;
     esac
@@ -1259,11 +1278,10 @@ test_pi_home_account_selection() {
           sm="$CASE_DIR/secondmate"
           make_seeded_secondmate_home "$sm" "$id"
           mkdir -p "$sm/config" "$sm/state"
-          printf '%s\n' "$pin" > "$sm/config/pi-agent-dir"
-          printf '%s\n' "$parent" > "$HOME_DIR/config/pi-agent-dir"
+          printf '%s\n' "$parent" > "$sm/config/pi-agent-dir"
           out=$(PI_CODING_AGENT_DIR="$parent" run_spawn "$HOME_DIR" "$sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
             "$id" "$sm" --secondmate --harness "$harness" --model sentinel/model --effort medium); status=$?
-          [ "$(cat "$sm/config/pi-agent-dir")" = "$pin" ] || fail "inheritance overwrote secondmate Pi pin"
+          [ "$(cat "$sm/config/pi-agent-dir")" = "$parent" ] || fail "inheritance overwrote secondmate Pi pin"
         elif [ "$kind" = ship ]; then
           out=$(PI_CODING_AGENT_DIR="$parent" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
             "$id" "$PROJ_DIR" --harness "$harness" --model sentinel/model --effort xhigh); status=$?
@@ -1294,7 +1312,7 @@ SH
           [ "$kind" != secondmate ] || expected="$pin|$harness|sentinel/model|medium"
           [ "$result" = "$expected" ] || fail "Pi launch selected the wrong root/identity: $result"
         done
-        pass "$harness $kind $filter: home pin beats caller and destination roots in actual shell execution"
+        pass "$harness $kind $filter: the launching home's pin beats caller, destination, and secondmate-home roots in actual shell execution"
       done
     done
   done
@@ -1311,7 +1329,6 @@ test_pi_home_account_invalid_refuses() {
       if [ "$kind" = secondmate ]; then
         make_seeded_secondmate_home "$CASE_DIR/sm" "$id"
         mkdir -p "$CASE_DIR/sm/config" "$CASE_DIR/sm/state"
-        cfg="$CASE_DIR/sm/config/pi-agent-dir"
       fi
       pin="$CASE_DIR/work-root"
       mkdir -p "$pin"
@@ -1353,26 +1370,80 @@ test_pi_home_account_invalid_refuses() {
   pass "invalid Pi home roots refuse, including a valid contradictory ambient root"
 }
 
-test_pi_absent_account_pin_preserves_ambient() {
-  local harness rec id out status launch result
-  for harness in pi pi-signed; do
-    id="root-absent-$harness"
+# A pinned runner never falls back to its vendor's default root: with no pin
+# the spawn refuses before any launch or task record, and says which file to
+# create. An ambient root in the caller does not stand in for a missing pin.
+test_account_pin_missing_refuses() {
+  local harness file runner rec id out status
+  for harness in claude pi pi-signed; do
+    case "$harness" in
+      claude) file=claude-config-dir runner=Claude ;;
+      *) file=pi-agent-dir runner=Pi ;;
+    esac
+    id="pin-missing-$harness"
     rec=$(make_spawn_case "$id" "$harness" "$id")
     read_case_record "$rec"
-    out=$(PI_CODING_AGENT_DIR=caller-root run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    rm "$HOME_DIR/config/$file"
+    out=$(PI_CODING_AGENT_DIR="$HOME_DIR/accounts/pi" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR" --scout --harness "$harness"); status=$?
-    expect_code 0 "$status" "absent Pi config failed: $out"
-    launch=$(cat "$LAUNCH_LOG")
-    cat > "$FAKEBIN_DIR/$harness" <<'SH'
-#!/bin/sh
-printf '%s\n' "${PI_CODING_AGENT_DIR:-unset}"
-SH
-    result=$(env -i HOME="$CASE_DIR" PATH="$PATH" PI_CODING_AGENT_DIR=destination-root /bin/sh -c "$launch")
-    [ "$result" = destination-root ] || fail "absent pin changed ambient behavior"
-    result=$(env -i HOME="$CASE_DIR" PATH="$PATH" /bin/sh -c "$launch")
-    [ "$result" = unset ] || fail "absent pin set a new default"
+    expect_code 1 "$status" "$harness spawn without an account pin must refuse: $out"
+    assert_contains "$out" "$runner launches from home $HOME_DIR require an account pin: create $HOME_DIR/config/$file" \
+      "$harness missing-pin refusal must name the runner, the home, and the file"
+    assert_contains "$out" "does not fall back" "$harness missing-pin refusal must say there is no fallback"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$harness spawn without a pin delivered a launch"
+    assert_absent "$HOME_DIR/state/$id.meta" "$harness spawn without a pin published a task"
   done
-  pass "absent Pi pin preserves both default and destination ambient behavior"
+  pass "claude, pi, and pi-signed spawns refuse without an account pin, naming the file to create"
+}
+
+# The pin must also authenticate. The preflight asks the runner's own check
+# under the pin with a scrubbed environment; the fake Pi check, like real Pi,
+# answers ready for any root when ANTHROPIC_API_KEY is set, so passing one here
+# proves the caller's key cannot vouch for an unauthenticated root.
+test_account_pin_preflight_refuses() {
+  local harness rec id out status
+  for harness in claude pi pi-signed; do
+    id="pin-unauth-$harness"
+    rec=$(make_spawn_case "$id" "$harness" "$id")
+    read_case_record "$rec"
+    case "$harness" in
+      claude) printf 'missing\n' > "$HOME_DIR/accounts/claude/.fake-auth" ;;
+      *) printf 'not_ready\n' > "$HOME_DIR/accounts/pi/.fake-auth" ;;
+    esac
+    out=$(ANTHROPIC_API_KEY=caller-key run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --scout --harness "$harness"); status=$?
+    expect_code 1 "$status" "$harness spawn under an unauthenticated pin must refuse: $out"
+    case "$harness" in
+      claude) assert_contains "$out" "the Claude account pin $HOME_DIR/accounts/claude holds no usable login (quota-axi auth: keychain=missing)" \
+        "claude preflight refusal must name the pin and the check's answer" ;;
+      *) assert_contains "$out" "the Pi account pin $HOME_DIR/accounts/pi cannot authenticate --provider fake (pi auth check: not_ready" \
+        "$harness preflight refusal must name the pin, the provider, and the check's answer" ;;
+    esac
+    [ ! -s "$LAUNCH_LOG" ] || fail "$harness spawn under an unauthenticated pin delivered a launch"
+    assert_absent "$HOME_DIR/state/$id.meta" "$harness spawn under an unauthenticated pin published a task"
+  done
+
+  # codex-native signs in through Codex's own login, which carries no pin, so
+  # the Pi root's answer does not gate it.
+  id="pin-native-pi"
+  rec=$(make_spawn_case "$id" pi "$id")
+  read_case_record "$rec"
+  printf 'not_ready\n' > "$HOME_DIR/accounts/pi/.fake-auth"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
+    --harness pi --model codex-native/gpt-6-astra --effort ultra); status=$?
+  expect_code 0 "$status" "a codex-native launch must not be gated by the Pi root's own check: $out"
+  assert_contains "$(cat "$LAUNCH_LOG")" "PI_CODING_AGENT_DIR='$HOME_DIR/accounts/pi'" "a codex-native launch lost its Pi pin"
+
+  id="pin-noprovider-pi"
+  rec=$(make_spawn_case "$id" pi "$id")
+  read_case_record "$rec"
+  rm "$HOME_DIR/accounts/pi/settings.json"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --harness pi); status=$?
+  expect_code 1 "$status" "a Pi spawn with no model and no default provider must refuse: $out"
+  assert_contains "$out" "pass --model <provider>/<id>, or set defaultProvider in $HOME_DIR/accounts/pi/settings.json" \
+    "an unconfirmable Pi pin must say how to make it confirmable"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unconfirmable Pi pin delivered a launch"
+  pass "a pin that cannot authenticate refuses before launch, a caller's key cannot vouch for it, and codex-native is not gated by it"
 }
 
 test_pi_raw_launch_command_receives_pin() {
@@ -1382,9 +1453,11 @@ test_pi_raw_launch_command_receives_pin() {
   read_case_record "$rec"
   pin="$CASE_DIR/work root"
   mkdir -p "$pin"
+  printf '{"defaultProvider":"fake"}\n' > "$pin/settings.json"
   printf '%s\n' "$pin" > "$HOME_DIR/config/pi-agent-dir"
   cat > "$FAKEBIN_DIR/pi" <<'SH'
 #!/bin/sh
+[ "${1:-} ${2:-}" != "auth check" ] || exec fm-fake-pi-auth "$@"
 printf '%s\n' "${PI_CODING_AGENT_DIR:-unset}"
 SH
   chmod +x "$FAKEBIN_DIR/pi"
@@ -1402,7 +1475,8 @@ SH
 
 test_pi_home_account_selection
 test_pi_home_account_invalid_refuses
-test_pi_absent_account_pin_preserves_ambient
+test_account_pin_missing_refuses
+test_account_pin_preflight_refuses
 test_pi_raw_launch_command_receives_pin
 
 test_launch_environment_allowlist
@@ -1492,9 +1566,14 @@ SH
 # config/claude-permission-mode (bin/fm-spawn.sh header): absent and `bypass`
 # must both produce today's launch byte-for-byte, `auto` swaps only the
 # permission flag, and any other token refuses before endpoint or metadata.
+# The account pin and the credential shed that open every Claude launch are
+# owned by bin/fm-account-pin-lib.sh and proven behaviorally by
+# test_claude_launch_sheds_environment_credentials above; they are restated here
+# only so this comparison stays byte-exact, the way the rest of this expectation
+# already is.
 claude_expected_launch() {  # <home> <id> <permission-flag>
   local home=$1 id=$2 flag=$3
-  printf '%s' "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
+  printf '%s' "env -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_PROFILE -u ANTHROPIC_FEDERATION_RULE_ID CLAUDE_CONFIG_DIR='$home/accounts/claude' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
 }
 
 test_claude_permission_mode_bypass_matches_absent_launch() {
@@ -1616,8 +1695,8 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
-test_claude_forwards_firstmate_config_dir_when_set
-test_claude_omits_config_dir_prefix_when_unset
+test_claude_worker_ignores_spawning_config_dir
+test_claude_launch_sheds_environment_credentials
 test_claude_permission_mode_bypass_matches_absent_launch
 test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch

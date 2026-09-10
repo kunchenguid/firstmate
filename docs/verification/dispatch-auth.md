@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports the dispatch judgment rules in `.agents/skills/quota-array-dispatch/SKILL.md` and the bounded vendor probe in `bin/fm-vendor-auth-probe.sh`.
+This record supports the dispatch judgment rules in `.agents/skills/quota-array-dispatch/SKILL.md`, the bounded vendor probe in `bin/fm-vendor-auth-probe.sh`, and the account-pin check in `bin/fm-account-pin-lib.sh`.
 It records only facts that must be re-established when a producer or vendor version changes.
 Task chronology, incident transcripts, and credential metadata stay in private reports or PR evidence.
 
@@ -193,11 +193,40 @@ These discriminator strings are un-owned vendor UI text.
 `bin/fm-vendor-auth-probe.sh` pins the verified version, reports `versionVerified=no` when the running CLI differs, and classifies any unrecognized first line as `indeterminate` rather than authenticated.
 Re-run the two commands above and update this section and the pinned version together when the vendor CLI changes.
 
+## Account-pin preflight
+
+Verified on 2026-09-10 with Pi 0.85.1 and quota-axi 0.1.30 on macOS, against throwaway roots holding no real credential.
+`bin/fm-account-pin-lib.sh` refuses a spawn unless the runner's own check says the pinned root can authenticate, and these are the answers it reads.
+The keyed Pi root holds `{"anthropic":{"type":"api_key","key":"<fake>"}}` in `auth.json`, and the filed Claude root holds a `.credentials.json` whose `claudeAiOauth.expiresAt` is one day ahead.
+
+```sh
+env -i HOME="$HOME" PATH="$PATH" PI_CODING_AGENT_DIR=<empty> pi auth check --provider anthropic --json --no-refresh
+env -i HOME="$HOME" PATH="$PATH" PI_CODING_AGENT_DIR=<keyed> pi auth check --provider anthropic --json --no-refresh
+env -i HOME="$HOME" PATH="$PATH" ANTHROPIC_API_KEY=<fake> PI_CODING_AGENT_DIR=<empty> pi auth check --provider anthropic --json --no-refresh
+env -i HOME="$HOME" PATH="$PATH" CLAUDE_CONFIG_DIR=<empty> quota-axi auth --json --provider claude | jq -c '[.auth[].sources[] | {source,status}]'
+env -i HOME="$HOME" PATH="$PATH" CLAUDE_CONFIG_DIR=<filed> quota-axi auth --json --provider claude | jq -c '[.auth[].sources[] | {source,status}]'
+```
+
+```text
+{"status":"not_ready","provider":"anthropic","reason":"credentials_not_configured"}
+{"status":"ready","provider":"anthropic","authType":"api_key"}
+{"status":"ready","provider":"anthropic","authType":"api_key"}
+[{"source":"oauth-file","status":"missing"},{"source":"keychain","status":"missing"}]
+[{"source":"oauth-file","status":"available"},{"source":"keychain","status":"missing"}]
+```
+
+The three Pi checks exited 1, 0, and 0.
+Against a real logged-in root, the same check answered `{"status":"invalid","provider":"codex-native/gpt-6-astra","reason":"invalid_state"}` for `--model codex-native/gpt-6-astra` and `{"status":"not_ready","provider":"codex-native","reason":"provider_not_found"}` for `--provider codex-native`, because `pi auth check` does not load the `pi-codex-native` extension that registers that provider; the library therefore skips the check for that provider.
+The third answer is why the check runs with a scrubbed environment: Pi counts `ANTHROPIC_API_KEY` as a ready credential for a root that holds none.
+Against real logged-in roots, each check answered in under one second.
+`tests/fm-account-pin-preflight-live-e2e.test.sh` re-runs these checks through the library on any host with pi, quota-axi, and jq, and fails naming the version whose answer changed.
+
 ## Regression coverage
 
 `tests/fm-vendor-auth-probe.test.sh` drives the real script against a fake vendor CLI that records every invocation's argv and anything readable on stdin.
 It asserts that the script accepts no harness, model, or provider input, never calls `quota-axi`, exits alike for every probe result because it renders no verdict, invokes only the two fixed non-destructive argv forms with stdin closed, holds a real bound even when the configured bound is zero or malformed, and never echoes raw vendor output.
-`tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile and harness refusals.
+`tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile, harness, and account-pin refusals, including a caller key that must not vouch for an unauthenticated pin, and the Claude launch's credential shed.
+`tests/fm-quota-snapshot.test.sh` owns the per-pin quota read, and `tests/fm-quota-choose.test.sh` owns the helper's refusal to rank across pins.
 `tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.
 `tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake schema-5 snapshot per case, served as quota-axi's default TOON.
 It covers TOON-first `spendPriority` ranking among candidates that pass eligibility, reasoning-class, and runway-feasibility gates, explicit accounting for unmeasurable runway, the strongest-reasoning constraint, and the runway feasibility floor over a higher `spendPriority`.
