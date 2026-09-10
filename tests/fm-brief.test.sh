@@ -257,8 +257,12 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
       "$mode existing-PR brief did not assert the caller-supplied head branch"
     assert_grep "config --get \"branch.\$PR_BRANCH.remote\"" "$brief" \
       "$mode existing-PR brief did not reject a fork-hosted head"
-    assert_grep "git remote get-url --push origin" "$brief" \
+    assert_grep "git remote get-url --push --all origin" "$brief" \
       "$mode existing-PR brief did not validate origin's effective push target"
+    assert_grep "origin must have exactly one push URL" "$brief" \
+      "$mode existing-PR brief did not refuse additional origin push destinations"
+    assert_grep "gh-axi pr list --state open" "$brief" \
+      "$mode existing-PR brief did not require the PR to remain open"
     assert_grep "existing PR head is the origin default branch" "$brief" \
       "$mode existing-PR brief did not refuse a default-branch head"
     assert_grep "$home/data/$id/existing-pr-branch" "$brief" \
@@ -270,7 +274,7 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
         "no-mistakes existing-PR brief did not record its base branch"
       assert_grep "--base-branch" "$brief" \
         "no-mistakes existing-PR brief did not target the recorded PR base"
-      assert_grep "gh-axi pr list --state all --base 'release/2.x' --head \"\$PR_BRANCH\" --limit 100 --fields url" "$brief" \
+      assert_grep "gh-axi pr list --state open --base 'release/2.x' --head \"\$PR_BRANCH\" --limit 100 --fields url" "$brief" \
         "no-mistakes existing-PR brief did not verify the base against the live PR"
       assert_grep "--base-branch does not match the live existing PR base" "$brief" \
         "no-mistakes existing-PR brief did not explain a live base mismatch"
@@ -300,7 +304,7 @@ test_existing_pr_ship_briefs_replace_new_pr_contract() {
 }
 
 test_existing_pr_setup_checks_out_a_new_origin_branch() {
-  local root remote source work holder home brief setup_command setup_out source_head fakebin real_git reuse_brief reuse_command reuse_out base_brief base_command base_out wrong_base_brief wrong_base_command wrong_base_out held_brief held_command held_out default_brief default_command default_out
+  local root remote source work holder home brief setup_command setup_out source_head fakebin real_git reuse_brief reuse_command reuse_out base_brief base_command base_out wrong_base_brief wrong_base_command wrong_base_out closed_brief closed_command closed_out multi_out held_brief held_command held_out default_brief default_command default_out
   root="$TMP_ROOT/existing-pr-checkout"
   remote="$root/remote.git"
   source="$root/source"
@@ -331,12 +335,15 @@ test_existing_pr_setup_checks_out_a_new_origin_branch() {
   real_git=$(command -v git)
   cat > "$fakebin/git" <<EOF
 #!/bin/sh
-if [ "\${1:-}" = remote ] && [ "\${2:-}" = get-url ] \
-  && { [ "\${3:-}" = origin ] || { [ "\${3:-}" = --push ] && [ "\${4:-}" = origin ]; }; }; then
-  if [ "\${3:-}" = --push ]; then
-    printf '%s\n' ssh://git@github.com/kunchenguid/firstmate.git/
-  else
-    printf '%s\n' git@github.com:kunchenguid/firstmate
+if [ "\${1:-}" = remote ] && [ "\${2:-}" = get-url ] && [ "\${3:-}" = origin ]; then
+  printf '%s\n' git@github.com:kunchenguid/firstmate
+  exit 0
+fi
+if [ "\${1:-}" = remote ] && [ "\${2:-}" = get-url ] && [ "\${3:-}" = --push ] \
+  && [ "\${4:-}" = --all ] && [ "\${5:-}" = origin ]; then
+  printf '%s\n' ssh://git@github.com/kunchenguid/firstmate.git/
+  if [ "\${FM_TEST_EXTRA_PUSH:-0}" = 1 ]; then
+    printf '%s\n' https://github.com/example/unrelated
   fi
   exit 0
 fi
@@ -356,7 +363,8 @@ if [ "$1" = pr ] && [ "$2" = list ]; then
       *) shift ;;
     esac
   done
-  if [ "${listed_base:-}" = "${FM_TEST_PR_BASE:-main}" ]; then
+  if [ "${FM_TEST_PR_OPEN:-1}" = 1 ] \
+    && { [ -z "${listed_base:-}" ] || [ "$listed_base" = "${FM_TEST_PR_BASE:-main}" ]; }; then
     printf '%s\n' '  2460,"fixture",open,test,no,none,"https://github.com/kunchenguid/firstmate/pull/2460"'
   fi
   exit 0
@@ -420,6 +428,23 @@ EOF
   fi
   assert_contains "$wrong_base_out" "--base-branch does not match the live existing PR base" \
     "generated existing-PR setup did not explain its live base mismatch"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" checkout-closed firstmate --mode direct-PR \
+    --existing-pr https://github.com/kunchenguid/firstmate/pull/2460 \
+    --branch existing/head >/dev/null 2>&1
+  closed_brief="$home/data/checkout-closed/brief.md"
+  # shellcheck disable=SC2016 # The sed expression is a literal parser for the generated Markdown command.
+  closed_command=$(sed -n 's/^1\. First action:.*: `\(.*\)`\.$/\1/p' "$closed_brief")
+  if closed_out=$(cd "$work" && FM_TEST_PR_REMOTE="$remote" FM_TEST_PR_OPEN=0 PATH="$fakebin:$PATH" eval "$closed_command" 2>&1); then
+    fail "generated existing-PR setup accepted a closed PR"
+  fi
+  assert_contains "$closed_out" "existing PR is not open" \
+    "generated existing-PR setup did not explain its closed-PR refusal"
+  if multi_out=$(cd "$work" && FM_TEST_PR_REMOTE="$remote" FM_TEST_EXTRA_PUSH=1 PATH="$fakebin:$PATH" eval "$closed_command" 2>&1); then
+    fail "generated existing-PR setup accepted multiple origin push URLs"
+  fi
+  assert_contains "$multi_out" "origin must have exactly one push URL" \
+    "generated existing-PR setup did not explain its multiple-push-URL refusal"
 
   holder="$root/holder"
   git -C "$work" worktree add "$holder" existing/head >/dev/null 2>&1 \
