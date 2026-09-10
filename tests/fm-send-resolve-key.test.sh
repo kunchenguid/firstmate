@@ -567,7 +567,7 @@ test_reserved_pending_reply_key_closes_through_resolve_key() {
   grep -F "pending-reply-resolved: task=mate pending-reply-id=$corr via=operator-resolve-key" \
     "$home/state/mate.status" >/dev/null \
     || fail "the operator close did not write the owning library's close note:"$'\n'"$(cat "$home/state/mate.status")"
-  if grep -E "resolved \[key=$key\]: answered:" "$home/state/mate.status" >/dev/null; then
+  if grep -E "resolved \[key=$key\]( \[at=[0-9]+\])?: answered:" "$home/state/mate.status" >/dev/null; then
     fail "the operator close still wrote a bare answered: note that the fold ignores:"$'\n'"$(cat "$home/state/mate.status")"
   fi
 
