@@ -87,6 +87,7 @@ OUTCOME_DIR="$STATE/terminal-outcomes"
 SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
 CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
+CAPTAIN_HOLD_BIN="${FM_INACTIVE_CAPTAIN_HOLD_BIN:-$SCRIPT_DIR/fm-captain-hold.sh}"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -458,6 +459,20 @@ ledger_pass() {
 }
 
 # The `report <task-id>` entry point: the caller holds the child's meta lock.
+# HOLD_FOR_CAPTAIN is a terminal reconciliation class, not a lifecycle action.
+# The backlog hold is the authoritative decision surface even when the worker's
+# last status line says done/resolved and its endpoint is gone. Classify before
+# any endpoint/current-state read so neither a dirty preserved copy nor a clean
+# local-only branch can be mistaken for abandoned work. An unreadable hold
+# source does not suppress anything.
+task_is_hold_for_captain() { # <id>
+  local id=$1 identity
+  identity=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$CAPTAIN_HOLD_BIN" open "$id" --identity 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  return 0
+}
+
 report_child() { # <id>
   local id=$1 meta rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
@@ -478,6 +493,13 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   turn="$STATE/$id.turn-ended"
   last=$(last_status_line "$status")
   status_line_verb "$last" | grep -Fx captain-held >/dev/null 2>&1 && return 0
+  if task_is_hold_for_captain "$id"; then
+    # Preserve the task record, endpoint evidence, worktree contents, branch,
+    # and existing captain hold exactly as found. The ordinary captain-hold
+    # surfaces already present the decision; emitting an inactive-outcome wake
+    # here would only repeat that same request and invite unsafe recovery.
+    return 0
+  fi
   # A ledger that states its own outcome is the ledger-first path's to deliver.
   if [ -n "$self" ] && child_terminal_ledger_line "$status" >/dev/null; then
     return 0
