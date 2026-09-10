@@ -160,9 +160,9 @@ def main():
         try:
             result = json.loads(output)
         except ValueError as error:
-            return False, 'Antigravity returned no readable JSON result: ' + str(error)
+            return False, 'Antigravity returned no readable JSON result: ' + str(error) + '\n' + output
         if not isinstance(result, dict):
-            return False, 'Antigravity JSON result must be an object'
+            return False, 'Antigravity JSON result must be an object\n' + output
         response = result.get('response', output)
         next_conversation = result.get('conversation_id')
         if result.get('status') != 'SUCCESS' or not isinstance(next_conversation, str) or not next_conversation:

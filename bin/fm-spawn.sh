@@ -1869,11 +1869,9 @@ effort_flag_for_harness() {
       esac
       ;;
     antigravity)
-      # agy 1.1.28 documents --effort as low|medium|high; the dispatch guard
-      # above refuses anything else before a launch command is built.
-      case "$effort" in
-        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
-      esac
+      # agy 1.1.28 documents --effort as low|medium|high, and the dispatch guard
+      # above already refused anything else before a launch command was built.
+      printf -- '--effort %s ' "$(shell_quote "$effort")"
       ;;
     claude)
       case "$effort" in

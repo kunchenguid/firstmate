@@ -116,6 +116,8 @@ print(json.dumps({'conversation_id':'conversation-exact','status':'SUCCESS','res
             banner = subprocess.run(command,input='again\n/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_BANNER='1'),timeout=20)
             assert banner.returncode == 0, banner.stderr
             assert banner.stdout.count('turn failed') == 2, banner.stdout
+            assert banner.stdout.count('Antigravity update available') == 2, banner.stdout
+            assert 'BRIDGE_OK' in banner.stdout, banner.stdout
         result = subprocess.run(command,input='/exit\n',capture_output=True,text=True,env=dict(env,BRIDGE_FAIL='1'),timeout=20)
         assert 'turn failed' in result.stdout
         assert 'blocked:' in (state/'probe.status').read_text()
