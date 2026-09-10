@@ -1059,11 +1059,28 @@ case "${FM_TEST_FINAL_ACTION:?}" in
     rm -f -- "$last"
     ln -s "${FM_TEST_FAULT_LINK_TARGET:?}" "$last"
     ;;
-  mode) "${FM_TEST_REAL_CHMOD:?}" 0644 "$last" ;;
+  mode) chmod 0644 "$last" ;;
   content) printf 'faulted final bytes\n' > "$last" ;;
   device) : > "${FM_TEST_FAULT_GATE:?}" ;;
   *) exit 2 ;;
 esac
+SH
+  # The mode fault asserts that a real post-rename permission corruption gets
+  # detected and rolled back, which only means something if the requested
+  # chmod is a chmod this run can actually observe. On a proven mode-inert
+  # host neither request nor readback would move, so the mv fault calls plain
+  # chmod, which PATH resolves to this capable-simulation chmod rather than
+  # the real one, and this stat mirrors install_mode_probe_fakebin's sidecar
+  # readback for the exact final path so fm_pr_device_mode_capable's own
+  # probe (on a scratch file here) and the production mode check both see the
+  # simulated bits.
+  cat > "$dir/fakebin/chmod" <<'SH'
+#!/usr/bin/env bash
+mode=$1
+shift
+for f in "$@"; do
+  printf '%s\n' "${mode#0}" > "$f.fakemode"
+done
 SH
   cat > "$dir/fakebin/stat" <<'SH'
 #!/usr/bin/env bash
@@ -1073,9 +1090,13 @@ if [ "$last" = "${FM_TEST_FINAL_PATH:-}" ] && [ -e "${FM_TEST_FAULT_GATE:-/nonex
     *" %d "*) printf '%s\n' 999999; exit 0 ;;
   esac
 fi
+if [ "$1" = -c ] && [ "$2" = %a ] && [ -f "$last.fakemode" ]; then
+  cat "$last.fakemode"
+  exit 0
+fi
 exec "${FM_TEST_REAL_STAT:?}" "$@"
 SH
-  chmod +x "$dir/fakebin/mv" "$dir/fakebin/stat"
+  chmod +x "$dir/fakebin/mv" "$dir/fakebin/chmod" "$dir/fakebin/stat"
 }
 
 assert_no_final_poll() {
@@ -1126,12 +1147,20 @@ test_postrename_poll_validation_revokes_and_retries() {
       printf 'external sentinel\n' > "$link_target"
       PATH="$sentinel_fakebin:$BASE_PATH" chmod 0644 "$link_target"
       install_final_publication_fault "$dir"
+      # Reset the capability cache so this device's status is decided fresh
+      # under the fault-injecting fakebin below: an earlier real-host probe
+      # from the plain fm_pr_poll_prepare calls above would otherwise still
+      # be cached and skip the mode fault's own capable-simulated probe.
+      FM_PR_MODE_CAPABLE_CACHE=
       if FM_TEST_FINAL_PATH="$destination" FM_TEST_FINAL_ACTION="$action" \
         FM_TEST_FAULT_LINK_TARGET="$link_target" FM_TEST_FAULT_GATE="$gate" \
-        FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REAL_STAT="$REAL_STAT" FM_TEST_REAL_CHMOD="$REAL_CHMOD" \
+        FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REAL_STAT="$REAL_STAT" \
         PATH="$dir/fakebin:$BASE_PATH" fm_pr_poll_publish_prepared; then
         fail "post-rename $artifact $action fault was reported as success"
       fi
+      # Drop the cache entry the simulated probe above just wrote before any
+      # further real (non-fakebin) use of this same device below.
+      FM_PR_MODE_CAPABLE_CACHE=
       fm_pr_poll_cleanup
       assert_no_final_poll "$state"
       [ "$(cat "$link_target")" = 'external sentinel' ] || fail "poll type fault changed an external target"
