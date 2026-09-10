@@ -179,6 +179,13 @@ jobs:
           set -eu
           npm install -g @earendil-works/pi-coding-agent
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
+      # Archive verification replays the frozen evaluator in real confinement.
+      # Hosted runners have Docker but do not cache this test image.
+      - name: Prepare benchmark replay confinement
+        run: |
+          set -eu
+          docker pull python:3.12-slim
+          docker image inspect python:3.12-slim --format '{{.Id}}'
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix
