@@ -12,8 +12,8 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--issue <issue-url>] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--issue <issue-url>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -28,6 +28,28 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --issue <issue-url> scaffolds work dispatched from a GitLab issue. It FILLS
+#   `## Captain's intent` from the issue itself - canonical URL, project path,
+#   author, state, title, description, and the issue's comments, read through
+#   `bin/fm-gitlab-issue.sh show` - so the worker reads the original request
+#   without calling GitLab and no `{TASK}` placeholder is left in that
+#   subsection; `{FIRSTMATE_SPEC}` is still firstmate's to fill. Every line of
+#   issue-authored text is quoted with a leading "> ", so a heading or code
+#   fence written in the issue cannot end that subsection or restructure the
+#   sections after it. bin/fm-gitlab-issue-lib.sh owns the accepted URL shape
+#   and the canonical spelling; the scaffold records it as a fixed
+#   machine-readable "Issue contract: issue=<url>" line that bin/fm-spawn.sh
+#   checks against its own --issue. A ship brief also carries the generated
+#   small-merge-request contract: one reviewable merge request for the task, a
+#   "#<iid> [n/N] <work>" title, a "Related to #<iid>" line and never a closing
+#   keyword (the human closes the issue), and the regression test shipping with
+#   the first subtask of a reproduced bug. That block is generated build
+#   guidance rather than the captain's words, and it sits outside `# Task` so it
+#   never becomes no-mistakes `--intent`. A scout brief carries the issue
+#   content without it, because a scout delivers a report and no merge request.
+#   --issue is refused on --secondmate, and needs glab and jq on PATH; an issue
+#   that cannot be read refuses the scaffold instead of writing a brief the
+#   worker cannot act on.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
@@ -90,6 +112,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-gitlab-issue-lib.sh
+. "$SCRIPT_DIR/fm-gitlab-issue-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -121,6 +145,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+ISSUE_ARG=
+ISSUE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -130,6 +156,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      issue) ISSUE_ARG=$a; ISSUE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -142,6 +169,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --issue) want_value=issue ;;
+    --issue=*) ISSUE_ARG=${a#--issue=}; ISSUE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -179,6 +208,19 @@ fi
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
+fi
+
+# The issue URL is validated before anything is written or fetched, by the same
+# library every other issue-aware surface uses (bin/fm-gitlab-issue-lib.sh).
+if [ "$ISSUE_SET" -eq 1 ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --issue applies only to crewmate ship or scout briefs; a secondmate charter is not issue work" >&2
+    exit 1
+  fi
+  fm_gitlab_issue_url_parse "$ISSUE_ARG" || {
+    echo "error: --issue is not a GitLab issue URL (expected https://<host>/<group>/<project>/-/issues/<iid>): $ISSUE_ARG" >&2
+    exit 1
+  }
 fi
 
 BRIEF="$DATA/$ID/brief.md"
@@ -311,6 +353,93 @@ fi
 
 REPO=${POS[1]}
 
+# Quote every line of issue-authored text. The leading "> " keeps a heading or
+# a code fence written by a human on GitLab from ending `## Captain's intent`
+# or restructuring the sections after it, while leaving the words verbatim.
+issue_quote() {
+  awk '{ sub(/\r$/, ""); if ($0 == "") print ">"; else print "> " $0 }'
+}
+
+issue_show_field() {  # <jq-filter>
+  printf '%s\n' "$ISSUE_SHOW" | jq -r "$1"
+}
+
+# The captain-facing half of --issue: the issue itself, rendered so the worker
+# never has to call GitLab to learn what was asked.
+render_issue_intent() {
+  local title description notes
+  title=$(issue_show_field '.title // ""')
+  description=$(issue_show_field '.description // ""')
+  notes=$(issue_show_field '.notes[]? | "@" + (.author.username // "unknown") + " at " + (.created_at // "unknown time") + ":\n" + (.body // "") + "\n"')
+  printf 'This task was dispatched from GitLab issue #%s in %s, opened by @%s and currently %s:\n' \
+    "$FM_GITLAB_ISSUE_IID" "$ISSUE_PROJECT_PATH" "$ISSUE_AUTHOR" "$ISSUE_STATE"
+  printf '%s\n\n' "$FM_GITLAB_ISSUE_URL"
+  printf 'The issue is quoted below as it was written; the leading "> " on each line is the quote, not part of the text.\n\n'
+  printf 'Title:\n'
+  printf '%s\n' "$title" | issue_quote
+  if [ -n "$(printf '%s' "$description" | tr -d '[:space:]')" ]; then
+    printf '\nDescription:\n'
+    printf '%s\n' "$description" | issue_quote
+  else
+    printf '\nDescription: the issue has none.\n'
+  fi
+  if [ -n "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+    printf '\nComments on the issue, oldest first:\n'
+    printf '%s\n' "$notes" | issue_quote
+  else
+    printf '\nThe issue has no comments.\n'
+  fi
+}
+
+ISSUE_SHOW=
+ISSUE_BLOCK=
+CAPTAIN_INTENT_BODY='{TASK}'
+if [ "$ISSUE_SET" -eq 1 ]; then
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: --issue needs jq on PATH to read the issue" >&2
+    exit 1
+  }
+  ISSUE_SHOW=$("$FM_ROOT/bin/fm-gitlab-issue.sh" show "$FM_GITLAB_ISSUE_URL") || {
+    echo "error: --issue could not read $FM_GITLAB_ISSUE_URL; no brief was written" >&2
+    exit 1
+  }
+  ISSUE_PROJECT_PATH=$(issue_show_field '.project_path_with_namespace // ""')
+  [ -n "$ISSUE_PROJECT_PATH" ] || ISSUE_PROJECT_PATH=$FM_GITLAB_ISSUE_PATH
+  ISSUE_AUTHOR=$(issue_show_field '.author.username // "unknown"')
+  ISSUE_STATE=$(issue_show_field '.state // "unknown"')
+  CAPTAIN_INTENT_BODY=$(render_issue_intent)
+
+  # Generated build guidance, never the captain's words: it stays outside
+  # `# Task` so it is not carried into a no-mistakes `--intent`. The
+  # "Issue contract: issue=" line is what bin/fm-spawn.sh checks its own
+  # --issue against.
+  IFS= read -r -d '' ISSUE_SECTION <<EOF || true
+# GitLab issue
+Issue contract: issue=$FM_GITLAB_ISSUE_URL
+This task was dispatched from that issue, quoted under \`## Captain's intent\` above.
+The human who opened it owns it: never close it, never change its labels, and never comment on it - firstmate reports back to the issue.
+EOF
+  ISSUE_SECTION=${ISSUE_SECTION%$'\n'}
+  if [ "$KIND" = ship ]; then
+    IFS= read -r -d '' ISSUE_MR_SECTION <<EOF || true
+Ship exactly one merge request for this task by default, small enough that a human reviews the whole diff in one reading.
+If the work genuinely cannot land as one reviewable change, say so to firstmate instead of splitting or stacking merge requests on your own.
+Title it \`#$FM_GITLAB_ISSUE_IID [n/N] <what this task changes>\`, where n/N is this task's position among the subtasks issue #$FM_GITLAB_ISSUE_IID was split into; \`## Firstmate spec\` names it, and when it does not, ask firstmate rather than guessing.
+The description must carry the line \`Related to #$FM_GITLAB_ISSUE_IID\` and must never carry \`Closes\`, \`Fixes\`, \`Resolves\`, or any other closing keyword: the human closes the issue after reviewing every merge request.
+When the issue is a bug you reproduced, the regression test ships with the first subtask's merge request; if the spec above says this is that subtask, this merge request must contain it.
+EOF
+    ISSUE_SECTION="$ISSUE_SECTION"$'\n\n'"${ISSUE_MR_SECTION%$'\n'}"
+  fi
+  ISSUE_BLOCK=$'\n'"$ISSUE_SECTION"$'\n'
+fi
+# --issue fills the captain's intent from the issue, so only the spec is left.
+PLACEHOLDER_HINT='{TASK} and {FIRSTMATE_SPEC}'
+ISSUE_LABEL=
+if [ "$ISSUE_SET" -eq 1 ]; then
+  PLACEHOLDER_HINT='{FIRSTMATE_SPEC}'
+  ISSUE_LABEL=", issue=#$FM_GITLAB_ISSUE_IID"
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -343,10 +472,10 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
-IFS= read -r -d '' TASK_SECTION <<'EOF' || true
+IFS= read -r -d '' TASK_SECTION <<EOF || true
 # Task
 ## Captain's intent
-{TASK}
+$CAPTAIN_INTENT_BODY
 
 ## Firstmate spec
 {FIRSTMATE_SPEC}
@@ -358,7 +487,7 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
-
+$ISSUE_BLOCK
 $HERDR_SECTION
 
 # Setup
@@ -414,7 +543,7 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-li
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
+echo "scaffolded: $BRIEF (scout$ISSUE_LABEL; replace $PLACEHOLDER_HINT)"
 exit 0
 fi
 
@@ -444,7 +573,7 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
-
+$ISSUE_BLOCK
 $HERDR_SECTION
 
 # Setup
@@ -506,4 +635,4 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+echo "scaffolded: $BRIEF (ship, mode=$MODE$ISSUE_LABEL; replace $PLACEHOLDER_HINT)"

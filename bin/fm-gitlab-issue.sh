@@ -20,10 +20,8 @@
 #   fm-gitlab-issue.sh --help
 #
 # <issue-url> is https://<host>/<group>[/<subgroup>...]/<project>/-/issues/<iid>.
-# Nested subgroups are ordinary path segments; a trailing "#note_<id>" fragment
-# is ignored. The host must be a plain DNS name (no port, no userinfo) and is
-# lowercased before use; the project path is validated by bin/fm-pr-lib.sh's
-# GitLab rules.
+# bin/fm-gitlab-issue-lib.sh owns that shape, its validation, and the canonical
+# spelling every issue-aware surface stores.
 #
 # Subcommands:
 #   show    Print one JSON object: title, description, state, labels, author
@@ -102,8 +100,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 TIMEOUT="${FM_GITLAB_TIMEOUT:-30}"
 
-# shellcheck source=bin/fm-pr-lib.sh
-. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-gitlab-issue-lib.sh
+. "$SCRIPT_DIR/fm-gitlab-issue-lib.sh"
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
 
@@ -133,30 +131,14 @@ shift
 
 # --- URL --------------------------------------------------------------------
 
-ISSUE_HOST=
-ISSUE_PATH=
-ISSUE_IID=
-parse_issue_url() {  # <url>
-  local raw=${1-} pattern host path iid
-  local LC_ALL=C
-  raw=${raw%%#*}
-  # The path class contains "/" and "-", so this match is greedy to the last
-  # "/-/issues/"; any earlier separator lands inside the captured path, where
-  # fm_pr_gitlab_path_valid refuses the reserved "-" segment.
-  pattern='^https://([A-Za-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/issues/([1-9][0-9]*)/?$'
-  [[ "$raw" =~ $pattern ]] || return 1
-  path=${BASH_REMATCH[2]}
-  iid=${BASH_REMATCH[3]}
-  host=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')
-  fm_pr_gitlab_host_valid "$host" || return 1
-  fm_pr_gitlab_path_valid "$path" || return 1
-  ISSUE_HOST=$host
-  ISSUE_PATH=$path
-  ISSUE_IID=$iid
-}
-
-parse_issue_url "$RAW_URL" || die 1 "not a GitLab issue URL (expected https://<host>/<group>/<project>/-/issues/<iid>): $RAW_URL"
-ISSUE_URL="https://$ISSUE_HOST/$ISSUE_PATH/-/issues/$ISSUE_IID"
+# The URL rules live in bin/fm-gitlab-issue-lib.sh so this helper, the brief
+# scaffold, and the spawn record all accept the same URLs (that library owns
+# the shape and the canonical spelling).
+fm_gitlab_issue_url_parse "$RAW_URL" || die 1 "not a GitLab issue URL (expected https://<host>/<group>/<project>/-/issues/<iid>): $RAW_URL"
+ISSUE_HOST=$FM_GITLAB_ISSUE_HOST
+ISSUE_PATH=$FM_GITLAB_ISSUE_PATH
+ISSUE_IID=$FM_GITLAB_ISSUE_IID
+ISSUE_URL=$FM_GITLAB_ISSUE_URL
 # The validated path holds only [A-Za-z0-9._-] and "/", so encoding the
 # separator is the whole of GitLab's required project-path encoding.
 PROJECT_ENC=${ISSUE_PATH//\//%2F}

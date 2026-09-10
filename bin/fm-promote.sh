@@ -21,6 +21,9 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
+# A scout dispatched from a GitLab issue (an `issue=` record, defined by
+# bin/fm-spawn.sh) keeps that issue's merge authority: --yolo on is refused
+# because the human who owns the issue merges each merge request.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 
@@ -132,6 +135,13 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   exit 1
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+# A task dispatched from a GitLab issue keeps that issue's merge authority when
+# it is promoted: the human who owns the issue reviews and merges each merge
+# request (bin/fm-spawn.sh's header owns the issue= record this reads).
+if [ "$YOLO" = on ] && grep -q '^issue=.' "$META"; then
+  echo "error: task $ID was dispatched from a GitLab issue, so it cannot be promoted with --yolo on: the human who owns the issue reviews and merges each merge request; pass --yolo off" >&2
+  exit 1
+fi
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then

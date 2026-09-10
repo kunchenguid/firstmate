@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--issue <issue-url>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--issue <issue-url>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -45,6 +45,20 @@
 #   worktree is told once to return, and only a shell that will not go refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
+#   --issue <issue-url> is the GitLab issue this task was dispatched from. It
+#   records `issue=<canonical-url>` in state/<id>.meta, and that key is the
+#   durable link between one issue and every task split out of it: an absent
+#   `issue=` means the task did not come from an issue, and the recorded value
+#   is the canonical URL owned by bin/fm-gitlab-issue-lib.sh, so tasks of one
+#   issue always share one exact spelling. The flag is accepted on ship and
+#   scout spawns and refused on --secondmate (a persistent agent is not issue
+#   work) and on --relaunch (which reuses the recorded value). An issue-sourced
+#   ship spawn also refuses --yolo on: the human who owns the issue reviews and
+#   merges each merge request, so firstmate never merges that work itself. When
+#   the brief records an "Issue contract: issue=<url>" line (bin/fm-brief.sh
+#   --issue writes one), the spawn refuses a disagreeing or missing --issue the
+#   same way it refuses a delivery-mode mismatch, and warns once when only the
+#   flag names an issue.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -352,6 +366,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-gitlab-issue-lib.sh
+. "$SCRIPT_DIR/fm-gitlab-issue-lib.sh"
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved raw_bytes
@@ -450,6 +466,8 @@ EFFORT=
 BACKEND_ARG=
 MODE=
 YOLO=
+ISSUE_ARG=
+ISSUE_URL=
 TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
@@ -457,6 +475,7 @@ EFFORT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
+ISSUE_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 POS=()
@@ -473,6 +492,7 @@ for a in "$@"; do
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      issue) ISSUE_ARG=$a; ISSUE_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
@@ -495,6 +515,8 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --issue) want_value=issue ;;
+    --issue=*) ISSUE_ARG=${a#--issue=}; ISSUE_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
     *) POS+=("$a") ;;
@@ -508,6 +530,15 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+# The issue URL is validated by the same library every issue-aware surface
+# uses, so one issue has exactly one accepted spelling (bin/fm-gitlab-issue-lib.sh).
+if [ "$ISSUE_SET" -eq 1 ]; then
+  fm_gitlab_issue_url_parse "$ISSUE_ARG" || {
+    echo "error: --issue is not a GitLab issue URL (expected https://<host>/<group>/<project>/-/issues/<iid>): $ISSUE_ARG" >&2
+    exit 1
+  }
+  ISSUE_URL=$FM_GITLAB_ISSUE_URL
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -535,6 +566,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$ISSUE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded issue; --issue cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -560,7 +592,18 @@ else
       on|off) ;;
       *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
     esac
+    # An issue-sourced task never carries standing merge authority: the human
+    # who opened the issue reviews and merges each merge request, and closes
+    # the issue afterwards.
+    if [ "$ISSUE_SET" -eq 1 ] && [ "$YOLO" = on ]; then
+      echo "error: a task dispatched from a GitLab issue cannot ship with --yolo on: the human who owns the issue reviews and merges each merge request; pass --yolo off" >&2
+      exit 1
+    fi
   else
+    if [ "$ISSUE_SET" -eq 1 ] && [ "$KIND" = secondmate ]; then
+      echo "error: --issue applies only to ship and scout spawns; a persistent secondmate is not a task dispatched from an issue" >&2
+      exit 1
+    fi
     [ "$MODE_SET" -eq 0 ] || {
       echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
       exit 1
@@ -1108,6 +1151,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  [ "$ISSUE_SET" -eq 0 ] || shared_args+=(--issue "$ISSUE_URL")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1292,6 +1336,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  ISSUE_URL=$(fm_meta_get "$RELAUNCH_META" issue)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -2265,6 +2310,24 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] \
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+# Brief/spawn issue agreement, for the same reason as the delivery contract
+# above: an issue-sourced brief records its canonical issue URL as a fixed
+# "Issue contract: issue=<url>" line, and the task's own issue= record is what a
+# later step reads to find every task belonging to one issue. A brief that names
+# an issue the spawn does not record would leave that task invisible to it.
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  BRIEF_ISSUE=$(sed -n 's/^Issue contract: issue=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  if [ -n "$BRIEF_ISSUE" ] && [ -z "$ISSUE_URL" ]; then
+    echo "error: $ID was briefed from GitLab issue $BRIEF_ISSUE but this spawn recorded no issue; pass --issue $BRIEF_ISSUE so the task stays linked to it" >&2
+    exit 1
+  elif [ -n "$BRIEF_ISSUE" ] && [ "$BRIEF_ISSUE" != "$ISSUE_URL" ]; then
+    echo "error: issue mismatch for $ID: the brief says $BRIEF_ISSUE but this spawn recorded $ISSUE_URL; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
+    exit 1
+  elif [ -z "$BRIEF_ISSUE" ] && [ -n "$ISSUE_URL" ]; then
+    echo "warning: $ID records issue $ISSUE_URL but its brief was not scaffolded from that issue; the worker has no issue text to work from - confirm that is intended" >&2
   fi
 fi
 
@@ -3614,7 +3677,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo issue tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3629,6 +3692,8 @@ preserve_relaunch_meta() {
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  # Absent issue= means this task did not come from a GitLab issue.
+  [ -z "$ISSUE_URL" ] || echo "issue=$ISSUE_URL"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

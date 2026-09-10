@@ -790,6 +790,64 @@ EOF
   pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
 }
 
+# A task dispatched from a GitLab issue never carries standing merge authority:
+# the human who opened the issue reviews and merges each merge request and
+# closes the issue afterwards. Both places that decide a ship task's merge
+# posture - the spawn and a scout promotion - refuse --yolo on for such a task.
+test_issue_tasks_keep_merge_authority_with_the_human() {
+  local rec home proj fakebin out status meta
+  local url='https://gitlab.example.test/grp/proj/-/issues/42'
+  rec=$(make_home issue-yolo)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" delivery-issue-e1 direct-PR
+  printf '\n# GitLab issue\nIssue contract: issue=%s\n' "$url" >> "$home/data/delivery-issue-e1/brief.md"
+
+  out=$(run_spawn "$home" "$fakebin" delivery-issue-e1 "$proj" claude --mode direct-PR --yolo on --issue "$url")
+  status=$?
+  [ "$status" -ne 0 ] || fail "an issue-sourced ship spawn carrying --yolo on should exit non-zero"
+  assert_contains "$out" "cannot ship with --yolo on" "the refusal did not explain the issue's merge authority"
+  assert_absent "$home/state/delivery-issue-e1.meta" "a refused issue spawn wrote task metadata"
+
+  # --yolo off on the same task clears the merge-authority check and only fails
+  # later, at the refusing tmux.
+  out=$(run_spawn "$home" "$fakebin" delivery-issue-e1 "$proj" claude --mode direct-PR --yolo off --issue "$url")
+  assert_not_contains "$out" "cannot ship with --yolo on" "an issue task shipping --yolo off was refused"
+
+  # Promotion is the other place a ship task's merge posture is decided.
+  meta="$home/state/delivery-issue-e2.meta"
+  write_brief "$home" delivery-issue-e2
+  fill_brief_subsections "$home/data/delivery-issue-e2/brief.md" "Investigate the issue." "Report the cause."
+  printf 'window=fm-delivery-issue-e2\nkind=scout\nworktree=/tmp/wt\nissue=%s\n' "$url" > "$meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$PROMOTE" delivery-issue-e2 --mode direct-PR --yolo on 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promoting an issue-sourced scout with --yolo on should exit non-zero"
+  assert_contains "$out" "dispatched from a GitLab issue" "the promote refusal did not name the issue"
+  assert_grep 'kind=scout' "$meta" "a refused promotion still changed the task record"
+  assert_no_grep '^yolo=' "$meta" "a refused promotion recorded a merge posture"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$PROMOTE" delivery-issue-e2 --mode direct-PR --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "promoting an issue-sourced scout with --yolo off should succeed: $out"
+  assert_grep 'yolo=off' "$meta" "promotion did not record the human-owned merge posture"
+  assert_grep "issue=$url" "$meta" "promotion dropped the issue the task came from"
+
+  # A task with no issue keeps the ordinary posture, so the guard cannot leak
+  # into every other promotion.
+  write_brief "$home" delivery-issue-e3
+  fill_brief_subsections "$home/data/delivery-issue-e3/brief.md" "Ordinary scout." "Report the cause."
+  printf 'window=fm-delivery-issue-e3\nkind=scout\nworktree=/tmp/wt\n' > "$home/state/delivery-issue-e3.meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$PROMOTE" delivery-issue-e3 --mode direct-PR --yolo on 2>&1)
+  status=$?
+  expect_code 0 "$status" "an ordinary scout promotion with --yolo on should still succeed: $out"
+  assert_grep 'yolo=on' "$home/state/delivery-issue-e3.meta" "an ordinary promotion lost its merge posture"
+  pass "issue-sourced tasks refuse standing merge authority at both spawn and promotion"
+}
+
 test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
@@ -801,4 +859,6 @@ test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
 test_spawn_and_promote_require_filled_task_subsections
+test_issue_tasks_keep_merge_authority_with_the_human
+
 echo "# all fm-task-delivery tests passed"
