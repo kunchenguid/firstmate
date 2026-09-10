@@ -41,7 +41,7 @@ gh-axi api "/repos/$OWNER/$REPO/pulls/$PR/reviews" --paginate --full
 gh-axi api "/repos/$OWNER/$REPO/pulls/$PR/comments" --paginate --full
 gh-axi api "/repos/$OWNER/$REPO/commits/$REVIEW_HEAD/check-runs?per_page=100" --paginate --full
 gh-axi api "/repos/$OWNER/$REPO/commits/$REVIEW_HEAD/statuses?per_page=100" --paginate --full
-gh-axi api POST graphql --paginate --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { reviewThreads(first: 100, after: \$endCursor) { nodes { id isResolved isOutdated comments(first: 100) { nodes { databaseId url path line body author { login } createdAt } } } pageInfo { hasNextPage endCursor } } } } }"
+gh-axi api POST graphql --paginate --full --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { reviewThreads(first: 100, after: \$endCursor) { nodes { id isResolved isOutdated comments(first: 100) { nodes { databaseId url path line body author { login } createdAt } } } pageInfo { hasNextPage endCursor } } } } }"
 ```
 
 Do not treat an outdated thread as resolved.
@@ -58,7 +58,8 @@ THREAD_ID=<graphql-review-thread-id>
 gh-axi api POST graphql --field query='mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { id isResolved } } }' --field thread="$THREAD_ID"
 ```
 
-If the GraphQL result reports `pageInfo.hasNextPage: true`, the `--paginate` command must return the later pages before the enumeration is complete.
+Count unresolved nodes across every complete response page.
+If the GraphQL result reports `pageInfo.hasNextPage: true`, the `--paginate --full` command must return the later pages before the enumeration is complete.
 
 ## Interpret automated reviewers
 
@@ -153,6 +154,7 @@ Never accept a worker's `done:` or ready claim without a fresh firstmate-side re
 Fetch the PR again and verify all of the following against one unchanged head:
 
 - The current full head SHA equals the SHA the worker reported.
+- The pull request is open, non-draft, and `MERGEABLE`, its active `reviewDecision` has no change request, and every required approval is present.
 - `statusCheckRollup` and `gh-axi pr checks` show every current CI context and no pending, skipped-without-explanation, cancelled, or failing required work.
 - The paginated GraphQL query reports zero unresolved review threads.
 - When CodeRabbit is configured, its latest summary covers the exact head and is clean, or an explicit rate-limit reply is recorded and the exact-head Codex fallback is clean.
@@ -164,7 +166,7 @@ Fetch the PR again and verify all of the following against one unchanged head:
 Use this query to bind the check rollup to the current commit rather than trusting a worker's copied terminal output:
 
 ```sh
-gh-axi api POST graphql --paginate --full --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { headRefOid commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100, after: \$endCursor) { nodes { __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } pageInfo { hasNextPage endCursor } } } } } } } } }"
+gh-axi api POST graphql --paginate --full --field query="query(\$endCursor: String) { repository(owner: \"$OWNER\", name: \"$REPO\") { pullRequest(number: $PR) { state isDraft mergeable reviewDecision headRefOid commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100, after: \$endCursor) { nodes { __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } pageInfo { hasNextPage endCursor } } } } } } } } }"
 ```
 
 Require every page when the context query reports `pageInfo.hasNextPage: true`.
