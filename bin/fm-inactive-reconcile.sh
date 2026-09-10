@@ -466,11 +466,9 @@ ledger_pass() {
 # local-only branch can be mistaken for abandoned work. An unreadable hold
 # source does not suppress anything.
 task_is_hold_for_captain() { # <id>
-  local id=$1 identity
-  identity=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$CAPTAIN_HOLD_BIN" open "$id" --identity 2>/dev/null) || return 1
-  [ -n "$identity" ] || return 1
-  return 0
+  local id=$1
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$CAPTAIN_HOLD_BIN" open "$id" >/dev/null 2>&1
 }
 
 report_child() { # <id>

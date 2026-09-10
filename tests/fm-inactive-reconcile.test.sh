@@ -38,6 +38,7 @@ SH
   cat > "$fake/fm-captain-hold.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ "$#" -eq 2 ] || exit 2
 [ "${1:-}" = open ] || exit 1
 id=${2:-}
 case ",${FM_FAKE_CAPTAIN_HELD_TASKS:-}," in
