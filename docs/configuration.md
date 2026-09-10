@@ -263,9 +263,10 @@ It renders `bin/fm-session-inventory.sh --json`, which is the structured owner o
 Close commands are printed for you to run - one for every row that has one, whatever its age - and a row that could lose work in progress says so on the line below its command.
 The stale threshold below governs the `!` marks and the unasked session-start lines, not what you are offered a way to close.
 The one row that never carries a close command is the captain's own background session: it is marked `(yours)` and is his to end, not something the overview offers to kill for him.
-It is recognised from the harness ancestry the overview runs in, and - in a pane, which has no harness ancestry at all - from `state/.lock.session`, which [`bin/fm-lock.sh`](../bin/fm-lock.sh) writes beside the lock when a session takes it, naming which of that session's own processes was working in this home.
-The lock file itself cannot answer that, because it names the outermost harness process, which under a shared harness daemon is the daemon rather than any one session.
-When neither answers - an older lock written before that record existed, for instance - every session row says `(owner unknown)` and none is offered for closing; the pids are still shown, so ending one deliberately stays possible.
+It is recognised from the harness ancestry the overview runs in, which the session-start path always has.
+A pane has no harness ancestry to walk, and nothing else can stand in for it: the session lock names the outermost harness process, which under a shared harness daemon is the daemon rather than any one session.
+So in a pane every session row says `(owner unknown)` and none is offered for closing; the pids are still shown, so ending one deliberately stays possible.
+The same applies whenever this home's workers could not be read, since a background session cannot then be told apart from a worker's own process - the view says so on its own line, and the unreadable source is named.
 
 Anything at or over the stale threshold is marked with a leading `!`.
 The age it is measured against is how long a worker has been RUNNING whenever a live process is working in its own local copy, and the age of the work itself when nothing is running, so abandoned work still holding a local copy is surfaced rather than hidden.

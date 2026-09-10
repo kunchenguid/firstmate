@@ -48,11 +48,11 @@
 #                     the recorded lock's harness, which is what lets the live
 #                     drift guard prove none has been quietly lost.
 #                     self_resolution says which signal answered "which of these
-#                     is the captain's own session": "ancestry", "session-lock",
-#                     "unresolved" when neither could, and "not_applicable" when
-#                     there is no session to ask it about. See WHOSE SESSION IS
-#                     THIS below; "unresolved" is why a row can be a live session
-#                     and still carry no close command.
+#                     is the captain's own session": "ancestry", "unresolved"
+#                     when it could not, and "not_applicable" when there is no
+#                     session to ask it about. See WHOSE SESSION IS THIS below;
+#                     "unresolved" is why a row can be a live session and still
+#                     carry no close command.
 #                     lock_owner is the honest answer to "which background
 #                     session drives this home": "single" when exactly one
 #                     session under the recorded lock's harness works in this
@@ -60,8 +60,12 @@
 #                     attributed, "none" when the lock's harness is alive but
 #                     none of its sessions works in this home, "stale" when the
 #                     recorded pid is not a live harness process, "absent" when
-#                     no lock is recorded, and "not_checked" when the ancestry
-#                     could not be resolved.
+#                     no lock is recorded, and "not_checked" when an input the
+#                     verdict rests on could not be read at all - the process
+#                     working directories, or the fleet snapshot that says which
+#                     of these processes are this home's own workers. sources[]
+#                     always names which one it was. "not_checked" withholds
+#                     every session close command for that reason.
 #   sources[]         {name, ok, reason} - one per collector, so an unreadable
 #                     source is disclosed instead of silently reported as zero.
 #
@@ -400,6 +404,13 @@ WORKER_PROCS="$WORK/worker-procs.tsv"
 # this home at once" alarm for something that is not that condition at all.
 WORKER_DIRS="$WORK/worker-dirs.tsv"
 : > "$WORKER_DIRS"
+# WHETHER THAT LIST CAN BE BELIEVED AT ALL. The worktrees come from the fleet
+# snapshot, so a snapshot that could not be read leaves this file empty - and an
+# empty list is indistinguishable from "this home has no workers". Telling those
+# two apart is the whole basis for calling a process a background session rather
+# than a worker, so the difference is recorded rather than inferred from the
+# file being empty.
+FLEET_SNAPSHOT_OK=1
 collect_worker_processes() {  # <worktree>...
   local pid cwd age dir saved keep
   local -a dirs=()
@@ -479,10 +490,12 @@ collect_workers() {
   FM_SNAPSHOT_LOCAL_ONLY=1 fm_run_timed "$FLEET_TIMEOUT" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json \
     > "$snapshot_file" 2>"$WORK/fleet.err" || rc=$?
   if [ "$rc" = 124 ]; then
+    FLEET_SNAPSHOT_OK=0
     note_source fleet-snapshot 0 "fleet snapshot exceeded ${FLEET_TIMEOUT}s"
     return 0
   fi
   if [ "$rc" != 0 ] || ! jq -e . "$snapshot_file" >/dev/null 2>&1; then
+    FLEET_SNAPSHOT_OK=0
     note_source fleet-snapshot 0 "fleet snapshot failed (exit $rc)"
     return 0
   fi
@@ -768,37 +781,31 @@ HARNESS_OWN_WORKERS=0
 
 # WHOSE SESSION IS THIS? Handing the captain a `kill` for the conversation he is
 # having is worse than telling him nothing, so no row may carry one until that
-# question has an answer. Two signals answer it, in order:
+# question has an answer. Exactly ONE signal can answer it: ANCESTRY.
+# bin/fm-session-lock-lib.sh already owns "which harness pids am I running
+# inside", so that answer is reused rather than re-derived - every pid in this
+# process's own contiguous harness ancestry is self. It is conclusive in both
+# directions: if none of this home's sessions is in that ancestry, the captain is
+# demonstrably talking to something else, and every row here is genuinely
+# closeable. The session-start path always has it, because the bootstrap runs
+# inside the session itself.
 #
-#   1. ANCESTRY. bin/fm-session-lock-lib.sh already owns "which harness pids am I
-#      running inside", so that answer is reused rather than re-derived: every
-#      pid in this process's own contiguous harness ancestry is self. This is the
-#      session-start path, where the bootstrap runs inside the session itself.
-#      When it resolves it is conclusive in both directions - if none of this
-#      home's sessions is in that ancestry, the captain is demonstrably talking
-#      to something else, and every row here is genuinely closeable.
-#   2. WHAT THE LOCK WRITER RECORDED BESIDE THE LOCK. The overview's primary
-#      home is a pane the captain leaves open, and that pane is a child of the
-#      terminal, not of any harness, so signal 1 finds nothing there at all. The
-#      lock file itself cannot answer either: it holds the OUTERMOST pid of the
-#      contiguous harness run, which for a shared harness daemon is the daemon,
-#      and the daemon is never one of the sessions listed here. So bin/fm-lock.sh
-#      writes state/.lock.session alongside it, naming the ancestry pids that
-#      were working in this home when the session took the lock - the one thing
-#      a reader outside the session cannot derive for itself. A recorded pid is
-#      believed only when it is still one of the live sessions found here, so a
-#      record left by a session that has since died attributes nothing.
+# A PANE HAS NO ANCESTRY TO WALK, AND NOTHING ELSE MAY SUBSTITUTE FOR IT. The
+# pane the captain leaves open is a child of the terminal, not of any harness.
+# The lock cannot stand in: it records the OUTERMOST pid of the contiguous run,
+# which under a shared harness daemon is the daemon and never one of the sessions
+# listed here. Nor may the lock writer record which session it was, because every
+# session in the home rewrites that record - so the reader would learn who took
+# the lock LAST and would then affirmatively offer a kill for a live session that
+# may well be the one the captain is talking to. That is worse than not knowing.
 #
-# NEITHER RESOLVING IS NOT A LICENCE TO OFFER A KILL. An older lock with no
-# record beside it, or a session whose working directory was never this home,
-# leaves both signals silent, and then every session here is equally likely to
-# be his. Those rows say ownership is unknown and carry no close command: the
-# pid is still printed, so ending one deliberately stays possible, but the
-# overview stops proposing it.
+# So when the ancestry is silent, ownership is simply unknown: those rows say so
+# and carry no close command. The pid is still printed, so ending one
+# deliberately stays possible; the overview just stops proposing it.
 SELF_HARNESS_PIDS=
 SELF_RESOLUTION=not_applicable
-resolve_session_ownership() {  # <session-pid>...
-  local pid pids recorded
+resolve_session_ownership() {
+  local pid pids
   SELF_HARNESS_PIDS=' '
   if pids=$(fm_harness_ancestry_pids 2>/dev/null); then
     while IFS= read -r pid; do
@@ -809,17 +816,6 @@ $pids
 EOF
     SELF_RESOLUTION=ancestry
     return 0
-  fi
-  if [ -r "$STATE/.lock.session" ]; then
-    while IFS= read -r recorded; do
-      case "$recorded" in ''|*[!0-9]*) continue ;; esac
-      for pid in "$@"; do
-        [ "$pid" = "$recorded" ] || continue
-        SELF_HARNESS_PIDS="$SELF_HARNESS_PIDS$recorded "
-        SELF_RESOLUTION=session-lock
-      done
-    done < "$STATE/.lock.session"
-    [ "$SELF_RESOLUTION" != session-lock ] || return 0
   fi
   SELF_RESOLUTION=unresolved
 }
@@ -832,7 +828,10 @@ is_self_harness_pid() {  # <pid>
 
 session_detail() {  # <self:1|0|?>
   local drives=yes
-  [ "$HARNESS_LOCK_OWNER" != ambiguous ] || drives=ambiguous
+  case "$HARNESS_LOCK_OWNER" in
+    ambiguous) drives=ambiguous ;;
+    not_checked) drives=unknown ;;
+  esac
   case "$1" in
     1) printf 'drives this home: %s; this is your own session' "$drives" ;;
     '?') printf 'drives this home: %s; whose session this is could not be established here' "$drives" ;;
@@ -890,13 +889,26 @@ collect_harness_sessions() {
     fi
   done
 
-  case "${#mine[@]}" in
-    0) HARNESS_LOCK_OWNER=none ;;
-    1) HARNESS_LOCK_OWNER=single ;;
-    *) HARNESS_LOCK_OWNER=ambiguous ;;
-  esac
+  # NO WORKER LIST, NO VERDICT. Without the snapshot there is no way to tell a
+  # background session from a worker's own process: both are harness processes of
+  # this harness working inside this home. Calling one a session would offer a
+  # bare `kill` for work whose real close command refuses rather than discarding
+  # anything unlanded, and counting two of them would raise the concurrent-session
+  # alarm for a home that simply has two workers running. So the rows are still
+  # listed - they are running, and seeing that is the point - but the verdict and
+  # every close command are withheld, and the unreadable source says why.
+  if [ "$FLEET_SNAPSHOT_OK" != 1 ]; then
+    HARNESS_LOCK_OWNER=not_checked
+    SELF_RESOLUTION=unresolved
+  else
+    case "${#mine[@]}" in
+      0) HARNESS_LOCK_OWNER=none ;;
+      1) HARNESS_LOCK_OWNER=single ;;
+      *) HARNESS_LOCK_OWNER=ambiguous ;;
+    esac
 
-  [ "${#mine[@]}" -eq 0 ] || resolve_session_ownership ${mine[@]+"${mine[@]}"}
+    [ "${#mine[@]}" -eq 0 ] || resolve_session_ownership
+  fi
 
   for pid in ${mine[@]+"${mine[@]}"}; do
     age=$(ps_field "$pid" 2)
@@ -904,7 +916,11 @@ collect_harness_sessions() {
       self='?'
       close=''
       safety=manual
-      cnote='which of this home'"'"'s sessions is your own could not be established from here, so none is offered for closing; the pid above is what you would end yourself'
+      if [ "$FLEET_SNAPSHOT_OK" = 1 ]; then
+        cnote='which of this home'"'"'s sessions is your own could not be established from here, so none is offered for closing; the pid above is what you would end yourself'
+      else
+        cnote='this home'"'"'s workers could not be read, so this may be a worker rather than a session; nothing is offered for closing until that is known'
+      fi
     elif is_self_harness_pid "$pid"; then
       self=1
       close=''

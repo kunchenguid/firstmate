@@ -192,6 +192,8 @@ render_once() {
            dim("no session is currently driving this home")
          elif $h.lock_owner == "single" then
            dim("one background session drives this home")
+         elif $h.lock_owner == "not_checked" then
+           warn("! what runs in this home could not be read fully, so a background session cannot be told apart from a worker here")
          else
            dim("background sessions: \($h.lock_owner)")
          end),
