@@ -40,23 +40,24 @@
 #   and the canonical spelling; the scaffold records it as a fixed
 #   machine-readable "Issue contract: issue=<url>" line that bin/fm-spawn.sh
 #   checks against its own --issue. A brief whose mode actually produces a
-#   merge request - no-mistakes or direct-PR - also carries the generated
-#   small-merge-request contract: one reviewable merge request for the task, its
-#   title, a "Related to #<iid>" line and never a closing keyword (the human
-#   closes the issue), and the regression test shipping with the first subtask of
-#   a reproduced bug. Under --mode no-mistakes the pipeline is what opens the
-#   merge request, so that block also makes setting the merge request's title and
-#   description the worker's last step - metadata of an already-open merge
-#   request, edited after the run, never code the pipeline owns - and
-#   bin/fm-dod-lib.sh puts that step inside the no-mistakes done gate for an
-#   issue-sourced task. Under --mode direct-PR the worker opens the merge request
-#   itself, so the title and description are already its own. --mode local-only
-#   produces no merge request, so it carries the issue and its contract line
-#   without that block rather than two contradicting delivery contracts. The
-#   block is generated build guidance rather than the captain's words, and it
-#   sits outside `# Task` so it never becomes no-mistakes `--intent`. --issue is
-#   a ship flag, refused on --scout (a scout delivers a report, not a merge
-#   request) and on --secondmate, and needs glab and jq on PATH; an issue that
+#   merge request also carries the generated small-merge-request contract: one
+#   reviewable merge request for the task, its title, a "Related to #<iid>" line
+#   and never a closing keyword (the human closes the issue), and the regression
+#   test shipping with the first subtask of a reproduced bug. The merge request
+#   is a GitLab one, so the block names `glab` as its tool in both modes. Under
+#   --mode no-mistakes the pipeline is what opens it, so the block also makes
+#   setting its title and description the worker's last step - metadata of an
+#   already-open merge request, edited after the run, never code the pipeline
+#   owns - and bin/fm-dod-lib.sh puts that step inside the no-mistakes done gate
+#   for an issue-sourced task. Under --mode direct-PR the worker opens the merge
+#   request itself with `glab`, and the block says so explicitly, overriding the
+#   definition of done's `gh-axi` sentence - the GitHub path, which cannot open a
+#   GitLab merge request. --mode local-only is refused: it opens no merge
+#   request, and an issue subtask exists to produce one. The block is generated
+#   build guidance rather than the captain's words, and it sits outside `# Task`
+#   so it never becomes no-mistakes `--intent`. --issue is a ship flag, refused
+#   on --scout (a scout delivers a report, not a merge request) and on
+#   --secondmate, and needs glab and jq on PATH; an issue that
 #   cannot be read refuses the scaffold instead of writing a brief the worker
 #   cannot act on. The issue must belong to <repo-name>'s own GitLab project -
 #   compared against the project path the issue itself reports, by full path or
@@ -239,6 +240,10 @@ fi
 if [ "$ISSUE_SET" -eq 1 ]; then
   if [ "$KIND" != ship ]; then
     echo "error: --issue applies only to ship briefs; a scout delivers a report and a secondmate charter is not issue work" >&2
+    exit 1
+  fi
+  if [ "$MODE" = local-only ]; then
+    echo "error: --issue cannot ship --mode local-only: local-only opens no merge request, and every subtask dispatched from an issue must produce one small merge request for the human to review and merge" >&2
     exit 1
   fi
   fm_gitlab_issue_url_parse "$ISSUE_ARG" || {
@@ -477,30 +482,29 @@ This task was dispatched from that issue, quoted under \`## Captain's intent\` a
 The human who opened it owns it: never close it, never change its labels, and never comment on it - firstmate reports back to the issue.
 EOF
   ISSUE_SECTION=${ISSUE_SECTION%$'\n'}
-  # Only the modes that actually produce a merge request carry the merge-request
-  # contract; local-only ships nothing, so adding it would hand the worker two
-  # mutually exclusive delivery contracts.
-  if [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ]; then
-    IFS= read -r -d '' ISSUE_MR_SECTION <<EOF || true
+  IFS= read -r -d '' ISSUE_MR_SECTION <<EOF || true
 Ship exactly one merge request for this task by default, small enough that a human reviews the whole diff in one reading.
 If the work genuinely cannot land as one reviewable change, say so to firstmate instead of splitting or stacking merge requests on your own.
 Title it \`#$FM_GITLAB_ISSUE_IID [$ISSUE_PART_N/$ISSUE_PART_TOTAL] <what this task changes>\`, where $ISSUE_PART_N/$ISSUE_PART_TOTAL is this task's resolved position among the subtasks issue #$FM_GITLAB_ISSUE_IID was split into - do not change it.
 The description must carry the line \`Related to #$FM_GITLAB_ISSUE_IID\` and must never carry \`Closes\`, \`Fixes\`, \`Resolves\`, or any other closing keyword: the human closes the issue after reviewing every merge request.
 When the issue is a bug you reproduced, the regression test ships with the first subtask's merge request; if the spec above says this is that subtask, this merge request must contain it.
 EOF
-    ISSUE_SECTION="$ISSUE_SECTION"$'\n\n'"${ISSUE_MR_SECTION%$'\n'}"
-    # Under no-mistakes the pipeline opens the merge request, so the title and
-    # description above are the worker's to set once it exists. This step is
-    # inside the definition of done, which bin/fm-dod-lib.sh renders.
-    if [ "$MODE" = no-mistakes ]; then
-      IFS= read -r -d '' ISSUE_NM_SECTION <<EOF || true
+  ISSUE_SECTION="$ISSUE_SECTION"$'\n\n'"${ISSUE_MR_SECTION%$'\n'}"
+  # Who opens the merge request differs by mode, and the tool never does: this
+  # work lands on GitLab, so it is glab either way.
+  if [ "$MODE" = no-mistakes ]; then
+    IFS= read -r -d '' ISSUE_TOOL_SECTION <<EOF || true
 The no-mistakes pipeline opens this merge request for you, so setting its title and description is your last step, not the pipeline's.
 After the pipeline reports CI green, set the open merge request's title and description to exactly the form above with \`glab mr update\`, and only then report done.
 That step edits the metadata of an already-open merge request: it changes no code and it happens after the run has finished, so it is not the hand-editing of findings the pipeline owns.
 EOF
-      ISSUE_SECTION="$ISSUE_SECTION"$'\n\n'"${ISSUE_NM_SECTION%$'\n'}"
-    fi
+  else
+    IFS= read -r -d '' ISSUE_TOOL_SECTION <<EOF || true
+You open this merge request yourself, and it lives on GitLab: push your branch and open it with \`glab\` (\`glab mr create\`), giving it the title and description required above.
+This sentence overrides the definition of done below where it says to open the PR with \`gh-axi\`: \`gh-axi\` is the GitHub tool and cannot open a GitLab merge request, so for this task \`glab\` is the one that applies.
+EOF
   fi
+  ISSUE_SECTION="$ISSUE_SECTION"$'\n\n'"${ISSUE_TOOL_SECTION%$'\n'}"
   ISSUE_BLOCK=$'\n'"$ISSUE_SECTION"$'\n'
 fi
 # --issue fills the captain's intent from the issue, so only the spec is left.

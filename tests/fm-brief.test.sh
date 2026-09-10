@@ -994,32 +994,53 @@ test_issue_fills_the_intent_and_carries_the_merge_request_contract() {
   pass "fm-brief: --issue fills the captain's intent from the issue and carries the small-merge-request contract"
 }
 
-# local-only ships nothing to review, so it carries the issue and its contract
-# line without the merge-request block - a brief that carried both would hand
-# the worker two mutually exclusive delivery contracts. An ordinary brief is
-# completely unchanged.
-test_issue_is_scoped_to_the_modes_that_ship_a_merge_request() {
-  local dir brief plain
+# Every subtask dispatched from an issue exists to produce one small merge
+# request, and local-only opens none, so the pairing is refused rather than
+# packing two mutually exclusive delivery contracts into one brief. An ordinary
+# brief is completely unchanged.
+test_issue_refuses_the_mode_that_ships_no_merge_request() {
+  local dir out status plain
   command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
   dir="$TMP_ROOT/issue-local-only"
   mkdir -p "$dir/home/data"
-  run_issue_brief "$dir" issue-local-b1 "$ISSUE_REPO" --mode local-only --issue "$ISSUE_URL" --issue-part 1/1 >/dev/null
-  brief="$dir/home/data/issue-local-b1/brief.md"
-  assert_grep 'GitLab issue #42' "$brief" "a local-only brief did not carry the issue it came from"
-  assert_grep '> ## Steps' "$brief" "a local-only brief did not quote the issue text"
-  assert_grep "Issue contract: issue=$ISSUE_URL" "$brief" "a local-only brief records no issue contract"
-  assert_no_grep 'Ship exactly one merge request' "$brief" "a local-only brief carries a merge-request contract it cannot fulfil"
-  assert_no_grep 'Related to #42' "$brief" "a local-only brief carries a merge-request description rule"
-  # The only delivery contract left in that brief is local-only's own.
-  assert_grep 'Delivery contract: mode=local-only' "$brief" "the local-only delivery contract is missing"
-  assert_grep 'Do NOT push, do NOT open a PR' "$brief" "the local-only definition of done is missing"
+  out=$(run_issue_brief "$dir" issue-local-b1 "$ISSUE_REPO" --mode local-only --issue "$ISSUE_URL" --issue-part 1/1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--issue with --mode local-only should exit non-zero"
+  assert_contains "$out" "local-only opens no merge request" "the refusal did not give the reason"
+  assert_absent "$dir/home/data/issue-local-b1/brief.md" "a local-only issue pairing still wrote a brief"
+  [ ! -s "$dir/requests.log" ] || fail "a refused local-only pairing still reached GitLab"
 
   # No --issue: byte-for-byte the brief firstmate scaffolded before this flag.
   plain="$dir/home/data/issue-none-b2/brief.md"
-  run_issue_brief "$dir" issue-none-b2 myproj --mode direct-PR >/dev/null
+  run_issue_brief "$dir" issue-none-b2 myproj --mode local-only >/dev/null
   assert_grep '{TASK}' "$plain" "a brief without --issue lost its captain-intent placeholder"
+  assert_grep 'Delivery contract: mode=local-only' "$plain" "an ordinary local-only brief lost its delivery contract"
   assert_no_grep '# GitLab issue' "$plain" "a brief without --issue grew an issue section"
-  pass "fm-brief: local-only carries the issue without a merge-request contract, and no --issue changes nothing"
+  pass "fm-brief: --issue refuses local-only, and no --issue changes nothing"
+}
+
+# The merge request lands on GitLab, so a direct-PR issue brief names glab and
+# says so outranks the shared definition of done's GitHub gh-axi sentence, which
+# stays as it is for every other direct-PR task.
+test_issue_direct_pr_opens_the_merge_request_with_glab() {
+  local dir brief issue_section dod
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-direct-pr"
+  mkdir -p "$dir/home/data"
+  run_issue_brief "$dir" issue-dpr-j1 "$ISSUE_REPO" --mode direct-PR --issue "$ISSUE_URL" --issue-part 1/2 >/dev/null
+  brief="$dir/home/data/issue-dpr-j1/brief.md"
+
+  issue_section=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$brief" "# GitLab issue" )
+  assert_contains "$issue_section" 'glab mr create' "a direct-PR issue brief does not name glab for the merge request"
+  assert_contains "$issue_section" 'overrides the definition of done' \
+    "the brief leaves the worker to infer which tool wins"
+  assert_contains "$issue_section" 'gh-axi' "the precedence sentence does not name the sentence it overrides"
+
+  # The shared gh-axi contract is untouched: it is still what a direct-PR brief
+  # carries, and the issue block is what supersedes it for this task.
+  dod=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$brief" "# Definition of done" )
+  assert_contains "$dod" 'open a PR with' "the direct-PR done gate changed"
+  pass "fm-brief: a direct-PR issue brief opens its merge request with glab and says so wins over gh-axi"
 }
 
 # Every refusal happens before a brief exists, and a malformed URL never reaches
@@ -1201,7 +1222,8 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_issue_fills_the_intent_and_carries_the_merge_request_contract
-test_issue_is_scoped_to_the_modes_that_ship_a_merge_request
+test_issue_refuses_the_mode_that_ships_no_merge_request
+test_issue_direct_pr_opens_the_merge_request_with_glab
 test_issue_no_mistakes_puts_the_merge_request_step_inside_the_done_gate
 test_issue_part_is_required_and_renders_concretely
 test_issue_must_belong_to_the_briefed_project
