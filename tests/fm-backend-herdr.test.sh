@@ -595,6 +595,25 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
   pass "herdr stale registration: an agent process outside the foreground group still counts as alive"
 }
 
+test_agent_descendant_under_a_spaced_install_path_stays_alive() {
+  local lab sleep_bin shell_pid out
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  # The executable path the process table reports contains a space (the macOS
+  # `/Library/Application Support/...` shape), so a field-split read of the
+  # process table sees only a fragment of the name.
+  lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support"; mkdir -p "$lab"
+  ln -sf "$sleep_bin" "$lab/pi"
+  sh -c "'$lab/pi' 300; :" &
+  shell_pid=$!
+  sleep 0.3
+  out=$(stale_registration_case spaced-descendant idle "$(shell_only_process_info "$shell_pid")")
+  pkill -P "$shell_pid" 2>/dev/null || true
+  kill "$shell_pid" 2>/dev/null || true
+  [ "$out" = "live alive refused" ] \
+    || fail "an agent-named descendant under a spaced install path must stay live/alive, got '$out'"
+  pass "herdr stale registration: the descendant walk reads a spaced executable path whole"
+}
+
 test_registered_agent_with_an_unreadable_process_view_is_unknown() {
   local out
   out=$(stale_registration_case unreadable-exit idle 'Error: socket unavailable' 1)
@@ -5151,6 +5170,7 @@ test_registered_agent_with_a_non_shell_foreground_process_stays_alive
 test_transient_prompt_helper_settles_into_stale_agent
 test_exhausted_settle_window_keeps_a_non_shell_foreground_live
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive
+test_agent_descendant_under_a_spaced_install_path_stays_alive
 test_registered_agent_with_an_unreadable_process_view_is_unknown
 test_projection_reclaim_rollback_refuses_a_stale_registration
 test_busy_state_never_reports_a_shell_only_pane_busy

@@ -2160,11 +2160,12 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
   [ "$others" -eq 0 ] || { printf 'other'; return 0; }
   ps_bin=${FM_HERDR_PS_BIN:-ps}
   command -v "$ps_bin" >/dev/null 2>&1 || { printf 'unreadable'; return 0; }
-  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm=,args= 2>/dev/null) || { printf 'unreadable'; return 0; }
+  rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || { printf 'unreadable'; return 0; }
   printf '%s\n' "$rows" | awk -v shell="$shell_pid" '$1 == shell { found = 1 } END { exit(found ? 0 : 1) }' \
     || { printf 'unreadable'; return 0; }
-  while IFS=$'\t' read -r pid name args; do
+  while IFS=$'\t' read -r pid name; do
     [ -n "$pid" ] || continue
+    args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || continue
     args=${args#"${args%%[![:space:]]*}"}
     argv0=${args%%[[:space:]]*}
     if [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ]; then
@@ -2174,11 +2175,10 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
   done <<EOF
 $(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
   {
-    pid[NR] = $1; ppid[NR] = $2; comm[NR] = $3
+    pid[NR] = $1; ppid[NR] = $2
     line = $0
     sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line)
-    sub(/^[^ \t]+[ \t]*/, "", line)
-    rest[NR] = line
+    comm[NR] = line
   }
   END {
     want[shell] = 1
@@ -2190,7 +2190,7 @@ $(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
       }
     }
     for (n = 1; n <= NR; n++) {
-      if ((pid[n] in want) && pid[n] != shell) printf "%s\t%s\t%s\n", pid[n], comm[n], rest[n]
+      if ((pid[n] in want) && pid[n] != shell) printf "%s\t%s\n", pid[n], comm[n]
     }
   }')
 EOF
