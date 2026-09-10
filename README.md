@@ -24,7 +24,25 @@
   <img alt="firstmate - talk to one agent, ship with a crew" src="assets/banner.png" width="100%" />
 </p>
 
-Local fork: required extras have been removed; see [local-use scope and upstream contribution limits](CONTRIBUTING.md) before setup or publishing.
+## Personal fork: what differs
+
+This is [lmuehleisen/firstmate](https://github.com/lmuehleisen/firstmate), a personal fork of [kunchenguid/firstmate](https://github.com/kunchenguid/firstmate).
+It prioritizes reliable local use, familiar tools, and less prescriptive workflows.
+Use this fork's repository when cloning for these changes; the upstream project overview and setup below are otherwise retained.
+
+- **No required `gh-axi`:** GitHub operations use the standard `gh` CLI, including compatible merge handling, to avoid an extra wrapper.
+- **No required `chrome-devtools-axi`:** browser work uses harness browser tools or Playwright, leaving the browser tool choice flexible.
+- **No required `lavish-axi`:** decisions and reports use chat, and `/bearings lavish` produces a read-only local HTML snapshot with no answer or dispatch controls and no board polling.
+- **No required `no-mistakes`:** workers run relevant tests and lint directly, then deliver through `direct-PR` or `local-only`; legacy no-mistakes delivery tokens map to `direct-PR` so local work needs no pipeline.
+- **Reviewed worker permissions:** Claude and Codex launches default to automatic permission review, with a manual-review option, instead of bypassing permissions or the sandbox; see [worker permission modes](docs/configuration.md#worker-permission-mode-configcrew-permissions).
+- **Remote-less local work:** explicit `local-only` ship tasks can start from local `main` or `master` without a remote, while rejecting dirty or divergent task bases.
+- **Durable approval waits:** completed ship work awaiting merge approval remains tracked and visible in Bearings, with quiet supervision after the finished worker is verified stopped.
+
+`tasks-axi` and `quota-axi` remain required, along with the selected backend's dependencies.
+Merge approval and unlanded-work safeguards still apply; inherited upstream contribution and CI requirements are explained in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Upstream changes are integrated on disposable review branches using real merges that preserve upstream ancestry, then fast-forwarded into the installation after review.
+The [updater](.agents/skills/updatefirstmate/SKILL.md) fetches this fork's `origin` and requires fast-forward ancestry; it does not merge upstream itself.
 
 ## What it is
 
@@ -83,7 +101,7 @@ Launch it with `--trust`, or none of its project hooks load; it also has no turn
 
 ```sh
 gh auth login
-git clone https://github.com/kunchenguid/firstmate
+git clone https://github.com/lmuehleisen/firstmate
 cd firstmate
 ```
 
