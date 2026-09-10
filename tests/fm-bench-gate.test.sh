@@ -1466,9 +1466,9 @@ for entrant in e1 e2; do
   mkdir -p "$ISO/$entrant/.git/worktrees/w"
 done
 
-write_isolation() {  # <bench-dir> <mechanism>
-  local bench=$1 mechanism=$2
-  python3 - "$bench/isolation.json" "$ROOT/bin/fm-bench-confine.sh" "$mechanism" "$ISO" "$IMAGE" <<'PY'
+write_isolation() {  # <bench-dir> <mechanism> [image]
+  local bench=$1 mechanism=$2 image=${3:-$IMAGE}
+  python3 - "$bench/isolation.json" "$ROOT/bin/fm-bench-confine.sh" "$mechanism" "$ISO" "$image" <<'PY'
 import json, sys
 path, confine, mechanism, iso, image = sys.argv[1:]
 json.dump({
@@ -1816,6 +1816,8 @@ fi
 # must inherit the names that resolution depends on. This stub runtime is only
 # reachable through a non-default DOCKER_HOST, exactly as colima, a remote
 # context, or rootless podman would be.
+# Stub runtimes use a fixed identity independent of local image availability.
+STUB_IMAGE=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ENDPOINT_BIN="$TMP_ROOT/endpoint-runtime-bin"
 mkdir -p "$ENDPOINT_BIN"
 cat > "$ENDPOINT_BIN/docker" <<'EOF'
@@ -1854,7 +1856,7 @@ write_plan "$BENCH"
 write_evaluator "$BENCH"
 write_freeze_inputs "$BENCH"
 run_gate "$BENCH" freeze >/dev/null
-write_isolation "$BENCH" container
+write_isolation "$BENCH" container "$STUB_IMAGE"
 out=$(run_gate_env "PATH=$ENDPOINT_BIN:$PATH" \
   "DOCKER_HOST=tcp://benchmark-endpoint:2375" \
   -- "$BENCH" evaluator-execute-verify) \
@@ -1872,7 +1874,7 @@ BENCH="$TMP_ROOT/evaluator-renamed-answer"
 write_plan "$BENCH"
 write_evaluator "$BENCH"
 write_freeze_inputs "$BENCH"
-write_isolation "$BENCH" container
+write_isolation "$BENCH" container "$STUB_IMAGE"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
@@ -1901,7 +1903,7 @@ BENCH="$TMP_ROOT/evaluator-echoed-pixels"
 write_plan "$BENCH"
 write_evaluator "$BENCH"
 write_freeze_inputs "$BENCH"
-write_isolation "$BENCH" container
+write_isolation "$BENCH" container "$STUB_IMAGE"
 python3 - "$BENCH" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
@@ -1933,7 +1935,7 @@ write_plan "$BENCH"
 write_evaluator "$BENCH"
 write_freeze_inputs "$BENCH"
 run_gate "$BENCH" freeze >/dev/null
-write_isolation "$BENCH" container
+write_isolation "$BENCH" container "$STUB_IMAGE"
 BROKEN_RUNTIME_BIN="$TMP_ROOT/broken-runtime-bin"
 mkdir -p "$BROKEN_RUNTIME_BIN"
 for runtime in docker podman; do
