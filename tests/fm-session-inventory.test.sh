@@ -1583,9 +1583,18 @@ EOF
   # But no verdict, and no kill for something that is in fact a worker.
   [ "$(printf '%s' "$json" | jq -r '.harness_sessions.lock_owner')" = not_checked ] \
     || fail "without the worker list there is no honest session verdict to give"
+  # The close command is what must be withheld, whatever ownership resolved to:
+  # the missing worker list says nothing about whose session it is, and the
+  # ancestry answers that on its own wherever it is available.
   [ "$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")
-    | "\(.self_known) \(.close)"] | unique | join(" ")')" = "false null" ] \
+    | .close] | unique | join(",")')" = "" ] \
     || fail "a process that may be a worker must never be offered as a session to kill"
+  [ "$(printf '%s' "$json" | jq -r '[.rows[] | select(.kind == "harness-session")
+    | .close_note] | unique | length')" = 1 ] \
+    || fail "every withheld session row must give the same, single reason"
+  assert_contains "$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "harness-session")
+    | .close_note' | head -1)" "workers could not be read" \
+    "the reason must name the worker list, not the ownership question"
 
   out=$(FM_SESSION_STALE_DAYS=0 FM_SNAPSHOT_BUDGET=not-a-number \
     run_inventory "$home" --stale-lines) || fail "--stale-lines failed"
@@ -1597,13 +1606,93 @@ EOF
   rendered=$(COLUMNS=110 FM_SNAPSHOT_BUDGET=not-a-number run_view "$home" --color never)
   assert_contains "$rendered" "fleet-snapshot unreadable:" \
     "the view must disclose the source it could not read"
-  assert_contains "$rendered" "cannot be told apart from a worker" \
-    "the view must say plainly that the distinction was unavailable"
+  assert_contains "$rendered" "workers could not be read" \
+    "the view must name the worker list as what is missing"
   assert_not_contains "$rendered" "background sessions are working in this home at once" \
     "the concurrent-session alarm must not fire on data that could not distinguish workers"
 
+  # TWO LINES FOR ONE CONDITION, AND NEITHER NAMES THE WRONG CAUSE. The missing
+  # worker list is what withholds the close commands; the ancestry answers
+  # ownership perfectly well and must not be reported as unable to.
+  assert_not_contains "$rendered" "which of these is your own session cannot be told" \
+    "ownership is not what the missing worker list makes unknowable"
+  assert_not_contains "$rendered" "owner unknown" \
+    "a session the ancestry resolved must not be rendered as unattributable"
+  [ "$(printf '%s\n' "$rendered" | LC_ALL=C grep -c 'could not be read')" = 1 ] \
+    || fail "the condition must be stated once, not repeated per row"
+
   kill_spawned
   pass "inventory: an unreadable fleet snapshot withholds the session verdict and every kill"
+}
+
+# THE PANE HAS NO OUTER BOUND. The session-start path is wrapped by bootstrap,
+# but `--watch` just loops clear-render-sleep, so a working-directory read that
+# never returns leaves the pane cleared and frozen - this overview failing
+# silently in the one mode it exists for. Reaching the bound must resolve
+# nothing, disclose itself as an unreadable source like every other collector,
+# and let the render finish.
+test_a_wedged_working_directory_read_still_renders() {
+  local home json rendered started elapsed
+  if [ -r /proc/self/cwd ]; then
+    pass "inventory: (skipped) this host reads /proc, so the bounded lsof path is not the one used here"
+    return 0
+  fi
+  local spec daemon
+  home=$(make_home wedged-cwd)
+  write_worker "$home" old-worker 30
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+  # A recorded live lock and a worker worktree, so BOTH working-directory reads
+  # are reached: the one that matches workers to their processes, and the one
+  # that tells a live session from an idle pool process.
+  spec="$home/children"
+  printf '%s|sess-a --session-id aaaa --agent claude\n' "$home" > "$spec"
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
+  printf '%s\n' "$daemon" > "$home/state/.lock"
+  # A reader that never returns, bounded at 1s: the wedge outlives the bound
+  # several times over, so a render that completes proves the bound is what
+  # ended it.
+  cat > "$FAKEBIN/lsof" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+  chmod +x "$FAKEBIN/lsof"
+
+  started=$(date +%s)
+  json=$(FM_SESSION_INVENTORY_CWD_TIMEOUT=1 run_inventory "$home" --json) \
+    || fail "the inventory must still finish when the working-directory read wedges"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 20 ] || fail "the bound did not end the wedged read (took ${elapsed}s)"
+
+  # Disclosed as an unreadable source, by the same route every collector uses.
+  local unreadable
+  unreadable=$(printf '%s' "$json" | jq -r '[.sources[] | select(.ok | not) | .name] | sort | join(",")')
+  assert_contains "$unreadable" "worker-processes" \
+    "a wedged read must disclose the worker-process match as unreadable"
+  assert_contains "$unreadable" "harness-sessions" \
+    "a wedged read must disclose the session scoping as unreadable"
+  assert_contains "$(printf '%s' "$json" | jq -r '.sources[] | select(.name == "worker-processes") | .reason')" \
+    "exceeded 1s" "the disclosure must name the bound that was reached"
+
+  # The pane renders rather than freezing, and says once that it could not read.
+  rendered=$(COLUMNS=110 FM_SESSION_INVENTORY_CWD_TIMEOUT=1 run_view "$home" --color never) \
+    || fail "the view must still render when the working-directory read wedges"
+  assert_contains "$rendered" "Sessions - $home" "the pane must still draw its overview"
+  assert_contains "$rendered" "worker-processes unreadable:" \
+    "the pane must say which source it could not read"
+  # One notice for it, not a report.
+  [ "$(printf '%s\n' "$rendered" | LC_ALL=C grep -c 'worker-processes unreadable:')" = 1 ] \
+    || fail "the unreadable source must be named once"
+
+  # And the unasked line says it too, rather than reading as nothing is old.
+  assert_contains "$(FM_SESSION_INVENTORY_CWD_TIMEOUT=1 run_inventory "$home" --stale-lines)" \
+    "could not check everything" \
+    "a wedged read must not be reported as nothing being old"
+
+  rm -f "$FAKEBIN/lsof"
+  kill_spawned
+  pass "inventory: a wedged working-directory read is bounded, disclosed, and the pane still renders"
 }
 
 test_inventory_closes_nothing_it_reports() {
@@ -1671,4 +1760,5 @@ test_inventory_does_not_rewrite_the_busy_classifier_cache
 test_an_unreadable_source_says_so_on_the_unasked_line
 test_a_machine_wide_source_failure_is_not_repeated_by_every_home
 test_an_unreadable_fleet_snapshot_withholds_the_session_verdict
+test_a_wedged_working_directory_read_still_renders
 test_inventory_closes_nothing_it_reports

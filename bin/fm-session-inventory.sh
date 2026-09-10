@@ -143,9 +143,11 @@
 # rewrite a state file underneath the watcher that owns it.
 #
 # Bounds. FM_SESSION_INVENTORY_FLEET_TIMEOUT (default 20s) bounds the fleet
-# snapshot and FM_SESSION_INVENTORY_LAVISH_TIMEOUT (default 8s) bounds the Lavish
-# listing; a bound that is hit is reported as an unreadable source, never as an
-# empty result. FM_SESSION_STALE_DAYS (default 3) sets the stale threshold.
+# snapshot, FM_SESSION_INVENTORY_LAVISH_TIMEOUT (default 8s) bounds the Lavish
+# listing, and FM_SESSION_INVENTORY_CWD_TIMEOUT (default 8s) bounds the working
+# directory read; a bound that is hit is reported as an unreadable source, never
+# as an empty result. FM_SESSION_STALE_DAYS (default 3) sets the stale
+# threshold.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -187,7 +189,8 @@ case "$STALE_DAYS" in
 esac
 FLEET_TIMEOUT=${FM_SESSION_INVENTORY_FLEET_TIMEOUT:-20}
 LAVISH_TIMEOUT=${FM_SESSION_INVENTORY_LAVISH_TIMEOUT:-8}
-for bound_name in FLEET_TIMEOUT LAVISH_TIMEOUT; do
+CWD_TIMEOUT=${FM_SESSION_INVENTORY_CWD_TIMEOUT:-8}
+for bound_name in FLEET_TIMEOUT LAVISH_TIMEOUT CWD_TIMEOUT; do
   case "${!bound_name}" in
     ''|*[!0-9]*|0)
       echo "fm-session-inventory: FM_SESSION_INVENTORY_${bound_name} must be a positive integer" >&2
@@ -309,6 +312,29 @@ fi
 # task it is running.
 CWDMAP="$WORK/cwd.tsv"
 : > "$CWDMAP"
+# BOUNDED LIKE ITS SIBLINGS. Without `-p` this stats the working directory of
+# every process on the machine, so a single cwd on a wedged mount blocks it for
+# as long as that mount stays wedged. The session-start path is covered from
+# outside, but the pane the captain leaves open all day is not: a redraw that
+# never returns leaves it cleared and frozen, which is this overview failing
+# silently in the one mode it exists for. The bound is the Lavish listing's 8s -
+# the same order as the reads it sits beside, and forty times the 0.19s a real
+# machine-wide pass measures - and reaching it resolves nothing, which the
+# callers already disclose as an unreadable source.
+CWD_READ_NOTE='cannot read process working directories here'
+bounded_lsof_cwds() {  # [lsof args...]
+  local rc=0 raw="$WORK/lsof.out"
+  : > "$raw"
+  fm_run_timed "$CWD_TIMEOUT" lsof -a -d cwd -Fpn "$@" > "$raw" 2>/dev/null || rc=$?
+  if [ "$rc" = 124 ]; then
+    CWD_READ_NOTE="reading process working directories exceeded ${CWD_TIMEOUT}s"
+    return 1
+  fi
+  LC_ALL=C awk '
+    /^p/ { pid = substr($0, 2); next }
+    /^n/ { if (pid != "") { printf "%s\t%s\n", pid, substr($0, 2); pid = "" } }' \
+    < "$raw" > "$CWDMAP"
+}
 # A reader that produced no directory at all read nothing, whatever the exit
 # status of the last pipeline stage was. Saying so is what keeps a denied or
 # sandboxed lsof from being reported as "nothing is running here".
@@ -329,9 +355,7 @@ read_cwds() {  # <pid>...
   joined=$(printf '%s,' "$@"); joined=${joined%,}
   # One batched call: per-pid invocations cost more than the whole rest of the
   # collection put together.
-  lsof -a -d cwd -Fpn -p "$joined" 2>/dev/null | LC_ALL=C awk '
-    /^p/ { pid = substr($0, 2); next }
-    /^n/ { if (pid != "") { printf "%s\t%s\n", pid, substr($0, 2); pid = "" } }' > "$CWDMAP"
+  bounded_lsof_cwds -p "$joined" || return 1
   cwdmap_has_a_directory
 }
 # Every process's working directory in one call. Used where the interesting set
@@ -348,9 +372,7 @@ read_all_cwds() {
     return
   fi
   command -v lsof >/dev/null 2>&1 || return 1
-  lsof -a -d cwd -Fpn 2>/dev/null | LC_ALL=C awk '
-    /^p/ { pid = substr($0, 2); next }
-    /^n/ { if (pid != "") { printf "%s\t%s\n", pid, substr($0, 2); pid = "" } }' > "$CWDMAP"
+  bounded_lsof_cwds || return 1
   cwdmap_has_a_directory
 }
 
@@ -436,7 +458,7 @@ collect_worker_processes() {  # <worktree>...
   CWDMAP="$WORK/worker-cwd.tsv"
   if ! read_all_cwds; then
     note_source worker-processes 0 \
-      'cannot read process working directories here, so a running worker cannot be matched to its own process'
+      "$CWD_READ_NOTE, so a running worker cannot be matched to its own process"
     CWDMAP=$saved
     return 0
   fi
@@ -892,7 +914,7 @@ collect_harness_sessions() {
   if ! read_cwds "${candidates[@]}"; then
     HARNESS_LOCK_OWNER=not_checked
     note_source harness-sessions 0 \
-      'cannot read process working directories here, so a live session cannot be told from an idle pool process'
+      "$CWD_READ_NOTE, so a live session cannot be told from an idle pool process"
     return 0
   fi
   note_source harness-sessions 1 ''
@@ -922,28 +944,32 @@ collect_harness_sessions() {
   # empty set.
   if [ "$FLEET_SNAPSHOT_OK" != 1 ] && [ "${#mine[@]}" -gt 0 ]; then
     HARNESS_LOCK_OWNER=not_checked
-    SELF_RESOLUTION=unresolved
   else
     case "${#mine[@]}" in
       0) HARNESS_LOCK_OWNER=none ;;
       1) HARNESS_LOCK_OWNER=single ;;
       *) HARNESS_LOCK_OWNER=ambiguous ;;
     esac
-
-    [ "${#mine[@]}" -eq 0 ] || resolve_session_ownership
   fi
+  # Ownership is a separate question with its own answer, and the ancestry
+  # answers it perfectly well here. Withholding the close commands is what the
+  # missing worker list forces; saying the captain's own session cannot be
+  # identified when it demonstrably can would name the wrong cause and spend a
+  # second line saying it.
+  [ "${#mine[@]}" -eq 0 ] || resolve_session_ownership
 
   for pid in ${mine[@]+"${mine[@]}"}; do
     age=$(ps_field "$pid" 2)
-    if [ "$SELF_RESOLUTION" = unresolved ]; then
+    if [ "$FLEET_SNAPSHOT_OK" != 1 ]; then
+      if is_self_harness_pid "$pid"; then self=1; elif [ "$SELF_RESOLUTION" = unresolved ]; then self='?'; else self=0; fi
+      close=''
+      safety=manual
+      cnote='this home'"'"'s workers could not be read, so this may be a worker rather than a session; nothing is offered for closing until that is known'
+    elif [ "$SELF_RESOLUTION" = unresolved ]; then
       self='?'
       close=''
       safety=manual
-      if [ "$FLEET_SNAPSHOT_OK" = 1 ]; then
-        cnote='which of this home'"'"'s sessions is your own could not be established from here, so none is offered for closing; the pid above is what you would end yourself'
-      else
-        cnote='this home'"'"'s workers could not be read, so this may be a worker rather than a session; nothing is offered for closing until that is known'
-      fi
+      cnote='which of this home'"'"'s sessions is your own could not be established from here, so none is offered for closing; the pid above is what you would end yourself'
     elif is_self_harness_pid "$pid"; then
       self=1
       close=''

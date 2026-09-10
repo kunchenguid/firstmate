@@ -193,7 +193,11 @@ render_once() {
          elif $h.lock_owner == "single" then
            dim("one background session drives this home")
          elif $h.lock_owner == "not_checked" then
-           warn("! what runs in this home could not be read fully, so a background session cannot be told apart from a worker here")
+           warn("! " + ([.rows[] | select(.kind == "harness-session") | .close_note
+                          | select(. != null)]
+                         | if length == 0
+                           then "what runs in this home could not be read fully, so a background session cannot be told apart from a worker here"
+                           else .[0] end))
          else
            dim("background sessions: \($h.lock_owner)")
          end),
