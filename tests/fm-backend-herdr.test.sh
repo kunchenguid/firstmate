@@ -1687,6 +1687,31 @@ test_projection_close_refuses_active_tab() {
   pass "herdr presentation focus: cleanup refuses rather than close the tab a live client is viewing"
 }
 
+test_projection_close_refuses_unknown_foreground_reason() {
+  local dir events out status
+  dir="$TMP_ROOT/projection-focus-unknown-foreground"; mkdir -p "$dir"
+  events="$dir/events"; : > "$events"
+  out=$(ROOT="$ROOT" EVENTS="$events" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() { printf "w9\tw9:t2"; }
+    fm_backend_herdr_emptying_close_plan() { printf "plain\n"; }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\",\"workspace_id\":\"w9\"}}}\n" ;;
+        "terminal title") printf "{\"result\":{\"reason\":\"set\"}}\n" ;;
+        "pane close") printf "close\n" >> "$EVENTS" ;;
+      esac
+    }
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2
+  ' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unexpected foreground response must not authorize an active-tab close"
+  [ ! -s "$events" ] || fail "unexpected foreground response still closed the pane"
+  assert_contains "$out" "could not verify whether a foreground client is viewing the target tab" \
+    "unexpected foreground response did not take the fail-closed unknown path"
+  pass "herdr presentation focus: unexpected foreground-client reasons fail closed"
+}
+
 test_projection_close_allows_stale_active_tab_without_foreground_client() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-focus-stale-active-allow"; mkdir -p "$dir/responses"
@@ -1838,6 +1863,35 @@ test_projection_close_rechecks_target_focus_after_planning() {
   assert_contains "$out" "target is the captain's active tab" \
     "focus-switch refusal did not explain the active-tab boundary"
   pass "herdr presentation focus: pre-close checkpoint catches a target focused during planning"
+}
+
+test_projection_close_preserves_live_focus_that_switched_away_from_target() {
+  local dir events sample out status
+  dir="$TMP_ROOT/projection-close-focus-switch-away"; mkdir -p "$dir"
+  events="$dir/events"; sample="$dir/sample"; : > "$events"; printf '0\n' > "$sample"
+  out=$(ROOT="$ROOT" EVENTS="$events" SAMPLE="$sample" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() {
+      local n
+      n=$(cat "$SAMPLE"); n=$((n + 1)); printf "%s\n" "$n" > "$SAMPLE"
+      if [ "$n" -eq 1 ]; then printf "w9\tw9:t2"; else printf "w1\tw1:t1"; fi
+    }
+    fm_backend_herdr_emptying_close_plan() { printf "plain\n"; }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\",\"workspace_id\":\"w9\"}}}\n" ;;
+        "terminal title") printf "{\"result\":{\"reason\":\"cleared\"}}\n" ;;
+      esac
+    }
+    fm_backend_herdr_explicit_close_pane_confirmed() { printf "close\n" >> "$EVENTS"; }
+    fm_backend_herdr_projection_focus_restore() { printf "restore:%s\n" "$2" >> "$EVENTS"; }
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2
+  ' 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a client switching from the target to another tab should allow the target close: $out"
+  [ "$(cat "$events")" = $'close\nrestore:w1\tw1:t1' ] \
+    || fail "close did not preserve the live client's fresh non-target focus: $(cat "$events")"
+  pass "herdr presentation focus: close preserves a live client that switches away from the target during planning"
 }
 
 # --- emptying-close focus-safe removal (Herdr 0.7.5 #1621 mitigation) ------
@@ -4899,11 +4953,13 @@ test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab
+test_projection_close_refuses_unknown_foreground_reason
 test_projection_close_allows_stale_active_tab_without_foreground_client
 test_projection_close_reports_focus_restore_failure
 test_projection_close_rechecks_required_agent_state_at_boundary
 test_projection_close_rechecks_foreground_client_after_agent_validation
 test_projection_close_rechecks_target_focus_after_planning
+test_projection_close_preserves_live_focus_that_switched_away_from_target
 test_projection_close_emptying_after_focus_uses_pane_death_without_move
 test_projection_close_emptying_before_focus_repositions_then_uses_pane_death
 test_projection_close_emptying_before_last_focus_needs_no_move

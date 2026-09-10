@@ -964,11 +964,17 @@ fm_backend_herdr_foreground_client_present() {  # <session>
 
 fm_backend_herdr_projection_target_tab_mutation_allowed() {  # <session> <tab-id>
   local session=$1 target_tab=$2 foreground_rc=0 focus active_tab
+  FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS=""
   fm_backend_herdr_foreground_client_present "$session" || foreground_rc=$?
   [ "$foreground_rc" -eq 1 ] && return 0
   focus=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
   active_tab=${focus#*$'\t'}
-  [ "$target_tab" != "$active_tab" ] && return 0
+  if [ "$target_tab" != "$active_tab" ]; then
+    # Let the close owner preserve the live viewer's fresh non-target focus,
+    # rather than restoring a stale pre-planning pointer after the mutation.
+    FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS=$focus
+    return 0
+  fi
   if [ "$foreground_rc" -eq 0 ]; then
     echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
   else
@@ -983,8 +989,8 @@ fm_backend_herdr_projection_target_tab_mutation_allowed() {  # <session> <tab-id
 # If the target belongs to the active tab AND a live foreground client is
 # attached, exact tab preservation is impossible, so cleanup refuses instead
 # of changing focus. When no live client is attached, the persisted .focused
-# pointer is not a viewer, so the close proceeds and focus restore is skipped
-# because there is no live focus to preserve.
+# pointer is not a viewer, so the close proceeds; restore is skipped when the
+# close destroys that persisted tab because there is no live focus to preserve.
 # When the close would empty the target workspace, Herdr 0.7.5's explicit
 # close moves focus to the workspace's neighbor, so the close is planned by
 # fm_backend_herdr_emptying_close_plan: reposition the doomed workspace
@@ -1050,16 +1056,34 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   # a durable atomic close remains deferred until Herdr exposes one.
   if [ "$plan" = death ]; then
     if fm_backend_herdr_death_close_pane "$session" "$pane_id" "$plan_shell_pid" "$target_tab"; then
+      if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
+        before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
+        skip_restore=0
+      fi
       close_status=0
-    elif fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab" \
-      && fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
+    elif fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab"; then
+      if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
+        before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
+        skip_restore=0
+      fi
+      if fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
+        close_status=0
+      else
+        close_status=1
+      fi
+    else
+      close_status=1
+    fi
+  elif fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab"; then
+    if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
+      before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
+      skip_restore=0
+    fi
+    if fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
       close_status=0
     else
       close_status=1
     fi
-  elif fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab" \
-    && fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
-    close_status=0
   else
     close_status=1
   fi
