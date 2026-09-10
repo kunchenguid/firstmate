@@ -244,9 +244,7 @@ INVALID_URLS=(
   'https://github.com/o/r/pull/1 '
   'https://github.com/o /r/pull/1'
   $'https://github.com/o/r/pull/1\t'
-  $'https://github.com/o/r/pull/1\r'
   $'https://github.com/o/r/pull/1\nnext'
-  $'https://github.com/o/r/pull/1\r\nnext'
   $'https://github.com/o/r/pull/1\001'
   $'https://github.com/o/r/pull/1\033'
   $'https://github.com/o/r/pull/1\177'
@@ -310,6 +308,15 @@ INVALID_URLS=(
   "https://github.com/o/r/pull/1'"
   'https://github.com/o/r/pull/1"'
 )
+# A lone or leading \r silently vanishes when spelled directly inside a
+# $'...' word in a compound array assignment on some bash builds (observed
+# with MSYS2/Git-Bash on Windows), so build these two carriage-return cases
+# through scalar variables and append them instead of embedding \r inline
+# above, where the byte would be dropped before fm_pr_url_parse ever saw it.
+FM_PR_CHECK_CR_URL=$'https://github.com/o/r/pull/1\r'
+FM_PR_CHECK_CRLF_URL=$'https://github.com/o/r/pull/1\r\nnext'
+INVALID_URLS+=("$FM_PR_CHECK_CR_URL" "$FM_PR_CHECK_CRLF_URL")
+unset FM_PR_CHECK_CR_URL FM_PR_CHECK_CRLF_URL
 
 # shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
 INVALID_IDS=(
