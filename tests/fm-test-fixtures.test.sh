@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Behavior tests for shared Git fixtures, fake-toolchain and spawn-world builders.
+# Behavior tests for tests/lib.sh primitives and tests/fixtures.sh builders.
 #
-# These cases drive the builders as a test would: they write stubs into a
-# fakebin and exec those stubs. Assertions are on the binaries' observable
-# output, exit status, and files they create - never on fixtures.sh source
-# text. Migrated spawn suites cover fm_test_run_spawn through the real
-# fm-spawn.sh; this file pins the stubs those suites now share.
+# Cases call shared primitives directly or write stubs into a fakebin and exec
+# them as a test would. Assertions are on observable output, exit status, and
+# filesystem effects - never on helper source text. Migrated spawn suites cover
+# fm_test_run_spawn through the real fm-spawn.sh; this file pins the shared
+# primitives and stubs those suites use.
 #
 # It is also the fixture Git-config isolation regression, with host signing
 # armed on a scratch config file: it drives every entry point that must reach
@@ -153,6 +153,21 @@ SH
   pass "runner and shared helpers isolate host Git config and preserve explicit config and outside commits"
 )
 
+test_touch_epoch_preserves_repeated_dst_hour() {
+  local TZ=Europe/Paris epoch path actual
+  export TZ
+  for epoch in 1761438600 1761442200; do
+    fm_touch_epoch "$epoch" "$TMP_ROOT/epoch-one" "$TMP_ROOT/epoch two"
+    for path in "$TMP_ROOT/epoch-one" "$TMP_ROOT/epoch two"; do
+      actual=$(stat -c %Y "$path" 2>/dev/null || stat -f %m "$path" 2>/dev/null) \
+        || fail "could not read fixture mtime for $path"
+      [ "$actual" = "$epoch" ] \
+        || fail "fm_touch_epoch should preserve epoch $epoch, got $actual"
+    done
+  done
+  pass "fm_touch_epoch preserves both epochs in the repeated DST hour"
+}
+
 test_no_mistakes_version_constant() {
   local fakebin out
   fakebin=$(fm_fakebin "$TMP_ROOT/nm")
@@ -265,6 +280,7 @@ test_spawn_home_layout() {
 }
 
 test_git_config_isolation || fail "Git fixture config isolation"
+test_touch_epoch_preserves_repeated_dst_hour
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers
 test_fake_gh_and_gh_axi

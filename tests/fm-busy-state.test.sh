@@ -439,6 +439,27 @@ test_boolean_view_never_promotes_unknown() {
   pass "the boolean view reports busy only on an exact busy verdict"
 }
 
+test_progress_is_generation_bound_and_not_semantic_state() {
+  local state gen replacement before
+  state=$(new_state_dir native-progress)
+  gen=$("$EV" arm "$state" t1)
+  before=$(cat "$state/t1.busy-state")
+  "$EV" progress "$state" t1 --gen "$gen" || fail "current progress was refused"
+  [ -f "$state/t1.progress" ] || fail "progress marker missing"
+  [ ! -e "$state/t1.turn-ended" ] || fail "progress emitted a completed turn"
+  [ "$(cat "$state/t1.busy-state")" = "$before" ] || fail "progress changed semantic state"
+  replacement=$("$EV" arm "$state" t1)
+  [ ! -e "$state/t1.progress" ] || fail "arm retained the previous incarnation's progress"
+  if "$EV" progress "$state" t1 --gen "$gen" 2>/dev/null; then fail "stale progress was accepted"; fi
+  [ ! -e "$state/t1.progress" ] || fail "stale progress wrote a marker"
+  "$EV" progress "$state" t1 --gen "$replacement" || fail "replacement progress was refused"
+  "$EV" retire "$state" t1 --gen "$replacement" || fail "retire failed"
+  [ ! -e "$state/t1.progress" ] || fail "retire retained progress"
+  pass "native progress is generation-bound, separately recorded, and cleared on arm and retire"
+}
+
+test_progress_is_generation_bound_and_not_semantic_state
+
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
