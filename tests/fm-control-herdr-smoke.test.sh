@@ -9,9 +9,13 @@
 # an agent is running, and therefore whether a lifecycle verb may act at all,
 # comes from herdr's own agent registry.
 #
-# No real agent is launched. herdr's `pane report-agent` is the same registry
-# the adapter reads, so registering and not registering an agent on a plain
-# shell pane exercises exactly the classification the control plane gates on.
+# No real agent CLI is launched. herdr's `pane report-agent` is the same
+# registry the adapter reads, so registering and not registering an agent
+# exercises exactly the classification the control plane gates on; the
+# registered-agent section additionally holds a real `sleep` process in the
+# pane's foreground, because since the 2026-09-03 spawn-gate defect-3 fix a
+# bare-shell foreground proves the EXITED shape (retained record + bare
+# shell), not a live agent (docs/herdr-backend.md agent-liveness probe).
 #
 # Always runs on a private, named, throwaway lab session, never the default
 # one (tests/herdr-test-safety.sh; the 2026-07-02 incident). Skips cleanly
@@ -119,8 +123,23 @@ herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-
   --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the task pane"
 
+# 2026-09-03 spawn-gate defect 3 (kimi herdr spawn gate): a registered agent
+# whose pane foreground is provably back to a bare shell now classifies as
+# DEAD - that retained-record-plus-bare-shell shape is exactly the
+# self-exited agent the relaunch stop-confirmation must recognize, verified
+# live on exited kimi 0.40.1 panes (docs/herdr-backend.md). A genuinely LIVE
+# agent therefore needs a real non-shell foreground in this fixture, exactly
+# as every dispatched TUI agent (kimi included) holds its foreground while
+# alive; a bare shell here would read as the exit proof, not as aliveness.
+# `sleep` ignores both the harness interrupt key (Escape) and the typed exit
+# command, so the verbs-below assertions keep their meaning: interrupt must
+# leave the agent running, and exit must fail closed when the agent cannot
+# actually be stopped.
+herdr pane run "$PANE_ID" 'exec sleep 300' --session "$SESSION" >/dev/null 2>&1 \
+  || fail "could not give the registered agent's pane a live non-shell foreground"
+
 STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
-[ "$STATE" = alive ] || fail "herdr should classify a registered agent as alive, got '$STATE'"
+[ "$STATE" = alive ] || fail "herdr should classify a registered agent with a live non-shell foreground as alive, got '$STATE'"
 
 OUT=$(run_control hsmoke interrupt) || fail "interrupt against a registered agent should succeed: $OUT"
 case "$OUT" in
