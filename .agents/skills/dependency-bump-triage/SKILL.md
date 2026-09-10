@@ -124,7 +124,7 @@ Run or request the smallest missing targeted validation when the skipped coverag
 
 A hand-verified bump may skip the independent Codex scout only when all of these are true:
 
-- The repository diff is exclusively the one manifest pin and its mechanically generated lockfile or automation metadata.
+- The repository diff is exclusively one dependency-version change represented by its manifest pin, its mechanically generated lockfile, or both, plus any automation metadata.
 - The bump is not in any risk-amplifier class above.
 - The upstream compare does not touch any locally used symbol, signature, default, or transitive behavior.
 - No relevant security advisory or unresolved evidence gap exists.

@@ -23,7 +23,7 @@ Set the repository and pull request explicitly, then record the current head bef
 OWNER=<owner>
 REPO=<repo>
 PR=<number>
-gh-axi api "/repos/$OWNER/$REPO/pulls/$PR" --jq '{url:.html_url,draft,headRef:.head.ref,headRepo:.head.repo.full_name,headSha:.head.sha,baseRef:.base.ref,baseSha:.base.sha}'
+gh-axi api "/repos/$OWNER/$REPO/pulls/$PR" --jq '{url:.html_url,draft,headRef:.head.ref,headRepo:.head.repo.full_name,headCloneUrl:.head.repo.clone_url,headSha:.head.sha,baseRef:.base.ref,baseRepo:.base.repo.full_name,baseCloneUrl:.base.repo.clone_url,baseSha:.base.sha}'
 ```
 
 Use the returned head SHA as `REVIEW_HEAD` and the returned base SHA as `BASE_SHA`.
@@ -95,11 +95,15 @@ Read all findings even when an earlier summary says the review is clean.
 
 Run a fresh local Codex review against the exact checked-out PR head after the implementation is committed.
 The reviewer must not be the worker that authored or fixed the change.
-Detach or use a disposable worktree at `REVIEW_HEAD`, verify `git rev-parse HEAD` equals it, and run Codex read-only against the PR base.
+Fetch both immutable commits before entering the read-only review, then detach or use a disposable worktree at `REVIEW_HEAD` and verify every prerequisite before invoking Codex.
 The narrow scout omission for a hand-verified dependency bump is owned only by `dependency-bump-triage`; every other part of this cycle still applies.
 
 ```sh
-test "$(git rev-parse HEAD)" = "$REVIEW_HEAD"
+git fetch --no-tags "$BASE_CLONE_URL" "$BASE_SHA"
+git fetch --no-tags "$HEAD_CLONE_URL" "$REVIEW_HEAD"
+test "$(git rev-parse HEAD)" = "$REVIEW_HEAD" || exit 1
+git cat-file -e "$BASE_SHA^{commit}" || exit 1
+git cat-file -e "$REVIEW_HEAD^{commit}" || exit 1
 codex exec --sandbox read-only --ephemeral '<adversarial review brief>'
 ```
 
@@ -135,7 +139,7 @@ Fix valid findings with focused tests, reply to each thread with the fix evidenc
 For every declined finding, reply with the concrete reason and resolve the thread.
 Commit and push only to the existing PR branch.
 After every push, capture the new exact head and rerun the independent Codex adversarial review plus every configured automated reviewer.
-Repeat until the exact head has all CI checks green, no actionable Codex, CodeRabbit, or Claude Review Bot findings, and zero unresolved review threads.
+Repeat until the exact head has all CI checks green, no actionable independent Codex or configured automated-reviewer findings, and zero unresolved review threads.
 Do not merge.
 Report the full PR URL, final head SHA, check rollup, reviewer verdict evidence, and unresolved-thread count.
 ```
@@ -150,6 +154,7 @@ Fetch the PR again and verify all of the following against one unchanged head:
 - The paginated GraphQL query reports zero unresolved review threads.
 - When CodeRabbit is configured, its latest summary covers the exact head and is clean, or an explicit rate-limit reply is recorded and the exact-head Codex fallback is clean.
 - When the Claude Review Bot is configured, its latest checklist covers the exact head and its final verdict is clean.
+- Every other configured automated reviewer has a current clean result for the exact head or a documented integration-specific fallback authorized by its owning contract.
 - The independent Codex report covers the exact head and ends `Verdict: ready`.
 - Every valid finding was fixed and every declined finding has a visible reason before its thread was resolved.
 

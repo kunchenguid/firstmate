@@ -383,6 +383,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 
 For PR-based ship tasks, the initial PR signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Treat that signal as intake to `pr-review-cycle`, independently pass its exact-head completion gate, then run `bin/fm-pr-check.sh <id> <PR url>` with the copied URL; the script records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher merge poll.
+Read back the recorded `pr_head=` and the live PR head, require both to equal the reviewed SHA, and restart the review-to-clean cycle on any mismatch before reporting readiness.
 Only after that cycle is clean, tell the captain the PR's full `https://...` URL copied from the worker's signal or the task's `pr=` metadata, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
