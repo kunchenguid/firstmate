@@ -1500,18 +1500,36 @@ detect_stale_sessions() {
   local out rc=0 inner cwd_inner
   [ "${FM_BOOTSTRAP_STALE_SESSIONS:-1}" = 1 ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
-  # The inventory's own per-source bounds have to sit BELOW this one, or a slow
-  # but living source can never reach the disclosure it was built for: this
-  # outer bound would kill the whole pass first and the captain would be told
-  # only that the check did not finish, instead of which source was unreadable
-  # and what the rest of the rows are.
+  # THE BUDGET, WRITTEN OUT SO IT CANNOT DRIFT AGAIN. Every per-source bound has
+  # to sit below this outer one TOGETHER WITH THE REST OF THE PASS, or the outer
+  # bound kills everything first and the captain is told only that the check did
+  # not finish - losing both the source that was unreadable and every row that
+  # was perfectly readable.
+  #
+  #   slack      2s            what a pass costs outside its bounded sources:
+  #                            the ps table, the process walk, the jq assembly.
+  #                            Measured at about 2s against a real home.
+  #   inner      outer - slack one wedged fleet snapshot OR Lavish listing still
+  #                            leaves room to finish and disclose, because
+  #                            inner + slack = outer.
+  #   cwd_inner  (inner - slack) / 2
+  #                            the working directory is read TWICE in one pass -
+  #                            once machine-wide to match workers to their
+  #                            processes, once for the sessions under this
+  #                            home's harness - and one wedged mount wedges
+  #                            BOTH, so the pair must fit where one source fits:
+  #                            2 * cwd_inner + slack <= inner. At the default
+  #                            outer of 8s that is 2s per read, and a wedged
+  #                            reader then still leaves 2s of headroom.
+  #
+  # What deliberately does NOT fit is several DIFFERENT sources wedging in one
+  # pass: inner + inner already exceeds outer, and no per-source value can
+  # change that. That case belongs to the outer bound below, which still says
+  # the check did not finish rather than going quiet. The floors below can also
+  # exceed the budget for an unusually small outer bound; the same applies then.
   inner=$((FM_STALE_SESSION_TIMEOUT - 2))
   [ "$inner" -ge 2 ] || inner=2
-  # The working directories are read TWICE in one pass - once machine-wide to
-  # match workers to their processes, once for the sessions under this home's
-  # harness - so that bound gets half, or two wedged reads would together
-  # outlast the outer one and forfeit the disclosure again.
-  cwd_inner=$((inner / 2))
+  cwd_inner=$(((inner - 2) / 2))
   [ "$cwd_inner" -ge 2 ] || cwd_inner=2
   out=$(FM_SESSION_INVENTORY_FLEET_TIMEOUT="${FM_SESSION_INVENTORY_FLEET_TIMEOUT:-$inner}" \
     FM_SESSION_INVENTORY_LAVISH_TIMEOUT="${FM_SESSION_INVENTORY_LAVISH_TIMEOUT:-$inner}" \

@@ -948,6 +948,46 @@ EOF
   assert_not_contains "$out" "SESSIONS_STALE:" \
     "FM_BOOTSTRAP_STALE_SESSIONS=0 must opt a home out of the unasked notice"
 
+  # THE BUDGET HAS TO LEAVE ROOM FOR THE DISCLOSURE. bootstrap bounds the whole
+  # pass and the inventory bounds each source underneath; if a per-source bound
+  # is sized so a single wedged source outlasts the outer one, the captain is
+  # told only that the check did not finish and loses both the named source and
+  # every row that WAS readable. This drives bootstrap's own numbers - nothing
+  # here sets a bound - so the arithmetic cannot drift without failing.
+  # A live harness session recorded as this home's lock, so BOTH working-
+  # directory reads run: the machine-wide one that matches workers to their
+  # processes, and the one that scopes this home's sessions. One wedged mount
+  # wedges both, which is the case the budget has to survive.
+  local wedged sess
+  ln -sf /bin/bash "$fakebin/claude"
+  ( cd "$home" && exec "$fakebin/claude" -c 'sleep 120; :' sess-a ) &
+  sess=$!
+  sleep 0.5
+  printf '%s\n' "$sess" > "$home/state/.lock"
+  for wedged in lsof readlink; do
+    cat > "$fakebin/$wedged" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+    chmod +x "$fakebin/$wedged"
+  done
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  # Both reads must actually have wedged, or this case is not exercising the
+  # additive pair the budget is sized for.
+  assert_contains "$out" "worker-processes, harness-sessions unreadable" \
+    "both working-directory reads must be the wedged sources here"
+  assert_contains "$out" "SESSIONS_STALE: could not check everything - " \
+    "a wedged source must be named, not swallowed by the outer bound"
+  assert_not_contains "$out" "the running-session check did not finish" \
+    "the per-source disclosure must be reachable under bootstrap's own budget"
+  assert_contains "$out" "SESSIONS_STALE: worker ancient-task" \
+    "and the rows that were readable must survive the source that was not"
+  rm -f "$fakebin/lsof" "$fakebin/readlink" "$fakebin/claude"
+  kill "$sess" 2>/dev/null || true
+  wait "$sess" 2>/dev/null || true
+
   pass "bootstrap reports what has been running for days, unasked, and only that"
 }
 

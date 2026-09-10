@@ -289,8 +289,17 @@ else
         | if length == 0 then true else .[0] end')
       fleet_ok=$(printf '%s' "$json" | jq -r '[.sources[] | select(.name == "fleet-snapshot") | .ok]
         | if length == 0 then true else .[0] end')
+      # harness-sessions goes not-ok for two different reasons, and only one of
+      # them is this guard's subject. An unreadable process table stops the
+      # collector BEFORE any working directory is read, so blaming the
+      # working-directory rule for it would point the maintainer at a rule that
+      # never ran.
+      ps_ok=$(printf '%s' "$json" | jq -r '[.sources[] | select(.name == "process-table") | .ok]
+        | if length == 0 then true else .[0] end')
       if [ "$owner" = stale ] || [ "$owner" = absent ]; then
         note "the session lock in $ROLE_HOME names no live harness right now, so the lock-owner half of this guard checked nothing"
+      elif [ "$ps_ok" != true ]; then
+        note "the process table for $ROLE_HOME was unreadable this run, so no working directory was ever read and this guard checked nothing (that is a ps failure, not overview drift)"
       elif [ "$cwds_ok" != true ]; then
         fail "LIVE-SESSION DRIFT: the working directory of the processes under harness $root could not be read here, so a live session cannot be told from an idle pool process at all. That is the one input the verdict rests on."
       elif [ "$fleet_ok" != true ]; then
