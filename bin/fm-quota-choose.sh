@@ -31,9 +31,9 @@
 # is checked against the wrong quota row. This is an accepted limitation of the
 # optional helper. Authoritative multi-provider routing - including provider
 # discovery from the harness catalog and quota matching by that explicit
-# provider - is owned by AGENTS.md section 4 and the quota-array-dispatch skill,
-# not by this helper. Use this helper only when the brief already fixed the
-# candidate order and every candidate's provider is the harness's primary family.
+# provider - is owned by the quota-array-dispatch skill, not by this helper.
+# Use this helper only when the brief already fixed the candidate order and
+# every candidate's provider is the harness's primary family.
 #
 # omp (Oh My Pi) has no single primary family, so its candidate model prefix
 # selects the family: openai-codex/<id> checks the codex row and
@@ -313,8 +313,8 @@ printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi prov
 # Multi-provider harnesses (Pi, OpenCode) map to their primary family only; see
 # the header limitation note. omp is keyed on the candidate model prefix instead
 # and has no family for any other prefix (see the header). Authoritative
-# multi-provider routing is owned by AGENTS.md section 4 and the
-# quota-array-dispatch skill, not this helper.
+# multi-provider routing is owned by the quota-array-dispatch skill, not this
+# helper.
 provider_for_harness() {
   case "$1" in
     omp)
