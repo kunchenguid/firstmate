@@ -193,11 +193,13 @@ render_once() {
          elif $h.lock_owner == "single" then
            dim("one background session drives this home")
          elif $h.lock_owner == "not_checked" then
-           warn("! " + ([.rows[] | select(.kind == "harness-session") | .close_note
-                          | select(. != null)]
-                         | if length == 0
-                           then "what runs in this home could not be read fully, so a background session cannot be told apart from a worker here"
-                           else .[0] end))
+           # With rows, their own note says what was missing. Without them the
+           # collector failed before any row existed, and sources[] names that
+           # on the very next line - so saying it here too would state one
+           # condition twice, and the guess this branch used to make named the
+           # wrong one.
+           ([.rows[] | select(.kind == "harness-session") | .close_note | select(. != null)]
+            | if length == 0 then empty else warn("! " + .[0]) end)
          else
            dim("background sessions: \($h.lock_owner)")
          end),

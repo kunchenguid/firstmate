@@ -312,67 +312,78 @@ fi
 # task it is running.
 CWDMAP="$WORK/cwd.tsv"
 : > "$CWDMAP"
-# BOUNDED LIKE ITS SIBLINGS. Without `-p` this stats the working directory of
-# every process on the machine, so a single cwd on a wedged mount blocks it for
-# as long as that mount stays wedged. The session-start path is covered from
-# outside, but the pane the captain leaves open all day is not: a redraw that
-# never returns leaves it cleared and frozen, which is this overview failing
-# silently in the one mode it exists for. The bound is the Lavish listing's 8s -
-# the same order as the reads it sits beside, and forty times the 0.19s a real
-# machine-wide pass measures - and reaching it resolves nothing, which the
-# callers already disclose as an unreadable source.
-CWD_READ_NOTE='cannot read process working directories here'
-bounded_lsof_cwds() {  # [lsof args...]
-  local rc=0 raw="$WORK/lsof.out"
+# BOUNDED LIKE ITS SIBLINGS, ON BOTH PLATFORMS. Reading a working directory can
+# block indefinitely on either path: the machine-wide `lsof` stats every process
+# on the box, and `readlink -f` canonicalizes, so one cwd under a wedged mount
+# stops the whole read. The session-start path is covered from outside, but the
+# pane the captain leaves open all day is not - a redraw that never returns
+# leaves it cleared and frozen, which is this overview failing silently in the
+# one mode it exists for. So the read runs as a bounded external command either
+# way. The bound is the Lavish listing's 8s: the same order as the reads it sits
+# beside, and forty times the 0.19s a real machine-wide pass measures. Reaching
+# it resolves nothing, which the callers already disclose as an unreadable
+# source, and the reason is reset per read so each one reports its own outcome
+# rather than inheriting an earlier read's.
+CWD_READ_DEFAULT_NOTE='cannot read process working directories here'
+CWD_READ_NOTE=$CWD_READ_DEFAULT_NOTE
+bounded_cwd_read() {  # [<pid>...]
+  local rc=0 mode=proc joined pidlist="$WORK/cwd-pids" raw="$WORK/cwd-read.out"
+  CWD_READ_NOTE=$CWD_READ_DEFAULT_NOTE
   : > "$raw"
-  fm_run_timed "$CWD_TIMEOUT" lsof -a -d cwd -Fpn "$@" > "$raw" 2>/dev/null || rc=$?
+  : > "$CWDMAP"
+  if [ -r /proc/self/cwd ]; then
+    if [ "$#" -gt 0 ]; then
+      printf '%s\n' "$@" > "$pidlist"
+    else
+      LC_ALL=C awk -F'\t' '{ print $1 }' "$PSTABLE" > "$pidlist"
+    fi
+    fm_run_timed "$CWD_TIMEOUT" bash -c '
+      while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        printf "%s\t%s\n" "$pid" "$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+      done < "$1"' fm-cwd-read "$pidlist" > "$raw" 2>/dev/null || rc=$?
+  elif command -v lsof >/dev/null 2>&1; then
+    mode=lsof
+    if [ "$#" -gt 0 ]; then
+      # One batched call: per-pid invocations cost more than the whole rest of
+      # the collection put together.
+      joined=$(printf '%s,' "$@"); joined=${joined%,}
+      fm_run_timed "$CWD_TIMEOUT" lsof -a -d cwd -Fpn -p "$joined" > "$raw" 2>/dev/null || rc=$?
+    else
+      fm_run_timed "$CWD_TIMEOUT" lsof -a -d cwd -Fpn > "$raw" 2>/dev/null || rc=$?
+    fi
+  else
+    return 1
+  fi
   if [ "$rc" = 124 ]; then
     CWD_READ_NOTE="reading process working directories exceeded ${CWD_TIMEOUT}s"
     return 1
   fi
-  LC_ALL=C awk '
-    /^p/ { pid = substr($0, 2); next }
-    /^n/ { if (pid != "") { printf "%s\t%s\n", pid, substr($0, 2); pid = "" } }' \
-    < "$raw" > "$CWDMAP"
+  if [ "$mode" = lsof ]; then
+    LC_ALL=C awk '
+      /^p/ { pid = substr($0, 2); next }
+      /^n/ { if (pid != "") { printf "%s\t%s\n", pid, substr($0, 2); pid = "" } }' \
+      < "$raw" > "$CWDMAP"
+  else
+    cat "$raw" > "$CWDMAP"
+  fi
 }
 # A reader that produced no directory at all read nothing, whatever the exit
 # status of the last pipeline stage was. Saying so is what keeps a denied or
-# sandboxed lsof from being reported as "nothing is running here".
+# sandboxed reader from being reported as "nothing is running here".
 cwdmap_has_a_directory() {
   LC_ALL=C awk -F'\t' '$2 != "" { found = 1; exit } END { exit(found ? 0 : 1) }' "$CWDMAP"
 }
 read_cwds() {  # <pid>...
-  local pid joined
   [ "$#" -gt 0 ] || return 0
-  if [ -r /proc/self/cwd ]; then
-    for pid in "$@"; do
-      printf '%s\t%s\n' "$pid" "$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
-    done > "$CWDMAP"
-    cwdmap_has_a_directory
-    return
-  fi
-  command -v lsof >/dev/null 2>&1 || return 1
-  joined=$(printf '%s,' "$@"); joined=${joined%,}
-  # One batched call: per-pid invocations cost more than the whole rest of the
-  # collection put together.
-  bounded_lsof_cwds -p "$joined" || return 1
+  bounded_cwd_read "$@" || return 1
   cwdmap_has_a_directory
 }
 # Every process's working directory in one call. Used where the interesting set
 # is not known in advance, so that filtering on the directory can come before
 # the far more expensive question of whether a pid is a verified harness.
 read_all_cwds() {
-  local pid
-  if [ -r /proc/self/cwd ]; then
-    while IFS= read -r pid; do
-      [ -n "$pid" ] || continue
-      printf '%s\t%s\n' "$pid" "$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
-    done < <(LC_ALL=C awk -F'\t' '{ print $1 }' "$PSTABLE") > "$CWDMAP"
-    cwdmap_has_a_directory
-    return
-  fi
-  command -v lsof >/dev/null 2>&1 || return 1
-  bounded_lsof_cwds || return 1
+  bounded_cwd_read || return 1
   cwdmap_has_a_directory
 }
 

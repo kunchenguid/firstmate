@@ -266,7 +266,7 @@ The one row that never carries a close command is the captain's own background s
 It is recognised from the harness ancestry the overview runs in, which the session-start path always has.
 A pane has no harness ancestry to walk, and nothing else can stand in for it: the session lock names the outermost harness process, which under a shared harness daemon is the daemon rather than any one session.
 So in a pane every session row says `(owner unknown)` and none is offered for closing; the pids are still shown, so ending one deliberately stays possible.
-The same applies whenever this home's workers could not be read, since a background session cannot then be told apart from a worker's own process - the view says so on its own line, and the unreadable source is named.
+The close commands are withheld the same way whenever this home's workers could not be read, since a background session cannot then be told apart from a worker's own process - the view says which list was missing, and names the unreadable source. Ownership is unaffected there: the ancestry still answers it, so a session it recognises is still marked `(yours)`.
 
 Anything at or over the stale threshold is marked with a leading `!`.
 The age it is measured against is how long a worker has been RUNNING whenever a live process is working in its own local copy, and the age of the work itself when nothing is running, so abandoned work still holding a local copy is surfaced rather than hidden.

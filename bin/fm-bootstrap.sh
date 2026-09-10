@@ -1497,7 +1497,7 @@ detect_local_config() {
 FM_STALE_SESSION_TIMEOUT=${FM_STALE_SESSION_TIMEOUT:-8}
 case "$FM_STALE_SESSION_TIMEOUT" in ''|*[!0-9]*|0) FM_STALE_SESSION_TIMEOUT=8 ;; esac
 detect_stale_sessions() {
-  local out rc=0 inner
+  local out rc=0 inner cwd_inner
   [ "${FM_BOOTSTRAP_STALE_SESSIONS:-1}" = 1 ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   # The inventory's own per-source bounds have to sit BELOW this one, or a slow
@@ -1507,8 +1507,15 @@ detect_stale_sessions() {
   # and what the rest of the rows are.
   inner=$((FM_STALE_SESSION_TIMEOUT - 2))
   [ "$inner" -ge 2 ] || inner=2
+  # The working directories are read TWICE in one pass - once machine-wide to
+  # match workers to their processes, once for the sessions under this home's
+  # harness - so that bound gets half, or two wedged reads would together
+  # outlast the outer one and forfeit the disclosure again.
+  cwd_inner=$((inner / 2))
+  [ "$cwd_inner" -ge 2 ] || cwd_inner=2
   out=$(FM_SESSION_INVENTORY_FLEET_TIMEOUT="${FM_SESSION_INVENTORY_FLEET_TIMEOUT:-$inner}" \
     FM_SESSION_INVENTORY_LAVISH_TIMEOUT="${FM_SESSION_INVENTORY_LAVISH_TIMEOUT:-$inner}" \
+    FM_SESSION_INVENTORY_CWD_TIMEOUT="${FM_SESSION_INVENTORY_CWD_TIMEOUT:-$cwd_inner}" \
     fm_run_timed "$FM_STALE_SESSION_TIMEOUT" \
     "$SCRIPT_DIR/fm-session-inventory.sh" --stale-lines 2>/dev/null) || rc=$?
   # The inventory discloses its OWN unreadable sources, in one line of exactly

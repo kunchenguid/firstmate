@@ -1610,16 +1610,25 @@ EOF
     "the view must name the worker list as what is missing"
   assert_not_contains "$rendered" "background sessions are working in this home at once" \
     "the concurrent-session alarm must not fire on data that could not distinguish workers"
+  [ "$(printf '%s\n' "$rendered" | LC_ALL=C grep -c 'could not be read')" = 1 ] \
+    || fail "the condition must be stated once, not repeated per row"
 
   # TWO LINES FOR ONE CONDITION, AND NEITHER NAMES THE WRONG CAUSE. The missing
   # worker list is what withholds the close commands; the ancestry answers
-  # ownership perfectly well and must not be reported as unable to.
+  # ownership perfectly well and must not be reported as unable to. Read from
+  # inside a session of its own, so the ancestry resolves here whether or not
+  # this suite itself happens to run inside a harness - the fixture decides the
+  # answer, not the runner.
+  rendered=$(COLUMNS=110 FM_SNAPSHOT_BUDGET=not-a-number \
+    run_in_session "$home" "$VIEW" --color never) \
+    || fail "the view failed when run from inside a live session"
   assert_not_contains "$rendered" "which of these is your own session cannot be told" \
     "ownership is not what the missing worker list makes unknowable"
   assert_not_contains "$rendered" "owner unknown" \
     "a session the ancestry resolved must not be rendered as unattributable"
-  [ "$(printf '%s\n' "$rendered" | LC_ALL=C grep -c 'could not be read')" = 1 ] \
-    || fail "the condition must be stated once, not repeated per row"
+  [ "$(printf '%s' "$(FM_SNAPSHOT_BUDGET=not-a-number run_in_session "$home" "$INVENTORY" --json)" \
+    | jq -r '.harness_sessions.self_resolution')" = ancestry ] \
+    || fail "this case only proves anything while the ancestry does answer ownership"
 
   kill_spawned
   pass "inventory: an unreadable fleet snapshot withholds the session verdict and every kill"
@@ -1633,10 +1642,6 @@ EOF
 # and let the render finish.
 test_a_wedged_working_directory_read_still_renders() {
   local home json rendered started elapsed
-  if [ -r /proc/self/cwd ]; then
-    pass "inventory: (skipped) this host reads /proc, so the bounded lsof path is not the one used here"
-    return 0
-  fi
   local spec daemon
   home=$(make_home wedged-cwd)
   write_worker "$home" old-worker 30
@@ -1652,12 +1657,17 @@ test_a_wedged_working_directory_read_still_renders() {
   printf '%s\n' "$daemon" > "$home/state/.lock"
   # A reader that never returns, bounded at 1s: the wedge outlives the bound
   # several times over, so a render that completes proves the bound is what
-  # ended it.
-  cat > "$FAKEBIN/lsof" <<'SH'
+  # ended it. Both platform readers are stubbed, because which one runs is the
+  # host's choice - lsof where there is no /proc, readlink where there is - and
+  # the bound has to hold either way.
+  local wedged
+  for wedged in lsof readlink; do
+    cat > "$FAKEBIN/$wedged" <<'SH'
 #!/usr/bin/env bash
 sleep 30
 SH
-  chmod +x "$FAKEBIN/lsof"
+    chmod +x "$FAKEBIN/$wedged"
+  done
 
   started=$(date +%s)
   json=$(FM_SESSION_INVENTORY_CWD_TIMEOUT=1 run_inventory "$home" --json) \
@@ -1681,6 +1691,11 @@ SH
   assert_contains "$rendered" "Sessions - $home" "the pane must still draw its overview"
   assert_contains "$rendered" "worker-processes unreadable:" \
     "the pane must say which source it could not read"
+  # Nothing about workers-versus-sessions was involved here: the reader wedged
+  # before any session row existed, so the pane must not guess at a cause that
+  # sources[] already names accurately on the very next line.
+  assert_not_contains "$rendered" "cannot be told apart from a worker" \
+    "the pane must not invent a cause when the reader failed before any row existed"
   # One notice for it, not a report.
   [ "$(printf '%s\n' "$rendered" | LC_ALL=C grep -c 'worker-processes unreadable:')" = 1 ] \
     || fail "the unreadable source must be named once"
@@ -1690,7 +1705,7 @@ SH
     "could not check everything" \
     "a wedged read must not be reported as nothing being old"
 
-  rm -f "$FAKEBIN/lsof"
+  rm -f "$FAKEBIN/lsof" "$FAKEBIN/readlink"
   kill_spawned
   pass "inventory: a wedged working-directory read is bounded, disclosed, and the pane still renders"
 }
