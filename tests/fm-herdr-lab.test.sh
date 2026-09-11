@@ -66,12 +66,6 @@ case "$1 ${2:-}" in
     ;;
   "terminal title")
     [ "${FM_FAKE_HERDR_TITLE_FAIL:-}" != 1 ] || exit 94
-    if [ -n "${FM_FAKE_HERDR_TITLE_ENTERED:-}" ]; then
-      : > "$FM_FAKE_HERDR_TITLE_ENTERED"
-      while [ ! -f "$FM_FAKE_HERDR_TITLE_RELEASE" ]; do
-        "$FM_FAKE_HERDR_REAL_SLEEP" 0.01
-      done
-    fi
     reason=no_foreground_client
     [ ! -f "$state/$session.foreground" ] || reason=$(cat "$state/$session.foreground")
     jq -nc --arg reason "$reason" '{result:{reason:$reason,type:"client_window_title"}}'
@@ -95,8 +89,6 @@ run_with_fake() {
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
-    FM_FAKE_HERDR_TITLE_ENTERED="${FM_FAKE_HERDR_TITLE_ENTERED:-}" \
-    FM_FAKE_HERDR_TITLE_RELEASE="${FM_FAKE_HERDR_TITLE_RELEASE:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -341,35 +333,6 @@ SH
   pass "fm-herdr-lab: startup timeout allows launcher child escalation"
 }
 
-test_concurrent_viewer_start_is_refused() {
-  local name="fm-lab-viewer-concurrent-$$" status=0 first_status=0 first_pid
-  local entered="$TMP_ROOT/viewer-title-entered" release="$TMP_ROOT/viewer-title-release"
-  local launches="$TMP_ROOT/viewer-launches" out="$TMP_ROOT/viewer-first.out"
-  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-concurrent fixture provision failed"
-  cat > "$FAKEBIN/python3" <<'SH'
-#!/usr/bin/env bash
-printf 'launched\n' >> "$FM_FAKE_VIEWER_LAUNCHES"
-exec "$FM_FAKE_HERDR_REAL_SLEEP" 20
-SH
-  chmod +x "$FAKEBIN/python3"
-  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_TITLE_ENTERED="$entered" \
-    FM_FAKE_HERDR_TITLE_RELEASE="$release" FM_FAKE_VIEWER_LAUNCHES="$launches" \
-    run_with_fake fm_herdr_lab_viewer_start "$name" >"$out" 2>&1 &
-  first_pid=$!
-  while [ ! -f "$entered" ]; do
-    "$REAL_SLEEP" 0.01
-  done
-  run_with_fake fm_herdr_lab_viewer_start "$name" >/dev/null 2>&1 || status=$?
-  expect_code 1 "$status" "a concurrent viewer start must be refused"
-  : > "$release"
-  wait "$first_pid" || first_status=$?
-  rm -f "$FAKEBIN/python3"
-  expect_code 1 "$first_status" "the blocked viewer fixture unexpectedly attached"
-  [ "$(wc -l < "$launches" | tr -d ' ')" = 1 ] || fail "concurrent starts launched more than one viewer"
-  run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-concurrent fixture teardown failed"
-  pass "fm-herdr-lab: concurrent viewer starts serialize before launch"
-}
-
 test_viewer_start_requires_its_owned_process() {
   local name="fm-lab-viewer-ownership-$$" out status=0 marker="$TMP_ROOT/viewer-launched"
   run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-ownership fixture provision failed"
@@ -452,21 +415,24 @@ test_viewer_stop_requires_the_recorded_parent() {
   pass "fm-herdr-lab: viewer ownership requires the recorded parent"
 }
 
-test_viewer_interruption_releases_transition_lock() {
-  local name="fm-lab-viewer-interrupt-$$" lock command_pid launcher_pid status=0
-  local started="$TMP_ROOT/viewer-interrupt-started" out="$TMP_ROOT/viewer-interrupt.out"
+test_interrupted_viewer_start_cancels_launcher() {
+  local name="fm-lab-viewer-interrupt-$$" command_pid launcher_pid status=0
+  local started="$TMP_ROOT/viewer-interrupt-started" attached="$TMP_ROOT/viewer-interrupt-attached"
   run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-interrupt fixture provision failed"
-  lock=$(run_with_fake fm_herdr_lab_viewer_lock_path "$name")
   cat > "$FAKEBIN/python3" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_FAKE_VIEWER_STARTED"
+"$FM_FAKE_HERDR_REAL_SLEEP" 0.5
+: > "$FM_FAKE_VIEWER_ATTACHED"
+printf '%s\n' cleared > "$FM_FAKE_HERDR_STATE/$FM_FAKE_VIEWER_SESSION.foreground"
 exec "$FM_FAKE_HERDR_REAL_SLEEP" 20
 SH
   chmod +x "$FAKEBIN/python3"
-  FM_FAKE_VIEWER_STARTED="$started" run_with_fake exec "$ROOT/bin/fm-herdr-lab.sh" \
-    viewer start "$name" >"$out" 2>&1 &
+  FM_FAKE_VIEWER_STARTED="$started" FM_FAKE_VIEWER_ATTACHED="$attached" \
+    FM_FAKE_VIEWER_SESSION="$name" run_with_fake exec "$ROOT/bin/fm-herdr-lab.sh" \
+    viewer start "$name" >/dev/null 2>&1 &
   command_pid=$!
-  while [ ! -f "$started" ] || [ ! -d "$lock" ]; do
+  while [ ! -f "$started" ]; do
     "$REAL_SLEEP" 0.01
   done
   launcher_pid=$(cat "$started")
@@ -474,29 +440,12 @@ SH
   wait "$command_pid" || status=$?
   rm -f "$FAKEBIN/python3"
   [ "$status" -ne 0 ] || fail "interrupted viewer start unexpectedly succeeded"
-  assert_absent "$lock" "interrupted viewer start leaked its transition lock"
-  kill "$launcher_pid" 2>/dev/null || true
-  wait "$launcher_pid" 2>/dev/null || true
+  "$REAL_SLEEP" 0.6
+  kill -0 "$launcher_pid" 2>/dev/null && fail "interrupted viewer start left its launcher running"
+  assert_absent "$attached" "interrupted viewer start attached after its command exited"
+  [ ! -f "$FAKE_STATE/$name.foreground" ] || fail "interrupted viewer start left a foreground client"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-interrupt fixture teardown failed"
-  pass "fm-herdr-lab: interrupted viewer transitions release their lock"
-}
-
-test_viewer_failure_releases_transition_lock() {
-  local name="fm-lab-viewer-unlock-$$" record lock status=0 pair="$TMP_ROOT/viewer-unlock-pair"
-  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-unlock fixture provision failed"
-  record=$(run_with_fake fm_herdr_lab_viewer_record_path "$name")
-  lock=$(run_with_fake fm_herdr_lab_viewer_lock_path "$name")
-  start_viewer_fixture "$pair"
-  write_viewer_record "$record" "$FIXTURE_LAUNCHER_PID" "$FIXTURE_VIEWER_PID"
-  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" viewer start "$name" >/dev/null 2>&1 || status=$?
-  expect_code 1 "$status" "starting an already-running viewer must fail"
-  assert_absent "$lock" "failed viewer start leaked its transition lock"
-  printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
-  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" viewer stop "$name" || fail "stop remained blocked after failed start"
-  wait "$FIXTURE_LAUNCHER_PID" 2>/dev/null || true
-  assert_absent "$lock" "successful viewer stop leaked its transition lock"
-  run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-unlock fixture teardown failed"
-  pass "fm-herdr-lab: viewer failures release the transition lock under errexit"
+  pass "fm-herdr-lab: interrupted viewer start cancels its launcher"
 }
 
 test_teardown_refuses_while_viewer_attached() {
@@ -559,12 +508,10 @@ test_timed_out_provision_cancels_late_launch
 test_viewer_refuses_unowned_sessions
 test_viewer_start_cancels_an_unrecorded_launcher
 test_viewer_timeout_allows_launcher_escalation
-test_concurrent_viewer_start_is_refused
 test_viewer_start_requires_its_owned_process
 test_viewer_stop_only_signals_owned_processes
 test_viewer_stop_requires_the_recorded_parent
-test_viewer_interruption_releases_transition_lock
-test_viewer_failure_releases_transition_lock
+test_interrupted_viewer_start_cancels_launcher
 test_teardown_refuses_while_viewer_attached
 test_viewer_stop_retains_record_when_detach_is_unreadable
 test_viewer_launcher_refuses_unsafe_arguments
