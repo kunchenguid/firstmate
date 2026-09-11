@@ -302,9 +302,10 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
 
-# A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
-# Require both its pool state and the same Git common directory as the recorded
-# project; an ordinary linked worktree is not evidence that Treehouse owns it.
+# Require both a pool registry (the managed-pool layout is owned by
+# bin/fm-wake-lib.sh's fm_treehouse_pool_state_file) and the same Git common
+# directory as the recorded project; an ordinary linked worktree is not evidence
+# that Treehouse owns it.
 is_treehouse_pool_slot() {  # <project> <worktree>
   local project=$1 worktree=$2 slot project_common slot_common
   [ -d "$project" ] && [ -d "$worktree" ] || return 1
