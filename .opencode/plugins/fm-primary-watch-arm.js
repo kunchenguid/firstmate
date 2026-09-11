@@ -20,6 +20,8 @@ const SESSION_ANCESTOR_LIMIT = 4;
 
 let child = null;
 let activeSessionID = "";
+let idleSequence = 0;
+let activeSequence = 0;
 let armStatus = "idle";
 let retryTimer = null;
 let retryFailures = 0;
@@ -196,13 +198,23 @@ async function resolveCaptainSession(client, sessionID) {
     try {
       parentID = (await client.session.get({ path: { id: current } }))?.data?.parentID ?? "";
     } catch {
-      // A harness without the session lookup keeps the most-recently-idle rule.
-      return current;
+      return "";
     }
     if (!parentID) return current;
     current = parentID;
   }
   return current;
+}
+
+async function noteIdleSession(client, sessionID) {
+  const sequence = ++idleSequence;
+  const resolved = await resolveCaptainSession(client, sessionID);
+  const next = resolved || (!activeSessionID ? sessionID : activeSessionID);
+  if (next !== activeSessionID && sequence > activeSequence) {
+    activeSessionID = next;
+    activeSequence = sequence;
+  }
+  return next;
 }
 
 async function sendPrompt(paths, client, sessionID, text) {
@@ -508,9 +520,8 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
   globalThis[COORDINATOR_KEY] = {
     ensureArmed: async (sessionID, activeClient) => {
       const sessionClient = activeClient ?? client;
-      const captainSessionID = await resolveCaptainSession(sessionClient, sessionID);
-      if (captainSessionID) activeSessionID = captainSessionID;
-      return ensureArm(paths, captainSessionID, sessionClient);
+      const sessionToArm = await noteIdleSession(sessionClient, sessionID);
+      return ensureArm(paths, sessionToArm, sessionClient);
     },
   };
 
@@ -524,8 +535,8 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
       // session in this home armed the watcher first. A subagent child's idle
       // resolves to the captain session that delegated it, never to the
       // finished child transcript.
-      activeSessionID = await resolveCaptainSession(client, sessionID);
-      void ensureArm(paths, activeSessionID, client);
+      const sessionToArm = await noteIdleSession(client, sessionID);
+      void ensureArm(paths, sessionToArm, client);
     },
   };
 };
