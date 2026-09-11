@@ -123,6 +123,22 @@
     }
   ],
   "surfaces": [
+    { "path": "modules/fm-tui-core/AGENTS.md", "audience": "agent-runtime" },
+    { "path": "modules/fm-tui-core/CLAUDE.md", "audience": "agent-runtime" },
+    { "path": "modules/fm-state-reader/AGENTS.md", "audience": "agent-runtime" },
+    { "path": "modules/fm-state-reader/CLAUDE.md", "audience": "agent-runtime" },
+    {
+      "path": "modules/TEMPLATE.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "modules/fm-tui-core/docs/README.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "modules/fm-state-reader/docs/README.md",
+      "audience": "maintainer-architecture"
+    },
     {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"

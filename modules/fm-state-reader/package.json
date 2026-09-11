@@ -1,0 +1,9 @@
+{
+  "name": "@firstmate/fm-state-reader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.mjs", "./ports": "./src/ports/files.d.ts" },
+  "engines": { "node": ">=20" },
+  "scripts": { "run": "node --test tests/*.test.mjs", "test": "node --test tests/*.test.mjs" }
+}

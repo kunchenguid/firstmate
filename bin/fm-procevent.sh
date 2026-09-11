@@ -219,7 +219,11 @@ if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   state_root_bind || die "process-event state root is not a private directory"
 fi
 
-adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
+adapter_script() {
+  local legacy="$FM_ROOT/bin/fm-procevent-$1.sh"
+  if [ -f "$legacy" ]; then printf '%s\n' "$legacy"
+  else printf '%s/modules/%s/src/adapters/procevent.sh\n' "$FM_ROOT" "$1"; fi
+}
 
 extension_lifecycle_lock_acquire() {
   state_root_bind create || return 1
