@@ -493,6 +493,72 @@ jq -e --argjson bytes "${#oversized_note}" '.secondmate_current.records
   || fail "the parent aggregation dropped a mirrored oversized status line: $(jq -c '[.secondmate_current.records[] | {id,sel:.provenance.selected,raw:(.parent_event.raw|length)}]' "$TMP_ROOT/mirror-snapshot.json")"
 pass "mirrored oversized status lines survive the parent secondmate aggregation"
 
+# The open-decision write-failure branch is the one path that still reaches exec
+# arguments, so it must stay bounded: a fold small enough to fit one argument may
+# ride argv, a larger fold must degrade to no open decisions, and NEITHER may drop
+# the task or fail the snapshot. Inject a REAL write failure instead of asserting
+# on source: give one task an id long enough that the transport filename
+# "<id>.open-decisions.json" exceeds the filesystem's 255-byte name limit while the
+# shorter observation filenames this loop writes first still fit, so exactly the
+# open-decision write fails (ENAMETOOLONG) with the rest of the task intact.
+WRITE_FAIL_ID=$(printf 'w%.0s' $(seq 1 236))
+mkdir -p "$TMP_ROOT/namecheck"
+if printf 'x' 2>/dev/null > "$TMP_ROOT/namecheck/$WRITE_FAIL_ID.crew-state-detail" \
+  && ! printf 'x' 2>/dev/null > "$TMP_ROOT/namecheck/$WRITE_FAIL_ID.open-decisions.json"; then
+  run_write_fail_snapshot() {  # <status-note> <out-json> <out-err>
+    local note=$1 out=$2 err=$3 home="$TMP_ROOT/write-fail-home"
+    rm -rf "$home"
+    mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+    printf '# Seeded Firstmate home\n' > "$home/AGENTS.md"
+    {
+      printf '%s\n' '## In flight'
+      printf -- '- [ ] %s - Task whose decision transport cannot be written (repo: firstmate) (kind: ship) (since 2026-08-28)\n' \
+        "$WRITE_FAIL_ID"
+      printf '%s\n' '- [ ] zzz-sibling - Ordinary task sorted after it (repo: firstmate) (kind: ship) (since 2026-08-28)'
+      printf '%s\n' '' '## Queued' '' '## Done'
+    } > "$home/data/backlog.md"
+    fm_write_meta "$home/state/$WRITE_FAIL_ID.meta" \
+      "window=fmtest:fm-write-fail" "project=firstmate" "harness=claude" \
+      "kind=ship" "mode=no-mistakes" "spawn_gen=fm.writefail123456"
+    fm_write_meta "$home/state/zzz-sibling.meta" \
+      "window=fmtest:fm-zzz-sibling" "project=firstmate" "harness=claude" \
+      "kind=ship" "mode=no-mistakes" "spawn_gen=fm.sibling123456"
+    printf 'needs-decision [key=transport]: %s\n' "$note" \
+      > "$home/state/$WRITE_FAIL_ID.status"
+    printf 'working: ordinary short note\n' > "$home/state/zzz-sibling.status"
+    PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+      "$SNAPSHOT" --json > "$out" 2> "$err"
+  }
+
+  run_write_fail_snapshot 'pick a route' \
+    "$TMP_ROOT/write-fail-small.json" "$TMP_ROOT/write-fail-small.err" \
+    || fail "a failed open-decision write aborted the snapshot for a small fold: $(cat "$TMP_ROOT/write-fail-small.err")"
+  jq -e --arg id "$WRITE_FAIL_ID" '[.tasks[].id] == [$id,"zzz-sibling"]
+    and (.tasks[0].hints.open_decisions | length) == 1
+    and (.tasks[0].hints.open_decisions[0].key == "transport")
+    and (.tasks[0].hints.pending_decision == true)' \
+    "$TMP_ROOT/write-fail-small.json" >/dev/null \
+    || fail "a failed open-decision write lost a task or its small fold: $(jq -c '[.tasks[] | {id:(.id|length),d:(.hints.open_decisions|length)}]' "$TMP_ROOT/write-fail-small.json")"
+
+  # The same failed write with a fold far above the per-argument limit must not
+  # hand those bytes to exec: the row survives with no open decisions rather than
+  # taking the whole task down with a failed jq.
+  run_write_fail_snapshot "$oversized_note" \
+    "$TMP_ROOT/write-fail-big.json" "$TMP_ROOT/write-fail-big.err" \
+    || fail "a failed open-decision write aborted the snapshot for an oversized fold: $(cat "$TMP_ROOT/write-fail-big.err")"
+  jq -e --arg id "$WRITE_FAIL_ID" --argjson bytes "${#oversized_note}" \
+    '[.tasks[].id] == [$id,"zzz-sibling"]
+    and (.tasks[0].hints.open_decisions | length) == 0
+    and (.tasks[0].hints.last_event_text | length) > $bytes
+    and (.tasks[1].current_state.state | length) > 0' \
+    "$TMP_ROOT/write-fail-big.json" >/dev/null \
+    || fail "an oversized fold on the write-failure path dropped a task or rode exec arguments: $(jq -c '[.tasks[] | {id:(.id|length),d:(.hints.open_decisions|length)}]' "$TMP_ROOT/write-fail-big.json")"
+  pass "a failed open-decision write keeps every task row and never hands an oversized fold to exec"
+else
+  echo "skip: this filesystem's name limit cannot isolate an open-decision transport write failure"
+fi
+
 mkdir -p "$CADENCE_HOME/state" "$CADENCE_HOME/data" "$CADENCE_HOME/config" \
   "$CADENCE_HOME/projects"
 printf '# Seeded Firstmate home\n' > "$CADENCE_HOME/AGENTS.md"
