@@ -1364,6 +1364,9 @@ FM_SEND_RETRIES=3       # fm-send typed-plane Enter-retry attempts after typing 
 FM_SEND_SLEEP=0.4       # seconds between fm-send typed-plane submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful typed-plane submit; 0 disables
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before a completed turn without a correlated parent report is eligible for its one recovery repost
+FM_PENDING_REPLY_RETENTION_SECS=172800   # seconds a resolved pending-reply record remains active before the watcher moves it into state/pending-replies-archive/YYYY-MM
+FM_PENDING_REPLY_TICK_HEARTBEAT_EVERY=10   # pending-reply records scanned between watcher-heartbeat refreshes
+FM_PENDING_REPLY_TICK_BUDGET_SECS=30   # wall-clock seconds one pending-reply reconciliation tick may consume before it logs triage and resumes next cycle
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
 FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected

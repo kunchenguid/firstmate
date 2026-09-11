@@ -1023,6 +1023,70 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   pass "pending replies scope Kimi capture fallback by recorded harness"
 )
 
+test_tick_retires_resolved_records_without_locks_or_stale_heartbeat() {
+  (
+    local home state dir archive lock_log heartbeat_log corr rec i started elapsed locks retired beats
+    home=$(setup_parent resolved-retirement)
+    state="$home/state"
+    dir=$(fm_pending_reply_dir "$state")
+    lock_log="$home/locks.log"
+    heartbeat_log="$home/heartbeats.log"
+    mkdir -p "$dir"
+    local now=200000
+    i=1
+    while [ "$i" -le 2000 ]; do
+      printf -v corr '%016x' "$i"
+      printf 'schema=fm-pending-reply.v1\ncorr_id=%s\nphase=resolved\nresolved_epoch=1\n' "$corr" \
+        > "$dir/$corr"
+      i=$((i + 1))
+    done
+    i=1
+    while [ "$i" -le 5 ]; do
+      corr=$(fm_pending_reply_create "$home" "$state" "open-$i" "open request $i")
+      [ -n "$corr" ] || fail "open fixture $i should be created"
+      i=$((i + 1))
+    done
+    # The tick owns lock selection; the lock primitive and delivery reconciliation
+    # have their own coverage, so this fixture measures the resolved-record sweep.
+    fm_pending_reply_lock_acquire() { printf '%s\n' "$1" >> "$lock_log"; }
+    fm_pending_reply_reconcile_delivery() {
+      fm_pending_reply_lock_acquire "$1/.pending-reply-$2.lock" "$2"
+      FM_PENDING_REPLY_LOCK_WAIT_FAILED=1
+      return 1
+    }
+    watcher_heartbeat() { printf 'beat\n' >> "$heartbeat_log"; }
+    started=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    FM_PENDING_REPLY_NOW=$now fm_pending_reply_tick "$state" || fail "resolved-record retirement tick should succeed"
+    elapsed=$(( $(python3 -c 'import time; print(int(time.time() * 1000))') - started ))
+    [ "$elapsed" -lt 2000 ] || fail "2000 resolved records took ${elapsed}ms, expected under 2000ms"
+    locks=$(sort -u "$lock_log" | wc -l | tr -d ' ')
+    [ "$locks" = 5 ] || fail "tick should touch only the five open locks, got $locks"
+    archive=$(FM_PENDING_REPLY_NOW=$now fm_pending_reply_archive_dir "$state")
+    retired=$(printf '%s\n' "$archive"/* | wc -l | tr -d ' ')
+    [ "$retired" = 2000 ] || fail "tick should archive 2000 old resolved records, got $retired"
+    [ ! -e "$dir/0000000000000001" ] || fail "old resolved record should leave the active directory"
+    beats=$(wc -l < "$heartbeat_log" | tr -d ' ')
+    [ "$beats" -gt 1 ] || fail "tick should refresh the watcher heartbeat while scanning"
+  ) || fail "resolved retirement performance regression failed"
+  pass "tick retires resolved records without locks and refreshes heartbeat"
+}
+
+test_tick_budget_logs_triage() {
+  (
+    local home state triage_log_file
+    home=$(setup_parent tick-budget)
+    state="$home/state"
+    mkdir -p "$(fm_pending_reply_dir "$state")"
+    triage_log_file="$home/triage.log"
+    fm_pending_reply_retire_resolved() { return 2; }
+    triage_log() { printf '%s\n' "$1" >> "$triage_log_file"; }
+    fm_pending_reply_tick "$state" || fail "budget-limited tick should return successfully"
+    rg -Fq 'pending-reply reconciliation reached its 30s tick budget while retiring resolved records' "$triage_log_file" \
+      || fail "budget-limited tick should emit triage context"
+  ) || fail "pending-reply tick budget regression failed"
+  pass "tick budget emits triage context"
+}
+
 test_tick_skips_terminal_and_reuses_target_observation() {
   (
     local home state open1 open2 resolved escalated rec probe_log probes scan_log scans snapshot
@@ -1627,6 +1691,8 @@ test_escalated_undelivered_correlation_stays_retryable() {
 
 # --- run --------------------------------------------------------------------
 
+test_tick_retires_resolved_records_without_locks_or_stale_heartbeat
+test_tick_budget_logs_triage
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected

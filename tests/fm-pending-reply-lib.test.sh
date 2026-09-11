@@ -107,10 +107,19 @@ pass 'the request embedder and the correlation reader both refuse a malformed to
 
 HELPER_ROOT=$(fm_test_tmproot fm-pending-reply-lib-helper)
 trap fm_test_cleanup EXIT
-STATUS_FILE="$HELPER_ROOT/parent/state/mate.status"
+PARENT_HOME="$HELPER_ROOT/parent"
+MATE_HOME="$HELPER_ROOT/mate"
+STATUS_FILE="$PARENT_HOME/state/mate.status"
+mkdir -p "$PARENT_HOME/state" "$MATE_HOME/state"
+printf '%s\n' mate > "$MATE_HOME/.fm-secondmate-home"
+cat > "$MATE_HOME/.fm-secondmate-parent" <<EOF
+schema=fm-secondmate-parent.v1
+route=local
+parent_home=$PARENT_HOME
+EOF
 
 set +e
-helper_out=$("$ROOT/bin/fm-secondmate-report.sh" "$STATUS_FILE" 'done' dc9b78419d7c1b6 'audit clean' 2>&1)
+helper_out=$(FM_HOME="$MATE_HOME" "$ROOT/bin/fm-secondmate-report.sh" 'done' dc9b78419d7c1b6 'audit clean' 2>&1)
 helper_rc=$?
 set -e
 [ "$helper_rc" -ne 0 ] \
@@ -120,7 +129,7 @@ assert_contains "$helper_out" 'corr_id must be 16 hex characters' \
 assert_absent "$STATUS_FILE" \
   'the report helper wrote a status file while refusing a malformed correlation'
 
-"$ROOT/bin/fm-secondmate-report.sh" "$STATUS_FILE" 'done' "$corr" 'audit clean' \
+FM_HOME="$MATE_HOME" "$ROOT/bin/fm-secondmate-report.sh" 'done' "$corr" 'audit clean' \
   || fail 'the report helper refused a valid 16-hex correlation'
 assert_grep "corr=$corr" "$STATUS_FILE" \
   'the report helper did not append the correlated report'

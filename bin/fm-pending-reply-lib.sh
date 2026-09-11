@@ -105,6 +105,9 @@
 #                                 (tests); receives task_id and full message as args
 #   FM_PENDING_REPLY_NOW          optional fixed epoch for deterministic tests
 #   FM_PENDING_REPLY_LOCK_WAIT_SECS bounded per-correlation lock wait (default 5)
+#   FM_PENDING_REPLY_RETENTION_SECS resolved-record retention (default 172800)
+#   FM_PENDING_REPLY_TICK_HEARTBEAT_EVERY records between watcher heartbeats (default 10)
+#   FM_PENDING_REPLY_TICK_BUDGET_SECS tick wall-time bound (default 30)
 
 # shellcheck source=bin/fm-marker-lib.sh
 _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PENDING_REPLY_LIB_DIR="."
@@ -119,6 +122,9 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
+FM_PENDING_REPLY_RETENTION_DEFAULT=172800
+FM_PENDING_REPLY_TICK_HEARTBEAT_EVERY_DEFAULT=10
+FM_PENDING_REPLY_TICK_BUDGET_DEFAULT=30
 
 fm_pending_reply_now() {
   if [ -n "${FM_PENDING_REPLY_NOW:-}" ]; then
@@ -140,6 +146,107 @@ fm_pending_reply_lock_wait_secs() {
   local seconds=${FM_PENDING_REPLY_LOCK_WAIT_SECS:-5}
   case "$seconds" in ''|*[!0-9]*|0) seconds=5 ;; esac
   printf '%s' "$seconds"
+}
+
+fm_pending_reply_retention_secs() {
+  local seconds=${FM_PENDING_REPLY_RETENTION_SECS:-$FM_PENDING_REPLY_RETENTION_DEFAULT}
+  case "$seconds" in ''|*[!0-9]*) seconds=$FM_PENDING_REPLY_RETENTION_DEFAULT ;; esac
+  printf '%s' "$seconds"
+}
+
+fm_pending_reply_tick_heartbeat_every() {
+  local records=${FM_PENDING_REPLY_TICK_HEARTBEAT_EVERY:-$FM_PENDING_REPLY_TICK_HEARTBEAT_EVERY_DEFAULT}
+  case "$records" in ''|*[!0-9]*|0) records=$FM_PENDING_REPLY_TICK_HEARTBEAT_EVERY_DEFAULT ;; esac
+  printf '%s' "$records"
+}
+
+fm_pending_reply_tick_budget_secs() {
+  local seconds=${FM_PENDING_REPLY_TICK_BUDGET_SECS:-$FM_PENDING_REPLY_TICK_BUDGET_DEFAULT}
+  case "$seconds" in ''|*[!0-9]*|0) seconds=$FM_PENDING_REPLY_TICK_BUDGET_DEFAULT ;; esac
+  printf '%s' "$seconds"
+}
+
+fm_pending_reply_archive_dir() {  # <state-dir>
+  local state=$1 now month
+  now=$(fm_pending_reply_now)
+  month=$(date -u -r "$now" +%Y-%m 2>/dev/null \
+    || date -u -d "@$now" +%Y-%m 2>/dev/null) || return 1
+  printf '%s/pending-replies-archive/%s' "$state" "$month"
+}
+
+# Read the record phase without spawning grep before considering its lock.
+fm_pending_reply_read_phase() {  # <record-path>
+  local rec=$1 line
+  FM_PENDING_REPLY_RECORD_PHASE=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      phase=*) FM_PENDING_REPLY_RECORD_PHASE=${line#phase=} ;;
+    esac
+  done < "$rec"
+}
+
+fm_pending_reply_tick_heartbeat() {
+  declare -F watcher_heartbeat >/dev/null 2>&1 || return 0
+  watcher_heartbeat
+}
+
+fm_pending_reply_tick_triage_log() {  # <message>
+  declare -F triage_log >/dev/null 2>&1 || return 0
+  triage_log "$1"
+}
+
+# Retire resolved records in one process so archival itself cannot recreate the
+# per-record process overhead that this tick avoids.
+fm_pending_reply_retire_resolved() {  # <state-dir> <pending-dir> <now> <retention> <heartbeat-every> <budget>
+  local state=$1 dir=$2 now=$3 retention=$4 heartbeat_every=$5 budget=$6 archive rc
+  command -v python3 >/dev/null 2>&1 || return 3
+  archive=$(fm_pending_reply_archive_dir "$state") || return 1
+  python3 - "$dir" "$archive" "$now" "$retention" "$heartbeat_every" "$budget" \
+    "$state/.last-watcher-beat" <<'PY'
+import os
+import sys
+import time
+
+source, archive, now, retention, every, budget, heartbeat = sys.argv[1:]
+now, retention, every, budget = map(int, (now, retention, every, budget))
+started = time.monotonic()
+try:
+    os.makedirs(archive, mode=0o700, exist_ok=True)
+    os.chmod(archive, 0o700)
+    for count, entry in enumerate(os.scandir(source), 1):
+        if entry.name.startswith('.') or not entry.is_file():
+            continue
+        if time.monotonic() - started >= budget:
+            sys.exit(2)
+        if count % every == 0:
+            with open(heartbeat, 'a'):
+                os.utime(heartbeat, None)
+        phase = resolved_epoch = None
+        with open(entry.path, encoding='utf-8', errors='replace') as record:
+            for line in record:
+                if line.startswith('phase='):
+                    phase = line[6:].rstrip('\n')
+                elif line.startswith('resolved_epoch='):
+                    resolved_epoch = line[15:].rstrip('\n')
+        if phase != 'resolved' or not resolved_epoch or not resolved_epoch.isdigit():
+            continue
+        if now < int(resolved_epoch) or now - int(resolved_epoch) < retention:
+            continue
+        target = os.path.join(archive, entry.name)
+        if os.path.lexists(target):
+            source_stat = os.stat(entry.path)
+            target_stat = os.stat(target)
+            if (source_stat.st_dev, source_stat.st_ino) != (target_stat.st_dev, target_stat.st_ino):
+                raise FileExistsError(target)
+            os.unlink(entry.path)
+            continue
+        os.rename(entry.path, target)
+except Exception as error:
+    print(f'pending-reply archive: {error}', file=sys.stderr)
+    sys.exit(1)
+PY
+  rc=$?
+  case "$rc" in 0|2) return "$rc" ;; *) return 1 ;; esac
 }
 
 fm_pending_reply_lock_acquire() {  # <lock-path> <corr-id>
@@ -1535,28 +1642,54 @@ fm_pending_reply_tick_note_lock_skip() {  # <corr-id>
 
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
-  local observation observation_task found i
+  local observation observation_task found i now retention processed=0 started=$SECONDS budget heartbeat_every timed_out=0 retire_rc
   local -a observation_tasks=() observation_values=()
   FM_PENDING_REPLY_TICK_SKIPPED_CORRS=
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
+  now=$(fm_pending_reply_now)
+  retention=$(fm_pending_reply_retention_secs)
+  budget=$(fm_pending_reply_tick_budget_secs)
+  heartbeat_every=$(fm_pending_reply_tick_heartbeat_every)
+  fm_pending_reply_tick_heartbeat
+  retire_rc=0
+  fm_pending_reply_retire_resolved "$state" "$dir" "$now" "$retention" "$heartbeat_every" "$budget" \
+    || retire_rc=$?
+  case "$retire_rc" in
+    0) ;;
+    2)
+      fm_pending_reply_tick_heartbeat
+      fm_pending_reply_tick_triage_log \
+        "pending-reply reconciliation reached its ${budget}s tick budget while retiring resolved records"
+      return 0
+      ;;
+    3) ;;
+    *)
+      fm_pending_reply_tick_triage_log "pending-reply reconciliation could not retire resolved records"
+      return 1
+      ;;
+  esac
+  fm_pending_reply_tick_heartbeat
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
-    FM_PENDING_REPLY_LOCK_WAIT_FAILED=0
-    case "$(basename "$rec")" in
+    case "${rec##*/}" in
       .*) continue ;;
     esac
-    corr=$(fm_pending_reply_get "$rec" corr_id)
-    [ -n "$corr" ] || corr=$(basename "$rec")
-    task_id=$(fm_pending_reply_get "$rec" task_id)
-    phase=$(fm_pending_reply_get "$rec" phase)
-    if [ "$phase" = resolved ]; then
-      # Cheap no-op unless an escalation for this record is still open; this is
-      # the retry that makes the close converge after a transient write failure.
-      fm_pending_reply_close_escalation "$state" "$corr" || true
-      fm_pending_reply_tick_note_lock_skip "$corr" && continue
-      continue
+    if [ $((SECONDS - started)) -ge "$budget" ]; then
+      timed_out=1
+      break
     fi
+    processed=$((processed + 1))
+    if [ $((processed % heartbeat_every)) -eq 0 ]; then
+      fm_pending_reply_tick_heartbeat
+    fi
+    fm_pending_reply_read_phase "$rec"
+    phase=$FM_PENDING_REPLY_RECORD_PHASE
+    [ "$phase" != resolved ] || continue
+    FM_PENDING_REPLY_LOCK_WAIT_FAILED=0
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    [ -n "$corr" ] || corr=${rec##*/}
+    task_id=$(fm_pending_reply_get "$rec" task_id)
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
     fm_pending_reply_tick_note_lock_skip "$corr" && continue
     phase=$(fm_pending_reply_get "$rec" phase)
@@ -1647,6 +1780,11 @@ fm_pending_reply_tick() {  # <state-dir>
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
   done
+  if [ "$timed_out" -eq 1 ]; then
+    fm_pending_reply_tick_heartbeat
+    fm_pending_reply_tick_triage_log \
+      "pending-reply reconciliation reached its ${budget}s tick budget after ${processed} records"
+  fi
   return 0
 }
 
