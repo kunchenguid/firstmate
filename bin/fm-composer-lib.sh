@@ -652,6 +652,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_AGY_ROW=-1
   FM_COMPOSER_SCAN_AGY_END=-1
   FM_COMPOSER_SCAN_AGY_BOUNDARY=-1
+  FM_COMPOSER_SCAN_AGY_AMBIGUOUS=0
   FM_COMPOSER_SCAN_LEFTBAR_START=-1
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
   FM_COMPOSER_SCAN_PI_PAIR_FOUND=0
@@ -660,7 +661,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local agy_opening_row=-1 agy_closing_row=-1
+  local agy_opening_row=-1 agy_closing_row=-1 agy_boundary_count=0
   local unsafe_rows='' unsafe_row
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
@@ -714,8 +715,12 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       *) leftbar_start=-1 ;;
     esac
     if _fm_composer_agy_boundary_row "$trimmed"; then
-      agy_opening_row=$agy_closing_row
-      agy_closing_row=$row
+      agy_boundary_count=$((agy_boundary_count + 1))
+      if [ "$agy_boundary_count" -eq 1 ]; then
+        agy_opening_row=$row
+      elif [ "$agy_boundary_count" -eq 2 ]; then
+        agy_closing_row=$row
+      fi
     fi
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
@@ -847,7 +852,8 @@ EOF
   fi
   local agy_end_row=-1
   local agy_first_row=-1 agy_first_line agy_first_trimmed
-  if [ "$agy_opening_row" -ge 0 ] && [ "$agy_closing_row" -gt "$agy_opening_row" ]; then
+  if [ "$agy_boundary_count" -eq 2 ] \
+     && [ "$agy_opening_row" -ge 0 ] && [ "$agy_closing_row" -gt "$agy_opening_row" ]; then
     agy_first_row=$((agy_opening_row + 1))
     agy_first_line=$(_fm_composer_screen_row "$agy_first_row" "$pane")
     agy_first_trimmed=$agy_first_line
@@ -875,6 +881,8 @@ EOF
         break
       fi
     done
+  elif [ "$agy_boundary_count" -gt 2 ]; then
+    FM_COMPOSER_SCAN_AGY_AMBIGUOUS=1
   fi
 }
 
@@ -1064,17 +1072,21 @@ _fm_composer_agy_boundary_row() {  # <trimmed-row>
 }
 
 _fm_composer_agy_busy_scope() {  # <plain-screen>
-  local screen=$1 line trimmed row=0 opening=-1 closing=-1 first first_trimmed
+  local screen=$1 line trimmed row=0 opening=-1 closing=-1 boundary_count=0 first first_trimmed
   while IFS= read -r line; do
     trimmed=$line
     fm_composer_normalize_trim_var trimmed
     if _fm_composer_agy_boundary_row "$trimmed"; then
-      opening=$closing
-      closing=$row
+      boundary_count=$((boundary_count + 1))
+      if [ "$boundary_count" -eq 1 ]; then
+        opening=$row
+      elif [ "$boundary_count" -eq 2 ]; then
+        closing=$row
+      fi
     fi
     row=$((row + 1))
   done <<< "$screen"
-  if [ "$opening" -lt 0 ] || [ "$closing" -le "$opening" ]; then
+  if [ "$boundary_count" -ne 2 ] || [ "$opening" -lt 0 ] || [ "$closing" -le "$opening" ]; then
     return 0
   fi
   first=$((opening + 1))
@@ -1293,6 +1305,7 @@ $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" "$cursor" 1
+  [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ] && return 0
   if [ -n "$cursor" ] \
      && [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
      && [ "$cursor" -ge "$FM_COMPOSER_SCAN_AGY_ROW" ] \
@@ -1391,6 +1404,10 @@ EOF
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" "$cy"
+  if [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ]; then
+    printf 'unknown'
+    return 0
+  fi
   if [ -n "$cy" ]; then
     # Cursor mode (tmux): the shape CONTAINING the cursor is the composer.
     if [ "$FM_COMPOSER_SCAN_UNSAFE" = 1 ]; then

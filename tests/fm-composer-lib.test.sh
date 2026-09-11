@@ -835,30 +835,30 @@ test_agy_prompt_uses_complete_positional_boundaries() {
   pass "fm_composer: agy uses the complete positional boundary contract"
 }
 
-test_agy_bottommost_boundary_pair_anchors_current_composer() {
+test_agy_boundary_ambiguity_fails_closed() {
   local boundary screen out extract
   boundary=$(printf '─%.0s' {1..16})
-  screen="$boundary"$'\n> old\n'"$boundary"$'\n'"$boundary"$'\n> \n'"$boundary"
-  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 4 probe-absent)
-  [ "$out" = empty ] \
-    || fail "the current empty AGY pair must not merge prior turns, got '$out'"
-  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 4)
-  [ -z "$extract" ] \
-    || fail "empty current AGY extraction must exclude prior turns, got '$extract'"
   screen="$boundary"$'\n> old\n'"$boundary"$'\n'"$boundary"$'\n> x\n'"$boundary"
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 4 probe-absent)
-  [ "$out" = pending ] \
-    || fail "the current AGY draft must stay pending, got '$out'"
-  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 4)
-  [ "$extract" = x ] \
-    || fail "current AGY extraction must exclude prior turns, got '$extract'"
+  [ "$out" = unknown ] \
+    || fail "an AGY capture with three boundaries must defer with a cursor, got '$out'"
+  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 4 || true)
+  [ -z "$extract" ] \
+    || fail "an ambiguous AGY capture must extract nothing with a cursor, got '$extract'"
   out=$(fm_composer_classify_screen 'styled=0' "$screen")
-  [ "$out" = pending ] \
-    || fail "cursorless current AGY draft must stay pending, got '$out'"
-  extract=$(fm_composer_extract_selected_content 'styled=0' "$screen")
-  [ "$extract" = x ] \
-    || fail "cursorless AGY extraction must exclude prior turns, got '$extract'"
+  [ "$out" = unknown ] \
+    || fail "an AGY capture with three boundaries must defer cursorlessly, got '$out'"
+  extract=$(fm_composer_extract_selected_content 'styled=0' "$screen" || true)
+  [ -z "$extract" ] \
+    || fail "an ambiguous AGY capture must extract nothing cursorlessly, got '$extract'"
+  screen="$boundary"$'\n> x\n'"$boundary"
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 1 probe-absent)
+  [ "$out" = pending ] \
+    || fail "an AGY capture with exactly two boundaries must remain pending, got '$out'"
+  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 1)
+  [ "$extract" = x ] \
+    || fail "an exact AGY pair must extract only current draft text, got '$extract'"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 2 probe-absent)
   [ "$out" = unknown ] \
     || fail "a cursor outside the current AGY pair must defer, got '$out'"
   screen=$'> quoted\n────────────────\n╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
@@ -868,7 +868,7 @@ test_agy_bottommost_boundary_pair_anchors_current_composer() {
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3)
   [ "$out" = empty ] \
     || fail "cursor selection must keep the lower bordered composer, got '$out'"
-  pass "fm_composer: AGY uses the bottom-most boundary pair and respects lower composers"
+  pass "fm_composer: AGY rejects ambiguous boundary captures"
 }
 
 test_agy_boundary_is_locale_independent() {
@@ -992,7 +992,7 @@ test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts
 test_agy_prompt_preserves_structural_draft_rows
 test_agy_ignores_incomplete_boxes_inside_pair
 test_agy_prompt_uses_complete_positional_boundaries
-test_agy_bottommost_boundary_pair_anchors_current_composer
+test_agy_boundary_ambiguity_fails_closed
 test_agy_boundary_is_locale_independent
 test_generic_delivery_busy_union_includes_agy_cancel
 test_agy_prompt_preserves_furniture_looking_drafts

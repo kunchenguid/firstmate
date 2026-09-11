@@ -19,6 +19,7 @@ The delivery fallback matches this anchored cancel-plus-effort row, not the bare
 The measured composer boundary is a 72-character row of U+2500 BOX DRAWINGS LIGHT HORIZONTAL.
 The adapter accepts only that byte-exact glyph after trimming, with a minimum width of 16 characters.
 Other box-drawing glyphs, ASCII rule characters, and shorter rows fail closed to `unknown`; a future AGY boundary change is caught by the composer-matrix live guard.
+A capture with three or more measured boundary rows is ambiguous by design and defers steering without selecting or extracting any AGY draft content.
 
 Command:
 
