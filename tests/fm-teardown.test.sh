@@ -845,6 +845,65 @@ test_teardown_writes_a_surviving_cost_summary() {
   pass "teardown writes data/<id>/cost.json before removing the task record it was built from, and it survives"
 }
 
+# The consumption totals are read from the harness's own session sidecars
+# under $HOME (a reused treehouse pool slot means an older session file from a
+# prior occupant of the same worktree must never be folded in - see
+# bin/fm-cost-summary-lib.sh's mtime/intake_at scoping). Fabricate a fake HOME
+# with one fresh Claude-style session file (mtime after intake_at) and one
+# stale one (mtime before intake_at) under the mangled worktree-path directory
+# fm_cost_claude_dir computes, plus the same fresh/stale pair for the Pi
+# sidecar convention, and prove teardown's real cost.json sums only the fresh
+# figures end to end - not by re-reading the writer function's source.
+test_teardown_cost_summary_excludes_stale_session_files() {
+  local case_dir rc cost_json fake_home claude_dir pi_dir intake_epoch
+  case_dir=$(make_case cost-consumption)
+  write_meta "$case_dir" local-only ship
+  intake_epoch=1767225600
+  {
+    printf '%s\n' 'intake_at=2026-01-01T00:00:00Z'
+    printf '%s\n' 'intake_harness=claude'
+    printf '%s\n' 'intake_model=claude-fable-5-1'
+    printf '%s\n' 'intake_effort=high'
+    printf '%s\n' 'harness=claude'
+    printf '%s\n' 'model=claude-fable-5-1'
+    printf '%s\n' 'effort=high'
+  } >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "merged work"
+  git -C "$case_dir/project" update-ref refs/heads/main \
+    "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  fake_home="$case_dir/fake-home"
+  claude_dir="$fake_home/.claude/projects/$(printf '%s' "$case_dir/wt" | tr '/.' '--')"
+  pi_dir="$fake_home/.pi/agent/sessions/--$(printf '%s' "${case_dir#/}/wt" | tr '/' '-')--"
+  mkdir -p "$claude_dir" "$pi_dir"
+  printf '%s\n' '{"type":"cost-state","totalCostUSD":4.56}' > "$claude_dir/fresh.jsonl"
+  printf '%s\n' '{"type":"cost-state","totalCostUSD":99.99}' > "$claude_dir/stale.jsonl"
+  printf '%s\n' '{"message":{"usage":{"cost":{"total":1.11}}}}' \
+    '{"message":{"usage":{"cost":{"total":2.22}}}}' > "$pi_dir/fresh.jsonl"
+  printf '%s\n' '{"message":{"usage":{"cost":{"total":50}}}}' > "$pi_dir/stale.jsonl"
+  fm_touch_epoch $((intake_epoch + 3600)) "$claude_dir/fresh.jsonl" "$pi_dir/fresh.jsonl"
+  fm_touch_epoch $((intake_epoch - 3600)) "$claude_dir/stale.jsonl" "$pi_dir/stale.jsonl"
+
+  set +e
+  HOME="$fake_home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "cost-consumption: teardown should succeed on merged local-only work"
+
+  cost_json="$case_dir/data/task-x1/cost.json"
+  [ -f "$cost_json" ] \
+    || fail "cost-consumption: data/task-x1/cost.json must survive a completed teardown"
+  command -v jq >/dev/null 2>&1 && {
+    jq -e '.consumption.claude_list_usd_total == 4.56' "$cost_json" >/dev/null \
+      || fail "cost-consumption: claude_list_usd_total must be exactly the fresh file's value, excluding the stale one"
+    jq -e '.consumption.pi_list_usd_total == 3.33' "$cost_json" >/dev/null \
+      || fail "cost-consumption: pi_list_usd_total must sum only the fresh file's values, excluding the stale one"
+    jq -e '.consumption.list_usd_total == 7.89' "$cost_json" >/dev/null \
+      || fail "cost-consumption: list_usd_total must be the sum of the fresh claude and pi totals"
+  }
+  pass "teardown's cost.json sums only session files at/after intake_at, excluding a reused pool slot's stale ones"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -1873,10 +1932,12 @@ test_local_only_force_overrides_unpushed() {
   expect_code 0 "$rc" "force-override: --force should bypass the unpushed-work check"
   ! grep -q REFUSED "$case_dir/stderr" || fail "force-override: REFUSED printed despite --force"
   cost_json="$case_dir/data/task-x1/cost.json"
-  if command -v jq >/dev/null 2>&1 && [ -f "$cost_json" ]; then
+  [ -f "$cost_json" ] \
+    || fail "force-override: data/task-x1/cost.json must survive a --force teardown"
+  command -v jq >/dev/null 2>&1 && {
     [ "$(jq -r '.accepted.landed' "$cost_json")" = null ] \
       || fail "force-override: --force must never mark genuinely unpushed work as landed"
-  fi
+  }
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
@@ -3739,6 +3800,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_teardown_writes_a_surviving_cost_summary
+test_teardown_cost_summary_excludes_stale_session_files
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
