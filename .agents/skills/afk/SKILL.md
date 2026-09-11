@@ -27,7 +27,10 @@ Hold-for-return is the default and the only reach profile this release records: 
    Write only clauses the words actually support; a wish with no object or no stated precondition is not a clause.
    Plain `/afk` with no words has no clauses.
 2. **Propose and read back.**
-   Run `bin/fm-afk-launch.sh propose --words-file <path> [--action <verb> --object <text> --when <text> [--stop <text>]]... [--expected-return <UTC ISO 8601>] [--spend <n>]` (or `--words <text>`), and relay its read-back to the captain in `AGENTS.md` section 9 language: the accepted clauses as a numbered list, every refused clause with the part it is missing, the expected return, the spend cap, and the one-sentence reach announcement.
+   Run `bin/fm-afk-launch.sh propose --words-file <path> [--action <verb> --object <text> --when <text> [--stop <text>]]... [--expected-return <UTC ISO 8601>] [--spend <n>] [--grant <task-id>]...` (or `--words <text>`), and relay its read-back to the captain in `AGENTS.md` section 9 language: the accepted clauses as a numbered list, every refused clause with the part it is missing, the expected return, the spend cap, any merge-when-green task ids, and the one-sentence reach announcement.
+   When the captain names task ids that may merge while green, pass `--grant <id>` for each named id.
+   Never infer task ids from clause prose, object text, or the away words.
+   Red-check exceptions stay in the words or clause `when` text and are not executed.
    A refused clause does not fail the proposal; the captain can restate it or leave it refused.
    Exit 3 only means a clause was refused; the proposal stands.
 3. **Confirm on the captain's go.**
@@ -79,6 +82,8 @@ Bias ambiguous cases toward exit: a present captain beats token savings, and a f
 afk changes how the captain is informed and what happens at a captain-owned decision point, **not who approves what**.
 "Away" never means "approves more" or "approves less."
 A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy; anything requiring the captain still waits for the captain's explicit word.
+While the away-posture record exists, a merge proceeds only when that task's recorded yolo posture is on or its id is in the record's merge-grant list; otherwise it is held for the captain's return.
+`--allow-red` remains attended-only and is refused while the record exists.
 A mandate clause is the captain's explicit instruction given before leaving, recorded with its named object and condition; a clause is never inferred, never applied by analogy, and expires at return.
 Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.
 This release records clauses and does not execute them.
