@@ -98,16 +98,23 @@
 # the pool handed the slot on. Refusing instead would strand the record, because
 # bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
 # unconditionally, so there is no line an operator could clear to get past it.
-# A claim that cannot be read proves nothing either way and refuses; repair or
-# remove the claim file at the printed path and re-run. An
+# A claim that cannot be read proves nothing either way and refuses; inspect or
+# repair the claim file at the printed path and re-run - never remove it, since
+# an absent claim proceeds and would return a slot that may be another task's. An
 # absent claim - a slot taken before claims existed, or already returned - keeps
 # exactly the record-scan protection it had before, because refusing it would
 # strand every task in flight across that change on no evidence at all.
-# Treehouse's own state file cannot answer this: it records a live process lease
-# (owner_pid/owner_started_at, with `treehouse status` reading in-use from the
-# processes under the path), which the worker's exit releases - the very event
-# that makes the record stale - so an unleased slot reads identical whether it is
-# still this task's or has since been handed on.
+# Why Treehouse's own state does not answer this for crewmate slots: Treehouse
+# does support a durable, holder-labelled lease (`treehouse get --lease
+# --lease-holder`, released with `treehouse return --if-lease-holder`), and
+# Firstmate already uses it for secondmate homes (bin/fm-home-seed.sh). Crewmate
+# spawns, though, take their slot through the interactive pane-driven `treehouse
+# get`, which records only a process lease (owner_pid/owner_started_at, with
+# `treehouse status` reading in-use from the processes under the path) that the
+# worker's exit releases - the very event that makes the record stale - so an
+# unleased slot reads identical whether it is still this task's or has since been
+# handed on, which is why the claim file sits on top of it. Moving crewmate
+# spawns onto the durable lease is separate follow-up work.
 # The recorded endpoint's exact task identity and the record's spawn incarnation
 # are validated separately
 # before cleanup. Its current working directory is only incidental process
