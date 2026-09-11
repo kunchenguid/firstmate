@@ -218,7 +218,7 @@ cmd_start() {  # <locked> <harvest-pid>
   # the worker: re-reading the lock later would only prove that SOME session
   # holds it, which is exactly the case this guard exists to reject.
   lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
-  if [ "$locked" = 1 ] && ! fm_session_lock_owned_by_self "$STATE"; then
+  if [ "$locked" = 1 ] && ! fm_session_lock_owned_by_current_session "$STATE"; then
     return 1
   fi
 
@@ -433,7 +433,7 @@ cmd_run() {  # <locked> <lock-pid> <generation>
     fi
     fm_lock_release "$PUBLISH_LOCK"
     [ "$internal" -eq 1 ] || return 1
-  elif [ "$locked" = 1 ] && ! fm_session_lock_owned_by_self "$STATE"; then
+  elif [ "$locked" = 1 ] && ! fm_session_lock_owned_by_current_session "$STATE"; then
     downgraded=1
     locked=0
   fi
