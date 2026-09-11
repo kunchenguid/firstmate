@@ -153,16 +153,16 @@ The classifier denies this class with `broad-process-kill`:
   The `xargs` utility is unwrapped through the same finite wrapper set as a command position (`sudo`, `env`, `command`, `nohup`, `exec`, `timeout`), so `xargs -n1 sudo kill` is still a kill, and `xargs` options with a separated value (`-n 1`, `-I {}`, `-L 1`, `--max-args 1`) or `--` do not hide the utility.
   A `pgrep` that itself selects by ancestry, group, or session (for example `pgrep -P $$`) is caller-scoped, so the kill it feeds is allowed.
   Caller-owned pid sources are not discovery: `kill $(cat pidfile)`, `kill $(jobs -p)`, `echo 123 | xargs kill`, and `cat pids | xargs kill` are allowed.
-  `kill -0` sends no signal and is a liveness probe, so `kill -0 $(pgrep -f X)` is allowed.
-  Query and help forms execute no kill and are allowed: `command -v pkill`, `command -v killall`, `pkill --help`, `pkill -V`, `killall -l` (any invocation whose only arguments are `--help`, `-h`, `-V`, `--version`, `-l`, or `-L`).
+  `kill -0` sends no signal and is a liveness probe, so `kill -0 $(pgrep -f X)` and `pgrep -f X | xargs kill -0` are allowed.
+  Query and help forms execute no kill and are allowed, in supported grammar and inside loop/`if`/`case` grammar alike: `command -v pkill`, `command -v killall`, `type pkill`, `which pkill`, `pkill --help`, `pkill -V`, `killall -l` (any invocation whose only arguments are `--help`, `-h`, `-V`, `--version`, `-l`, or `-L`).
 
 The classifier judges the shape, not runtime identity: it permits the caller-scopeable forms without proving the argument value is the caller's own, exactly as the watcher rule permits `pkill -P <pid>` regardless of the pid.
 A specific `kill <pid>` is allowed, because a literal pid carries no evidence of a foreign origin in the command text.
 Read-only discovery (`pgrep -f X`, `ps aux | grep X`, `lsof -i :3000`) and quoted data (`echo 'pkill -f X'`) are never kills and are allowed.
 
 Unsupported compound grammar (a loop, `case`, `if`, or other construct the classifier does not model) falls back to a raw byte check, the same way the watcher backstop does.
-The raw check fires on any `killall`, on a `fuser` followed by `-k`/`--kill`, on a `pkill` whose own argument span (up to the next `;`, `|`, `&`, newline, or closing paren) carries no caller-scope flag, and - when the command also carries a `kill` or `xargs` verb - on such an unscoped `pgrep`, on any `ps`, `pidof`, or `fuser`, or on an `lsof` whose argument span carries a `-t` flag.
-So `while true; do pkill -f node; done`, `if true; then lsof -ti :3000 | xargs kill -9; fi`, and `for x in 1; do kill $(pidof node); done` are denied, while the recommended scoped cleanup idiom `for p in $(pgrep -P $$); do kill $p; done` is allowed.
+The raw check first blanks `command -v`/`type`/`which` lookup spans and help/version-only kill-tool invocations, then fires on any `killall`, on a `fuser` followed by `-k`/`--kill`, on a `kill` whose target after a signal spec or `--` is the literal `-1`, on a `pkill` whose own argument span (up to the next `;`, `|`, `&`, newline, or closing paren) carries no caller-scope flag, and - when the command also carries a `kill` or `xargs` verb - on such an unscoped `pgrep`, on any `ps`, `pidof`, or `fuser`, or on an `lsof` whose argument span carries a `-t` flag.
+So `while true; do pkill -f node; done`, `while true; do kill -9 -1; done`, `if true; then lsof -ti :3000 | xargs kill -9; fi`, and `for x in 1; do kill $(pidof node); done` are denied, while the recommended scoped cleanup idiom `for p in $(pgrep -P $$); do kill $p; done`, the SIGHUP form `for x in 1; do kill -1 1234; done`, and the portable probe `if command -v pkill >/dev/null 2>&1; then echo y; fi` are allowed.
 
 Residuals - what this rule does not catch, so a reader can tell without running it:
 
@@ -170,7 +170,7 @@ Residuals - what this rule does not catch, so a reader can tell without running 
 2. Discovery output routed through anything other than a command substitution or a plain `$var` reference is not tracked: a file (`ps aux | grep X > /tmp/pids; kill $(cat /tmp/pids)`), an array, a parameter transform, or an intermediate command that is not itself discovery.
    The classifier follows direct variable references (`a=$(ps ...); b=$a; kill $b` is denied), not general shell dataflow.
    In unsupported loop/`if`/`case` grammar the raw check is byte-level, so a discovery command and a `kill`/`xargs` anywhere in the same command are denied together even when the shell would not connect them.
-3. A bare `pkill`, `killall`, or `pgrep` token used as pure data inside unsupported loop/`if`/`case` grammar (`if grep -q pkill tests/x.sh; then echo y; fi`) is conservatively denied, because the raw fallback cannot tell data from command there; the supported-grammar equivalent `grep -q pkill tests/x.sh && echo y` is allowed.
+3. A bare kill-tool token (`pkill` or `killall`, or a `pgrep`/`ps`/`lsof -t`/`pidof`/`fuser` alongside a `kill` or `xargs`) used as pure data inside unsupported loop/`if`/`case` grammar (`if grep -q pkill tests/x.sh; then echo y; fi`) is conservatively denied, because the raw fallback cannot tell data from command there, except for the recognized query and help forms above; the supported-grammar equivalent `grep -q pkill tests/x.sh && echo y` is allowed.
 4. A discover-then-literal-kill across two commands (`pgrep -f X` now, `kill 76803` later) cannot be caught by any command-shape seatbelt, because the literal pid carries no evidence of foreign origin; the shared-process-table rule in `AGENTS.md` is the containment for it.
 5. The gate-agent surface under `disable_project_settings` (see "Purpose and boundary") does not load this seatbelt at all; the `AGENTS.md` rule and the crewmate brief's wait-discipline rule are the containment there.
 

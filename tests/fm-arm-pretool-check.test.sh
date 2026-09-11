@@ -191,6 +191,12 @@ matrix_case K33 allow 'kill -- -$pgid'
 matrix_case K34 allow 'kill -1 1234'
 matrix_case K35 allow 'command -v pkill'
 matrix_case K36 allow 'pkill --help'
+# K37-K40: kill-all inside loop grammar fails closed; the portable probe idiom
+# inside if grammar and an xargs kill -0 probe stay allowed.
+matrix_case K37 deny 'while true; do kill -9 -1; done'
+matrix_case K38 deny 'pgrep -f node | xargs --max-lines kill'
+matrix_case K39 allow 'if command -v pkill >/dev/null 2>&1; then echo y; fi'
+matrix_case K40 allow 'pgrep -f node | xargs kill -0'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -354,6 +360,10 @@ test_broad_process_kill_contract() {
   assert_policy bpk-kill-all-dashdash $'deny\tbroad-process-kill' 'kill -- -1'
   assert_policy bpk-kill-all-named-signal $'deny\tbroad-process-kill' 'kill -s TERM -1'
   assert_policy bpk-kill-all-signal-dashdash $'deny\tbroad-process-kill' 'kill -TERM -- -1'
+  # The kill-all form fails closed inside unsupported grammar too.
+  assert_policy bpk-loop-kill-all $'deny\tbroad-process-kill' 'while true; do kill -9 -1; done'
+  assert_policy bpk-if-kill-all-dashdash $'deny\tbroad-process-kill' 'if true; then kill -- -1; fi'
+  assert_policy bpk-case-kill-all $'deny\tbroad-process-kill' 'case x in x) kill -9 -1 ;; esac'
   # A discovery wrapped in the producer node's subshell, group, or substitution
   # still feeds the xargs kill.
   assert_policy bpk-subshell-pgrep-xargs $'deny\tbroad-process-kill' '(pgrep -f node) | xargs kill'
@@ -369,6 +379,16 @@ test_broad_process_kill_contract() {
   assert_policy bpk-xargs-command-kill $'deny\tbroad-process-kill' 'pgrep -f node | xargs -n1 command kill'
   assert_policy bpk-xargs-env-kill $'deny\tbroad-process-kill' 'pgrep -f node | xargs -n1 env kill'
   assert_policy bpk-xargs-long-option-kill $'deny\tbroad-process-kill' 'pgrep -f node | xargs --max-args 1 kill'
+  # --max-lines and --eof take an optional attached value only, so unattached
+  # they consume nothing and the next word is the utility.
+  assert_policy bpk-xargs-max-lines-bare $'deny\tbroad-process-kill' 'pgrep -f node | xargs --max-lines kill'
+  assert_policy bpk-xargs-eof-bare $'deny\tbroad-process-kill' 'pgrep -f node | xargs --eof kill'
+  assert_policy bpk-xargs-max-lines-attached $'deny\tbroad-process-kill' 'pgrep -f node | xargs --max-lines=1 kill'
+  assert_policy bpk-xargs-kill-signal $'deny\tbroad-process-kill' 'pgrep -f node | xargs kill -9'
+  # Query forms inside unsupported grammar are still queries; an executed kill
+  # in the same grammar is still denied.
+  assert_policy bpk-if-pkill-executed $'deny\tbroad-process-kill' 'if true; then pkill -f node; fi'
+  assert_policy bpk-if-killall-list-then-kill $'deny\tbroad-process-kill' 'if true; then killall -l; killall node; fi'
 
   # Caller-scoped kills - the safe forms the guard must NOT refuse - selecting by
   # parent, process group, or session, or by a specific pid the caller chose.
@@ -388,6 +408,8 @@ test_broad_process_kill_contract() {
   assert_policy bpk-allow-kill-pgroup-attached allow 'kill -12345'
   assert_policy bpk-allow-kill-sighup-pid allow 'kill -1 1234'
   assert_policy bpk-allow-kill-plain-pid allow 'kill 1234'
+  assert_policy bpk-allow-loop-kill-sighup-pid allow 'for x in 1; do kill -1 1234; done'
+  assert_policy bpk-allow-loop-kill-pgroup allow 'for x in 1; do kill -- -$pgid; done'
   # Query and help forms of the kill tools execute no kill.
   assert_policy bpk-allow-command-v-pkill allow 'command -v pkill'
   assert_policy bpk-allow-command-v-pkill-redirected allow 'command -v pkill >/dev/null 2>&1'
@@ -397,6 +419,12 @@ test_broad_process_kill_contract() {
   assert_policy bpk-allow-pkill-help allow 'pkill --help'
   assert_policy bpk-allow-pkill-version allow 'pkill -V'
   assert_policy bpk-allow-killall-list allow 'killall -l'
+  assert_policy bpk-allow-if-command-v-pkill allow 'if command -v pkill >/dev/null 2>&1; then echo y; fi'
+  assert_policy bpk-allow-if-command-v-killall allow 'if command -v killall; then :; fi'
+  assert_policy bpk-allow-if-which-pkill allow 'if which pkill; then :; fi'
+  assert_policy bpk-allow-if-pkill-help allow 'if true; then pkill --help; fi'
+  assert_policy bpk-allow-xargs-kill-zero-probe allow 'pgrep -f node | xargs kill -0'
+  assert_policy bpk-allow-xargs-n1-kill-zero-probe allow 'pgrep -f node | xargs -n1 kill -0'
   assert_policy bpk-allow-xargs-pkill-scoped allow 'echo node | xargs pkill -P $$'
   assert_policy bpk-allow-literal-signal allow 'kill -9 "$pid"'
   assert_policy bpk-allow-parent-attached allow 'pkill -P12345'

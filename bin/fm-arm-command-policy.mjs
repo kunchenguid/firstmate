@@ -57,13 +57,19 @@ function rawMentionsBroadKill(command) {
 // only on grammar the AST cannot model, mirroring rawMentionsBroadKill for the
 // watcher. `pkill`/`killall` are kills-by-match by definition; a `pgrep` feeding
 // a `kill` or `xargs`, like any ps/pidof/fuser or pid-listing lsof alongside
-// one, is the discover-then-kill form, and `fuser -k` is a kill by itself. A
-// pkill/pgrep occurrence whose own argument span carries a caller-scope flag is
-// not broad, so the recommended scoped cleanup idiom inside a loop stays allowed.
+// one, is the discover-then-kill form, `fuser -k` is a kill by itself, and a
+// `kill` whose target is the literal pid -1 signals every process. A pkill/pgrep
+// occurrence whose own argument span carries a caller-scope flag is not broad,
+// so the recommended scoped cleanup idiom inside a loop stays allowed, and a
+// `command -v`/`type`/`which` lookup or a help/version-only invocation of a
+// kill tool is blanked before matching because it executes no kill.
 function rawMentionsGeneralBroadKill(command) {
-  const normalized = normalizeLineContinuations(command);
+  const normalized = normalizeLineContinuations(command)
+    .replace(/\b(?:command\s+-[A-Za-z]*[vV]\S*|type|which)\s+\S+/g, " ")
+    .replace(/\b(?:pkill|killall)(?:\s+(?:--help|-h|-V|--version|-l|-L))+(?=\s*(?:[;|&)`\n]|$))/g, " ");
   if (/\bkillall\b/.test(normalized)) return true;
   if (/\bfuser\b[^;|&\n)`]*\s(?:-[A-Za-z]*k|--kill)/.test(normalized)) return true;
+  if (/\bkill\s+(?:-[A-Za-z0-9]+|-[sn]\s+\S+|--)\s+(?:\S+\s+)*-1(?=[\s;|&)`]|$)/.test(normalized)) return true;
   const unscoped = (verbPattern) => [...normalized.matchAll(verbPattern)].some((match) => !rawArgsSelectByCallerScope(match[1]));
   if (unscoped(/\bpkill\b([^;|&\n)`]*)/g)) return true;
   if (!/\b(?:kill|xargs)\b/.test(normalized)) return false;
@@ -804,7 +810,7 @@ function isUnscopedDiscovery(position) {
 // tokens rather than its words because the lexer reads a bare `{}` replstr as
 // an empty brace group, not a word.
 const XARGS_VALUE_OPTIONS = /[nILPsdEaJRS]$/;
-const XARGS_VALUE_LONG_OPTIONS = new Set(["arg-file", "delimiter", "eof", "max-args", "max-chars", "max-lines", "max-procs", "process-slot-var"]);
+const XARGS_VALUE_LONG_OPTIONS = new Set(["arg-file", "delimiter", "max-args", "max-chars", "max-procs", "process-slot-var"]);
 function xargsKillKind(position, tokens) {
   if (!position.command) return "";
   if (!["xargs", "gxargs"].includes(basename(position.command.value))) return "";
@@ -842,7 +848,7 @@ function xargsKillKind(position, tokens) {
   const utility = commandPosition(args.slice(start));
   if (!utility.command) return "";
   const name = basename(utility.command.value);
-  if (name === "kill") return "fed";
+  if (name === "kill") return isKillProbe(utility.words.slice(utility.index + 1)) ? "" : "fed";
   if (name === "killall") return "broad";
   if (name === "pkill") return selectsByCallerScope(utility.words.slice(utility.index + 1)) ? "" : "broad";
   return "";
