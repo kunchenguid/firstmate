@@ -23,6 +23,10 @@
 #   --validate-bookends checks an ordinary ship/scout brief has no unfilled
 #   standalone {TASK} or {FIRSTMATE_SPEC} slot and that its opening and closing
 #   structured task copies agree; a charter (no # Task section) is a no-op.
+#   On success it also prints the brief's position against the per-spawn start
+#   budget as `start_budget_target=<n> status=within|over over_by=<m>`, where <n>
+#   defaults to 1500 estimated tokens and FM_BRIEF_START_BUDGET overrides it.
+#   That line is a signal for the dispatcher, never a refusal.
 #   bin/fm-spawn.sh calls
 #   this before creating any endpoint or task state, so a half-filled or
 #   divergent brief is refused before mutation.
@@ -352,6 +356,16 @@ if [ "$VALIDATE_BOOKENDS" -eq 1 ]; then
   VB_ESTIMATE=$(( (VB_BYTES + 2) / 3 ))
   printf 'utf8_bytes=%s\n' "$VB_BYTES"
   printf 'estimated_tokens=ceil(UTF-8 bytes / 3)=%s\n' "$VB_ESTIMATE"
+  VB_TARGET=${FM_BRIEF_START_BUDGET:-1500}
+  case "$VB_TARGET" in
+    ''|*[!0-9]*)
+      echo "error: FM_BRIEF_START_BUDGET must be a non-negative integer (got '$VB_TARGET')" >&2
+      exit 1 ;;
+  esac
+  VB_OVER=$(( VB_ESTIMATE > VB_TARGET ? VB_ESTIMATE - VB_TARGET : 0 ))
+  VB_STATUS=within
+  [ "$VB_OVER" -eq 0 ] || VB_STATUS=over
+  printf 'start_budget_target=%s status=%s over_by=%s\n' "$VB_TARGET" "$VB_STATUS" "$VB_OVER"
   VB_RESOURCES=$(awk '
     /^Read `\/[^`]+`\.$/ {
       path=$0

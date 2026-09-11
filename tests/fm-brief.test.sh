@@ -352,7 +352,7 @@ test_brief_selector_rules_and_fill_oracles() {
 }
 
 test_validate_bookends_reports_byte_and_resource_costs() {
-  local home="$TMP_ROOT/byte-accounting-home" id=byte-accounting brief intent spec out bytes estimate path resource_bytes resource_estimate
+  local home="$TMP_ROOT/byte-accounting-home" id=byte-accounting brief intent spec out bytes estimate path resource_bytes resource_estimate target over_by raised
   local lib=/Users/pedromuller/dev/firstmate/data/ecc-curated/5064474d4d762dc9640234a41617cccb79185cec
   path="$lib/skills/benchmark-optimization-loop/SKILL.md"
   mkdir -p "$home/data"
@@ -374,7 +374,15 @@ test_validate_bookends_reports_byte_and_resource_costs() {
     "bookend validation omitted the labelled bytes/3 estimate"
   assert_contains "$out" "selected_resource_cost path=$path utf8_bytes=$resource_bytes estimated_tokens=ceil(UTF-8 bytes / 3)=$resource_estimate" \
     "bookend validation omitted the selected-resource cost"
-  pass "fm-brief.sh: --validate-bookends reports brief bytes, labelled bytes/3 estimate, and selected-resource costs"
+  target=1500
+  over_by=$(( estimate - target ))
+  assert_contains "$out" "start_budget_target=$target status=over over_by=$over_by" \
+    "bookend validation omitted the default start-budget target line"
+  raised=$(( estimate + 1 ))
+  out=$(FM_BRIEF_START_BUDGET="$raised" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$brief")
+  assert_contains "$out" "start_budget_target=$raised status=within over_by=0" \
+    "bookend validation did not honour FM_BRIEF_START_BUDGET or misreported a within-target brief"
+  pass "fm-brief.sh: --validate-bookends reports brief bytes, labelled bytes/3 estimate, selected-resource costs, and the start-budget target"
 }
 
 test_fill_refuses_non_ordinary_or_already_filled_brief() {
