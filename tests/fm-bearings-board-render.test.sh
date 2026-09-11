@@ -2,7 +2,8 @@
 # Behavior tests for the shipped bearings board renderer
 # (.agents/skills/bearings/assets/board-template.html), exercised through a real
 # `fm-bearings-board.sh build` and then executed under the minimal DOM shim in
-# tests/assets/board-render-harness.mjs. The assertions are on what the page
+# tests/assets/board-render-harness.mjs, with queued-owner geometry also checked
+# in real Chromium. The assertions are on what the page
 # renders - row badges, the stat strip, the empty state - never on the
 # template's source text.
 set -u
@@ -170,6 +171,33 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
 # The captain's fleet and his second mate both work the SAME repository, so the
 # repo column cannot tell their rows apart. Ownership is a payload field, and
 # these pin that it reaches the board without anyone typing it into a title.
+
+test_queued_owners_remain_visible_beside_the_lavish_sidebar() {
+  local home chrome candidate
+  chrome=${FM_CHROME_BIN:-}
+  if [ -z "$chrome" ]; then
+    for candidate in google-chrome google-chrome-stable chromium chromium-browser \
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+    do
+      chrome=$(command -v "$candidate") && break
+    done
+  fi
+  if [ -z "$chrome" ]; then
+    printf 'skip: Chrome or Chromium not found for queued-owner layout; set FM_CHROME_BIN\n'
+    return
+  fi
+  home=$(make_home queued-owner-layout)
+  render "$home" '[
+    {"id":"held-recorded","repo":"firstmate","owner":"(main)","title":"Delivery waiting on a dependency",
+     "reason":"dependency https://github.com/acme/repo/…","dispatchable":false,"pr_url":"https://github.com/acme/repo/pull/2"},
+    {"id":"held-child","repo":"firstmate","owner":"mate","title":"Delivery waiting on a dependency",
+     "reason":"dependency https://github.com/acme/repo/…","dispatchable":false,"pr_url":"https://github.com/acme/repo/pull/2"}
+  ]' >/dev/null
+  node "$ROOT/tests/assets/board-layout-harness.mjs" "$chrome" "$home/.lavish/bearings-board.html" \
+    || fail "same-repository queued owners are not fully visible in the browser"
+  pass "same-repository queued owners remain visible beside the Lavish sidebar"
+}
 
 owners_of() {  # <render-json> <tile-label>
   printf '%s' "$1" | jq -r --arg l "$2" '.stats[] | select(.label == $l) | .owners'
@@ -399,6 +427,7 @@ test_an_aged_delivery_reaches_the_captain_as_a_nudge_card() {
   pass "an aged delivery rises into the captain's call carrying its wait and its link"
 }
 
+test_queued_owners_remain_visible_beside_the_lavish_sidebar
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued

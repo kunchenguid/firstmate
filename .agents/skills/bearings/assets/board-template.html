@@ -249,6 +249,7 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bb-row__sub { font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.3; margin-top: 1px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bb-row__identity { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 .bb-row__id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
 .bb-row__pr { font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600; color: var(--ocean-600); white-space: nowrap; }
 .bb-row__pr:hover { text-decoration: underline; }
@@ -767,9 +768,10 @@ __FM_BEARINGS_BOARD_DATA__
     }
     var main = el("div", "bb-row__main");
     main.appendChild(el("div", "bb-row__title", t.title));
-    /* second line keeps the title uncrowded in the half-width column */
+    /* Ownership must remain visible when the reason fills the half-width column. */
     var chSub = (t.repo || t.id) + " · " + t.owner;
-    main.appendChild(el("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
+    main.appendChild(el("div", "bb-row__sub bb-row__identity", chSub));
+    if (t.reason) main.appendChild(el("div", "bb-row__sub", t.reason));
     row.appendChild(main);
     if (t.pr_url) row.appendChild(prLink(t.pr_url));
     if (isWarning(t)) row.appendChild(badge("danger", "needs repair"));
