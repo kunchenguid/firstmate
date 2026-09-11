@@ -1502,23 +1502,35 @@ ep_reconcile() {  # <expected-fragment> <expected-exit-nonzero:0|1> <msg>; sets 
   fi
 }
 ep_damage
-ep_reconcile "failed=1" 1 "a runner that died before claiming was not reported failed"
+ep_reconcile "failed=1" 1 "a launch that never proved its claim was not reported failed"
 [ "$(launch_failed_wake_count "$HEP" episode-src)" = 1 ] \
   || fail "a launch that could not confirm was not announced: $ep_out"
 ep_key=$(launch_failed_wake_keys "$HEP" episode-src)
 # <registration identity>-<per-episode nonce>: the watcher remembers every key
 # it has surfaced for good, so the identity alone would announce only the first
 # episode of a registration (tests/fm-watch-triage.test.sh proves delivery).
-[[ "$ep_key" =~ ^(procevent:episode-src:launch-failed:[0-9]+-[0-9]+)-[0-9]+-[0-9]+$ ]] \
+[[ "$ep_key" =~ ^(procevent:episode-src:launch-failed:[0-9]+-[0-9]+)-[0-9]+$ ]] \
   || fail "the launch-failed wake is not keyed by source, registration identity and episode: $ep_key"
 ep_episode_prefix=${BASH_REMATCH[1]}
 ep_wake=$(launch_failed_wake_payloads "$HEP" episode-src)
 assert_contains "$ep_wake" "episode-src" \
   "the launch-failed wake does not name the source it is about: $ep_wake"
-assert_contains "$ep_wake" "start episode-src is not what fixes this" \
-  "the launch-failed wake does not say the runner never claimed: $ep_wake"
+# The payload may state only what confirmation observed: no claim proved
+# inside the window. It cannot know whether the runner died or was slow, so it
+# must not assert a cause, must not present `start` as the fix, and must say
+# that a later cycle finding the source owned closes the episode by itself.
+assert_contains "$ep_wake" "did not prove it took the source's claim within FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS" \
+  "the launch-failed wake does not state what confirmation observed: $ep_wake"
+assert_contains "$ep_wake" "attached bin/fm-procevent.sh start episode-src to reproduce a refusal" \
+  "the launch-failed wake does not say start reproduces rather than fixes: $ep_wake"
 assert_contains "$ep_wake" "adapter binary" \
   "the launch-failed wake does not name what to check: $ep_wake"
+assert_contains "$ep_wake" "finds the source owned ends this episode on its own" \
+  "the launch-failed wake does not say a slow runner closes its own episode: $ep_wake"
+case "$ep_wake" in
+  *"never claimed"*|*"exited without"*|*"runner died"*)
+    fail "the launch-failed wake asserts a cause confirmation cannot observe: $ep_wake" ;;
+esac
 ep_reconcile "failed=1" 1 "the second cycle stopped relaunching a source that cannot start"
 [ "$(launch_failed_wake_count "$HEP" episode-src)" = 1 ] \
   || fail "the same failure episode was announced twice: $ep_out"
@@ -1551,6 +1563,28 @@ esac
 ep_repair
 pe "$HEP" retire episode-src >/dev/null 2>&1 || true
 pass "a launch that cannot confirm is announced once per failure episode"
+
+# --- the launch-failed key fits the watcher's seen marker at the id limit ----
+# bin/fm-watch.sh names the marker for a surfaced key `.seen-procevent-<hex>`,
+# 16 + 2 * keylen bytes against NAME_MAX 255, so a key longer than 119 chars
+# cannot be marked and its wake would re-surface every cycle. The longest id
+# the validator accepts is 64 chars; the executed key for such an id must fit.
+HLK="$TMP_ROOT/hlk"; new_home "$HLK"
+LK_ID=$(printf 'k%.0s' $(seq 1 64))
+[ "${#LK_ID}" -eq 64 ] || fail "fixture invalid: long source id is ${#LK_ID} chars"
+pe_register "$HLK" lavish "$LK_ID" -- "$EP_SOURCE_CMD" >/dev/null
+LK_SOURCE="$HLK/state/procevent/$LK_ID.source"
+awk '/^argv:$/ { print; exit } { print }' "$LK_SOURCE" > "$LK_SOURCE.tmp" \
+  && cat "$LK_SOURCE.tmp" > "$LK_SOURCE" && rm -f "$LK_SOURCE.tmp" \
+  || fail "could not damage the long-id registration"
+lk_out=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=2 pe "$HLK" reconcile) || true
+assert_contains "$lk_out" "failed=1" "the long-id launch was not reported failed: $lk_out"
+lk_key=$(launch_failed_wake_keys "$HLK" "$LK_ID")
+[ -n "$lk_key" ] || fail "the long-id launch failure was not announced: $lk_out"
+[ "${#lk_key}" -le 119 ] \
+  || fail "a 64-char source id yields a ${#lk_key}-char launch-failed key, which the watcher cannot mark: $lk_key"
+pe "$HLK" retire "$LK_ID" >/dev/null 2>&1 || true
+pass "a 64-char source id keeps the launch-failed key within the watcher's marker bound"
 
 # --- reconcile reports only launches it actually confirmed -------------------
 # The reported incident. A review board the captain had answered sat collecting

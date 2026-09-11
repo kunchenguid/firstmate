@@ -1247,15 +1247,19 @@ report_stranded_source() {  # <source-id> <claim-token> <why-and-recovery>
 
 # Announce a launch that reconcile could not confirm, once per failure episode.
 #
-# A runner that dies BEFORE claiming - unreadable argv, a missing adapter
-# binary, a guard that refuses to start - is relaunched every supervision cycle
-# and reported `failed=` to a stdout that cycle discards: armed in appearance,
-# a dead drop in fact, which is the incident with a different cause. An episode
-# is keyed by the registration identity the launch ran under and ends when a
-# later launch of that source confirms, so a second failure inside one episode
-# announces nothing and a source that recovers and then fails again announces
-# a new one. Nothing here changes what reconcile does about the launch itself:
-# it keeps relaunching exactly as before, and this only says so once.
+# A launch that never proves it took the claim - a runner that died before
+# claiming on unreadable argv, a missing adapter binary or a guard that refused
+# to start, or one merely too slow under load - is relaunched every supervision
+# cycle and reported `failed=` to a stdout that cycle discards: armed in
+# appearance, a dead drop in fact, which is the incident with a different cause.
+# Confirmation observes only that no claim and no launch stamp appeared inside
+# the window, so this says exactly that and no more about why. An episode is
+# keyed by the registration identity the launch ran under and ends when a later
+# cycle finds the source owned or a launch confirms, so a second failure inside
+# one episode announces nothing, a slow runner that arms later closes its own
+# episode without a retraction, and a source that recovers and then fails again
+# announces a new one. Nothing here changes what reconcile does about the launch
+# itself: it keeps relaunching exactly as before, and this only says so once.
 #
 # The queue key carries a nonce beyond the episode: the watcher remembers every
 # key it has surfaced for good, so a key made of the registration identity alone
@@ -1266,10 +1270,10 @@ report_stranded_source() {  # <source-id> <claim-token> <why-and-recovery>
 report_launch_failure() {  # <source-id> <registration-identity>
   local id=$1 identity=$2 episode nonce
   case "$identity" in ''|*[!0-9:]*) episode=unreadable ;; *) episode=${identity//:/-} ;; esac
-  nonce="$(date +%s)-$RANDOM"
+  nonce="$RANDOM$RANDOM"
   announce_source_once "$(launch_failed_file "$id")" "$episode" \
     "procevent:$id:launch-failed:$episode-$nonce" \
-    "check: process-event source $id is registered but its runner could not start: reconcile launched it and the runner exited without taking the source's claim, so nothing is collecting from it, and reconcile will keep launching it every supervision cycle with the same result until the cause is fixed. The runner never claimed, so bin/fm-procevent.sh start $id is not what fixes this; it reproduces the failure with the runner's refusal on stderr, where a hand-run bin/fm-procevent.sh reconcile only counts it as failed=. Check the source command and the adapter binary the registration names." \
+    "check: process-event source $id is registered but its launch did not prove it took the source's claim within FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS, so nothing is confirmed to be collecting from it; reconcile reports that as failed= and keeps launching it every supervision cycle. If it stays that way, check the source command and the adapter binary the registration names, and run an attached bin/fm-procevent.sh start $id to reproduce a refusal on its stderr - the detached launch discards it, and a hand-run reconcile only counts it as failed=. A later cycle that finds the source owned ends this episode on its own, so a runner that was merely slow to claim needs nothing from you." \
     "$episode $nonce"
 }
 
@@ -1483,7 +1487,9 @@ launch_entry_listed() {  # <entry> <newline-separated entries>
 # stamp after claiming and before running the source command and nothing removes
 # it on the way out - only registration replacement does, which also changes the
 # snapshotted identity this reads under. A runner that dies BEFORE claiming
-# reaches neither, and that is the case this confirmation exists to catch.
+# reaches neither, and that is the case this confirmation exists to catch; a
+# runner merely slow to claim looks the same inside the window, which is why
+# the failure this reports is "not proved within the window" and nothing more.
 #
 # Every launch shares ONE window rather than taking a window each, so a whole
 # fleet of failing sources costs a watcher cycle the same bounded wait as one.

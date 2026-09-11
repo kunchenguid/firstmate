@@ -4179,7 +4179,7 @@ test_procevent_launch_failed_episodes_are_each_delivered() {
   local dir state out status
   dir=$(make_case procevent-launch-failed-episodes); state="$dir/state"; out="$dir/watch.out"
   append_wake "$state" check "procevent:lf-src:launch-failed:1-2-100-7" \
-    "check: process-event source lf-src is registered but its runner could not start"
+    "check: process-event source lf-src is registered but its launch did not prove it took the claim"
   surface_once "$dir" "$out" || fail "a launch-failed key was not surfaced: $(cat "$out")"
   grep -F "check: process-event source failed to start: procevent:lf-src:launch-failed:1-2-100-7" "$out" >/dev/null \
     || fail "a failed launch did not surface under its own headline: $(cat "$out")"
@@ -4190,7 +4190,7 @@ test_procevent_launch_failed_episodes_are_each_delivered() {
   # The same key again is what a registration-identity-only key would produce
   # for the next episode: already surfaced, so the watcher never wakes for it.
   append_wake "$state" check "procevent:lf-src:launch-failed:1-2-100-7" \
-    "check: process-event source lf-src is registered but its runner could not start"
+    "check: process-event source lf-src is registered but its launch did not prove it took the claim"
   : > "$out"
   status=0
   surface_once "$dir" "$out" 30 || status=$?
@@ -4201,7 +4201,7 @@ test_procevent_launch_failed_episodes_are_each_delivered() {
   # A later episode of the same registration carries the same identity under a
   # fresh suffix, and that one must be delivered.
   append_wake "$state" check "procevent:lf-src:launch-failed:1-2-160-9" \
-    "check: process-event source lf-src is registered but its runner could not start"
+    "check: process-event source lf-src is registered but its launch did not prove it took the claim"
   : > "$out"
   surface_once "$dir" "$out" || fail "a second launch-failure episode was not surfaced: $(cat "$out")"
   grep -F "check: process-event source failed to start: procevent:lf-src:launch-failed:1-2-160-9" "$out" >/dev/null \

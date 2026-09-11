@@ -84,12 +84,14 @@
 #                          payload names what clears it
 #   check: process-event source failed to start: <keys>
 #                          a registered process-to-event source was launched by
-#                          reconcile and its runner exited without claiming it,
-#                          so nothing is collecting for it and every cycle will
-#                          relaunch it (bin/fm-procevent.sh reconcile queues it
-#                          once per failure episode); the queued payload names
-#                          what to check. These three kinds are joined with `;`
-#                          when more than one surfaces in a cycle
+#                          reconcile and did not prove it took the claim within
+#                          the confirm window, so nothing is confirmed to be
+#                          collecting for it and every cycle will relaunch it
+#                          (bin/fm-procevent.sh reconcile queues it once per
+#                          failure episode, and a later cycle that finds the
+#                          source owned closes that episode); the queued
+#                          payload names what to check. These three kinds are
+#                          joined with `;` when more than one surfaces in a cycle
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -1427,7 +1429,7 @@ procevent_surface_queued() {
     case "$key" in procevent:*) ;; *) continue ;; esac
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
-    # A stranded source or one whose runner could not start is the opposite
+    # A stranded source or one whose launch never proved itself is the opposite
     # of a captured result: nothing is collecting for it. Headlining either as
     # a capture would present it as healthy, which is the shape of defect
     # these wakes exist to surface.
