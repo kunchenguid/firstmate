@@ -564,7 +564,7 @@ if (sent[0].m.display !== false) throw new Error("watcher wake must stay hidden 
 if (!sent[0].m.content.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: omp-e2e done")) throw new Error(`unexpected wake text: ${sent[0].m.content}`);
 if (sent[0].o?.deliverAs !== "followUp" || sent[0].o?.triggerTurn !== true) throw new Error("wake must be a turn-triggering follow-up");
 // A streaming delivery is consumed by its hidden custom message, without using
-// the user role that owns the captain's composer.
+// the user role reserved for captain-authored input.
 await handlers.get("message_start")({
   type: "message_start",
   message: { role: "custom", ...sent[0].m },

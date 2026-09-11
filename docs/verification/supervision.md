@@ -57,12 +57,12 @@ A file named both by `-e` and by auto-discovery loads twice (two factory calls, 
 
 ### omp watcher composer preservation, 2026-09-11
 
-The omp watcher transport was verified against omp 18.1.17 in the named isolated Herdr lab `fm-lab-pam-prompt-loss-258002-23766` with the tracked `.omp/extensions/fm-primary-omp-watch.ts` implementation and a deterministic watcher-arm fixture.
-The lab exercised an idle multiline draft, a running turn followed by one locally queued captain message and a second multiline draft, and two successive actionable watcher closes.
-The exact draft remained visible before and after every watcher delivery, the queued captain message entered the session once before the watcher wake, both repeated wakes entered once in their original order, and no partial draft text entered the session.
+The prompt-safe watcher transport was verified on 2026-09-11 against omp 18.1.17 with the portable fake-API guard and the real-provider live guard below.
 The watcher wake is a hidden `firstmate-primary-omp-watcher-wake` custom message with `deliverAs: "followUp"` and `triggerTurn: true`, so operational input remains model-visible without claiming the captain-owned user role that clears the editor on `message_start`.
 `bash tests/fm-omp-harness.test.sh` pins the custom message type, hidden display, follow-up delivery, turn trigger, exact content, and wake consumption over a fake omp API.
+Its relevant output is `ok - .omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one hidden custom follow-up`.
 `FM_OMP_LIVE_E2E=1 bash tests/fm-omp-primary-live-e2e.test.sh` verifies through a real omp provider turn that the actionable watcher close reaches the model exactly once as hidden custom input and never as a user message.
+Its relevant outputs are `ok - omp omp/18.1.17: an actionable close spawned a ledger-linked successor and woke main exactly once through hidden custom input` and `# omp omp/18.1.17 model=openai-codex/gpt-6-astra: every live omp primary assertion passed`.
 The tracked extension remains auto-discovered with no config or installation change, but an omp process that loaded the previous extension must restart normally after the updated file lands.
 
 ### Run-tier source vocabulary and context-reset injection
