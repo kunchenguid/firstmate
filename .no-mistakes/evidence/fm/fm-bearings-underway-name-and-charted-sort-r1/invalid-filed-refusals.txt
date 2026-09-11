@@ -1,0 +1,12 @@
+filed=2026-13-01
+exit=1
+fm-bearings-board: board data does not satisfy fm-bearings-board.v1: .test-live/home/invalid.json
+
+filed=2026-08-14T99:30:00Z
+exit=1
+fm-bearings-board: board data does not satisfy fm-bearings-board.v1: .test-live/home/invalid.json
+
+filed=2026-02-29
+exit=1
+fm-bearings-board: board data does not satisfy fm-bearings-board.v1: .test-live/home/invalid.json
+
