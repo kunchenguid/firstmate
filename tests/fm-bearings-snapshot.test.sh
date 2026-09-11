@@ -2402,6 +2402,72 @@ EOF
   pass "active children reach Underway independently of a home captain hold"
 }
 
+test_nameless_legacy_summary_uses_its_durable_identifier() {
+  local parent remote_home fakebin json
+  parent=$(make_home nameless-legacy-summary)
+  make_remote_ledger_fleet "$parent" 1
+  remote_home="$TMP_ROOT/remote-ledger-home-1"
+  fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  jq '
+    .active_children = [{id:"legacy-child",kind:"ship",state:"working",repo:null,
+      source:"remote-ledger",doing:"running review"}]
+    | .counts.active_children = 1
+    | .state = "active_child_work"
+  ' "$remote_home/state/home-summary.json" > "$remote_home/state/legacy-summary.json"
+  mv "$remote_home/state/legacy-summary.json" "$remote_home/state/home-summary.json"
+
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100) \
+    || fail "nameless legacy summary bearings failed"
+  printf '%s' "$json" | jq -e '
+    (.in_flight | any(.id == "ledger-1/legacy-child"
+      and .name == "ledger-1/legacy-child"
+      and .doing == "running review"
+      and .name != .doing))
+  ' >/dev/null || fail "a nameless legacy child was not identified by id: $json"
+  pass "nameless legacy summary children use their durable identifier"
+}
+
+test_newest_filed_gates_are_selected_before_snapshot_bounds() {
+  local home mate fakebin json i
+  home=$(make_home newest-before-bounds)
+  : > "$home/data/secondmates.md"
+  printf '## In flight\n\n## Queued\n' > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 20 ]; do
+    printf -- '- [ ] old-%02d - Older gate %02d (repo: sample) (kind: ship) (since 2026-06-%02d)\n' \
+      "$i" "$i" "$i" >> "$home/data/backlog.md"
+    i=$((i + 1))
+  done
+  printf -- '- [ ] newest - Newest gate (repo: sample) (kind: ship) (since 2026-07-01)\n\n## Done\n' \
+    >> "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.gates | length) == 20 and .gates[0].id == "newest"
+      and (.gates | any(.id == "old-01") | not)
+  ' >/dev/null || fail "the bearings gate bound dropped the newest filed row: $json"
+
+  mate="$TMP_ROOT/newest-before-bounds-mate"
+  make_valid_secondmate_home bounded-mate "$mate"
+  : > "$home/data/backlog.md"
+  append_secondmate_registry "$home" bounded-mate "$mate"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] mate-old - Old remote gate (repo: sample) (kind: ship) (since 2026-06-01)
+- [ ] mate-middle - Middle remote gate (repo: sample) (kind: ship) (since 2026-06-02)
+- [ ] mate-newest - Newest remote gate (repo: sample) (kind: ship) (since 2026-06-03)
+
+## Done
+EOF
+  json=$(FM_SNAPSHOT_SECONDMATE_QUEUED=2 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    [.gates[].id] == ["mate-newest", "mate-middle"]
+  ' >/dev/null || fail "the secondmate queue bound dropped the newest filed row: $json"
+  pass "newest filed gates are selected before snapshot bounds"
+}
+
 # A captain scanning Underway must be able to tell WHICH task a row is, and the
 # board orders Charted Next by the durable filed date, so both facts have to come
 # out of fleet state rather than being invented at render time.
@@ -3271,6 +3337,8 @@ test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_working_captain_holds_keep_their_bucket_surfaces
 test_active_children_project_independent_of_home_captain_hold
+test_nameless_legacy_summary_uses_its_durable_identifier
+test_newest_filed_gates_are_selected_before_snapshot_bounds
 test_underway_and_gate_rows_carry_the_durable_name_and_filed_date
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection

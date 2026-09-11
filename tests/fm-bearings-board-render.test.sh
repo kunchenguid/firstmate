@@ -183,21 +183,21 @@ test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status() {
   pass "an underway row leads with the task name and still reports its run status"
 }
 
-test_an_underway_row_without_a_name_falls_back_to_the_run_status() {
+test_an_underway_identifier_label_is_not_replaced_by_run_status() {
   local home out
-  home=$(make_home underway-noname)
+  home=$(make_home underway-identifier)
   out=$(render_board "$home" '[
-    {"id":"mate/child-1","repo":null,"name":null,
+    {"id":"mate/child-1","repo":null,"name":"mate/child-1",
      "state":"working","kind":"secondmate","doing":"fixing the failing check"}
   ]' '[]')
   printf '%s' "$out" | jq -e '
     (.underway | length) == 1
       and (.underway[0]
-        | .title == "fixing the failing check"
-          and (.sub | test("mate/child-1"))
-          and (.sub | contains("fixing the failing check · ") | not))
-  ' >/dev/null || fail "a nameless underway row did not fall back to its status: $out"
-  pass "an underway row with no known name falls back to the run status once"
+        | .title == "mate/child-1"
+          and (.sub | startswith("fixing the failing check · "))
+          and (.title != "fixing the failing check"))
+  ' >/dev/null || fail "an identifier-labelled underway row rendered as status-only: $out"
+  pass "an underway identifier label is not replaced by run status"
 }
 
 test_charted_next_reads_newest_filed_first() {
@@ -229,7 +229,7 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
 }
 
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
-test_an_underway_row_without_a_name_falls_back_to_the_run_status
+test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
 test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order
 test_a_warning_row_reads_as_a_repair_not_as_queued_work

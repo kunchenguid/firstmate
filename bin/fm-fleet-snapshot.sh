@@ -953,6 +953,16 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
+    def filed_epoch:
+      (.since // null) as $filed
+      | if ($filed | type) != "string" then null
+        elif ($filed | test("T")) then try ($filed | fromdateiso8601) catch null
+        else try (($filed + "T00:00:00Z") | fromdateiso8601) catch null end;
+    def newest_filed_first:
+      to_entries
+      | sort_by((.value | filed_epoch) as $epoch
+          | if $epoch == null then [1, 0, .key] else [0, -$epoch, .key] end)
+      | map(.value);
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
@@ -1016,7 +1026,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
-            name:(($work.title // null) | if . == null then null else trunc(70) end),
+            name:(($work.title // "") as $name
+              | (if $name != "" then $name else .id end) | trunc(70)),
             source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
@@ -1084,7 +1095,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
-          since:((.since // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
+          since:((.since // null) | if . == null then null else trunc(40) end)}]
+          | newest_filed_first | .[:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),

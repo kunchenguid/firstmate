@@ -458,7 +458,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | {id, kind,
         state: .current_state.state,
         repo:(.backlog.repo // .project // null),
-        name:(.backlog.title | trunc(70)),
+        name:((.backlog.title // "") as $name
+              | (if $name != "" then $name else .id end) | trunc(70)),
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
@@ -468,7 +469,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             kind:(.kind // "secondmate"),
             state:(.state // "working"),
             repo:(.repo // null),
-            name:((.name // null) | trunc(70)),
+            name:((.name // "") as $name
+                  | (if $name != "" then $name else ($m.id + "/" + .id) end) | trunc(70)),
             doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record
@@ -526,7 +528,17 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
   | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
-  | . as $snap
+  | def filed_epoch:
+      (.filed // null) as $filed
+      | if ($filed | type) != "string" then null
+        elif ($filed | test("T")) then try ($filed | fromdateiso8601) catch null
+        else try (($filed + "T00:00:00Z") | fromdateiso8601) catch null end;
+    def newest_filed_first:
+      to_entries
+      | sort_by((.value | filed_epoch) as $epoch
+          | if $epoch == null then [1, 0, .key] else [0, -$epoch, .key] end)
+      | map(.value);
+    . as $snap
   | {
       schema: "fm-bearings.v1",
       home: $home,
@@ -540,7 +552,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(landed_artifact // "-"),owner:.home_id})),
-      gates: (if $all_queued == 1 then $gates_all else $gates_all[:$gates_n] end),
+      gates: ($gates_all | newest_filed_first
+              | if $all_queued == 1 then . else .[:$gates_n] end),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
       recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
     }

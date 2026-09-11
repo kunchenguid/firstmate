@@ -266,10 +266,13 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "an underway row without an explicit name marker was accepted"
 
-  write_valid_payload "$data"
-  jq '.charted[0].filed = "last Tuesday"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
-  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
-  [ "$rc" -ne 0 ] || fail "a charted row with an uncomparable filed date was accepted"
+  for invalid_filed in "last Tuesday" "2026-13-01" "2026-08-14T99:30:00Z" "2026-02-29"; do
+    write_valid_payload "$data"
+    jq --arg filed "$invalid_filed" '.charted[0].filed = $filed' "$data" > "$data.tmp" \
+      && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "an invalid filed date was accepted: $invalid_filed"
+  done
 
   write_valid_payload "$data"
   jq '.captains_call[0].allow_freeform = "yes"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"

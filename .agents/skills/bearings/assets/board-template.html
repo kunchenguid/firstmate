@@ -630,11 +630,11 @@ __FM_BEARINGS_BOARD_DATA__
     var main = el("div", "bb-row__main");
     /* the durable task name leads the row so a scan says WHICH task this is;
        the run status keeps its place on the second line */
-    main.appendChild(el("div", "bb-row__title", t.name || t.doing));
+    main.appendChild(el("div", "bb-row__title", t.name));
     /* captain-facing rows name the repo; the internal task id shows only when
        no repo is known */
     main.appendChild(el("div", "bb-row__sub",
-      (t.name ? t.doing + " · " : "") + t.kind + " · " + (t.repo || t.id)));
+      t.doing + " · " + t.kind + " · " + (t.repo || t.id)));
     row.appendChild(main);
     uw.appendChild(row);
   });
