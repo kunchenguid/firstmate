@@ -66,6 +66,12 @@ case "$1 ${2:-}" in
     ;;
   "terminal title")
     [ "${FM_FAKE_HERDR_TITLE_FAIL:-}" != 1 ] || exit 94
+    if [ -n "${FM_FAKE_HERDR_TITLE_ENTERED:-}" ]; then
+      : > "$FM_FAKE_HERDR_TITLE_ENTERED"
+      while [ ! -f "$FM_FAKE_HERDR_TITLE_RELEASE" ]; do
+        "$FM_FAKE_HERDR_REAL_SLEEP" 0.01
+      done
+    fi
     reason=no_foreground_client
     [ ! -f "$state/$session.foreground" ] || reason=$(cat "$state/$session.foreground")
     jq -nc --arg reason "$reason" '{result:{reason:$reason,type:"client_window_title"}}'
@@ -89,6 +95,8 @@ run_with_fake() {
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
+    FM_FAKE_HERDR_TITLE_ENTERED="${FM_FAKE_HERDR_TITLE_ENTERED:-}" \
+    FM_FAKE_HERDR_TITLE_RELEASE="${FM_FAKE_HERDR_TITLE_RELEASE:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -264,38 +272,77 @@ test_viewer_refuses_unowned_sessions() {
   pass "fm-herdr-lab: the viewer attaches only to a session this lab owns"
 }
 
+start_viewer_fixture() {
+  local pair=$1
+  (
+    "$REAL_SLEEP" 20 &
+    printf '%s\n' "$!" > "$pair"
+    wait
+  ) &
+  FIXTURE_LAUNCHER_PID=$!
+  while [ ! -s "$pair" ]; do
+    "$REAL_SLEEP" 0.01
+  done
+  FIXTURE_VIEWER_PID=$(cat "$pair")
+}
+
 write_viewer_record() {
-  local record=$1 pid=$2 start
-  start=$(fm_herdr_lab_process_start "$pid") || fail "could not identify viewer fixture process"
+  local record=$1 launcher_pid=$2 viewer_pid=$3 launcher_start viewer_start
+  launcher_start=$(fm_herdr_lab_process_start "$launcher_pid") || fail "could not identify launcher fixture process"
+  viewer_start=$(fm_herdr_lab_process_start "$viewer_pid") || fail "could not identify viewer fixture process"
   printf 'launcher_pid=%s\nlauncher_start=%s\nviewer_pid=%s\nviewer_start=%s\n' \
-    "$pid" "$start" "$pid" "$start" > "$record"
+    "$launcher_pid" "$launcher_start" "$viewer_pid" "$viewer_start" > "$record"
 }
 
 test_viewer_start_cancels_an_unrecorded_launcher() {
   local name="fm-lab-viewer-late-$$" out status=0 launcher_pid
-  local started="$TMP_ROOT/viewer-launcher-started" attached="$TMP_ROOT/viewer-late-attach"
+  local started="$TMP_ROOT/viewer-launcher-started"
   run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-late fixture provision failed"
   cat > "$FAKEBIN/python3" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_FAKE_VIEWER_STARTED"
-"$FM_FAKE_HERDR_REAL_SLEEP" 0.5
-: > "$FM_FAKE_VIEWER_ATTACHED"
 exec "$FM_FAKE_HERDR_REAL_SLEEP" 20
 SH
   chmod +x "$FAKEBIN/python3"
   out=$(FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_WAIT_MARKER="$started" \
-    FM_FAKE_VIEWER_STARTED="$started" FM_FAKE_VIEWER_ATTACHED="$attached" \
-    run_with_fake fm_herdr_lab_viewer_start "$name" 2>&1) || status=$?
+    FM_FAKE_VIEWER_STARTED="$started" run_with_fake fm_herdr_lab_viewer_start "$name" 2>&1) || status=$?
   rm -f "$FAKEBIN/python3"
   expect_code 1 "$status" "an unrecorded launcher must not outlive viewer start"
   assert_present "$started" "delayed viewer launcher did not start"
   launcher_pid=$(cat "$started")
   kill -0 "$launcher_pid" 2>/dev/null && fail "timed-out viewer launcher remained alive"
-  "$REAL_SLEEP" 0.6
-  assert_absent "$attached" "timed-out viewer launcher attached after start failed"
   assert_contains "$out" "did not become the foreground client" "launcher timeout was unclear"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-late fixture teardown failed"
   pass "fm-herdr-lab: timed-out viewer startup cancels its exact launcher"
+}
+
+test_concurrent_viewer_start_is_refused() {
+  local name="fm-lab-viewer-concurrent-$$" status=0 first_status=0 first_pid
+  local entered="$TMP_ROOT/viewer-title-entered" release="$TMP_ROOT/viewer-title-release"
+  local launches="$TMP_ROOT/viewer-launches" out="$TMP_ROOT/viewer-first.out"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-concurrent fixture provision failed"
+  cat > "$FAKEBIN/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'launched\n' >> "$FM_FAKE_VIEWER_LAUNCHES"
+exec "$FM_FAKE_HERDR_REAL_SLEEP" 20
+SH
+  chmod +x "$FAKEBIN/python3"
+  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_TITLE_ENTERED="$entered" \
+    FM_FAKE_HERDR_TITLE_RELEASE="$release" FM_FAKE_VIEWER_LAUNCHES="$launches" \
+    run_with_fake fm_herdr_lab_viewer_start "$name" >"$out" 2>&1 &
+  first_pid=$!
+  while [ ! -f "$entered" ]; do
+    "$REAL_SLEEP" 0.01
+  done
+  run_with_fake fm_herdr_lab_viewer_start "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a concurrent viewer start must be refused"
+  : > "$release"
+  wait "$first_pid" || first_status=$?
+  rm -f "$FAKEBIN/python3"
+  expect_code 1 "$first_status" "the blocked viewer fixture unexpectedly attached"
+  [ "$(wc -l < "$launches" | tr -d ' ')" = 1 ] || fail "concurrent starts launched more than one viewer"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-concurrent fixture teardown failed"
+  pass "fm-herdr-lab: concurrent viewer starts serialize before launch"
 }
 
 test_viewer_start_requires_its_owned_process() {
@@ -321,7 +368,7 @@ SH
 }
 
 test_viewer_stop_only_signals_owned_processes() {
-  local name="fm-lab-viewer-stop-$$" record status=0 holder_pid
+  local name="fm-lab-viewer-stop-$$" record status=0 holder_pid pair="$TMP_ROOT/viewer-stop-pair"
   run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-stop fixture provision failed"
   record=$(run_with_fake fm_herdr_lab_viewer_record_path "$name")
 
@@ -334,15 +381,14 @@ test_viewer_stop_only_signals_owned_processes() {
 
   # A recorded viewer is signalled until it exits and the session reports no
   # foreground client again.
-  sleep 20 &
-  holder_pid=$!
-  write_viewer_record "$record" "$holder_pid"
+  start_viewer_fixture "$pair"
+  write_viewer_record "$record" "$FIXTURE_LAUNCHER_PID" "$FIXTURE_VIEWER_PID"
   status=0
   FM_FAKE_HERDR_FAST_POLL=1 run_with_fake fm_herdr_lab_viewer_stop "$name" \
     >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "stop must fail while the session still reports a foreground client"
-  wait "$holder_pid" 2>/dev/null || true
-  kill -0 "$holder_pid" 2>/dev/null && fail "stop left the recorded viewer process running"
+  wait "$FIXTURE_LAUNCHER_PID" 2>/dev/null || true
+  kill -0 "$FIXTURE_VIEWER_PID" 2>/dev/null && fail "stop left the recorded viewer process running"
   assert_present "$record" "a failed detach discarded the viewer record it still needs"
 
   sleep 20 &
@@ -361,14 +407,32 @@ test_viewer_stop_only_signals_owned_processes() {
   pass "fm-herdr-lab: viewer stop signals only recorded processes and confirms the detach"
 }
 
+test_viewer_stop_requires_the_recorded_parent() {
+  local name="fm-lab-viewer-parent-$$" record launcher_pid viewer_pid
+  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-parent fixture provision failed"
+  record=$(run_with_fake fm_herdr_lab_viewer_record_path "$name")
+  sleep 20 &
+  launcher_pid=$!
+  sleep 20 &
+  viewer_pid=$!
+  write_viewer_record "$record" "$launcher_pid" "$viewer_pid"
+  printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
+  run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "parent-mismatch stop failed"
+  kill -0 "$viewer_pid" 2>/dev/null || fail "stop signalled a viewer outside the recorded launcher"
+  wait "$launcher_pid" 2>/dev/null || true
+  kill "$viewer_pid" 2>/dev/null || true
+  wait "$viewer_pid" 2>/dev/null || true
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-parent fixture teardown failed"
+  pass "fm-herdr-lab: viewer ownership requires the recorded parent"
+}
+
 test_teardown_refuses_while_viewer_attached() {
-  local name="fm-lab-viewer-teardown-$$" record status=0 holder_pid
+  local name="fm-lab-viewer-teardown-$$" record status=0 pair="$TMP_ROOT/viewer-teardown-pair"
   run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-teardown fixture provision failed"
   record=$(run_with_fake fm_herdr_lab_viewer_record_path "$name")
   printf '%s\n' cleared > "$FAKE_STATE/$name.foreground"
-  sleep 20 &
-  holder_pid=$!
-  write_viewer_record "$record" "$holder_pid"
+  start_viewer_fixture "$pair"
+  write_viewer_record "$record" "$FIXTURE_LAUNCHER_PID" "$FIXTURE_VIEWER_PID"
   : > "$FAKE_LOG"
   FM_FAKE_HERDR_FAST_POLL=1 run_with_fake fm_herdr_lab_teardown "$name" \
     >/dev/null 2>&1 || status=$?
@@ -421,8 +485,10 @@ test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch
 test_viewer_refuses_unowned_sessions
 test_viewer_start_cancels_an_unrecorded_launcher
+test_concurrent_viewer_start_is_refused
 test_viewer_start_requires_its_owned_process
 test_viewer_stop_only_signals_owned_processes
+test_viewer_stop_requires_the_recorded_parent
 test_teardown_refuses_while_viewer_attached
 test_viewer_stop_retains_record_when_detach_is_unreadable
 test_viewer_launcher_refuses_unsafe_arguments

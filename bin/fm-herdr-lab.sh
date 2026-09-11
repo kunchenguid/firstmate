@@ -182,6 +182,10 @@ fm_herdr_lab_viewer_log_path() { # <session>
   printf '%s/%s.viewer.log' "$(fm_herdr_lab_state_dir)" "$1"
 }
 
+fm_herdr_lab_viewer_lock_path() { # <session>
+  printf '%s/%s.viewer.lock' "$(fm_herdr_lab_state_dir)" "$1"
+}
+
 fm_herdr_lab_viewer_launcher_path() {
   printf '%s/fm-herdr-lab-viewer.py' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 }
@@ -198,6 +202,10 @@ fm_herdr_lab_process_start() { # <pid>
   LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
+fm_herdr_lab_process_parent() { # <pid>
+  LC_ALL=C ps -p "$1" -o ppid= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
 fm_herdr_lab_viewer_recorded_value() { # <session> <key>
   local record value
   record=$(fm_herdr_lab_viewer_record_path "$1")
@@ -208,7 +216,7 @@ fm_herdr_lab_viewer_recorded_value() { # <session> <key>
 }
 
 fm_herdr_lab_viewer_owned_pid() { # <session> <launcher|viewer>
-  local pid recorded_start current_start
+  local pid recorded_start current_start launcher_pid parent_pid
   pid=$(fm_herdr_lab_viewer_recorded_value "$1" "$2_pid") || return 1
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
@@ -216,6 +224,11 @@ fm_herdr_lab_viewer_owned_pid() { # <session> <launcher|viewer>
   recorded_start=$(fm_herdr_lab_viewer_recorded_value "$1" "$2_start") || return 1
   current_start=$(fm_herdr_lab_process_start "$pid") || return 1
   [ -n "$current_start" ] && [ "$current_start" = "$recorded_start" ] || return 1
+  if [ "$2" = viewer ]; then
+    launcher_pid=$(fm_herdr_lab_viewer_owned_pid "$1" launcher) || return 1
+    parent_pid=$(fm_herdr_lab_process_parent "$pid") || return 1
+    [ "$parent_pid" = "$launcher_pid" ] || return 1
+  fi
   printf '%s' "$pid"
 }
 
@@ -243,7 +256,7 @@ fm_herdr_lab_viewer_session_stopped_or_absent() { # <session>
   [ "$running" = false ] || [ "$running" = absent ]
 }
 
-fm_herdr_lab_viewer_start() { # <session>
+fm_herdr_lab_viewer_start_locked() { # <session>
   local name=$1 record log launcher launcher_pid waited attempt reason pid timeout=$fm_herdr_lab_viewer_timeout_seconds
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
@@ -288,11 +301,11 @@ fm_herdr_lab_viewer_start() { # <session>
   fm_herdr_lab_cancel_provision "$launcher_pid"
   fm_herdr_lab_error "lab viewer did not become the foreground client of '$name' within $timeout seconds (last reason: ${reason:-<unreadable>})"
   [ ! -s "$log" ] || fm_herdr_lab_error "viewer log: $(tail -n 5 "$log" | tr '\n' ' ')"
-  fm_herdr_lab_viewer_stop "$name" >/dev/null 2>&1 || true
+  fm_herdr_lab_viewer_stop_locked "$name" >/dev/null 2>&1 || true
   return 1
 }
 
-fm_herdr_lab_viewer_stop() { # <session>
+fm_herdr_lab_viewer_stop_locked() { # <session>
   local name=$1 record log role waited attempt reason timeout=$fm_herdr_lab_viewer_timeout_seconds
   fm_herdr_lab_validate_name "$name" || return 1
   record=$(fm_herdr_lab_viewer_record_path "$name")
@@ -327,6 +340,43 @@ fm_herdr_lab_viewer_stop() { # <session>
   done
   fm_herdr_lab_error "lab viewer for '$name' did not detach within $timeout seconds (last reason: ${reason:-<unreadable>})"
   return 1
+}
+
+fm_herdr_lab_viewer_lock() { # <session>
+  local lock
+  mkdir -p "$(fm_herdr_lab_state_dir)" || return 1
+  lock=$(fm_herdr_lab_viewer_lock_path "$1")
+  mkdir "$lock" 2>/dev/null || {
+    fm_herdr_lab_error "a viewer transition is already in progress for '$1'"
+    return 1
+  }
+}
+
+fm_herdr_lab_viewer_unlock() { # <session>
+  rmdir "$(fm_herdr_lab_viewer_lock_path "$1")" 2>/dev/null || {
+    fm_herdr_lab_error "could not release the viewer transition for '$1'"
+    return 1
+  }
+}
+
+fm_herdr_lab_viewer_start() { # <session>
+  local name=$1 status
+  fm_herdr_lab_validate_name "$name" || return 1
+  fm_herdr_lab_viewer_lock "$name" || return 1
+  fm_herdr_lab_viewer_start_locked "$name"
+  status=$?
+  fm_herdr_lab_viewer_unlock "$name" || return 1
+  return "$status"
+}
+
+fm_herdr_lab_viewer_stop() { # <session>
+  local name=$1 status
+  fm_herdr_lab_validate_name "$name" || return 1
+  fm_herdr_lab_viewer_lock "$name" || return 1
+  fm_herdr_lab_viewer_stop_locked "$name"
+  status=$?
+  fm_herdr_lab_viewer_unlock "$name" || return 1
+  return "$status"
 }
 
 fm_herdr_lab_viewer() { # <start|stop> <session>
