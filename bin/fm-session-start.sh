@@ -708,7 +708,7 @@ fi
 # separate 900-second cadence remains unchanged.
 # Presented records are this turn's first work queue and remain durable until
 # post-handling acknowledgement. The drain's separate OPEN DECISIONS section
-# remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
+# remains actionable even when that queue is empty (AGENTS.md section 8).
 # The drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
 # below. The read-only path never touches the queue because it lacks mutation
