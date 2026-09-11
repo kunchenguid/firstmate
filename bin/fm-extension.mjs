@@ -649,13 +649,36 @@ async function removeManagedTree(root) {
   await rm(root, { recursive: true, force: true });
 }
 
+async function validatePublishedPackage(destination, sourceInfo) {
+  try {
+    return await validatePackage(destination, { installed: true });
+  } catch (error) {
+    const existing = await maybeLstat(destination);
+    const interrupted = existing
+      && existing.isDirectory()
+      && !existing.isSymbolicLink()
+      && existing.uid === currentUid()
+      && modeOf(existing) === 0o700;
+    if (interrupted) {
+      const candidate = await validatePackage(destination, { installed: false }).catch(() => null);
+      if (candidate
+          && candidate.tree.digest === sourceInfo.tree.digest
+          && candidate.manifestDigest === sourceInfo.manifestDigest) {
+        await chmod(destination, 0o555);
+        return validatePackage(destination, { installed: true });
+      }
+    }
+    throw error;
+  }
+}
+
 async function installPackage(home, sourceInfo) {
   const digestHex = sourceInfo.tree.digest.slice("sha256:".length);
   const parent = await ensureHomePrivatePath(home, ["data", "extensions", "packages", sourceInfo.manifest.id, sourceInfo.manifest.version]);
   const destination = path.join(parent, digestHex);
   const existing = await maybeLstat(destination);
   if (existing) {
-    const installed = await validatePackage(destination, { installed: true });
+    const installed = await validatePublishedPackage(destination, sourceInfo);
     if (installed.tree.digest !== sourceInfo.tree.digest) fail("integrity-mismatch", "existing content-addressed package directory has different bytes");
     return { packageInfo: installed };
   }
@@ -694,7 +717,7 @@ async function installPackage(home, sourceInfo) {
     } catch (error) {
       if (!error || !["EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;
       await removeManagedTree(temporary);
-      const winner = await validatePackage(destination, { installed: true });
+      const winner = await validatePublishedPackage(destination, sourceInfo);
       if (winner.tree.digest !== sourceInfo.tree.digest) fail("integrity-mismatch", "concurrent package install produced a different tree");
       return { packageInfo: winner };
     }
