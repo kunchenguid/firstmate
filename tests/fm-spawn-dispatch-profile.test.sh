@@ -1224,8 +1224,6 @@ test_claude_permission_mode_bypass_matches_absent_launch() {
   launch=$(cat "$LAUNCH_LOG")
   expected=$(claude_expected_launch "$HOME_DIR" "$id" --dangerously-skip-permissions)
   [ "$launch" = "$expected" ] || fail "explicit bypass did not reproduce the absent-file launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  assert_no_grep 'claude_permission_mode=' "$HOME_DIR/state/$id.meta" \
-    "bypass must write no claude_permission_mode= line so the default meta stays byte-identical"
   pass "config/claude-permission-mode=bypass launches exactly as an absent file does"
 }
 
@@ -1245,9 +1243,7 @@ test_claude_permission_mode_auto_swaps_only_the_permission_flag() {
   expected=$(claude_expected_launch "$HOME_DIR" "$id" '--permission-mode auto')
   [ "$launch" = "$expected" ] || fail "auto changed more than the permission flag"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   assert_not_contains "$launch" "--dangerously-skip-permissions" "auto launch must not request bypass mode"
-  assert_grep 'claude_permission_mode=auto' "$HOME_DIR/state/$id.meta" \
-    "auto launch must record claude_permission_mode=auto in meta"
-  pass "config/claude-permission-mode=auto replaces --dangerously-skip-permissions with --permission-mode auto and records it"
+  pass "config/claude-permission-mode=auto replaces --dangerously-skip-permissions with --permission-mode auto"
 }
 
 test_claude_permission_mode_auto_reaches_scout_launch() {
@@ -1263,7 +1259,6 @@ test_claude_permission_mode_auto_reaches_scout_launch() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "claude --permission-mode auto --settings" "scout launch did not carry --permission-mode auto"
   assert_not_contains "$launch" "--dangerously-skip-permissions" "scout launch must not request bypass mode"
-  assert_grep 'claude_permission_mode=auto' "$HOME_DIR/state/$id.meta" "scout meta must record the auto mode"
   pass "config/claude-permission-mode=auto reaches scout launches too"
 }
 
@@ -1298,7 +1293,6 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex " "codex launch did not run codex"
   assert_not_contains "$launch" "--permission-mode" "the claude permission flag must not leak into a codex launch"
-  assert_no_grep 'claude_permission_mode=' "$HOME_DIR/state/$id.meta" "a non-claude launch must not record claude_permission_mode="
   pass "config/claude-permission-mode changes claude launches only"
 }
 

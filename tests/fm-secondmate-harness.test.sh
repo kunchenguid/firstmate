@@ -1393,7 +1393,7 @@ test_bootstrap_sweep_materializes_and_inherits_memory_default() {
 
 # config/backend: present and absent primary state converges exactly.
 # config/claude-permission-mode=auto reaches a Claude SECONDMATE launch too: the
-# same template swap and meta line as a crewmate, with model/effort untouched.
+# same template swap as a crewmate, with model/effort untouched.
 test_spawn_secondmate_claude_permission_mode_auto() {
   local w sm meta launchlog launch out status
   w="$TMP_ROOT/spawn-claude-permmode"
@@ -1409,8 +1409,6 @@ test_spawn_secondmate_claude_permission_mode_auto() {
 
   meta="$w/home/state/sm.meta"
   [ "$(meta_field "$meta" harness)" = claude ] || fail "permmode: meta harness not claude"
-  [ "$(meta_field "$meta" claude_permission_mode)" = auto ] \
-    || fail "permmode: meta did not record claude_permission_mode=auto (got '$(meta_field "$meta" claude_permission_mode)')"
   launch=$(cat "$launchlog")
   assert_contains "$launch" "claude --permission-mode auto --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus'" \
     "permmode: secondmate launch did not swap the permission flag while keeping --model"
