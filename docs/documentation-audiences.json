@@ -353,6 +353,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/fabro-integration.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/fm-test-isolation-proof.md",
       "audience": "maintainer-verification"
     },

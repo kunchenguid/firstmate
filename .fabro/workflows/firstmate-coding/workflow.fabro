@@ -1,0 +1,25 @@
+digraph FirstmateCoding {
+    graph [
+        goal="Firstmate autonomous coding lifecycle with planning, implementation, audit, bounded fix/re-review, and completion",
+        label="Firstmate Coding Workflow"
+    ]
+    rankdir=LR
+
+    start          [shape=Mdiamond, label="Start"]
+    plan           [shape=box, label="Planning", prompt="Inspect task brief and repository state. Formulate an isolated implementation plan."]
+    implement      [shape=box, label="Implementation", prompt="Execute code changes in the isolated task worktree following coding conventions."]
+    audit          [shape=box, label="Audit & Review", prompt="Audit code changes against task intent, verify test suites, and check safety gates."]
+    check_decision [shape=diamond, label="Audit Passed?"]
+    bounded_fix    [shape=box, label="Bounded Fix", prompt="Apply targeted fixes for issues identified during audit within bounded retry limits."]
+    complete       [shape=box, label="Completion", prompt="Verify all tests pass, finalize changes, and mark task ready for delivery."]
+    exit           [shape=Msquare, label="Exit"]
+
+    start -> plan
+    plan -> implement
+    implement -> audit
+    audit -> check_decision
+    check_decision -> complete    [label="Pass"]
+    check_decision -> bounded_fix [label="Issues Found"]
+    bounded_fix -> audit          [label="Re-review"]
+    complete -> exit
+}

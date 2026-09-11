@@ -1,0 +1,5 @@
+_version = 1
+
+[workflow]
+description = "Firstmate DAG coding lifecycle covering planning, implementation, audit, bounded fix/re-review, and completion"
+graph = "workflow.fabro"
