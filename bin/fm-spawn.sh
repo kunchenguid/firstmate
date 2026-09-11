@@ -436,6 +436,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-agent-memory-lib.sh
+. "$SCRIPT_DIR/fm-agent-memory-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -3598,6 +3600,26 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+
+# Per-worker memory throttling (captain order 2026-09-02, after a busy fleet
+# froze a host; bin/fm-agent-memory-lib.sh header). Linux+systemd only; every
+# other host keeps the prior unwrapped launch, and MEMORY_SCOPE stays empty
+# so the meta below writes no new lines there (byte-identical default path).
+# Slice configuration is best-effort and never blocks the spawn: a host that
+# cannot set the fleet-wide ceiling still gets the per-worker one.
+MEMORY_SCOPE=
+MEMORY_HIGH=
+MEMORY_MAX=
+MEMORY_SWAP_MAX=
+if fm_agent_memory_systemd_user_available; then
+  MEMORY_HIGH=$(fm_agent_memory_worker_high "$CONFIG")
+  MEMORY_MAX=$(fm_agent_memory_worker_max "$CONFIG")
+  MEMORY_SWAP_MAX=$(fm_agent_memory_worker_swap_max "$CONFIG")
+  MEMORY_SCOPE=$(fm_agent_memory_unit_name "$ID" "$SPAWN_GEN")
+  fm_agent_memory_slice_configure "$CONFIG" \
+    || echo "warning: could not configure $FM_AGENT_MEMORY_SLICE fleet-wide memory limits; continuing with per-worker limits only" >&2
+fi
+
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -3614,7 +3636,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx memory_scope memory_high memory_max memory_swap_max", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3634,6 +3656,12 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ -n "$MEMORY_SCOPE" ]; then
+    echo "memory_scope=$MEMORY_SCOPE"
+    echo "memory_high=$MEMORY_HIGH"
+    echo "memory_max=$MEMORY_MAX"
+    echo "memory_swap_max=$MEMORY_SWAP_MAX"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -3909,6 +3937,9 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
+fi
+if [ -n "$MEMORY_SCOPE" ]; then
+  LAUNCH=$(fm_agent_memory_compose_launch "$LAUNCH" "$MEMORY_SCOPE" "$MEMORY_HIGH" "$MEMORY_MAX" "$MEMORY_SWAP_MAX")
 fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"

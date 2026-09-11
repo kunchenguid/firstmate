@@ -1969,6 +1969,95 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- non-terminal stale, worker OOM-killed AFTER the first stale sighting: the
+#     retry on a same-hash repeat poll must still catch it ------------------
+# fm_agent_memory_report_oom_kill (bin/fm-agent-memory-lib.sh) is only reachable
+# from surface_nonterminal_stale, which runs exactly once per distinct stale
+# hash - on the FIRST sighting. If the worker's systemd scope is still alive at
+# that first sighting, the OOM check is (correctly) skipped, but the hash is
+# still recorded as classified. A worker that is then OOM-killed WITHOUT
+# repainting its pane (the common case: a killed process leaves the last
+# rendered frame on screen) produces no new hash, so every later poll takes the
+# unchanged-hash "repeat" path instead of surface_nonterminal_stale - and before
+# this fix that path never rechecked liveness, so the task retained only the
+# generic wedge diagnosis forever. This drives two real fm-watch.sh processes
+# against the same state dir (mirroring how the daemon is actually re-invoked):
+# phase 1 sees the worker still alive and must NOT report an OOM; phase 2 sees
+# the exact same pane hash but a now-dead foreground process backed by a
+# Result=oom-kill scope, and must append the failed: line on that repeat poll.
+test_nonterminal_stale_oom_retried_on_repeat_poll() {
+  local dir state fakebin out1 out2 drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case nonterminal-stale-oom-retry); state="$dir/state"; fakebin="$dir/fakebin"
+  out1="$dir/watch1.out"; out2="$dir/watch2.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-oomretry"
+  printf 'idle prompt, finished' > "$capture_file"
+  printf 'window=%s\nkind=ship\nmemory_scope=fm-oomretry-g1.scope\nmemory_max=6G\n' "$window" \
+    > "$state/oomretry.meta"
+  printf 'working: implementing\n' > "$state/oomretry.status"
+  sig=$(seen_sig "$state/oomretry.status"); printf '%s' "$sig" > "$state/.seen-oomretry_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, finished")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Not provably working (same "none" classification as the sibling test above)
+  # so pause_state_class routes straight to surface_nonterminal_stale.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # systemctl fake: Result is always oom-kill once asked, mirroring
+  # tests/fm-agent-memory-lib.test.sh's FAKEBIN_OOM fixture. Harmless in phase 1,
+  # where the tmux fake keeps the foreground process classified as an agent, so
+  # fm_agent_memory_report_oom_kill is never reached.
+  cat > "$fakebin/systemctl" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --user ] && [ "${2:-}" = show ]; then
+  for a in "$@"; do
+    case "$a" in
+      Result) printf 'oom-kill\n'; exit 0 ;;
+    esac
+  done
+fi
+exit 1
+SH
+  chmod +x "$fakebin/systemctl"
+
+  # Phase 1: first stale sighting, endpoint still alive (foreground = claude) -
+  # surfaces immediately (matching the sibling test above) with no OOM report.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out1" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher did not surface the first stale sighting: $(cat "$out1")"; }
+  grep -Fx "stale: $window" "$out1" >/dev/null || fail "phase 1 did not print the immediate stale wake"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "phase 1 did not advance the stale suppressor"
+  grep -F "failed: killed by the per-worker memory limit" "$state/oomretry.status" >/dev/null \
+    && fail "phase 1 must not report an OOM while the endpoint still looks alive"
+  [ ! -e "$state/oomretry.oom-reported" ] || fail "phase 1 must not write the OOM marker while the endpoint still looks alive"
+  # Drain the queued wake before phase 2 starts: an undrained queue makes the
+  # next watcher process treat this as a downtime recovery ("check:
+  # rearm-resurface") instead of running its normal poll loop, exactly like
+  # the daemon's real drain-then-rearm cycle between invocations.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after phase 1's stale wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "phase 1 stale wake was not queued"
+
+  # Phase 2: a fresh watcher process (the daemon's real re-invocation shape),
+  # same unchanged pane hash, but the worker is now OOM-killed (foreground
+  # reverted to a bare shell, scope Result=oom-kill). Let it complete at least
+  # one full poll cycle, then confirm the repeat-poll path retried the check.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "phase 2 watcher exited or never completed a poll cycle: $(cat "$out2")"
+  fi
+  reap "$pid"
+  grep -Fx "failed: killed by the per-worker memory limit (MemoryMax=6G)" "$state/oomretry.status" >/dev/null \
+    || fail "a same-hash repeat poll never retried the OOM check after the worker was killed post-first-sighting"
+  [ -e "$state/oomretry.oom-reported" ] || fail "OOM idempotency marker was not written on the retried check"
+  pass "a same-hash repeat poll retries the OOM check after the worker is killed post-first-sighting"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -4857,6 +4946,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
+test_nonterminal_stale_oom_retried_on_repeat_poll
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle

@@ -166,6 +166,34 @@ The caller-facing label remains `fm-<id>`, but the actual cmux workspace title i
 Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.md#current-operation-and-safety), never enumerate-and-close every workspace.
 `config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 
+## Agent memory limits (config/agent-memory)
+
+On a Linux host with a working `systemd --user` session (checked at every spawn by `fm_agent_memory_systemd_user_available` in `bin/fm-agent-memory-lib.sh`: `uname -s` is `Linux`, `systemd-run` is on `PATH`, and `systemctl --user show-environment` succeeds), `fm-spawn.sh` launches a crewmate's process tree through `systemd-run --user --scope --slice=firstmate-agents.slice --unit=fm-<task-id>-<spawn-gen>.scope` wrapping the existing launch command, instead of the bare pane command.
+Every other host - non-Linux, or Linux with no reachable `systemd --user` manager (some CI runners) - keeps the prior unwrapped launch untouched, byte-identical meta included.
+This is a throttle-then-protect shape, not a tight per-worker cap: the kernel reclaims aggressively above `MemoryHigh` without killing anything, and only `MemoryMax` past that is fatal, set high enough that a legitimately hungry agent is never the common case killed.
+It exists because an unbounded fleet of worker processes has no ceiling of its own, so the kernel - not discipline - is what stands between a runaway agent and a frozen host.
+
+The five tunable numbers live in one place, local gitignored `config/agent-memory`, as plain `key=value` lines (first non-comment match per key wins, same convention as `state/<id>.meta`).
+An absent file, or an absent key within it, falls back to the compiled-in default:
+
+| Key | Applies to | Default |
+|---|---|---|
+| `worker_memory_high` | one crew's scope `MemoryHigh` (soft; throttled, not killed) | `3G` |
+| `worker_memory_max` | one crew's scope `MemoryMax` (hard; killed past this) | `6G` |
+| `worker_memory_swap_max` | one crew's scope `MemorySwapMax` | `2G` |
+| `slice_memory_high_pct` | `firstmate-agents.slice` `MemoryHigh`, percent of `MemTotal` | `55` |
+| `slice_memory_max_pct` | `firstmate-agents.slice` `MemoryMax`, percent of `MemTotal` | `70` |
+
+The parent slice bounds every worker's scope TOGETHER, computed from `/proc/meminfo` at every spawn and applied with `systemctl --user set-property firstmate-agents.slice MemoryHigh=<bytes> MemoryMax=<bytes>` (idempotent - the same `MemTotal` always recomputes the same bytes), so the host always keeps roughly 30% of RAM for itself regardless of how many workers are running.
+Slice configuration is best-effort: a host that cannot configure it still spawns the worker unwrapped by the per-worker limits, rather than blocking the spawn on host-level protection it cannot set up.
+
+Task metadata records `memory_scope=<unit>`, `memory_high=`, `memory_max=`, and `memory_swap_max=` (the exact values applied to that spawn) only when a scope was actually created; an absent `memory_scope=` means the prior unwrapped path, preserving existing default-path meta files for every non-systemd host.
+`fm-crew-state.sh <id>` reads the recorded scope's live `MemoryCurrent` (`systemctl --user show -p MemoryCurrent`) and appends it to its one-line state report whenever the scope still exists, so per-worker usage is visible without a separate tool; an already-collected scope (the crew's turn ended, or systemd garbage-collected it) adds nothing rather than reporting stale numbers.
+Teardown and exit never need the scope to exist - systemd scopes are transient and disappear on their own once the process tree exits, so cleanup only removes the meta fields, never a unit.
+
+When a worker is killed by its own `MemoryMax`, `bin/fm-watch.sh`'s general stale-classification path checks the recorded scope's `systemctl --user show -p Result` as soon as the endpoint is independently confirmed dead - on first sighting of a stale window (`surface_nonterminal_stale`) and again on every later poll of that same unchanged hash, so a worker OOM-killed after first sighting (with no pane repaint to advance the hash) is still caught. Only when `Result` is exactly `oom-kill`, and only once per task (`state/<id>.oom-reported`, removed by teardown), it appends `failed: killed by the per-worker memory limit (MemoryMax=...)` to the task's own status log, so firstmate escalates on the actual cause instead of guessing at a generic wedge.
+The check is best-effort and silent otherwise: no recorded scope, an already-collected scope, or a `Result` other than `oom-kill` leaves the existing stale/wedge handling untouched.
+
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.

@@ -10,6 +10,15 @@ set -u
 # which the no-mistakes gate runs from a gate worktree, must be exempt).
 export FM_GATE_REFUSE_BYPASS=1
 
+# Same reasoning, same fix, for the per-worker memory-scope wrapper
+# (bin/fm-agent-memory-lib.sh): these real-fm-spawn tests do not source
+# tests/lib.sh either, so its global FM_AGENT_MEMORY_DISABLE=1 exemption never
+# reaches them. Without this, a real spawn driven by this family activates the
+# real systemd-run wrapper whenever the test host has a working systemd --user
+# session, changing timing and process-tree shape under a family whose
+# assertions are already timing-sensitive.
+export FM_AGENT_MEMORY_DISABLE=1
+
 HERDR_TEST_SAFETY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 . "$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh"
