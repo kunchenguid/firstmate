@@ -65,6 +65,9 @@
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
+#     Any task whose endpoint observation was discarded rather than probed - a
+#     generation change mid-snapshot, or an observation this command cannot read
+#     back - also reports "unknown" regardless of kind, with exists null.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -197,6 +200,12 @@ case "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" in
     exit 2
     ;;
 esac
+# Linux caps ONE exec argument at 128 KiB (MAX_ARG_STRLEN) however large ARG_MAX
+# is, so a payload with no contract size bound may ride argv only when it provably
+# fits. Shell string length counts characters, so this bound holds even where
+# every character is four bytes; a larger payload must ride a file or be reported
+# as unavailable rather than fail the exec.
+SNAPSHOT_ARGV_FALLBACK_MAX_CHARS=16384
 
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
@@ -840,9 +849,20 @@ task_json_lines() {
     open_decisions_file="$SNAPSHOT_TASK_DIR/$id.open-decisions.json"
     open_decisions_arg=(--slurpfile open_decisions_file "$open_decisions_file")
     printf '%s\n' "$open_decisions_json" > "$open_decisions_file" || {
-      printf 'fm-fleet-snapshot: %s: open-decision transport write failed; passing the fold on argv\n' \
-        "$id" >&2
-      open_decisions_arg=(--argjson open_decisions_file "[$open_decisions_json]")
+      # The file is the only transport that can carry an unbounded fold, so argv
+      # remains available only for a fold small enough to provably fit one exec
+      # argument. A larger fold degrades to no open decisions: handing it to exec
+      # would fail the composing jq below and silently drop this whole task from
+      # the snapshot.
+      if [ "${#open_decisions_json}" -le "$SNAPSHOT_ARGV_FALLBACK_MAX_CHARS" ]; then
+        printf 'fm-fleet-snapshot: %s: open-decision transport write failed; passing the fold on argv\n' \
+          "$id" >&2
+        open_decisions_arg=(--argjson open_decisions_file "[$open_decisions_json]")
+      else
+        printf 'fm-fleet-snapshot: %s: open-decision transport write failed and the fold exceeds the argv bound; reporting no open decisions\n' \
+          "$id" >&2
+        open_decisions_arg=(--argjson open_decisions_file '[[]]')
+      fi
     }
 
     endpoint_exists=null
