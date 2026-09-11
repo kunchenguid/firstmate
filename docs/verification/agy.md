@@ -16,6 +16,10 @@ esc to cancel                                                Gemini 3.8 Flash ·
 
 The delivery fallback matches this anchored cancel-plus-effort row, not the bare words in draft text.
 
+The measured composer boundary is a 72-character row of U+2500 BOX DRAWINGS LIGHT HORIZONTAL.
+The adapter accepts only that byte-exact glyph after trimming, with a minimum width of 16 characters.
+Other box-drawing glyphs, ASCII rule characters, and shorter rows fail closed to `unknown`; a future AGY boundary change is caught by the composer-matrix live guard.
+
 Command:
 
 ```text

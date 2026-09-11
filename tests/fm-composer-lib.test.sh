@@ -668,9 +668,9 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
 
 test_agy_prompt_requires_footer_proof() {
   local caps=$'styled=0\ncursor=1' out
-  out=$(fm_composer_classify_screen "$caps" $'────────\n>\n────────\n? for shortcuts' 1)
+  out=$(fm_composer_classify_screen "$caps" $'────────────────\n>\n────────────────\n? for shortcuts' 1)
   [ "$out" = empty ] || fail "an idle agy prompt with its footer must read empty, got '$out'"
-  out=$(fm_composer_classify_screen "$caps" $'────────\n> draft\n────────\n? for shortcuts' 1)
+  out=$(fm_composer_classify_screen "$caps" $'────────────────\n> draft\n────────────────\n? for shortcuts' 1)
   [ "$out" = pending ] || fail "typed agy prompt text must read pending, got '$out'"
   out=$(fm_composer_classify_screen "$caps" $'> ' 0)
   [ "$out" = unknown ] || fail "a lone empty shell prompt must remain unknown, got '$out'"
@@ -681,9 +681,9 @@ test_agy_prompt_requires_footer_proof() {
 
 test_agy_prompt_requires_footer_proof_without_cursor() {
   local out
-  out=$(fm_composer_classify_screen 'styled=0' $'────────\n>\n────────\n? for shortcuts')
+  out=$(fm_composer_classify_screen 'styled=0' $'────────────────\n>\n────────────────\n? for shortcuts')
   [ "$out" = empty ] || fail "cursorless idle agy prompt must read empty, got '$out'"
-  out=$(fm_composer_classify_screen 'styled=0' $'────────\n> draft\n────────\n? for shortcuts')
+  out=$(fm_composer_classify_screen 'styled=0' $'────────────────\n> draft\n────────────────\n? for shortcuts')
   [ "$out" = pending ] || fail "cursorless typed agy prompt must read pending, got '$out'"
   out=$(fm_composer_classify_screen 'styled=0' $'> ')
   [ "$out" = unknown ] || fail "cursorless lone empty shell prompt must remain unknown, got '$out'"
@@ -694,7 +694,7 @@ test_agy_prompt_requires_footer_proof_without_cursor() {
 
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
   local cursor_caps=$'styled=1\ncursor=1' cursorless_caps='styled=0' out screen extract
-  screen=$'────────\n> first line\n  second line\n────────\nGemini 3.8 Flash · low'
+  screen=$'────────────────\n> first line\n  second line\n────────────────\nGemini 3.8 Flash · low'
   out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2)
   [ "$out" = pending ] || fail "a styled agy multiline draft under the cursor must read pending, got '$out'"
   out=$(fm_composer_classify_screen "$cursorless_caps" "$screen")
@@ -705,14 +705,14 @@ test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
   extract=$(fm_composer_extract_selected_content "$cursorless_caps" "$screen")
   [ "$extract" = 'first line second line' ] \
     || fail "cursorless agy extraction lost multiline draft content: '$extract'"
-  screen=$'────────\n> first line\n? for shortcuts\n────────\nGemini 3.8 Flash · low'
+  screen=$'────────────────\n> first line\n? for shortcuts\n────────────────\nGemini 3.8 Flash · low'
   out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2)
   [ "$out" = pending ] \
     || fail "a multiline agy draft containing furniture-looking rows must read pending, got '$out'"
   extract=$(fm_composer_extract_selected_content "$cursor_caps" "$screen")
   [ "$extract" = 'first line ? for shortcuts' ] \
     || fail "agy extraction dropped furniture-looking multiline draft content: '$extract'"
-  screen=$'output\n────────\n>\n────────\n? for shortcuts\n$ live shell'
+  screen=$'output\n────────────────\n>\n────────────────\n? for shortcuts\n$ live shell'
   out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2)
   [ "$out" = empty ] || fail "the cursor-anchored agy prompt must remain empty beside a lower shell, got '$out'"
   out=$(fm_composer_classify_screen "$cursorless_caps" "$screen")
@@ -723,7 +723,7 @@ test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
 test_agy_prompt_preserves_structural_draft_rows() {
   local screen out extract caps
   for caps in "$CAPS_TMUX" 'styled=0'; do
-    screen=$'────────\n> first\n> second\n────────\nClaude Sonnet 4.6 · low'
+    screen=$'────────────────\n> first\n> second\n────────────────\nClaude Sonnet 4.6 · low'
     if [ "$caps" = "$CAPS_TMUX" ]; then
       out=$(fm_composer_classify_screen "$caps" "$screen" 1)
     else
@@ -734,7 +734,7 @@ test_agy_prompt_preserves_structural_draft_rows() {
     extract=$(fm_composer_extract_selected_content "$caps" "$screen")
     [ "$extract" = 'first > second' ] \
       || fail "agy draft rows beginning with > were not preserved, got '$extract'"
-    screen=$'────────\n> run this:\n$ make test\n────────\nGPT-OSS 120B · medium'
+    screen=$'────────────────\n> run this:\n$ make test\n────────────────\nGPT-OSS 120B · medium'
     if [ "$caps" = "$CAPS_TMUX" ]; then
       out=$(fm_composer_classify_screen "$caps" "$screen" 1)
     else
@@ -745,7 +745,7 @@ test_agy_prompt_preserves_structural_draft_rows() {
     extract=$(fm_composer_extract_selected_content "$caps" "$screen")
     [ "$extract" = 'run this: $ make test' ] \
       || fail "agy shell-looking draft rows were not preserved, got '$extract'"
-    screen=$'────────\n> first \n second line\n────────'
+    screen=$'────────────────\n> first \n second line\n────────────────'
     extract=$(fm_composer_extract_selected_content "$caps" "$screen")
     [ "$extract" = 'first second line' ] \
       || fail "agy extraction must use the shared normalized row join, got '$extract'"
@@ -754,12 +754,15 @@ test_agy_prompt_preserves_structural_draft_rows() {
 }
 
 test_agy_prompt_uses_complete_positional_boundaries() {
-  local caps boundary screen out extract
+  local caps boundary16 boundary72 boundary15 screen out extract
+  boundary16=$(printf '─%.0s' {1..16})
+  boundary72=$(printf '─%.0s' {1..72})
+  boundary15=$(printf '─%.0s' {1..15})
   for caps in "$CAPS_TMUX" 'styled=0'; do
-    for boundary in '════' '━━━━' '----'; do
+    for boundary in "$boundary16" "$boundary72"; do
       screen="$boundary"$'\n> draft\n'"$boundary"
       if [ "$caps" = "$CAPS_TMUX" ]; then
-        out=$(fm_composer_classify_screen "$caps" "$screen" 1)
+        out=$(fm_composer_classify_screen "$caps" "$screen" 1 probe-absent)
       else
         out=$(fm_composer_classify_screen "$caps" "$screen")
       fi
@@ -769,7 +772,17 @@ test_agy_prompt_uses_complete_positional_boundaries() {
       [ "$extract" = draft ] \
         || fail "agy boundary '$boundary' must preserve the draft, got '$extract'"
     done
-    screen=$'────────\n> first\nsecond · low\n────────\nGemini 3.8 Flash · low'
+    for boundary in '━━━━' '═══' '----' '====' '____' '-' '─' "$boundary15"; do
+      screen="$boundary"$'\n> draft\n'"$boundary"
+      if [ "$caps" = "$CAPS_TMUX" ]; then
+        out=$(fm_composer_classify_screen "$caps" "$screen" 1 probe-absent)
+      else
+        out=$(fm_composer_classify_screen "$caps" "$screen")
+      fi
+      [ "$out" = unknown ] \
+        || fail "unsupported AGY boundary '$boundary' must defer, got '$out'"
+    done
+    screen=$'────────────────\n> first\nsecond · low\n────────────────\nGemini 3.8 Flash · low'
     if [ "$caps" = "$CAPS_TMUX" ]; then
       out=$(fm_composer_classify_screen "$caps" "$screen" 1)
     else
@@ -781,30 +794,41 @@ test_agy_prompt_uses_complete_positional_boundaries() {
     [ "$extract" = 'first second · low' ] \
       || fail "a model-looking draft continuation was dropped, got '$extract'"
   done
+  for caps in "$CAPS_TMUX" 'styled=0'; do
+    screen=$'> first\n-'
+    if [ "$caps" = "$CAPS_TMUX" ]; then
+      out=$(fm_composer_classify_screen "$caps" "$screen" 1 probe-absent)
+    else
+      out=$(fm_composer_classify_screen "$caps" "$screen")
+    fi
+    [ "$out" = unknown ] \
+      || fail "a draft dash without the native boundary must defer, got '$out'"
+  done
   pass "fm_composer: agy uses the complete positional boundary contract"
 }
 
 test_agy_prompt_disambiguates_repeated_boundaries() {
-  local screen out extract
-  screen=$'────\n> first\n────\nsecond\n────'
+  local screen out extract boundary
+  boundary=$(printf '─%.0s' {1..16})
+  screen="$boundary"$'\n> first\n'"$boundary"$'\nsecond\n'"$boundary"
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3)
   [ "$out" = pending ] \
     || fail "styled cursor should use the first boundary below the cursor, got '$out'"
   extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 3)
-  [ "$extract" = 'first ──── second' ] \
+  [ "$extract" = "first $boundary second" ] \
     || fail "styled cursor extraction dropped a rule-separated draft row: '$extract'"
-  screen=$'────\n> first\n────\nsecond\n────\n? for shortcuts'
+  screen="$boundary"$'\n> first\n'"$boundary"$'\nsecond\n'"$boundary"$'\n? for shortcuts'
   out=$(fm_composer_classify_screen 'styled=0' "$screen")
   [ "$out" = pending ] \
     || fail "cursorless AGY with a footer should use the last boundary, got '$out'"
   extract=$(fm_composer_extract_selected_content 'styled=0' "$screen")
-  [ "$extract" = 'first ──── second' ] \
+  [ "$extract" = "first $boundary second" ] \
     || fail "cursorless AGY extraction dropped a rule-separated draft row: '$extract'"
-  screen=$'────\n> first\n────\nsecond\n────'
+  screen="$boundary"$'\n> first\n'"$boundary"$'\nsecond\n'"$boundary"
   out=$(fm_composer_classify_screen 'styled=0' "$screen")
   [ "$out" = unknown ] \
     || fail "cursorless AGY with repeated boundaries and no footer must defer, got '$out'"
-  screen=$'> quoted\n────\n╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
+  screen=$'> quoted\n────────────────\n╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
   out=$(fm_composer_classify_screen 'styled=1' "$screen")
   [ "$out" = empty ] \
     || fail "cursorless selection must keep the lower bordered composer, got '$out'"
@@ -815,7 +839,7 @@ test_agy_prompt_disambiguates_repeated_boundaries() {
 }
 
 test_agy_boundary_is_locale_independent() {
-  local utf8_locale locale boundary
+  local utf8_locale locale boundary16 boundary72 boundary15 boundary
   utf8_locale=
   for candidate in C.UTF-8 en_US.UTF-8; do
     if LC_ALL="$candidate" locale charmap >/dev/null 2>&1; then
@@ -827,16 +851,19 @@ test_agy_boundary_is_locale_independent() {
     utf8_locale=$(LC_ALL=C locale -a | LC_ALL=C awk '/[Uu][Tt][Ff].*8/ { print; exit }')
   fi
   [ -n "$utf8_locale" ] || fail "no UTF-8 locale is available for AGY boundary coverage"
-  for boundary in '────' '━━━━' '═══' '╿' '----' '===='; do
+  boundary16=$(printf '─%.0s' {1..16})
+  boundary72=$(printf '─%.0s' {1..72})
+  boundary15=$(printf '─%.0s' {1..15})
+  for boundary in "$boundary16" "$boundary72"; do
     for locale in C "$utf8_locale"; do
       LC_ALL="$locale" _fm_composer_agy_boundary_row "$boundary" \
         || fail "AGY boundary '$boundary' was rejected under $locale"
     done
   done
   for locale in C "$utf8_locale"; do
-    for non_boundary in '│abc│' '- text -'; do
+    for non_boundary in '━━━━' '═══' '----' '====' '____' '-' '─' "$boundary15" '│abc│' '- text -'; do
       if LC_ALL="$locale" _fm_composer_agy_boundary_row "$non_boundary"; then
-        fail "mixed AGY boundary text was accepted under $locale: $non_boundary"
+        fail "unsupported AGY boundary was accepted under $locale: $non_boundary"
       fi
     done
   done
@@ -845,8 +872,8 @@ test_agy_boundary_is_locale_independent() {
 
 test_generic_delivery_busy_union_includes_agy_cancel() {
   local active draft_screen cropped_screen
-  active=$'────\n> \n────\nesc to cancel                                                Gemini 3.8 Flash · medium'
-  draft_screen=$'────\n> first\nesc to cancel Gemini 3.8 Flash · medium\n────\n? for shortcuts'
+  active=$'────────────────\n> \n────────────────\nesc to cancel                                                Gemini 3.8 Flash · medium'
+  draft_screen=$'────────────────\n> first\nesc to cancel Gemini 3.8 Flash · medium\n────────────────\n? for shortcuts'
   cropped_screen=$'draft continuation 1\ndraft continuation 2\ndraft continuation 3\ndraft continuation 4\ndraft continuation 5\ndraft continuation 6\ndraft continuation 7\ndraft continuation 8\ndraft continuation 9\ndraft continuation 10\ndraft continuation 11\nesc to cancel Gemini 3.8 Flash · medium'
   if printf '%s\n' 'esc to cancel' | fm_busy_lines_match; then
     fail "generic delivery busy matcher must not classify draft text as busy"
@@ -880,8 +907,8 @@ test_generic_delivery_busy_union_includes_agy_cancel() {
 
 test_agy_prompt_preserves_furniture_looking_drafts() {
   local caps=$'styled=0\ncursor=1' out extract screen
-  for draft in '? for shortcuts' '────────'; do
-    screen=$'────────\n> '"$draft"$'\n────────\n? for shortcuts'
+  for draft in '? for shortcuts' '────────────────'; do
+    screen=$'────────────────\n> '"$draft"$'\n────────────────\n? for shortcuts'
     out=$(fm_composer_classify_screen "$caps" "$screen" 1)
     [ "$out" = pending ] \
       || fail "agy draft '$draft' must classify pending, got '$out'"

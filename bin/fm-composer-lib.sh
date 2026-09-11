@@ -1054,23 +1054,22 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
 }
 
 _fm_composer_agy_boundary_row() {  # <trimmed-row>
-  local LC_ALL=C s=$1 b1 b2 b3
-  s=${s// /}
+  local LC_ALL=C s=$1 b1 b2 b3 count=0
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
   [ -n "$s" ] || return 1
   while [ -n "$s" ]; do
-    case "$s" in
-      -*|=*|_*) s=${s:1}; continue ;;
-    esac
     [ ${#s} -ge 3 ] || return 1
     printf -v b1 '%d' "'${s:0:1}"
     printf -v b2 '%d' "'${s:1:1}"
     printf -v b3 '%d' "'${s:2:1}"
     [ "$b1" -eq 226 ] || return 1
-    [ "$b2" -eq 148 ] || [ "$b2" -eq 149 ] || return 1
-    [ "$b3" -ge 128 ] && [ "$b3" -le 191 ] || return 1
+    [ "$b2" -eq 148 ] || return 1
+    [ "$b3" -eq 128 ] || return 1
+    count=$((count + 1))
     s=${s:3}
   done
-  return 0
+  [ "$count" -ge 16 ]
 }
 
 _fm_composer_agy_footer_row() {  # <trimmed-row>
