@@ -459,7 +459,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         state: .current_state.state,
         repo:(.backlog.repo // .project // null),
         name:((.backlog.title // "") as $name
-              | (if $name != "" then $name else .id end) | trunc(70)),
+              | (if ($name | test("[^[:space:]]")) then $name else .id end) | trunc(70)),
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
@@ -470,7 +470,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             state:(.state // "working"),
             repo:(.repo // null),
             name:((.name // "") as $name
-                  | (if $name != "" then $name else ($m.id + "/" + .id) end) | trunc(70)),
+                  | (if (($name | type) == "string" and ($name | test("[^[:space:]]")))
+                     then $name else ($m.id + "/" + .id) end) | trunc(70)),
             doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record

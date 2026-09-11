@@ -2409,9 +2409,13 @@ test_nameless_legacy_summary_uses_its_durable_identifier() {
   remote_home="$TMP_ROOT/remote-ledger-home-1"
   fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
   jq '
-    .active_children = [{id:"legacy-child",kind:"ship",state:"working",repo:null,
-      source:"remote-ledger",doing:"running review"}]
-    | .counts.active_children = 1
+    .active_children = [
+      {id:"legacy-child",kind:"ship",state:"working",repo:null,
+       source:"remote-ledger",doing:"running review"},
+      {id:"blank-name-child",kind:"ship",state:"working",repo:null,name:" \t ",
+       source:"remote-ledger",doing:"running tests"}
+    ]
+    | .counts.active_children = 2
     | .state = "active_child_work"
   ' "$remote_home/state/home-summary.json" > "$remote_home/state/legacy-summary.json"
   mv "$remote_home/state/legacy-summary.json" "$remote_home/state/home-summary.json"
@@ -2423,8 +2427,12 @@ test_nameless_legacy_summary_uses_its_durable_identifier() {
       and .name == "ledger-1/legacy-child"
       and .doing == "running review"
       and .name != .doing))
-  ' >/dev/null || fail "a nameless legacy child was not identified by id: $json"
-  pass "nameless legacy summary children use their durable identifier"
+    and (.in_flight | any(.id == "ledger-1/blank-name-child"
+      and .name == "ledger-1/blank-name-child"
+      and .doing == "running tests"
+      and .name != .doing))
+  ' >/dev/null || fail "a blank legacy child name was not replaced by its id: $json"
+  pass "blank legacy summary names use their durable identifier"
 }
 
 test_newest_filed_gates_are_selected_before_snapshot_bounds() {
@@ -2455,16 +2463,18 @@ test_newest_filed_gates_are_selected_before_snapshot_bounds() {
 ## In flight
 
 ## Queued
-- [ ] mate-old - Old remote gate (repo: sample) (kind: ship) (since 2026-06-01)
-- [ ] mate-middle - Middle remote gate (repo: sample) (kind: ship) (since 2026-06-02)
-- [ ] mate-newest - Newest remote gate (repo: sample) (kind: ship) (since 2026-06-03)
+- [ ] mate-eligible - Eligible remote gate (repo: sample) (kind: ship) (since 2026-07-08)
+- [ ] mate-call-one - Newer captain call (repo: sample) (kind: captain) (hold: choose one) (hold-kind: captain) (since 2026-07-10)
+- [ ] mate-call-two - Newest captain call (repo: sample) (kind: captain) (hold: choose two) (hold-kind: captain) (since 2026-07-11)
 
 ## Done
 EOF
   json=$(FM_SNAPSHOT_SECONDMATE_QUEUED=2 run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    [.gates[].id] == ["mate-newest", "mate-middle"]
-  ' >/dev/null || fail "the secondmate queue bound dropped the newest filed row: $json"
+    [.gates[].id] == ["mate-eligible"]
+      and (.decisions_open | any(.id == "bounded-mate/mate-call-one"))
+      and (.decisions_open | any(.id == "bounded-mate/mate-call-two"))
+  ' >/dev/null || fail "captain calls crowded eligible Charted work out of the bound: $json"
   pass "newest filed gates are selected before snapshot bounds"
 }
 
