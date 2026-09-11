@@ -103,7 +103,15 @@ configure_merged_github() {  # <home>
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
-  "pr view") printf '%s\n' 1111111111111111111111111111111111111111 ;;
+  "pr view")
+    case " $* " in
+      *statusCheckRollup*)
+        printf '%s\n' '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1111111111111111111111111111111111111111","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}'
+        ;;
+      *headRefOid*) printf '%s\n' 1111111111111111111111111111111111111111 ;;
+    esac
+    ;;
+  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
   "api graphql")
     printf '%s\n' 'state=MERGED' 'merged=true' 'queued=false' 'base=main'
     ;;
@@ -113,7 +121,6 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
-  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
   "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
 esac
 SH
@@ -3197,14 +3204,14 @@ test_pr_merge_entrypoint_refuses_a_captain_held_task() {
   run_captain "$home" hold "$pr_id" --reason "captain merge approval pending" >/dev/null \
     || fail "could not hold the PR entrypoint fixture"
 
-  # Without the entrypoint guard, this run reaches gh-axi and returns success
-  # even though the task is still held for the captain.
+  # Without the entrypoint guard, this run reaches gh and returns success even
+  # though the task is still held for the captain.
   set +e
   run_pr_merge "$home" "$pr_id" "$pr" > "$home/pr.out" 2> "$home/pr.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted a still-held task"
-  assert_no_grep 'pr merge 31 ' "$home/gh-axi.log" \
+  assert_no_grep 'pr merge 31 ' "$home/gh.log" \
     "the PR merge entrypoint reached the irreversible forge call for a held task"
   assert_grep "$pr_id is still held for the captain" "$home/pr.err" \
     "the PR merge refusal did not name the held task"
@@ -3272,7 +3279,7 @@ test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
   [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted an unreadable captain-hold authority record"
   assert_grep "could not determine whether task $id is still held for the captain" "$home/missing-pr.err" \
     "the PR merge refusal did not name its unreadable authority record"
-  assert_no_grep 'pr merge 43 ' "$home/gh-axi.log" \
+  assert_no_grep 'pr merge 43 ' "$home/gh.log" \
     "the PR merge entrypoint reached the forge without a readable authority record"
 
   # A home with no backlog at all records no captain calls, so nothing can be
@@ -3280,7 +3287,7 @@ test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
   rm "$home/data/backlog.md"
   run_pr_merge "$home" "$id" "$pr" > "$home/absent-pr.out" 2> "$home/absent-pr.err" \
     || fail "the PR merge entrypoint refused a home carrying no backlog"
-  merge_count=$(grep -c 'pr merge 43 ' "$home/gh-axi.log" || true)
+  merge_count=$(grep -c 'pr merge 43 ' "$home/gh.log" || true)
   [ "$merge_count" -eq 1 ] || fail "the absent backlog did not permit exactly one PR merge"
   pass "the PR merge entrypoint separates an unreadable authority record from an absent one"
 }
@@ -3476,7 +3483,7 @@ test_merge_entrypoints_refuse_a_reused_task_incarnation() {
   # Without the pre-wait generation capture and locked comparison, the waiter
   # records and merges pull request 42 against the replacement task record.
   [ "$merge_rc" -ne 0 ] || fail "the PR merge accepted a replacement task incarnation"
-  assert_no_grep 'pr merge 42 ' "$home/gh-axi.log" \
+  assert_no_grep 'pr merge 42 ' "$home/gh.log" \
     "the PR merge reached the forge for a replacement task incarnation"
   assert_grep "changed incarnation while waiting to merge" "$home/reuse-merge.err" \
     "the PR merge did not identify the replacement task incarnation"
@@ -3666,7 +3673,7 @@ SH
     "PR cleanup was not refused by the merge's task control lock"
   [ "$merge_rc" -eq 0 ] || fail "the serialized PR merge failed after cleanup was refused"
   assert_present "$home/state/$id.meta" "the refused PR cleanup removed task metadata"
-  assert_grep 'pr merge 33 ' "$home/gh-axi.log" \
+  assert_grep 'pr merge 33 ' "$home/gh.log" \
     "the serialized PR merge did not reach the forge after cleanup was refused"
 
   local_home=$(make_home teardown-race-local-entrypoint)
