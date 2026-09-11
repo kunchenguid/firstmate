@@ -8,8 +8,8 @@
 # while pr= is unchanged.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# A GitHub pull request URL is accepted; GitLab URLs are refused when that
+# platform is disabled by config/disabled-adapters.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -42,6 +42,7 @@ PROVIDER=$FM_PR_PROVIDER
 HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
+fm_pr_provider_enabled "$PROVIDER" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"

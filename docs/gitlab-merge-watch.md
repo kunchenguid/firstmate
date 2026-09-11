@@ -1,6 +1,8 @@
-# GitLab merge request watch and merge verification
+# Historical GitLab merge request watch and merge verification
 
-Empirical record for the merge watch and the merge path on GitLab, alongside the existing GitHub ones.
+GitLab is disabled by `config/disabled-adapters`; `fm-pr-check.sh` and `fm-pr-merge.sh` refuse GitLab requests, while the record below is retained historical verification.
+
+Empirical record for the merge watch and merge path on GitLab, alongside the existing GitHub ones.
 The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
 Every output is reproduced exactly.
 

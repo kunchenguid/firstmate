@@ -48,7 +48,7 @@ The 2026-08-30 archive refresh records the current candidate set after replacing
 | `portable-parallel-2` | 13 | 547931 ms | 321922 ms (~321.9 s) |
 
 `bin/fm-test-run.sh` contains the exact ordered memberships in `list_portable_parallel_1` and `list_portable_parallel_2`.
-Water 7 invokes `--jobs 2` only for `portable-parallel-1`; `portable-parallel-2` remains serial because its concurrency oracle was rejected.
+The historical Water 7 fallback invoked `--jobs 2` only for `portable-parallel-1`; `portable-parallel-2` remained serial because its concurrency oracle was rejected.
 
 ## Portable serial remainder
 
@@ -62,9 +62,8 @@ Pull-request CI runs focused teardown, spawn, delivery/wake, and end-to-end smok
 The complete behavior suite runs on `main` pushes or pull requests carrying the `full-ci` label.
 When enabled, `.github/workflows/ci.yml` runs `portable-parallel-1` with `--jobs 2`, `portable-parallel-2` serially, five serial shards, and the real-Herdr family as separate GitHub-hosted `ubuntu-latest` jobs.
 Shard membership and count remain owned by `bin/fm-test-run.sh`, and CI refuses a matrix count that disagrees with that owner.
-The superseded historical Water 7 oracle is retained in [verification/ci-portable-parallel-jobs.md](verification/ci-portable-parallel-jobs.md); current candidate-set evidence is in [fm-test-isolation-proof.md](fm-test-isolation-proof.md).
-If primary CI fails, `.github/workflows/ci-water7-fallback.yml` runs `bin/fm-ci.sh` as one self-hosted Water 7 `Suite`; maintainers may also dispatch it manually.
-That fallback discovers and executes the serial shards sequentially, and admits and validates its verdict through the shared-host load guard.
+The historical Water 7 oracle is retained in [verification/ci-portable-parallel-jobs.md](verification/ci-portable-parallel-jobs.md); current candidate-set evidence is in [fm-test-isolation-proof.md](fm-test-isolation-proof.md).
+Water 7 is disabled by `config/disabled-adapters`; its retained workflow is `.github/workflows/ci-water7-fallback.yml.disabled`, and `bin/fm-ci.sh` refuses the disabled platform.
 Static portability checks run on Linux, while CI also runs the documented stock-macOS Bash lane when the broad suite is enabled.
 
 On green CI run [30725985757](https://github.com/kunchenguid/firstmate/actions/runs/30725985757), that remainder accumulated 19m04s of script time against a 20-minute job timeout.
@@ -126,7 +125,7 @@ It reports the unmeasured serial share as `serial_unhinted=` and refuses when th
 
 `bin/fm-test-run.sh --json <path>` writes one lane's runner-generated timing JSON, and `bin/fm-test-run.sh --aggregate-json out.json <lane>.json ...` merges lanes for critical-path review.
 Primary CI uploads per-shard timing JSON and an aggregate artifact.
-The Water 7 fallback uses the same flag for job-summary observability: when `GITHUB_STEP_SUMMARY` is set, `bin/fm-ci.sh` collects one timing JSON per executed lane in a temporary directory under `RUNNER_TEMP` and appends a compact lane report to the job summary.
+The historical Water 7 fallback used the same flag for job-summary observability: when `GITHUB_STEP_SUMMARY` was set, `bin/fm-ci.sh` collected one timing JSON per executed lane in a temporary directory under `RUNNER_TEMP` and appended a compact lane report to the job summary.
 `bin/fm-test-run.sh --aggregate-json` remains the single owner of cross-lane merging and slowest-test ranking, while `bin/fm-ci.sh` only renders those aggregate fields for the job summary.
 Both collection and publication are non-blocking: `bin/fm-test-run.sh` reports an unwritable timing artifact without changing the suite exit status it already decided, and `bin/fm-ci.sh` reports a publish failure without changing the policy verdict.
 Publication is success-only: a failing lane still fails the policy at that lane, so a job summary carries a timing report only when every lane passed.

@@ -1,13 +1,55 @@
 #!/usr/bin/env bash
-# Contract tests for the hosted slim primary path and self-hosted fallback policy.
+# Contract tests for hosted CI, no-mistakes, and the policy-gated Water 7 fallback.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# This mixed suite retains active hosted and no-mistakes coverage while skipping
+# only Water 7 behavior under the tracked platform policy.
+WATER7_DISABLED=0
+if grep -Fqx water7 "$ROOT/config/disabled-adapters"; then
+  WATER7_DISABLED=1
+  [ -f "$ROOT/.github/workflows/ci-water7-fallback.yml.disabled" ] \
+    || fail "disabled Water 7 workflow must be retained"
+  [ ! -e "$ROOT/.github/workflows/ci-water7-fallback.yml" ] \
+    || fail "Water 7 workflow must not be runnable"
+fi
+
 fm_ensure_pyyaml || fail "python3 PyYAML is required to parse workflow policy"
 
 test_workflows_use_hosted_slim_ci_with_a_self_hosted_fallback() {
+  if [ "$WATER7_DISABLED" -eq 1 ]; then
+    if ! python3 - "$ROOT" <<'PY'
+import pathlib
+import sys
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    sys.exit(2)
+
+root = pathlib.Path(sys.argv[1])
+ci = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+assert ci.get("permissions") == {"contents": "read"}
+assert not (root / ".github/workflows/ci-water7-fallback.yml").exists()
+assert (root / ".github/workflows/ci-water7-fallback.yml.disabled").is_file()
+expected_jobs = {
+    "lint", "modules", "critical-teardown", "critical-spawn", "critical-delivery",
+    "critical-smokes", "test-coverage", "tests-portable-parallel-1",
+    "tests-portable-parallel-2", "tests-portable-serial", "tests-herdr",
+    "tests-timing-aggregate", "macos-stock-bash", "invariants",
+}
+assert set(ci["jobs"]) == expected_jobs
+for job_id, job in ci["jobs"].items():
+    assert job["runs-on"] == ("macos-latest" if job_id == "macos-stock-bash" else "ubuntu-latest")
+PY
+    then
+      fail "hosted CI contract failed while Water 7 was disabled"
+    fi
+    pass "hosted CI remains primary while Water 7 is disabled"
+    return
+  fi
   if ! python3 - "$ROOT" <<'PY'
 import pathlib
 import os
@@ -1575,16 +1617,17 @@ test_herdr_installer_matches_the_presentation_floor
 test_body_compliance_command_distinguishes_signed_from_unsigned_bodies
 test_body_compliance_polls_live_pr_body_when_opened_payload_is_stale
 test_workflow_invariant_step_executes_the_regular_claude_pointer_contract
-test_policy_runs_every_family_serially
-test_policy_requires_a_regular_claude_pointer
-test_policy_runs_lint_serially
-test_policy_runs_pr_fast_lane_before_complete_suite
-test_policy_publishes_nonblocking_timing_summary
-test_policy_publishes_the_summary_without_github_run_metadata
-test_policy_summary_failure_does_not_fail_delivery
-test_policy_delivers_when_a_lane_timing_artifact_cannot_be_written
-test_policy_fails_when_a_lane_suite_fails_under_the_summary
-test_policy_refuses_semantically_unsafe_systemd_limits
-test_policy_refuses_a_cpu_quota_below_its_own_concurrency
-test_policy_uses_only_bounded_ci_bootstrap
-test_policy_refuses_a_missing_test_dependency
+if [ "$WATER7_DISABLED" -eq 0 ]; then
+  test_policy_runs_every_family_serially
+  test_policy_requires_a_regular_claude_pointer
+  test_policy_runs_lint_serially
+  test_policy_runs_pr_fast_lane_before_complete_suite
+  test_policy_publishes_nonblocking_timing_summary
+  test_policy_publishes_the_summary_without_github_run_metadata
+  test_policy_summary_failure_does_not_fail_delivery
+  test_policy_fails_when_a_lane_suite_fails_under_the_summary
+  test_policy_refuses_semantically_unsafe_systemd_limits
+  test_policy_refuses_a_cpu_quota_below_its_own_concurrency
+  test_policy_uses_only_bounded_ci_bootstrap
+  test_policy_refuses_a_missing_test_dependency
+fi

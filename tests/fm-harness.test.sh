@@ -121,7 +121,7 @@ test_tracked_policy_blocks_every_listed_harness_and_test_lane() {
 
   while IFS= read -r adapter; do
     case "$adapter" in
-      ''|\#*|zellij|orca|cmux) continue ;;
+      ''|\#*|zellij|orca|cmux|windows|gitlab|water7) continue ;;
     esac
     if policy_out=$(FM_CONFIG_OVERRIDE="$ROOT/config" "$HARNESS" validate "$adapter" 2>&1); then
       fail "disabled adapter '$adapter' passed the policy gate"

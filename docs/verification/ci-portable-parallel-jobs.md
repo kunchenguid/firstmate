@@ -1,10 +1,13 @@
-# Water 7 portable-parallel `--jobs 2` verification
+# Historical Water 7 portable-parallel `--jobs 2` verification
 
 Audience: maintainer verification.
 
+Water 7 is disabled by `config/disabled-adapters`, its workflow is retained as `.github/workflows/ci-water7-fallback.yml.disabled`, and `bin/fm-ci.sh` refuses to run it.
+The evidence below is retained historical verification, not an active CI contract.
+
 The active candidate-set evidence is [fm-test-isolation-proof.md](../fm-test-isolation-proof.md), and the current lane composition and timing inputs are [fm-test-portable-shards.md](../fm-test-portable-shards.md).
 Task chronology and delivery evidence beyond the measured runs stay in the PR.
-The Water 7 timing-summary regression behavior is covered by `tests/fm-ci-water7.test.sh`.
+`tests/fm-ci-water7.test.sh` retains the Water 7 timing-summary regression for explicit re-enablement.
 
 ## 2026-08-30 current-candidate equivalence refresh
 
@@ -106,14 +109,14 @@ At that historical point, `N=2` was not wired into CI for this lane until a new 
 
 ## Historical fallback policy
 
-`bin/fm-ci.sh`, invoked by `.github/workflows/ci-water7-fallback.yml` after primary CI failure or by manual dispatch:
+`bin/fm-ci.sh`, historically invoked by `.github/workflows/ci-water7-fallback.yml.disabled` after primary CI failure or by manual dispatch:
 
 ```sh
 bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1
 bin/fm-test-run.sh --lane portable-parallel-2
 ```
 
-The current Water 7 policy still invokes `portable-parallel-1` with `--jobs 2`; the 2026-08-30 refresh above re-proves that command after the candidate replacement and reorder.
+The historical Water 7 policy invoked `portable-parallel-1` with `--jobs 2`; the 2026-08-30 refresh re-proved that command after the candidate replacement and reorder.
 
 Measured opportunity on this host at acceptance time:
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-ci.sh - the single command policy for Firstmate's one-job Water 7 CI run.
+# fm-ci.sh - retained command policy for Firstmate's one-job Water 7 CI run.
 #
 # Lanes run one after another in that single job. The upstream portable serial
 # partition is retained as its repository-owned shards, but those shards remain
@@ -25,6 +25,17 @@ set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
+
+FM_DISABLED_ADAPTERS_CONFIG="${FM_CONFIG_OVERRIDE:-${FM_HOME:-$ROOT}/config}/disabled-adapters"
+# shellcheck source=bin/fm-disabled-adapters-lib.sh
+. "$ROOT/bin/fm-disabled-adapters-lib.sh"
+if fm_disabled_adapter water7; then
+  printf 'error: Water 7 is disabled by config/disabled-adapters\n' >&2
+  exit 1
+else
+  fm_ci_disabled_rc=$?
+  [ "$fm_ci_disabled_rc" -eq 1 ] || exit "$fm_ci_disabled_rc"
+fi
 
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"

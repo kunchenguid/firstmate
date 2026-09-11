@@ -144,7 +144,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-identity metadata and PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check.sh`         | Refresh validated PR identity, then atomically arm a static merge poll                |
-| `fm-pr-merge.sh`         | Record PR identity and any captain-authorized override, merge the canonical full GitHub or GitLab URL bound to the verified head, then refuse every outcome it cannot prove landed, queued ones included, while leaving the poll armed |
+| `fm-pr-merge.sh`         | Record PR identity and any captain-authorized override, merge the canonical full GitHub URL or enabled GitLab URL bound to the verified head, then refuse every outcome it cannot prove landed, queued ones included, while leaving the poll armed |
 | `fm-merge-outcome-lib.sh` | Publish a confirmed merge's durable, role-routed supervision outcome                 |
 | `fm-parent-channel-lib.sh` | Resolve a secondmate home's parent channel and append a captain-facing outcome line to it at most once |
 | `fm-promote.sh`          | Promote a writer scout task in place to a protected ship task with an explicit delivery mode and durable instructions carrying that mode's definition of done |

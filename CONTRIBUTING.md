@@ -111,8 +111,8 @@ Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
 Pull-request CI owns one low-memory lint pass, focused teardown/spawn/delivery/wake safety tests, and three critical end-to-end smokes in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 The complete behavior suite, real-Herdr setup, invariants, coverage guard, timing aggregation, and stock macOS Bash compatibility run on `main` pushes or pull requests carrying the `full-ci` label.
-If primary CI fails, [`.github/workflows/ci-water7-fallback.yml`](.github/workflows/ci-water7-fallback.yml) may run the complete `Suite` on the dedicated self-hosted `water-7` runner; maintainers may also dispatch that fallback manually.
-The fallback executes one job at a time and refuses a suite verdict when the shared host's one-minute load is above 12.
+Water 7 fallback CI is disabled by this fork's tracked `config/disabled-adapters` policy.
+Its retained workflow is [`.github/workflows/ci-water7-fallback.yml.disabled`](.github/workflows/ci-water7-fallback.yml.disabled), and `bin/fm-ci.sh` refuses to run it until the repository owner explicitly re-enables the platform.
 Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.
 Leave the `sleep 0.1` cadence in the suites' bounded condition waits alone.
 Those sleeps look like recoverable overhead - `fm-watch-triage.test.sh` alone issues about 1,900 of them, each paying a flat ~100ms scheduler wake-up penalty on macOS - but they are not overhead added to the clock; they are how a test waits for a subject that only moves on `fm-watch.sh`'s own one-second `FM_POLL` cadence.

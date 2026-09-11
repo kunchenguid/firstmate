@@ -10,8 +10,10 @@ set -u
 LC_ALL=C
 export LC_ALL
 DETAIL_STATE=${FM_PR_POLL_DETAIL_STATE:-0}
+VALIDATED=0
 
 if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+  VALIDATED=1
   provider=$2
   url=$3
   host=$4
@@ -45,6 +47,18 @@ esac
 case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
+
+# The watcher executes this source through the validated root copy, while the
+# static state-file copy remains data-only. Refuse disabled GitLab polling here
+# without executing glab or turning the watch cycle into a failure.
+if [ "$VALIDATED" -eq 1 ] && [ "$provider" = gitlab ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+  FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+  # shellcheck source=bin/fm-pr-lib.sh
+  . "$SCRIPT_DIR/fm-pr-lib.sh"
+  fm_pr_provider_enabled gitlab 2>/dev/null || exit 0
+fi
 
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so

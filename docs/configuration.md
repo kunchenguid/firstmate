@@ -455,11 +455,13 @@ Its `remove` action excises only the marker-delimited Firstmate region and remov
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
-## Disabled adapters (config/disabled-adapters)
+## Disabled surfaces (config/disabled-adapters)
 
-This fork's tracked `config/disabled-adapters` policy holds one lowercase harness or runtime-backend name per non-comment line.
-`fm-harness.sh` and `fm-backend.sh` refuse listed selections before launch or auto-detection, and `fm-test-run.sh` omits their dedicated tests from default selection and coverage accounting.
-The policy is inherited into secondmate homes, so an upstream sync cannot reactivate a listed adapter.
+This fork's tracked `config/disabled-adapters` policy holds one lowercase harness, runtime-backend, or platform name per non-comment line.
+`fm-harness.sh` and `fm-backend.sh` refuse listed selections before launch or auto-detection, `fm-pr-check.sh` and `fm-pr-merge.sh` refuse disabled GitLab, and `fm-ci.sh` refuses disabled Water 7.
+`fm-test-run.sh` omits mapped dedicated tests from default selection and coverage accounting.
+Disabled workflow files remain retained with a `.disabled` suffix.
+The policy is inherited into secondmate homes, so an upstream sync cannot reactivate a listed surface.
 Only the repository owner may remove a name from this file.
 
 ## Worker launch environment (config/launch-env-allowlist)

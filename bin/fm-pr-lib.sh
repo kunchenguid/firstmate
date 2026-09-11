@@ -91,6 +91,24 @@ FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_POLL_RETIREMENT_REJECTED=
 
+FM_PR_LIB_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+FM_PR_LIB_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_PR_LIB_ROOT}}"
+FM_DISABLED_ADAPTERS_CONFIG="${FM_CONFIG_OVERRIDE:-$FM_PR_LIB_HOME/config}/disabled-adapters"
+# shellcheck source=bin/fm-disabled-adapters-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-disabled-adapters-lib.sh"
+
+fm_pr_provider_enabled() {  # <provider>
+  local rc
+  [ "$1" = gitlab ] || return 0
+  if fm_disabled_adapter gitlab; then
+    printf 'error: GitLab is disabled by config/disabled-adapters\n' >&2
+    return 1
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 1 ] || return "$rc"
+}
+
 fm_task_id_path_safe() {
   local id=${1-}
   local LC_ALL=C
