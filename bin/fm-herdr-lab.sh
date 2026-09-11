@@ -173,6 +173,8 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
 # environment mechanics; the guards below own who may be attached to.
 # Per-session locks are deliberately absent: generated fm-lab-<label>-$$-$RANDOM
 # names have no caller that starts one viewer concurrently, so locks add risk.
+# A subsecond interrupt window and SIGKILL residue are accepted in this isolated
+# lab helper because teardown drops any stray viewer connection with the session.
 
 readonly fm_herdr_lab_viewer_timeout_seconds=5
 readonly fm_herdr_lab_viewer_launcher_grace_seconds=6
@@ -286,13 +288,14 @@ fm_herdr_lab_viewer_start() { # <session>
   [ -f "$launcher" ] || { fm_herdr_lab_error "missing viewer launcher at $launcher"; return 1; }
   log=$(fm_herdr_lab_viewer_log_path "$name")
   mkdir -p "$(fm_herdr_lab_state_dir)" || return 1
-  nohup python3 "$launcher" "$name" "$record" >"$log" 2>&1 &
-  launcher_pid=$!
+  launcher_pid=
   if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     interrupt_traps=1
-    trap 'trap - INT TERM; fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 130' INT
-    trap 'trap - INT TERM; fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 143' TERM
+    trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 130' INT
+    trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 143' TERM
   fi
+  nohup python3 "$launcher" "$name" "$record" >"$log" 2>&1 &
+  launcher_pid=$!
 
   waited=0
   attempt=$((timeout * 5))

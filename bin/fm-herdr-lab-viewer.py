@@ -54,9 +54,11 @@ TERMINATE_GRACE_SECONDS = 5.0
 READ_CHUNK = 65536
 ROWS = 40
 COLS = 120
+TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
 
 def _child(slave, master, session):
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, TERMINATION_SIGNALS)
     os.setsid()
     try:
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
@@ -133,9 +135,11 @@ def main(argv):
     # Before the fork, so the TUI's first grid read already sees a real size.
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 
+    signal.pthread_sigmask(signal.SIG_BLOCK, TERMINATION_SIGNALS)
     try:
         viewer_pid = os.fork()
     except OSError as error:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, TERMINATION_SIGNALS)
         sys.stderr.write("fm-herdr-lab-viewer: could not fork the viewer: %s\n" % error)
         return 3
     if viewer_pid == 0:
@@ -151,6 +155,7 @@ def main(argv):
     signal.signal(signal.SIGTERM, _cancel_before_record)
     signal.signal(signal.SIGINT, _cancel_before_record)
     signal.signal(signal.SIGHUP, _cancel_before_record)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, TERMINATION_SIGNALS)
 
     os.close(slave)
     try:
