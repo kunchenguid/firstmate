@@ -333,12 +333,15 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
 # native message on the first call. A second case proves the already-complete
 # path reaches the same result.
 probe_pi_sessionstart_prerequisite() {
-  local version lab project home config sessions session=pi-race
+  local version calm_state calm_extension lab project home config sessions session resume_session resume_session_file
   local pane i session_file first_line second_line
+  calm_state=${FM_PI_CALM_STATE:-on}
+  calm_extension=${FM_PI_CALM_EXTENSION:-$ROOT/.pi/extensions/fm-calm.ts}
+  session="pi-race-$calm_state"
   command -v pi >/dev/null 2>&1 || fail "pi not found for the offline /new provider-prerequisite regression"
   version=$(pi --version 2>/dev/null | head -n 1)
   [ -n "$version" ] || version=unknown
-  lab="$LAB/pi-race"
+  lab="$LAB/pi-race-$calm_state"
   project="$lab/project"
   home="$lab/home"
   config="$lab/config"
@@ -349,9 +352,15 @@ probe_pi_sessionstart_prerequisite() {
   git -C "$project" config user.name fmtest
   printf '# Offline Pi startup-prerequisite lab\n' > "$project/AGENTS.md"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/"
+  cp "$calm_extension" "$project/.pi/extensions/fm-calm.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts" \
+    "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" \
+    "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" \
+    "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$project/.pi/extensions/lib/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
     "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$project/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-operational-input.sh" "$project/bin/"
+  printf '%s\n' "$calm_state" > "$config/calm"
   cat > "$project/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -367,6 +376,14 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+printf 'source=%s\n' "$source_name" >> "$state/sources"
+if [ "$source_name" = startup ]; then
+  : > "$state/startup-started"
+  while [ ! -f "$state/release-startup" ]; do sleep 0.02; done
+  printf 'RACE_NATIVE generation=0\n'
+  : > "$state/startup-completed"
+  exit 0
+fi
 if [ "$source_name" != clear ]; then
   printf 'INITIAL_STARTUP source=%s\n' "$source_name"
   exit 0
@@ -444,11 +461,23 @@ export default function (pi: ExtensionAPI): void {
       const stream = createAssistantMessageEventStream();
       const texts = context.messages.map((message) => textOf(message.content));
       const all = texts.join("\n");
-      const prompt = all.includes("IMMEDIATE_RACE_PROMPT")
-        ? "immediate"
-        : all.includes("PROVEN_RACE_PROMPT")
-          ? "proven"
-          : "other";
+      const promptByMarker = new Map([
+        ["FRESH_FEEDBACK_PROMPT", "fresh"],
+        ["RESUME_FEEDBACK_PROMPT", "resume"],
+        ["IMMEDIATE_RACE_PROMPT", "immediate"],
+        ["PROVEN_RACE_PROMPT", "proven"],
+        ["FAILURE_FEEDBACK_PROMPT", "failure"],
+      ]);
+      let latestPromptMarker: string | undefined;
+      let latestMarkerPosition = -1;
+      for (const marker of promptByMarker.keys()) {
+        const position = all.lastIndexOf(marker);
+        if (position > latestMarkerPosition) {
+          latestPromptMarker = marker;
+          latestMarkerPosition = position;
+        }
+      }
+      const prompt = promptByMarker.get(latestPromptMarker ?? "") ?? "other";
       const nativeCount = texts.filter((text) => text.includes("RACE_NATIVE generation=")).length;
       const manual = all.includes("RACE_MANUAL");
       if (prompt !== "other") {
@@ -460,6 +489,12 @@ export default function (pi: ExtensionAPI): void {
       const output = assistant(model);
       queueMicrotask(() => {
         stream.push({ type: "start", partial: output });
+        if (prompt === "failure") {
+          output.stopReason = "error";
+          stream.push({ type: "error", reason: "error", error: output });
+          stream.end();
+          return;
+        }
         if (prompt !== "other" && nativeCount === 0 && !manual) {
           output.stopReason = "toolUse";
           const toolCall = {
@@ -500,7 +535,7 @@ TS
   git -C "$project" commit -q -m init
 
   tmux -L "$SOCKET" new-session -d -s "$session" -c "$project" -x 180 -y 50 \
-    "env FM_HOME='$home' FM_ROOT_OVERRIDE='$project' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --session-dir '$sessions' --no-context-files --no-skills --no-prompt-templates --tools bash --model race-local/deterministic; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 60" \
+    "env FM_HOME='$home' FM_ROOT_OVERRIDE='$project' FM_CONFIG_OVERRIDE='$config' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --session-dir '$sessions' --no-context-files --no-skills --no-prompt-templates --tools bash --model race-local/deterministic; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 60" \
     || fail "Pi $version: could not start the offline /new lab"
   i=0
   while [ "$i" -lt 200 ]; do
@@ -512,6 +547,51 @@ TS
   done
   printf '%s\n' "$pane" | grep -Fq 'deterministic' \
     || { printf '%s\n' "$pane" >&2; fail "Pi $version: offline local provider did not reach the ready composer"; }
+
+  i=0
+  while [ "$i" -lt 500 ] && [ ! -f "$home/state/startup-started" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -f "$home/state/startup-started" ] \
+    || { capture "$session" >&2; fail "Pi $version: fresh startup generation never started"; }
+  tmux -L "$SOCKET" send-keys -t "$session" -l FRESH_FEEDBACK_PROMPT
+  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  sleep 0.5
+  [ ! -s "$home/state/provider-calls" ] \
+    || fail "Pi $version: the fresh provider call escaped before startup settled"
+  if [ "$calm_state" = on ]; then
+    capture "$session" | grep -Fq '\__/' \
+      || { capture "$session" >&2; fail "Pi $version: Calm-on fresh startup gave no visible working presentation"; }
+  else
+    capture "$session" | grep -Fq 'Preparing session' \
+      || { capture "$session" >&2; fail "Pi $version: Calm-off fresh startup gave no visible preflight feedback"; }
+  fi
+  : > "$home/state/release-startup"
+  i=0
+  while [ "$i" -lt 1000 ] && ! grep -Fq 'prompt=fresh native_count=1 manual=false' "$home/state/provider-calls" 2>/dev/null; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  grep -Fqx 'prompt=fresh native_count=1 manual=false' "$home/state/provider-calls" \
+    || { capture "$session" >&2; fail "Pi $version: fresh first payload lacked exactly one native startup context"; }
+  [ "$(grep -Fc 'prompt=fresh native_count=1 manual=false' "$home/state/provider-calls")" -eq 1 ] \
+    || fail "Pi $version: fresh startup made more than one provider call"
+  wait_for_text "$session" 'RACE_RESULT prompt=fresh native_count=1 manual=false' 60 \
+    || fail "Pi $version: fresh local-provider turn did not settle"
+  if [ "$calm_state" = on ]; then
+    if capture "$session" | grep -Fq '\__/'; then
+      capture "$session" >&2
+      fail "Pi $version: Calm-on working presentation remained after settle"
+    fi
+  elif capture "$session" | grep -Fq 'Preparing session'; then
+    capture "$session" >&2
+    fail "Pi $version: Calm-off preflight feedback remained after settle"
+  fi
+  session_file=$(find "$sessions" -type f -name '*.jsonl' -exec grep -l FRESH_FEEDBACK_PROMPT {} + 2>/dev/null | head -1 || true)
+  [ -n "$session_file" ] || fail "Pi $version: fresh session file was not found"
+  [ "$(grep -Fc FRESH_FEEDBACK_PROMPT "$session_file")" -eq 1 ] \
+    || fail "Pi $version: fresh prompt was persisted other than once"
+  [ "$(grep -Fc 'RACE_NATIVE generation=0' "$session_file")" -eq 1 ] \
+    || fail "Pi $version: fresh startup context persisted other than once"
+  : > "$home/state/provider-calls"
 
   tmux -L "$SOCKET" send-keys -t "$session" -l /new
   tmux -L "$SOCKET" send-keys -t "$session" Enter
@@ -534,6 +614,8 @@ TS
   done
   grep -Fqx 'prompt=immediate native_count=1 manual=false' "$home/state/provider-calls" \
     || { capture "$session" >&2; fail "Pi $version: immediate first payload lacked exactly one native startup context"; }
+  [ "$(grep -Fc 'prompt=immediate native_count=1 manual=false' "$home/state/provider-calls")" -eq 1 ] \
+    || fail "Pi $version: immediate /new made more than one provider call"
   wait_for_text "$session" 'RACE_RESULT prompt=immediate native_count=1 manual=false' 60 \
     || fail "Pi $version: immediate local-provider turn did not settle"
   session_file=$(find "$sessions" -type f -name '*.jsonl' -exec grep -l IMMEDIATE_RACE_PROMPT {} + 2>/dev/null | head -1 || true)
@@ -565,19 +647,79 @@ TS
     || fail "Pi $version: immediate provider evidence changed unexpectedly: $first_line"
   [ "$second_line" = 'prompt=proven native_count=1 manual=false' ] \
     || fail "Pi $version: proven provider evidence changed unexpectedly: $second_line"
+  [ "$(grep -Fc 'prompt=proven native_count=1 manual=false' "$home/state/provider-calls")" -eq 1 ] \
+    || fail "Pi $version: proven /new made more than one provider call"
   [ "$(grep -c '^clear-start:' "$home/state/events")" -eq 2 ] \
     || fail "Pi $version: two /new generations did not execute native startup exactly once each"
   [ ! -f "$home/state/manual-started" ] \
     || fail "Pi $version: proven fixed path executed manual startup"
 
+  tmux -L "$SOCKET" send-keys -t "$session" -l FAILURE_FEEDBACK_PROMPT
+  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  i=0
+  while [ "$i" -lt 1000 ] && ! grep -Fqx 'prompt=failure native_count=1 manual=false' "$home/state/provider-calls" 2>/dev/null; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  grep -Fqx 'prompt=failure native_count=1 manual=false' "$home/state/provider-calls" \
+    || fail "Pi $version: provider failure did not make its expected request"
+  wait_for_text "$session" FAILURE_FEEDBACK_PROMPT 60 \
+    || fail "Pi $version: provider failure prompt did not reach the transcript"
+  [ "$(grep -Fc 'prompt=failure native_count=1 manual=false' "$home/state/provider-calls")" -eq 1 ] \
+    || fail "Pi $version: provider failure made an unexpected number of requests"
+  if [ "$calm_state" = on ]; then
+    if capture "$session" | grep -Fq '\__/'; then
+      capture "$session" >&2
+      fail "Pi $version: Calm-on working presentation remained after provider failure"
+    fi
+  elif capture "$session" | grep -Fq 'Preparing session'; then
+    capture "$session" >&2
+    fail "Pi $version: Calm-off preflight feedback remained after provider failure"
+  fi
+
+  resume_session_file=$session_file
   tmux -L "$SOCKET" send-keys -t "$session" -l /quit
   tmux -L "$SOCKET" send-keys -t "$session" Enter
   wait_for_text "$session" 'PI_EXIT=0' 30 || fail "Pi $version: offline /new lab did not exit cleanly"
-  pass "Pi $version: immediate and completed-before-prompt /new paths each made one first provider call with exactly one native startup context and no manual execution"
+  resume_session="pi-resume-$calm_state"
+  tmux -L "$SOCKET" new-session -d -s "$resume_session" -c "$project" -x 180 -y 50 \
+    "env FM_HOME='$home' FM_ROOT_OVERRIDE='$project' FM_CONFIG_OVERRIDE='$config' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --session '$resume_session_file' --no-context-files --no-skills --no-prompt-templates --tools bash --model race-local/deterministic; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 60" \
+    || fail "Pi $version: could not start the resume feedback lab"
+  i=0
+  while [ "$i" -lt 200 ]; do
+    pane=$(capture "$resume_session")
+    printf '%s\n' "$pane" | grep -Fq 'race-local-provider.ts' && \
+      printf '%s\n' "$pane" | grep -Fq 'deterministic' && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  printf '%s\n' "$pane" | grep -Fq 'deterministic' \
+    || { capture "$resume_session" >&2; fail "Pi $version: resume lab did not reach the ready composer"; }
+  : > "$home/state/provider-calls"
+  tmux -L "$SOCKET" send-keys -t "$resume_session" -l RESUME_FEEDBACK_PROMPT
+  tmux -L "$SOCKET" send-keys -t "$resume_session" Enter
+  i=0
+  while [ "$i" -lt 1000 ] && ! grep -Fq 'prompt=resume native_count=1 manual=false' "$home/state/provider-calls" 2>/dev/null; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  grep -Fqx 'prompt=resume native_count=1 manual=false' "$home/state/provider-calls" \
+    || { capture "$resume_session" >&2; fail "Pi $version: resume payload lacked exactly one native startup context"; }
+  [ "$(grep -Fc 'prompt=resume native_count=1 manual=false' "$home/state/provider-calls")" -eq 1 ] \
+    || fail "Pi $version: resume made more than one provider call"
+  [ "$(tail -n 1 "$home/state/sources")" = 'source=resume' ] \
+    || fail "Pi $version: explicit session launch did not route through the resume source"
+  wait_for_text "$resume_session" 'RACE_RESULT prompt=resume native_count=1 manual=false' 60 \
+    || fail "Pi $version: resume local-provider turn did not settle"
+  tmux -L "$SOCKET" send-keys -t "$resume_session" -l /quit
+  tmux -L "$SOCKET" send-keys -t "$resume_session" Enter
+  wait_for_text "$resume_session" 'PI_EXIT=0' 30 || fail "Pi $version: resume lab did not exit cleanly"
+  pass "Pi $version ($calm_state): fresh, /new, failure, and explicit resume paths preserved feedback cleanup and exactly-once provider/native context"
 }
 
 if [ "${FM_PI_SESSIONSTART_RACE_LIVE_E2E:-0}" = 1 ]; then
-  probe_pi_sessionstart_prerequisite
+  FM_PI_CALM_STATE=on probe_pi_sessionstart_prerequisite
+  FM_PI_CALM_STATE=off probe_pi_sessionstart_prerequisite
   if [ "${FM_SESSIONSTART_HOOK_LIVE_E2E:-0}" != 1 ]; then
     echo "# fm-sessionstart-hook-live-e2e.test.sh: offline Pi /new race assertions passed"
     exit 0

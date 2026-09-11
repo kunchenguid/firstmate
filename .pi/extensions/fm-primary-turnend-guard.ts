@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   classifyFirstmateCurrentOperationalText,
+  FIRSTMATE_SESSIONSTART_PREFLIGHT_EVENT,
   encodeFirstmateOperationalInput,
   firstmateShellInvocation,
 } from "./lib/fm-operational-input.ts";
@@ -560,6 +561,7 @@ export default function (pi: ExtensionAPI) {
       source as SessionstartSource,
       sessionIdFromContext(ctx),
     );
+    pi.events.emit(FIRSTMATE_SESSIONSTART_PREFLIGHT_EVENT, undefined);
   });
 
   pi.on?.("before_agent_start", async (_event, ctx) => {

@@ -6,6 +6,10 @@ const operationalInputScript =
   process.env.FM_OPERATIONAL_INPUT_SCRIPT ||
   resolve(dirname(fileURLToPath(import.meta.url)), "../../../bin/fm-operational-input.sh");
 
+// The primary session-start adapter publishes this before an awaited native
+// preflight, so Calm can present feedback only for that otherwise-silent wait.
+export const FIRSTMATE_SESSIONSTART_PREFLIGHT_EVENT = "firstmate:sessionstart-preflight";
+
 export const FIRSTMATE_CURRENT_OPERATIONAL_KINDS = [
   "session-start",
   "post-compact",

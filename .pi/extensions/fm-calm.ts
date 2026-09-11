@@ -49,6 +49,7 @@ import { Box, Container, getKeybindings, type Component } from "@earendil-works/
 import type { TSchema } from "typebox";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
+import { FIRSTMATE_SESSIONSTART_PREFLIGHT_EVENT } from "./lib/fm-operational-input.ts";
 import {
   CALM_WORKING_SHIP_WIDGET_KEY,
   createCalmWorkingShipAnimation,
@@ -130,6 +131,7 @@ export default function (pi: ExtensionAPI) {
   // continuations, retries, or compaction that stay inside the same run.
   let agentRunActive = false;
   let workingShipShown = false;
+  let sessionstartPreflightPending = false;
   // One animation instance per extension lifetime. Hiding the working widget freezes
   // this state; the next working period resumes it. session_start resets it so a fresh
   // Pi session starts at the normal initial position. Never module-global.
@@ -194,6 +196,9 @@ export default function (pi: ExtensionAPI) {
   };
 
   registerFirstmateSyntheticPresentation(pi);
+  pi.events.on(FIRSTMATE_SESSIONSTART_PREFLIGHT_EVENT, () => {
+    sessionstartPreflightPending = true;
+  });
 
   // Every on-screen tool row Calm currently presents, keyed by the row-local state Pi
   // hands its render slots, so Calm can repaint exactly those rows without touching
@@ -458,19 +463,34 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
-  pi.on("agent_start", (_event, ctx) => {
+  pi.on("before_agent_start", (_event, ctx) => {
+    if (!sessionstartPreflightPending) return;
     agentRunActive = true;
+    if (!calmPresentationIsActive()) {
+      ctx.ui.setStatus("firstmate-calm", ctx.ui.theme.fg("dim", "Preparing session…"));
+    }
+    applyWorkingPresentation(ctx.ui);
+  });
+
+  pi.on("agent_start", (_event, ctx) => {
+    sessionstartPreflightPending = false;
+    agentRunActive = true;
+    ctx.ui.setStatus("firstmate-calm", undefined);
     applyWorkingPresentation(ctx.ui);
   });
 
   // agent_settled is emitted from a finally block, so it also covers abort and failure.
   pi.on("agent_settled", (_event, ctx) => {
+    sessionstartPreflightPending = false;
     agentRunActive = false;
+    ctx.ui.setStatus("firstmate-calm", undefined);
     applyWorkingPresentation(ctx.ui);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
+    sessionstartPreflightPending = false;
     agentRunActive = false;
+    ctx.ui.setStatus("firstmate-calm", undefined);
     applyWorkingPresentation(ctx.ui);
   });
 
