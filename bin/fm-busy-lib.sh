@@ -297,7 +297,7 @@ fm_busy_record_read() {  # <state-dir> <id>
 # Pi push sources. A version allowlist would be false precision and a maintenance
 # treadmill for an auto-updating vendor binary: busy classification receives
 # only the normalized muse harness identity, while session metadata records
-# semver 0.1.0 plus a build SHA that cannot be matched against it. Resolution
+# a Muse semver plus a build SHA that cannot be matched against it. Resolution
 # failures - no sidecar, no matching log, an unreadable or run-free log - remain
 # unknown because those prove nothing about the turn either way. See
 # docs/verification/muse.md for the evidence.

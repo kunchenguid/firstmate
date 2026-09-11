@@ -28,8 +28,8 @@ TMP_ROOT=$(fm_test_tmproot fm-muse-harness)
 
 # --- session-log fixtures ---------------------------------------------------
 
-# muse_log_metadata <workspace-root>: the first record of every session log,
-# which is what binds a log to a task worktree.
+# muse_log_metadata <workspace-root>: the session metadata record that binds a
+# log to a task worktree.
 muse_log_metadata() {
   printf '{"schema_version":1,"id":"d77de583","stream":{"kind":"session","id":"52f21aea"},"sequence":1,"record_type":"event","durability":"durable","payload_type":"runtime.session.metadata","payload":{"kind":"metadata","record":{"workspace_root":"%s","provider_id":"meta","build":{"sha":"427a430436","semver":"0.1.0"}}}}\n' "$1"
 }
