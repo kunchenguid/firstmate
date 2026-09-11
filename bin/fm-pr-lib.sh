@@ -1014,3 +1014,74 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
 }
+
+# --- review-ready notification marker ----------------------------------------
+# bin/fm-notify.sh posts one review-ready notification per task PR and records
+# the exact notified PR identity here, so a re-run of the notifier for the same
+# PR is a no-op. A different PR for the same task replaces the marker when its
+# own notification is published. The merge marker above is deliberately
+# separate: a review-ready notification is not a merge outcome. Removed at
+# teardown alongside the other per-task PR-poll artifacts.
+fm_pr_poll_ready_notified_matches() {  # <marker> <device> <provider> <host> <path> <number>
+  local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
+  local version provider host path number
+  fm_pr_private_file_valid "$marker" 600 "$device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-ready-notified-v1 ] \
+    && [ "$provider" = "$expected_provider" ] \
+    && [ "$host" = "$expected_host" ] \
+    && [ "$path" = "$expected_path" ] \
+    && [ "$number" = "$expected_number" ]
+}
+
+fm_pr_poll_ready_already_notified() {  # <state> <id> <provider> <host> <path> <number>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 marker state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-notified"
+  fm_pr_poll_ready_notified_matches "$marker" "$state_device" \
+    "$provider" "$host" "$path" "$number"
+}
+
+fm_pr_poll_ready_mark_notified() {  # <state> <id> <provider> <host> <path> <number>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 marker tmp state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-notified"
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-notified.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-ready-notified-v1 "$provider" "$host" "$path" "$number" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_poll_ready_notified_matches "$tmp" "$state_device" \
+      "$provider" "$host" "$path" "$number" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker" \
+    || ! fm_pr_poll_ready_notified_matches "$marker" "$state_device" \
+      "$provider" "$host" "$path" "$number"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_pr_poll_ready_notified_remove() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
+  marker="$state/$id.pr-notified"
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  rm -f -- "$marker"
+}

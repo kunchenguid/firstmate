@@ -153,3 +153,8 @@ case "$READY_RC" in
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
 printf 'armed: state/%s.check.sh\n' "$ID"
+
+# Review-ready Discord notification, best-effort and after the PR record and
+# poll are durable. The guard keeps a notification failure from changing this
+# step's exit status; bin/fm-notify.sh is silent when no webhook is configured.
+"$SCRIPT_DIR/fm-notify.sh" task-ready "$ID" "$URL" || true
