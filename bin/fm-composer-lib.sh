@@ -661,6 +661,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
   local agy_opening_row=-1 agy_closing_row=-1
+  local unsafe_rows='' unsafe_row
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
   while IFS= read -r line; do
@@ -733,6 +734,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     if [ "$kind" = top ] || { [ "$kind" = ascii ] && [ "$top" -lt 0 ]; }; then
       if [ -n "$cy" ] && [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; then
         FM_COMPOSER_SCAN_UNSAFE=1
+        unsafe_rows="$unsafe_rows $row"
       fi
       top=$row
       FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM=$row
@@ -796,6 +798,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
           if { [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ] && [ "$cy" -le "$row" ]; } \
              || [ "$row" -eq "$cy" ]; then
             FM_COMPOSER_SCAN_UNSAFE=1
+            unsafe_rows="$unsafe_rows $row"
           fi
         fi
       fi
@@ -838,6 +841,10 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   done <<EOF
 $pane
 EOF
+  if [ -n "$cy" ] && [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ]; then
+    FM_COMPOSER_SCAN_UNSAFE=1
+    unsafe_rows="$unsafe_rows $top"
+  fi
   local agy_end_row=-1
   local agy_first_row=-1 agy_first_line agy_first_trimmed
   if [ "$agy_opening_row" -ge 0 ] && [ "$agy_closing_row" -gt "$agy_opening_row" ]; then
@@ -861,9 +868,13 @@ EOF
        && [ "$FM_COMPOSER_SCAN_SHELL_ROW" -le "$agy_end_row" ]; then
       FM_COMPOSER_SCAN_SHELL_ROW=-1
     fi
-  fi
-  if [ -n "$cy" ] && [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ]; then
-    FM_COMPOSER_SCAN_UNSAFE=1
+    FM_COMPOSER_SCAN_UNSAFE=0
+    for unsafe_row in $unsafe_rows; do
+      if [ "$unsafe_row" -lt "$agy_opening_row" ] || [ "$unsafe_row" -gt "$agy_closing_row" ]; then
+        FM_COMPOSER_SCAN_UNSAFE=1
+        break
+      fi
+    done
   fi
 }
 

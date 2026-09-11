@@ -764,6 +764,23 @@ test_agy_prompt_preserves_structural_draft_rows() {
   pass "fm_composer: agy preserves prompt and shell-looking multiline rows"
 }
 
+test_agy_ignores_incomplete_boxes_inside_pair() {
+  local boundary screen out extract
+  boundary=$(printf '─%.0s' {1..16})
+  screen="$boundary"$'\n> draft\n╭────╮\n│ x\n'"$boundary"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3 probe-absent)
+  [ "$out" = pending ] \
+    || fail "an incomplete box inside an AGY draft must stay pending, got '$out'"
+  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen")
+  [ "$extract" = 'draft ╭────╮ │ x' ] \
+    || fail "an incomplete box inside an AGY draft lost rows, got '$extract'"
+  screen=$'╭────╮\n│ x\n'"$boundary"$'\n> draft\n'"$boundary"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3 probe-absent)
+  [ "$out" = unknown ] \
+    || fail "an incomplete box outside an AGY pair must remain unknown, got '$out'"
+  pass "fm_composer: AGY ignores incomplete boxes only inside its draft pair"
+}
+
 test_agy_prompt_uses_complete_positional_boundaries() {
   local caps boundary16 boundary72 boundary15 screen out extract
   boundary16=$(printf '─%.0s' {1..16})
@@ -973,6 +990,7 @@ test_agy_prompt_requires_footer_proof
 test_agy_prompt_requires_footer_proof_without_cursor
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts
 test_agy_prompt_preserves_structural_draft_rows
+test_agy_ignores_incomplete_boxes_inside_pair
 test_agy_prompt_uses_complete_positional_boundaries
 test_agy_bottommost_boundary_pair_anchors_current_composer
 test_agy_boundary_is_locale_independent
