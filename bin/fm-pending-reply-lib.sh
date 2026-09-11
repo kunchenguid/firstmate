@@ -1078,10 +1078,10 @@ fm_pending_reply_escalation_payload() {  # <record-path> <kind>
   [ -n "$task_id" ] && [ -n "$corr" ] || return 1
   case "$kind" in
     missed)
-      token=pending-reply-missed
+      token='pending-reply-missed'
       ;;
     delivery-unknown)
-      token=pending-reply-delivery-unknown
+      token='pending-reply-delivery-unknown'
       ;;
     recovery-delivery)
       outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
