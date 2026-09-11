@@ -771,10 +771,14 @@ cmd_start() {
   CLAIM_STATE_DEVICE=$FM_PROCEVENT_CLAIM_STATE_DEVICE
   CLAIM_STATE_INODE=$FM_PROCEVENT_CLAIM_STATE_INODE
   STAGED_OUTPUT=
+  # Exit cleanup must not wait for the source lock: retire and reconcile hold it
+  # while waiting for this runner, so blocking here creates a circular wait
+  # broken only by KILL. On contention, leave the generation-bound claim for
+  # the stopper or subsequent reconciliation to reclaim.
   release_start_claim() {
     extension_lifecycle_lock_release 2>/dev/null || true
     [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
-    fm_procevent_source_lock_acquire "$CLAIM_ID" 2>/dev/null || return 0
+    fm_procevent_source_lock_try_acquire "$CLAIM_ID" 2>/dev/null || return 0
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
       && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
       && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
@@ -1097,11 +1101,17 @@ start_owner_guard() {  # <source-id>
 
 # The runner's owner guard, which bounds an accidentally orphaned detached
 # runner after its home ends. It revalidates the recorded physical state root
-# and its lease on a bounded cadence and, after two consecutive checks cannot prove
+# and its lease on a bounded cadence and, after two consecutive reads cannot prove
 # both, invokes the identity-gated stop for the runner's whole process group -
 # which is what reaches the blocking child and everything that child spawned,
 # exactly as retirement does. A failed verified stop stays on the retry cadence;
 # an absent leader ends the guard without signalling an ambiguous group.
+#
+# Those two reads are spaced HALF a check interval apart, so the pair completes
+# within one check interval rather than costing two. That keeps the debounce -
+# one unreadable read still cannot end a live runner - while bounding detection
+# at the lease plus a single check interval. The spacing is what was tightened;
+# the second read is what must not be traded away for it.
 #
 # Scope is the owning state root and this one runner generation. It never
 # matches on a script name, a command line, or a process name: those are shared
@@ -1109,7 +1119,7 @@ start_owner_guard() {  # <source-id>
 # proves its own owner through that home's own lease.
 cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file> <state-device> <state-inode>
   local id=${1-} pid=${2-} identity=${3-} ready=${4-} state_device=${5-} state_inode=${6-}
-  local lease tick misses=0 pid_state state_identity current_device current_inode
+  local lease tick half misses=0 pid_state state_identity current_device current_inode
   [ "$#" -eq 6 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$pid" in ''|*[!0-9]*) die "runner pid must be a positive integer: $pid" ;; esac
@@ -1124,6 +1134,16 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
     || die "FM_PROCEVENT_OWNER_LEASE_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS to $FM_PROCEVENT_OWNER_LEASE_MAX_SECONDS"
   tick=$(fm_procevent_owner_check_seconds) \
     || die "FM_PROCEVENT_OWNER_CHECK_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS to $FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS"
+  # Force base ten before any arithmetic. The validator accepts a zero-prefixed
+  # value and `[` reads it as decimal, but `$(( ))` would read it as octal: 010
+  # would halve to 4 rather than 5, and 08 would not be a number at all and
+  # would end the guard before it reports ready, so the runner would fail closed
+  # and never listen. Every value the validator accepts must keep working.
+  tick=$((10#$tick))
+  # Half the configured interval, kept exact for an odd interval so the smallest
+  # configurable interval still yields two reads rather than collapsing to one.
+  half=$((tick / 2))
+  [ $((tick % 2)) -eq 0 ] || half="$half.5"
   fm_procevent_pid_state "$pid" "$identity"
   pid_state=$?
   [ "$pid_state" -eq 0 ] || die "runner identity changed before owner guard initialization"
@@ -1137,7 +1157,7 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
   printf 'ready\n' > "$ready" || die "cannot confirm owner guard initialization"
   trap - EXIT
   while :; do
-    sleep "$tick"
+    sleep "$half"
     fm_procevent_pid_state "$pid" "$identity"
     pid_state=$?
     case "$pid_state" in
@@ -1157,6 +1177,8 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
       continue
     fi
     # Two consecutive misses, so one unreadable read cannot end a live runner.
+    # They are half an interval apart, so requiring the second costs detection
+    # time inside the interval already budgeted rather than a second interval.
     misses=$((misses + 1))
     [ "$misses" -ge 2 ] || continue
     if stop_runner_pid "$pid" "$identity"; then
@@ -1270,20 +1292,35 @@ cmd_reconcile() {
 # its own process group leader, so the group signal is what actually reaches the
 # blocking child - signalling only the runner would leave that child alive and
 # reparented, which is exactly how a source that never completes leaks.
-runner_group_signal() {  # <signal> <pid> <identity>
-  local signal=$1 pid=$2 identity=$3 state pgid
-  # KNOWN LIMIT: only an alive identity-matched leader proves group ownership.
-  # Detected reused PIDs and absent leaders are refused before signalling;
-  # launch pacing, leases, and reconcile cleanup are the backstop.
-  fm_procevent_pid_state "$pid" "$identity"
-  state=$?
-  case "$state" in
-    0) ;;
-    1) fm_procevent_group_alive "$pid" && return 2; return 1 ;;
-    *) return 2 ;;
-  esac
-  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
-  [ "$pgid" = "$pid" ] || return 2
+# docs/configuration.md owns the operating contract and unproved-group limits.
+# A leaderless group nobody in this call ever proved remains refused for every
+# caller, and that untouched refusal is what makes a crashed leader's group
+# permanent. Relaxing it is a SEPARATE OPEN QUESTION, not something this path
+# assumes: an unresolved question has to be marked unresolved where the decision
+# is made, because a reader who does not know it is open will read a bare refusal
+# as settled design and eventually relax it.
+runner_group_signal() {  # <signal> <pid> <identity> [proved]
+  local signal=$1 pid=$2 identity=$3 proved=${4-} state pgid
+  if [ -n "$proved" ]; then
+    # This stop proved ownership before TERM; only its own escalation may reuse
+    # that same proof within the same stop_runner_pid call. Re-reading the leader
+    # as our signal ends it would discard that proof, not disprove ownership.
+    # A group encountered without proof remains refused by the unproved path.
+    fm_procevent_group_alive "$pid" || return 1
+  else
+    # Before the first signal, require a live identity-matched group leader:
+    # absent, unreadable, reused, or nonleader PIDs cannot prove ownership.
+    # Launch pacing, leases, and reconcile cleanup remain the backstop.
+    fm_procevent_pid_state "$pid" "$identity"
+    state=$?
+    case "$state" in
+      0) ;;
+      1) fm_procevent_group_alive "$pid" && return 2; return 1 ;;
+      *) return 2 ;;
+    esac
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2
+    [ "$pgid" = "$pid" ] || return 2
+  fi
   # KNOWN LIMIT: portable shell cannot make this verification and signal atomic,
   # so the PID and group could be reused in the interval between them.
   kill -"$signal" -"$pid" 2>/dev/null || return 2
@@ -1301,7 +1338,7 @@ stop_runner_pid() {  # <pid> <identity>
     sleep 0.1
     i=$((i + 1))
   done
-  runner_group_signal KILL "$pid" "$identity"
+  runner_group_signal KILL "$pid" "$identity" proved
   signal_state=$?
   [ "$signal_state" -eq 0 ] || return "$signal_state"
   i=0

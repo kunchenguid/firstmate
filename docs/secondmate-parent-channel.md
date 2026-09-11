@@ -9,7 +9,7 @@ This note records why a secondmate home's captain-facing outcomes are delivered 
 A secondmate is a firstmate in its own home, and nobody reads its chat: the captain and the main firstmate see only what is appended to the parent channel.
 On 2026-09-02 four outcomes across two mate homes never reached the captain.
 The watcher had delivered the parent's request within a minute each time, the mate did the work, and then the mate addressed "captain" in its own chat instead of appending to the channel.
-The cause is structural rather than a one-off lapse: `AGENTS.md` tells every firstmate to reach the captain and to address the captain in every response, while the charter's return-channel rule is a smaller, later instruction.
+The cause is structural rather than a one-off lapse: the mate can satisfy the [address rule in `AGENTS.md`](../AGENTS.md#firstmate) in local chat while missing the charter's later return-channel instruction.
 The captain's framing of the requirement was: "the root problem is not specific to PRs, right? it looks like any message or outcomes from second mates can miss. we need to make sure our fixes are addressing this in a principled, fundamental way, not surgically treating the symptoms of just this PR update miss."
 A PR-ready report was the observed symptom, but a finding, a decision, a blocker, and a failure all fail the same way, because every one of them depended on the mate model remembering to write one line.
 
@@ -42,7 +42,7 @@ A missed-reply escalation includes the complete first sighting path and line num
 
 ## What is deliberately not built
 
-- No mirror of the mate's chat: every firstmate turn contains captain-facing text by mandate, so choosing which sentence is an outcome would itself be model behavior, and every harness exposes turn text differently.
+- No mirror of the mate's chat: chat can mix outcomes with other conversation, so choosing which sentence is an outcome would itself be model behavior, and every harness exposes turn text differently.
 - No threshold escalation of a child's open decision or blocker: a decision the mate escalates is a captain hold, which is published; a decision the mate neither answers nor escalates is a supervision-quality question, separable from channel delivery.
 - No second watcher or standalone scanner: a lightweight ledger pass runs inside the existing inactive-outcome command on every watcher poll and reuses its receipts and upstream append.
 - No orphan lifecycle: teardown refuses instead of removing an undelivered outcome, the same way it refuses on other unlanded conditions.

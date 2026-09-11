@@ -27,6 +27,8 @@
 #      escalating as a false miss
 #  14. The mechanical helper writes the parent channel from (verb, corr, note)
 #  15. Remote parent-replies.status is not classified as wrong-home
+#  16. An escalated correlation stays retryable while undelivered, is never reset
+#      once delivered, and its delivery-unknown decision still closes on resolve
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1504,6 +1506,70 @@ test_failed_send_discards_undelivered_expectation() {
   pass "failed transport discards undelivered expectation only"
 }
 
+test_escalated_undelivered_correlation_stays_retryable() {
+  local home state corr rec marker delivered_corr delivered_rec open
+  home=$(setup_parent escalated-retry)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=9600
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "wake after lost transport")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  # The owner prepared the delivery, the remote transport was lost, and the
+  # watcher escalated the unknown delivery before any resend ran.
+  fm_pending_reply_prepare_delivery "$state" "$corr" || fail "prepare delivery failed"
+  fm_pending_reply_mark_delivery_unknown "$state" "$corr" || fail "mark delivery unknown failed"
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "delivery-unknown escalation should fire"
+  [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase should be escalated"
+  [ -z "$(fm_pending_reply_get "$rec" delivered_epoch)" ] || fail "escalation must not invent delivery"
+  [ "$(grep -cF "blocked [key=pending-reply-$corr]:" "$state/hibit.status")" = 1 ] \
+    || fail "delivery-unknown escalation should publish once"
+  fm_pending_reply_corr_reusable "$state" "$corr" hibit \
+    || fail "an escalated undelivered correlation must stay reusable by its owner"
+  if fm_pending_reply_corr_reusable "$state" "$corr" other 2>/dev/null; then
+    fail "an escalated correlation must not be reusable for another task"
+  fi
+  fm_pending_reply_reset_known_undelivered "$state" "$corr" \
+    || fail "an escalated undelivered correlation must reset for its resend"
+  [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+    || fail "reset should return the undelivered escalation to awaiting_report"
+  [ ! -e "$marker" ] || fail "reset should drop the stale attempted marker"
+  [ -n "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
+    || fail "reset must keep the escalation history so its decision can still close"
+  open=$(status_open_decisions "$state/hibit.status" | cut -f1)
+  [ "$open" = "pending-reply-$corr" ] \
+    || fail "the published escalation must stay open until the record resolves, got '$open'"
+  # The resend lands and the mate reports: the ordinary resolve closes the
+  # delivery-unknown decision the retry left open.
+  export FM_PENDING_REPLY_NOW=9601
+  fm_pending_reply_prepare_delivery "$state" "$corr" || fail "resend prepare failed"
+  fm_pending_reply_confirm_delivery "$state" "$corr" || fail "resend confirm failed"
+  [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ] || fail "resend should confirm delivery"
+  printf 'done [corr=%s]: routed work picked up\n' "$corr" >> "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "correlated report should resolve"
+  [ "$(phase_of "$state" "$corr")" = resolved ] || fail "phase should be resolved"
+  open=$(status_open_decisions "$state/hibit.status")
+  [ -z "$open" ] || fail "resolution left the delivery-unknown decision open: $open"
+  # A delivered record escalated for a genuine missed report is never reset.
+  export FM_PENDING_REPLY_NOW=9700
+  delivered_corr=$(fm_pending_reply_create "$home" "$state" "hibit" "delivered then missed")
+  delivered_rec=$(fm_pending_reply_path "$state" "$delivered_corr")
+  fm_pending_reply_mark_delivered "$state" "$delivered_corr" || fail "mark delivered failed"
+  fm_pending_reply_set "$delivered_rec" phase escalated
+  fm_pending_reply_set "$delivered_rec" escalated_epoch 9700
+  if fm_pending_reply_corr_reusable "$state" "$delivered_corr" hibit 2>/dev/null; then
+    fail "a delivered escalated correlation must not be reusable"
+  fi
+  if fm_pending_reply_reset_known_undelivered "$state" "$delivered_corr" 2>/dev/null; then
+    fail "a delivered escalated correlation must never be reset"
+  fi
+  [ "$(phase_of "$state" "$delivered_corr")" = escalated ] \
+    || fail "refused reset must leave the delivered escalation untouched"
+  [ "$(fm_pending_reply_get "$delivered_rec" delivered_epoch)" = 9700 ] \
+    || fail "refused reset must keep the confirmed delivery"
+  unset FM_PENDING_REPLY_NOW
+  pass "an escalated correlation stays retryable only while undelivered"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1544,5 +1610,6 @@ test_child_status_wrong_home_is_not_copied
 test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
+test_escalated_undelivered_correlation_stays_retryable
 
 printf 'ok - all pending-reply tests passed\n'

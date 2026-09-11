@@ -22,7 +22,7 @@ The supervision branch itself is Pi-only by construction:
 ## Components and their owners
 
 - Wake dispatch: `.pi/extensions/fm-primary-pi-watch.ts` stays the dispatcher; `.pi/extensions/lib/fm-branch-dispatch.ts` owns the offer handshake and row eligibility, while [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor consume contract.
-  A successful row grant transfers ownership of exactly the currently branch-eligible rows to the branch; a check-kind triggering close (merge-confirmation polls, Relay mentions, credential/auth failures, and every other legitimately main-only class) is never offered even when other rows are eligible, no acceptor (extension absent, away mode, branch broken) keeps today's wake-to-main path for that close, and watcher-failure alarms always go to main because only main can repair the watcher cycle.
+  A successful row grant transfers ownership of exactly the currently branch-eligible rows to the branch; a check-kind triggering close (merge-confirmation polls, Relay mentions, credential/auth failures, and every other legitimately main-only class) is never offered even when other rows are eligible, no acceptor (extension absent, legacy away daemon flag, branch broken) keeps today's wake-to-main path for that close, and watcher-failure alarms always go to main because only main can repair the watcher cycle.
   A decision-owned event surfaced by `bin/fm-watch.sh`'s signal path gets the identical treatment even though it keeps the ordinary `signal` kind.
   `signal_files_actionable` marks the queued payload `needs-decision:` for a newly surfaced `needs-decision`, a `captain-held` declaration surfaced through the no-verb fallback, or a pending-reply second-mate escalation; `scopeForUnreadWake` excludes every marked row from what the branch may claim.
   For a stale row, `scopeForUnreadWake` folds the mapped task's status log and excludes the row when any `needs-decision` remains open or the current meaningful declaration is `captain-held`; an unreadable or symlinked status log fails the scope closed rather than influencing routing.
@@ -64,7 +64,7 @@ The supervision branch itself is Pi-only by construction:
   [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the consume-side guarantee that neither actor can present or acknowledge the other's claim.
   Heartbeat keeps its own all-or-nothing recheck over the rows it can claim: it takes every branch-ownable unread row or none of them, and an unresolvable task-local row still defers the whole review to main.
   A producer can still append a row in the instant between that final check and drain startup; this accepted residual follows the confused-agent-grade boundary above rather than claiming adversarial queue isolation.
-  Away mode and a broken branch between its bounded recovery probes keep today's wake-to-main behavior.
+  A legacy away daemon flag and a broken branch between its bounded recovery probes keep today's wake-to-main behavior; the away-posture record alone leaves the branch active.
 
 ## Off-thread delivery
 
@@ -150,8 +150,9 @@ No caching machinery beyond this exists, deliberately: any later dynamic content
 
 ## Away mode
 
-Away mode carries over unchanged: while `state/.afk` exists the away daemon owns supervision, and the branch declines every wake offer for the duration.
-What is new is only the attended path: outside away mode, the branch absorbs the routine majority that previously interrupted the captain's conversation, applying the same escalation etiquette the daemon applies while away.
+On Pi the away daemon is no longer launched: `/afk` writes the away-posture record (`state/.afk-contract`, owned by `bin/fm-afk-contract.sh`) and never the `state/.afk` daemon flag, so the branch keeps its attended shape under the record until the posture-aware dispatch lands in a later phase.
+The branch's decline while `state/.afk` exists is retained only for a legacy flag left by an older daemon launch.
+What the branch already does for the captain is unchanged: it absorbs the routine majority that previously interrupted the captain's conversation, applying the same escalation etiquette the daemon applies on the harnesses that still run one.
 
 ## Verification
 

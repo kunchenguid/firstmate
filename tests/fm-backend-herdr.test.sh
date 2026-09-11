@@ -14,6 +14,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/herdr-test-safety.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
+# shellcheck source=tests/herdr-client-pair-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
@@ -57,6 +59,11 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 } >> "$LOG"
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS:-0}" != 1 ]; then
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+  exit 0
+fi
+if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
+  reason=${FM_FAKE_HERDR_FOREGROUND_REASON:-no_foreground_client}
+  printf '{"result":{"reason":"%s"}}\n' "$reason"
   exit 0
 fi
 n=$next
@@ -153,6 +160,9 @@ done
 case "$cmd $sub" in
   "status --json")
     printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+    ;;
+  "terminal title")
+    printf '{"result":{"reason":"no_foreground_client"}}\n'
     ;;
   "workspace list")
     jq_state '{result:{workspaces:.workspaces}}'
@@ -327,6 +337,235 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
   assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''list'$'\x1f''--session'$'\x1f''fmtest' \
     "fm_backend_herdr_cli did not append a trailing --session <name> flag (the fix for the env-var-alone routing bug)"
   pass "fm_backend_herdr_cli: sets HERDR_SESSION AND appends a trailing --session flag on every call"
+}
+
+# --- client selection: a stale client shadowing a compatible one -------------
+#
+# Two herdr clients on PATH is a real host shape (a self-updated ~/.local/bin
+# copy next to a package-managed one), and the fixed remote-job PATH resolves
+# ~/.local/bin first. A client older than the running server answers every
+# command with error code protocol_mismatch (verified: herdr 0.8.2, protocol
+# 20, against a 0.9.0 server, protocol 22), and until the adapter learned to
+# step around it, a live remote secondmate read `unreadable`, every doorbell
+# into it failed, and the relaunch that would repair it was refused.
+
+# run_with_clients <dir> <path-dirs...> -- <bash -c body>: sources the adapter
+# in a fresh shell whose PATH holds exactly the named client directories plus
+# jq and the system tail, so no herdr from the runner's own PATH can leak in.
+# Bodies are bash -c sources, so their single-quoted $ expansions are
+# deliberate (SC2016).
+# shellcheck disable=SC2016
+run_with_clients() {  # <dir> <path> <body>
+  local dir=$1 path=$2 body=$3
+  FM_HERDR_PAIR_DIR="$dir" PATH="$path:$dir/tools:/usr/bin:/bin" \
+    bash -c ". \"\$0/bin/backends/herdr.sh\"; $body" "$ROOT"
+}
+
+# The #4091 widening, and the boundary it is deliberately confined to.
+#
+# A recovery-grade read that cannot confirm the pane is `missing` only when the
+# session's server is POSITIVELY stopped - absence for that whole session -
+# and stays `unreadable` otherwise. The two signals are driven apart here on
+# purpose: the SAME failed pane read is settled two ways by the server state
+# alone, so the case cannot go quietly vacuous if one signal stops being read.
+#
+# The second half matters as much as the first: the widening must not reach the
+# husk classifier under it, because that one licenses CLOSING panes.
+test_recovery_grade_read_widens_only_at_its_own_boundary() {
+  local dir log resp fb gone running husk
+
+  herdr_state_with_server() {  # <dir-suffix> <server-running-json>
+    local dir="$TMP_ROOT/recovery-widen-$1" resp log fb
+    mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+    # 1: the pane read, failing in a way this parse cannot interpret.
+    printf 'Error: socket unavailable\n' > "$resp/1.out"
+    printf '1\n' > "$resp/1.exit"
+    # 2: the server-state read that settles it.
+    printf '{"client":{"protocol":22},"server":{"running":%s}}\n' "$2" > "$resp/2.out"
+    fb=$(make_herdr_fakebin "$dir")
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w1:p2' "$ROOT"
+  }
+
+  gone=$(herdr_state_with_server gone false)
+  running=$(herdr_state_with_server running true)
+  [ "$gone" = missing ] \
+    || fail "an uninterpretable pane read against a positively stopped server must read missing, got '$gone'"
+  [ "$running" = unreadable ] \
+    || fail "an uninterpretable pane read against a RUNNING server must stay unreadable, got '$running'"
+  [ "$gone" != "$running" ] \
+    || fail "the server-state signal is not being consulted: both verdicts are '$gone'"
+
+  # An unreadable server state is not evidence of absence either.
+  dir="$TMP_ROOT/recovery-widen-unknown"; mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  printf 'Error: socket unavailable\n' > "$resp/1.out"; printf '1\n' > "$resp/1.exit"
+  printf 'not json at all\n' > "$resp/2.out"; printf '1\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w1:p2' "$ROOT")
+  [ "$out" = unreadable ] \
+    || fail "a server state that cannot itself be read must keep the conservative verdict, got '$out'"
+
+  # The confinement: the husk classifier sees the SAME stopped-server read and
+  # must still refuse, because it is what licenses closing a pane.
+  dir="$TMP_ROOT/recovery-widen-husk"; mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  printf 'Error: socket unavailable\n' > "$resp/1.out"; printf '1\n' > "$resp/1.exit"
+  printf '{"client":{"protocol":22},"server":{"running":false}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  husk=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2; printf " "; fm_backend_herdr_tab_is_husk fmtest w1:p2 && printf husk || printf refused' "$ROOT")
+  [ "$husk" = "unknown refused" ] \
+    || fail "the stopped-server rule leaked into the husk classifier, which licenses closing panes: got '$husk'"
+  pass "herdr recovery-grade read: a stopped server means missing there, and nowhere else"
+}
+
+test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one() {
+  local dir out err
+  dir="$TMP_ROOT/client-pair-bypass"; make_herdr_client_pair "$dir"
+  out=$(run_with_clients "$dir" "$dir/stale:$dir/current" 'fm_backend_herdr_agent_state fm-remote:wCY:p2' 2>"$dir/stderr") \
+    || fail "agent-state read with a shadowing stale client should not fail"
+  err=$(cat "$dir/stderr")
+  [ "$out" = alive ] || fail "a live remote pane behind a stale shadowing client should read alive, got: $out (stderr: $err)"
+  assert_contains "$(cat "$dir/current.log")" "pane get wCY:p2" "the compatible client should have served the pane read"
+  assert_contains "$(cat "$dir/current.log")" "agent get wCY:p2" "the compatible client should have served the agent read"
+  [ -z "$err" ] || fail "a successful bypass must print nothing on stderr (callers merge stderr into parsed JSON), got: $err"
+  pass "herdr client selection: a live pane behind a stale shadowing client reads alive"
+}
+
+# shellcheck disable=SC2016
+test_cli_caches_the_selected_client_within_a_process() {
+  local dir out
+  dir="$TMP_ROOT/client-pair-cache"; make_herdr_client_pair "$dir"
+  out=$(run_with_clients "$dir" "$dir/stale:$dir/current" \
+    'fm_backend_herdr_cli fm-remote pane get wCY:p2 >/dev/null 2>&1
+     fm_backend_herdr_cli fm-remote agent get wCY:p2 >/dev/null 2>&1
+     printf "%s" "${FM_BACKEND_HERDR_BIN:-unset}"')
+  [ "$out" = "$dir/current/herdr" ] \
+    || fail "the compatible client should be selected and exported, got: $out"
+  [ "$(grep -c 'pane get\|agent get' "$dir/stale.log")" -eq 1 ] \
+    || fail "after selection the stale client must not be retried in the same process, got: $(cat "$dir/stale.log")"
+  assert_contains "$(cat "$dir/current.log")" "agent get wCY:p2" "the second call should go straight to the selected client"
+  pass "herdr client selection: one selected client is reused per process"
+}
+
+# shellcheck disable=SC2016
+test_cli_scopes_the_selected_client_to_its_session() {
+  local dir out
+  dir="$TMP_ROOT/client-pair-cross-session"
+  mkdir -p "$dir/stale" "$dir/current" "$dir/tools"
+  ln -sf "$(command -v jq)" "$dir/tools/jq"
+  cat > "$dir/stale/herdr" <<'SH'
+#!/usr/bin/env bash
+session=${!#}
+printf '%s\n' "$*" >> "${FM_HERDR_PAIR_DIR:?}/stale.log"
+if [ "${1:-} ${2:-}" = "status --json" ]; then
+  if [ "$session" = fresh ]; then
+    printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":false}}\n'
+  elif [ -e "$FM_HERDR_PAIR_DIR/switched" ]; then
+    printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"protocol":20,"compatible":true}}\n'
+  else
+    printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true,"protocol":22,"compatible":false}}\n'
+  fi
+elif [ "$session" = fresh ] && [ "${1:-}" = server ]; then
+  printf 'path-default-server\n'
+elif [ "$session" = modern ] && [ -e "$FM_HERDR_PAIR_DIR/switched" ]; then
+  printf 'legacy\n'
+else
+  printf '{"error":{"code":"protocol_mismatch"}}\n' >&2
+  exit 1
+fi
+SH
+  cat > "$dir/current/herdr" <<'SH'
+#!/usr/bin/env bash
+session=${!#}
+printf '%s\n' "$*" >> "${FM_HERDR_PAIR_DIR:?}/current.log"
+if [ "${1:-} ${2:-}" = "status --json" ]; then
+  if [ "$session" = fresh ]; then
+    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":false}}\n'
+  elif [ -e "$FM_HERDR_PAIR_DIR/switched" ]; then
+    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true,"protocol":20,"compatible":false}}\n'
+  else
+    printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true,"protocol":22,"compatible":true}}\n'
+  fi
+elif [ "$session" = fresh ] && [ "${1:-}" = server ]; then
+  printf 'selected-server\n'
+elif [ "$session" = modern ] && [ ! -e "$FM_HERDR_PAIR_DIR/switched" ]; then
+  printf 'modern\n'
+else
+  printf '{"error":{"code":"protocol_mismatch"}}\n' >&2
+  exit 1
+fi
+SH
+  chmod +x "$dir/stale/herdr" "$dir/current/herdr"
+  out=$(run_with_clients "$dir" "$dir/stale:$dir/current" \
+    'fm_backend_herdr_cli modern pane get w1:p1 > "$FM_HERDR_PAIR_DIR/modern.out" || exit 1
+     fm_backend_herdr_cli fresh status --json > "$FM_HERDR_PAIR_DIR/fresh-status.out" || exit 1
+     fm_backend_herdr_cli fresh server > "$FM_HERDR_PAIR_DIR/server.out" || exit 1
+     touch "$FM_HERDR_PAIR_DIR/switched"
+     fm_backend_herdr_cli modern pane get w1:p1 > "$FM_HERDR_PAIR_DIR/legacy.out" || exit 1
+     printf "%s|%s|%s|%s|%s" "$(cat "$FM_HERDR_PAIR_DIR/modern.out")" "$(jq -r .server.running "$FM_HERDR_PAIR_DIR/fresh-status.out")" "$(cat "$FM_HERDR_PAIR_DIR/server.out")" "$(cat "$FM_HERDR_PAIR_DIR/legacy.out")" "${FM_BACKEND_HERDR_BIN:-PATH-default}"')
+  [ "$out" = 'modern|false|path-default-server|legacy|PATH-default' ] \
+    || fail "a selected client should stay scoped to its session while forced reselection still returns to the PATH default, got: $out"
+  assert_contains "$(cat "$dir/stale.log")" 'server --session fresh' "a stopped second session should start with the PATH-default client"
+  assert_not_contains "$(cat "$dir/current.log")" 'server --session fresh' "another session's selected client must not start the stopped session"
+  [ "$(grep -c 'pane get w1:p1' "$dir/current.log")" -eq 2 ] \
+    || fail "the selected client should be retried after its own server compatibility changes: $(cat "$dir/current.log")"
+  assert_contains "$(cat "$dir/stale.log")" 'pane get w1:p1' "the changed session call should retry on the newly compatible PATH-default client"
+  pass "herdr client selection: selected clients remain scoped to their session"
+}
+
+# shellcheck disable=SC2016
+test_cli_unrelated_failure_never_triggers_reselection() {
+  local dir out rc
+  dir="$TMP_ROOT/client-pair-unrelated"; make_herdr_client_pair "$dir"
+  # current first: its pane_not_found refusal is an ordinary business result,
+  # so the stale client behind it must never be consulted or selected.
+  out=$(run_with_clients "$dir" "$dir/current:$dir/stale" \
+    'fm_backend_herdr_cli fm-remote pane get wZZ:p9 2>&1; rc=$?; printf "\nrc=%s bin=%s\n" "$rc" "${FM_BACKEND_HERDR_BIN:-unset}"'); rc=$?
+  assert_contains "$out" 'pane_not_found' "the ordinary refusal must be replayed to the caller verbatim"
+  assert_contains "$out" 'rc=1 bin=unset' "an unrelated failure must keep the exit status and select nothing"
+  [ ! -e "$dir/stale.log" ] || fail "the shadowed client must not be consulted on an unrelated failure: $(cat "$dir/stale.log")"
+  pass "herdr client selection: only protocol_mismatch triggers reselection; other failures pass through untouched"
+}
+
+# shellcheck disable=SC2016
+test_cli_single_client_pays_no_selection_read() {
+  local dir out
+  dir="$TMP_ROOT/client-single"; make_herdr_client_pair "$dir"
+  out=$(run_with_clients "$dir" "$dir/current" 'fm_backend_herdr_cli fm-remote pane get wCY:p2 >/dev/null; printf "%s" "${FM_BACKEND_HERDR_BIN:-unset}"')
+  [ "$out" = unset ] || fail "a single healthy client must stay the PATH default, got: $out"
+  [ "$(grep -c status "$dir/current.log")" -eq 0 ] \
+    || fail "a healthy call must make no status read: $(cat "$dir/current.log")"
+  pass "herdr client selection: the happy path makes no extra call"
+}
+
+test_client_status_reads_both_status_shapes() {
+  local dir out
+  dir="$TMP_ROOT/client-status-shapes"; mkdir -p "$dir/bin" "$dir/tools"
+  ln -sf "$(command -v jq)" "$dir/tools/jq"
+  # An older client that reports protocols but no .server.compatible field
+  # (the pre-0.8 status shape) must be judged by protocol equality.
+  cat > "$dir/bin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${FM_HERDR_STATUS_SHAPE:?}" in
+  legacy-equal) printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true,"protocol":16}}\n' ;;
+  legacy-older) printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true,"protocol":22}}\n' ;;
+  no-protocol)  printf '{"client":{"version":"0.7.1"},"server":{"running":true}}\n' ;;
+  stopped)      printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":false}}\n' ;;
+esac
+SH
+  chmod +x "$dir/bin/herdr"
+  for shape in legacy-equal legacy-older no-protocol stopped; do
+    out=$(FM_HERDR_STATUS_SHAPE=$shape PATH="$dir/tools:/usr/bin:/bin" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_client_status "$1" fm-remote' "$ROOT" "$dir/bin/herdr")
+    case "$shape" in
+      legacy-equal) [ "$out" = 'true|true' ] || fail "legacy equal protocols should read compatible, got: $out" ;;
+      legacy-older) [ "$out" = 'true|false' ] || fail "legacy older client should read incompatible, got: $out" ;;
+      no-protocol)  [ "$out" = 'true|' ] || fail "a client reporting no protocol must read unknown, never false, got: $out" ;;
+      stopped)      [ "$out" = 'false|' ] || fail "a stopped server must read not running, got: $out" ;;
+    esac
+  done
+  pass "herdr client status: .server.compatible, legacy protocol equality, unknown, and stopped shapes all normalize"
 }
 
 # --- launcher_identity: the exact workspace a worker must be placed in -------
@@ -1430,16 +1669,73 @@ test_projection_close_refuses_active_tab() {
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t2","focused":true}]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t2","focused":true}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","workspace_id":"w9"},{"tab_id":"w9:t2","workspace_id":"w9"}]}}' > "$resp/4.out"
+  cp "$resp/1.out" "$resp/5.out"
+  cp "$resp/2.out" "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_FAKE_HERDR_FOREGROUND_REASON=cleared \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "cleanup must refuse when a live client is viewing the active tab"
+  assert_contains "$out" "target is the captain's active tab" \
+    "active-tab cleanup refusal did not explain the focus-safety boundary"
+  assert_contains "$(cat "$log")" $'terminal\x1ftitle\x1fclear' \
+    "live-client active-tab refusal did not probe foreground attachment"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' \
+    "active-tab cleanup refusal still closed the pane"
+  pass "herdr presentation focus: cleanup refuses rather than close the tab a live client is viewing"
+}
+
+test_projection_close_refuses_unknown_foreground_reason() {
+  local dir events out status
+  dir="$TMP_ROOT/projection-focus-unknown-foreground"; mkdir -p "$dir"
+  events="$dir/events"; : > "$events"
+  out=$(ROOT="$ROOT" EVENTS="$events" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() { printf "w9\tw9:t2"; }
+    fm_backend_herdr_emptying_close_plan() { printf "plain\n"; }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\",\"workspace_id\":\"w9\"}}}\n" ;;
+        "terminal title") printf "{\"result\":{\"reason\":\"set\"}}\n" ;;
+        "pane close") printf "close\n" >> "$EVENTS" ;;
+      esac
+    }
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2
+  ' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unexpected foreground response must not authorize an active-tab close"
+  [ ! -s "$events" ] || fail "unexpected foreground response still closed the pane"
+  assert_contains "$out" "could not verify whether a foreground client is viewing the target tab" \
+    "unexpected foreground response did not take the fail-closed unknown path"
+  pass "herdr presentation focus: unexpected foreground-client reasons fail closed"
+}
+
+test_projection_close_allows_stale_active_tab_without_foreground_client() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/projection-focus-stale-active-allow"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t2","focused":true}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t2","focused":true}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","workspace_id":"w9"},{"tab_id":"w9:t2","workspace_id":"w9"}]}}' > "$resp/4.out"
+  : > "$resp/5.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "cleanup must refuse when exact active-tab preservation is impossible"
-  assert_contains "$out" "target is the captain's active tab" \
-    "active-tab cleanup refusal did not explain the focus-safety boundary"
-  assert_not_contains "$(cat "$log")" $'pane\x1fclose' \
-    "active-tab cleanup refusal still closed the pane"
-  pass "herdr presentation focus: cleanup refuses rather than close the captain's active tab"
+  [ "$status" -eq 0 ] || fail "cleanup must close a persisted-focused tab when no live client is attached: $out"
+  assert_not_contains "$out" "target is the captain's active tab" \
+    "detached persisted-focus close still used the live-viewer refusal"
+  assert_contains "$(cat "$log")" $'terminal\x1ftitle\x1fclear' \
+    "detached persisted-focus close did not probe foreground attachment"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p2' \
+    "detached persisted-focus close did not close the exact pane"
+  assert_not_contains "$(cat "$log")" $'tab\x1ffocus' \
+    "detached persisted-focus close restored a persisted pointer with no live viewer"
+  pass "herdr presentation focus: cleanup closes a persisted-focused tab when no live client is attached"
 }
 
 test_projection_close_reports_focus_restore_failure() {
@@ -1496,6 +1792,106 @@ test_projection_close_rechecks_required_agent_state_at_boundary() {
   assert_not_contains "$(cat "$log")" "pane close" \
     "required close-boundary agent state still closed a live pane"
   pass "herdr presentation reclaim: live agent state at the close boundary refuses mutation"
+}
+
+test_projection_close_rechecks_foreground_client_after_agent_validation() {
+  local dir events attached out status
+  dir="$TMP_ROOT/projection-close-foreground-boundary"; mkdir -p "$dir"
+  events="$dir/events"; attached="$dir/attached"; : > "$events"
+  out=$(ROOT="$ROOT" EVENTS="$events" ATTACHED="$attached" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() { printf "w9\tw9:t2"; }
+    fm_backend_herdr_pane_agent_state() {
+      printf "agent\n" >> "$EVENTS"
+      : > "$ATTACHED"
+      printf no-agent
+    }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\"}}}\n" ;;
+        "terminal title")
+          printf "foreground\n" >> "$EVENTS"
+          if [ -e "$ATTACHED" ]; then
+            printf "{\"result\":{\"reason\":\"cleared\"}}\n"
+          else
+            printf "{\"result\":{\"reason\":\"no_foreground_client\"}}\n"
+          fi
+          ;;
+        "pane close") printf "close\n" >> "$EVENTS" ;;
+      esac
+    }
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 no-agent
+  ' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a client attaching during agent validation must defer the active-tab close"
+  [ "$(cat "$events")" = $'agent\nforeground' ] \
+    || fail "foreground attachment was not checked immediately after agent validation: $(cat "$events")"
+  assert_contains "$out" "target is the captain's active tab" \
+    "fresh foreground-client refusal did not explain the active-tab boundary"
+  pass "herdr presentation focus: active-tab attachment is rechecked after agent validation"
+}
+
+test_projection_close_rechecks_target_focus_after_planning() {
+  local dir events focused out status
+  dir="$TMP_ROOT/projection-close-focus-switch"; mkdir -p "$dir"
+  events="$dir/events"; focused="$dir/focused"; : > "$events"
+  out=$(ROOT="$ROOT" EVENTS="$events" FOCUSED="$focused" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() {
+      if [ -e "$FOCUSED" ]; then
+        printf "w9\tw9:t2"
+      else
+        printf "w1\tw1:t1"
+      fi
+    }
+    fm_backend_herdr_emptying_close_plan() {
+      : > "$FOCUSED"
+      printf "plain\n"
+    }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\",\"workspace_id\":\"w9\"}}}\n" ;;
+        "terminal title") printf "{\"result\":{\"reason\":\"cleared\"}}\n" ;;
+        "pane close") printf "close\n" >> "$EVENTS" ;;
+      esac
+    }
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2
+  ' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a target focused during planning must defer the pane close"
+  [ ! -s "$events" ] || fail "the focus-switched target was still mutated: $(cat "$events")"
+  assert_contains "$out" "target is the captain's active tab" \
+    "focus-switch refusal did not explain the active-tab boundary"
+  pass "herdr presentation focus: pre-close checkpoint catches a target focused during planning"
+}
+
+test_projection_close_preserves_live_focus_that_switched_away_from_target() {
+  local dir events sample out status
+  dir="$TMP_ROOT/projection-close-focus-switch-away"; mkdir -p "$dir"
+  events="$dir/events"; sample="$dir/sample"; : > "$events"; printf '0\n' > "$sample"
+  out=$(ROOT="$ROOT" EVENTS="$events" SAMPLE="$sample" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() {
+      local n
+      n=$(cat "$SAMPLE"); n=$((n + 1)); printf "%s\n" "$n" > "$SAMPLE"
+      if [ "$n" -eq 1 ]; then printf "w9\tw9:t2"; else printf "w1\tw1:t1"; fi
+    }
+    fm_backend_herdr_emptying_close_plan() { printf "plain\n"; }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\",\"workspace_id\":\"w9\"}}}\n" ;;
+        "terminal title") printf "{\"result\":{\"reason\":\"cleared\"}}\n" ;;
+      esac
+    }
+    fm_backend_herdr_explicit_close_pane_confirmed() { printf "close\n" >> "$EVENTS"; }
+    fm_backend_herdr_projection_focus_restore() { printf "restore:%s\n" "$2" >> "$EVENTS"; }
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2
+  ' 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a client switching from the target to another tab should allow the target close: $out"
+  [ "$(cat "$events")" = $'close\nrestore:w1\tw1:t1' ] \
+    || fail "close did not preserve the live client's fresh non-target focus: $(cat "$events")"
+  pass "herdr presentation focus: close preserves a live client that switches away from the target during planning"
 }
 
 # --- emptying-close focus-safe removal (Herdr 0.7.5 #1621 mitigation) ------
@@ -2245,8 +2641,12 @@ test_projection_seeded_prune_refuses_active_tab() {
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t1","focused":true}]}}' > "$resp/4.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","focused":true},{"tab_id":"w9:t2","focused":false}]}}' > "$resp/5.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}' > "$resp/6.out"
+  cp "$resp/1.out" "$resp/7.out"
+  cp "$resp/4.out" "$resp/8.out"
+  cp "$resp/5.out" "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_FAKE_HERDR_FOREGROUND_REASON=cleared \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w9 w9:t1 focus-preserving' "$ROOT" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "projected seeded pruning must refuse the active tab"
@@ -2794,7 +3194,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   [ -n "$agent_line" ] && [ "$agent_line" -lt "$close_line" ] \
     || fail "reclaim did not recheck the old pane agent state before the close"
   boundary_mutations=$(sed -n "$((agent_line + 1)),$((close_line - 1))p" "$log" \
-    | grep -Ev $'\x1f(tab\x1flist|pane\x1flist|workspace\x1flist)' || true)
+    | grep -Ev $'\x1f(tab\x1flist|pane\x1flist|workspace\x1flist|terminal\x1ftitle\x1fclear)' || true)
   [ -z "$boundary_mutations" ] \
     || fail "reclaim mutated between the old pane agent recheck and the close: $boundary_mutations"
   assert_not_contains "$calls" $'workspace\x1fclose' "reclaim introduced workspace-close authority"
@@ -4493,6 +4893,13 @@ test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
+test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
+test_recovery_grade_read_widens_only_at_its_own_boundary
+test_cli_caches_the_selected_client_within_a_process
+test_cli_scopes_the_selected_client_to_its_session
+test_cli_unrelated_failure_never_triggers_reselection
+test_cli_single_client_pays_no_selection_read
+test_client_status_reads_both_status_shapes
 test_launcher_identity_absent_without_a_herdr_pane
 test_launcher_identity_absent_when_herdr_env_alone_is_set
 test_launcher_identity_resolves_the_exact_pane_tab_and_workspace
@@ -4546,8 +4953,13 @@ test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab
+test_projection_close_refuses_unknown_foreground_reason
+test_projection_close_allows_stale_active_tab_without_foreground_client
 test_projection_close_reports_focus_restore_failure
 test_projection_close_rechecks_required_agent_state_at_boundary
+test_projection_close_rechecks_foreground_client_after_agent_validation
+test_projection_close_rechecks_target_focus_after_planning
+test_projection_close_preserves_live_focus_that_switched_away_from_target
 test_projection_close_emptying_after_focus_uses_pane_death_without_move
 test_projection_close_emptying_before_focus_repositions_then_uses_pane_death
 test_projection_close_emptying_before_last_focus_needs_no_move

@@ -914,7 +914,8 @@ pass "Lavish classification staging stays bounded while nonmatches stream"
 HW="$TMP_ROOT/hw"; new_home "$HW"
 TRIGW="$TMP_ROOT/trigger-restart-cut"
 pe_register "$HW" lavish restart-cut-src -- "$BLOCKER" "$TRIGW" "restart cut payload" >/dev/null
-pe "$HW" reconcile >/dev/null
+pe "$HW" start restart-cut-src > "$TMP_ROOT/restart-cut-start.log" 2>&1 &
+restart_cut_start_pid=$!
 sleep 0.5
 : > "$TRIGW"
 wait_for "$HW/state/.wake-queue" || fail "the restart-cut source published no event"
@@ -927,7 +928,10 @@ assert_contains "$(wake_payloads "$HW")" "procevent lavish restart-cut-src 1" \
 # capture a fresh generation; retiring leaves only the durable inbox and wake
 # state under test, matching the exact restart cut - the source side is done,
 # only the handling side is still open.
-pe "$HW" retire restart-cut-src >/dev/null
+# Publication precedes runner exit; wait for completion before retiring.
+wait "$restart_cut_start_pid" || fail "the restart-cut source did not complete"
+pe "$HW" retire restart-cut-src >/dev/null \
+  || fail "the restart-cut registration was not retired"
 
 # Drain the wake without handling it: the end-user experience of a session
 # reading the wake queue at turn end without yet acting on this specific line.
@@ -1287,8 +1291,12 @@ awk -v identity="$sr4_identity" 'NR == 4 { print identity; next } { print }' \
   "$sr4_claim" > "$sr4_claim.tmp" && mv "$sr4_claim.tmp" "$sr4_claim"
 chmod 0600 "$sr4_claim"
 chmod 755 "$HSR4/state"
-: > "$SR4_TRIGGER"
-pe "$HSR4" retire reused-group-src >/dev/null
+# Keep the child blocked so retirement alone ends the restored generation;
+# releasing it races natural exit against the first signal's ownership check.
+pe "$HSR4" retire reused-group-src >/dev/null \
+  || fail "retirement failed after restoring the reused-group fixture's identity"
+kill -0 -"$sr4_leader" 2>/dev/null \
+  && fail "retirement left the restored reused-group fixture running"
 pass "a reused pid never makes its surviving process group reclaimable"
 
 HJ="$TMP_ROOT/hj"; new_home "$HJ"
@@ -1530,63 +1538,113 @@ kill -0 "$noisy_child" 2>/dev/null && fail "TERM-resistant source child survived
 assert_absent "$staged" "retirement removes the tracked partial staging file"
 pass "live output stays bounded and retirement reaps the whole source group"
 
-HPOST_TERM="$TMP_ROOT/post-term-reuse"; new_home "$HPOST_TERM"
-POST_TERM_SOURCE="$TMP_ROOT/post-term-reuse-source.sh"
-POST_TERM_PID="$TMP_ROOT/post-term-reuse.pid"
-POST_TERM_MARKER="$TMP_ROOT/post-term-reuse.marker"
-POST_TERM_COUNT="$TMP_ROOT/post-term-reuse.count"
-cat > "$POST_TERM_SOURCE" <<'SH'
+# When a fixture never records TERM, capture the claim, leader, group, and
+# retirement output to help distinguish a blocked stop from a refused signal.
+# Collect this evidence only on the failure path so passing cases stay quiet.
+post_term_evidence() {  # <case> <runner-pid> <claim> <signals> <started-epoch> <retire-output>
+  local case=$1 runner=$2 claim=$3 signals=$4 started=$5 out=$6
+  {
+    printf 'post-TERM evidence (%s case)\n' "$case"
+    printf '  elapsed since retire started: %ss\n' "$(( $(date +%s) - started ))"
+    printf '  identity recorded at claim time: %s\n' "$(sed -n '4p' "$claim" 2>/dev/null || echo '<claim unreadable>')"
+    printf '  identity readable now (real ps): %s\n' "$(LC_ALL=C ps -p "$runner" -o lstart= 2>/dev/null || echo '<ps failed>')"
+    printf '  signals file: %s (%s bytes)\n' "$signals" "$(wc -c < "$signals" 2>/dev/null | tr -d ' ' || echo 0)"
+    printf '  leader state: %s\n' "$(ps -o pid=,ppid=,pgid=,stat= -p "$runner" 2>/dev/null || echo '<leader gone>')"
+    printf '  leader wchan: %s\n' "$(ps -o wchan= -p "$runner" 2>/dev/null || echo '<none>')"
+    printf '  live members of the runner group:\n'
+    ps -Ao pid,ppid,pgid,stat,wchan,command 2>/dev/null | awk -v g="$runner" 'NR==1 || $3==g' | sed 's/^/    /'
+    printf '  retire said: %s\n' "${out:-<no output>}"
+  } >&2
+}
+
+for post_term_case in mismatch unreadable unreadable-pgid nonleader; do
+  HPOST_TERM="$TMP_ROOT/post-term-$post_term_case"; new_home "$HPOST_TERM"
+  POST_TERM_SOURCE="$HPOST_TERM/source.sh"
+  POST_TERM_PID="$HPOST_TERM/child.pid"
+  POST_TERM_SIGNALS="$HPOST_TERM/child.signals"
+  cat > "$POST_TERM_SOURCE" <<'SH'
 #!/usr/bin/env bash
-trap '' TERM
+trap 'printf "signalled\n" >> "$2"' TERM
 printf '%s\n' "$$" > "$1"
-while :; do sleep 1; done
+while [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 1; done
 SH
-chmod +x "$POST_TERM_SOURCE"
-POST_TERM_BIN=$(fm_fakebin "$TMP_ROOT/post-term-reuse-bin")
-REAL_PS=$(command -v ps) || fail "the post-TERM reuse fixture requires ps"
-cat > "$POST_TERM_BIN/ps" <<SH
+  chmod +x "$POST_TERM_SOURCE"
+  POST_TERM_BIN=$(fm_fakebin "$HPOST_TERM/tools")
+  REAL_PS=$(command -v ps) || fail "the post-TERM reuse fixture requires ps"
+  pe_register "$HPOST_TERM" lavish post-term-src -- \
+    "$POST_TERM_SOURCE" "$POST_TERM_PID" "$POST_TERM_SIGNALS" >/dev/null
+  FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS=5 pe "$HPOST_TERM" reconcile >/dev/null
+  wait_for "$POST_TERM_PID" || fail "the post-TERM reuse fixture did not start"
+  wait_for "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
+    || fail "the post-TERM reuse fixture did not claim its source"
+  POST_TERM_RUNNER=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim")
+  # The child can publish its PID before startup releases the source lock.
+  # Cross that boundary before suspending the runner, or retirement waits on
+  # a stopped lock owner instead of exercising the signal checks below.
+  FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" pe "$HPOST_TERM" list >/dev/null \
+    || fail "the post-TERM fixture never finished its source launch"
+  kill -STOP "$POST_TERM_RUNNER" || fail "the post-TERM fixture could not keep its leader alive"
+  cat > "$POST_TERM_BIN/ps" <<SH
 #!/usr/bin/env bash
-if [ -e "$POST_TERM_MARKER" ] && [ "\${1-}" = -p ] \
+if [ "\${1-}" = -p ] && [ "\${2-}" = "$POST_TERM_RUNNER" ] \
   && [ "\${3-}" = -o ] && [ "\${4-}" = lstart= ]; then
-  count=0
-  [ ! -f "$POST_TERM_COUNT" ] || count=\$(cat "$POST_TERM_COUNT")
-  count=\$((count + 1))
-  printf '%s\n' "\$count" > "$POST_TERM_COUNT"
-  if [ "\$count" -gt 1 ]; then
-    printf 'post-TERM reused identity\n'
+  if [ "$post_term_case" = mismatch ]; then
+    printf 'reused identity\n'
     exit 0
   fi
+  [ ! -s "$POST_TERM_SIGNALS" ] || exit 1
+fi
+if [ "\${1-}" = -o ] && [ "\${2-}" = pgid= ] \
+  && [ "\${3-}" = -p ] && [ "\${4-}" = "$POST_TERM_RUNNER" ]; then
+  case "$post_term_case" in
+    unreadable-pgid) [ ! -s "$POST_TERM_SIGNALS" ] || exit 1 ;;
+    nonleader) printf '0\n'; exit 0 ;;
+  esac
 fi
 exec "$REAL_PS" "\$@"
 SH
-chmod +x "$POST_TERM_BIN/ps"
-pe_register "$HPOST_TERM" lavish post-term-src -- \
-  "$POST_TERM_SOURCE" "$POST_TERM_PID" >/dev/null
-FM_PROCEVENT_OWNER_CHECK_SECONDS=5 pe "$HPOST_TERM" reconcile >/dev/null
-wait_for "$POST_TERM_PID" || fail "the post-TERM reuse fixture did not start"
-wait_for "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
-  || fail "the post-TERM reuse fixture did not claim its source"
-POST_TERM_RUNNER=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim")
-touch "$POST_TERM_MARKER"
-post_term_status=0
-PATH="$POST_TERM_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
-  pe "$HPOST_TERM" retire post-term-src >/dev/null 2>&1 || post_term_status=$?
-[ "$post_term_status" -ne 0 ] || fail "retirement escalated after runner identity became ambiguous"
-# Which ambiguity the escalation meets here is platform-dependent, so this
-# asserts the invariant both forms share rather than one form's internals.
-# Where the runner leader keeps waiting on its TERM-ignoring source child the
-# post-TERM check sees a live leader whose identity no longer matches, and
-# where the leader dies promptly it sees a leaderless group carrying the same
-# numeric id; fm_procevent_pid_state reaches the second verdict without
-# consulting process identity at all, so counting identity lookups pins a
-# timing- and platform-dependent internal rather than the behavior.
-kill -0 -"$POST_TERM_RUNNER" 2>/dev/null \
-  || fail "an ambiguous reused-PID group was killed during escalation"
-kill -KILL -"$POST_TERM_RUNNER" 2>/dev/null || true
-for _ in $(seq 1 50); do kill -0 -"$POST_TERM_RUNNER" 2>/dev/null || break; sleep 0.1; done
-kill -0 -"$POST_TERM_RUNNER" 2>/dev/null && fail "could not clean up the post-TERM fixture group"
-pe "$HPOST_TERM" retire post-term-src >/dev/null
-pass "cleanup aborts escalation after runner identity becomes ambiguous"
+  chmod +x "$POST_TERM_BIN/ps"
+  post_term_status=0
+  post_term_started=$(date +%s)
+  post_term_out=$(PATH="$POST_TERM_BIN:$PATH" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-post-term-proc" \
+    pe "$HPOST_TERM" retire post-term-src 2>&1) || post_term_status=$?
+  case "$post_term_case" in
+    mismatch|nonleader)
+      assert_absent "$POST_TERM_SIGNALS" "the first signal refuses $post_term_case evidence"
+      [ "$post_term_status" -ne 0 ] || fail "retirement escalated despite $post_term_case evidence"
+      assert_contains "$post_term_out" "cannot confirm runner identity" \
+        "first-signal $post_term_case evidence refuses retirement"
+      kill -0 "$POST_TERM_RUNNER" 2>/dev/null \
+        || fail "the post-TERM fixture lost its leader instead of exercising $post_term_case evidence"
+      kill -0 -"$POST_TERM_RUNNER" 2>/dev/null \
+        || fail "a $post_term_case group was killed during escalation"
+      assert_present "$HPOST_TERM/state/procevent/post-term-src.source" \
+        "first-signal $post_term_case evidence preserves registration"
+      assert_present "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
+        "first-signal $post_term_case evidence preserves its claim"
+      kill -KILL -"$POST_TERM_RUNNER" 2>/dev/null || true
+      ;;
+    *)
+      if [ ! -s "$POST_TERM_SIGNALS" ]; then
+        post_term_evidence "$post_term_case" "$POST_TERM_RUNNER" \
+          "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" "$POST_TERM_SIGNALS" \
+          "$post_term_started" "$post_term_out"
+        fail "the post-TERM fixture never received TERM"
+      fi
+      [ "$post_term_status" -eq 0 ] \
+        || fail "retirement abandoned a proved stop after $post_term_case identity: $post_term_out"
+      assert_absent "$HPOST_TERM/state/procevent/post-term-src.source" \
+        "proved escalation retires the source after $post_term_case identity"
+      assert_absent "$FM_PROCEVENT_CLAIM_ROOT/post-term-src.claim" \
+        "proved escalation releases its claim after $post_term_case identity"
+      ;;
+  esac
+  for _ in $(seq 1 50); do kill -0 -"$POST_TERM_RUNNER" 2>/dev/null || break; sleep 0.1; done
+  kill -0 -"$POST_TERM_RUNNER" 2>/dev/null && fail "the post-TERM fixture group survived: $post_term_case"
+  pe "$HPOST_TERM" retire post-term-src >/dev/null
+  pass "stop $post_term_case evidence preserves the proved-stop boundary"
+done
 
 HBAD="$TMP_ROOT/hbad"; new_home "$HBAD"
 pe_register "$HBAD" lavish bad-limit -- /bin/true >/dev/null
@@ -2349,10 +2407,36 @@ chmod +x "$QUIET_STUB"
 
 # Short enough to observe, and driven through the same environment a real home
 # uses, so the bound under test is the shipped one rather than a test-only path.
+# One source of truth for the shortened lease and check these fixtures run under,
+# so a case that derives a deadline from the guard's documented bound cannot
+# silently diverge from the settings the guard is actually given.
+PROOF_LEASE_SECONDS=2
+PROOF_CHECK_SECONDS=1
+
+# The documented bound, derived here rather than restated as a flat number.
+#
+# The whole-second lease comparison is part of the bound, not slack: a lease of
+# N is honoured until its age reads N+1, so the lease term is N+1.
+PROOF_LEASE_BOUND=$((PROOF_LEASE_SECONDS + 1))
+# Detection is the lease plus ONE check interval. The guard still takes two
+# consecutive failing reads before it acts - one unreadable read must not end a
+# live runner - but they are spaced half an interval apart, so the pair fits
+# inside the single interval this term budgets.
+PROOF_DETECT_BOUND=$((PROOF_LEASE_BOUND + PROOF_CHECK_SECONDS))
+# The stop's own ceiling: two seconds for the ordinary signal, then two for the
+# forced one. Only a group that outlives the ordinary signal spends it, so a
+# case whose stub exits on that signal uses PROOF_PROMPT_STOP instead.
+PROOF_STOP_CEILING=4
+PROOF_PROMPT_STOP=1
+# Additive scheduling slack shared by cleanup and timing cases. The strict
+# timing case below owns and enforces its relation to BOUND_CHECK_SECONDS.
+PROOF_LOAD_SLACK=2
+
 orphan_pe() {  # <home> <command...>
   local home=$1
   shift
-  FM_PROCEVENT_OWNER_LEASE_SECONDS=2 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+  FM_PROCEVENT_OWNER_LEASE_SECONDS="$PROOF_LEASE_SECONDS" \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS="$PROOF_CHECK_SECONDS" \
     FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" "$@"
 }
 
@@ -2399,13 +2483,21 @@ pass "a detached listener starts reparented, with a live descendant tree under i
 # owning session is the single difference between the two listeners.
 keep_owner_present() { orphan_pe "$HKEEP" reconcile >/dev/null 2>&1 || true; sleep 0.25; }
 
-deadline=$((SECONDS + 40))
+# This stub exits on the ordinary signal, so the stop ceiling is not spent here.
+# The deadline is DERIVED from the documented bound; the timing case below is
+# the one that pins the bound's worst case, while this one asserts that the
+# reaping happens at all and cannot quietly take an unbounded amount of time.
+orphan_bound=$((PROOF_DETECT_BOUND + PROOF_PROMPT_STOP))
+deadline=$((SECONDS + orphan_bound + PROOF_LOAD_SLACK))
+orphan_started=$SECONDS
 while kill -0 -"$ORPHAN_PID" 2>/dev/null; do
   [ "$SECONDS" -lt "$deadline" ] \
-    || fail "a listener whose owning session was gone kept its process group running"
+    || fail "a listener whose owning session was gone kept its process group running for $((SECONDS - orphan_started))s, against a documented bound of ${orphan_bound}s"
   keep_owner_present
 done
-deadline=$((SECONDS + 20))
+# The descendant goes down with the same group signal, so it needs no bound of
+# its own beyond the slack that covers a loaded host.
+deadline=$((SECONDS + PROOF_LOAD_SLACK))
 while kill -0 "$ORPHAN_DESCENDANT" 2>/dev/null; do
   [ "$SECONDS" -lt "$deadline" ] \
     || fail "a listener whose owning session was gone left a descendant running"
@@ -2499,5 +2591,507 @@ done
 wait_gone "$RETRY_DESCENDANT" \
   || fail "the guard stopped retrying before the expired runner's descendant was reaped"
 pass "a stop the guard cannot prove is retried until the expired runner is reaped"
+
+# --- a stop reaches a child that does not die on the ordinary signal ---------
+#
+# Every reaper here sends the ordinary stop signal to the runner's process group
+# and escalates only if the group outlives it. Both halves of that escalation
+# were broken, in ways that hid each other:
+#
+#   - The stop held the per-source lock across its wait while the runner's own
+#     exit cleanup waited for that same lock, so the runner outlived the ordinary
+#     signal every time and the forced kill silently became the normal path.
+#   - The escalation re-derived ownership from the leader, so once the leader did
+#     die to the stop's own signal it read that success as a leaderless group and
+#     refused to escalate at all.
+#
+# With only the first repaired, the second turned every stop of a signal-proof
+# child into a refusal that left it running. They are asserted together because
+# they only hold together.
+#
+# Earlier fixtures include TERM-resistant children and deliberately kept-alive
+# leaders. The cases below also exercise escalation after TERM ends the leader.
+
+# Millisecond clock for supplementary retirement and stop-window measurements;
+# the healthy-stop verdict below requires attached-start status 143 (TERM).
+now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
+
+SIGNAL_PROOF_STUB="$TMP_ROOT/signal-proof-stub.sh"
+cat > "$SIGNAL_PROOF_STUB" <<'SH'
+#!/usr/bin/env bash
+# A blocking source whose child handles the ordinary stop signal and keeps
+# waiting - the shape a poll client with its own shutdown handler presents while
+# a request is still outstanding. Reaching it requires a real escalation. The
+# signal log is what proves the child was signalled and survived, rather than
+# never having been signalled at all. The wait stays bounded so an escaped stub
+# cannot outlive the suite.
+marker=$1
+trap 'printf "signalled\n" >> "$marker.signals"' TERM INT HUP
+printf '%s\n' "$$" > "$marker.child"
+while [ ! -e "$marker.trigger" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.1 &
+  wait $!
+done
+printf 'signal-proof payload\n'
+SH
+chmod +x "$SIGNAL_PROOF_STUB"
+
+trap '[ -z "${PROOF_RELEASE:-}" ] || touch "$PROOF_RELEASE"; fm_test_cleanup' EXIT
+for proof_state in absent zombie; do
+  HPROOF="$TMP_ROOT/signal-proof-retire-$proof_state"; new_home "$HPROOF"
+  PROOF_MARKER="$HPROOF/poll"
+  pe_register "$HPROOF" lavish proof-src -- "$SIGNAL_PROOF_STUB" "$PROOF_MARKER" >/dev/null
+  PROOF_RELEASE=
+  if [ "$proof_state" = zombie ]; then
+    PROOF_RELEASE="$HPROOF/reap"
+    FM_HOME="$HPROOF" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proof-proc" \
+      perl - "$PROOF_RELEASE" "$ROOT/bin/fm-procevent.sh" _start proof-src >"$HPROOF/start.log" 2>&1 <<'PL' &
+my $release = shift @ARGV;
+defined(my $pid = fork) or exit 125;
+if ($pid == 0) {
+  setpgrp(0, 0) or exit 125;
+  $ENV{FM_PROCEVENT_RUNNER_GROUP} = $$;
+  exec @ARGV;
+  exit 125;
+}
+my $deadline = time + ($ENV{FM_TEST_STUB_MAX_BLOCK_SECONDS} // 120);
+while (!-e $release && time < $deadline) { select undef, undef, undef, 0.05; }
+waitpid($pid, 0) == $pid or exit 125;
+PL
+  else
+    FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proof-proc" \
+      pe "$HPROOF" start proof-src >"$HPROOF/start.log" 2>&1 &
+  fi
+  PROOF_START=$!
+  wait_for "$HPROOF/state/procevent/proof-src.runner" \
+    || fail "the signal-proof listener never recorded its runner"
+  PROOF_PID=$(cat "$HPROOF/state/procevent/proof-src.runner")
+  wait_for "$PROOF_MARKER.child" || fail "the signal-proof child never started"
+  PROOF_CHILD=$(cat "$PROOF_MARKER.child")
+  FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proof-proc" \
+    pe "$HPROOF" retire proof-src >"$HPROOF/retire.log" 2>&1 &
+  PROOF_STOP=$!
+  proof_transition=0
+  for _ in $(seq 1 100); do
+    if [ "$proof_state" = zombie ]; then
+      case "$(ps -o stat= -p "$PROOF_PID" 2>/dev/null | tr -d '[:space:]')" in
+        Z*) proof_transition=1; break ;;
+      esac
+    elif ! kill -0 "$PROOF_PID" 2>/dev/null; then
+      proof_transition=1
+      break
+    fi
+    sleep 0.05
+  done
+  proof_survivor=0
+  kill -0 "$PROOF_CHILD" 2>/dev/null && proof_survivor=1
+  proof_reaped=0
+  for _ in $(seq 1 100); do
+    if ! kill -0 "$PROOF_CHILD" 2>/dev/null; then proof_reaped=1; break; fi
+    sleep 0.1
+  done
+  [ -z "$PROOF_RELEASE" ] || touch "$PROOF_RELEASE"
+  PROOF_RELEASE=
+  proof_status=0
+  wait "$PROOF_STOP" || proof_status=$?
+  [ "$proof_reaped" -eq 1 ] || kill -KILL -"$PROOF_PID" 2>/dev/null || true
+  wait "$PROOF_START" 2>/dev/null || true
+  [ "$proof_transition" -eq 1 ] || fail "the runner never became $proof_state after TERM"
+  [ "$proof_survivor" -eq 1 ] || fail "no child survived the $proof_state leader's TERM"
+  [ "$proof_reaped" -eq 1 ] || fail "escalation abandoned a child behind a $proof_state leader"
+  [ "$proof_status" -eq 0 ] || fail "retiring the $proof_state leader's group reported failure"
+  wait_gone "-$PROOF_PID" || fail "retirement left the $proof_state leader's group running"
+  [ -s "$PROOF_MARKER.signals" ] || fail "the signal-proof child never received TERM"
+  pass "retirement escalates after TERM leaves a surviving child ($proof_state leader)"
+done
+trap fm_test_cleanup EXIT
+
+# --- the owner guard reaps a signal-proof child too --------------------------
+#
+# The guard is where the time bound on a leaked listener lives, so it is the half
+# that matters most: a guard that signals, loses its leader to its own signal and
+# then walks away leaves the survivor unreachable by anything at all - worse than
+# no guard, because the leader it destroyed was the only proof of ownership left.
+
+HPGUARD="$TMP_ROOT/signal-proof-guard"; new_home "$HPGUARD"
+fm_test_track_procevent_home "$HPGUARD"
+orphan_pe "$HPGUARD" register lavish proof-guard-src \
+  -- "$SIGNAL_PROOF_STUB" "$TMP_ROOT/proof-guard" >/dev/null
+orphan_pe "$HPGUARD" reconcile >/dev/null
+# The owner is kept present until the fixture is fully up, because the input
+# under test is an owner that GOES AWAY, not a runner that never finished
+# starting: on a loaded host the short lease here can otherwise expire while the
+# runner is still between fork and its first recorded state.
+deadline=$((SECONDS + 60))
+until [ -s "$HPGUARD/state/procevent/proof-guard-src.runner" ] \
+  && [ -s "$TMP_ROOT/proof-guard.child" ]; do
+  [ "$SECONDS" -lt "$deadline" ] || fail "the guarded signal-proof listener never started"
+  orphan_pe "$HPGUARD" reconcile >/dev/null 2>&1 || true
+  sleep 0.25
+done
+GUARD_PID=$(cat "$HPGUARD/state/procevent/proof-guard-src.runner")
+GUARD_CHILD=$(cat "$TMP_ROOT/proof-guard.child")
+
+# Nothing refreshes this home's lease from here on, which is the whole input.
+#
+# The deadline is DERIVED from the bound this case exists to defend, not a flat
+# wall-clock number. The documented bound is the lease term, plus ONE check
+# interval for detection - the guard's two confirming reads are half an interval
+# apart and both fit inside it - plus the stop's own grace, its ordinary signal
+# window and then its forced one. THIS case does spend that grace, because its
+# child ignores the ordinary signal; that is what separates its allowance from
+# the ordinary-stop case above.
+#
+# This case bounds cleanup completion; the strict timing case below owns the
+# phase and slack requirements that distinguish one check interval from two.
+guard_bound=$((PROOF_DETECT_BOUND + PROOF_STOP_CEILING))
+deadline=$((SECONDS + guard_bound + PROOF_LOAD_SLACK))
+guard_started=$SECONDS
+while kill -0 -"$GUARD_PID" 2>/dev/null; do
+  [ "$SECONDS" -lt "$deadline" ] \
+    || fail "the guard exceeded its bound: still holding the group after $((SECONDS - guard_started))s, against a documented bound of ${guard_bound}s"
+  sleep 0.5
+done
+wait_gone "$GUARD_CHILD" \
+  || fail "the guard stopped at the leader and left the signal-proof child running"
+[ -s "$TMP_ROOT/proof-guard.signals" ] \
+  || fail "the guarded child was never signalled, so nothing about escalation was exercised"
+pass "an expired runner's guard escalates past a signal-proof child"
+
+# --- the guard's bound is one check interval, not two ------------------------
+#
+# The case above proves the guard reaps at all. This one measures HOW LONG it
+# may take, because that is the number the operating contract states and the one
+# a later change can quietly double.
+#
+# The bound: the lease term, plus ONE check interval. The guard still refuses to
+# act on a single failed read - the debounce case below is what defends that -
+# but its two confirming reads are spaced half an interval apart, so the pair
+# fits inside the one interval budgeted here. A guard that put a whole interval
+# between them would spend two, and this deadline is sized to catch exactly that.
+#
+# THE PHASE IS OBSERVED AND ENFORCED, NOT ASSUMED. Where the lease expiry falls
+# relative to the guard's own check clock decides whether a run lands near the
+# bound or well inside it, and a sampled phase would let a guard spending two
+# intervals slip under this deadline on a lucky alignment. So the lease is
+# synchronized to the guard's own FIRST observed lease read, every later real
+# read is recorded, and the case then REFUSES unless one of those reads proves
+# the required phase: fresh, before expiry, and late enough that two further
+# full intervals could not finish before the deadline.
+#
+# Pinning the phase by construction instead - from an assumed startup time - is
+# what an earlier version of this case did, and it is not enough: the day
+# startup reaches two seconds it silently stops rejecting a two-interval guard
+# and goes on passing. A bound that cannot fail for the reason it names is the
+# defect this whole delivery exists to correct, so an unestablished precondition
+# refuses here rather than proceeding on trust.
+BOUND_LEASE_SECONDS=7
+BOUND_CHECK_SECONDS=6
+# The whole-second lease comparison is part of the bound, not slack: a lease of
+# N is honoured until its age reads N+1.
+bound_lease_term=$((BOUND_LEASE_SECONDS + 1))
+bound_detect=$((bound_lease_term + BOUND_CHECK_SECONDS))
+# This stub exits on the ordinary signal, so the stop's escalation ceiling is
+# not spent here; one second covers signalling and exit against a measured
+# ~0.4s for a whole retire command on this host.
+bound_total=$((bound_detect + PROOF_PROMPT_STOP))
+# Additive load slack, under half a check interval for the reason above. The
+# invariant is asserted rather than left to a comment, because a later widening
+# is exactly what would disarm the deadline below.
+bound_deadline_s=$((bound_total + PROOF_LOAD_SLACK))
+[ "$((PROOF_LOAD_SLACK * 2))" -lt "$BOUND_CHECK_SECONDS" ] \
+  || fail "the bound fixture's load slack must stay below half a check interval"
+
+now_mono() {
+  perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \
+    'printf "%.3f\n", clock_gettime(CLOCK_MONOTONIC)'
+}
+mono_since() {  # <monotonic-reference>: seconds elapsed, one decimal
+  perl -e 'printf "%.1f\n", $ARGV[0] - $ARGV[1]' "$(now_mono)" "$1"
+}
+
+HBOUND="$TMP_ROOT/guard-bound"; new_home "$HBOUND"
+fm_test_track_procevent_home "$HBOUND"
+BOUND_STATE="$TMP_ROOT/guard-bound-state"; mkdir -p "$BOUND_STATE"
+BOUND_BIN=$(fm_fakebin "$TMP_ROOT/guard-bound-bin")
+REAL_PERL=$(command -v perl) || fail "this host has no perl to observe the guard's lease reads"
+# Observes the real lease-age reads, identified by the lease-age program's own
+# text, and changes nothing about what they return. The FIRST such read becomes
+# the lease reference - that is the synchronization - and every later one is
+# recorded with the value it read and the interval it spanned, which is the
+# evidence the phase assertion below consumes.
+cat > "$BOUND_BIN/perl" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case \$arg in
+    *'int(\$now - \$value)'*)
+      started=\$("$REAL_PERL" -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \\
+        'printf "%.6f\\n", clock_gettime(CLOCK_MONOTONIC)') || exit 1
+      age=\$("$REAL_PERL" "\$@") || exit \$?
+      finished=\$("$REAL_PERL" -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e \\
+        'printf "%.6f\\n", clock_gettime(CLOCK_MONOTONIC)') || exit 1
+      if [ ! -s "\$GUARD_BOUND_STATE/reference" ]; then
+        printf '%s\\n' "\$finished" > "\$FM_HOME/state/procevent/.owner-lease" || exit 1
+        printf '%s\\n' "\$finished" > "\$GUARD_BOUND_STATE/reference" || exit 1
+      else
+        printf '%s\\t%s\\t%s\\t%s\\n' "\$started" "\$finished" "\$age" "\${!#}" \\
+          >> "\$GUARD_BOUND_STATE/reads" || exit 1
+      fi
+      printf '%s\\n' "\$age"
+      exit 0
+      ;;
+  esac
+done
+exec "$REAL_PERL" "\$@"
+SH
+chmod +x "$BOUND_BIN/perl"
+bound_pe() {
+  PATH="$BOUND_BIN:$PATH" GUARD_BOUND_STATE="$BOUND_STATE" \
+    FM_PROCEVENT_OWNER_LEASE_SECONDS="$BOUND_LEASE_SECONDS" \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS="$BOUND_CHECK_SECONDS" \
+    FM_HOME="$HBOUND" "$ROOT/bin/fm-procevent.sh" "$@"
+}
+bound_pe register lavish bound-src -- "$QUIET_STUB" "$TMP_ROOT/guard-bound-marker" >/dev/null
+bound_pe reconcile >/dev/null
+wait_for "$HBOUND/state/procevent/bound-src.runner" \
+  || fail "the bound fixture's listener never recorded its runner"
+wait_for "$TMP_ROOT/guard-bound-marker.descendant" \
+  || fail "the bound fixture's listener never spawned its descendant"
+BOUND_PID=$(cat "$HBOUND/state/procevent/bound-src.runner")
+BOUND_DESCENDANT=$(cat "$TMP_ROOT/guard-bound-marker.descendant")
+# Elapsed is measured from the refresh the guard itself reads, not from a
+# wall-clock moment near it, so the fixture's own startup cost cannot be
+# mistaken for guard latency in either direction.
+bound_reference=$(cat "$HBOUND/state/procevent/.owner-lease") \
+  || fail "the bound fixture recorded no owner lease to measure against"
+[ "$bound_reference" = "$(cat "$BOUND_STATE/reference" 2>/dev/null)" ] \
+  || fail "the bound fixture did not synchronize its lease to an observed guard read"
+while kill -0 -"$BOUND_PID" 2>/dev/null; do
+  [ "$(mono_since "$bound_reference" | cut -d. -f1)" -lt "$bound_deadline_s" ] \
+    || fail "the guard exceeded its bound: group still running $(mono_since "$bound_reference")s after the last owner activity, against a documented bound of ${bound_total}s (lease term ${bound_lease_term}s + one ${BOUND_CHECK_SECONDS}s check interval + ${PROOF_PROMPT_STOP}s stop)"
+  sleep 0.2
+done
+bound_elapsed=$(mono_since "$bound_reference")
+# The loop above only ever checks the clock while the group is still alive, so a
+# sampler descheduled past the deadline would see the group already gone and
+# report success. Check the OBSERVED completion time too: a late observation
+# must not certify timely completion.
+[ "${bound_elapsed%%.*}" -lt "$bound_deadline_s" ] \
+  || fail "the guard's completion was first observed ${bound_elapsed}s after the last owner activity, beyond its ${bound_deadline_s}s deadline"
+# FAIL CLOSED ON THE PHASE. One recorded read must prove the run was in the part
+# of the interval this deadline can actually judge: it read the synchronized
+# reference, it was still fresh (pre-expiry), and it began late enough that two
+# further FULL intervals could not finish before the deadline. Without such a
+# read the case refuses - it does not pass on trust, however quickly the group
+# happened to stop.
+perl - "$BOUND_STATE/reads" "$bound_reference" "$BOUND_LEASE_SECONDS" \
+  "$BOUND_CHECK_SECONDS" "$bound_deadline_s" <<'PL' \
+  || fail "the bound fixture could not establish the required pre-expiry guard-read phase"
+use strict;
+use warnings;
+my ($path, $reference, $lease, $check, $deadline) = @ARGV;
+open my $reads, '<', $path or exit 1;
+while (<$reads>) {
+  chomp;
+  my ($started, $finished, $age, $value) = split /\t/;
+  next unless defined $value && $value eq $reference && $age <= $lease;
+  next unless $started >= $reference && $finished >= $started;
+  next unless $finished < $reference + $lease + 1;
+  next unless $started + 2 * $check >= $reference + $deadline;
+  printf "guard phase: fresh read %.3f-%.3fs, expiry %ss, two full intervals could not finish before %.3fs (deadline %ss)\n",
+    $started - $reference, $finished - $reference, $lease + 1,
+    $started - $reference + 2 * $check, $deadline;
+  exit 0;
+}
+exit 1;
+PL
+wait_gone "$BOUND_DESCENDANT" \
+  || fail "the guard stopped at the leader and left its descendant running"
+printf 'guard bound: lease=%ss check=%ss reaped %ss after the last owner activity, documented bound %ss\n' \
+  "$BOUND_LEASE_SECONDS" "$BOUND_CHECK_SECONDS" "$bound_elapsed" "$bound_total"
+pass "an orphaned runner is reaped within the lease plus ONE check interval"
+
+# --- a zero-prefixed interval still starts a listener, and halves correctly ---
+#
+# OUR OWN REGRESSION, found in review before this change was published. The
+# interval validator accepts a zero-prefixed value and `[` compares it as
+# decimal, but the half-interval arithmetic introduced above reads `$(( ))`,
+# which is octal for a leading zero: 010 halved to 4 instead of 5, and 08 was
+# not a number at all, so the guard died before reporting ready and the runner
+# failed closed and never listened.
+#
+# Asserted through the executable interface rather than by reading the source:
+# a real listener is started at each value, and the guard's actual sleep
+# argument is observed. Reading `10#` out of the script would prove nothing.
+INTERVAL_BIN=$(fm_fakebin "$TMP_ROOT/decimal-interval-bin")
+REAL_SLEEP=$(command -v sleep) || fail "this host has no sleep to observe guard intervals"
+cat > "$INTERVAL_BIN/sleep" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$INTERVAL_SLEEP_LOG"
+exec "$REAL_SLEEP" "\$@"
+SH
+chmod +x "$INTERVAL_BIN/sleep"
+for interval in 08 010; do
+  case "$interval" in
+    08) expected_half=4 ;;
+    010) expected_half=5 ;;
+  esac
+  HINTERVAL="$TMP_ROOT/decimal-interval-$interval"; new_home "$HINTERVAL"
+  pe_register "$HINTERVAL" lavish "interval-$interval" \
+    -- "$QUIET_STUB" "$HINTERVAL/poll" >/dev/null
+  PATH="$INTERVAL_BIN:$PATH" INTERVAL_SLEEP_LOG="$HINTERVAL/sleeps" \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS="$interval" \
+    pe "$HINTERVAL" reconcile >/dev/null
+  wait_for "$HINTERVAL/poll.descendant" \
+    || fail "a zero-prefixed decimal interval ($interval) prevented the listener from starting"
+  for _ in $(seq 1 100); do
+    grep -qx "$expected_half" "$HINTERVAL/sleeps" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -qx "$expected_half" "$HINTERVAL/sleeps" \
+    || fail "the guard did not sleep half of the decimal interval $interval (expected ${expected_half}s)"
+  pe "$HINTERVAL" retire "interval-$interval" >/dev/null \
+    || fail "retiring the decimal-interval listener ($interval) reported failure"
+  printf 'decimal interval: %s halves to %ss and its listener started\n' "$interval" "$expected_half"
+done
+pass "a zero-prefixed decimal interval starts its listener and halves as decimal"
+
+# --- one unreadable read still does not end a live runner --------------------
+#
+# The bound above was tightened by moving the guard's two reads closer together,
+# NOT by dropping the second one. This is what that second read is for, asserted
+# separately so the two cannot be traded for each other by accident: against a
+# home that is still alive, an isolated failed read must not stop the runner.
+#
+# The failure is injected where the real path actually reads. ONE lease read
+# fails, exactly once, identified by the lease-age program's own text so no
+# other call in the runner is touched; every read before and after it is the
+# real command, and the home's lease stays long and fresh throughout. The single
+# failed read is therefore the only thing wrong that the guard can see.
+
+DEBOUNCE_HOME="$TMP_ROOT/lease-debounce"; new_home "$DEBOUNCE_HOME"
+fm_test_track_procevent_home "$DEBOUNCE_HOME"
+DEBOUNCE_STATE="$TMP_ROOT/lease-debounce-state"; mkdir -p "$DEBOUNCE_STATE"
+DEBOUNCE_BIN=$(fm_fakebin "$TMP_ROOT/lease-debounce-bin")
+REAL_PERL=$(command -v perl) || fail "this host has no perl to build the debounce fixture on"
+cat > "$DEBOUNCE_BIN/perl" <<SH
+#!/usr/bin/env bash
+if [ -s "\$LEASE_DEBOUNCE_STATE/armed" ] && [ ! -s "\$LEASE_DEBOUNCE_STATE/spent" ]; then
+  for arg in "\$@"; do
+    case \$arg in
+      *'int(\$now - \$value)'*)
+        printf 'spent\n' > "\$LEASE_DEBOUNCE_STATE/spent"
+        exit 1
+        ;;
+    esac
+  done
+fi
+exec "$REAL_PERL" "\$@"
+SH
+chmod +x "$DEBOUNCE_BIN/perl"
+
+# A long lease and a short check: many reads happen inside the observation
+# window, and none of them can go stale on their own during it.
+DEBOUNCE_LEASE_SECONDS=30
+DEBOUNCE_CHECK_SECONDS=1
+debounce_pe() {
+  PATH="$DEBOUNCE_BIN:$PATH" LEASE_DEBOUNCE_STATE="$DEBOUNCE_STATE" \
+    FM_PROCEVENT_OWNER_LEASE_SECONDS="$DEBOUNCE_LEASE_SECONDS" \
+    FM_PROCEVENT_OWNER_CHECK_SECONDS="$DEBOUNCE_CHECK_SECONDS" \
+    FM_HOME="$DEBOUNCE_HOME" "$ROOT/bin/fm-procevent.sh" "$@"
+}
+debounce_pe register lavish debounce-src -- "$QUIET_STUB" "$TMP_ROOT/lease-debounce-marker" >/dev/null
+debounce_pe reconcile >/dev/null
+wait_for "$DEBOUNCE_HOME/state/procevent/debounce-src.runner" \
+  || fail "the debounce fixture's listener never recorded its runner"
+DEBOUNCE_PID=$(cat "$DEBOUNCE_HOME/state/procevent/debounce-src.runner")
+# Armed only now. The guard proves the lease once before it reports ready, and
+# failing THAT read would refuse the runner outright instead of exercising the
+# debounce this case is about.
+printf 'armed\n' > "$DEBOUNCE_STATE/armed"
+wait_for "$DEBOUNCE_STATE/spent" \
+  || fail "the single failed lease read this case injects never happened"
+# Several further checks at the configured interval. A guard that acted on one
+# failed read would have stopped the group during them.
+sleep $((DEBOUNCE_CHECK_SECONDS * 4))
+kill -0 -"$DEBOUNCE_PID" 2>/dev/null \
+  || fail "one unreadable lease read ended a runner whose home was still alive"
+debounce_pe retire debounce-src >/dev/null \
+  || fail "retiring the debounce fixture's source reported failure"
+wait_gone "-$DEBOUNCE_PID" \
+  || fail "retiring the debounce fixture left its process group running"
+pass "one unreadable read does not end a live runner"
+
+# --- the ordinary stop signal is what stops a runner ------------------------
+#
+# The forced kill is the backstop, not the normal path. When it carries every
+# stop, it stops being able to report that anything went wrong - which is exactly
+# how a listener that could not be stopped looked identical to one that could.
+
+HPROMPT="$TMP_ROOT/prompt-stop"; new_home "$HPROMPT"
+pe_register "$HPROMPT" lavish prompt-src -- "$QUIET_STUB" "$TMP_ROOT/prompt-stop" >/dev/null
+pe "$HPROMPT" start prompt-src >"$TMP_ROOT/prompt-start.log" 2>&1 &
+PROMPT_START_PID=$!
+wait_for "$HPROMPT/state/procevent/prompt-src.runner" \
+  || fail "the promptly-stopping listener never recorded its runner"
+PROMPT_PID=$(cat "$HPROMPT/state/procevent/prompt-src.runner")
+wait_for "$TMP_ROOT/prompt-stop.descendant" \
+  || fail "the promptly-stopping listener's child never spawned its own descendant"
+stop_window_ms() {
+  local from to
+  from=$(now_ms)
+  for _ in $(seq 1 20); do sleep 0.1; done
+  to=$(now_ms)
+  printf '%s\n' "$((to - from))"
+}
+window_before=$(stop_window_ms)
+start=$(now_ms)
+pe "$HPROMPT" retire prompt-src >/dev/null || fail "retiring a healthy listener reported failure"
+elapsed=$(( $(now_ms) - start ))
+window_after=$(stop_window_ms)
+prompt_status=0
+wait "$PROMPT_START_PID" || prompt_status=$?
+wait_gone "-$PROMPT_PID" || fail "retiring a healthy listener left its process group running"
+[ "$prompt_status" -eq 143 ] \
+  || fail "the runner did not exit on TERM (start status=$prompt_status, retirement=${elapsed}ms, sampled windows=${window_before}/${window_after}ms)"
+printf 'ordinary stop: start status=%s retirement=%sms sampled windows=%s/%sms\n' \
+  "$prompt_status" "$elapsed" "$window_before" "$window_after"
+pass "a runner exits on the ordinary stop signal instead of outliving it"
+
+# --- a crashed leader's group is still refused -------------------------------
+#
+# The escalation above accepts a leaderless group in exactly one place: inside
+# the stop that just proved and signalled that generation itself. Whether a group
+# whose leader died to something ELSE may ever be signalled is a separate open
+# question, and this pins that it stays refused - so the escalation cannot widen
+# into an answer to it by accident.
+
+HCRASH="$TMP_ROOT/crashed-leader"; new_home "$HCRASH"
+pe_register "$HCRASH" lavish crash-src -- "$QUIET_STUB" "$TMP_ROOT/crash-leader" >/dev/null
+pe "$HCRASH" reconcile >/dev/null
+wait_for "$HCRASH/state/procevent/crash-src.runner" \
+  || fail "the crash-fixture listener never recorded its runner"
+CRASH_PID=$(cat "$HCRASH/state/procevent/crash-src.runner")
+wait_for "$TMP_ROOT/crash-leader.descendant" \
+  || fail "the crash-fixture listener's child never spawned its own descendant"
+kill -KILL "$CRASH_PID" 2>/dev/null || fail "the crash fixture could not stop its own leader"
+deadline=$((SECONDS + 10))
+while kill -0 "$CRASH_PID" 2>/dev/null; do
+  [ "$SECONDS" -lt "$deadline" ] || fail "the crash fixture's leader never died"
+  sleep 0.1
+done
+kill -0 -"$CRASH_PID" 2>/dev/null \
+  || fail "the crash fixture left no surviving group, so nothing was refused"
+
+out=$(pe "$HCRASH" retire crash-src 2>&1) && fail "retirement claimed success on a crashed leader's group"
+assert_contains "$out" "cannot confirm runner identity" \
+  "a crashed leader's group is refused with its own diagnostic"
+assert_present "$HCRASH/state/procevent/crash-src.source" \
+  "a refused retirement leaves the source registered"
+kill -0 -"$CRASH_PID" 2>/dev/null \
+  || fail "a refused retirement signalled the leaderless group anyway"
+pass "a group whose leader died to something else is still refused, not signalled"
+kill -KILL -"$CRASH_PID" 2>/dev/null || true
 
 printf '\nall procevent tests passed\n'

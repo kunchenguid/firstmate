@@ -398,6 +398,31 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# --- portable file timestamps -----------------------------------------------
+
+# fm_touch_epoch <epoch> <path> [path...]: set each path's modification time to
+# an absolute epoch second on every supported host.
+#
+# There is no portable touch(1) flag that takes an epoch: `touch -d @<epoch>` is
+# a GNU extension and BSD touch rejects it outright ("out of range or illegal
+# time specification"), leaving the file at its current mtime. A test that wants
+# a beacon aged 700 seconds then silently measures a brand-new one.
+# `touch -t [[CC]YY]MMDDhhmm[.SS]` is POSIX and both accept it, so the only
+# host-specific step left is turning the epoch into that stamp, and date(1)
+# spells that two incompatible ways. Probe them in this order: GNU date rejects
+# `-r <seconds>` (its -r takes a file), while BSD date rejects `-d` as an
+# illegal option, so whichever runs is the one that understood the request.
+# TZ is pinned to UTC for date and touch so repeated DST hours stay unambiguous.
+fm_touch_epoch() {
+  local epoch=$1 stamp
+  shift
+  stamp=$(TZ=UTC0 date -d "@$epoch" +%Y%m%d%H%M.%S 2>/dev/null) \
+    || stamp=$(TZ=UTC0 date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null) \
+    || fail "fm_touch_epoch: date(1) accepted neither -d @<epoch> nor -r <epoch>"
+  TZ=UTC0 touch -t "$stamp" "$@" \
+    || fail "fm_touch_epoch: touch -t $stamp failed for $*"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
@@ -409,11 +434,13 @@ fm_git_identity() {
 
 # fm_git_init_commit <dir>: create a git repo at <dir> with a README and one
 # commit. Uses an inline identity so it works whether or not fm_git_identity was
-# called.
+# called. The initial branch is pinned rather than inherited from
+# init.defaultBranch, so a fixture that names main resolves the same on a
+# developer machine and on a runner that still defaults to master.
 fm_git_init_commit() {
   local dir=$1
   mkdir -p "$dir"
-  git -C "$dir" init -q
+  git -C "$dir" init -q -b main
   printf '# %s\n' "$(basename "$dir")" > "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
@@ -472,6 +499,16 @@ fm_write_secondmate_meta() {
 }
 
 # --- common assertions ------------------------------------------------------
+
+# assert_equals <expected> <actual> <msg>
+assert_equals() {
+  [ "$1" = "$2" ] || fail "$3 (expected '$1', got '$2')"
+}
+
+# assert_not_equals <unexpected> <actual> <msg>
+assert_not_equals() {
+  [ "$1" != "$2" ] || fail "$3 (unexpectedly got '$1')"
+}
 
 # assert_contains <haystack> <needle> <msg>
 assert_contains() {

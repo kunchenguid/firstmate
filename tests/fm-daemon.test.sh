@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # tests/fm-daemon.test.sh - supervise-daemon classifiers, the captain-relevant
-# status-phrase matrix (a product contract), escalation batching/dedupe, afk
-# presence-gating, and the injection-hardening units that an e2e cannot
-# deterministically reach (persistent-Enter-swallow, max-defer wedge alarms,
-# fm-send typed-plane swallow reporting, composer-pending ANSI parsing). The operator-visible
-# inject flow lives in fm-afk-inject-e2e and fm-wake-daemon-lifecycle-e2e.
+# status-phrase matrix (a product contract), escalation batching/dedupe,
+# decision-owned queued-row suppression, afk presence-gating, and the
+# injection-hardening units that an e2e cannot deterministically reach
+# (persistent-Enter-swallow, max-defer wedge alarms, fm-send typed-plane swallow
+# reporting, composer-pending ANSI parsing). The operator-visible inject flow
+# lives in fm-afk-inject-e2e and fm-wake-daemon-lifecycle-e2e.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -1106,6 +1107,55 @@ test_housekeeping_busy_declared_wait_matures_its_window() {
   pass "housekeeping matures a busy pane's declared-wait window into exactly one recheck per window"
 }
 
+test_housekeeping_declared_time_controls_pause_recheck() {
+  local dir state fakebin task win pane key now future distant past escalations
+  dir=$(make_supercase pause-until-cadence)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task='held-until'; win="sess:fm-$task"; pane="$dir/pane.txt"
+  printf 'idle prompt $\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  now=$(date +%s)
+  if [ "$(uname)" = Darwin ]; then
+    future=$(date -u -r "$((now + 120))" +%Y-%m-%dT%H:%M:%SZ)
+    distant=$(date -u -r "$((now + 31536000))" +%Y-%m-%dT%H:%M:%SZ)
+    past=$(date -u -r "$((now - 120))" +%Y-%m-%dT%H:%M:%SZ)
+  else
+    future=$(date -u -d "@$((now + 120))" +%Y-%m-%dT%H:%M:%SZ)
+    distant=$(date -u -d "@$((now + 31536000))" +%Y-%m-%dT%H:%M:%SZ)
+    past=$(date -u -d "@$((now - 120))" +%Y-%m-%dT%H:%M:%SZ)
+  fi
+  printf 'paused: waiting for release until %s\n' "$future" > "$state/$task.status"
+  echo $((now - 60)) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a near-future declared time was rechecked before that time"
+
+  printf 'paused: waiting for release until %s\n' "$distant" > "$state/$task.status"
+  echo $((now - 300)) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
+  [ "$escalations" -eq 1 ] || fail "a wrong-year declared time silenced daemon housekeeping beyond the cadence"
+  grep -F 'declared time is beyond the recheck cadence' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the bounded daemon recheck gave the wrong reason: $(cat "$state/.subsuper-escalations")"
+  grep -F 'declared clearing time has passed' "$state/.subsuper-escalations" >/dev/null \
+    && fail "the bounded daemon recheck falsely claimed the future declared time passed"
+
+  printf 'paused: waiting for release until %s\n' "$past" > "$state/$task.status"
+  date +%s > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
+  [ "$escalations" -eq 2 ] || fail "a reached declared time did not trigger an immediate recheck"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+  escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
+  [ "$escalations" -eq 2 ] || fail "a reached declared time bypassed the reset pause cadence"
+  pass "housekeeping bounds a distant declared time, defers to a near one, and rechecks a passed one at once"
+}
+
 # A pane still idle but whose status is no longer a pause (the crew changed state
 # without becoming busy) drops the marker - the signal path owns the new state, so
 # the pause recheck must not re-surface a stale pause reason.
@@ -1429,6 +1479,122 @@ test_handle_wake_routes_self_and_escalate() {
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/h-done.status" "$state"
   [ -s "$state/.subsuper-escalations" ] || fail "captain signal was not buffered by handle_wake"
   pass "handle_wake routes routine->self and captain->escalate"
+}
+
+# Decision-owned queued rows are marked needs-decision:<files> by the watcher.
+# The away-mode daemon must classify that payload the same way it classifies an
+# ordinary signal: escalate once as the decision, suppress an unchanged repeat
+# (queued-row and catch-all alike), and re-escalate when the status log grows.
+# https://github.com/kunchenguid/firstmate/issues/4096
+test_needs_decision_queued_row_escalates_once_as_the_decision() {
+  local dir state fakebin status_file payload out
+  dir=$(make_supercase needs-decision-queued-row)
+  state="$dir/state"
+  fakebin="$dir/daemon-bin"
+  mkdir -p "$fakebin"
+  status_file="$state/decision-task.status"
+  printf 'working: setup\nneeds-decision [key=release]: pick A or B\n' > "$status_file"
+  payload="needs-decision: $status_file"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\tdecision-task.status\t%s\n' "$payload"
+printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+
+  FM_DAEMON_DIR="$fakebin" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999 \
+    handle_durable_wakes fallback "$state" \
+    || fail "the first decision-owned queued row was not handled"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in
+    *"unknown wake:"*) fail "a decision-owned wake was labelled unknown: $out" ;;
+  esac
+  case "$out" in
+    *"needs-decision [key=release]: pick A or B"*) ;;
+    *) fail "the first decision-owned wake was not presented as the decision: $out" ;;
+  esac
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+    || fail "the first decision-owned wake did not escalate exactly once: $out"
+
+  : > "$state/.subsuper-escalations"
+  FM_DAEMON_DIR="$fakebin" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999 \
+    handle_durable_wakes fallback "$state" \
+    || fail "an unchanged decision-owned repeat was not handled"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an unchanged open decision re-escalated: $(cat "$state/.subsuper-escalations")"
+
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "the catch-all scan re-escalated an already-surfaced open decision: $(cat "$state/.subsuper-escalations")"
+
+  printf 'needs-decision [key=release]: pick A, C, or D\n' >> "$status_file"
+  : > "$state/.subsuper-escalations"
+  FM_DAEMON_DIR="$fakebin" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999 \
+    handle_durable_wakes fallback "$state" \
+    || fail "a changed decision-owned wake was not handled"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in
+    *"unknown wake:"*) fail "a changed decision-owned wake was labelled unknown: $out" ;;
+  esac
+  case "$out" in
+    *"needs-decision [key=release]: pick A, C, or D"*) ;;
+    *) fail "a later status change did not re-escalate the decision: $out" ;;
+  esac
+
+  : > "$state/.subsuper-escalations"
+  printf 'working: still going\n' > "$state/ordinary-routine.status"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/ordinary-routine.status" "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    && fail "an ordinary routine signal was escalated: $(cat "$state/.subsuper-escalations")"
+  printf 'done: PR https://example.test/pull/1\n' > "$state/ordinary-done.status"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/ordinary-done.status" "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in
+    *"done: PR https://example.test/pull/1"*) ;;
+    *) fail "an ordinary captain-relevant signal lost its escalate behaviour: $out" ;;
+  esac
+  case "$out" in
+    *"unknown wake:"*) fail "an ordinary signal was labelled unknown: $out" ;;
+  esac
+
+  pass "a decision-owned queued row escalates once as the decision, then suppresses until the status changes"
+}
+
+# The watcher also marks a row decision-owned when its only new line is a
+# captain-held transfer. fm-captain-hold.sh complete writes that line through the
+# self-announced append and the hold stays durable in the backlog, so the daemon
+# self-handles the row like any other captain-held line, now and on repeat.
+test_captain_held_decision_owned_row_is_self_handled() {
+  local dir state fakebin status_file
+  dir=$(make_supercase captain-held-decision-owned-row)
+  state="$dir/state"
+  fakebin="$dir/daemon-bin"
+  mkdir -p "$fakebin"
+  status_file="$state/held-task.status"
+  printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$status_file"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then exit 0; fi
+printf '1\t1\tsignal\theld-task.status\t%s\n' "needs-decision: $status_file"
+printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+
+  FM_DAEMON_DIR="$fakebin" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999 \
+    handle_durable_wakes fallback "$state" \
+    || fail "the captain-held decision-owned row was not handled"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a captain-held decision-owned row escalated: $(cat "$state/.subsuper-escalations")"
+
+  FM_DAEMON_DIR="$fakebin" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999 \
+    handle_durable_wakes fallback "$state" \
+    || fail "an unchanged captain-held decision-owned repeat was not handled"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an unchanged captain-held decision-owned repeat escalated: $(cat "$state/.subsuper-escalations")"
+
+  pass "a captain-held decision-owned row is self-handled without escalation, now and on repeat"
 }
 
 test_inject_skip_forces_self() {
@@ -2641,6 +2807,7 @@ test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
+test_housekeeping_declared_time_controls_pause_recheck
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared
 test_housekeeping_stale_marker_transitions_to_pause
@@ -2654,6 +2821,8 @@ test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
+test_needs_decision_queued_row_escalates_once_as_the_decision
+test_captain_held_decision_owned_row_is_self_handled
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker

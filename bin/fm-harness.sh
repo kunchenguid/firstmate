@@ -13,6 +13,12 @@
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
+#        fm-harness.sh validate-native-effort <harness> <model> <effort>
+#                                        Refuse ultra unless the harness is pi or
+#                                        pi-signed and the model explicitly names
+#                                        codex-native/<id>. Other efforts retain
+#                                        their adapter's existing policy. Native
+#                                        Codex validates model support at startup.
 # config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
 # whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
@@ -270,7 +276,20 @@ resolve_secondmate_effort() {
   secondmate_field 3
 }
 
+validate_native_effort() {
+  local harness=${1:-} model=${2:-} effort=${3:-}
+  [ "$effort" = ultra ] || return 0
+  case "$harness" in
+    pi|pi-signed)
+      case "$model" in codex-native/?*) return 0 ;; esac
+      ;;
+  esac
+  echo "error: ultra effort requires pi or pi-signed with an explicit codex-native/<model> model" >&2
+  return 1
+}
+
 case "${1:-}" in
+  validate-native-effort) shift; validate_native_effort "$@" ;;
   crew) resolve_crew ;;
   secondmate) resolve_secondmate ;;
   secondmate-model) resolve_secondmate_model ;;
