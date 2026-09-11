@@ -99,7 +99,10 @@ fm_pid_identity() {
 # process that exec'd away from the role it registered for; reusing that string
 # for holder liveness would read a live exec'd holder as dead and let its lock
 # be stolen out from under it. Mirrors fm_pid_identity's source selection so
-# both read the same process facts on every platform.
+# both read the same process facts on every platform. The ps fallback's lstart
+# rendering is pinned to one locale AND one time zone: the identity is written
+# under one environment and re-read under another, and a zone-shifted rendering
+# of the same start instant would read a live process as a stranger.
 fm_pid_start_identity() {  # <pid>
   local pid=$1 proc_root stat_line starttime
   local -a stat_fields
@@ -119,9 +122,9 @@ fm_pid_start_identity() {  # <pid>
     printf 'proc-starttime=%s\n' "$starttime"
     return 0
   fi
-  # Same LC_ALL=C pinning as fm_pid_identity: lstart is written under one locale
-  # and re-read under the machine's ambient one.
-  starttime=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  # Same LC_ALL=C pinning as fm_pid_identity, plus TZ=UTC: lstart is written
+  # under one locale and zone and re-read under the machine's ambient ones.
+  starttime=$(LC_ALL=C TZ=UTC ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$starttime" ] || return 1
   printf 'lstart=%s\n' "$(printf '%s' "$starttime" | sed 's/^[[:space:]]*//')"
 }

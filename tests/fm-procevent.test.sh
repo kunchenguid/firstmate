@@ -1156,6 +1156,8 @@ pe_register "$HG" lavish orphan-src -- \
 pe "$HG" reconcile >/dev/null
 wait_for "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" || fail "leader-crash fixture never claimed its source"
 wait_for "$ORPHAN_LOG" || fail "leader-crash fixture source never started"
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.child" \
+  || fail "fixture invalid: the runner recorded no poll child before the leader was killed"
 orphan_leader=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim")
 case "$orphan_leader" in ''|*[!0-9]*) fail "could not read the runner leader pid: $orphan_leader" ;; esac
 printf '%s\n' "$orphan_leader" > "$ORPHAN_GROUP"
@@ -1650,15 +1652,15 @@ rg_child_start=$(sed -n '3p' "$rg_child_record")
 case "$rg_child" in ''|*[!0-9]*) fail "the poll-child record names no pid: $rg_child" ;; esac
 [ -n "$rg_child_start" ] || fail "the poll-child record carries no start identity"
 for _ in $(seq 1 50); do
-  case "$(ps -o command= -p "$rg_child" 2>/dev/null)" in *race-blocker*) break ;; esac
+  case "$(ps -o args= -p "$rg_child" 2>/dev/null)" in *"$RACE_BLOCKER"*) break ;; esac
   sleep 0.1
 done
-rg_identity_now=$(claim_lib fm_pid_identity "$rg_child") \
-  || fail "could not read the exec'd child's identity"
-case "$rg_identity_now" in
-  *"$REGROUP"*|*perl*) fail "fixture invalid: the child has not exec'd away from the spawned image: $rg_identity_now" ;;
-  *race-blocker*) ;;
-  *) fail "fixture invalid: the child is not the blocker: $rg_identity_now" ;;
+rg_image_now=$(ps -o args= -p "$rg_child" 2>/dev/null) \
+  || fail "could not read the exec'd child's process image"
+case "$rg_image_now" in
+  *"$REGROUP"*|*perl*) fail "fixture invalid: the child has not exec'd away from the spawned image: $rg_image_now" ;;
+  *"$RACE_BLOCKER"*) ;;
+  *) fail "fixture invalid: the child is not the blocker: $rg_image_now" ;;
 esac
 [ "$(claim_lib fm_pid_start_identity "$rg_child")" = "$rg_child_start" ] \
   || fail "the recorded start identity did not survive the child's exec"
