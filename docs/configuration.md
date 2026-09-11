@@ -11,6 +11,15 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
+
+### Ideas (`bin/fm-idea.sh`)
+
+Ideas are captured quickly in `data/ideas.md`, with completed drops copied to `data/ideas-archive.md`.
+The state path is `raw -> cased -> bet|queued|dropped`.
+`bin/fm-idea.sh triage` is run on request only, creates a case report under `data/ideas/`, and does not schedule background work.
+This keeps creative thoughts from being lost without forcing immediate prioritization.
+Independent criticism makes weak ideas cheap to discard and promising ideas easier to invest in.
+A queue preserves worthwhile uncertainty without turning it into active work.
 `data/routing-outcomes.jsonl` is the private canonical model-attempt ledger owned exclusively by `bin/fm-model-telemetry.sh`, whose header and help own its event, receipt, recovery, and read-only sheet contracts.
 `data/review-outcomes.jsonl` is the private review-outcome ledger owned exclusively by `bin/fm-review-outcome.sh`, whose header and help own its append and read-only sheet contracts.
 `state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, automatic quota-threshold episodes and action journals under `state/auto-quota-drain/`, inactive terminal-outcome receipts under `state/terminal-outcomes/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).

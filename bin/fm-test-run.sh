@@ -287,7 +287,7 @@ family_for_basename() {
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-capture-visual-evidence-mechanism.test.sh|\
     fm-pr-body.test.sh|fm-pr-body-template-mechanism.test.sh|\
-    fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
+    fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|fm-idea.test.sh|\
     fm-ci-load-guard.test.sh|fm-canonical-guard-benchmark.test.sh|\
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|fm-daily.test.sh|\
