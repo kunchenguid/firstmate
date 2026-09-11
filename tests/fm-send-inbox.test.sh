@@ -132,6 +132,18 @@ test_text_steer_rides_inbox() {
   pass "fm-send inbox: the payload is recorded durably and only the doorbell is typed"
 }
 
+test_opt_in_record_receipt() {
+  local dir err out expected
+  dir=$(setup_case receipt); err="$dir/send.err"
+  expected="$dir/home/state/t1.inbox/001.msg"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" \
+    FM_SEND_LOG="$dir/send.log" FM_SEND_SETTLE=0 FM_SEND_PRINT_INBOX_RECORD=1 \
+    "$SEND" t1 "receipt requested" 2> "$err") || fail "receipt send failed: $(cat "$err")"
+  [ "$out" = "$expected" ] || fail "fm-send returned the wrong inbox record: $out"
+  [ -f "$expected" ] || fail "fm-send reported a record that was not durable"
+  pass "fm-send inbox: an internal caller can bind follow-up state to the durable record"
+}
+
 test_multiline_steer_is_legal() {
   local dir err rc body
   dir=$(setup_case multiline); err="$dir/send.err"
@@ -339,6 +351,7 @@ test_unwritable_inbox_fails_loudly() {
 }
 
 test_text_steer_rides_inbox
+test_opt_in_record_receipt
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
