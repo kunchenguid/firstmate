@@ -285,10 +285,10 @@
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
 # claude is the one harness whose pre-launch setup can REFUSE the spawn: before
 # any per-task state exists, and before its worktree .claude/settings.local.json
-# hooks are written, a non-secondmate claude launch pre-registers the worktree in
-# the launching user's own Claude trust store through bin/fm-claude-trust.sh,
-# because Claude's interactive workspace-trust dialog gates a fresh worktree and
-# firstmate cannot answer it. That helper's header owns the structural scope test
+# hooks are written, a non-secondmate claude launch pre-registers the worktree
+# and its canonical git root in the launching user's own Claude trust store
+# through bin/fm-claude-trust.sh, because Claude's interactive workspace-trust
+# dialog gates a fresh worktree and firstmate cannot answer it. That helper's header owns the structural scope test
 # and every refusal; a failed registration stops this spawn rather than launching
 # a worker that would wedge on the dialog. A --secondmate launch never runs it,
 # so a claude secondmate home keeps its own one-time trust decision.
@@ -3126,11 +3126,11 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-# Pre-register Claude's workspace trust for the worktree, at the first point the
-# worktree is known and before any per-task state is created below. The dialog
-# gates the pane before the brief is ever read, and it also gates loading the
-# project settings written further down, so nothing armed below takes effect
-# without it. bin/fm-claude-trust.sh owns the structural scope test and refuses
+# Pre-register Claude's workspace trust for the worktree and its canonical git
+# root, at the first point the worktree is known and before any per-task state
+# is created below. The dialog gates the pane before the brief is ever read, and
+# it also gates loading the project settings written further down, so nothing
+# armed below takes effect without it. bin/fm-claude-trust.sh owns the structural scope test and refuses
 # any path that is not this project's own isolated worktree; a refusal blocks the
 # spawn rather than launching a worker that would wedge on a dialog firstmate
 # cannot answer. Refusing here rather than beside the arm keeps this in the same

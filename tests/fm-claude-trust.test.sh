@@ -2,9 +2,10 @@
 # Behavior tests for bin/fm-claude-trust.sh and the claude spawn that calls it.
 #
 # Both halves of the contract are load-bearing and both are proven here: a
-# legitimate fresh task worktree is trusted so a claude worker reaches its
-# brief with no human, and every out-of-scope path is REFUSED rather than
-# warned about or quietly skipped.
+# legitimate fresh task worktree AND its canonical root (the primary checkout
+# Claude's gated-grants backstop keys trust on) are trusted so a claude worker
+# reaches its brief with no human, and every out-of-scope path is REFUSED
+# rather than warned about or quietly skipped.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -86,6 +87,12 @@ test_fresh_worktree_is_trusted() {
   expect_code 0 $? "a fresh linked worktree must be trusted: $out"
   assert_contains "$out" "trusted:" "registration did not report what it trusted"
   assert_trusted "$CONFIG/.claude.json" "$WT" "the worktree was not recorded as trusted"
+  # Claude's gated-grants backstop keys trust on the canonical git root, the
+  # primary checkout a linked worktree's .git file points at, so the worktree
+  # entry alone leaves a worker parked on that dialog variant.
+  assert_trusted "$CONFIG/.claude.json" "$PROJ" "the worktree's canonical root was not recorded as trusted"
+  assert_contains "$out" "$WT" "the success line did not name the worktree"
+  assert_contains "$out" "$PROJ" "the success line did not name the canonical root"
   # The staged write is renamed into place, so no temporary store may survive it.
   [ -z "$(find "$CONFIG" -maxdepth 1 -name '.claude.json.fm-trust.*' -print -quit)" ] \
     || fail "a temporary store file was left behind in the config directory"
@@ -101,6 +108,8 @@ test_registration_is_idempotent() {
   expect_code 0 $? "a repeat registration must succeed: $out"
   count=$(trusted_paths "$CONFIG/.claude.json" | grep -Fxc "$WT")
   [ "$count" = 1 ] || fail "a repeat registration duplicated the entry ($count)"
+  count=$(trusted_paths "$CONFIG/.claude.json" | grep -Fxc "$PROJ")
+  [ "$count" = 1 ] || fail "a repeat registration duplicated the canonical-root entry ($count)"
   pass "fm-claude-trust.sh: repeat registration is idempotent"
 }
 
@@ -262,6 +271,101 @@ test_worktree_subdirectory_is_refused() {
   assert_contains "$out" "is not a worktree root" "the refusal did not name the non-root path"
   assert_not_trusted "$CONFIG/.claude.json" "$sub" "a worktree subdirectory was trusted"
   pass "fm-claude-trust.sh: refuses a subdirectory of the worktree"
+}
+
+# The canonical root Claude's backstop keys on is the repository's MAIN
+# checkout, which is not always the project argument: a linked spawning home
+# (fm-spawn.sh's header) is a firstmate home that is itself a linked worktree
+# of the project repository, and spawns from it must keep launching. The
+# registered root must then be the main checkout, and the home's own path must
+# never be written, because Claude does not look there.
+test_linked_spawning_home_registers_the_repository_main_checkout() {
+  local rec out home_wt
+  rec=$(make_case linked-home)
+  read_case "$rec"
+  home_wt="$CASE_DIR/linked-home"
+  git -C "$PROJ" worktree add --quiet --detach "$home_wt" HEAD
+  out=$(run_trust "$CONFIG" "$WT" "$home_wt")
+  expect_code 0 $? "a spawn from a linked spawning home must still register: $out"
+  assert_trusted "$CONFIG/.claude.json" "$WT" "the worktree was not recorded for a linked spawning home"
+  assert_trusted "$CONFIG/.claude.json" "$PROJ" "the repository main checkout was not recorded as the canonical root"
+  assert_not_trusted "$CONFIG/.claude.json" "$home_wt" "the linked spawning home itself was trusted although Claude never keys on it"
+  assert_contains "$out" "$PROJ" "the success line did not name the main checkout as the canonical root"
+  pass "fm-claude-trust.sh: a linked spawning home registers the repository main checkout, not itself"
+}
+
+# The root is derived from git, never from the project argument's path: a
+# subdirectory of the primary shares its common dir and passes the project
+# check, and what gets written is still the checkout root.
+test_primary_subdirectory_as_project_registers_the_checkout_root() {
+  local rec out sub
+  rec=$(make_case subdir-project)
+  read_case "$rec"
+  sub="$PROJ/sub"
+  mkdir -p "$sub"
+  out=$(run_trust "$CONFIG" "$WT" "$sub")
+  expect_code 0 $? "a subdirectory of the primary named as the project must still register: $out"
+  assert_trusted "$CONFIG/.claude.json" "$PROJ" "the checkout root was not recorded as the canonical root"
+  assert_not_trusted "$CONFIG/.claude.json" "$sub" "the project argument's subdirectory was trusted instead of the checkout root"
+  pass "fm-claude-trust.sh: the canonical root comes from git, not from the project argument's path"
+}
+
+# A home directory that happens to hold the main checkout is still never a
+# standing trust grant, for the same reason it is refused as a worktree.
+test_home_directory_as_canonical_root_is_refused() {
+  local rec out home wt
+  rec=$(make_case home-root)
+  read_case "$rec"
+  home="$CASE_DIR/home-repo"
+  wt="$CASE_DIR/home-repo-wt"
+  fm_git_worktree "$home" "$wt" wt-home-root
+  out=$(run_trust "$CONFIG" "$wt" "$home" "$home")
+  expect_code 1 $? "a home directory as the canonical root must be refused: $out"
+  assert_contains "$out" "home directory" "the refusal did not name the home directory"
+  assert_not_trusted "$CONFIG/.claude.json" "$home" "the home directory was trusted as the canonical root"
+  assert_not_trusted "$CONFIG/.claude.json" "$wt" "the worktree was trusted although its canonical root was refused"
+  # The same pair is acceptable once the root is not HOME, so the home guard is
+  # what refused rather than an unrelated failure.
+  out=$(run_trust "$CONFIG" "$wt" "$home" "$CASE_DIR/elsewhere-home")
+  expect_code 0 $? "the same pair must be acceptable once the root is not HOME: $out"
+  assert_trusted "$CONFIG/.claude.json" "$home" "the canonical root was not recorded once it was no longer HOME"
+  pass "fm-claude-trust.sh: refuses a home directory as the canonical root"
+}
+
+# A bare repository has linked worktrees but no main checkout, so there is no
+# canonical root for Claude's backstop to find and nothing safe to guess at.
+test_bare_repository_worktree_is_refused() {
+  local rec out bare wt
+  rec=$(make_case bare)
+  read_case "$rec"
+  bare="$CASE_DIR/bare.git"
+  wt="$CASE_DIR/bare-wt"
+  git clone --quiet --bare "$PROJ" "$bare"
+  git -C "$bare" worktree add --quiet --detach "$wt" HEAD
+  out=$(run_trust "$CONFIG" "$wt" "$bare")
+  expect_code 1 $? "a worktree of a bare repository must be refused: $out"
+  assert_contains "$out" "has no main working tree" "the refusal did not say the repository has no main working tree"
+  assert_not_trusted "$CONFIG/.claude.json" "$wt" "a bare repository's worktree was trusted without a canonical root"
+  pass "fm-claude-trust.sh: refuses a worktree whose repository has no main checkout"
+}
+
+# A canonical-root entry usually already exists: firstmate itself opens the
+# primary checkout in Claude, and Claude records per-project state there.
+# Registration must only set the trust flag and leave every other key alone.
+test_existing_canonical_root_entry_keeps_its_other_keys() {
+  local rec store
+  rec=$(make_case preserve-root)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  node -e 'const [store, proj] = process.argv.slice(1); require("node:fs").writeFileSync(store, JSON.stringify({numStartups: 4, projects: {[proj]: {hasTrustDialogAccepted: false, allowedTools: ["Bash"], history: [{display: "hello"}], hasCompletedProjectOnboarding: true}}}) + "\n");' "$store" "$PROJ"
+  run_trust "$CONFIG" "$WT" "$PROJ" >/dev/null || fail "registration failed against a store holding the canonical root"
+  assert_trusted "$store" "$PROJ" "an existing canonical-root entry was not flipped to trusted"
+  assert_trusted "$store" "$WT" "the worktree was not recorded beside an existing canonical-root entry"
+  assert_store_value "$store" '["Bash"]' "the canonical root's allowedTools were lost" projects "$PROJ" allowedTools
+  assert_store_value "$store" '[{"display":"hello"}]' "the canonical root's history was lost" projects "$PROJ" history
+  assert_store_value "$store" true "the canonical root's onboarding flag was lost" projects "$PROJ" hasCompletedProjectOnboarding
+  assert_store_value "$store" 4 "an unrelated top-level value was changed" numStartups
+  pass "fm-claude-trust.sh: an existing canonical-root entry keeps its other keys"
 }
 
 test_unrelated_store_content_is_preserved() {
@@ -428,6 +532,8 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
   expect_code 0 $? "the claude spawn must succeed: $out"
   assert_trusted "$config/.claude.json" "$wt" \
     "the claude spawn did not pre-register trust for its worktree"
+  assert_trusted "$config/.claude.json" "$proj" \
+    "the claude spawn did not pre-register trust for the worktree's canonical root"
   assert_present "$launch_log" "the claude spawn sent no launch command"
   assert_grep 'claude --dangerously-skip-permissions' "$launch_log" \
     "the launch command was not the claude worker launch"
@@ -452,6 +558,11 @@ test_non_git_directory_is_refused
 test_missing_directory_is_refused
 test_foreign_project_worktree_is_refused
 test_worktree_subdirectory_is_refused
+test_linked_spawning_home_registers_the_repository_main_checkout
+test_primary_subdirectory_as_project_registers_the_checkout_root
+test_home_directory_as_canonical_root_is_refused
+test_bare_repository_worktree_is_refused
+test_existing_canonical_root_entry_keeps_its_other_keys
 test_unrelated_store_content_is_preserved
 test_symlinked_store_to_a_foreign_owned_target_is_refused
 test_symlinked_store_to_an_owned_target_is_accepted

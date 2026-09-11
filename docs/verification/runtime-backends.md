@@ -300,7 +300,8 @@ That warning rendered in the same shape as the trust dialog, with the selection 
 That gate is not a production blocker, because a normal environment has already accepted it and the treatment arm above ran against the real config and saw neither dialog.
 This change does not address that warning and does not claim to.
 
-`bin/fm-spawn.sh` therefore pre-registers the task worktree through `bin/fm-claude-trust.sh` before launch, and `tests/fm-claude-trust.test.sh` pins both halves of the scope contract: a fresh worktree is trusted, and an out-of-scope path is refused.
+`bin/fm-spawn.sh` therefore pre-registers the task worktree, and since 2026-09-09 its canonical git root as well, through `bin/fm-claude-trust.sh` before launch, and `tests/fm-claude-trust.test.sh` pins both halves of the scope contract: a fresh worktree and its canonical root are trusted, and an out-of-scope path is refused.
+The arms above predate the canonical-root registration, so their success line names only the worktree and they observed only the plain dialog variant; the gated-grants variant that keys on the canonical root, owned by `.agents/skills/harness-adapters/references/harness/claude.md`, has no live suppression arm recorded here yet.
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
