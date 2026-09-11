@@ -4188,14 +4188,22 @@ test_procevent_launch_failed_episodes_are_each_delivered() {
   ack_stopped_cycle "$state" >/dev/null || fail "launch-failed fixture could not be handled and acknowledged"
 
   # The same key again is what a registration-identity-only key would produce
-  # for the next episode: already surfaced, so the watcher never wakes for it.
+  # for the next episode: already surfaced, so the process-event surface never
+  # delivers it under its headline again. A fresh watcher still recovers the
+  # unacknowledged queue row through the generic `check: rearm-resurface`
+  # path (the contract test_procevent_unacknowledged_result_redrains_until_handled
+  # proves), so what this asserts is the headline, not silence.
   append_wake "$state" check "procevent:lf-src:launch-failed:1-2-100-7" \
     "check: process-event source lf-src is registered but its launch did not prove it took the claim"
   : > "$out"
   status=0
   surface_once "$dir" "$out" 30 || status=$?
-  [ "$status" -eq 124 ] \
-    || fail "an already-surfaced launch-failed key woke the watcher again (status $status): $(cat "$out")"
+  case "$status" in
+    0|124) ;;
+    *) fail "the watcher failed on an already-surfaced launch-failed key (status $status): $(cat "$out")" ;;
+  esac
+  ! grep -F "failed to start: procevent:lf-src:launch-failed:1-2-100-7" "$out" >/dev/null \
+    || fail "an already-surfaced launch-failed key was delivered again under its headline: $(cat "$out")"
   ack_stopped_cycle "$state" >/dev/null || fail "repeated-key fixture could not be handled and acknowledged"
 
   # A later episode of the same registration carries the same identity under a
