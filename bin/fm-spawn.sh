@@ -4182,8 +4182,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reade
             rm -f -- "$SPAWN_TREEHOUSE_LEASE_ERROR_FILE" 2>/dev/null || true
             SPAWN_TREEHOUSE_LEASE_ERROR_FILE=
           elif [ -r "$SPAWN_TREEHOUSE_LEASE_ERROR_FILE" ]; then
-            lease_stderr=
-            IFS= read -r lease_stderr < "$SPAWN_TREEHOUSE_LEASE_ERROR_FILE" || true
+            lease_stderr=$(cat "$SPAWN_TREEHOUSE_LEASE_ERROR_FILE") || true
             spawn_lease_refusal "$(spawn_lease_cause "$lease_stderr")"
             exit 1
           else

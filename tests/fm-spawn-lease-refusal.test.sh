@@ -216,6 +216,22 @@ test_lease_refusal_records_reason() {
   pass "a refused treehouse lease records its bounded stderr reason"
 }
 
+test_lease_refusal_surfaces_actionable_treehouse_error() {
+  local case_data id out status
+  id=lease-refusal-actionable-z22
+  case_data=$(make_case actionable "$id")
+  read_case "$case_data"
+  write_treehouse_refusal_fake "$FAKEBIN_DIR"
+  out=$(FM_FAKE_TREEHOUSE_CALLS="$TREEHOUSE_CALLS" \
+    FM_FAKE_TREEHOUSE_STDERR=$'🌳 Setting up worktree...\nall 24 worktrees are in use or dirty (max_trees = 24); increase max_trees in treehouse.toml' \
+    run_spawn "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "an exhausted treehouse pool should keep exit 1"
+  assert_contains "$out" "all 24 worktrees are in use or dirty (max_trees = 24); increase max_trees in treehouse.toml" \
+    "the actionable treehouse pool diagnostic was hidden"
+  pass "a treehouse progress line does not hide its actionable lease refusal"
+}
+
 test_lease_refusal_without_path_records_reason() {
   local case_data id out status ledger
   id=lease-refusal-path-z3
@@ -519,6 +535,7 @@ test_telemetry_consumer_reads_refusal() {
 
 test_lease_cause_builder
 test_lease_refusal_records_reason
+test_lease_refusal_surfaces_actionable_treehouse_error
 test_lease_refusal_without_path_records_reason
 test_recorded_writer_refusal_records_reason
 test_ledger_write_failure_does_not_retry
