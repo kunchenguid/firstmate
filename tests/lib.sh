@@ -360,6 +360,45 @@ SH
   done
 }
 
+# fm_test_fake_treehouse_lease <fakebin>
+# Spawn-world treehouse: `get --lease` prints FM_FAKE_TREEHOUSE_PATH, else the
+# next line from FM_FAKE_TREEHOUSE_QUEUE (consumed), else FM_FAKE_PANE_PATH.
+# Missing path on --lease exits 1. Other verbs exit 0. When
+# FM_FAKE_TREEHOUSE_LOG is set, each invocation's arguments are appended.
+fm_test_fake_treehouse_lease() {
+  local fakebin=$1
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_TREEHOUSE_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+fi
+lease=0
+for arg in "$@"; do
+  case "$arg" in
+    --lease) lease=1 ;;
+  esac
+done
+if [ "$lease" = 1 ]; then
+  path=${FM_FAKE_TREEHOUSE_PATH:-}
+  if [ -z "$path" ] && [ -n "${FM_FAKE_TREEHOUSE_QUEUE:-}" ] && [ -f "$FM_FAKE_TREEHOUSE_QUEUE" ]; then
+    path=$(head -n 1 "$FM_FAKE_TREEHOUSE_QUEUE")
+    tail -n +2 "$FM_FAKE_TREEHOUSE_QUEUE" > "$FM_FAKE_TREEHOUSE_QUEUE.next"
+    mv "$FM_FAKE_TREEHOUSE_QUEUE.next" "$FM_FAKE_TREEHOUSE_QUEUE"
+  fi
+  [ -n "$path" ] || path=${FM_FAKE_PANE_PATH:-}
+  [ -n "$path" ] || exit 1
+  if [ -n "${FM_FAKE_TREEHOUSE_QUEUE:-}" ]; then
+    printf '%s\n' "$path" > "$FM_FAKE_TREEHOUSE_QUEUE.last"
+  fi
+  printf '%s\n' "$path"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only

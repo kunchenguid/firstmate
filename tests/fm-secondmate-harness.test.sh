@@ -665,7 +665,9 @@ meta_field() { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 # capture technique in fm-spawn-dispatch-profile.test.sh so the constructed
 # launch command (not just meta) can be asserted on. Also answers the
 # `#{pane_current_path}` probe from FM_FAKE_PANE_PATH so this same stub works
-# for a crew/scout (non-secondmate) spawn's treehouse-worktree wait loop.
+# for a crew/scout (non-secondmate) spawn's leased-worktree seating loop.
+# The fake treehouse get --lease must print that same path, or seating
+# waits for a real pool copy the pane never enters.
 make_launch_capturing_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
@@ -695,6 +697,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_test_fake_treehouse_lease "$fakebin"
   fm_test_fake_account_auth "$fakebin"
   cat > "$fakebin/pi" <<'SH'
 #!/bin/sh

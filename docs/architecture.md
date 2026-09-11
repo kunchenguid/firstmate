@@ -239,8 +239,9 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
-The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation and fresh-base refusal rules, including spawns from linked homes.
-Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
+Ship and scout Treehouse copies are acquired with a task-lifetime durable lease (`treehouse get --lease --lease-holder <task-id>`), so a copy stays reserved with no process inside it until teardown returns it after the landed-work test.
+The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns that lease, the live-record occupancy guard, ship/scout worktree isolation, and fresh-base refusal rules, including spawns from linked homes.
+Portable regressions live in [`tests/fm-spawn-worktree-lease.test.sh`](../tests/fm-spawn-worktree-lease.test.sh) for task-lifetime leases and live-record occupancy, [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.

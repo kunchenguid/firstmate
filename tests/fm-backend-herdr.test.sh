@@ -2222,6 +2222,19 @@ death_process_info_fixture() {  # <pane> <pid>
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' "$1" "$2" "$2" "$2"
 }
 
+test_pane_shell_pid_reads_process_info_without_idle_proof() {
+  local out
+  out=$(ROOT="$ROOT" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      printf "%s\n" "{\"result\":{\"type\":\"pane_process_info\",\"process_info\":{\"pane_id\":\"w1:p1\",\"shell_pid\":4242,\"foreground_process_group_id\":99,\"foreground_processes\":[{\"pid\":99,\"name\":\"sleep\",\"argv0\":\"sleep\"}]}}}"
+    }
+    fm_backend_herdr_pane_shell_pid fmtest w1:p1
+  ')
+  [ "$out" = 4242 ] || fail "pane_shell_pid should print process-info.shell_pid without requiring an idle shell: $out"
+  pass "herdr pane_shell_pid reads process-info.shell_pid without the idle-shell proof"
+}
+
 test_projection_close_emptying_after_focus_uses_pane_death_without_move() {
   local dir log resp fb out status bgpid
   dir="$TMP_ROOT/close-death-after"; mkdir -p "$dir/responses"
@@ -5283,6 +5296,7 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
+test_pane_shell_pid_reads_process_info_without_idle_proof
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab
 test_projection_close_refuses_unknown_foreground_reason

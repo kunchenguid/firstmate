@@ -96,7 +96,8 @@ case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes
+  fm_test_fake_treehouse_lease "$fakebin"
+  fm_fake_exit0 "$fakebin" gh gh-axi no-mistakes
   fm_test_fake_account_auth "$fakebin"
 
   fm_git_init_commit "$case_dir/project"
@@ -611,6 +612,12 @@ run_ship_spawn() {  # <case-dir> <id>
   run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off
 }
 
+assert_no_treehouse_acquire() {  # <log>
+  if [ -s "$1" ] && grep -E '(^|[[:space:]])get([[:space:]]|$)' "$1" >/dev/null; then
+    fail "spawn acquired a treehouse copy before refusing"$'\n'"$(cat "$1")"
+  fi
+}
+
 # Teardown against a recorded worktree that no longer exists: the landed-work and
 # worktree-return steps are then no-ops, which keeps these cases about the
 # backlog transition rather than re-testing tests/fm-teardown.test.sh's matrix.
@@ -912,15 +919,15 @@ test_dispatch_refuses_a_pending_authoritative_close() {
 #!/usr/bin/env bash
 case "\$*" in
   *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
   *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tmux"
+  : > "$case_dir/treehouse.log"
 
-  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  out=$(FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn accepted work with an authoritative close still pending"
   assert_contains "$out" "pending authoritative backlog close" \
     "spawn did not explain why the pending close blocks dispatch"
@@ -929,8 +936,7 @@ SH
     "spawn published a new worker over a pending close"
   assert_absent "$case_dir/task-endpoint-created" \
     "spawn created an unowned endpoint before refusing the pending close"
-  assert_absent "$case_dir/local-copy-requested" \
-    "spawn requested an unowned local copy before refusing the pending close"
+  assert_no_treehouse_acquire "$case_dir/treehouse.log"
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
     || fail "refused dispatch changed the pending close's backlog row"
   pass "dispatch refuses to supersede a pending authoritative close"
@@ -947,15 +953,15 @@ test_dispatch_refuses_a_held_row_before_creating_resources() {
 #!/usr/bin/env bash
 case "\$*" in
   *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
   *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tmux"
+  : > "$case_dir/treehouse.log"
 
-  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  out=$(FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn accepted a held backlog row"
   assert_contains "$out" "state queued yes" \
     "held-row refusal did not name the actual ineligible state"
@@ -963,8 +969,7 @@ SH
     "held-row refusal published a task record"
   assert_absent "$case_dir/task-endpoint-created" \
     "held-row refusal created an unowned endpoint"
-  assert_absent "$case_dir/local-copy-requested" \
-    "held-row refusal requested an unowned local copy"
+  assert_no_treehouse_acquire "$case_dir/treehouse.log"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "held-row refusal changed the backlog state"
   pass "dispatch refuses held rows before creating resources"
@@ -982,15 +987,15 @@ test_dispatch_refuses_a_blocked_row_before_creating_resources() {
 #!/usr/bin/env bash
 case "\$*" in
   *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
   *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tmux"
+  : > "$case_dir/treehouse.log"
 
-  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  out=$(FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn accepted a dependency-blocked backlog row"
   assert_contains "$out" "state queued no yes" \
     "blocked-row refusal did not name the actual ineligible state"
@@ -998,8 +1003,7 @@ SH
     "blocked-row refusal published a task record"
   assert_absent "$case_dir/task-endpoint-created" \
     "blocked-row refusal created an unowned endpoint"
-  assert_absent "$case_dir/local-copy-requested" \
-    "blocked-row refusal requested an unowned local copy"
+  assert_no_treehouse_acquire "$case_dir/treehouse.log"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "blocked-row refusal changed the backlog state"
   pass "dispatch refuses dependency-blocked rows before creating resources"
@@ -1017,15 +1021,15 @@ test_dispatch_refuses_a_held_in_flight_row_before_relaunch() {
 #!/usr/bin/env bash
 case "\$*" in
   *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
   *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tmux"
+  : > "$case_dir/treehouse.log"
 
-  out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
+  out=$(FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn accepted a held In-flight backlog row"
   assert_contains "$out" "state in_flight yes no" \
     "held In-flight refusal did not name the actual ineligible state"
@@ -1033,8 +1037,7 @@ SH
     "held In-flight refusal published a task record"
   assert_absent "$case_dir/task-endpoint-created" \
     "held In-flight refusal created a replacement endpoint"
-  assert_absent "$case_dir/local-copy-requested" \
-    "held In-flight refusal requested a replacement local copy"
+  assert_no_treehouse_acquire "$case_dir/treehouse.log"
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
     || fail "held In-flight refusal changed the backlog state"
   pass "dispatch refuses held In-flight rows before relaunch"

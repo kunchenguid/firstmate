@@ -216,6 +216,9 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
+  # Drop the first spawn's record so this second launch is not handed the
+  # same live copy. The assertion is about FM_HOME spelling, not occupancy.
+  rm -f "$HOME_DIR/state/$relative_id.meta"
   : > "$LAUNCH_LOG"
   out=$(
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
@@ -696,11 +699,16 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
 }
 
 test_batch_preserves_native_ultra() {
-  local rec id1=ultra-batch-a id2=ultra-batch-b out launch
+  local rec id1=ultra-batch-a id2=ultra-batch-b out launch second queue
   rec=$(make_spawn_case ultra-batch pi "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  second="$CASE_DIR/wt2"
+  git -C "$PROJ_DIR" worktree add --quiet -b "wt2-ultra-batch" "$second"
+  queue="$CASE_DIR/th-queue"
+  printf '%s\n%s\n' "$WT_DIR" "$second" > "$queue"
+  out=$(FM_FAKE_TREEHOUSE_QUEUE="$queue" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model codex-native/gpt-6-astra --effort ultra)
   expect_code 0 "$?" "native Ultra batch failed: $out"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" pi codex-native/gpt-6-astra ultra
@@ -853,14 +861,19 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status second queue
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  second="$CASE_DIR/wt2"
+  git -C "$PROJ_DIR" worktree add --quiet -b "wt2-profile-batch" "$second"
+  queue="$CASE_DIR/th-queue"
+  printf '%s\n%s\n' "$WT_DIR" "$second" > "$queue"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(FM_FAKE_TREEHOUSE_QUEUE="$queue" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"

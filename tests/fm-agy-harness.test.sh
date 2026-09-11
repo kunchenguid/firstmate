@@ -544,7 +544,8 @@ echo "fake agy must never execute" >&2
 exit 9
 SH
   chmod +x "$fakebin/agy"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_test_fake_treehouse_lease "$fakebin"
+  fm_fake_exit0 "$fakebin" gh-axi gh
   printf '%s\n' "$fakebin"
 }
 
@@ -620,7 +621,7 @@ test_agy_launch_carries_the_brief_with_model_effort_and_autonomy() {
   out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model gemini-3.8-flash-low --effort low)
   rc=$?
-  expect_code 0 "$rc" "agy spawn with a listed model should succeed"
+  expect_code 0 "$rc" "agy spawn with a listed model should succeed: $out"
   launch=$(cat "$CASE_DIR/launch.log")
   assert_contains "$launch" "$FAKEBIN_DIR/agy" "agy launch did not pin the resolved absolute binary"
   assert_contains "$launch" "--prompt-interactive" "agy launch did not carry the brief via --prompt-interactive"

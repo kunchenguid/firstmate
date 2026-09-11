@@ -657,6 +657,8 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   assert_absent "$state/$id.meta" "aborted Orca spawn must not record meta"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create' \
     "Orca spawn should validate the worktree before creating a terminal"
+  assert_contains "$out" "closing window term-bad" \
+    "Orca spawn should report the implicit terminal close"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-bad'$'\x1f''--json' \
     "Orca spawn should close the implicit terminal after validation aborts"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-bad::/orca/wt-bad'$'\x1f''--force'$'\x1f''--json' \

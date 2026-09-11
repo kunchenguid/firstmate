@@ -250,6 +250,11 @@
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
+#     On Herdr, the pane's own shell is excluded: a leased spawn seats that
+#     shell inside the copy, so treating it as a leaked descendant kills the
+#     pane before the focus-preserving close and, on Herdr 0.7.4, steals
+#     focus to the focused workspace's right neighbor. The recorded pane
+#     shell is left for the locked close, which repositions then death-closes.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -1961,7 +1966,7 @@ task_pid_list_contains() {  # <pid-list> <pid>
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
-  local dir dir_pids pids=""
+  local dir dir_pids pids="" pid keep
   for dir in "$@"; do
     [ -n "$dir" ] || continue
     if ! dir_pids=$(pids_with_cwd_under "$dir"); then
@@ -1972,6 +1977,16 @@ task_pids_under_roots() {  # <dir>...
 $dir_pids"
   done
   TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+  [ -n "${TEARDOWN_REAP_KEEP_PIDS:-}" ] || return 0
+  keep=""
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    printf '%s\n' "$TEARDOWN_REAP_KEEP_PIDS" | grep -Fxq "$pid" && continue
+    keep="$keep$pid"$'\n'
+  done <<EOF
+$TASK_PIDS
+EOF
+  TASK_PIDS=$(printf '%s' "$keep" | grep -E '^[0-9]+$' | sort -un || true)
 }
 
 reap_task_backend_process_group() {  # <label>
@@ -2156,52 +2171,6 @@ teardown_live_slot_path() {
   [ "$KIND" != secondmate ] || return 1
   fm_treehouse_pool_slot "$PROJ" "$WT" || return 1
   canonical_existing_dir "$WT"
-}
-
-collect_local_firstmate_states() {
-  local record_state=$1 root home reg line child known existing i=0
-  local -a homes
-  TREEHOUSE_OWNER_STATES=("$record_state")
-  root=$(fm_firstmate_root_home "$FM_HOME") || {
-    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
-    return 1
-  }
-  homes=("$root")
-  while [ "$i" -lt "${#homes[@]}" ]; do
-    home=${homes[$i]}
-    i=$((i + 1))
-    known=0
-    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
-    done
-    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
-    reg="$home/data/secondmates.md"
-    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
-    [ -f "$reg" ] && [ ! -L "$reg" ] || {
-      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
-      return 1
-    }
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "- "*)
-          secondmate_registry_parse_line "$line" || {
-            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
-            return 1
-          }
-          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
-          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || {
-            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
-            return 1
-          }
-          known=0
-          for existing in "${homes[@]}"; do
-            [ "$existing" != "$child" ] || known=1
-          done
-          [ "$known" = 1 ] || homes+=("$child")
-          ;;
-      esac
-    done < "$reg"
-  done
 }
 
 require_exclusive_worktree_slot_record() {
@@ -2860,6 +2829,12 @@ validate_firstmate_home_children_removal() {
 }
 
 TEARDOWN_HERDR_LOCK_RECORDS=
+TEARDOWN_REAP_KEEP_PIDS=
+TEARDOWN_HERDR_ENDPOINT_CLOSED=0
+HERDR_PRESENTATION_JOURNAL=
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_PANE=
 teardown_release_herdr_locks() {
   local lock_session lock_path
   [ -n "$TEARDOWN_HERDR_LOCK_RECORDS" ] || return 0
@@ -2883,6 +2858,77 @@ FMEOF
   return 1
 }
 
+# Keep the recorded Herdr pane shell out of the worktree-process reap. A
+# leased spawn seats that shell in the copy; reaping it is unplanned
+# pane-death, which on Herdr 0.7.4 moves focus to the focused workspace's
+# right neighbor before the locked close can reposition.
+teardown_herdr_keep_pane_shell_for_reap() {
+  local session pane pid
+  session=${TEARDOWN_HERDR_SESSION:-}
+  pane=${TEARDOWN_HERDR_PANE:-}
+  [ -n "$session" ] && [ -n "$pane" ] || return 0
+  declare -F fm_backend_herdr_pane_shell_pid >/dev/null 2>&1 || return 0
+  pid=$(fm_backend_herdr_pane_shell_pid "$session" "$pane") || return 0
+  case "$pid" in
+    ''|*[!0-9]*|0|1) return 0 ;;
+  esac
+  TEARDOWN_REAP_KEEP_PIDS=$pid
+}
+
+# Close the recorded Herdr pane under the session lock already held from
+# preflight.
+teardown_herdr_close_locked_endpoint() {
+  HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+  HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+  HERDR_PRESENTATION_SESSION=
+  HERDR_PRESENTATION_PANE=
+  if { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+    fm_backend_source herdr || true
+    HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+    HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+    HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+    if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+       && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+       && [ -n "$HERDR_PRESENTATION_PANE" ] \
+       && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+       && fm_backend_herdr_projection_endpoint_matches_journal \
+         "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+         "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+      HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+    fi
+  fi
+  if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+    if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
+      # stderr is deliberately NOT discarded here. This is the highest-frequency
+      # projected-close call site, and the helper's only stderr output is a real
+      # warning - unverifiable workspace.move support, a refused focus-unsafe
+      # close, an unconfirmed repositioned-workspace removal, or a failed exact
+      # restore.
+      # Swallowing them left a wrong active workspace with no operator-visible
+      # signal at all. The close stays non-fatal exactly as before: the presence
+      # gate below is what decides whether any durable record may be removed.
+      fm_backend_herdr_projection_close_pane_focus_preserving \
+        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
+    else
+      echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
+    fi
+  elif teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
+    fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
+  else
+    echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
+  fi
+  if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+    if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
+      rm -f "$HERDR_PRESENTATION_JOURNAL"
+    else
+      echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
+    fi
+  elif { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+    echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
+  fi
+  TEARDOWN_HERDR_ENDPOINT_CLOSED=1
+}
+
 teardown_herdr_require_prerequisites() {  # <task-id>
   local task_id=$1 prerequisite
   if ! fm_backend_source herdr; then
@@ -2895,6 +2941,7 @@ teardown_herdr_require_prerequisites() {  # <task-id>
     fm_backend_herdr_workspace_presence_state \
     fm_backend_herdr_endpoint_confirmed_gone \
     fm_backend_herdr_explicit_close_pane_confirmed \
+    fm_backend_herdr_pane_shell_pid \
     fm_backend_herdr_presentation_session_lock_path; do
     if ! declare -F "$prerequisite" >/dev/null 2>&1; then
       echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
@@ -3392,7 +3439,13 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
+  if [ "$BACKEND" = herdr ]; then
+    teardown_herdr_keep_pane_shell_for_reap
+  fi
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  if [ "$BACKEND" = herdr ]; then
+    teardown_herdr_close_locked_endpoint
+  fi
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
@@ -3454,24 +3507,11 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fm_treehouse_slot_owner_release "$WT" "$ID"
 fi
 
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+if [ "$TEARDOWN_HERDR_ENDPOINT_CLOSED" != 1 ]; then
+  if [ "$BACKEND" = herdr ]; then
+    teardown_herdr_close_locked_endpoint
+  elif [ "$BACKEND" != orca ]; then
+    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fi
 fi
 

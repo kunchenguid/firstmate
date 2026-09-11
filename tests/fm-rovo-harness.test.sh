@@ -123,7 +123,8 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_test_fake_treehouse_lease "$fakebin"
+  fm_fake_exit0 "$fakebin" gh-axi gh
   fm_fake_exit0 "$fakebin" rovo
   printf '%s\n' "$fakebin"
 }
@@ -291,6 +292,12 @@ test_rovo_readiness_gate_precedes_pointer() {
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "rovo pointer was sent before an observable ready signal"
   grep -q "kill-window.*fm-$id" "$CASE_DIR/tmux-calls.log" \
     || fail "a failed rovo readiness gate must tear down the exact endpoint it created instead of leaking an orphaned --yolo process"
+  n=$(grep -c "kill-window.*fm-$id" "$CASE_DIR/tmux-calls.log" || true)
+  [ "$n" = 1 ] \
+    || fail "a failed fresh rovo spawn closed the window $n times; it should close once"
+  n=$(printf '%s\n' "$out" | grep -cF "closing window firstmate:fm-$id" || true)
+  [ "$n" = 1 ] \
+    || fail "a failed fresh rovo spawn reported the window close $n times; it should report once"
   pass "fm-spawn: rovo never sends the brief pointer before an observable ready signal, and tears down the created endpoint on failure"
 }
 
