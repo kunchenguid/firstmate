@@ -2092,30 +2092,13 @@ json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-agy_hook_directory_secure() {
-  local path=$1 owner mode
-  [ -d "$path" ] && [ ! -L "$path" ] || return 1
-  owner=$(stat -c %u "$path" 2>/dev/null || stat -f %u "$path" 2>/dev/null) || return 1
-  mode=$(stat -c %a "$path" 2>/dev/null || stat -f %Lp "$path" 2>/dev/null) || return 1
-  case "$mode" in
-    ''|*[!0-7]*) return 1 ;;
-  esac
-  [ "$owner" = "$(id -u)" ] || return 1
-  (( (8#$mode & 022) == 0 && (8#$mode & 200) != 0 ))
-}
-
 agy_prepare_hook_root() {
   local root=$1 state_root=$2 root_real agents_real
-  if [ -L "$root" ]; then
-    echo "error: refusing symlinked agy hook root $root" >&2
+  if [ -e "$root" ] || [ -L "$root" ]; then
+    echo "error: refusing pre-existing agy hook root $root" >&2
     return 1
   fi
-  if [ -e "$root" ]; then
-    if ! agy_hook_directory_secure "$root"; then
-      echo "error: refusing unsafe agy hook root $root" >&2
-      return 1
-    fi
-  elif ! (umask 077 && mkdir "$root"); then
+  if ! (umask 077 && mkdir "$root"); then
     echo "error: could not create agy hook root $root" >&2
     return 1
   fi
@@ -2134,16 +2117,11 @@ agy_prepare_hook_root() {
       return 1
       ;;
   esac
-  if [ -L "$root_real/.agents" ]; then
-    echo "error: refusing symlinked agy hook settings directory $root_real/.agents" >&2
+  if [ -e "$root_real/.agents" ] || [ -L "$root_real/.agents" ]; then
+    echo "error: refusing pre-existing agy hook settings directory $root_real/.agents" >&2
     return 1
   fi
-  if [ -e "$root_real/.agents" ]; then
-    if ! agy_hook_directory_secure "$root_real/.agents"; then
-      echo "error: refusing unsafe agy hook settings directory $root_real/.agents" >&2
-      return 1
-    fi
-  elif ! (umask 077 && mkdir "$root_real/.agents"); then
+  if ! (umask 077 && mkdir "$root_real/.agents"); then
     echo "error: could not create agy hook settings directory $root_real/.agents" >&2
     return 1
   fi
@@ -2162,12 +2140,8 @@ agy_prepare_hook_root() {
   AGY_HOOK_SETTINGS=$agents_real/hooks.json
 }
 
-agy_prepare_hook_file() {
-  local path=$1 state_root=$2 parent_real owner
-  if [ -L "$path" ]; then
-    echo "error: refusing symlinked agy hook file $path" >&2
-    return 1
-  fi
+agy_write_hook_file() {
+  local path=$1 state_root=$2 parent_real
   parent_real=$(cd -P -- "$(dirname -- "$path")" && pwd -P) || {
     echo "error: could not resolve agy hook file parent $path" >&2
     return 1
@@ -2179,37 +2153,14 @@ agy_prepare_hook_file() {
       return 1
       ;;
   esac
-  if [ -e "$path" ]; then
-    [ -L "$path" ] && {
-      echo "error: refusing symlinked agy hook file $path" >&2
-      return 1
-    }
-    [ -f "$path" ] || {
-      echo "error: refusing non-regular agy hook file $path" >&2
-      return 1
-    }
-    owner=$(stat -c %u "$path" 2>/dev/null || stat -f %u "$path" 2>/dev/null) || {
-      echo "error: could not inspect agy hook file $path" >&2
-      return 1
-    }
-    [ "$owner" = "$(id -u)" ] || {
-      echo "error: refusing agy hook file not owned by the current user $path" >&2
-      return 1
-    }
+  if ! (
+    set -C
+    exec 3> "$path"
+    cat >&3
+  ); then
+    echo "error: could not create agy hook file $path" >&2
+    return 1
   fi
-}
-
-agy_write_hook_file() {
-  local path=$1 state_root=$2
-  agy_prepare_hook_file "$path" "$state_root" || return 1
-  if [ ! -e "$path" ]; then
-    if ! (set -C; : > "$path"); then
-      echo "error: could not create agy hook file $path" >&2
-      return 1
-    fi
-  fi
-  agy_prepare_hook_file "$path" "$state_root" || return 1
-  cat > "$path"
 }
 
 # rovo confines every file-tool operation (open_files, create_file, grep, ...)

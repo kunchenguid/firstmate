@@ -8,6 +8,14 @@ The adapter reference at [`.agents/skills/harness-adapters/references/harness/ag
 The current measurement was taken on 2026-09-11 UTC on Linux with Antigravity CLI 1.2.0 from `~/.local/bin/agy`.
 The verified scope is CREWMATE and SCOUT only.
 
+The active status row captured during the tool-running probe was:
+
+```text
+esc to cancel                                                Gemini 3.8 Flash · medium
+```
+
+The delivery fallback matches this anchored cancel-plus-effort row, not the bare words in draft text.
+
 Command:
 
 ```text

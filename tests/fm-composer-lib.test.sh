@@ -844,13 +844,23 @@ test_agy_boundary_is_locale_independent() {
 }
 
 test_generic_delivery_busy_union_includes_agy_cancel() {
-  if ! printf '%s\n' 'esc to cancel' | fm_busy_lines_match; then
-    fail "generic delivery busy matcher must recognize AGY's cancel marker"
+  local active='esc to cancel                                                Gemini 3.8 Flash · medium'
+  if printf '%s\n' 'esc to cancel' | fm_busy_lines_match; then
+    fail "generic delivery busy matcher must not classify draft text as busy"
   fi
-  if printf '%s\n' 'esc to cancel' | fm_busy_lines_match unknown-harness; then
+  if printf '%s\n' 'esc to cancel' | fm_busy_lines_match agy; then
+    fail "agy busy matcher must not classify draft text as busy"
+  fi
+  if ! printf '%s\n' "$active" | fm_busy_lines_match; then
+    fail "generic delivery busy matcher must recognize AGY's native active row"
+  fi
+  if ! printf '%s\n' "$active" | fm_busy_lines_match agy; then
+    fail "agy busy matcher must recognize its native active row"
+  fi
+  if printf '%s\n' "$active" | fm_busy_lines_match unknown-harness; then
     fail "unknown harness must not borrow the generic delivery busy matcher"
   fi
-  pass "fm_composer: generic delivery busy union recognizes AGY cancel"
+  pass "fm_composer: AGY busy matching excludes draft text"
 }
 
 test_agy_prompt_preserves_furniture_looking_drafts() {

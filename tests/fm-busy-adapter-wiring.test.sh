@@ -451,16 +451,25 @@ test_agy_hooks_refuse_symlinked_file() {
   target="$CASE_DIR/foreign-hooks.json"
   settings="$state/$id.agy-hooks/.agents/hooks.json"
   printf '%s\n' untouched > "$target"
-  mkdir -p "$(dirname "$settings")"
-  ln -s "$target" "$settings"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  cat > "$FAKEBIN_DIR/mkdir" <<'SH'
+#!/usr/bin/env bash
+/bin/mkdir "$@"
+status=$?
+if [ "$status" -eq 0 ] && [ "$#" -eq 1 ] && [ "${1:-}" = "${FM_TEST_AGY_SYMLINK_PARENT:-}" ]; then
+  /bin/ln -s "$FM_TEST_AGY_SYMLINK_TARGET" "$FM_TEST_AGY_SYMLINK_PATH"
+fi
+exit "$status"
+SH
+  chmod +x "$FAKEBIN_DIR/mkdir"
+  out=$(FM_TEST_AGY_SYMLINK_PARENT="$(dirname "$settings")" \
+    FM_TEST_AGY_SYMLINK_TARGET="$target" FM_TEST_AGY_SYMLINK_PATH="$settings" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   status=$?
   [ "$status" -ne 0 ] || fail "agy spawn must refuse a symlinked hook file: $out"
   assert_contains "$out" "$settings" \
     "agy file-symlink refusal must name the hook file: $out"
   [ "$(cat "$target")" = untouched ] \
     || fail "agy spawn modified the symlinked hook target"
-  assert_absent "$target.tmp" "agy spawn must not create a target-side temporary file"
   pass "agy spawn refuses symlinked hook files without touching their targets"
 }
 
