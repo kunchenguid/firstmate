@@ -652,7 +652,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local agy_prompt_row=-1 agy_boundary_row=-1 agy_last_nonempty_row=-1
+  local agy_prompt_row=-1 agy_boundary_row=-1
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
   while IFS= read -r line; do
@@ -713,7 +713,6 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         ;;
     esac
     if [ "$agy_prompt_row" -ge 0 ] && [ "$row" -ge "$agy_prompt_row" ]; then
-      [ -n "$trimmed" ] && agy_last_nonempty_row=$row
       if [ "$row" -gt "$agy_prompt_row" ] \
          && [ "$agy_boundary_row" -lt 0 ] \
          && _fm_composer_agy_boundary_row "$trimmed"; then
@@ -724,7 +723,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
     # lower shell prompts as staleness evidence for cursorless selection.
     if [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
-      [ "$row" -eq "$agy_prompt_row" ] || FM_COMPOSER_SCAN_SHELL_ROW=$row
+      FM_COMPOSER_SCAN_SHELL_ROW=$row
     elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_BARE_ROW=$row
     fi
@@ -843,12 +842,8 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
 $pane
 EOF
   local agy_end_row=-1
-  if [ "$agy_prompt_row" -ge 0 ]; then
-    if [ "$agy_boundary_row" -ge 0 ]; then
-      agy_end_row=$((agy_boundary_row - 1))
-    else
-      agy_end_row=$agy_last_nonempty_row
-    fi
+  if [ "$agy_prompt_row" -ge 0 ] && [ "$agy_boundary_row" -ge 0 ]; then
+    agy_end_row=$((agy_boundary_row - 1))
   fi
   if [ "$agy_prompt_row" -ge 0 ] && [ "$agy_end_row" -ge "$agy_prompt_row" ]; then
     FM_COMPOSER_SCAN_AGY_ROW=$agy_prompt_row
@@ -857,7 +852,7 @@ EOF
        && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$agy_end_row" ]; then
       FM_COMPOSER_SCAN_BARE_ROW=-1
     fi
-    if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$agy_prompt_row" ] \
+    if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -ge "$agy_prompt_row" ] \
        && [ "$FM_COMPOSER_SCAN_SHELL_ROW" -le "$agy_end_row" ]; then
       FM_COMPOSER_SCAN_SHELL_ROW=-1
     fi

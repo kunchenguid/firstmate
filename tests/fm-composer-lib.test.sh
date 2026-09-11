@@ -673,7 +673,9 @@ test_agy_prompt_requires_footer_proof() {
   out=$(fm_composer_classify_screen "$caps" $'────────\n> draft\n────────\n? for shortcuts' 1)
   [ "$out" = pending ] || fail "typed agy prompt text must read pending, got '$out'"
   out=$(fm_composer_classify_screen "$caps" $'> ' 0)
-  [ "$out" = empty ] || fail "a lone empty agy prompt must read empty, got '$out'"
+  [ "$out" = unknown ] || fail "a lone empty shell prompt must remain unknown, got '$out'"
+  out=$(fm_composer_classify_screen "$caps" $'> $ ls' 0)
+  [ "$out" = unknown ] || fail "a shell command prompt without a boundary must remain unknown, got '$out'"
   pass "fm_composer_classify_screen: agy uses positional boundary proof"
 }
 
@@ -684,7 +686,9 @@ test_agy_prompt_requires_footer_proof_without_cursor() {
   out=$(fm_composer_classify_screen 'styled=0' $'────────\n> draft\n────────\n? for shortcuts')
   [ "$out" = pending ] || fail "cursorless typed agy prompt must read pending, got '$out'"
   out=$(fm_composer_classify_screen 'styled=0' $'> ')
-  [ "$out" = empty ] || fail "cursorless lone empty agy prompt must read empty, got '$out'"
+  [ "$out" = unknown ] || fail "cursorless lone empty shell prompt must remain unknown, got '$out'"
+  out=$(fm_composer_classify_screen 'styled=0' $'> $ ls')
+  [ "$out" = unknown ] || fail "cursorless shell command prompt without a boundary must remain unknown, got '$out'"
   pass "fm_composer_classify_screen: cursorless agy uses positional boundary proof"
 }
 

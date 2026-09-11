@@ -2028,11 +2028,9 @@ effort_flag_for_harness() {
       ;;
     agy)
       # agy 1.2.0 accepts low, medium, and high directly.
-      # xhigh and max cap at agy's highest supported level so the requested
-      # higher effort is never silently omitted.
       case "$effort" in
         low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
-        xhigh|max) printf -- '--effort high ' ;;
+        xhigh) printf -- '--effort high ' ;;
       esac
       ;;
     # rovo has no --effort flag on `run`; its effort mapping rides
