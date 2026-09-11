@@ -893,10 +893,16 @@ test_network_phase_partitions_the_run() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   # Break the two diagnostics that stand for the two halves: a local tool floor
-  # and the network GitHub-auth probe.
+  # and the network GitHub-auth probe. The auth half models a credential GitHub
+  # actually answered and refused, because that - not a bare non-zero exit - is
+  # what NEEDS_GH_AUTH now means.
   rm -f "$fakebin/node"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'HTTP/2.0 401 Unauthorized'
+  exit 1
+fi
 exit 1
 SH
   chmod +x "$fakebin/gh"
@@ -1154,6 +1160,303 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# The GitHub credential probe used to be `gh auth status || echo NEEDS_GH_AUTH`:
+# unbounded, and mapping ANY non-zero exit onto "re-authenticate". `gh auth
+# status` validates the credential over the network and exits non-zero reporting
+# the token invalid when that call could not complete at all, so a transient
+# network fault reported a broken sign-in against a perfectly good credential -
+# every session, until the operator stopped believing the check.
+#
+# These cases pin the three outcomes apart. gh is faked per case because the
+# real one needs credentials and a network CI does not have, and each fake
+# reproduces gh 2.96.0's observed behavior in that condition.
+# Writes a fake gh reproducing gh 2.96.0's observed behavior in one condition.
+# The real gh needs credentials and a network CI does not have.
+write_fake_gh() {  # <fakebin> <healthy|rejected|rate-limited|throttled|other-host-failed|own-host-failed|unreachable|no-credential|hang>
+  local fakebin=$1 mode=$2
+  case "$mode" in
+    healthy)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+      ;;
+    # GitHub answered 401: `auth status` exits 1 and `api` still gets a response
+    # status line back, because the exchange completed.
+    rejected)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'HTTP/2.0 401 Unauthorized'
+  exit 1
+fi
+printf '%s\n' '  X Failed to log in to github.com account octocat (keyring)' >&2
+printf '%s\n' '  - The token in keyring is invalid.' >&2
+exit 1
+SH
+      ;;
+    # GitHub answers 403 to a VALID token whose primary rate limit is spent, and
+    # marks it with x-ratelimit-remaining: 0. `auth status` validates with the
+    # same API, so it renders the same "invalid" verdict as a real rejection.
+    rate-limited)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'HTTP/2.0 403 Forbidden' 'X-Ratelimit-Limit: 5000' 'X-Ratelimit-Remaining: 0' '' '{"message":"API rate limit exceeded for user ID 1."}'
+  exit 1
+fi
+printf '%s\n' '  X Failed to log in to github.com account octocat (keyring)' >&2
+printf '%s\n' '  - The token in keyring is invalid.' >&2
+exit 1
+SH
+      ;;
+    # Secondary rate limiting answers 429 with no ratelimit-remaining header.
+    throttled)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'HTTP/2.0 429 Too Many Requests' 'Retry-After: 60' '' '{"message":"You have exceeded a secondary rate limit."}'
+  exit 1
+fi
+printf '%s\n' '  X Failed to log in to github.com account octocat (keyring)' >&2
+printf '%s\n' '  - The token in keyring is invalid.' >&2
+exit 1
+SH
+      ;;
+    # `auth status` failed on github.com ITSELF (a fault that cleared before
+    # the follow-up, or a validation failure short of a refusal), yet `api`
+    # completes with 200. There is no other host to blame here.
+    own-host-failed)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'HTTP/2.0 200 OK' 'X-Ratelimit-Limit: 5000' '' '{"current_user_url":"https://api.github.com/user"}'
+  exit 0
+fi
+printf '%s\n' 'github.com' \
+  '  X Failed to log in to github.com account octocat (keyring)' \
+  '  - Active account: true' \
+  '  - The token in keyring is invalid.' >&2
+exit 1
+SH
+      ;;
+    # github.com is healthy but hosts.yml also carries a host whose token fails:
+    # `auth status` exits 1 for ANY failing host or account, while `api` on
+    # github.com still completes with 200 because the active credential is
+    # fine. The token line is deliberately unmasked so the probe's output can
+    # be checked for never repeating it.
+    other-host-failed)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'HTTP/2.0 200 OK' 'X-Ratelimit-Limit: 5000' '' '{"current_user_url":"https://api.github.com/user"}'
+  exit 0
+fi
+printf '%s\n' 'github.com' \
+  '  ✓ Logged in to github.com account octocat (keyring)' \
+  '  - Active account: true' \
+  '  - Token: gho_fakefakefakefakefakefakefakefakefake' \
+  '' \
+  'ghe.example.com' \
+  '  X Failed to log in to ghe.example.com account someone (hosts.yml)' \
+  '  - Active account: true' \
+  '  - The token in hosts.yml is invalid.' >&2
+exit 1
+SH
+      ;;
+    # The API is unreachable. Note the `auth status` text: gh renders the SAME
+    # "token is invalid" verdict it renders for a real rejection, which is
+    # exactly why its exit status cannot be trusted on its own.
+    unreachable)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'Get "https://api.github.com/": dial tcp: lookup api.github.com: no such host' >&2
+  exit 1
+fi
+printf '%s\n' '  X Failed to log in to github.com account octocat (keyring)' >&2
+printf '%s\n' '  - The token in keyring is invalid.' >&2
+exit 1
+SH
+      ;;
+    # No credential configured at all: no request is attempted, so there is no
+    # status line - but this genuinely does need `gh auth login`.
+    no-credential)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'To get started with GitHub CLI, please run:  gh auth login' >&2
+  exit 4
+fi
+printf '%s\n' 'You are not logged into any GitHub hosts. To log in, run: gh auth login' >&2
+exit 1
+SH
+      ;;
+    # Real `gh auth status` carries no timeout of its own: pointed at a socket
+    # that accepts and never answers, it was still running when a 60s bound
+    # killed it. So the bound has to come from bootstrap.
+    hang)
+      cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
+  sleep 120
+fi
+exit 0
+SH
+      ;;
+    *) fail "unknown fake gh mode: $mode" ;;
+  esac
+  chmod +x "$fakebin/gh"
+}
+
+# Runs the read-only GitHub credential probe on its own: `only` plus detect-only
+# is exactly that one step (bin/fm-bootstrap.sh's header owns that composition).
+gh_auth_probe_case() {  # <case-dir> <fake gh mode> [env...]
+  local case_dir=$1 mode=$2
+  shift 2
+  local fakebin
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  write_fake_gh "$fakebin" "$mode"
+  env "$@" PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
+test_gh_auth_probe_separates_rejection_from_an_unreachable_check() {
+  local dir="$TMP_ROOT/gh-auth-probe" out
+
+  out=$(gh_auth_probe_case "$dir/healthy" healthy)
+  [ -z "$out" ] \
+    || fail "a confirmed-good credential must stay silent, got: $out"
+
+  out=$(gh_auth_probe_case "$dir/rejected" rejected)
+  assert_contains "$out" "NEEDS_GH_AUTH" \
+    "GitHub answered 401 for the credential, which is the one case that needs gh auth login"
+  assert_not_contains "$out" "GH_AUTH_UNKNOWN" \
+    "a credential GitHub actually rejected is established, not unknown"
+
+  # The other half of the false alarm: `gh auth status` exits 1 when ANY
+  # configured host or account fails, so a stale second host in hosts.yml used
+  # to send the operator to re-authenticate a github.com credential that
+  # GitHub had just answered 200 to.
+  out=$(gh_auth_probe_case "$dir/other-host" other-host-failed)
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "a credential github.com accepted with 200 must never be reported as needing gh auth login"
+  assert_contains "$out" "GH_AUTH_UNKNOWN" \
+    "a failed gh auth status against an accepted credential is unconfirmed, not silence"
+  assert_contains "$out" "ghe.example.com" \
+    "the unknown line must name the host gh auth status actually failed on"
+  assert_not_contains "$out" "gho_fake" \
+    "the excerpt must never repeat a token from gh auth status output"
+
+  # When gh's failure line names github.com itself, there is no other host to
+  # blame, and saying so would send the operator to log out of github.com.
+  out=$(gh_auth_probe_case "$dir/own-host" own-host-failed)
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "a credential github.com accepted with 200 is not a rejection whatever gh auth status said"
+  assert_contains "$out" "GH_AUTH_UNKNOWN: github.com accepted the credential but gh auth status still failed" \
+    "a failure gh pins on github.com itself gets the neutral wording"
+  assert_not_contains "$out" "another host" \
+    "the line must not blame another host when the excerpt names github.com"
+  assert_contains "$out" "github.com account octocat" \
+    "the neutral line still quotes what gh auth status said"
+
+  # A spent rate limit is a 403 for a credential GitHub has NOT refused; the
+  # x-ratelimit-remaining: 0 header is what tells it apart from a rejection,
+  # and a 429 is throttling by definition.
+  out=$(gh_auth_probe_case "$dir/rate-limited" rate-limited)
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "a rate-limited credential must never be reported as needing gh auth login"
+  assert_contains "$out" "GH_AUTH_UNKNOWN: github.com is rate-limiting this credential" \
+    "a 403 carrying x-ratelimit-remaining: 0 is throttling, reported as unconfirmed"
+  out=$(gh_auth_probe_case "$dir/throttled" throttled)
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "a 429 must never be reported as needing gh auth login"
+  assert_contains "$out" "GH_AUTH_UNKNOWN: github.com is rate-limiting this credential" \
+    "a 429 is throttling, reported as unconfirmed"
+
+  # The regression itself: this used to print NEEDS_GH_AUTH and send the
+  # operator to re-authenticate a credential nothing had rejected.
+  out=$(gh_auth_probe_case "$dir/unreachable" unreachable)
+  assert_contains "$out" "GH_AUTH_UNKNOWN" \
+    "an unreachable GitHub leaves the credential unconfirmed, not rejected"
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "a network fault must never be reported as a credential that needs re-authentication"
+
+  # ... and it must not swing the other way either: an unconfirmed credential is
+  # never silence, because silence is this check's way of saying "signed in".
+  [ -n "$out" ] || fail "an unconfirmed credential was reported as healthy"
+
+  out=$(gh_auth_probe_case "$dir/nocred" no-credential)
+  assert_contains "$out" "NEEDS_GH_AUTH" \
+    "no credential at all still needs gh auth login, even though no exchange completed"
+
+  pass "bootstrap tells a rejected GitHub credential apart from a check it could not complete"
+}
+
+test_gh_auth_probe_cannot_stall_the_startup_stage() {
+  local dir="$TMP_ROOT/gh-auth-stall" out started elapsed zero_pid zeros_pid
+
+  started=$(date +%s)
+  out=$(gh_auth_probe_case "$dir/bounded" hang FM_GH_AUTH_TIMEOUT=2)
+  elapsed=$(( $(date +%s) - started ))
+  assert_contains "$out" "GH_AUTH_UNKNOWN" \
+    "a probe that never answered must report that it could not confirm the credential"
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "a probe that never answered established nothing about the credential"
+  [ "$elapsed" -lt 60 ] \
+    || fail "the auth probe ran ${elapsed}s against a 2s bound, so it is not bounded"
+
+  # A non-positive bound is not a bound: `timeout 0` and `alarm 0` both disable
+  # the deadline, so a malformed override must fall back to the default rather
+  # than silently restoring the unbounded stall. `00` is zero too, in every
+  # mechanism's parser, so it must not slip past a textual check. Both cases
+  # wait out the default bound, so they run side by side.
+  mkdir -p "$dir"
+  started=$(date +%s)
+  gh_auth_probe_case "$dir/zero" hang FM_GH_AUTH_TIMEOUT=0 > "$dir/zero.out" 2>&1 &
+  zero_pid=$!
+  gh_auth_probe_case "$dir/zeros" hang FM_GH_AUTH_TIMEOUT=00 > "$dir/zeros.out" 2>&1 &
+  zeros_pid=$!
+  wait "$zero_pid" || true
+  wait "$zeros_pid" || true
+  elapsed=$(( $(date +%s) - started ))
+  out=$(cat "$dir/zero.out")
+  assert_contains "$out" "GH_AUTH_UNKNOWN" \
+    "a zero bound must still be bounded by the default, not disabled"
+  out=$(cat "$dir/zeros.out")
+  assert_contains "$out" "GH_AUTH_UNKNOWN" \
+    "a bound spelled 00 must still be bounded by the default, not disabled"
+  assert_contains "$out" "within 20s" \
+    "a bound spelled 00 must fall back to the 20s default, not run as written"
+  [ "$elapsed" -lt 110 ] \
+    || fail "a zero bound disabled the deadline; the probes ran ${elapsed}s"
+
+  pass "bootstrap's GitHub auth probe is bounded and a malformed bound cannot disable it"
+}
+
+test_gh_auth_probe_reports_a_missing_gh_instead_of_passing_it() {
+  local dir="$TMP_ROOT/gh-auth-absent" case_dir fakebin out
+  case_dir="$dir/home-case"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/gh"
+  # The network phase never runs the local tool detection that owns MISSING: gh,
+  # so if this probe stayed silent, a home with no gh at all would read as
+  # signed in.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_contains "$out" "GH_AUTH_UNKNOWN" \
+    "with no gh installed the credential is unknown, and must not read as signed in"
+  assert_not_contains "$out" "NEEDS_GH_AUTH" \
+    "a missing gh is not evidence that the stored credential was rejected"
+  pass "bootstrap reports an unchecked credential when gh is absent rather than passing it"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1177,6 +1480,9 @@ test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
+test_gh_auth_probe_separates_rejection_from_an_unreachable_check
+test_gh_auth_probe_cannot_stall_the_startup_stage
+test_gh_auth_probe_reports_a_missing_gh_instead_of_passing_it
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
