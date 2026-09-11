@@ -144,6 +144,11 @@ mkdir -p "$STATE"
 # (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# The recorded-harness to verified-adapter-family resolution, for declaring the
+# harness of the exact pane a composer proof is about to read. Pure tables with
+# no side effects, no backend command, and no state read.
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 # The away-posture record (state/.afk-contract) is the posture in both the
 # attended and the afk session; bin/fm-afk-contract.sh owns its schema and this
 # watcher reads only its presence (afk_record_present below).
@@ -204,7 +209,7 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
                                       # evidence alone (signal_turnend_panes_churned)
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
-# remaining rendered-text fallback (Grok only).
+# remaining harness-scoped rendered-text fallbacks (Grok and Agy).
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
@@ -307,7 +312,7 @@ hash_pane() {
 # adapter whose semantic state is missing, malformed, stale, or unverified is
 # treated as not-provably-working and surfaces rather than being absorbed.
 # <tail40> is the same bounded capture already read for hashing and is
-# consumed only by the Grok-scoped fallback inside the contract.
+# consumed only by the Grok- and Agy-scoped fallbacks inside the contract.
 window_is_busy() {  # <window> <tail40>
   local w=$1 tail40=$2 task meta verdict
   task=$(window_to_task "$w" "$STATE")
@@ -408,6 +413,7 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
   local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
+  local ring_harness FM_COMPOSER_HARNESS
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -434,6 +440,13 @@ inbox_steer_check() {  # <window> <task>
   case "$verb" in
     ring)
       ring_rc=0
+      # The composer proof is harness-scoped by contract
+      # (bin/fm-composer-lib.sh): a caller that does not declare the harness of
+      # the pane it is about to read gets 'unknown' for a composer that visibly
+      # holds text, and the doorbell would be typed onto that text.
+      ring_harness=$(window_harness "$w")
+      FM_COMPOSER_HARNESS=$(fm_control_harness_family "$ring_harness") \
+        || FM_COMPOSER_HARNESS=$ring_harness
       fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
       if [ "$ring_rc" -eq 3 ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"

@@ -304,6 +304,38 @@ Ctrl+c:cancel')
   pass "the grok fallback is regex-scoped to grok and classifies only grok tasks"
 }
 
+test_agy_regex_isolated() {
+  local state out
+  state=$(new_state_dir agy-arm)
+  out=$(fm_busy_classify tmux w1 agy t1 "$state" 'Generating...
+esc to cancel')
+  [ "$out" = "busy agy-regex" ] || fail "Agy busy tail must classify 'busy agy-regex', got '$out'"
+  out=$(fm_busy_classify tmux w1 agy t1 "$state" 'done.
+> ')
+  [ "$out" = "idle agy-regex" ] || fail "Agy idle tail must classify 'idle agy-regex', got '$out'"
+  out=$(fm_busy_classify tmux w1 agy t1 "$state" 'Ctrl+c:cancel')
+  [ "$out" = "idle agy-regex" ] || fail "a Grok footer must not classify Agy busy, got '$out'"
+  out=$(fm_busy_classify tmux w1 agy t1 "$state" 'previous output: esc to cancel
+? for shortcuts                              Gemini 3.6 Flash · low')
+  [ "$out" = "idle agy-regex" ] \
+    || fail "Agy transcript text above an idle footer must not classify busy, got '$out'"
+  # A prefix-named harness reaches this classifier only through the raw-launch
+  # escape hatch, which records the command basename. That task arms no wiring
+  # and yields no composer reading, so this footer fallback is the ONLY thing
+  # that can prove it is mid-turn - and busy is the one verdict the watcher
+  # acts on, so dropping the family here would type a doorbell into a pane in
+  # the middle of generating.
+  out=$(fm_busy_classify tmux w1 agy-nightly t1 "$state" 'Generating...
+esc to cancel')
+  [ "$out" = "busy agy-regex" ] \
+    || fail "a raw-launched agy pane mid-turn must classify busy, got '$out'"
+  out=$(fm_busy_classify tmux w1 agy-nightly t1 "$state" 'done.
+? for shortcuts                              Gemini 3.6 Flash · low')
+  [ "$out" = "idle agy-regex" ] \
+    || fail "a raw-launched agy pane at an idle footer must classify idle, got '$out'"
+  pass "the Agy fallback is harness-scoped and reads only the live footer"
+}
+
 # --- kimi verification gate -----------------------------------------------------
 
 test_codex_unverified_gate() {
@@ -475,6 +507,7 @@ test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
+test_agy_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals

@@ -47,6 +47,7 @@ Observed result: `PI_SMOKE_DONE`, with one session-start execution.
 That cold positional-prompt check established eventual custom-message delivery, but it did not submit immediately after `/new` while native digest generation was still running, so its earlier race-free inference is superseded by the provider-prerequisite evidence below.
 The installed pi-signed 0.82.0 wrapper repeated the shared Pi primary extension and session-start path on 2026-07-27.
 [`runtime-backends.md`](runtime-backends.md#tmux) owns the shared-ancestry evidence and authoritative selection-marker boundary.
+Agy 1.1.28 exposes no SessionStart lifecycle event in its installed hook contract (re-inspected 2026-09-09), so its native nudge axis is not applicable.
 
 ### omp (Oh My Pi) native delivery, 2026-09-05
 
@@ -217,6 +218,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
+| Agy | 1.1.28 | Isolated rendered-tail fallback | The stable ASCII `esc to cancel` footer classifies only an Agy task; its Stop hook provides the end notification but no verified semantic turn-start event. Re-verified on 2026-09-09 through `FM_AGY_LIVE_E2E=1 tests/fm-agy-live-e2e.test.sh`, where `bin/fm-crew-state.sh` read a running `sleep` turn as `working · pane · harness busy (agy-regex)`. |
 
 Codex was probed two ways, both refused:
 
@@ -240,7 +242,7 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-09-05, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Cursor's stop-hook park validated on 2026-08-13, and omp's blocking `session_stop` hook validated on 2026-09-05.
+The blocking and bounded-follow-up mechanisms were validated across eight harnesses on 2026-07-08 through 2026-09-05, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Agy's native Stop continuation added on 2026-07-30, Cursor's stop-hook park validated on 2026-08-13, and omp's blocking `session_stop` hook validated on 2026-09-05.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
@@ -251,6 +253,7 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | omp | 18.1.11 | Blocking `session_stop` hook returning `{ continue: true, additionalContext }` | In the isolated rpc lab (2026-09-05), the successor watcher was frozen with `SIGSTOP` until its beacon passed the lab `FM_GUARD_GRACE` of 20s while its arm child stayed attached (a killed watcher closes its arm child and the extension re-arms before the guard can fire); the next turn end raised the guard, the guard spy recorded `rc=2` followed by a stop carrying `stop_hook_active: true`, omp compelled a continuation carrying the `turn-end-guard` operational text, the `fm_watch_arm_omp` invocation count then rose to at least two, and a live watcher held the home lock after the thaw; the flagged stop was allowed, so exactly one continuation ran. `session_stop` never fired for an interrupted turn. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
+| Agy | 1.1.28 | Native Stop `continue` response | Execution zero continued the same conversation and process, execution one stopped normally, and the task-token crew hook stayed inert for a foreign workspace. Re-verified on 2026-09-09 through `FM_AGY_LIVE_E2E=1 tests/fm-agy-live-e2e.test.sh`, whose project-owned Stop hook answered execution zero with the guard's `continue` decision and observed the `[0,1]` execution sequence in one conversation. |
 
 ### Cursor primary park, 2026-08-13
 
@@ -349,6 +352,7 @@ Current entry points:
 ```sh
 tests/fm-turnend-guard.test.sh
 tests/fm-supervision-instructions.test.sh
+tests/fm-agy-harness.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_GROK_STOP_LIVE_E2E=1 FM_GROK_NATIVE_BIN="$native_grok" FM_GROK_LEGACY_BIN="$pre_native_grok" tests/fm-grok-stop-live-e2e.test.sh
 ```

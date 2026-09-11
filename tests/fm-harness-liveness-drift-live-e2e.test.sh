@@ -103,7 +103,9 @@ SKIPPED=
 # cursor matters for the same reason muse does, from the other direction: it
 # runs as a bundled node script, so its pane title is a bare `node` that no name
 # pattern can own, and identity has to come from its install path or argv[0].
-for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
+# agy launches bare into its workspace-trust prompt on a directory it has never
+# seen; the process is already running there, which is all this probe reads.
+for harness in claude codex opencode pi pi-signed grok kimi cursor muse agy; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"

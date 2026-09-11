@@ -78,6 +78,28 @@
 #                                   tmux target or a herdr "<session>:<pane-id>"
 #                                   target; which one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
+#          FM_SUPERVISOR_HARNESS    harness rendering the supervisor pane, which
+#                                   a daemon launched into its own terminal
+#                                   cannot read from its own ancestry (it is a
+#                                   child of the terminal server, not of that
+#                                   pane). bin/fm-afk-launch.sh forwards an
+#                                   operator-supplied value verbatim, forwards
+#                                   its own detected harness only when the pane
+#                                   it ran in IS the supervised one, and
+#                                   forwards NOTHING when FM_SUPERVISOR_TARGET
+#                                   was overridden without a stated harness,
+#                                   since the two panes may run different
+#                                   harnesses. An absent value is therefore the
+#                                   deliberate fail-safe, not a launcher bug:
+#                                   the daemon falls back to detecting its own
+#                                   harness, which is correct only on the
+#                                   harness-native launch paths and otherwise
+#                                   resolves unknown, so the harness-scoped
+#                                   checks are skipped and escalations defer.
+#                                   Set it yourself to supervise a pane this
+#                                   daemon cannot identify. Scopes the busy and
+#                                   composer proofs run against that pane before
+#                                   injection.
 #          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr;
 #                                   override; otherwise auto-discovered the same
 #                                   way bin/fm-backend.sh's fm_backend_detect
@@ -626,13 +648,22 @@ mark_escalated_seen() {  # <state> <captured-endpoint-file>
 # existing caller/test that passes only <target> is unaffected.
 #
 # This rendered reader applies only to the supervisor pane during away-mode
-# injection. It never classifies a recorded worker task. The detected primary
-# harness selects exactly one signature, so output from another harness cannot
-# make the primary read busy.
+# injection. It never classifies a recorded worker task. Exactly one harness
+# signature is selected, so output from another harness cannot make the pane
+# read busy, and the harness it selects is the SUPERVISOR PANE's own
+# (FM_COMPOSER_HARNESS, resolved once at startup by
+# discover_supervisor_harness) rather than the daemon process's, which on the
+# script-owned away launch is the terminal server's and answers unknown. An
+# unknown harness registers no signature at all, so the busy guard would pass
+# every pane through to the composer proof, and a harness whose composer looks
+# identical busy and idle (agy renders the same container with an
+# `esc to cancel` footer) would then be typed into mid-turn.
 #
-# Resolved lazily and memoized: harness detection walks process ancestry, which
-# is too heavy to pay on every source of this library (the unit tests and the
-# launcher source it purely for its pure functions).
+# fm_daemon_primary_harness remains the fallback for the harness-native launch
+# paths, where the daemon does run inside the primary's process tree. Resolved
+# lazily and memoized: harness detection walks process ancestry, which is too
+# heavy to pay on every source of this library (the unit tests and the launcher
+# source it purely for its pure functions).
 fm_daemon_primary_harness() {
   if [ -z "${FM_DAEMON_PRIMARY_HARNESS:-}" ]; then
     FM_DAEMON_PRIMARY_HARNESS=$("$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null || printf 'unknown')
@@ -643,7 +674,8 @@ fm_daemon_primary_harness() {
 
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
-  harness=$(fm_daemon_primary_harness)
+  harness=${FM_COMPOSER_HARNESS:-}
+  [ -n "$harness" ] || harness=$(fm_daemon_primary_harness)
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$native" in
     busy) return 0 ;;
@@ -1598,6 +1630,22 @@ fm_super_main() {
   FM_SUPERVISOR_BACKEND="$discovered_backend"
   local BACKEND="$FM_SUPERVISOR_BACKEND"
 
+  # --- scope harness-specific composer proofs to the supervisor pane's own
+  # harness (discover_supervisor_harness, bin/fm-supervisor-target-lib.sh).
+  # FM_SUPERVISOR_HARNESS, stated by the operator or forwarded by
+  # bin/fm-afk-launch.sh when the pane it ran in IS the supervised one, wins
+  # (that launcher forwards nothing rather than a value it cannot prove
+  # describes the target pane); without it the
+  # daemon falls back to its own ancestry, which IS the supervisor pane's
+  # harness on the harness-native launch paths and resolves to unknown
+  # otherwise, simply skipping harness-scoped structural checks (fail-safe
+  # deferral). An ambient FM_COMPOSER_HARNESS is never trusted here: every
+  # reader of that contract declares the harness of the exact pane it is about
+  # to read, so a value arriving from some other pane's operation would claim a
+  # different harness's structure.
+  FM_COMPOSER_HARNESS=$(discover_supervisor_harness) || FM_COMPOSER_HARNESS=""
+  export FM_COMPOSER_HARNESS
+
   # --- refuse an unsupported supervisor backend loudly, before ever trying a
   # tmux/herdr-specific call against it (zellij, orca, and cmux have no verified
   # composer/busy primitives wired up for this daemon yet - AGENTS.md section 4
@@ -1696,7 +1744,7 @@ fm_super_main() {
 
   start_watcher() {
     CUR_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-watch.XXXXXX") || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
-    "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
+    FM_COMPOSER_HARNESS='' "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
     WATCHER_PID=$!
   }
 

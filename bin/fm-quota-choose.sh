@@ -44,6 +44,12 @@
 # its own Codex login, so an openai-codex candidate reads as unknown quota here
 # and is never selected on this host; its runway is disclosed uncertainty for
 # the agent-side gates, not measured headroom.
+#
+# agy (Anti-Gravity CLI) is refused up front for a different reason: one Agy
+# account routes Gemini, Claude, and GPT-OSS model profiles, and quota-axi has
+# no verified provider row that measures that account, so no candidate model
+# prefix can select a family. The refusal names agy so a dispatch profile that
+# lists it is corrected rather than misread as an unknown harness.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -373,6 +379,7 @@ for c in "${CANDIDATES[@]}"; do
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
   provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
     omp) die "omp quota mapping covers only the openai-codex and claude-bridge prefixes: $model" ;;
+    agy) die "agy has no quota-axi provider mapping: one Antigravity account routes Gemini, Claude, and GPT-OSS profiles and no quota row measures it" ;;
     *) die "unknown harness: $harness" ;;
   esac
 done

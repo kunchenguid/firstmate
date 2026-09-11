@@ -14,12 +14,13 @@
 #   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
 #
-# Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex. Cursor delivers the same .tool_input.command shape with
-# tool_name "Shell" (verified live, cursor-agent 2026.08.11-e8db854), so it needs
-# no new extraction - only --cursor, which selects Cursor's own deny rendering
-# and marks this invocation as the Cursor registration rather than the
-# Claude-settings duplicate Cursor also loads.
+# Stdin mode extracts .toolInput.command for Grok, .tool_input.command for
+# Claude and Codex, or .toolCall.args.CommandLine for Agy. Cursor delivers the
+# same .tool_input.command shape with tool_name "Shell" (verified live,
+# cursor-agent 2026.08.11-e8db854), so it needs no new extraction - only
+# --cursor, which selects Cursor's own deny rendering and marks this invocation
+# as the Cursor registration rather than the Claude-settings duplicate Cursor
+# also loads.
 # CLI mode is used by OpenCode and Pi after their adapters extract the exact
 # command string.
 # --background remains accepted for compatibility, but harness-native tracked
@@ -32,6 +33,10 @@
 #   DENY, --cursor - exit 0 and Cursor's own decision object on stdout. Cursor
 #          reads the returned object rather than the exit status, and only that
 #          rendering is verified to block the command and surface the reason.
+#   DENY, --agy - exit 0 and Agy's own decision object on stdout. Agy reads
+#          the returned object and treats ANY nonzero exit as a failed hook
+#          rather than a decision, so only this rendering blocks the command
+#          and surfaces the reason (verified live, Anti-Gravity CLI 1.1.28).
 #   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
 #               missing Node or policy owner, or an invalid policy response.
 #
@@ -40,6 +45,7 @@
 # Grok consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
 # Cursor consumes the stdout decision object.
+# Agy consumes the stdout decision object and must never see a nonzero exit.
 set -u
 
 CMD=""
@@ -47,10 +53,11 @@ CMD_SET=0
 BACKGROUND=""
 CLAUDE_MODE=0
 CURSOR_MODE=0
+AGY_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor]
+Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor|--agy]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
 toolInput.command, or Claude/Codex/Cursor tool_input.command).
@@ -59,6 +66,8 @@ The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
 With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
 because Cursor reads the returned object rather than the exit status.
+With --agy, a deny is Agy's own decision object on stdout and exit 0, because
+Agy reads the returned object and treats a nonzero exit as a failed hook.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }
@@ -93,6 +102,10 @@ while [ "$#" -gt 0 ]; do
       CURSOR_MODE=1
       shift
       ;;
+    --agy)
+      AGY_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -117,7 +130,7 @@ if [ "$CMD_SET" -eq 0 ]; then
   if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // .toolCall.args.CommandLine // empty)' 2>/dev/null) || exit 0
   [ -n "$CMD" ] || exit 0
   # Kept for transport parity only.
   # shellcheck disable=SC2034
@@ -193,6 +206,10 @@ DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
 if [ "$CURSOR_MODE" -eq 1 ]; then
   printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
+if [ "$AGY_MODE" -eq 1 ]; then
+  printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
   exit 0
 fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2

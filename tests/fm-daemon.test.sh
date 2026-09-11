@@ -2643,6 +2643,53 @@ test_primary_busy_guard_is_harness_scoped() {
   pass "primary busy guard isolates rendered signatures by detected harness"
 }
 
+test_watch_child_does_not_inherit_the_supervisor_composer_harness() {
+  local dir fakebin stage record f name deadline
+  dir=$(make_supercase watch-composer-scope)
+  fakebin="$dir/fakebin"
+  stage="$dir/bin"
+  record="$dir/watch-env"
+  mkdir -p "$stage"
+  # A staged daemon dir: every real bin entry, with only the watcher and the
+  # harness detector replaced, so the daemon under test is the real one.
+  for f in "$ROOT"/bin/*; do
+    name=$(basename "$f")
+    case "$name" in fm-watch.sh|fm-harness.sh) continue ;; esac
+    ln -s "$f" "$stage/$name"
+  done
+  # The daemon declares the harness of ITS OWN pane from this detector.
+  printf '%s\n' '#!/usr/bin/env bash' 'printf agy' > "$stage/fm-harness.sh"
+  # The watcher reads OTHER panes, so it must not carry that declaration.
+  cat > "$stage/fm-watch.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\${FM_COMPOSER_HARNESS-UNSET}" > "$record"
+sleep 30
+SH
+  chmod +x "$stage/fm-harness.sh" "$stage/fm-watch.sh"
+
+  env -u TMUX -u TMUX_PANE -u FM_COMPOSER_HARNESS \
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+    "$stage/fm-supervise-daemon.sh" >/dev/null 2>&1 &
+  local daemon_pid=$!
+  deadline=$(( $(date +%s) + 20 ))
+  while [ ! -s "$record" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+    kill -0 "$daemon_pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  kill -TERM "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  pkill -f "$stage/fm-watch.sh" 2>/dev/null || true
+
+  [ -s "$record" ] || fail "the daemon never launched its watcher child"
+  case "$(cat "$record")" in
+    agy) fail "the watch child inherited the supervisor pane's declared harness (agy); it reads other panes" ;;
+    ''|UNSET) ;;
+    *) fail "the watch child received an unexpected declared harness: $(cat "$record")" ;;
+  esac
+  pass "away-mode daemon does not leak its own declared composer harness into the watch child"
+}
+
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
   local dir fakebin capture
   dir=$(make_supercase busy-default-backend)
@@ -2781,6 +2828,71 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+# The supervisor pane's harness is only knowable inside that pane. On the
+# script-owned away launch (agy, codex, opencode, omp, kimi, cursor) the daemon
+# is a child of the terminal server, so bin/fm-afk-launch.sh forwards it as
+# FM_SUPERVISOR_HARNESS. Without that declaration an Agy composer classifies
+# `unknown` and every escalation defers forever; with it the real classifier
+# reads the same pane `empty` and the injection is confirmed.
+# The idle and busy Agy tails are the same container: only the footer row
+# differs (docs/verification/agy-harness.md captures both live). The composer
+# proof accepts either footer, so on Agy the busy guard is the ONLY thing
+# standing between a mid-turn pane and a typed escalation, and it has to read
+# the supervisor pane's harness to have a signature at all.
+agy_supervisor_capture() {  # <footer>
+  printf '%s\n' \
+    'Antigravity CLI' \
+    '────────────────────────────────────────────────────────────────' \
+    '>' \
+    '────────────────────────────────────────────────────────────────' \
+    "$1"
+}
+
+run_agy_supervisor_inject() {  # <case-name> <declared-harness> <footer>
+  local dir state capture sent
+  dir=$(make_supercase "$1")
+  state="$dir/state"; capture="$dir/pane.txt"; sent="$dir/sent.txt"
+  afk_enter "$state"
+  agy_supervisor_capture "$3" > "$capture"
+  (
+    fm_backend_target_exists() { return 0; }
+    PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_SENT="$sent" \
+      FM_FAKE_TMUX_CURSOR_Y=2 FM_COMPOSER_HARNESS="$2" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      inject_msg "away escalation digest" "$state"
+  )
+}
+
+AGY_IDLE_FOOTER='? for shortcuts                              Gemini 3.6 Flash · low'
+AGY_BUSY_FOOTER='esc to cancel                                 Gemini 3.6 Flash · low'
+
+test_supervisor_harness_prefers_the_forwarded_pane_value() {
+  local out own
+  out=$(FM_SUPERVISOR_HARNESS=agy discover_supervisor_harness)
+  [ "$out" = agy ] || fail "the forwarded supervisor-pane harness was not preferred: $out"
+  own=$("$ROOT/bin/fm-harness.sh" 2>/dev/null || printf '')
+  out=$(FM_SUPERVISOR_HARNESS='' discover_supervisor_harness || printf '')
+  [ "$out" = "$own" ] \
+    || fail "without a forwarded value the daemon no longer falls back to its own ancestry ($out vs $own)"
+  pass "discover_supervisor_harness: forwarded captain-pane harness wins, own ancestry remains the fallback"
+}
+
+test_away_injection_into_an_agy_supervisor_pane_is_confirmed() {
+  if run_agy_supervisor_inject inject-agy-undeclared '' "$AGY_IDLE_FOOTER"; then
+    fail "an undeclared supervisor harness let the injector type into an unproven composer"
+  fi
+  run_agy_supervisor_inject inject-agy-declared agy "$AGY_IDLE_FOOTER" \
+    || fail "an idle Agy supervisor pane with the forwarded harness still deferred instead of confirming the injection"
+  pass "away-mode injection into an idle Agy supervisor pane is confirmed once the pane's harness is declared"
+}
+
+test_away_injection_defers_on_a_busy_agy_supervisor_pane() {
+  if run_agy_supervisor_inject inject-agy-busy agy "$AGY_BUSY_FOOTER"; then
+    fail "the injector typed into an Agy supervisor pane whose footer says a turn is running"
+  fi
+  pass "away-mode injection defers on a mid-turn Agy supervisor pane the composer proof reads empty"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -2899,6 +3011,10 @@ test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
+test_watch_child_does_not_inherit_the_supervisor_composer_harness
+test_supervisor_harness_prefers_the_forwarded_pane_value
+test_away_injection_into_an_agy_supervisor_pane_is_confirmed
+test_away_injection_defers_on_a_busy_agy_supervisor_pane
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers

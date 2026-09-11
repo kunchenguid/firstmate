@@ -36,6 +36,23 @@
 # captain pane FIRST (from the pane this script runs in) and passes it in as
 # FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
 #
+# The captain pane's HARNESS travels as FM_SUPERVISOR_HARNESS, because the
+# daemon in its own terminal is a child of the terminal server and its ancestry
+# cannot answer which harness renders the pane whose composer it must prove
+# empty before typing into it. What this script detects is the harness of the
+# process running it, which describes the SUPERVISED PANE only when that pane
+# is this one, so the value is resolved in this order:
+#   1. An explicitly supplied FM_SUPERVISOR_HARNESS is forwarded as given: an
+#      operator who overrides the target is the one who can state its harness.
+#   2. An explicitly overridden FM_SUPERVISOR_TARGET with no stated harness
+#      forwards NOTHING. The launcher may be in a different pane running a
+#      different harness, and a wrong declaration makes the daemon apply a
+#      foreign composer proof and busy signature to the captain pane. The
+#      daemon then falls back to its own detection, which on this path resolves
+#      unknown and defers, the fail-safe behavior.
+#   3. Otherwise the target IS this pane, so this process's detected harness
+#      describes it and is forwarded.
+#
 # Usage:
 #   fm-afk-launch.sh propose [--words-file <path> | --words <text>]
 #                            [--action <verb> --object <text> --when <text> [--stop <text>]]...
@@ -70,6 +87,9 @@
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
 # placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
 # override the captured captain pane/backend (an isolated lab pane in tests).
+# FM_SUPERVISOR_HARNESS is honored when supplied and forwarded verbatim; when
+# it is absent, overriding the target suppresses the forward entirely (see
+# "Correct supervisor targeting" above).
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -183,6 +203,17 @@ fm_afk_launch_usage() {
 
 fm_afk_launch_primary_harness() {
   "$FM_AFK_LAUNCH_DIR/fm-harness.sh" 2>/dev/null || printf unknown
+}
+
+# The harness of the pane the daemon will supervise, or empty when this script
+# cannot know it. See "Correct supervisor targeting" for the ordering.
+fm_afk_launch_supervisor_harness() {
+  if [ -n "${FM_SUPERVISOR_HARNESS:-}" ]; then
+    printf '%s' "$FM_SUPERVISOR_HARNESS"
+    return 0
+  fi
+  [ -z "${FM_SUPERVISOR_TARGET:-}" ] || return 0
+  fm_afk_launch_primary_harness
 }
 
 # The away daemon is no longer launched on Pi: the posture record is the whole
@@ -494,8 +525,8 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     IFS=$'\t' read -r wsid pane <<< "$recovered"
   fi
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_SUPERVISOR_HARNESS=%q %q' \
+    "$FM_HOME" "$captain_target" "$captain_backend" "$(fm_afk_launch_supervisor_harness)" "$entry")
   if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
     fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
     fm_afk_launch_close_terminal herdr "$session:$pane"
@@ -521,8 +552,8 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   nonce="$$-${RANDOM:-0}-$(date '+%s')"
   session="fm-afk-daemon-$hash-$nonce"
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_SUPERVISOR_HARNESS=%q %q' \
+    "$FM_HOME" "$captain_target" "$captain_backend" "$(fm_afk_launch_supervisor_harness)" "$entry")
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1

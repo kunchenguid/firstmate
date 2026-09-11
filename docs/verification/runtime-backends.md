@@ -29,6 +29,8 @@ zsh
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
+Anti-Gravity CLI 1.1.8 was observed under `agy` on 2026-07-30 in a dedicated tmux server, and 1.1.28 again on 2026-09-09 through `FM_AGY_LIVE_E2E=1 tests/fm-agy-live-e2e.test.sh`.
+Its empty and typed separator composers were classified through the shared executable interface, and `esc to cancel` was present only during an active turn.
 
 ### Agent liveness name sources
 
@@ -112,6 +114,22 @@ The first default-on run failed on Cursor with `LIVENESS DRIFT: cursor unknown i
 The classifier was not at fault: the guard resolved the harness through a generic `command -v cursor`, which on a machine that also has the Cursor editor finds `~/.local/bin/cursor` - the editor launcher, not the agent.
 That binary exits immediately, leaving a bare shell in the pane.
 The guard now asks `fm_cursor_resolve_binary` first for `cursor`, which is the same verified owner `bin/fm-spawn.sh` uses, so the probe launches `cursor-agent` and the editor CLI can no longer masquerade as the harness.
+
+### 2026-09-09 Linux drift refresh adding Agy
+
+Running the guard with `FM_HARNESS_LIVENESS_DRIFT=1` on Linux 6.8 x86_64 with tmux 3.4 checked the 4 installed harnesses and classified every one `alive`, including Anti-Gravity CLI, which joined the guard's loop on 2026-09-08 at 1.1.27 and was refreshed at 1.1.28 the next day:
+
+```text
+# claude 2.1.266 (Claude Code): title='claude' foreground=[claude ]
+# codex codex-cli 0.153.4: title='codex' foreground=[codex ]
+# cursor 2026.07.23-e383d2b: title='cursor-agent' foreground=[MainThread ]
+# agy 1.1.28: title='agy' foreground=[agy ]
+# unverified on this machine (not installed): opencode pi pi-signed grok kimi muse
+# checked 4 installed harness(es)
+```
+
+Agy is a single native executable whose live process name is the bare word `agy`, attributed by both name sources, so `bin/backends/tmux.sh` and `bin/fm-session-lock-lib.sh` anchor it exactly like omp rather than globbing the `agy` fragment of ordinary words.
+`tests/fm-tmux-agent-liveness.test.sh` pins that anchoring with real processes and the `strategy` and `pedagogy` decoys.
 
 Bounded output from the 2026-08-03 run that produced the first table above:
 
@@ -202,6 +220,11 @@ The current classifier matrix and its refresh guard are recorded in [Composer cl
 Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
 Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-herdr.test.sh` and refreshed by `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh`.
 
+The Agy composer review covered all five backends.
+Tmux, Herdr, Orca, and cmux use the shared complete separator-container proof.
+Zellij is the one backend whose adapter did not get the Agy composer branch in this change, and its capabilities are not the reason: it declares `styled=1` with `cursor=0`, while Orca and cmux declare `styled=0` with `cursor=0` and were wired to the shared proof regardless.
+`tests/fm-agy-harness.test.sh` executes the shared and backend-specific interfaces, while [`agy-harness.md`](agy-harness.md) owns the live captures.
+
 ### Cleanup endpoint identity
 
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
@@ -228,7 +251,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, Muse, and Agy share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Claude workspace trust
 

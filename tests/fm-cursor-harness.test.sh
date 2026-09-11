@@ -186,7 +186,7 @@ test_cursor_marker_outranks_inherited_claudecode() {
   # Both cursor markers stand alone, and neither steals a plain claude session.
   out=$(env -u CLAUDECODE CURSOR_AGENT=1 "$HARNESS")
   [ "$out" = cursor ] || fail "CURSOR_AGENT alone must detect cursor, got '$out'"
-  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 "$HARNESS")
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT CLAUDECODE=1 "$HARNESS")
   [ "$out" = claude ] || fail "CLAUDECODE alone must still detect claude, got '$out'"
   # A CURSOR_* variable that is not the invocation identity proves nothing.
   out=$(env -u CURSOR_AGENT CLAUDECODE=1 CURSOR_API_ENDPOINT=https://example \

@@ -175,6 +175,11 @@ Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1`
 That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
+`FM_SUPERVISOR_HARNESS` is the third axis of the same pane: it names the harness rendering it, which scopes the structural composer proofs the daemon runs before typing an escalation into that pane.
+`bin/fm-afk-launch.sh` forwards it with the target and backend, because a daemon launched into its own terminal is a child of the terminal server and cannot read the captain pane's harness from its own ancestry.
+The launcher forwards what it detects only when the pane it runs in is the pane being supervised; if you override `FM_SUPERVISOR_TARGET` and state no harness, it forwards nothing rather than declaring its own, since the two panes may run different harnesses.
+Set `FM_SUPERVISOR_HARNESS` yourself in that case, and it is forwarded as given.
+Without any value the daemon detects its own harness, which is the same pane's harness only on the harness-native launch paths, and an unresolved harness simply skips the harness-scoped checks and defers.
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
@@ -215,6 +220,9 @@ Storing evidence in the repo publishes each run's test artifacts to the orphan `
 That branch shares no history with code branches, so evidence never enters a pushed feature branch or the default branch; the worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
 The [`firstmate-coding-guidelines` skill](../.agents/skills/firstmate-coding-guidelines/SKILL.md#no-mistakes-test-configuration) owns why `commands.test` stays absent and targeted validation belongs to the evidence path.
 `commands.test` executes code, so no-mistakes honors it only from the default-branch copy of `.no-mistakes.yaml`; a pushed branch cannot change what the gate runs.
+That trust boundary covers the whole file rather than only its executable keys, which is the same reason `disable_project_settings` cannot be switched off by pushing a branch.
+Every run's manifest records a `trusted_config_sha` equal to the default branch's tip at the moment the run started, so the gate reads its settings from `main` and never from the branch under validation.
+The consequence is worth knowing before hunting for a knob: a gate behavior that blocks a feature branch cannot be configured around from that branch, and has to be changed by landing a config commit on `main` first.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
@@ -302,7 +310,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 ## Harness support
 
-claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
+claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, omp, and agy are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
 A cursor secondmate or primary runs the tracked project-scope `.cursor/hooks.json` in its own home and must be launched with `--trust`, or no project hook loads; [`docs/supervision-protocols/cursor.md`](supervision-protocols/cursor.md) owns its supervision protocol.
 Cursor typed-submit confirmation is verified on tmux and Herdr only.
 On Zellij, cmux, and Orca a typed-plane Cursor send (a harness-native invocation or an explicit backend target; ordinary text steers ride the durable inbox and exit 0 at enqueue) lands, but `fm-send` reports delivery unconfirmed and exits non-zero because their shared submit core does not consult the busy footer; [runtime backend verification](verification/runtime-backends.md#cursor-agent-cli) owns the evidence and transcript-state boundary.
@@ -318,7 +326,7 @@ Pi-family launches adapt the regular-TUI safeguard to the installed CLI's capabi
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
-Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
+Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex and Agy use bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When pi-signed is selected, Firstmate preserves `FM_PI_HARNESS=pi-signed` and refuses the launch if the selected executable is unavailable rather than falling back to pi; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns executable resolution and launch mechanics.
 Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cannot relabel a plain Pi worker.
@@ -338,6 +346,10 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
+Agy crews receive a Stop hook in the first unoccupied `.agents`, `.agent`, `_agents`, or `_agent` customization root, a per-task `.fm-agy-turnend` pointer, and a private state registry token.
+Spawn refuses rather than merging with or overwriting an existing Agy `hooks.json`.
+Spawn records whether it created the chosen root or borrowed a pre-existing hookless project directory, along with the exact `hooks.json` bytes it installed; teardown and relaunch remove only a hook file still byte-identical to that recorded install (never a project-authored or project-replaced `hooks.json`, even one retaining the generated task-token entry) and only remove a root Firstmate itself created.
+The `FM_AGY_READY_STABLE_POLLS`, `FM_AGY_SUBMIT_SETTLE`, and `FM_AGY_SUBMIT_RETRIES` defaults are the observed floor for Agy's post-trust composer repaint; [`docs/verification/agy-harness.md`](verification/agy-harness.md) records how they were measured and what to do when a spawn still aborts with `not proven empty after Enter`.
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
@@ -971,6 +983,14 @@ FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # a runner guard's detection interval, r
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of one registration generation's source command; 1..3600
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
+FM_AGY_WATCH_CHECKPOINT=180     # seconds per foreground watcher checkpoint in Agy primary supervision
+FM_AGY_READY_POLLS=80           # agy-only: spawn readiness polls for the trust dialog and empty composer before brief delivery
+FM_AGY_READY_STABLE_POLLS=2     # agy-only: consecutive empty-composer polls required before the composer counts as ready
+FM_AGY_DELIVERY_POLLS=40        # agy-only: spawn polls confirming the brief pointer was accepted
+FM_AGY_POLL_INTERVAL=0.5        # agy-only: seconds between spawn readiness and delivery polls
+FM_AGY_SUBMIT_RETRIES=6         # agy-only: Enter re-sends when the brief pointer submission is not yet proven empty; the text is never retyped
+FM_AGY_SUBMIT_SLEEP=0.5         # agy-only: seconds between those Enter re-sends; defaults to FM_AGY_POLL_INTERVAL
+FM_AGY_SUBMIT_SETTLE=0.4        # agy-only: seconds between typing the brief pointer and the first Enter
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when the runs ledger is consulted: axi status cannot be attributed directly, or its answer is terminal and may have a live sibling run
@@ -1035,6 +1055,7 @@ FM_BUSY_REGEX=          # optional override for rendered delivery guards and Gro
 FM_COMPOSER_IDLE_RE=    # optional fleet-wide idle-placeholder regex override (bin/fm-composer-lib.sh); a match alone does not prove emptiness because shape-specific position and ANSI de-emphasis safety gates still apply
 FM_COMPOSER_CAPTURE_LINES=20   # fleet-wide bound for tail-capture composer reads; tmux instead supplies its bounded visible pane, while the other adapters use this small window so stale scrollback banners stay out of the candidate set
 FM_COMPOSER_PI_MAX_LINES=8     # fleet-wide: maximum rows admitted between Pi's identity-corroborated separator pair; taller or ambiguous candidates stay unknown
+FM_COMPOSER_AGY_MAX_LINES=7    # fleet-wide: maximum row distance admitted between Agy's composer separator pair; taller candidates form no container and stay unknown
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, used by styled tmux, herdr, and Zellij reads)
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send typed-plane Enter-retry attempts after typing the line once
@@ -1044,6 +1065,7 @@ FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
 FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected
+FM_SUPERVISOR_HARNESS=             # optional supervisor pane harness; forwarded verbatim by bin/fm-afk-launch.sh, which otherwise forwards its own only when it is the target pane; unset leaves the daemon detecting its own
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables

@@ -147,7 +147,7 @@ Prose may improve without changing adapter behavior.
 
 - Allow returns exit 0 with both streams empty.
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[code] reason"}` to stderr.
-- Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
+- Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok and Agy.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
@@ -160,6 +160,7 @@ Prose may improve without changing adapter behavior.
 | Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
+| Agy | `.toolCall.args.CommandLine` | `.agents/hooks.json` anchors from `pwd -P`, verifies the hook-loaded firstmate root, and forwards stdin with `--agy`. Agy reads the RETURNED object and treats ANY nonzero exit as a failed hook, so `--agy` prints `{"decision":"deny","reason":"[code] reason"}` on stdout and exits 0. Agy also reads a returned `{}` as a deny with an empty reason, so an allowed command must return NOTHING. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |
 | omp | `event.input.command` | `.omp/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true, reason}` only for exit 2; omp surfaces the reason verbatim to the model (verified 18.1.2). |
@@ -169,6 +170,7 @@ Cursor also loads `<project>/.claude/settings.json`, so the tracked Claude entry
 
 Grok project hooks require folder trust.
 Cursor project hooks require the workspace to be launched with `--trust`.
+Agy project hooks require the exact project trust acceptance that `fm-spawn.sh` handles before first prompt delivery.
 Every shell variable reference in a Grok hook command must carry an inline default such as `${GROK_WORKSPACE_ROOT:-}` because Grok expands the raw hook command before `bash -lc` runs it.
 The tracked Grok adapter therefore references `${GROK_WORKSPACE_ROOT:-}` directly instead of assigning and later reading a shell-local `$root` variable.
 
@@ -234,7 +236,7 @@ Every native-path automatic marker was present and every deny sentinel remained 
 ## Automated validation
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
-Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
+Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, Agy-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
 The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:

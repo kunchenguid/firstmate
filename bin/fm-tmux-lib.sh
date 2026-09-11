@@ -138,10 +138,14 @@ EOF
 # it (a pi separator pair under the cursor), so the common read never pays
 # for the process probe.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cy pane verdict identity
+  local target=$1 cy pane verdict identity agy_state
   cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
+  if agy_state=$(fm_composer_separated_state "$pane" "$cy"); then
+    printf '%s' "$agy_state"
+    return 0
+  fi
   verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then

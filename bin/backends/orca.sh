@@ -246,8 +246,12 @@ fm_backend_orca_composer_caps() {
 # row this adapter never learned, which left every claude/codex/pi/muse steer
 # unconfirmed) lives in bin/fm-composer-lib.sh.
 fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pending|pending-unproven|unknown
-  local cap verdict
+  local cap verdict agy_state
   cap=$(fm_backend_orca_composer_capture "$1") || { printf 'unknown'; return 0; }
+  if agy_state=$(fm_composer_separated_state "$cap"); then
+    printf '%s' "$agy_state"
+    return 0
+  fi
   verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$cap")
   [ "$verdict" != need-identity ] || verdict=unknown
   printf '%s' "$verdict"

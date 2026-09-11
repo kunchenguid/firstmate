@@ -3,7 +3,7 @@
 # Behavior tests for the watcher-arm PreToolUse seatbelt (docs/arm-pretool-check.md).
 #
 # bin/fm-arm-command-policy.mjs is the single owner of command classification.
-# This suite drives the stable shell transport through all five harness entry
+# This suite drives the stable shell transport through all six harness entry
 # forms and asserts the per-harness wiring contract without spawning a harness.
 # Empirical harness evidence lives in docs/arm-pretool-check.md.
 set -u
@@ -166,6 +166,11 @@ run_matrix_entry() {
       printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
+    agy)
+      payload=$(jq -cn --arg command "$cmd" '{toolCall:{name:"run_command",args:{CommandLine:$command}}}')
+      printf '%s' "$payload" | "$CHECK" --agy >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
     opencode|pi)
       "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
       rc=$?
@@ -179,6 +184,16 @@ run_matrix_entry() {
     [ "$rc" -eq 0 ] || fail "$id via $entry must allow, got exit $rc: $(cat "$err_file")"
     [ ! -s "$out_file" ] || fail "$id via $entry allow must leave stdout empty: $(cat "$out_file")"
     [ ! -s "$err_file" ] || fail "$id via $entry allow must leave stderr empty: $(cat "$err_file")"
+    return
+  fi
+
+  if [ "$entry" = agy ]; then
+    # Agy treats any nonzero hook exit as a failed hook rather than a
+    # decision, so its deny must ride the returned object at exit 0.
+    [ "$rc" -eq 0 ] || fail "$id via agy deny must exit 0, got exit $rc"
+    jq -e '.decision == "deny" and (.reason | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via agy deny must carry decision=deny and a stable reason code on stdout: $(cat "$out_file")"
+    [ ! -s "$err_file" ] || fail "$id via agy deny must leave stderr empty: $(cat "$err_file")"
     return
   fi
 
@@ -196,10 +211,10 @@ run_matrix_entry() {
 test_full_acceptance_matrix() {
   local i entry
   for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
-    for entry in codex claude grok opencode pi; do
+    for entry in codex claude grok agy opencode pi; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
-    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all five entry forms"
+    pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all six entry forms"
   done
 }
 

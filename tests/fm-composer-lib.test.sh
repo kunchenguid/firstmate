@@ -728,3 +728,52 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+
+# --- Agy container height is a lever, not a literal --------------------------
+
+# A composer whose separator rows sit 5 apart: inside the default bound, so it
+# reads pending whenever the effective bound is a usable number.
+agy_medium_composer_capture() {
+  printf '%s\n' \
+    '────────────────────────────────────────────────────────────────' \
+    '> first line of a pasted captain steer' \
+    'second line' \
+    'third line' \
+    'fourth line' \
+    '────────────────────────────────────────────────────────────────' \
+    '  ? for shortcuts                          Gemini 3.8 Flash · low'
+}
+
+# A composer whose separator rows sit 8 apart: taller than the default bound
+# admits, so it forms no container until the knob is raised.
+agy_tall_composer_capture() {
+  printf '%s\n' \
+    '────────────────────────────────────────────────────────────────' \
+    '> first line of a pasted captain steer' \
+    'second line' \
+    'third line' \
+    'fourth line' \
+    'fifth line' \
+    'sixth line' \
+    'seventh line' \
+    '────────────────────────────────────────────────────────────────' \
+    '  ? for shortcuts                          Gemini 3.8 Flash · low'
+}
+
+test_agy_max_lines_moves_the_accepted_container_height() {
+  local state
+  state=$(FM_COMPOSER_HARNESS=agy fm_composer_separated_state "$(agy_tall_composer_capture)")
+  [ -z "$state" ] || fail "a composer taller than the default bound was claimed as Agy structure: '$state'"
+  state=$(FM_COMPOSER_AGY_MAX_LINES=8 FM_COMPOSER_HARNESS=agy \
+    fm_composer_separated_state "$(agy_tall_composer_capture)")
+  [ "$state" = pending ] || fail "raising FM_COMPOSER_AGY_MAX_LINES did not admit the taller container, got '$state'"
+  state=$(FM_COMPOSER_AGY_MAX_LINES=nonsense FM_COMPOSER_HARNESS=agy \
+    fm_composer_separated_state "$(agy_medium_composer_capture)")
+  [ "$state" = pending ] || fail "a non-numeric override did not clamp back to the default bound, got '$state'"
+  state=$(FM_COMPOSER_AGY_MAX_LINES=nonsense FM_COMPOSER_HARNESS=agy \
+    fm_composer_separated_state "$(agy_tall_composer_capture)")
+  [ -z "$state" ] || fail "a non-numeric override widened the bound past the default: '$state'"
+  pass "fm_composer_separated_state: FM_COMPOSER_AGY_MAX_LINES bounds the Agy container height"
+}
+
+test_agy_max_lines_moves_the_accepted_container_height

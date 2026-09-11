@@ -5,7 +5,7 @@
 # bin/fm-cd-command-policy.mjs is the single owner of the block/allow decision;
 # it reuses the shell classifier owned by bin/fm-arm-command-policy.mjs.
 # bin/fm-cd-pretool-check.sh is the stable transport: it scopes the guard to the
-# real primary checkout, then drives all five harness entry forms. This suite
+# real primary checkout, then drives all six harness entry forms. This suite
 # proves the decision matrix, the harness-output shaping, the primary-checkout
 # scoping (including the deliberate secondmate-home difference from the turn-end
 # guard), the fail-open transport behavior, the prefilter fast path, the
@@ -167,6 +167,11 @@ run_matrix_entry() {
       printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
+    agy)
+      payload=$(jq -cn --arg command "$cmd" '{toolCall:{name:"run_command",args:{CommandLine:$command}}}')
+      printf '%s' "$payload" | "$CHECK" --agy >"$out_file" 2>"$err_file"
+      rc=$?
+      ;;
     opencode|pi)
       "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
       rc=$?
@@ -180,6 +185,16 @@ run_matrix_entry() {
     [ "$rc" -eq 0 ] || fail "$id via $entry must allow, got exit $rc: $(cat "$err_file")"
     [ ! -s "$out_file" ] || fail "$id via $entry allow must leave stdout empty: $(cat "$out_file")"
     [ ! -s "$err_file" ] || fail "$id via $entry allow must leave stderr empty: $(cat "$err_file")"
+    return
+  fi
+
+  if [ "$entry" = agy ]; then
+    # Agy treats any nonzero hook exit as a failed hook rather than a
+    # decision, so its deny must ride the returned object at exit 0.
+    [ "$rc" -eq 0 ] || fail "$id via agy deny must exit 0, got exit $rc"
+    jq -e '.decision == "deny" and (.reason | test("\\[persistent-cd\\]"))' "$out_file" >/dev/null 2>&1 \
+      || fail "$id via agy deny must carry decision=deny and a stable reason code on stdout: $(cat "$out_file")"
+    [ ! -s "$err_file" ] || fail "$id via agy deny must leave stderr empty: $(cat "$err_file")"
     return
   fi
 
@@ -197,7 +212,7 @@ run_matrix_entry() {
 test_full_acceptance_matrix() {
   local i entry
   for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
-    for entry in codex claude grok opencode pi; do
+    for entry in codex claude grok agy opencode pi; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
   done
