@@ -547,7 +547,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                  else "away-return catch-up is still open" end) | trunc(60)),
          blocked_by:"-",
          reason:"away-return catch-up",
-         owner:"(main)"}]
+         owner:"(main)",
+         filed:null}]
      else [] end) as $return_catchup_gate
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",

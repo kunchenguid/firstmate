@@ -97,7 +97,7 @@ EOF
 }
 
 test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
-  local dir out rc gate wake_count i
+  local dir out rc gate wake_count i toon gate_header
   dir="$TMP_ROOT/ordering"
   install_runner "$dir"
   seed_live_blocker "$dir" herdr synthetic-dependency
@@ -147,7 +147,7 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   # do is stop the fleet read, so the worker has to reach Underway at all.
   printf '%s' "$out" | jq -e '
     (.in_flight | any(.id == "repair-task"))
-    and (.gates[0].id == "(return-catchup)")
+    and (.gates[0].id == "(return-catchup)" and .gates[0].filed == null)
     and (.gates | length == 21)
     and ([.gates[] | select(.id | startswith("queued-"))] | length == 20)
     and (.gates | any(.id == "(return-catchup)"
@@ -156,6 +156,11 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
                       and (.title | test("^1 blocker"))))
     and ([.decisions_open[].id] | index("(return-catchup)") | not)' >/dev/null \
     || fail "Bearings did not reserve the catch-up posture outside bounded action-free gate rows: $out"
+  toon=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" 2>&1) \
+    || fail "default Bearings should render behind the return catch-up gate: $toon"
+  gate_header=$(printf '%s\n' "$toon" | awk '/^gates\[[0-9]+\]\{/ { print; exit }')
+  assert_contains "$gate_header" '{id,title,blocked_by,reason,owner,filed}' "catch-up removed filed from the TOON gate schema"
+  assert_contains "$toon" '2026-06-20' "catch-up removed durable gate dates from default Bearings output"
 
   # The guard itself still separates its two branches by exit status, so an
   # active away window keeps refusing while catch-up reports.
