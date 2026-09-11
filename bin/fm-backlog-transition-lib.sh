@@ -63,6 +63,8 @@ FM_BACKLOG_TRANSITION_SKIP=
 FM_BACKLOG_TRANSITION_ERROR=
 FM_BACKLOG_ROW_RESULT=
 FM_BACKLOG_ROW_STATE=
+FM_BACKLOG_ROW_TITLE=
+FM_BACKLOG_ROW_REPO=
 FM_BACKLOG_ROW_ERROR=
 # Set by fm_backlog_row_probe on a found row: the tasks-axi hold kind, empty when
 # the row is not held.
@@ -382,6 +384,21 @@ fm_tasks_axi() {
   exit 127
 }
 
+# Decode one scalar from `tasks-axi show`: plain values stay plain, while
+# quoted values use the command's JSON string representation.
+fm_backlog_show_value_decode() {  # <displayed-value>
+  LC_ALL=C perl -MJSON::PP -e '
+    my $value = <STDIN>;
+    $value = "" unless defined $value;
+    $value =~ s/\n\z//;
+    if ($value =~ /\A"/) {
+      print decode_json($value);
+    } elsif ($value ne "-") {
+      print $value;
+    }
+  '
+}
+
 # Print one row's `tasks-axi show` output (plus stderr); the exit status is
 # tasks-axi's. Extra flags (such as --full) are passed through.
 fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
@@ -417,7 +434,9 @@ fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
 }
 
 fm_backlog_row_probe() {  # <data-dir> <id>
-  local data authorized_data=$1 id=$2 out state held blocked hold_kind command_status source_status
+  local data authorized_data=$1 id=$2 out state held blocked hold_kind title repo command_status source_status
+  FM_BACKLOG_ROW_TITLE=
+  FM_BACKLOG_ROW_REPO=
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
@@ -452,13 +471,23 @@ fm_backlog_row_probe() {  # <data-dir> <id>
     return "$command_status"
   fi
   state=$(printf '%s\n' "$out" | sed -n 's/^  state: *//p' | head -1)
+  title=$(printf '%s\n' "$out" | sed -n 's/^  title: *//p' | head -1)
+  repo=$(printf '%s\n' "$out" | sed -n 's/^  repo: *//p' | head -1)
   held=$(printf '%s\n' "$out" | sed -n 's/^  held: *//p' | head -1)
   blocked=$(printf '%s\n' "$out" | sed -n 's/^  blocked: *//p' | head -1)
   hold_kind=$(printf '%s\n' "$out" | sed -n 's/^  hold_kind: *//p' | head -1)
-  if [ -z "$state" ]; then
-    FM_BACKLOG_ROW_ERROR="tasks-axi show $id returned no state"
+  if [ -z "$state" ] || [ -z "$title" ] || [ -z "$repo" ]; then
+    FM_BACKLOG_ROW_ERROR="tasks-axi show $id returned an incomplete row"
     return 1
   fi
+  FM_BACKLOG_ROW_TITLE=$(printf '%s\n' "$title" | fm_backlog_show_value_decode) || {
+    FM_BACKLOG_ROW_ERROR="tasks-axi show $id returned an invalid title"
+    return 1
+  }
+  FM_BACKLOG_ROW_REPO=$(printf '%s\n' "$repo" | fm_backlog_show_value_decode) || {
+    FM_BACKLOG_ROW_ERROR="tasks-axi show $id returned an invalid repo"
+    return 1
+  }
   FM_BACKLOG_ROW_RESULT=found
   FM_BACKLOG_ROW_STATE="$state ${held:-no} ${blocked:-no}"
   case "$hold_kind" in
@@ -468,12 +497,14 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   return 0
 }
 
-# Run one tasks-axi mutation against <home>'s backlog, capturing its first
-# output line in FM_BACKLOG_TRANSITION_ERROR on failure. The home boundary is
+# Run one tasks-axi mutation against <home>'s backlog, capturing its complete
+# output and its first line in separate globals on failure. The home boundary is
 # authorized through fm_backlog_source_present first; fm_backlog_tasks_axi owns
 # how the selected adapter is addressed (ADDRESSING above).
+FM_BACKLOG_MUTATION_OUTPUT=
 fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   local data authorized_data=$1 verb=$2 id=$3 out command_status source_status
+  FM_BACKLOG_MUTATION_OUTPUT=
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
     return 1
@@ -493,6 +524,7 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   fi
   command_status=$?
   [ "$command_status" -ne 0 ] || return 0
+  FM_BACKLOG_MUTATION_OUTPUT=$out
   FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
   if [ -z "$FM_BACKLOG_TRANSITION_ERROR" ]; then
     if fm_tasks_axi_timeout_expired "$command_status" && [ -n "${FM_TASKS_AXI_TIMEOUT:-}" ]; then
@@ -502,6 +534,20 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
     fi
   fi
   return "$command_status"
+}
+
+# Add one queued backlog row and preserve the complete tasks-axi diagnostic for
+# callers that must surface a failed automatic dispatch loudly.
+FM_BACKLOG_ADD_OUTPUT=
+fm_backlog_add() {  # <data-dir> <id> <title> <kind> <repo>
+  local status
+  if fm_backlog_mutate "$1" add "$2" "$3" --kind "$4" --repo "$5"; then
+    return 0
+  else
+    status=$?
+  fi
+  FM_BACKLOG_ADD_OUTPUT=$FM_BACKLOG_MUTATION_OUTPUT
+  return "$status"
 }
 
 fm_backlog_start() {  # <data-dir> <id>

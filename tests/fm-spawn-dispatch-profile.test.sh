@@ -105,6 +105,46 @@ run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off
 }
 
+make_spawn_backlog_tasks_axi() {
+  local fakebin=$1 case_dir=$2 real
+  real=$(command -v tasks-axi) || return 1
+  cat > "$fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s\\n' "\$*" >> "$case_dir/tasks-axi.log"
+if [ "\${1:-}" = add ]; then
+  id=\${2:-}
+  state=\${FM_STATE_OVERRIDE:-\${FM_HOME:-}/state}
+  [ -d "\$state/.meta-\$id.lock" ] || {
+    printf '%s\\n' 'error: add was called without the spawn metadata lock' >&2
+    exit 74
+  }
+  if [ "\${FM_TEST_TASKS_AXI_FAIL_ADD:-0}" = 1 ]; then
+    printf '%s\\n' 'error: synthetic add failure' >&2
+    printf '%s\\n' 'hint: backlog is locked' >&2
+    exit 73
+  fi
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$fakebin/tasks-axi"
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -k ]; then
+  shift 3
+else
+  shift
+fi
+exec "$@"
+SH
+  chmod +x "$fakebin/timeout"
+}
+
+seed_spawn_backlog() {
+  local home=$1
+  printf '%s\\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+}
+
 read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
@@ -116,6 +156,90 @@ assert_meta_profile() {
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+}
+
+test_backlog_title_creates_repo_bound_item_under_spawn_lock() {
+  local rec id out status row
+  id=backlog-title-create-z1
+  rec=$(make_spawn_case backlog-title-create pi "$id")
+  read_case_record "$rec"
+  seed_spawn_backlog "$HOME_DIR"
+  make_spawn_backlog_tasks_axi "$FAKEBIN_DIR" "$CASE_DIR"
+  fm_test_write_active_treehouse_fake "$FAKEBIN_DIR" "$WT_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backlog-title 'Create the tracked item')
+  status=$?
+  expect_code 0 "$status" "--backlog-title spawn should succeed"
+  row=$(PATH="$FAKEBIN_DIR:$PATH" tasks-axi show "$id" --file "$HOME_DIR/data/backlog.md")
+  assert_contains "$row" 'title: Create the tracked item' "created backlog title missing"
+  assert_contains "$row" 'state: in_flight' "created backlog item was not started by spawn"
+  assert_contains "$row" 'repo: project' "created backlog item did not derive the project repo"
+  assert_grep "add $id Create the tracked item --kind ship --repo project" \
+    "$CASE_DIR/tasks-axi.log" "spawn did not add the repo-bound backlog item"
+  pass "--backlog-title creates a repo-bound item under the spawn metadata lock"
+}
+
+test_backlog_title_repairs_existing_repo_gap() {
+  local rec id out status row real
+  id=backlog-title-repair-z2
+  rec=$(make_spawn_case backlog-title-repair pi "$id")
+  read_case_record "$rec"
+  seed_spawn_backlog "$HOME_DIR"
+  real=$(command -v tasks-axi)
+  "$real" add "$id" 'Existing item' --kind ship --file "$HOME_DIR/data/backlog.md" >/dev/null
+  make_spawn_backlog_tasks_axi "$FAKEBIN_DIR" "$CASE_DIR"
+  fm_test_write_active_treehouse_fake "$FAKEBIN_DIR" "$WT_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backlog-title 'Existing item')
+  status=$?
+  expect_code 0 "$status" "existing repo-gap spawn should succeed"
+  row=$(PATH="$FAKEBIN_DIR:$PATH" tasks-axi show "$id" --file "$HOME_DIR/data/backlog.md")
+  assert_contains "$row" 'repo: project' "existing backlog repo gap was not repaired"
+  assert_grep "update $id --repo project" "$CASE_DIR/tasks-axi.log" \
+    "spawn did not fill the existing backlog repo"
+  pass "existing backlog rows gain the project repo before dispatch"
+}
+
+test_backlog_title_refuses_different_existing_title() {
+  local rec id out status real
+  id=backlog-title-mismatch-z3
+  rec=$(make_spawn_case backlog-title-mismatch pi "$id")
+  read_case_record "$rec"
+  seed_spawn_backlog "$HOME_DIR"
+  real=$(command -v tasks-axi)
+  "$real" add "$id" 'Original item' --kind ship --file "$HOME_DIR/data/backlog.md" >/dev/null
+  make_spawn_backlog_tasks_axi "$FAKEBIN_DIR" "$CASE_DIR"
+  fm_test_write_active_treehouse_fake "$FAKEBIN_DIR" "$WT_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backlog-title 'Different item')
+  status=$?
+  [ "$status" -ne 0 ] || fail "different existing backlog title was accepted"
+  assert_contains "$out" "already has backlog title 'Original item'" \
+    "title mismatch did not explain the refusal"
+  assert_absent "$HOME_DIR/state/$id.meta" "title mismatch published task metadata"
+  pass "--backlog-title refuses an existing id with a different title"
+}
+
+test_backlog_title_surfaces_full_add_diagnostic() {
+  local rec id out status
+  id=backlog-title-add-failure-z4
+  rec=$(make_spawn_case backlog-title-add-failure pi "$id")
+  read_case_record "$rec"
+  seed_spawn_backlog "$HOME_DIR"
+  make_spawn_backlog_tasks_axi "$FAKEBIN_DIR" "$CASE_DIR"
+  fm_test_write_active_treehouse_fake "$FAKEBIN_DIR" "$WT_DIR"
+
+  out=$(FM_TEST_TASKS_AXI_FAIL_ADD=1 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --backlog-title 'Fail this add')
+  status=$?
+  [ "$status" -ne 0 ] || fail "failed backlog add was accepted"
+  assert_contains "$out" 'error: synthetic add failure' "add failure did not surface tasks-axi stderr"
+  assert_contains "$out" 'hint: backlog is locked' "multiline add diagnostic was truncated"
+  assert_absent "$HOME_DIR/state/$id.meta" "failed backlog add published task metadata"
+  pass "failed backlog creation preserves the complete tasks-axi diagnostic"
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
@@ -1204,6 +1328,10 @@ SH
 }
 
 test_worker_launch_delivers_role_scope
+test_backlog_title_creates_repo_bound_item_under_spawn_lock
+test_backlog_title_repairs_existing_repo_gap
+test_backlog_title_refuses_different_existing_title
+test_backlog_title_surfaces_full_add_diagnostic
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths

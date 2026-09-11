@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, a reader
 # scout in checkout-free scratch, or a secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback|secondmate-config>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--access <reader|writer>] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback|secondmate-config>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--backlog-title <title>] [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback|secondmate-config>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--access <reader|writer>] [--backlog-title <title>] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback|secondmate-config>] [--matched-rule <default|rule-<n>>] [--quota-decision <selected|stopped|not-applicable|unknown>] [--quota-headroom <sufficient|tight|exhausted|unmeasurable|unknown>] [--quota-runway <sufficient|tight|exhausted|unmeasurable|unknown>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--routing-source <captain|profile|fallback|secondmate-config>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
-#   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
+#   spawn and refused on --scout and --secondmate spawns. --backlog-title creates
+#   a queued ship/scout backlog item through tasks-axi before launch, or validates
+#   the title of an existing item, and is refused on relaunches and secondmates.
+#   Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
 #   standing posture as context, not as this task's answer, so a spawn never looks
 #   the mode up. A ship spawn additionally reads the brief's recorded
@@ -748,6 +751,8 @@ ROUTING_SOURCE=
 TELEMETRY_TASK_ROOT=
 TELEMETRY_PARENT=
 ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA=0
+BACKLOG_TITLE=
+BACKLOG_TITLE_SET=0
 DISPATCH_RESOLVED=0
 DISPATCH_OVERRIDE_REASON=
 DISPATCH_OVERRIDE_REASON_SET=0
@@ -790,6 +795,7 @@ for a in "$@"; do
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       account-profile) ACCOUNT_PROFILE=$a; ACCOUNT_PROFILE_SET=1 ;;
       task-class) TASK_CLASS=$a; TASK_CLASS_SET=1 ;;
+      backlog-title) BACKLOG_TITLE=$a; BACKLOG_TITLE_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
@@ -827,6 +833,8 @@ for a in "$@"; do
     --account-profile=*) ACCOUNT_PROFILE=${a#--account-profile=}; ACCOUNT_PROFILE_SET=1 ;;
     --task-class) want_value='task-class' ;;
     --task-class=*) TASK_CLASS=${a#--task-class=}; TASK_CLASS_SET=1 ;;
+    --backlog-title) want_value=backlog-title ;;
+    --backlog-title=*) BACKLOG_TITLE=${a#--backlog-title=}; BACKLOG_TITLE_SET=1 ;;
     --exploration) EXPLORATION=deliberate ;;
     --allow-no-mistakes-without-reviewer-quota) ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA=1 ;;
     --backend) want_value=backend ;;
@@ -877,6 +885,18 @@ if [ "$ACCOUNT_PROFILE_SET" -eq 1 ] && [ "$KIND" = secondmate ]; then
   exit 1
 fi
 [ "$TASK_CLASS_SET" -eq 0 ] || [ -n "$TASK_CLASS" ] || { echo "error: --task-class requires a non-empty value" >&2; exit 1; }
+if [ "$BACKLOG_TITLE_SET" -eq 1 ]; then
+  [ -n "$BACKLOG_TITLE" ] || { echo "error: --backlog-title requires a non-empty value" >&2; exit 1; }
+  BACKLOG_TITLE_BYTES=$(fm_backlog_bytes_of_string "$BACKLOG_TITLE") || exit 1
+  fm_backlog_control_bytes_valid 0 "$BACKLOG_TITLE_BYTES" || {
+    echo "error: --backlog-title must not contain control bytes or newlines" >&2
+    exit 1
+  }
+  [ -n "$(printf '%s' "$BACKLOG_TITLE" | tr -d '[:space:]')" ] || {
+    echo "error: --backlog-title must contain a non-whitespace character" >&2
+    exit 1
+  }
+fi
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
@@ -1014,6 +1034,16 @@ else
       exit 1
     }
   fi
+fi
+if [ "$BACKLOG_TITLE_SET" -eq 1 ]; then
+  [ "$RELAUNCH" -eq 0 ] || {
+    echo "error: --backlog-title applies only to fresh ship or scout spawns; relaunch reuses its existing backlog item" >&2
+    exit 1
+  }
+  [ "$KIND" = ship ] || [ "$KIND" = scout ] || {
+    echo "error: --backlog-title applies only to ship or scout spawns" >&2
+    exit 1
+  }
 fi
 [ "$RESUME_SESSION_SET" -eq 0 ] || [ "$RELAUNCH" -eq 1 ] || {
   echo "error: --resume-session requires --relaunch for an existing task" >&2
@@ -1762,6 +1792,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ "$TASK_CLASS_SET" -eq 0 ] || shared_args+=(--task-class "$TASK_CLASS")
+  [ "$BACKLOG_TITLE_SET" -eq 0 ] || shared_args+=(--backlog-title "$BACKLOG_TITLE")
   [ "$EXPLORATION" = none ] || shared_args+=(--exploration)
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   [ "$ROUTING_SOURCE_SET" -eq 0 ] || shared_args+=(--routing-source "$ROUTING_SOURCE")
@@ -1920,6 +1951,7 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
 fi
 SPAWN_TASK_LOCK_HELD=1
 PROJ=
+PROJECT_REPO=
 ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
@@ -3008,6 +3040,7 @@ if [ "$KIND" = secondmate ]; then
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJECT_REPO=$(basename "$PROJ_ABS")
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
@@ -3090,7 +3123,7 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  PROJ_NAME=$(basename "$PROJ_ABS")
+  PROJ_NAME=$PROJECT_REPO
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
@@ -3674,6 +3707,14 @@ if [ -f "$STATE/$ID.meta" ]; then
   fi
 fi
 
+# The per-task metadata lock also guards automatic backlog creation and repair,
+# so the row cannot change between this preflight and the later spawn commit.
+if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=1
+fi
+
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
 # transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
@@ -3683,11 +3724,48 @@ BACKLOG_TRANSITION=0
 BACKLOG_ROW_STATE=
 if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   BACKLOG_TRANSITION=1
+  if [ -z "$PROJECT_REPO" ]; then
+    echo "error: task $ID cannot derive its backlog repo from project $PROJ_ABS" >&2
+    exit 1
+  fi
   if fm_backlog_row_probe "$DATA" "$ID"; then
+    if [ "$BACKLOG_TITLE_SET" -eq 1 ] && [ "$FM_BACKLOG_ROW_TITLE" != "$BACKLOG_TITLE" ]; then
+      echo "error: task $ID already has backlog title '$FM_BACKLOG_ROW_TITLE', not requested title '$BACKLOG_TITLE'; refusing to reuse the id" >&2
+      exit 1
+    fi
+    case "$FM_BACKLOG_ROW_REPO" in
+      ''|-)
+        if ! fm_backlog_mutate "$DATA" update "$ID" --repo "$PROJECT_REPO"; then
+          echo "error: task $ID's backlog repo could not be set to $PROJECT_REPO ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+          exit 1
+        fi
+        if ! fm_backlog_row_probe "$DATA" "$ID" || [ "$FM_BACKLOG_ROW_REPO" != "$PROJECT_REPO" ]; then
+          echo "error: task $ID's backlog repo did not read back as $PROJECT_REPO after update" >&2
+          exit 1
+        fi
+        ;;
+      "$PROJECT_REPO") ;;
+      *)
+        echo "error: task $ID's backlog repo is $FM_BACKLOG_ROW_REPO, but this spawn targets project $PROJECT_REPO" >&2
+        exit 1
+        ;;
+    esac
     BACKLOG_ROW_STATE=$FM_BACKLOG_ROW_STATE
   elif [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
-    echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (tasks-axi add $ID '<title>' --kind $KIND) and re-run" >&2
-    exit 1
+    if [ "$BACKLOG_TITLE_SET" -eq 0 ]; then
+      echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; pass --backlog-title '<title>' to create it or add it first and re-run" >&2
+      exit 1
+    fi
+    if ! fm_backlog_add "$DATA" "$ID" "$BACKLOG_TITLE" "$KIND" "$PROJECT_REPO"; then
+      echo "error: task $ID's backlog item could not be created by tasks-axi ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+      [ -z "$FM_BACKLOG_ADD_OUTPUT" ] || printf '%s\n' "$FM_BACKLOG_ADD_OUTPUT" >&2
+      exit 1
+    fi
+    if ! fm_backlog_row_probe "$DATA" "$ID"; then
+      echo "error: task $ID's newly-created backlog item could not be read back ($FM_BACKLOG_ROW_ERROR)" >&2
+      exit 1
+    fi
+    BACKLOG_ROW_STATE=$FM_BACKLOG_ROW_STATE
   else
     echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
     exit 1
@@ -3700,6 +3778,10 @@ else
   BACKLOG_GATE_STATUS=$?
   if [ "$BACKLOG_GATE_STATUS" -eq 2 ]; then
     echo "error: task $ID cannot be dispatched because its backlog data directory is inaccessible: $DATA ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  fi
+  if [ "$BACKLOG_TITLE_SET" -eq 1 ]; then
+    echo "error: --backlog-title requires an automatic tasks-axi backlog for this home; refusing to launch without creating the paired item" >&2
     exit 1
   fi
 fi
