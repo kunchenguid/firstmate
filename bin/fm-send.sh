@@ -70,10 +70,11 @@
 # failure); any other nonzero = the send failed and nothing may be assumed
 # delivered. Submission dispatches through the target's recorded backend; the
 # tmux adapter shares its composer/submit core with the away-mode daemon via
-# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP
-# (0.4). Slash commands, and codex `$...` skill invocations resolved through
-# harness meta, get a longer pre-Enter settle so completion popups do not
-# swallow Enter. A remote secondmate target has no typed text plane at all:
+# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3; agy typed targets
+# default to 20 for agy's late busy render) / FM_SEND_SLEEP (0.4). Slash
+# commands, and codex `$...` skill invocations resolved through harness meta,
+# get a longer pre-Enter settle so completion popups do not swallow Enter.
+# A remote secondmate target has no typed text plane at all:
 # every remote text steer rides the inbox (a marked secondmate request already
 # reaches the harness as marker-prefixed chat rather than a parser command, so
 # routing a remote "/..." or "$..." through the record changes nothing the

@@ -9,8 +9,9 @@
 # multi-line brief (live-measured on agy 1.2.1), while the shared default
 # confirm budget is 3 retries x 0.4s - so fm-send used to exit 1 "not
 # submitted" for a message that landed and ran, inviting a duplicate resend.
-# fm-send now gives agy typed targets a longer default budget (10 retries);
-# an explicit FM_SEND_RETRIES still wins and every other harness keeps the
+# fm-send now gives agy typed targets a longer default budget (20 retries,
+# ~8s at the default cadence); an explicit FM_SEND_RETRIES still wins and every
+# other harness keeps the
 # shared 3-retry default. These tests pin that behavior hermetically (stubbed
 # tmux + sleep, no real agent): the fake tmux renders the busy footer only
 # from the BUSY_AT-th plain pane capture, so the number of logged 0.4s waits
@@ -113,7 +114,7 @@ run_send() {  # <harness> <busy-at> [env=val ...]
 }
 
 # agy, default budget, busy footer renders at the 5th poll (the 6th plain
-# capture): the raised default (10 retries) must reach that read and exit 0.
+# capture): the raised default (20 retries) must reach that read and exit 0.
 # Under the old shared default (3 retries) this exact shape exited 1
 # "verdict=unknown" - the regression this suite pins.
 out=$(run_send agy 6)
