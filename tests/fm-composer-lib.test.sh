@@ -836,7 +836,7 @@ test_agy_prompt_uses_complete_positional_boundaries() {
 }
 
 test_agy_boundary_ambiguity_fails_closed() {
-  local boundary screen out extract
+  local boundary screen out extract base_screen rules_screen base_out rules_out base_extract rules_extract
   boundary=$(printf '─%.0s' {1..16})
   screen="$boundary"$'\n> old\n'"$boundary"$'\n'"$boundary"$'\n> x\n'"$boundary"
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 4 probe-absent)
@@ -861,6 +861,16 @@ test_agy_boundary_ambiguity_fails_closed() {
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 2 probe-absent)
   [ "$out" = unknown ] \
     || fail "a cursor outside the current AGY pair must defer, got '$out'"
+  base_screen=$'╭────────────────────────╮\n│ ❯ real draft           │\n╰────────────────────────╯'
+  rules_screen="$boundary"$'\nscrollback\n'"$boundary"$'\nmore output\n'"$boundary"$'\n'"$base_screen"
+  base_out=$(fm_composer_classify_screen 'styled=1' "$base_screen")
+  rules_out=$(fm_composer_classify_screen 'styled=1' "$rules_screen")
+  [ "$rules_out" = "$base_out" ] \
+    || fail "horizontal rules in non-AGY scrollback changed boxed classification from '$base_out' to '$rules_out'"
+  base_extract=$(fm_composer_extract_selected_content 'styled=1' "$base_screen")
+  rules_extract=$(fm_composer_extract_selected_content 'styled=1' "$rules_screen")
+  [ "$rules_extract" = "$base_extract" ] \
+    || fail "horizontal rules in non-AGY scrollback changed boxed extraction from '$base_extract' to '$rules_extract'"
   screen=$'> quoted\n────────────────\n╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
   out=$(fm_composer_classify_screen 'styled=1' "$screen")
   [ "$out" = empty ] \
