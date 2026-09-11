@@ -10,7 +10,8 @@
 #     records the posture with no daemon terminal, pid, or flag;
 #   - a real Pi draft is never touched by away mode (nothing injects on Pi);
 #   - an unmarked return request is recognized as the return, opens the
-#     catch-up gate before Bearings on the live blocker, and renders the brief;
+#     catch-up gate on the live blocker, renders the brief, and still lets
+#     Bearings report that catch-up posture as content;
 #   - remediation/resolution clears the gate, and re-entry is idempotent.
 # The 2026-07-14 two-owner incident's daemon-injection assertions retired with
 # the daemon on Pi; the daemon transport keeps its coverage in
@@ -252,19 +253,23 @@ assert_contains "$RETURN_OUT" 'firstmate-actionable blocker: repair-task [key=sy
 assert_contains "$RETURN_OUT" '=== Return brief (away ' "the return did not render the brief"
 assert_contains "$RETURN_OUT" 'Supervisor health:' "the brief did not lead with supervisor health"
 [ ! -f "$STATE/.afk-contract" ] || fail "the return did not archive the away-posture record"
-set +e
 BEARINGS_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1)
-BEARINGS_RC=$?
-set -e
-[ "$BEARINGS_RC" -eq 3 ] || fail "Bearings bypassed the return gate (rc=$BEARINGS_RC): $BEARINGS_OUT"
-pass "real unmarked Pi return renders the brief, opens catch-up, and blocks Bearings before the unresolved blocker can be deferred"
+  "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1) \
+  || fail "Bearings refused behind the return gate instead of reporting it: $BEARINGS_OUT"
+printf '%s' "$BEARINGS_OUT" | jq -e '
+  (.in_flight | any(.id == "repair-task"))
+  and (.gates | any(.id == "(return-catchup)" and .reason == "away-return catch-up"))
+  and ([.decisions_open[].id] | index("(return-catchup)") | not)' >/dev/null \
+  || fail "Bearings did not surface the catch-up posture as content: $BEARINGS_OUT"
+pass "real unmarked Pi return renders the brief, opens catch-up, and reports that posture through Bearings while the blocker stays Firstmate's to remediate"
 
 printf 'resolved [key=synthetic-dependency]: refreshed the synthetic token and resumed the task\n' >> "$STATE/repair-task.status"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
   "$ROOT/bin/fm-afk-return.sh" check >/dev/null || fail "remediated blocker did not clear return catch-up"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  "$ROOT/bin/fm-bearings-snapshot.sh" --json >/dev/null || fail "Bearings remained gated after blocker remediation"
+  "$ROOT/bin/fm-bearings-snapshot.sh" --json \
+  | jq -e '[.gates[].id] | index("(return-catchup)") | not' >/dev/null \
+  || fail "Bearings kept the catch-up posture row after the gate cleared"
 
 # A clean re-entry records a fresh posture, and an immediate return is
 # idempotently clear because the keyed blocker is resolved.

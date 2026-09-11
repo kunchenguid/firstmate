@@ -54,6 +54,12 @@
 # gaps in omitted[] and, when invalid, a Charted Next gate line so the four-section
 # chat cannot claim an empty fleet while main current state is broken.
 #
+# An open away-return catch-up is disclosed the same way, as a single action-free
+# (return-catchup) gate row naming the blockers left to clear or the reason the
+# catch-up was retained. Reporting is not ordinary captain work, so the gate never
+# suppresses the digest; an ACTIVE away window still refuses, because the right
+# answer there is to run the return first. bin/fm-afk-return.sh owns the gate.
+#
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
@@ -197,10 +203,29 @@ done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
 
-# The deterministic return-catch-up owner must clear before this or any other
-# ordinary captain request proceeds. Bearings does not reproduce that policy;
-# it only consults the shared read-only gate.
-"$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
+# The shared read-only away-return owner is consulted, not obeyed. An active
+# away window still refuses here: the correct answer to a bearings request then
+# is to run the return first. Return CATCH-UP is different - the captain is
+# back and asking for the picture, so the catch-up posture is reported as
+# content (a Charted Next gate row) and collection continues. bin/fm-afk-return.sh
+# owns both the gate format and the branch distinction; bearings reproduces
+# neither. Acting on the fleet still waits for its `check`.
+RETURN_CATCHUP=null
+GUARD_RC=0
+GUARD_ERR=$("$SCRIPT_DIR/fm-afk-return.sh" guard 2>&1 >/dev/null) || GUARD_RC=$?
+if [ "$GUARD_RC" -ne 0 ] && [ "$GUARD_RC" -ne 4 ]; then
+  [ -z "$GUARD_ERR" ] || printf '%s\n' "$GUARD_ERR" >&2
+  exit "$GUARD_RC"
+fi
+if [ "$GUARD_RC" -eq 4 ]; then
+  CATCHUP_LINE=$("$SCRIPT_DIR/fm-afk-return.sh" catchup-summary) || CATCHUP_LINE=""
+  CATCHUP_BLOCKERS=${CATCHUP_LINE%%$'\t'*}
+  case "$CATCHUP_BLOCKERS" in ''|*[!0-9]*) CATCHUP_BLOCKERS=0 ;; esac
+  CATCHUP_REASON=""
+  case "$CATCHUP_LINE" in *"$(printf '\t')"*) CATCHUP_REASON=${CATCHUP_LINE#*$'\t'} ;; esac
+  RETURN_CATCHUP=$(jq -n --argjson blockers "$CATCHUP_BLOCKERS" --arg reason "$CATCHUP_REASON" \
+    '{pending:true,blockers:$blockers,reason:$reason}')
+fi
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
@@ -340,6 +365,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
+  --argjson return_catchup "$RETURN_CATCHUP" \
   --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
@@ -511,7 +537,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ (.secondmate_current.records // [])[] | .queued[]?
          | select(.hold_kind == "captain" and projected_deferred_hold) ]
      | length) as $decisions_marked_deferred
-  | ((if (.main_inventory.valid == false) then
+  | ((if ($return_catchup.pending // false) then
+        [{id:"(return-catchup)",
+          title:((if ($return_catchup.blockers // 0) > 0 then
+                    "\($return_catchup.blockers) blocker(s) to clear before ordinary work"
+                  elif (($return_catchup.reason // "") != "") then
+                    ("catch-up retained: " +
+                     ($return_catchup.reason | sub("[,;] *catch-up stays gated$"; "")))
+                  else "away-return catch-up is still open" end) | trunc(60)),
+          blocked_by:"-",
+          reason:"away-return catch-up",
+          owner:"(main)"}]
+      else [] end)
+     + (if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
           blocked_by:"-",

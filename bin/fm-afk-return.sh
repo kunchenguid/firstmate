@@ -6,7 +6,9 @@
 #   fm-afk-return.sh          Stop away mode, render the return brief, and open/check the gate.
 #   fm-afk-return.sh begin    Same as the default command.
 #   fm-afk-return.sh check    Re-render the brief and close the gate only after blockers resolve.
-#   fm-afk-return.sh guard    Read-only refusal while away or catch-up is pending.
+#   fm-afk-return.sh guard    Read-only consult: exit 3 while away mode is still
+#                            active, exit 4 while return catch-up is pending.
+#   fm-afk-return.sh catchup-summary  Read-only catch-up projection for a reporting surface.
 #
 # THE RETURN BRIEF (stdout, on begin and on every check) is rendered from durable
 # records, never from conversation memory: the archived away-posture record
@@ -37,9 +39,12 @@
 # so a crash between stopping, wake presentation, and blocker handling fails
 # closed. It retains the presented wake, buffered-escalation, wedge-marker,
 # health, and posture-record evidence until every live open blocker is closed
-# and `check` succeeds. Repeated begin/check calls are idempotent. `guard`
-# never mutates state and is suitable for ordinary read entrypoints such as
-# fm-bearings-snapshot.sh.
+# and `check` succeeds. Repeated begin/check calls are idempotent. `guard` and
+# `catchup-summary` never mutate state and are suitable for ordinary read
+# entrypoints such as fm-bearings-snapshot.sh. `guard` separates its two
+# refusal branches by exit status so a reporting surface can keep refusing
+# during an active away window while still rendering the catch-up posture as
+# content; this file owns the gate format both branches read.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,7 +64,7 @@ RETURN_GRACE=${FM_GUARD_GRACE:-300}
 CONTRACT="$SCRIPT_DIR/fm-afk-contract.sh"
 
 usage() {
-  sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 clean_field() {
@@ -245,15 +250,58 @@ clear_delivery_artifacts() {
     "$STATE/.subsuper-inject-wedged"
 }
 
+# The lifecycle retention reasons the gate kept, one per line, empty when the
+# gate was retained for open blockers alone.
+gate_retention_reasons() {  # <file>
+  local file=$1 tag kind text
+  while IFS="$(printf '\t')" read -r tag kind text; do
+    [ "$tag" = evidence ] && [ "$kind" = lifecycle ] || continue
+    printf '%s\n' "$text"
+  done < "$file"
+}
+
+gate_has_blockers() {  # <file>
+  grep -q "^blocker$(printf '\t')" "$1" 2>/dev/null
+}
+
+# Read-only catch-up projection for a reporting surface such as
+# fm-bearings-snapshot.sh: one tab-separated line
+# `<open-blocker-count><TAB><first-retention-reason>`, and exit 1 when no gate
+# is open. The reason field is empty when open blockers alone hold the gate.
+catchup_summary() {
+  local count reason
+  [ -e "$GATE" ] || return 1
+  count=$(grep -c "^blocker$(printf '\t')" "$GATE" 2>/dev/null || true)
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  reason=$(gate_retention_reasons "$GATE" | head -1)
+  printf '%s\t%s\n' "$count" "$reason"
+}
+
 return_guard() {
+  local reasons
   if [ -e "$STATE/.afk" ] || fm_afk_contract_present "$STATE"; then
     printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
     return 3
   fi
   if [ -e "$GATE" ]; then
-    printf 'fm-afk-return: return catch-up is pending; remediate or durably reclassify every listed blocker, then run bin/fm-afk-return.sh check\n' >&2
-    print_blockers "$GATE" >&2
-    return 3
+    if gate_has_blockers "$GATE"; then
+      printf 'fm-afk-return: return catch-up is pending; remediate or durably reclassify every listed blocker, then run bin/fm-afk-return.sh check\n' >&2
+      print_blockers "$GATE" >&2
+    else
+      # No blocker row exists, so naming "every listed blocker" would ask for
+      # something the gate does not list. Name the lifecycle retention reason
+      # that actually holds it instead.
+      printf 'fm-afk-return: return catch-up is pending with no open blocker; clear the retention reason below, then run bin/fm-afk-return.sh check\n' >&2
+      reasons=$(gate_retention_reasons "$GATE")
+      if [ -n "$reasons" ]; then
+        printf '%s\n' "$reasons" | while IFS= read -r text; do
+          printf 'catch-up retained: %s\n' "$text" >&2
+        done
+      else
+        printf 'catch-up retained: the durable gate recorded no retention reason\n' >&2
+      fi
+    fi
+    return 4
   fi
   return 0
 }
@@ -650,6 +698,7 @@ main() {
   case "$mode" in
     begin|check) ;;
     guard) return_guard; return ;;
+    catchup-summary) catchup_summary; return ;;
     -h|--help|help) usage; return 0 ;;
     *) usage >&2; return 2 ;;
   esac
