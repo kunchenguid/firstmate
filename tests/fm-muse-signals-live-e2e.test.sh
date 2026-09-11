@@ -204,17 +204,17 @@ for _ in $(seq 1 100); do
   sleep 0.2
 done
 [ "$COMPOSER_STATE" = empty ] || fail "the shared classifier read Muse's real idle composer as '$COMPOSER_STATE'"
-pass "the shared classifier read Muse's real idle composer as empty"
 
-CAPTURE="$LAB/muse-pane.ansi"
-tmux capture-pane -e -p -t "$TARGET" -S 0 -E - > "$CAPTURE" \
-  || fail "could not capture Muse's styled pane"
-if muse_prompt_glyph_is_bright "$CAPTURE" 2>/dev/null; then
-  pass "Muse's real bright prompt glyph classifies as an empty composer"
+if [ "$MUSE_VERSION" = "Muse Code 1.1.1 (1.1.1-R2514.1)" ]; then
+  printf 'ok - %s # SKIP %s\n' "Muse's real prompt glyph color on $MUSE_VERSION" \
+    "composer glyph out of scope; 1.1.1 drift tracked as follow-up muse-111-composer-glyph-drift"
 else
-  # Session-log folding is the proof this guard owns on Muse Code 1.1.1.
-  # Prompt-glyph color is a separate composer signal and is not claimed here.
-  pass "$MUSE_VERSION session-log folding held; prompt glyph color is unverified"
+  CAPTURE="$LAB/muse-pane.ansi"
+  tmux capture-pane -e -p -t "$TARGET" -S 0 -E - > "$CAPTURE" \
+    || fail "could not capture Muse's styled pane"
+  muse_prompt_glyph_is_bright "$CAPTURE" \
+    || fail "Muse's real prompt glyph is missing a bright effective truecolor foreground"
+  pass "Muse's real bright prompt glyph classifies as an empty composer"
 fi
 
 cleanup
