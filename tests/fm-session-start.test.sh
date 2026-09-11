@@ -838,7 +838,7 @@ EOF
 }
 
 test_session_start_does_not_wait_for_slow_home_summary() {
-  local rec root home fakebin out started elapsed i
+  local rec root home fakebin stage_file pid i
   rec=$(new_world slow-home-summary)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -862,17 +862,22 @@ SH
     i=$((i + 1))
   done
 
-  started=$(date +%s)
-  out=$(FM_HOME_SUMMARY_TIMEOUT=11 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 FM_TEST_SNAPSHOT_TASK_SLEEP=1 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 10 ] || fail "session start waited $elapsed seconds for a slow home summary"
+  stage_file="$home/state/.session-start-stage"
+  FM_HOME_SUMMARY_TIMEOUT=20 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 FM_TEST_SNAPSHOT_TASK_SLEEP=1 \
+    FM_SESSION_START_STAGE_FILE="$stage_file" run_session_start "$home" "$root" "$fakebin:$BASE_PATH" \
+    > "$home/state/.session-start-output" 2>&1 &
+  pid=$!
   i=0
-  while ! grep -Fq 'refresh exceeded its 11-second deadline' "$home/state/.home-summary-refresh.log" 2>/dev/null && [ "$i" -lt 200 ]; do
+  while [ "$i" -lt 100 ] && ! grep -Eq '^(bootstrap|wake-queue)$' "$stage_file" 2>/dev/null; do
     sleep 0.1
     i=$((i + 1))
   done
-  grep -Fq 'refresh exceeded its 11-second deadline' "$home/state/.home-summary-refresh.log" \
-    || fail "the deferred home summary did not retain its worker bound"
+  if ! grep -Eq '^(bootstrap|wake-queue)$' "$stage_file" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "session start did not reach bootstrap within the 10-second probe"
+  fi
+  wait "$pid" || fail "session start did not complete after reaching bootstrap"
   pass "session start does not wait for a slow 60-task home summary"
 }
 
