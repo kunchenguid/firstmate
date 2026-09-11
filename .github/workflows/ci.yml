@@ -55,6 +55,8 @@ jobs:
           node-version: '22'
       - name: Verify shared module contracts, routing, and process-event composition
         run: bin/fm-test-run.sh tests/fm-modules.test.sh tests/fm-moiras.test.sh tests/fm-peer-message.test.sh tests/fm-tachikoma.test.sh tests/fm-model-telemetry.test.sh tests/fm-model-usage.test.sh tests/fm-marvin.test.sh
+      - name: Verify Robin research workflow and delivery composition
+        run: bin/fm-test-run.sh tests/fm-robin.test.sh
 
   critical-teardown:
     name: Critical teardown safety

@@ -806,6 +806,7 @@ tests/fm-remote-secondmate-parent-binding.test.sh 295
 tests/fm-remote-secondmate-trace-context.test.sh 308
 tests/fm-remote-transport-lanes.test.sh 425
 tests/fm-review-diff.test.sh 176
+tests/fm-robin.test.sh 78204
 tests/fm-search.test.sh 318
 tests/fm-secondmate-charter-lib.test.sh 41
 tests/fm-secondmate-harness.test.sh 2741
@@ -1786,6 +1787,9 @@ families_for_changed_path() {
       ;;
     modules/TEMPLATE.md|modules/fm-tui-core/*|modules/fm-state-reader/*)
       printf '%s\n' __script__:fm-modules.test.sh
+      ;;
+    modules/fm-robin/*|bin/fm-robin.sh)
+      printf '%s\n' __script__:fm-robin.test.sh
       ;;
     tests/assets/board-render-harness.mjs)
       printf '%s\n' __script__:fm-bearings-board-render.test.sh

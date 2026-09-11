@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["maxSeconds", "maxFetches", "maxBytes", "enabledAdapters", "sources", "roles"],
+  "properties": {
+    "maxSeconds": {"type": "integer", "minimum": 1, "maximum": 600},
+    "maxFetches": {"type": "integer", "minimum": 1, "maximum": 20},
+    "maxBytes": {"type": "integer", "minimum": 1024, "maximum": 262144},
+    "enabledAdapters": {"type": "array", "uniqueItems": true, "items": {"enum": ["fetch", "gh", "scrapling", "alphaxiv"]}},
+    "sources": {
+      "type": "array", "maxItems": 100,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["origin", "publisher"],
+        "properties": {"origin": {"type": "string", "format": "uri"}, "publisher": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"}}
+      }
+    },
+    "roles": {
+      "type": "object", "additionalProperties": false, "required": ["researcher"],
+      "properties": {
+        "researcher": {
+          "type": "object", "additionalProperties": false, "required": ["harness", "model", "effort", "persona"],
+          "properties": {
+            "harness": {"type": "string", "enum": ["pi", "pi-signed"]},
+            "model": {"type": "string", "minLength": 1, "maxLength": 200},
+            "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh"]},
+            "persona": {"type": "string", "pattern": "^personas/[a-z0-9-]+\\.md$"}
+          }
+        }
+      }
+    }
+  }
+}

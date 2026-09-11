@@ -1,0 +1,15 @@
+{
+  "maxSeconds": 120,
+  "maxFetches": 6,
+  "maxBytes": 65536,
+  "enabledAdapters": [],
+  "sources": [],
+  "roles": {
+    "researcher": {
+      "harness": "pi",
+      "model": "default",
+      "effort": "low",
+      "persona": "personas/researcher.md"
+    }
+  }
+}
