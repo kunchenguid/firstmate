@@ -40,9 +40,7 @@
 # queued is refused the same way and says auto-merge was armed with nothing
 # landed or queued yet, or, when the merge command itself failed, that auto-merge
 # was only requested; both are read from the caller's own arguments rather than
-# from the forge's prose. The observed state is judged the same way whichever
-# read produced it, and a refusal built on the gh-axi view says the merge queue
-# could not be observed at all rather than implying an unqueued pull request.
+# from the forge's prose.
 # Every refusal that follows a merge command which returned success quotes that
 # command's own output, marked as the forge's text and kept apart from this
 # script's verdict, including the refusal for an outcome that cannot be read;
@@ -637,7 +635,9 @@ github_read_outcome_with_gh_axi() {
 
 github_read_outcome() {
   if ! command -v gh >/dev/null 2>&1; then
-    github_read_outcome_with_gh_axi && return 0
+    if github_read_outcome_with_gh_axi && [ "$FM_PR_GITHUB_MERGED" = true ]; then
+      return 0
+    fi
     echo "error: could not read the GitHub pull request outcome after the merge attempt; PR metadata and merge poll remain recorded" >&2
     return 1
   fi
@@ -646,10 +646,7 @@ github_read_outcome() {
   # missing one, so it keeps its own refusal. The gh-axi view cannot observe the
   # merge queue, so it can only turn this into a proved merge or into a refusal.
   github_read_outcome_with_gh && return 0
-  # A failed gh read may still yield a concrete fallback view: a proved merge,
-  # or an unmerged state whose queue bit gh-axi cannot observe. Only a failed
-  # fallback view is an unreadable outcome.
-  if github_read_outcome_with_gh_axi; then
+  if github_read_outcome_with_gh_axi && [ "$FM_PR_GITHUB_MERGED" = true ]; then
     return 0
   fi
   echo "error: could not read the GitHub pull request outcome after the merge attempt: the gh read failed and the gh-axi view could not prove the outcome either; PR metadata and merge poll remain recorded" >&2

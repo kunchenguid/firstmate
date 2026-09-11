@@ -66,8 +66,8 @@
 #       guesses no method
 #   (au) unreadable branch rules are reported apart from a queue-less base
 #   (av) a base branch with no queue rule says nothing about a merge queue
-#   (aw) a refusal built on the gh-axi view says the merge queue could not be
-#       observed, and judges that view's state like the queue-aware one
+#   (aw) an unmerged gh-axi fallback cannot substitute for the failed
+#       queue-aware outcome read
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -862,9 +862,9 @@ test_github_no_queue_rule_says_nothing_about_a_queue() {
   pass "fm-pr-merge says nothing about a merge queue when the base branch has no queue rule"
 }
 
-test_github_fallback_view_refusal_says_the_queue_was_unobservable() {
+test_github_unmerged_fallback_cannot_replace_queue_aware_read() {
   local case_dir rc
-  case_dir=$(make_case github-fallback-unobservable-queue)
+  case_dir=$(make_case github-unmerged-fallback)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 8686868686868686868686868686868686868686
   add_gh_mock_outcome_read_fails "$case_dir"
@@ -880,28 +880,22 @@ SH
   : > "$case_dir/gh-axi.log"
 
   set +e
-  run_pr_merge "$case_dir" task-x1 \
-    https://github.com/example/repo/pull/73 --attended-override -- --auto --merge \
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/73 \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "github-fallback-unobservable-queue: an unproved merge must fail"
-  assert_grep 'isInMergeQueue=unknown' "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: refusal did not name the concrete observed state"
-  assert_grep 'the merge queue could not be observed for https://github.com/example/repo/pull/73' \
+  expect_code 1 "$rc" "github-unmerged-fallback: an unproved merge must fail"
+  assert_grep 'pr view 73 --repo example/repo' "$case_dir/gh-axi.log" \
+    "github-unmerged-fallback: the fallback view was not consulted"
+  assert_grep 'the gh read failed and the gh-axi view could not prove the outcome either' \
     "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the refusal implied an unqueued PR it could not see"
-  assert_grep "re-check the pull request's merge queue state" "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the refusal named no concrete next step"
-  # The lowercase state the fallback view reports must be judged the same way
-  # the queue-aware read's uppercase enum is, or every explanation is skipped.
-  assert_grep 'auto-merge was requested and armed for https://github.com/example/repo/pull/73' \
-    "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the fallback view's state skipped the auto-merge explanation"
+    "github-unmerged-fallback: an unmerged fallback was treated as a readable outcome"
+  assert_no_grep 'GitHub merge outcome was not successful' "$case_dir/stderr" \
+    "github-unmerged-fallback: an unmerged fallback reached detailed outcome handling"
   assert_no_grep 'verified: ' "$case_dir/stdout" \
-    "github-fallback-unobservable-queue: an unproved merge was reported as verified"
-  pass "fm-pr-merge says the merge queue was unobservable when only the gh-axi view answered"
+    "github-unmerged-fallback: an unproved merge was reported as verified"
+  pass "fm-pr-merge accepts only a proved merge from the gh-axi fallback"
 }
 
 test_github_unreadable_outcome_refusal_quotes_the_forge_output() {
@@ -2114,7 +2108,7 @@ test_github_mismatched_queue_flags_still_name_the_retry
 test_github_unrecognised_queue_method_still_names_the_queue
 test_github_unreadable_queue_rules_are_not_reported_as_no_queue
 test_github_no_queue_rule_says_nothing_about_a_queue
-test_github_fallback_view_refusal_says_the_queue_was_unobservable
+test_github_unmerged_fallback_cannot_replace_queue_aware_read
 test_github_auto_merge_without_queue_refuses_legibly
 test_github_failed_merge_never_claims_armed_auto_merge
 test_github_failed_merge_with_queue_flags_never_claims_acceptance
