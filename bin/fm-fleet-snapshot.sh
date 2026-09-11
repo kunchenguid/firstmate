@@ -60,13 +60,13 @@
 #     runtime is present only in a home that opts in with the local, gitignored
 #     config/worker-running-time presence flag; without it this snapshot carries
 #     no runtime fields at all (bin/fm-running-time-lib.sh).
-#     runtime.started_epoch and runtime.running_seconds are how long that row's
-#     own worker has been running, derived from the spawn_gen incarnation token
-#     bin/fm-spawn.sh writes and always read as base 10. Both are null when no
-#     start is recorded, when the token carries no readable epoch, or when the
-#     recorded start is later than the observation time, so a consumer never
-#     renders a fabricated elapsed time. On a kind=secondmate row this is that
-#     second mate's own uptime, never the age of the child work it supervises.
+#     runtime.running_seconds is how long that row's own worker has been
+#     running, derived from the spawn_gen incarnation token bin/fm-spawn.sh
+#     writes and always read as base 10. It is null when no start is recorded,
+#     when the token carries no readable epoch, or when the recorded start is
+#     later than the observation time, so a consumer never renders a fabricated
+#     elapsed time. On a kind=secondmate row this is that second mate's own
+#     uptime, never the age of the child work it supervises.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -776,10 +776,8 @@ task_json_lines() {
       running_seconds=""
       if [ -n "$started_epoch" ] && [ "$started_epoch" -le "$SNAPSHOT_EPOCH" ]; then
         running_seconds=$((SNAPSHOT_EPOCH - started_epoch))
-      else
-        started_epoch=""
       fi
-      runtime_json="{\"started_epoch\":${started_epoch:-null},\"running_seconds\":${running_seconds:-null}}"
+      runtime_json="{\"running_seconds\":${running_seconds:-null}}"
     fi
     remote_host=$(meta_value "$meta" remote_host)
     remote_root=$(meta_value "$meta" remote_root)

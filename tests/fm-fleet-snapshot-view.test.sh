@@ -1094,9 +1094,9 @@ EOF
   : > "$home/config/worker-running-time"
   on=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH="$observed" \
     "$SNAPSHOT" --json)
-  printf '%s' "$on" | jq -e --argjson started "$((observed - 4440))" '
+  printf '%s' "$on" | jq -e '
     .tasks[] | select(.id == "ship-task")
-    | .runtime.started_epoch == $started and .runtime.running_seconds == 4440
+    | .runtime.running_seconds == 4440
   ' >/dev/null || fail "an opted-in home must derive the recorded start: $on"
   on_summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z FM_SNAPSHOT_NOW_EPOCH="$observed" \
     "$SNAPSHOT" --secondmate-home-summary)
