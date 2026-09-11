@@ -649,8 +649,7 @@ pane_is_busy() {  # <target> [backend]
     busy) return 0 ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  printf '%s' "$tail40" | fm_busy_lines_match "$harness"
 }
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats

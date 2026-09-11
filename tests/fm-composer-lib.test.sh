@@ -668,9 +668,11 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
 
 test_agy_prompt_requires_footer_proof() {
   local caps=$'styled=0\ncursor=1' out
-  out=$(fm_composer_classify_screen "$caps" $'────────────────\n>\n────────────────\n? for shortcuts' 1)
+  out=$(fm_composer_classify_screen "$caps" $'────────────────\n>\n────────────────\n? for shortcuts' 1 '' agy)
   [ "$out" = empty ] || fail "an idle agy prompt with its footer must read empty, got '$out'"
-  out=$(fm_composer_classify_screen "$caps" $'────────────────\n> draft\n────────────────\n? for shortcuts' 1)
+  out=$(fm_composer_classify_screen "$caps" $'────────────────\n>\n────────────────\n? for shortcuts' 1)
+  [ "$out" = unknown ] || fail "an AGY-shaped screen without harness proof must remain unknown, got '$out'"
+  out=$(fm_composer_classify_screen "$caps" $'────────────────\n> draft\n────────────────\n? for shortcuts' 1 '' agy)
   [ "$out" = pending ] || fail "typed agy prompt text must read pending, got '$out'"
   out=$(fm_composer_classify_screen "$caps" $'> ' 0)
   [ "$out" = unknown ] || fail "a lone empty shell prompt must remain unknown, got '$out'"
@@ -681,9 +683,9 @@ test_agy_prompt_requires_footer_proof() {
 
 test_agy_prompt_requires_footer_proof_without_cursor() {
   local out
-  out=$(fm_composer_classify_screen 'styled=0' $'────────────────\n>\n────────────────\n? for shortcuts')
+  out=$(fm_composer_classify_screen 'styled=0' $'────────────────\n>\n────────────────\n? for shortcuts' '' '' agy)
   [ "$out" = empty ] || fail "cursorless idle agy prompt must read empty, got '$out'"
-  out=$(fm_composer_classify_screen 'styled=0' $'────────────────\n> draft\n────────────────\n? for shortcuts')
+  out=$(fm_composer_classify_screen 'styled=0' $'────────────────\n> draft\n────────────────\n? for shortcuts' '' '' agy)
   [ "$out" = pending ] || fail "cursorless typed agy prompt must read pending, got '$out'"
   out=$(fm_composer_classify_screen 'styled=0' $'> ')
   [ "$out" = unknown ] || fail "cursorless lone empty shell prompt must remain unknown, got '$out'"
@@ -695,27 +697,27 @@ test_agy_prompt_requires_footer_proof_without_cursor() {
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
   local cursor_caps=$'styled=1\ncursor=1' cursorless_caps='styled=0' out screen extract
   screen=$'────────────────\n> first line\n  second line\n────────────────\nGemini 3.8 Flash · low'
-  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2)
+  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2 '' agy)
   [ "$out" = pending ] || fail "a styled agy multiline draft under the cursor must read pending, got '$out'"
-  out=$(fm_composer_classify_screen "$cursorless_caps" "$screen")
+  out=$(fm_composer_classify_screen "$cursorless_caps" "$screen" '' '' agy)
   [ "$out" = pending ] || fail "a cursorless agy multiline draft must read pending, got '$out'"
-  extract=$(fm_composer_extract_selected_content "$cursor_caps" "$screen")
+  extract=$(fm_composer_extract_selected_content "$cursor_caps" "$screen" '' agy)
   [ "$extract" = 'first line second line' ] \
     || fail "styled agy extraction lost multiline draft content: '$extract'"
-  extract=$(fm_composer_extract_selected_content "$cursorless_caps" "$screen")
+  extract=$(fm_composer_extract_selected_content "$cursorless_caps" "$screen" '' agy)
   [ "$extract" = 'first line second line' ] \
     || fail "cursorless agy extraction lost multiline draft content: '$extract'"
   screen=$'────────────────\n> first line\n? for shortcuts\n────────────────\nGemini 3.8 Flash · low'
-  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2)
+  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2 '' agy)
   [ "$out" = pending ] \
     || fail "a multiline agy draft containing furniture-looking rows must read pending, got '$out'"
-  extract=$(fm_composer_extract_selected_content "$cursor_caps" "$screen")
+  extract=$(fm_composer_extract_selected_content "$cursor_caps" "$screen" '' agy)
   [ "$extract" = 'first line ? for shortcuts' ] \
     || fail "agy extraction dropped furniture-looking multiline draft content: '$extract'"
   screen=$'output\n────────────────\n>\n────────────────\n? for shortcuts\n$ live shell'
-  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2)
+  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2 '' agy)
   [ "$out" = empty ] || fail "the cursor-anchored agy prompt must remain empty beside a lower shell, got '$out'"
-  out=$(fm_composer_classify_screen "$cursorless_caps" "$screen")
+  out=$(fm_composer_classify_screen "$cursorless_caps" "$screen" '' '' agy)
   [ "$out" = unknown ] || fail "cursorless agy selection must reject a lower shell, got '$out'"
   pass "fm_composer_classify_screen: agy uses cursor divergence and model-footer proof for multiline drafts"
 }
@@ -725,39 +727,39 @@ test_agy_prompt_preserves_structural_draft_rows() {
   for caps in "$CAPS_TMUX" 'styled=0'; do
     screen=$'────────────────\n> first\n> second\n────────────────\nClaude Sonnet 4.6 · low'
     if [ "$caps" = "$CAPS_TMUX" ]; then
-      out=$(fm_composer_classify_screen "$caps" "$screen" 1)
+      out=$(fm_composer_classify_screen "$caps" "$screen" 1 '' agy)
     else
-      out=$(fm_composer_classify_screen "$caps" "$screen")
+      out=$(fm_composer_classify_screen "$caps" "$screen" '' '' agy)
     fi
     [ "$out" = pending ] \
       || fail "agy draft rows beginning with > must classify pending, got '$out'"
-    extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen" '' agy)
     [ "$extract" = 'first > second' ] \
       || fail "agy draft rows beginning with > were not preserved, got '$extract'"
     screen=$'────────────────\n> run this:\n$ make test\n────────────────\nGPT-OSS 120B · medium'
     if [ "$caps" = "$CAPS_TMUX" ]; then
-      out=$(fm_composer_classify_screen "$caps" "$screen" 1)
+      out=$(fm_composer_classify_screen "$caps" "$screen" 1 '' agy)
     else
-      out=$(fm_composer_classify_screen "$caps" "$screen")
+      out=$(fm_composer_classify_screen "$caps" "$screen" '' '' agy)
     fi
     [ "$out" = pending ] \
       || fail "agy shell-looking draft rows must classify pending, got '$out'"
-    extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen" '' agy)
     [ "$extract" = 'run this: $ make test' ] \
       || fail "agy shell-looking draft rows were not preserved, got '$extract'"
     screen=$'────────────────\n> first \n second line\n────────────────'
-    extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen" '' agy)
     [ "$extract" = 'first second line' ] \
       || fail "agy extraction must use the shared normalized row join, got '$extract'"
     screen=$'────────────────\n> first\n╭────────────────────────╮\n│ x                      │\n╰────────────────────────╯\n────────────────'
     if [ "$caps" = "$CAPS_TMUX" ]; then
-      out=$(fm_composer_classify_screen "$caps" "$screen" 3 probe-absent)
+      out=$(fm_composer_classify_screen "$caps" "$screen" 3 probe-absent agy)
     else
-      out=$(fm_composer_classify_screen "$caps" "$screen")
+      out=$(fm_composer_classify_screen "$caps" "$screen" '' '' agy)
     fi
     [ "$out" = pending ] \
       || fail "a boxed AGY draft must classify pending, got '$out'"
-    extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen" '' agy)
     [ "$extract" = 'first ╭────────────────────────╮ x ╰────────────────────────╯' ] \
       || fail "a boxed AGY draft lost rows during extraction, got '$extract'"
   done
@@ -768,14 +770,14 @@ test_agy_ignores_incomplete_boxes_inside_pair() {
   local boundary screen out extract
   boundary=$(printf '─%.0s' {1..16})
   screen="$boundary"$'\n> draft\n╭────╮\n│ x\n'"$boundary"
-  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3 probe-absent)
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3 probe-absent agy)
   [ "$out" = pending ] \
     || fail "an incomplete box inside an AGY draft must stay pending, got '$out'"
-  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen")
+  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" '' agy)
   [ "$extract" = 'draft ╭────╮ │ x' ] \
     || fail "an incomplete box inside an AGY draft lost rows, got '$extract'"
   screen=$'╭────╮\n│ x\n'"$boundary"$'\n> draft\n'"$boundary"
-  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3 probe-absent)
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3 probe-absent agy)
   [ "$out" = unknown ] \
     || fail "an incomplete box outside an AGY pair must remain unknown, got '$out'"
   pass "fm_composer: AGY ignores incomplete boxes only inside its draft pair"
@@ -790,44 +792,44 @@ test_agy_prompt_uses_complete_positional_boundaries() {
     for boundary in "$boundary16" "$boundary72"; do
       screen="$boundary"$'\n> draft\n'"$boundary"
       if [ "$caps" = "$CAPS_TMUX" ]; then
-        out=$(fm_composer_classify_screen "$caps" "$screen" 1 probe-absent)
+        out=$(fm_composer_classify_screen "$caps" "$screen" 1 probe-absent agy)
       else
-        out=$(fm_composer_classify_screen "$caps" "$screen")
+        out=$(fm_composer_classify_screen "$caps" "$screen" '' '' agy)
       fi
       [ "$out" = pending ] \
         || fail "agy boundary '$boundary' must classify the draft pending, got '$out'"
-      extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen" '' agy)
       [ "$extract" = draft ] \
         || fail "agy boundary '$boundary' must preserve the draft, got '$extract'"
     done
     for boundary in '━━━━' '═══' '----' '====' '____' '-' '─' "$boundary15"; do
       screen="$boundary"$'\n> draft\n'"$boundary"
       if [ "$caps" = "$CAPS_TMUX" ]; then
-        out=$(fm_composer_classify_screen "$caps" "$screen" 1 probe-absent)
+        out=$(fm_composer_classify_screen "$caps" "$screen" 1 probe-absent agy)
       else
-        out=$(fm_composer_classify_screen "$caps" "$screen")
+        out=$(fm_composer_classify_screen "$caps" "$screen" '' '' agy)
       fi
       [ "$out" = unknown ] \
         || fail "unsupported AGY boundary '$boundary' must defer, got '$out'"
     done
     screen=$'────────────────\n> first\nsecond · low\n────────────────\nGemini 3.8 Flash · low'
     if [ "$caps" = "$CAPS_TMUX" ]; then
-      out=$(fm_composer_classify_screen "$caps" "$screen" 1)
+      out=$(fm_composer_classify_screen "$caps" "$screen" 1 '' agy)
     else
-      out=$(fm_composer_classify_screen "$caps" "$screen")
+      out=$(fm_composer_classify_screen "$caps" "$screen" '' '' agy)
     fi
     [ "$out" = pending ] \
       || fail "a model-looking draft continuation must classify pending, got '$out'"
-    extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+      extract=$(fm_composer_extract_selected_content "$caps" "$screen" '' agy)
     [ "$extract" = 'first second · low' ] \
       || fail "a model-looking draft continuation was dropped, got '$extract'"
   done
   for caps in "$CAPS_TMUX" 'styled=0'; do
     screen=$'> first\n-'
     if [ "$caps" = "$CAPS_TMUX" ]; then
-      out=$(fm_composer_classify_screen "$caps" "$screen" 1 probe-absent)
+      out=$(fm_composer_classify_screen "$caps" "$screen" 1 probe-absent agy)
     else
-      out=$(fm_composer_classify_screen "$caps" "$screen")
+      out=$(fm_composer_classify_screen "$caps" "$screen" '' '' agy)
     fi
     [ "$out" = unknown ] \
       || fail "a draft dash without the native boundary must defer, got '$out'"
@@ -839,26 +841,26 @@ test_agy_boundary_ambiguity_fails_closed() {
   local boundary screen out extract base_screen rules_screen base_out rules_out base_extract rules_extract
   boundary=$(printf '─%.0s' {1..16})
   screen="$boundary"$'\n> old\n'"$boundary"$'\n'"$boundary"$'\n> x\n'"$boundary"
-  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 4 probe-absent)
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 4 probe-absent agy)
   [ "$out" = unknown ] \
     || fail "an AGY capture with three boundaries must defer with a cursor, got '$out'"
-  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 4 || true)
+  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 4 agy || true)
   [ -z "$extract" ] \
     || fail "an ambiguous AGY capture must extract nothing with a cursor, got '$extract'"
-  out=$(fm_composer_classify_screen 'styled=0' "$screen")
+  out=$(fm_composer_classify_screen 'styled=0' "$screen" '' '' agy)
   [ "$out" = unknown ] \
     || fail "an AGY capture with three boundaries must defer cursorlessly, got '$out'"
-  extract=$(fm_composer_extract_selected_content 'styled=0' "$screen" || true)
+  extract=$(fm_composer_extract_selected_content 'styled=0' "$screen" '' agy || true)
   [ -z "$extract" ] \
     || fail "an ambiguous AGY capture must extract nothing cursorlessly, got '$extract'"
   screen="$boundary"$'\n> x\n'"$boundary"
-  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 1 probe-absent)
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 1 probe-absent agy)
   [ "$out" = pending ] \
     || fail "an AGY capture with exactly two boundaries must remain pending, got '$out'"
-  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 1)
+  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 1 agy)
   [ "$extract" = x ] \
     || fail "an exact AGY pair must extract only current draft text, got '$extract'"
-  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 2 probe-absent)
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 2 probe-absent agy)
   [ "$out" = unknown ] \
     || fail "a cursor outside the current AGY pair must defer, got '$out'"
   base_screen=$'╭────────────────────────╮\n│ ❯ real draft           │\n╰────────────────────────╯'
@@ -914,10 +916,11 @@ test_agy_boundary_is_locale_independent() {
 }
 
 test_generic_delivery_busy_union_includes_agy_cancel() {
-  local active draft_screen cropped_screen
+  local active draft_screen cropped_screen long_active
   active=$'────────────────\n> \n────────────────\nesc to cancel                                                Gemini 3.8 Flash · medium'
   draft_screen=$'────────────────\n> first\nesc to cancel Gemini 3.8 Flash · medium\n────────────────\n? for shortcuts'
   cropped_screen=$'draft continuation 1\ndraft continuation 2\ndraft continuation 3\ndraft continuation 4\ndraft continuation 5\ndraft continuation 6\ndraft continuation 7\ndraft continuation 8\ndraft continuation 9\ndraft continuation 10\ndraft continuation 11\nesc to cancel Gemini 3.8 Flash · medium'
+  long_active=$(printf '────────────────\n> row 1\nrow 2\nrow 3\nrow 4\nrow 5\nrow 6\nrow 7\nrow 8\nrow 9\nrow 10\nrow 11\nrow 12\nrow 13\nrow 14\n────────────────\nesc to cancel Gemini 3.8 Flash · medium')
   if printf '%s\n' 'esc to cancel' | fm_busy_lines_match; then
     fail "generic delivery busy matcher must not classify draft text as busy"
   fi
@@ -935,6 +938,9 @@ test_generic_delivery_busy_union_includes_agy_cancel() {
   fi
   if printf '%s\n' "$cropped_screen" | fm_busy_lines_match agy; then
     fail "AGY busy matcher must fail closed on cropped captures"
+  fi
+  if ! printf '%s\n' "$long_active" | fm_busy_lines_match agy; then
+    fail "AGY busy matcher must scope the full capture before its tail limit"
   fi
   if ! FM_BUSY_REGEX=BUSYTOKEN fm_busy_lines_match agy <<< 'BUSYTOKEN'; then
     fail "an explicit busy-regex override must scan the full capture"
@@ -955,10 +961,10 @@ test_agy_prompt_preserves_furniture_looking_drafts() {
   local caps=$'styled=0\ncursor=1' out extract screen
   for draft in '? for shortcuts' '────────────────'; do
     screen=$'────────────────\n> '"$draft"$'\n────────────────\n? for shortcuts'
-    out=$(fm_composer_classify_screen "$caps" "$screen" 1)
+    out=$(fm_composer_classify_screen "$caps" "$screen" 1 '' agy)
     [ "$out" = pending ] \
       || fail "agy draft '$draft' must classify pending, got '$out'"
-    extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen" '' agy)
     [ "$extract" = "$draft" ] \
       || fail "agy draft '$draft' must extract verbatim, got '$extract'"
   done

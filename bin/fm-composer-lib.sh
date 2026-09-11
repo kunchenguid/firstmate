@@ -346,8 +346,8 @@ FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
-  local harness=${1:-} lines regex agy_lines
-  IFS= read -r -d '' lines || true
+  local harness=${1:-} lines regex agy_lines full_lines
+  IFS= read -r -d '' full_lines || true
   if [ -n "${FM_BUSY_REGEX:-}" ]; then
     regex=$FM_BUSY_REGEX
   else
@@ -369,13 +369,19 @@ fm_busy_lines_match() {  # [harness]
         ;;
     esac
   fi
-  if [ "$harness" = agy ] && [ -z "${FM_BUSY_REGEX:-}" ]; then
-    lines=$(_fm_composer_agy_busy_scope "$lines")
+  if [ -n "${FM_BUSY_REGEX:-}" ]; then
+    lines=$full_lines
+  elif [ "$harness" = agy ]; then
+    lines=$(_fm_composer_agy_busy_scope "$full_lines")
+    lines=$(printf '%s' "$lines" | grep -v '^[[:space:]]*$' | tail -12)
   elif [ -z "${FM_BUSY_REGEX:-}" ] && [ -z "$harness" ]; then
-    agy_lines=$(_fm_composer_agy_busy_scope "$lines")
+    agy_lines=$(_fm_composer_agy_busy_scope "$full_lines")
     if printf '%s' "$agy_lines" | grep -qiE "$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT"; then
       return 0
     fi
+    lines=$(printf '%s' "$full_lines" | grep -v '^[[:space:]]*$' | tail -12)
+  else
+    lines=$(printf '%s' "$full_lines" | grep -v '^[[:space:]]*$' | tail -12)
   fi
   [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
 }
@@ -597,7 +603,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 
 # --- The screen classifier ---------------------------------------------------
 #
-# fm_composer_classify_screen <caps> <screen> [cursor_row] [identity]
+# fm_composer_classify_screen <caps> <screen> [cursor_row] [identity] [harness]
 #   <caps>       newline-separated key=value capability facts (see header).
 #   <screen>     the captured screen: ANSI-preserving when styled=1, plain
 #                otherwise.
@@ -633,8 +639,8 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
-_fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
-  local pane=$1 cy=${2:-}
+_fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] [harness]
+  local pane=$1 cy=${2:-} harness=${4:-}
   local line indent left_stripped trimmed kind family side_family
   local top_inner top_spaces='' geometry_check=0 geometry_ambiguous=0
   local content_inner content_spaces bottom_inner bottom_spaces glyph
@@ -717,7 +723,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         ;;
       *) leftbar_start=-1 ;;
     esac
-    if _fm_composer_agy_boundary_row "$trimmed"; then
+    if [ "$harness" = agy ] && _fm_composer_agy_boundary_row "$trimmed"; then
       agy_boundary_count=$((agy_boundary_count + 1))
       agy_last_boundary_row=$row
       if [ "$agy_boundary_count" -eq 1 ]; then
@@ -1314,8 +1320,8 @@ _fm_composer_select_cursorless() {
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
 }
 
-fm_composer_extract_selected_content() {  # <caps> <screen> [cursor_row]
-  local caps=$1 screen=$2 cursor=${3:-} styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
+fm_composer_extract_selected_content() {  # <caps> <screen> [cursor_row] [harness]
+  local caps=$1 screen=$2 cursor=${3:-} harness=${4:-} styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
@@ -1324,7 +1330,7 @@ fm_composer_extract_selected_content() {  # <caps> <screen> [cursor_row]
 $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
-  _fm_composer_scan_screen "$plain" "$cursor" 1
+  _fm_composer_scan_screen "$plain" "$cursor" 1 "$harness"
   if [ -n "$cursor" ] \
      && [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ] \
      && [ "$cursor" -gt "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS_OPEN" ] \
@@ -1412,8 +1418,8 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
-fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
-  local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
+fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity] [harness]
+  local caps=$1 screen=$2 cy=${3:-} identity=${4:-} harness=${5:-}
   local styled=0 cursor=0 has_identity=0 kv plain
   while IFS= read -r kv; do
     case "$kv" in
@@ -1429,7 +1435,7 @@ EOF
     case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
-  _fm_composer_scan_screen "$plain" "$cy"
+  _fm_composer_scan_screen "$plain" "$cy" '' "$harness"
   if [ -n "$cy" ]; then
     # Cursor mode (tmux): the shape CONTAINING the cursor is the composer.
     if [ "$FM_COMPOSER_SCAN_UNSAFE" = 1 ]; then
@@ -1549,12 +1555,12 @@ EOF
 # stays a loud refusal rather than a blind retry into an unreadable pane.
 # tmux and herdr keep richer cores that consume this same shared verdict plus
 # fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
-fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label]
-  local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} i=0 state
+fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label] [harness]
+  local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} harness=${7:-} i=0 state
   while :; do
     "$send_key_fn" "$target" Enter "$expected_label" || true
     sleep "$sleep_s"
-    state=$("$state_fn" "$target" "$expected_label")
+    state=$("$state_fn" "$target" "$expected_label" "$harness")
     case "$state" in
       pending|pending-unproven) ;;
       *) printf '%s' "$state"; return 0 ;;

@@ -245,10 +245,10 @@ fm_backend_orca_composer_caps() {
 # shared verdict out. Every shape (bordered boxes AND the borderless bare-glyph
 # row this adapter never learned, which left every claude/codex/pi/muse steer
 # unconfirmed) lives in bin/fm-composer-lib.sh.
-fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pending|pending-unproven|unknown
-  local cap verdict
+fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] [harness] -> empty|pending|pending-unproven|unknown
+  local cap verdict harness=${3:-}
   cap=$(fm_backend_orca_composer_capture "$1") || { printf 'unknown'; return 0; }
-  verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$cap")
+  verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$cap" '' '' "$harness")
   [ "$verdict" != need-identity ] || verdict=unknown
   printf '%s' "$verdict"
 }
@@ -275,13 +275,13 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
 # fm_composer_submit_retry_core) against the shared composer verdict, so a
 # slash-command popup placeholder fill gets the required second Enter without
 # duplicating text.
-fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle>
-  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
+  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${7:-}
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
   fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
-    "$terminal" "$retries" "$sleep_s"
+    "$terminal" "$retries" "$sleep_s" '' "$harness"
 }
 
 fm_backend_orca_kill() {  # <terminal-id>

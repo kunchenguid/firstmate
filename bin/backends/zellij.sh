@@ -521,8 +521,8 @@ fm_backend_zellij_composer_capture() {  # <target> [expected-label]
 # a message the crew never received. A dead pane still fails safe here: the
 # unconditional-exit-0 CLI quirk (file header) yields an empty dump, which
 # classifies unknown - never a confirmation.
-fm_backend_zellij_composer_state() {  # <target> [expected-label] -> empty|pending|pending-unproven|unknown
-  local target=$1 expected_label=${2:-} cap caps verdict
+fm_backend_zellij_composer_state() {  # <target> [expected-label] [harness] -> empty|pending|pending-unproven|unknown
+  local target=$1 expected_label=${2:-} harness=${3:-} cap caps verdict
   if cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label"); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   elif cap=$(fm_backend_zellij_capture "$target" "$FM_COMPOSER_CAPTURE_LINES" "$expected_label") && [ -n "$cap" ]; then
@@ -531,24 +531,24 @@ fm_backend_zellij_composer_state() {  # <target> [expected-label] -> empty|pendi
     printf 'unknown'
     return 0
   fi
-  verdict=$(fm_composer_classify_screen "$caps" "$cap")
+  verdict=$(fm_composer_classify_screen "$caps" "$cap" '' '' "$harness")
   [ "$verdict" != need-identity ] || verdict=unknown
   printf '%s' "$verdict"
 }
 
-fm_backend_zellij_composer_content() {  # <target> [expected-label]
-  local target=$1 expected_label=${2:-} cap caps
+fm_backend_zellij_composer_content() {  # <target> [expected-label] [harness]
+  local target=$1 expected_label=${2:-} harness=${3:-} cap caps
   cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label") || return 1
   caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
-  fm_composer_extract_selected_content "$caps" "$cap"
+  fm_composer_extract_selected_content "$caps" "$cap" '' "$harness"
 }
 
-fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expected-label]
-  local target=$1 before=$2 text=$3 expected_label=${4:-} cap caps after expected
+fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expected-label] [harness]
+  local target=$1 before=$2 text=$3 expected_label=${4:-} harness=${5:-} cap caps after expected
   [ -n "$text" ] || return 1
   cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label") || return 1
   caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
-  after=$(fm_composer_extract_selected_content "$caps" "$cap") || return 1
+  after=$(fm_composer_extract_selected_content "$caps" "$cap" '' "$harness") || return 1
   fm_composer_normalize_spaces_var before
   fm_composer_normalize_spaces_var text
   fm_composer_normalize_spaces_var after
@@ -567,16 +567,16 @@ fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expe
 # subset of the proof-carrying submit vocabulary. Only a positively classified
 # empty composer confirms delivery - a pane that merely CHANGED does not, so
 # the old heuristic's false "delivery confirmed" cannot recur.
-fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} before
-  before=$(fm_backend_zellij_composer_content "$target" "$expected_label") \
+fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} before
+  before=$(fm_backend_zellij_composer_content "$target" "$expected_label" "$harness") \
     || { printf 'send-failed'; return 0; }
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_backend_zellij_composer_observed_append "$target" "$before" "$text" "$expected_label" \
+  fm_backend_zellij_composer_observed_append "$target" "$before" "$text" "$expected_label" "$harness" \
     || { printf 'send-failed'; return 0; }
   fm_composer_submit_retry_core fm_backend_zellij_send_key fm_backend_zellij_composer_state \
-    "$target" "$retries" "$sleep_s" "$expected_label"
+    "$target" "$retries" "$sleep_s" "$expected_label" "$harness"
 }
 
 # fm_backend_zellij_kill: remove the task's tab, best-effort (mirrors

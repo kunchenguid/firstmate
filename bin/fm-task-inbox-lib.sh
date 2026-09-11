@@ -283,14 +283,20 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict inbox_dir task_id state_dir meta harness
+  inbox_dir=${rec%/*}
+  task_id=${inbox_dir##*/}
+  task_id=${task_id%.inbox}
+  state_dir=${inbox_dir%/*}
+  meta="$state_dir/$task_id.meta"
+  harness=$(fm_meta_get "$meta" harness)
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
   fi
-  cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+  cstate=$(fm_backend_composer_state "$backend" "$target" "$label" "$harness" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending) return 1 ;;
   esac
@@ -298,7 +304,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   # steps, so an agent exiting after the liveness check could leave a bare
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
+  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" "$harness" 2>/dev/null); then
     return 2
   fi
   # The verdict is read only to report a failed keystroke; every other value

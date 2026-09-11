@@ -729,7 +729,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.
-fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
+fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
@@ -810,16 +810,19 @@ fm_backend_busy_state() {  # <backend> <target>
 # fm_composer_classify_screen) - so no backend can hold a private shape
 # assumption; zellij's classifier reads `dump-screen --ansi`, which replaced
 # its old no-classifier content-diff reporting.
-fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pending|pending-unproven|unknown
-  local backend=$1
+fm_backend_composer_state() {  # <backend> <target> [expected-label] [harness] -> empty|pending|pending-unproven|unknown
+  local backend=$1 target expected_label harness
   shift
+  target=$1
+  expected_label=${2:-}
+  harness=${3:-}
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
-    tmux) fm_tmux_composer_state "$@" ;;
-    herdr) fm_backend_herdr_composer_state "$@" ;;
-    orca) fm_backend_orca_composer_state "$@" ;;
-    cmux) fm_backend_cmux_composer_state "$@" ;;
-    zellij) fm_backend_zellij_composer_state "$@" ;;
+    tmux) fm_tmux_composer_state "$target" "$harness" ;;
+    herdr) fm_backend_herdr_composer_state "$target" "$harness" ;;
+    orca) fm_backend_orca_composer_state "$target" "$expected_label" "$harness" ;;
+    cmux) fm_backend_cmux_composer_state "$target" "$expected_label" "$harness" ;;
+    zellij) fm_backend_zellij_composer_state "$target" "$expected_label" "$harness" ;;
     *) printf 'unknown' ;;
   esac
 }

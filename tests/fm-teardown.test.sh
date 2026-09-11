@@ -2379,6 +2379,36 @@ SH
   pass "forced AGY child teardown retains metadata until hook cleanup succeeds"
 }
 
+test_normal_agy_hook_cleanup_retains_record_on_failure() {
+  local case_dir hook_root rc
+  case_dir=$(make_case agy-normal-hook-cleanup)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'harness=agy' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/state/task-x1.agy-hooks"
+  printf '%s\n' hook > "$case_dir/state/task-x1.agy-hooks/stop"
+  wt_commit "$case_dir" "land agy task"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  hook_root="$case_dir/state/task-x1.agy-hooks"
+  cat > "$case_dir/fakebin/rm" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" $hook_root "*) exit 1 ;;
+esac
+exec /bin/rm "\$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "agy-normal-hook-cleanup: teardown succeeded after hook-root removal failed"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "agy-normal-hook-cleanup: failed hook cleanup erased task metadata"
+  [ -d "$hook_root" ] || fail "agy-normal-hook-cleanup: failed hook cleanup erased the hook root"
+  assert_grep "failed to remove agy hook root '$hook_root'" "$case_dir/stderr" \
+    "agy-normal-hook-cleanup: failure did not report the retained hook root"
+  pass "normal AGY teardown retains metadata until hook cleanup succeeds"
+}
+
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
   local case_dir home lock ready release holder_pid rc waited=0 child
   case_dir=$(make_case descendant-locks)
@@ -3736,6 +3766,7 @@ test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_agy_hook_cleanup_retains_record_on_failure
+test_normal_agy_hook_cleanup_retains_record_on_failure
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close

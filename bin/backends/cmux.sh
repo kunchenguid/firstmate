@@ -551,10 +551,10 @@ fm_backend_cmux_composer_caps() {
 # bin/fm-composer-lib.sh, so a new harness shape is taught there once and
 # never here. cmux has no identity probe, so the classifier's identity
 # sentinel resolves to unknown.
-fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending|pending-unproven|unknown
-  local cap verdict
+fm_backend_cmux_composer_state() {  # <target> [expected-label] [harness] -> empty|pending|pending-unproven|unknown
+  local cap verdict harness=${3:-}
   cap=$(fm_backend_cmux_composer_capture "$1" "${2:-}") || { printf 'unknown'; return 0; }
-  verdict=$(fm_composer_classify_screen "$(fm_backend_cmux_composer_caps)" "$cap")
+  verdict=$(fm_composer_classify_screen "$(fm_backend_cmux_composer_caps)" "$cap" '' '' "$harness")
   [ "$verdict" != need-identity ] || verdict=unknown
   printf '%s' "$verdict"
 }
@@ -564,13 +564,13 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
 # loop (bin/fm-composer-lib.sh: fm_composer_submit_retry_core) against the
 # shared composer verdict. Echoes empty|pending|unknown|send-failed, a subset
 # of the proof-carrying submit vocabulary.
-fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-}
+fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-}
   fm_backend_cmux_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_cmux_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_composer_submit_retry_core fm_backend_cmux_send_key fm_backend_cmux_composer_state \
-    "$target" "$retries" "$sleep_s" "$expected_label"
+    "$target" "$retries" "$sleep_s" "$expected_label" "$harness"
 }
 
 # fm_backend_cmux_window_of_workspace: echo "<window_id> <workspace_count>" for
