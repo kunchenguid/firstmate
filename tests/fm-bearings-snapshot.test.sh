@@ -53,6 +53,14 @@ SH
 echo "gh $*" >> "$NET_LOG"
 if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
 if [ "${FAKE_GH_SLEEP:-0}" = 1 ]; then sleep 30; fi
+if [ "${FAKE_GH_HUGE:-0}" = 1 ]; then
+  jq -n '[range(0; 500) | {
+    number:., title:"Bulk PR",
+    url:("https://github.com/acme/repo/pull/\(.)?pad=" + ("x" * 220)),
+    headRefName:"fm/bulk-\(.)", reviewDecision:"", mergeable:"MERGEABLE",
+    statusCheckRollup:[]}]'
+  exit 0
+fi
 if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
   cat <<'JSON'
 [{"number":1,"title":"One","url":"https://github.com/acme/repo/pull/1","headRefName":"fm/one","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":2,"title":"Two","url":"https://github.com/acme/repo/pull/2","headRefName":"fm/two","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":3,"title":"Three","url":"https://github.com/acme/repo/pull/3","headRefName":"fm/three","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]}]
@@ -1536,6 +1544,23 @@ test_per_repository_pr_cap_is_disclosed() {
   ' >/dev/null || fail "per-repository PR truncation was not disclosed: $json"
   assert_contains "$toon" 'candidate_prs showing 2 of at least 3' "TOON did not preserve PR truncation disclosure"
   pass "per-repository open-PR caps are disclosed with an expansion knob"
+}
+
+# Accumulated candidate-PR rows above Linux MAX_ARG_STRLEN (128 KiB per jq argv
+# argument) must still project: rows travel by file transport, never argv.
+test_pr_rows_above_arg_limit_still_project() {
+  local home fakebin json
+  home=$(make_home huge-prs); write_large_fixture "$home" 2
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(FM_BEARINGS_PR_LIMIT=500 FAKE_GH_HUGE=1 run "$home" "$fakebin" --include-prs --json) \
+    || fail "projection failed on PR rows above the per-argument limit"
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-bearings.v1"
+      and (.candidate_prs | length) == 1000
+      and (.prs | test("checked \\(2 repos, 1000 open\\)"))
+      and ([.candidate_prs[] | select(.repo == "acme/repo-1")] | tostring | length) > 131072
+  ' >/dev/null || fail "huge candidate_prs set was not fully preserved: ${json:0:2000}"
+  pass "candidate-PR rows above the per-argument limit still project completely"
 }
 
 install_failing_jq() {  # <fakebin> <model|toon>
@@ -3230,4 +3255,5 @@ test_blocked_deferred_hold_has_concrete_disclosure
 test_revealed_deferred_holds_show_their_deferral_reason
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
+test_pr_rows_above_arg_limit_still_project
 test_projection_and_toon_fail_closed
