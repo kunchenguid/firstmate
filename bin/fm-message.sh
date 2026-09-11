@@ -4,7 +4,7 @@
 #        fm-message.sh validate <message-json-file>
 #        fm-message.sh receive  (own inbox, ordered JSONL {name,message})
 #        fm-message.sh ack <numeric-record-name>  (own inbox, idempotent)
-#        fm-message.sh stats  (JSON summary of the last 24 hours)
+#        fm-message.sh stats  (bounded last-24-hour JSON summary, with completeness)
 #        fm-message.sh service register|deregister <name> <parent-pid>
 #        fm-message.sh send <recipients> [--thread <name>] [--kind <kind>]
 #                           [--ref <request-id>] <text>
@@ -29,7 +29,8 @@ help() {
     '  ack NAME                   Move one own numeric record to handled/. Example: ack 001.msg' \
     '  read FILE                  Decode one structured inbox record. Example: read state/peer-a.inbox/001.msg' \
     '  validate FILE              Validate one fm-message.v1 JSON object. Example: validate message.json' \
-    '  stats                      Print the rolling 24-hour telemetry summary. Example: stats' \
+    '  stats                      Print the bounded rolling 24-hour telemetry summary. Example: stats' \
+    '    Reads at most 1 MiB across today/yesterday; complete=false means partial counts. No arguments.' \
     '  service register NAME PID  Register the calling service process. Example: service register fm-moiras "$$"' \
     '  service deregister NAME PID  Remove its registration, preserving inbox data. Example: service deregister fm-moiras "$$"' \
     '  -h, --help                 Show help for any command without side effects. Example: send --help' \

@@ -115,6 +115,11 @@ jq . /path/to/home/state/fm-message/telemetry/2026-09-11.jsonl
 ```
 
 `stats` summarizes the rolling last 24 hours, including service registration/deregistration outcomes; delivery counters count accepted delivery calls, including idempotent retry confirmations, not unique new inbox files.
+The owner expires regular daily logs older than seven UTC dates on append, while retained files remain append-only; there is no daily byte cap or idle cleanup process.
+Stats opens only today's and yesterday's UTC logs and reads at most 512 KiB from each tail, exposing actual source `bytesRead` and `complete` alongside the counters.
+A bounded tail or unfinished edge sets `complete: false`; those counters cover only the observed complete records, not authoritative totals or proof of zero activity.
+Future timestamps are excluded, malformed complete records in the bounded window fail, and selected symlinked or non-regular files refuse.
+Old or oversized logs are never rewritten by a stats read; aggregate memory does not grow with historical files or event count.
 Thread ledgers contain private conversation text and must not be copied into telemetry.
 Consuming services own their own decision and model telemetry; this shared reader adds no autonomous logging process.
 For Tachikoma and Backpass integration, consume these JSONL files by `requestId` and `threadId`; this change provides the feed, not an automatic ingestion process.
@@ -129,6 +134,7 @@ npm --prefix modules/fm-state-reader test
 Follow the [module template](../TEMPLATE.md): pure record parsing in `src/core`, snapshot orchestration in `src/usecases`, TypeScript contracts in `src/ports`, and concrete edges in `src/adapters`.
 Tests distinguish plain core assertions, use cases using [fake files](tests/fake-files.mjs) and [fake messages](tests/fake-messages.mjs), and real filesystem/CLI/process-event composition.
 The message fake includes `close()` for service use cases; real service acceptance tests exercise separate Node processes, registration, both reply directions, guarded refusal, normal shutdown and abrupt-death recovery.
+[Telemetry acceptance tests](tests/telemetry.test.mjs) exercise actual CLI retention, bounded stats, incomplete counters and preserved unrelated evidence.
 Ordinary task records retain verified tmux or Herdr liveness; standalone service admission uses native process identity independently of those backends.
 
 ### Supported limits

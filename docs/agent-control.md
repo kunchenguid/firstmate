@@ -45,7 +45,8 @@ Standalone processes use the shared reader's [service admission contract](../mod
 
 ### Message telemetry
 
-[`bin/fm-message-telemetry-lib.sh`](../bin/fm-message-telemetry-lib.sh) owns daily append-only `fm-message-telemetry.v1` JSONL under `state/fm-message/telemetry/` and the rolling 24-hour `stats` summary.
+[`bin/fm-message-telemetry-lib.sh`](../bin/fm-message-telemetry-lib.sh) owns retained daily append-only `fm-message-telemetry.v1` JSONL under `state/fm-message/telemetry/` and the bounded rolling 24-hour `stats` summary.
+The [shared reader's telemetry reference](../modules/fm-state-reader/README.md#telemetry) explains retention and incomplete-count reporting.
 Intake, routing decisions, endpoint validation, ledger/inbox/wake/doorbell results, timings, and terminal per-request counters share an attempt id and the message/thread identifiers when available.
 Logs contain ids and input sizes, never message text, environment contents, or captured stderr; model/harness/effort come from the validated sender record and tokens/cost remain unknown because the transport calls no model.
 A telemetry failure warns without turning an already-delivered message into a resend instruction.
