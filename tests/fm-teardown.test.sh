@@ -783,6 +783,66 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# data/cost-per-accepted-issue-scout/report.md section 3.2 B: at exactly the
+# moment a task completes, its per-task state - the only join between the task
+# and the harness consumption sidecars keyed by its worktree - is removed.
+# data/<id>/cost.json is written BEFORE that removal and lives under data/,
+# which this cleanup never touches, so it is this task's only remaining record
+# once state/<id>.meta and its control-relaunch sidecars are gone. This is the
+# hard correctness bar: prove the artifact exists AFTER a real teardown run
+# has already removed the task record it was built from, not merely that the
+# writer function produces reasonable content in isolation.
+test_teardown_writes_a_surviving_cost_summary() {
+  local case_dir rc cost_json
+  case_dir=$(make_case cost-summary)
+  write_meta "$case_dir" local-only ship
+  {
+    printf '%s\n' 'intake_at=2026-01-01T00:00:00Z'
+    printf '%s\n' 'intake_harness=claude'
+    printf '%s\n' 'intake_model=claude-fable-5-1'
+    printf '%s\n' 'intake_effort=high'
+    printf '%s\n' 'intake_rule=complex-investigation'
+    printf '%s\n' "session_ptr=$case_dir/wt"
+    printf '%s\n' 'harness=codex'
+    printf '%s\n' 'model=gpt-5'
+    printf '%s\n' 'effort=medium'
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/43'
+  } >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "merged work"
+  git -C "$case_dir/project" update-ref refs/heads/main \
+    "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "cost-summary: teardown should succeed on merged local-only work"
+
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "cost-summary: the task record should be gone after a completed teardown"
+  cost_json="$case_dir/data/task-x1/cost.json"
+  [ -f "$cost_json" ] \
+    || fail "cost-summary: data/task-x1/cost.json must survive a completed teardown"
+  command -v jq >/dev/null 2>&1 && {
+    jq -e . "$cost_json" >/dev/null || fail "cost-summary: cost.json is not valid JSON"
+    [ "$(jq -r '.intake.harness' "$cost_json")" = claude ] \
+      || fail "cost-summary: cost.json lost the frozen intake harness"
+    [ "$(jq -r '.intake.model' "$cost_json")" = claude-fable-5-1 ] \
+      || fail "cost-summary: cost.json lost the frozen intake model"
+    [ "$(jq -r '.intake.rule' "$cost_json")" = complex-investigation ] \
+      || fail "cost-summary: cost.json lost the frozen intake rule"
+    [ "$(jq -r '.final.harness' "$cost_json")" = codex ] \
+      || fail "cost-summary: cost.json lost the live (final) harness"
+    [ "$(jq -r '.relaunched' "$cost_json")" = true ] \
+      || fail "cost-summary: cost.json did not detect the harness switch"
+    [ "$(jq -r '.cash_mxn' "$cost_json")" = null ] \
+      || fail "cost-summary: cost.json must never invent a cash MXN figure"
+    [ "$(jq -r '.accepted.pr' "$cost_json")" = "https://github.com/example/repo/pull/43" ] \
+      || fail "cost-summary: cost.json lost the PR link"
+  }
+  pass "teardown writes data/<id>/cost.json before removing the task record it was built from, and it survives"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -3671,6 +3731,7 @@ test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_teardown_writes_a_surviving_cost_summary
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
