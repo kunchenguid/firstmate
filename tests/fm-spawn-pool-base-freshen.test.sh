@@ -4,8 +4,9 @@
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin tip, launches a clean origin-less
-# pool as-is, or stops when a configured origin is unusable.
+# starts the worker from the fetched origin tip, from the local default branch
+# when that is where the project's approved work lands or when there is no origin
+# at all, or stops when the base it would launch from cannot be verified.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -238,30 +239,58 @@ make_originless_case() {  # <name> <id>
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
 }
 
-test_originless_pool_launches_without_a_freshness_fetch() {
+# With no origin there is nothing for origin to be authoritative about, so the
+# local default branch is the only base - in every delivery mode. A pooled slot
+# allocated before the captain landed work on it must still be moved onto it.
+test_originless_pool_refreshes_to_the_local_default_branch() {
+  local rec id out status landed mode
+  for mode in local-only no-mistakes unregistered; do
+    id="pool-originless-$mode-r6"
+    rec=$(make_originless_case "originless-$mode" "$id")
+    read_case_record "$rec"
+    [ "$mode" = unregistered ] || register_project_mode "$mode"
+    ! git -C "$POOL_DIR" remote get-url origin >/dev/null 2>&1 \
+      || fail "fixture unexpectedly configured an origin remote"
+    landed=$(land_locally landed-locally.txt 'approved work that was never pushed')
+    [ "$landed" != "$(git -C "$POOL_DIR" rev-parse HEAD)" ] \
+      || fail "fixture did not leave the pool short of the locally landed commit"
+
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    expect_code 0 "$status" "spawn should launch an origin-less pooled worktree ($mode)"$'\n'"$out"
+    assert_contains "$out" "spawned $id" "spawn did not report success for the origin-less pool"
+    assert_not_contains "$out" "could not fetch origin" \
+      "spawn attempted a freshness fetch against a nonexistent origin"
+    [ ! -e "$POOL_DIR/.git/FETCH_HEAD" ] || fail "spawn fetched against a pooled worktree with no origin"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$landed" ] \
+      || fail "spawn left an origin-less pool on a base missing locally landed work ($mode)"
+    assert_grep 'approved work that was never pushed' "$POOL_DIR/landed-locally.txt" \
+      "the origin-less pooled worktree does not carry the locally landed file"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# observed origin-less launch (%s): %s\n' "$mode" "$(printf '%s\n' "$out" | tail -n 1)"
+    fi
+  done
+  pass "an origin-less pooled worktree refreshes to the local default branch in every delivery mode"
+}
+
+test_originless_pool_with_no_default_branch_refuses() {
   local rec id out status before
-  id='pool-originless-r6'
-  rec=$(make_originless_case originless "$id")
+  id='pool-originless-no-default-r1'
+  rec=$(make_originless_case originless-no-default "$id")
   read_case_record "$rec"
-  ! git -C "$POOL_DIR" remote get-url origin >/dev/null 2>&1 \
-    || fail "fixture unexpectedly configured an origin remote"
+  git -C "$PROJECT_DIR" branch -m main not-a-default
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "spawn should launch a local-only pooled worktree with no origin"$'\n'"$out"
-  assert_contains "$out" "spawned $id" "spawn did not report success for the origin-less pool"
-  assert_not_contains "$out" "could not fetch origin" \
-    "spawn attempted a freshness fetch against a nonexistent origin"
-  [ ! -e "$POOL_DIR/.git/FETCH_HEAD" ] || fail "spawn fetched against a pooled worktree with no origin"
+  [ "$status" -ne 0 ] || fail "spawn launched an origin-less pool whose default branch does not resolve"
+  assert_contains "$out" "could not determine the default branch" \
+    "spawn did not clearly refuse an unresolvable default branch"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD on an origin-less pooled worktree that had nothing to refresh against"
-  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed origin-less launch: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
-  fi
-  pass "an origin-less pooled worktree launches as-is, skipping the freshness gate"
+    || fail "spawn moved HEAD after failing to resolve the default branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an origin-less pool with no resolvable default branch refuses rather than launching"
 }
-
 test_originless_dirty_pool_refuses_without_discarding_work() {
   local rec id out status before
   id='pool-originless-dirty-r1'
@@ -748,6 +777,16 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
 # that shape - origin's tip is real, the local branch carries it plus landed work -
 # and prove the next pooled spawn starts from the landed work rather than from a
 # base that would read as a revert of it.
+# The delivery mode the captain registered for a project is what decides whether
+# its approved work lands locally, so these fixtures register it the same way the
+# captain does - a line in the home's own data/projects.md - rather than asserting
+# on the resolution itself.
+register_project_mode() {  # <mode>
+  local mode=$1
+  printf -- '- %s [%s] - pooled base fixture (added 2026-09-11)\n' \
+    "$(basename "$PROJECT_DIR")" "$mode" > "$HOME_DIR/data/projects.md"
+}
+
 land_locally() {  # <file> <content>
   local file=$1 content=$2
   printf '%s\n' "$content" > "$PROJECT_DIR/$file"
@@ -767,6 +806,7 @@ test_local_default_ahead_of_origin_wins() {
   id='pool-local-ahead-r1'
   rec=$(make_case local-ahead "$id")
   read_case_record "$rec"
+  register_project_mode local-only
   sync_local_default_to_origin
   origin_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
   landed=$(land_locally landed-locally.txt 'approved work that was never pushed')
@@ -791,11 +831,39 @@ test_local_default_ahead_of_origin_wins() {
   pass "a local default branch strictly ahead of origin becomes the pooled base"
 }
 
+# The preference exists because a `local-only` project lands approved work on its
+# local default branch. On a project delivered through a PR, an unpushed local
+# default is not landed work, and starting a branch there would sweep those
+# commits into it and narrow the review diff that follows.
+test_local_ahead_keeps_origin_unless_the_project_lands_locally() {
+  local rec id out status landed origin_tip mode
+  for mode in no-mistakes direct-PR no-mistakes-prod-only unregistered; do
+    id="pool-local-ahead-$mode-r1"
+    rec=$(make_case "local-ahead-$mode" "$id")
+    read_case_record "$rec"
+    [ "$mode" = unregistered ] || register_project_mode "$mode"
+    sync_local_default_to_origin
+    origin_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+    landed=$(land_locally landed-locally.txt 'a local commit that was never pushed')
+    [ "$landed" != "$origin_tip" ] || fail "fixture did not advance the local default branch past origin"
+
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    expect_code 0 "$status" "spawn should launch from origin for a $mode project"$'\n'"$out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$origin_tip" ] \
+      || fail "spawn adopted an unpushed local default branch on a $mode project"
+    [ ! -e "$POOL_DIR/landed-locally.txt" ] \
+      || fail "spawn swept unpushed local commits into a $mode project's base"
+  done
+  pass "an unpushed local default branch is only preferred for a project registered local-only"
+}
+
 test_local_default_equal_to_origin_keeps_origin() {
   local rec id out status origin_tip
   id='pool-local-equal-r1'
   rec=$(make_case local-equal "$id")
   read_case_record "$rec"
+  register_project_mode local-only
   sync_local_default_to_origin
   origin_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
   [ "$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")" = "$origin_tip" ] \
@@ -814,6 +882,7 @@ test_local_default_behind_origin_keeps_origin() {
   id='pool-local-behind-r1'
   rec=$(make_case local-behind "$id")
   read_case_record "$rec"
+  register_project_mode local-only
   git -C "$PROJECT_DIR" fetch --quiet origin
   origin_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
   local_tip=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
@@ -835,6 +904,7 @@ test_local_default_diverged_from_origin_keeps_origin() {
   id='pool-local-diverged-r1'
   rec=$(make_case local-diverged "$id")
   read_case_record "$rec"
+  register_project_mode local-only
   git -C "$PROJECT_DIR" fetch --quiet origin
   origin_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
   diverged=$(land_locally diverged.txt 'a local commit that never saw origin tip')
@@ -857,6 +927,7 @@ test_local_ahead_dirty_pool_refuses_without_discarding_work() {
   id='pool-local-ahead-dirty-r1'
   rec=$(make_case local-ahead-dirty "$id")
   read_case_record "$rec"
+  register_project_mode local-only
   sync_local_default_to_origin
   landed=$(land_locally landed-locally.txt 'approved work that was never pushed')
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
@@ -880,6 +951,7 @@ test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_local_default_ahead_of_origin_wins
+test_local_ahead_keeps_origin_unless_the_project_lands_locally
 test_local_default_equal_to_origin_keeps_origin
 test_local_default_behind_origin_keeps_origin
 test_local_default_diverged_from_origin_keeps_origin
@@ -888,7 +960,8 @@ test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
-test_originless_pool_launches_without_a_freshness_fetch
+test_originless_pool_refreshes_to_the_local_default_branch
+test_originless_pool_with_no_default_branch_refuses
 test_originless_dirty_pool_refuses_without_discarding_work
 test_origin_config_without_url_refuses_pool
 test_empty_origin_config_section_refuses_pool

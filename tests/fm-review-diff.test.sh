@@ -38,8 +38,18 @@ make_case() {
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
   git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
 
+  mkdir -p "$case_dir/data"
+  : > "$case_dir/data/projects.md"
   touch "$case_dir/state/.last-watcher-beat"
   printf '%s\n' "$case_dir"
+}
+
+# The review base follows where a project lands approved work, and the captain
+# records that in the home's project registry, so these cases register it the
+# same way rather than asserting on how it is resolved.
+register_project_mode() {  # <case_dir> <mode>
+  printf -- '- project [%s] - review base fixture (added 2026-09-11)\n' "$2" \
+    > "$1/data/projects.md"
 }
 
 write_task_meta() {
@@ -72,6 +82,7 @@ run_review_diff() {
   shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
     "$REVIEW_DIFF" "$@"
 }
 
@@ -96,6 +107,7 @@ commit_branch_work() {  # <case_dir>
 test_local_default_ahead_of_origin_is_the_review_base() {
   local case_dir out
   case_dir=$(make_case local-default-ahead)
+  register_project_mode "$case_dir" local-only
   land_on_local_default "$case_dir" landed-locally.txt 'approved work that was never pushed'
   commit_branch_work "$case_dir"
   write_task_meta "$case_dir"
@@ -113,6 +125,7 @@ test_local_default_ahead_of_origin_is_the_review_base() {
 test_local_default_behind_origin_keeps_origin_review_base() {
   local case_dir out
   case_dir=$(make_case local-default-behind)
+  register_project_mode "$case_dir" local-only
   git clone -q "$case_dir/origin.git" "$case_dir/publisher"
   printf 'pushed elsewhere\n' > "$case_dir/publisher/pushed.txt"
   git -C "$case_dir/publisher" add pushed.txt
@@ -127,6 +140,27 @@ test_local_default_behind_origin_keeps_origin_review_base() {
     "local-default-behind: origin must stay the review base when local trails it"
   assert_contains "$out" '+branch work' "local-default-behind: the branch's own change should still show"
   pass "fm-review-diff keeps origin as the review base when the local default branch trails it"
+}
+
+# A project delivered through a PR lands on origin, so an unpushed local default
+# branch is not landed work. Reviewing against it would hide commits the PR
+# against origin will carry.
+test_local_default_ahead_keeps_origin_unless_the_project_lands_locally() {
+  local case_dir out mode
+  for mode in no-mistakes direct-PR unregistered; do
+    case_dir=$(make_case "local-default-ahead-$mode")
+    [ "$mode" = unregistered ] || register_project_mode "$case_dir" "$mode"
+    land_on_local_default "$case_dir" landed-locally.txt 'a local commit that was never pushed'
+    commit_branch_work "$case_dir"
+    write_task_meta "$case_dir"
+
+    out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+    assert_contains "$out" 'diff base: origin/main' \
+      "$mode: origin must stay the review base when the project does not land work locally"
+    assert_contains "$out" '+branch work' "$mode: the branch's own change should still show"
+  done
+  pass "fm-review-diff only prefers the local default branch for a project registered local-only"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local() {
@@ -230,3 +264,4 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_local_default_ahead_of_origin_is_the_review_base
 test_local_default_behind_origin_keeps_origin_review_base
+test_local_default_ahead_keeps_origin_unless_the_project_lands_locally

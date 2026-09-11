@@ -455,6 +455,8 @@ if [ -e "$STATE" ] || [ -L "$STATE" ]; then
 fi
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-pool-base-lib.sh
+. "$SCRIPT_DIR/fm-pool-base-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
@@ -2499,23 +2501,16 @@ spawn_worktree_has_origin_config() {  # <worktree>
 
 # Refresh a pooled worktree onto the base the next task must start from.
 #
-# Which ref carries landed work depends on how the project lands it. A project
-# delivered through a PR lands on origin, so origin's default branch is
-# authoritative. A `local-only` project lands through bin/fm-merge-local.sh,
-# which merges into the LOCAL default branch and never pushes, so origin's tip is
-# missing work the captain has already approved. Resetting to origin there hands
-# the next task a base from before that merge, and its branch then reads as a
-# revert of the landed work: silent, because the worker's own change is correct
-# and the deletions hide inside its diff, and compounding, because every further
-# local landing widens the gap.
+# A pooled slot is allocated once and reused, so whatever landed since it was
+# allocated is missing from it. Which ref carries that landed work depends on how
+# the project lands it; fm_pool_base_prefers_local_default in
+# bin/fm-pool-base-lib.sh owns that rule and states its reasoning in full.
 #
-# So the local default branch wins exactly when it strictly contains origin's:
-# it then holds everything origin has plus the locally landed work, and nothing
-# can be lost by starting there. Equal means the same commit and origin stands.
-# Behind or diverged both keep origin authoritative, because a local branch that
-# does not contain origin's tip is not something to silently build on.
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status local_ref local_commit
+# A worktree with no origin configured is the one shape that rule does not
+# decide: there is no origin to be authoritative, so refs/heads/<default> is the
+# only base there, whatever the project's delivery mode.
+freshen_spawn_worktree_base() {  # <worktree> <project>
+  local worktree=$1 project=$2 default target expected status local_ref local_commit
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2529,7 +2524,17 @@ freshen_spawn_worktree_base() {  # <worktree>
     return 1
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
-    return 0
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine the default branch for pooled worktree '$worktree', which has no origin; refusing to launch from an unverified base" >&2
+      return 1
+    }
+    target="refs/heads/$default"
+    expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+      echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from an unverified base" >&2
+      return 1
+    }
+    reset_spawn_worktree_base "$worktree" "$target" "$expected"
+    return
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -2554,11 +2559,15 @@ freshen_spawn_worktree_base() {  # <worktree>
   }
   local_ref="refs/heads/$default"
   local_commit=$(git -C "$worktree" rev-parse --verify --quiet "$local_ref^{commit}" 2>/dev/null || true)
-  if [ -n "$local_commit" ] && [ "$local_commit" != "$expected" ] \
-    && git -C "$worktree" merge-base --is-ancestor "$expected" "$local_commit" 2>/dev/null; then
+  if fm_pool_base_prefers_local_default "$worktree" "$project" "$expected" "$local_commit"; then
     target=$local_ref
     expected=$local_commit
   fi
+  reset_spawn_worktree_base "$worktree" "$target" "$expected"
+}
+
+reset_spawn_worktree_base() {  # <worktree> <target> <expected-commit>
+  local worktree=$1 target=$2 expected=$3 actual
   if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -3238,7 +3247,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "$PROJ_ABS" || exit 1
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
