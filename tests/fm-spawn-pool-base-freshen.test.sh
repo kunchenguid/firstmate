@@ -183,6 +183,9 @@ test_stale_pool_base_refreshes_before_branching() {
       "$branch_head" "$current" "$(cat "$POOL_DIR/advanced-main.txt")"
   fi
 
+  # Only teardown releases a slot; retire the first task's record before a new
+  # task may enter the same pooled worktree.
+  rm "$HOME_DIR/state/$id.meta"
   id='pool-current-base-repeat-r1'
   fm_test_spawn_brief "$HOME_DIR" "$id"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
@@ -528,6 +531,7 @@ strand_submodule_pin_via_spawn() {  # <seed-id>
     || fail "the first spawn did not move the pooled base across the moved submodule pin"
   [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
     || fail "the first spawn did not strand the submodule on the pin the old base recorded"
+  rm "$HOME_DIR/state/$id.meta"
 }
 
 test_stale_submodule_pin_explains_itself() {
@@ -676,6 +680,112 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+# fake_treehouse_status <fakebin> <json>: a treehouse whose `status --json`
+# reports the given pool and whose other subcommands stay no-ops.
+fake_treehouse_status() {
+  local fakebin=$1 json=$2
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then
+  printf '%s\n' '$json'
+fi
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
+test_claimed_pool_refuses_before_allocation() {
+  local rec id out status before live_slot
+  id='pool-held-slot-r14'
+  rec=$(make_case held-slot "$id")
+  read_case_record "$rec"
+  # Slot 3 belongs to a task whose endpoint died. Treehouse judges availability
+  # by live processes, so it offers that slot again; the durable record must win.
+  mkdir -p "$POOL_DIR/out"
+  printf 'held render\n' > "$POOL_DIR/out/Explainer.mp4"
+  ln -s "$POOL_DIR" "$CASE_DIR/pool-alias"
+  printf 'kind=ship\nbackend=tmux\nwindow=missing-window\nworktree=%s\n' "$CASE_DIR/pool-alias" \
+    > "$HOME_DIR/state/held.meta"
+  live_slot="$CASE_DIR/slot1"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$live_slot" "$INITIAL_SHA"
+  printf 'kind=ship\nbackend=tmux\nwindow=live-window\nworktree=%s\n' "$live_slot" \
+    > "$HOME_DIR/state/live.meta"
+  fake_treehouse_status "$FAKEBIN_DIR" \
+    "[{\"name\":\"1\",\"path\":\"$live_slot\",\"status\":\"in-use\"},{\"name\":\"3\",\"path\":\"$POOL_DIR\",\"status\":\"available\"}]"
+  before=$(cat "$HOME_DIR/state/held.meta")
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn reused a dead endpoint's recorded pool slot"
+  assert_contains "$out" "available slot" "refusal must come from the preflight over Treehouse's offered slots"
+  assert_not_contains "$out" "entered slot" "refusal must not wait for treehouse get to enter the slot"
+  assert_contains "$out" "task held's recorded worktree" "refusal must name the claiming task"
+  assert_contains "$out" 'fm-crew-state.sh held' "refusal must name reconciliation"
+  assert_contains "$out" 'teardown' "refusal must explain slot release"
+  [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "spawn published a second owner"
+  [ "$before" = "$(cat "$HOME_DIR/state/held.meta")" ] || fail "spawn changed the owner record"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] || fail "spawn reset the held copy"
+  assert_absent "$CASE_DIR/launch.log" "spawn sent a launch command despite the refusal"
+  assert_grep 'held render' "$POOL_DIR/out/Explainer.mp4" "spawn destroyed the held artifact"
+  pass "a dead endpoint's durable claim refuses before pool allocation"
+}
+
+test_claim_entered_after_preflight_refuses_before_publication() {
+  local rec id out status before
+  id='pool-late-claim-r14'
+  rec=$(make_case late-claim "$id")
+  read_case_record "$rec"
+  # At preflight Treehouse still sees task held's shell in slot 3, so it is not
+  # offered; the shell then exits and treehouse get enters that very slot.
+  mkdir -p "$POOL_DIR/out"
+  printf 'held render\n' > "$POOL_DIR/out/Explainer.mp4"
+  printf 'kind=ship\nbackend=tmux\nwindow=closing-window\nworktree=%s\n' "$POOL_DIR" \
+    > "$HOME_DIR/state/held.meta"
+  fake_treehouse_status "$FAKEBIN_DIR" \
+    "[{\"name\":\"3\",\"path\":\"$POOL_DIR\",\"status\":\"in-use\"}]"
+  before=$(cat "$HOME_DIR/state/held.meta")
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn bound a second owner to a slot entered after its claimant died"
+  assert_contains "$out" "entered slot" "late refusal must come from the recheck of the slot treehouse get entered"
+  assert_not_contains "$out" "available slot" "preflight must not refuse a slot Treehouse reported in use"
+  assert_contains "$out" "inspect window" "late refusal must name the window whose shell sits in the slot"
+  assert_contains "$out" "task held's recorded worktree" "late refusal must name the claiming task"
+  assert_contains "$out" 'fm-crew-state.sh held' "late refusal must name reconciliation"
+  [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "spawn published a second owner"
+  [ "$before" = "$(cat "$HOME_DIR/state/held.meta")" ] || fail "spawn changed the owner record"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] || fail "spawn reset the held copy"
+  assert_absent "$CASE_DIR/launch.log" "spawn sent a launch command despite the refusal"
+  assert_grep 'held render' "$POOL_DIR/out/Explainer.mp4" "spawn destroyed the held artifact"
+  pass "a slot claimed by a task whose endpoint died after preflight is refused before publication"
+}
+
+test_live_claim_on_another_slot_does_not_block_allocation() {
+  local rec id out status before live_slot
+  id='pool-other-slot-live-r14'
+  rec=$(make_case other-slot-live "$id")
+  read_case_record "$rec"
+  # Task live holds slot 1 and Treehouse reports it in use; slot 2 is free and
+  # unclaimed, so the spawn must take it. Concurrent pooled tasks are normal.
+  live_slot="$CASE_DIR/slot1"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$live_slot" "$INITIAL_SHA"
+  printf 'kind=ship\nbackend=tmux\nwindow=live-window\nworktree=%s\n' "$live_slot" \
+    > "$HOME_DIR/state/live.meta"
+  fake_treehouse_status "$FAKEBIN_DIR" \
+    "[{\"name\":\"1\",\"path\":\"$live_slot\",\"status\":\"in-use\"},{\"name\":\"2\",\"path\":\"$POOL_DIR\",\"status\":\"available\"}]"
+  before=$(cat "$HOME_DIR/state/live.meta")
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a live claim on another slot must not block allocation"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "the spawn beside a live task did not report success"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+    "the spawn did not publish the free slot as its worktree"
+  assert_present "$CASE_DIR/launch.log" "the spawn beside a live task sent no launch command"
+  [ "$before" = "$(cat "$HOME_DIR/state/live.meta")" ] || fail "spawn changed the live task's record"
+  pass "a live task's claim on another slot leaves a free slot allocatable"
+}
+
+test_claimed_pool_refuses_before_allocation
+test_claim_entered_after_preflight_refuses_before_publication
+test_live_claim_on_another_slot_does_not_block_allocation
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching

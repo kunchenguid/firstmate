@@ -97,16 +97,40 @@ fm_test_fake_gh_axi() {
 # set, each send-keys -l payload is appended one per line. Optional
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
 #
-# The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
-# cleanup and option operations are no-ops. Launch logging is env-gated, so
-# suites that do not set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
+# The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. When
+# FM_FAKE_PANE_PATHS_DIR is set instead, new-window prints its fm-<id> window
+# name as the window id and the pane path of window fm-<id> is
+# FM_FAKE_PANE_PATHS_DIR/<id>, so several tasks in one home each sit in their
+# own worktree the way separate pool slots do. Window cleanup and option
+# operations are no-ops. Launch logging is env-gated, so suites that do not
+# set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
 fm_test_fake_tmux_spawn() {
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+fake_opt() {  # <flag> <args...>: the value following <flag>, if any
+  local flag=$1 prev=
+  shift
+  for a in "$@"; do
+    if [ "$prev" = "$flag" ]; then printf '%s\n' "$a"; return 0; fi
+    prev=$a
+  done
+  return 1
+}
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    if [ -n "${FM_FAKE_PANE_PATHS_DIR:-}" ]; then
+      target=$(fake_opt -t "$@") || target=
+      case "$target" in
+        fm-*) printf '%s\n' "$FM_FAKE_PANE_PATHS_DIR/${target#fm-}" ;;
+        *) printf '\n' ;;
+      esac
+    else
+      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    fi
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -116,7 +140,11 @@ case "${1:-}" in
     fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  new-window)
+    [ -z "${FM_FAKE_PANE_PATHS_DIR:-}" ] || fake_opt -n "$@" || true
+    exit 0
+    ;;
+  has-session|new-session|kill-window|set-window-option) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=

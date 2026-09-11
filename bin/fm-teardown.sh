@@ -91,8 +91,11 @@
 # boundary. Fresh Treehouse spawns for that project in
 # every local Firstmate home hold the same lock from before slot allocation
 # through metadata publication, closing the publication
-# gap; forced secondmate teardown takes it and runs the same checks for every
-# descendant Treehouse slot before touching any child.
+# gap, and run this same record matcher (fm_meta_find_directory_claim in
+# bin/fm-backend.sh) against the slots they could receive; bin/fm-spawn.sh's
+# header owns that allocation rule. Forced secondmate teardown takes the lock
+# and runs the same checks for every descendant Treehouse slot before touching
+# any child.
 # This refusal is not relaxed by --force: --force authorizes discarding THIS
 # task's unlanded work, never another task's live work. Reconcile whichever
 # record is wrong and re-run. Orca is not a pool slot and proves its path through
@@ -2135,26 +2138,15 @@ collect_local_firstmate_states() {
 
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
-  for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
-    for other in "$state_dir"/*.meta; do
-      [ -f "$other" ] && [ ! -L "$other" ] || continue
-      [ "$other" != "$record_meta" ] || continue
-      other_id=$(basename "$other" .meta)
-      for field in worktree home; do
-        other_path=$(fm_meta_get "$other" "$field")
-        [ -n "$other_path" ] || continue
-        other_slot=$(canonical_existing_dir "$other_path") || continue
-        [ "$other_slot" = "$slot" ] || continue
-        echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
-        echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
-        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
-        return 1
-      done
-    done
-  done
+  if fm_meta_find_directory_claim "$record_meta" "$slot" 'worktree home' "${TREEHOUSE_OWNER_STATES[@]}"; then
+    echo "REFUSED: task $record_id's recorded worktree $slot is also task $FM_META_CLAIM_ID's recorded $FM_META_CLAIM_FIELD." >&2
+    echo "Returning that pool slot would kill $FM_META_CLAIM_ID's processes and reset its copy, so nothing was changed - not even with --force." >&2
+    echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $FM_META_CLAIM_ID), then re-run teardown." >&2
+    return 1
+  fi
 }
 
 require_exclusive_task_worktree_slot() {

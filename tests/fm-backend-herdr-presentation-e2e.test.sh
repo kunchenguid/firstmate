@@ -1359,7 +1359,11 @@ FLAT_TAB_OUT=$(lab tab create --workspace "$(lab workspace list | jq -r '.result
 FLAT_TAB_ID=$(printf '%s' "$FLAT_TAB_OUT" | jq -r '.result.tab.tab_id // empty')
 mkdir -p "$HOME_DIR/data/post-legacy"
 write_ship_brief "$HOME_DIR" post-legacy 'Post-legacy primary child.'
-spawn_task post-legacy "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/post-legacy.out" 2> "$TMP_ROOT/post-legacy.err" \
+# The retained multi-home workers (p1, p2, pcw) lost their processes when the
+# restart fixtures stopped the session, so Treehouse reports their PROJECT_DIR
+# slots available while their task records still claim them. A fresh spawn
+# refuses such a slot by design, so this fixture uses the recovery pool.
+spawn_task post-legacy "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/post-legacy.out" 2> "$TMP_ROOT/post-legacy.err" \
   || fail "post-legacy projected spawn failed: $(cat "$TMP_ROOT/post-legacy.err")"
 remember_meta_worktree "$HOME_DIR/state/post-legacy.meta" >/dev/null
 [ "$(lab workspace get "$LEGACY_WSID" | jq -r '.result.workspace.label')" = "firstmate/legacy-seed · p:AbCdEfGhIjKlMnOpQrStUv" ] \

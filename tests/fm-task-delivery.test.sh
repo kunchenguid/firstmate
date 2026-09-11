@@ -36,6 +36,7 @@ make_home() {  # <name> [<registry-line>...]
   git -C "$projects/proj" init -q || fail "could not initialize project fixture"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse
   if [ "$#" -gt 0 ]; then
     printf '%s\n' "$@" > "$home/data/projects.md"
   fi

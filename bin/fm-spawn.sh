@@ -118,7 +118,19 @@
 #   is published. The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
-#   contention refuses rather than waits.
+#   contention refuses rather than waits. Under that lock, before `treehouse get`,
+#   a fresh spawn reads `treehouse status --json` and refuses when any slot
+#   Treehouse reports available is still recorded as worktree= by another task
+#   meta in this home: Treehouse judges availability by live processes, so a task
+#   whose endpoint died still owns its slot here. Slots Treehouse reports in use or
+#   leased are never handed out, so other live pooled tasks do not block a spawn.
+#   `treehouse get` has no slot selector, so a claimed available slot refuses
+#   loudly, naming the claiming task, rather than taking another slot. The slot
+#   `treehouse get` actually enters is matched again before the copy is refreshed
+#   or a task record is published, so an endpoint dying between the preflight and
+#   get still cannot bind a second owner; nothing is reset or released on that
+#   refusal. Only teardown releases claims; relaunch reuses its own slot without
+#   either check.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -2181,6 +2193,13 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+refuse_claimed_spawn_slot() {  # <slot> <what> <consequence>
+  fm_meta_find_directory_claim "$STATE/$ID.meta" "$1" worktree "$STATE" || return 0
+  echo "error: Treehouse allocation refused: $2 $1 is still task $FM_META_CLAIM_ID's recorded worktree, $3." >&2
+  echo "Reconcile with bin/fm-crew-state.sh $FM_META_CLAIM_ID, then bin/fm-teardown.sh $FM_META_CLAIM_ID when its work is landed; only teardown releases the slot." >&2
+  exit 1
+}
+
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
@@ -2594,6 +2613,26 @@ fi
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
+fi
+
+if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+  # Under the project lock, after every cheap refusal and before any endpoint
+  # exists: inspect before get, since allocation itself can reset the selected copy.
+  if ! SPAWN_POOL_STATUS=$(cd "$PROJ_ABS" && treehouse status --json 2>/dev/null); then
+    echo "error: treehouse status failed for $PROJ_ABS; refusing Treehouse allocation" >&2
+    exit 1
+  fi
+  if ! SPAWN_POOL_AVAILABLE=$(printf '%s' "$SPAWN_POOL_STATUS" \
+      | jq -r '.[] | select(.status == "available") | .path'); then
+    echo "error: treehouse status for $PROJ_ABS was not pool JSON; refusing Treehouse allocation" >&2
+    exit 1
+  fi
+  while IFS= read -r spawn_available_slot; do
+    [ -n "$spawn_available_slot" ] || continue
+    refuse_claimed_spawn_slot "$spawn_available_slot" "available slot" "so treehouse get could hand it out again"
+  done <<EOF
+$SPAWN_POOL_AVAILABLE
+EOF
 fi
 
 W="fm-$ID"
@@ -3121,6 +3160,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  refuse_claimed_spawn_slot "$WT" "entered slot" "and its endpoint died between the preflight and treehouse get; the launch shell was left in that slot, inspect window $T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
