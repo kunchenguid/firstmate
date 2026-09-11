@@ -143,8 +143,8 @@
 # fire-and-forget delivery deliberately arms neither mechanism. Internal
 # semantic callers may set FM_SEND_EXPECTED_SPAWN_GEN or
 # FM_SEND_EXPECTED_REMOTE_HOST to require that sampled identity to still match
-# during the final locked remote-route validation; unset or empty guards do not
-# change ordinary sends.
+# during final locked route validation. FM_SEND_PRINT_INBOX_RECORD=1 prints the
+# durable local record path after enqueue; unset guards do not change sends.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
@@ -1013,6 +1013,7 @@ else
       2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
       3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     esac
+    [ "${FM_SEND_PRINT_INBOX_RECORD:-0}" != 1 ] || printf '%s\n' "$INBOX_RECORD"
     exit 0
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
