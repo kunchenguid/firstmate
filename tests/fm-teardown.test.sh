@@ -839,6 +839,8 @@ test_teardown_writes_a_surviving_cost_summary() {
       || fail "cost-summary: cost.json must never invent a cash MXN figure"
     [ "$(jq -r '.accepted.pr' "$cost_json")" = "https://github.com/example/repo/pull/43" ] \
       || fail "cost-summary: cost.json lost the PR link"
+    [ "$(jq -r '.accepted.landed' "$cost_json")" = true ] \
+      || fail "cost-summary: cost.json must mark confirmed-landed ship work as landed"
   }
   pass "teardown writes data/<id>/cost.json before removing the task record it was built from, and it survives"
 }
@@ -1858,7 +1860,7 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
 }
 
 test_local_only_force_overrides_unpushed() {
-  local case_dir rc
+  local case_dir rc cost_json
   case_dir=$(make_case force-override)
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "unpushed work"
@@ -1870,6 +1872,11 @@ test_local_only_force_overrides_unpushed() {
 
   expect_code 0 "$rc" "force-override: --force should bypass the unpushed-work check"
   ! grep -q REFUSED "$case_dir/stderr" || fail "force-override: REFUSED printed despite --force"
+  cost_json="$case_dir/data/task-x1/cost.json"
+  if command -v jq >/dev/null 2>&1 && [ -f "$cost_json" ]; then
+    [ "$(jq -r '.accepted.landed' "$cost_json")" = null ] \
+      || fail "force-override: --force must never mark genuinely unpushed work as landed"
+  fi
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
