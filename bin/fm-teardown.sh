@@ -3038,9 +3038,11 @@ cleanup_firstmate_home_children() {
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
+      "$sub_state/$child_id.agy-hook/.agents/hooks.json" "$sub_state/$child_id.agy-hook/"*.conversation \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
       "$sub_state/.$child_id.branch-outcome-index"
+    rmdir "$sub_state/$child_id.agy-hook/.agents" "$sub_state/$child_id.agy-hook" 2>/dev/null || true
   done
 }
 
@@ -3457,7 +3459,9 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
+  "$STATE/$ID.agy-hook/.agents/hooks.json" "$STATE/$ID.agy-hook/"*.conversation \
   "$STATE/.$ID.branch-outcome-index"
+rmdir "$STATE/$ID.agy-hook/.agents" "$STATE/$ID.agy-hook" 2>/dev/null || true
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.

@@ -6,6 +6,54 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Antigravity CLI (AGY) workers
+
+Verified on 2026-09-11 with AGY 1.2.1, tmux 3.4, and Herdr 0.9.0 (client and server, protocol 22) on Linux x86_64.
+The [AGY adapter reference](../../.agents/skills/harness-adapters/references/harness/agy.md) owns setup and limits; `bin/fm-agy-lib.sh` owns catalog preflight and `bin/fm-spawn.sh` owns canonical launch.
+No primary or secondmate support is claimed.
+
+The actual inference and interactive tool probes used `gemini-3.8-flash-low` with native `low` effort.
+The CLI catalog also returned Flash 3.8/3.7/3.6 low/medium/high variants and Gemini 3.1 Pro low/high; those catalog rows are availability evidence, not individual inference tests.
+A separate interactive probe combining the low model ID with `--effort high` reported `gemini-3.8-flash-high` in the native invocation payload, motivating the conflicting-profile refusal.
+`agy models` succeeded even before account eligibility was established, so only a successful actual prompt proves that prerequisite.
+
+Refresh commands:
+
+```sh
+FM_AGY_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
+FM_AGY_HERDR_LAB_HELPER="$HERDR_LAB_HELPER" FM_AGY_BACKEND=herdr FM_AGY_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
+```
+
+The Herdr invocation used the task's prescribed `bin/fm-herdr-lab.sh` helper; omit that override when the current tree owns the helper.
+Every Herdr operation used its named non-default lab, and teardown's unchanged-default-session tripwire passed.
+`status --json` through that same helper reported client/server version `0.9.0` and protocol `22`.
+Tmux used a private socket and a stable named window, never the fleet server.
+
+Both backend runs emitted:
+
+```text
+AGY live version=1.2.1 model=gemini-3.8-flash-low effort=low
+ok - AGY 1.2.1 actual prompt executes successfully
+ok - AGY 1.2.1 interactive prompt executes tools in the isolated workspace, detects agy and settles native hooks
+ok - AGY 1.2.1 follow-up steering performs external task reporting and completes
+ok - AGY 1.2.1 Escape interrupts, clears the composer and accepts subsequent work
+ok - AGY 1.2.1 /exit stops only the lab agent and stale shell input stays protected
+ok - AGY 1.2.1 deterministic relaunch preserves the workspace and completes with fresh hook custody
+```
+
+The complete tmux run returned `exit=0 duration_ms=64628 gate_skip=false`; the complete Herdr run returned `exit=0 duration_ms=104160 gate_skip=false`.
+The guard asserts actual tool-produced files, physical command cwd, process identity from inside the tool, backend `alive`, native busy/completion records, empty composer, cancellation followed by new work, exit, and a replacement conversation in the same preserved directory.
+It does not equate successful key delivery or an echoed prompt with processing.
+Native `PreInvocation` and `Stop` payloads supplied workspace and conversation identity; only boolean `fullyIdle: true` closed the parent turn.
+Escape emitted no Stop in the observed cancellation, so the adapter conservatively keeps semantic busy state until a subsequent turn completes or the process exits, rather than inventing a completion event.
+
+Portable coverage is in `tests/fm-agy-harness.test.sh`, with lifecycle dispatch in `tests/fm-control.test.sh` and profile preflight/retirement in `tests/fm-control-relaunch.test.sh`.
+These passed, including old-generation and other-conversation rejection, backend/kind restrictions, model/effort conflicts, and pre-stop refusal when an AGY replacement lacks a model.
+Shared composer, busy-wiring, dispatch-profile, bootstrap, and teardown regressions also passed.
+The generated launch was exercised with a fake provider for portable argv/hook checks; the credentialed guard deliberately uses equivalent raw launch arguments rather than normal fleet dispatch.
+Zellij, Orca, and cmux have no verified AGY identity/composer proof in their inspected integration surfaces and are refused for this adapter; Codex App remains outside supported spawn backends.
+Existing primary integrations and the primary-only session-lock identity table were left unchanged; AGY's supervision renderer explicitly refuses primary use.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

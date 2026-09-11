@@ -156,6 +156,20 @@ fm_backend_tmux_current_command() {  # <target>
 # (fm_agent_process_classify_name) is owned by bin/fm-agent-process-lib.sh,
 # shared with the Herdr adapter so both backends mean the same thing by
 # `agent`, `shell`, and `other`.
+# AGY's exact executable name is the adapter-specific extension from the
+# replayed change; delegate every other identity decision to that shared owner.
+fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
+  local path=${1:-} argv0=${2:-} candidate base
+  for candidate in "$path" "$argv0"; do
+    base=${candidate##*/}
+    base=${base#-}
+    if [ "$base" = agy ]; then
+      printf 'agent'
+      return 0
+    fi
+  done
+  fm_agent_process_classify_name "$@"
+}
 
 # fm_backend_tmux_foreground_comms: the kernel-side names of every process in
 # <target>'s pane tty foreground process group, one full value per line.
@@ -288,7 +302,7 @@ fm_backend_tmux_agent_state() {  # <target>
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     fg_seen=1
-    case "$(fm_agent_process_classify_name "$name")" in
+    case "$(fm_backend_tmux_classify_process_name "$name")" in
       agent) printf 'alive'; return 0 ;;
       shell) fg_shell=1 ;;
       *) fg_other=1 ;;
@@ -300,7 +314,7 @@ EOF
   argv0s=$(fm_backend_tmux_foreground_argv0s "$target")
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    if [ "$(fm_agent_process_classify_name '' "$name")" = agent ]; then
+    if [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ]; then
       printf 'alive'
       return 0
     fi
@@ -337,7 +351,7 @@ EOF
     printf 'unreadable'
     return 0
   }
-  if [ "$(fm_agent_process_classify_name "$comm")" = agent ]; then
+  if [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ]; then
     printf 'alive'
     return 0
   fi
@@ -356,7 +370,7 @@ EOF
   case "$comm" in
     '') printf 'unreadable'; return 0 ;;
   esac
-  case "$(fm_agent_process_classify_name "$comm")" in
+  case "$(fm_backend_tmux_classify_process_name "$comm")" in
     shell) printf 'dead' ;;
     *) printf 'ambiguous' ;;
   esac

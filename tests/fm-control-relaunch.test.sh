@@ -299,6 +299,37 @@ SH
 
 # --- 1. same-harness relaunch -----------------------------------------------
 
+test_agy_profile_refuses_before_stop_and_retires_wiring() {
+  local dir out rc gen
+  dir=$(new_case agy-profile rl-agy)
+  add_ship_task "$dir" rl-agy claude
+  cat > "$dir/fakebin/agy" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  --help) printf '%s\n' '  --new-project ' '  --add-dir ' '  --prompt-interactive ' '  --model ' '  --effort ' '  --dangerously-skip-permissions ' ;;
+  models) printf 'gemini-3.8-flash-low\tGemini Flash Low\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/agy"
+  out=$(run_control "$dir" rl-agy relaunch --harness agy --note 'continue bounded work'); rc=$?
+  expect_code 1 "$rc" 'AGY requires a model before stopping the current agent'
+  assert_contains "$out" 'require an explicit Gemini model' 'missing AGY profile diagnostic'
+  [ ! -s "$dir/fake/literal" ] && [ ! -s "$dir/fake/keys" ] || fail 'invalid AGY profile stopped the current agent'
+  printf agy > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl-agy relaunch --harness agy --model gemini-3.8-flash-low --effort low --note 'continue bounded work'); rc=$?
+  expect_code 0 "$rc" "verified AGY profile should relaunch: $out"
+  gen=$(meta_field "$dir" rl-agy busy_gen)
+  [ -n "$gen" ] || fail 'AGY relaunch did not arm busy generation'
+  [ -s "$dir/home/state/rl-agy.agy-hook/.agents/hooks.json" ] || fail 'AGY relaunch lacks hook wiring'
+  printf '%s\tmain-1\n' "$gen" > "$dir/home/state/rl-agy.agy-hook/$gen.conversation"
+  printf claude > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl-agy relaunch --harness claude --note 'preserve work on another adapter'); rc=$?
+  expect_code 0 "$rc" "switching away from AGY should preserve work: $out"
+  [ ! -e "$dir/home/state/rl-agy.agy-hook/$gen.conversation" ] || fail 'AGY conversation binding survived retirement'
+  [ ! -e "$dir/home/state/rl-agy.agy-hook/.agents/hooks.json" ] || fail 'AGY hooks survived retirement'
+  pass 'AGY relaunch refuses missing profiles before stop and retires old wiring on replacement'
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   local dir out rc gen_before gen_after
   dir=$(new_case same rl1)
@@ -1558,6 +1589,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_agy_profile_refuses_before_stop_and_retires_wiring
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata

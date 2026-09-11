@@ -309,6 +309,8 @@ On Zellij, cmux, and Orca a typed-plane Cursor send (a harness-native invocation
 muse is verified for crewmate and scout launches ONLY, and `fm-spawn.sh` refuses it for a secondmate, because muse ships no usable hook surface for a primary session's turn-end supervision; [`docs/verification/muse.md`](verification/muse.md) owns that evidence.
 muse also needs a worker-reachable credential before spawning, and the portable fleet path is the `<config>/muse/auth.json` credential stored by `muse login`, because a caller-only `META_API_KEY` does not cross a long-lived backend daemon.
 gemini is likewise refused for secondmates because it has no primary supervision protocol; [its adapter reference](../.agents/skills/harness-adapters/references/harness/gemini.md) owns the credential precondition, canonical-launch wiring, and raw-launch limitations.
+Antigravity CLI (`agy`) supports ordinary ship/scout workers on tmux and Herdr only, not primary or secondmate sessions; [its adapter reference](../.agents/skills/harness-adapters/references/harness/agy.md) owns setup, native hook/control evidence, and limitations.
+Install and sign in through [AGY's official getting-started guide](https://antigravity.google/docs/cli/getting-started/), complete any account-eligibility verification, and verify real prompt execution before dispatch; a model catalog alone does not prove account eligibility.
 rovo is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no turn-end hook and no primary supervision protocol; [`docs/verification/rovo.md`](verification/rovo.md) owns that evidence, including the OAuth token's silent background refresh from a stored refresh token and both tmux and herdr pane liveness (herdr placement is verified live, with a Herdr-side agent-detection gap left open for recovery classification).
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in the skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
@@ -446,6 +448,23 @@ Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstr
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+### Bounded Gemini Flash work through AGY
+
+This optional rule uses the existing profile mechanism, not a separate scheduler.
+Merge it into your local rules only when you want this routing; do not replace the stronger-reasoning profiles used for ambiguous investigation, design, or high-impact changes.
+
+```json
+{
+  "when": "Bounded, well-specified changes with concrete acceptance tests; no ambiguous design, security-sensitive decisions, or high-impact migration",
+  "use": { "harness": "agy", "model": "gemini-3.8-flash-low", "effort": "low" },
+  "why": "Use Gemini Flash for explicit work proportionate to its capability; retain stronger reasoning for uncertainty and broad consequences."
+}
+```
+
+Refresh the exact ID with `agy models` before using the example; the adapter requires an explicit catalog-listed Gemini model, even when `config/crew-harness` selects AGY.
+Native effort is `low`, `medium`, or `high`, and a conflicting suffix/effort pair is refused because AGY can otherwise change the chosen model variant.
+The [AGY adapter reference](../.agents/skills/harness-adapters/references/harness/agy.md) owns the capability and authentication preflight details.
 
 ## Toolchain
 

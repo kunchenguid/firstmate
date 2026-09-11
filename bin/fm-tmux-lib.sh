@@ -98,9 +98,10 @@ fm_tmux_composer_caps() {
 #   - status: pi's verified busy footer via fm_pane_is_busy, mapped onto the
 #     idle/working vocabulary herdr's probe reports natively.
 # Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
-# live pi.
+# live pi. AGY uses the same process-bound separated shape, with a leading
+# > on its composer row; the shared classifier owns that content distinction.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm found=0 status
+  local target=$1 tty pgid tpgid comm found=0 status agent=pi
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
@@ -109,6 +110,7 @@ fm_tmux_composer_identity() {  # <target>
         [ "$pgid" = "$tpgid" ] || continue
         case "${comm##*/}" in
           pi|pi-signed|pi-launcher|Pi) found=1 ;;
+          agy) found=1; agent=agy ;;
         esac
       done <<EOF
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
@@ -119,13 +121,14 @@ EOF
     comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
     case "${comm##*/}" in
       pi|pi-signed|pi-launcher) found=1 ;;
+      agy) found=1; agent=agy ;;
     esac
   fi
   [ "$found" -eq 1 ] || return 1
-  status=$(fm_pane_busy_state "$target" pi)
+  status=$(fm_pane_busy_state "$target" "$agent")
   case "$status" in
-    busy) printf 'pi\tworking' ;;
-    idle) printf 'pi\tidle' ;;
+    busy) printf '%s\tworking' "$agent" ;;
+    idle) printf '%s\tidle' "$agent" ;;
     *) return 1 ;;
   esac
 }

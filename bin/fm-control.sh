@@ -685,6 +685,14 @@ resolve_relaunch_profile() {
   if [ "$TARGET_EFFORT" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
+  if [ "$TARGET_HARNESS" = agy ]; then
+    # AGY requires a concrete supported profile; discover a refusal before
+    # stopping the current agent, not after relinquishing its work.
+    # shellcheck source=bin/fm-agy-lib.sh
+    . "$SCRIPT_DIR/fm-agy-lib.sh"
+    fm_agy_backend_check "$BACKEND" || return 1
+    fm_agy_preflight "$(type -P agy || true)" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
+  fi
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch

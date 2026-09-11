@@ -342,6 +342,8 @@ FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # injection. Cursor's recorded worker state comes from its transcript fold in
 # bin/fm-busy-lib.sh, never from this row.
 FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
+# AGY's task state comes from semantic hooks, never this delivery-only footer.
+FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='^[[:space:]]*esc to cancel[[:space:]]'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
@@ -359,6 +361,7 @@ fm_busy_lines_match() {  # [harness]
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
+      agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -1446,6 +1449,24 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   agent=${identity%%$'\t'*}
   agent_status=${identity#*$'\t'}
+  if [ "$agent" = agy ] && [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ]; then
+    # AGY uses separators plus a shell-like > glyph. Only the exact live
+    # process identity authorizes stripping it; shell transcripts stay unknown.
+    local row raw content first=1
+    row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
+    while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
+      raw=$(_fm_composer_screen_row "$row" "$screen")
+      content=$(_fm_composer_row_content "$raw" "$styled")
+      if [ "$first" = 1 ]; then
+        case "$content" in '>'*) content=${content#>}; first=0 ;; *) printf 'unknown'; return 0 ;; esac
+      fi
+      fm_composer_normalize_trim_var content
+      [ -z "$content" ] || { printf 'pending'; return 0; }
+      row=$((row + 1))
+    done
+    case "$agent_status" in idle|done) printf 'empty' ;; *) printf 'unknown' ;; esac
+    return 0
+  fi
   if [ "$agent" != pi ] || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
     printf 'unknown'
     return 0

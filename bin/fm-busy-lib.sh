@@ -32,6 +32,8 @@
 #   omp-ext          omp (Oh My Pi) per-task extension (agent_start/agent_end without willContinue)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
+#   agy-hook         AGY PreInvocation opens; fullyIdle Stop closes (manual
+#                    Escape has no Stop and conservatively retains busy).
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
@@ -197,6 +199,7 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
+    agy) adapter=agy-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)

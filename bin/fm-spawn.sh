@@ -142,6 +142,12 @@
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
+#   AGY is worker-only on tmux and Herdr. It requires an explicit catalog Gemini model,
+#   uses --new-project and --add-dir to bind tool cwd (bare agy uses its shared
+#   scratch directory), and never updates account settings or the binary.
+#   state/<id>.agy-hook/.agents/hooks.json is an added customization workspace,
+#   not a replacement for project hooks. PreInvocation/Stop feed fm-busy-event.
+#   A fresh path may still require the documented folder-trust confirmation.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -1389,7 +1395,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1595,6 +1601,7 @@ launch_template() {
     # stays in task metadata only, per the record-and-omit contract.
     # Its turn-end and busy-state signals do NOT ride the launch command:
     # they are project hooks written into the worktree below.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS FM_AGY_HARNESS=agy AGY_CLI_DISABLE_AUTO_UPDATE=true __AGYBIN__ --new-project --add-dir __WORKTREE__ --add-dir __AGYHOOKDIR__ --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__--prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     gemini) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
@@ -1713,6 +1720,17 @@ fi
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
   echo "error: rovo is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
+fi
+
+if [ "$HARNESS" = agy ]; then
+  case "$KIND" in ship|scout) ;; *) echo 'error: agy is worker-only; primary and secondmate supervision are unverified' >&2; exit 1 ;; esac
+  # shellcheck source=bin/fm-agy-lib.sh
+  . "$SCRIPT_DIR/fm-agy-lib.sh"
+  fm_agy_backend_check "$BACKEND" || exit 1
+  if [ "$RAW_LAUNCH" -eq 0 ]; then
+    AGY_BIN=$(resolve_pi_executable agy) || { echo 'error: agy executable not found on PATH' >&2; exit 1; }
+    fm_agy_preflight "$AGY_BIN" "$MODEL" "$EFFORT" || exit 1
+  fi
 fi
 
 case "$HARNESS" in
@@ -1902,7 +1920,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1950,6 +1968,11 @@ effort_flag_for_harness() {
       # a superset of the shared vocabulary, so every level maps straight across.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    agy)
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     muse)
@@ -3303,7 +3326,7 @@ if [ "$KIND" != secondmate ]; then
       }
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       ;;
-    gemini)
+    gemini|agy)
       if [ "$RAW_LAUNCH" -eq 0 ]; then
         BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
           echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -3324,6 +3347,21 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
+    agy)
+      if [ "$RAW_LAUNCH" -eq 0 ]; then
+        AGY_HOOK_DIR="$STATE_REAL/$ID.agy-hook"
+        if [ -L "$AGY_HOOK_DIR" ] || [ -L "$AGY_HOOK_DIR/.agents" ] || [ -L "$AGY_HOOK_DIR/.agents/hooks.json" ]; then
+          echo 'error: agy hook workspace must not contain symlinked wiring' >&2
+          exit 1
+        fi
+        mkdir -p "$AGY_HOOK_DIR/.agents" || exit 1
+        agy_hook_prefix="$(shell_quote "$FM_ROOT/bin/fm-agy-hook.sh")"
+        agy_hook_suffix="$(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$BUSY_GEN") $(shell_quote "$WT")"
+        jq -n --arg pre "$agy_hook_prefix PreInvocation $agy_hook_suffix" --arg stop "$agy_hook_prefix Stop $agy_hook_suffix" \
+          '{"firstmate-worker":{"PreInvocation":[{"command":$pre,"timeout":10}],"Stop":[{"command":$stop,"timeout":10}]}}' \
+          > "$AGY_HOOK_DIR/.agents/hooks.json" || exit 1
+      fi
+      ;;
     claude*)
       # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
       # a turn; Stop (normal completion), StopFailure (API-error turn end),
@@ -3881,12 +3919,16 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  agy)
+    LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "${AGY_BIN:-agy}")"}
+    LAUNCH=${LAUNCH//__AGYHOOKDIR__/"$(shell_quote "${AGY_HOOK_DIR:-}")"}
+    ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
   omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo|agy)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac

@@ -83,6 +83,10 @@ fi
 case "$HARNESS" in
   claude|codex|opencode|pi|grok|cursor|omp) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
+  agy)
+    echo 'error: agy supports ordinary workers only; primary and secondmate supervision are not implemented' >&2
+    exit 1
+    ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
