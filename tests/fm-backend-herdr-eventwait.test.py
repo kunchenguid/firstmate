@@ -101,6 +101,97 @@ class EventWaitReadLineTest(unittest.TestCase):
         self.assertEqual(result, 3)
         self.assertEqual(stdout.getvalue(), "")
 
+    def test_main_saturated_stream_stays_within_budget(self):
+        # 2026-08-21 quiet-fleet crash-loop regression: a stream that keeps
+        # producing events (a pending-backlog replay, a fast-flapping agent)
+        # with a consumer slower than the stream must not make the reader
+        # outlive its deadline - neither in the stream loop nor inside a
+        # blocking stdout write on a full pipe. Drive the REAL reader process
+        # against a saturating fake server and a throttled stdout consumer and
+        # assert it exits at the deadline (rc 0, a clean bounded wait).
+        import json as _json
+        import os
+        import subprocess
+        import sys as _sys
+        import tempfile
+        import threading
+
+        timeout = 2
+        tmpdir = tempfile.mkdtemp(prefix="fm-eventwait-budget.")
+        self.addCleanup(
+            lambda: __import__("shutil").rmtree(tmpdir, ignore_errors=True)
+        )
+        sock_path = os.path.join(tmpdir, "s.sock")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(sock_path)
+        server.listen(1)
+        self.addCleanup(server.close)
+        stop = threading.Event()
+
+        def serve():
+            try:
+                conn, _ = server.accept()
+                with conn:
+                    conn.recv(65536)
+                    conn.sendall(
+                        b'{"id":"x","result":{"type":"subscription_started"}}\n'
+                    )
+                    event = (
+                        _json.dumps(
+                            {
+                                "event": "pane.agent_status_changed",
+                                "data": {
+                                    "pane_id": "w1:p2",
+                                    "workspace_id": "w1",
+                                    "agent_status": "working",
+                                    "agent": "claude",
+                                },
+                            }
+                        )
+                        + "\n"
+                    ).encode()
+                    while not stop.is_set():
+                        conn.sendall(event)
+            except OSError:
+                pass
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+
+        proc = subprocess.Popen(
+            [_sys.executable, str(READER_PATH), sock_path, str(timeout), "w1:p2"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+        def consume_slowly():
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    return
+                time.sleep(0.02)
+
+        consumer = threading.Thread(target=consume_slowly, daemon=True)
+        consumer.start()
+
+        deadline = time.monotonic() + timeout + 6
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        try:
+            self.assertIsNotNone(
+                proc.poll(),
+                "reader still alive long past its wait budget under a "
+                "saturated stream (quiet-fleet crash-loop regression)",
+            )
+            self.assertEqual(proc.returncode, 0)
+        finally:
+            stop.set()
+            proc.kill()
+            proc.wait()
+
 
 if __name__ == "__main__":
     unittest.main()
