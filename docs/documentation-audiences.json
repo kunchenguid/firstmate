@@ -125,6 +125,7 @@
   "surfaces": [
     { "path": "modules/fm-tui-core/AGENTS.md", "audience": "agent-runtime" },
     { "path": "modules/fm-tui-core/CLAUDE.md", "audience": "agent-runtime" },
+    { "path": "modules/fm-state-reader/README.md", "audience": "operator-current" },
     { "path": "modules/fm-state-reader/AGENTS.md", "audience": "agent-runtime" },
     { "path": "modules/fm-state-reader/CLAUDE.md", "audience": "agent-runtime" },
     {

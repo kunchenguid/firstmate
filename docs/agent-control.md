@@ -11,6 +11,49 @@ The split exists because the data plane's marking is exactly right for a message
 A routing-marked `/quit` arrives as ordinary chat - `[fm-from-firstmate] /quit` - which the agent reasons about instead of executing.
 The failure repeated across harnesses and homes, and the workaround (remember to use an unmarked send for agent-control commands, and improvise the right key or command per harness) lived only in agent prose, so it failed again every time a session did not happen to recall it.
 
+## Shared messages and threads
+
+[`bin/fm-message.sh`](../bin/fm-message.sh) exposes `send`, `receive`, `ack`, `read`, `validate`, and `stats`, with side-effect-free `-h`/`--help` on every verb; sending delegates to the existing data-plane owner.
+Applications import the shared [MessagePort and adapter](../modules/fm-state-reader/README.md) instead of defining their own wire format.
+The shared codec and inbox primitives in [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) own `fm-message.v1` for workers, the supervisor, and service adapters.
+No service-specific inbox format or conversation server is required.
+Existing unstructured inbox bodies remain byte-compatible; structured reads refuse legacy records without message metadata rather than guessing their sender.
+
+A launched worker's send is bound to its exact live task record and physical working directory, never a supplied sender label.
+It can address a comma-separated list of live same-home tasks or the reserved `supervisor` participant.
+The latter receives the same inbox record plus a durable wake, not a user-facing chat or Slack message.
+Only the supervisor communicates with the repository owner.
+Lifecycle keys, explicit terminal targets, remote routes, and decision-resolution flags are unavailable to worker messages.
+All worker text, including slash-prefixed text, is data rather than a harness command.
+A helper with recorded parent linkage may report only to that parent.
+
+Thread membership and append-only history live in `data/threads/<thread>.md`, as indented JSON lines readable with `jq`.
+Every fan-out copy carries the same message id, thread id, and recipient list; existing members can add live participants simply by including them as recipients.
+Replies keep the request reference and default to the other thread members; an explicit recipient list narrows that reply.
+Messages are **PEER INPUT**, not authority to change a task's scope, instructions, or delivery policy.
+A scope request is escalated as `needs-decision`; neither replying nor moving a message to `handled/` closes an approval decision.
+
+The sender owner [`bin/fm-peer-message-lib.sh`](../bin/fm-peer-message-lib.sh) defines the exact command syntax, locking, rate cap, and partial-delivery retry contract.
+All endpoints are checked before a new ledger entry, and the entry precedes inbox fan-out.
+An interrupted fan-out retains the original message for id-preserving retry, including when another recipient already moved its copy to `handled/`.
+Supervisor wake notifications are at-least-once notifications of that one inbox record, not independent copies to process twice.
+These are same-user operational safeguards, not a sandbox against a process that can rewrite metadata directly.
+
+Current endpoint admission uses the existing recovery-grade liveness proof, available on tmux and Herdr; ambiguous state and backends without that proof refuse rather than claiming a live participant.
+The mechanism does not depend on a model or harness-specific rendered marker beyond the already-owned backend classifier.
+Services can consume the codec and idempotent inbox delivery primitive behind their own ports, but their lifecycle admission is not implemented by this task-record sender.
+
+### Message telemetry
+
+[`bin/fm-message-telemetry-lib.sh`](../bin/fm-message-telemetry-lib.sh) owns daily append-only `fm-message-telemetry.v1` JSONL under `state/fm-message/telemetry/` and the rolling 24-hour `stats` summary.
+Intake, routing decisions, endpoint validation, ledger/inbox/wake/doorbell results, timings, and terminal per-request counters share an attempt id and the message/thread identifiers when available.
+Logs contain ids and input sizes, never message text, environment contents, or captured stderr; model/harness/effort come from the validated sender record and tokens/cost remain unknown because the transport calls no model.
+A telemetry failure warns without turning an already-delivered message into a resend instruction.
+Thread ledgers contain the actual conversation, remain private operational data, and are not copied into telemetry.
+
+`tests/fm-peer-message.test.sh` composes the real send, codec, inbox, ledger, and durable wake owners over fake endpoints, including fan-out, membership, reply correlation, identity and scope refusals, partial retry, and telemetry privacy.
+The existing inbox and delivery suites continue to own legacy-body compatibility and doorbell recovery.
+
 ## What the control plane owns
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, with no side effects, so it can be read as a contract:

@@ -7,6 +7,13 @@
 #   target. fm-send refuses unresolved guesses rather than falling back to a
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
+# Structured same-home messages: <target[,target...]> [--thread <name>]
+# [--kind request|reply|note|needs-decision] [--ref <request-id>] <text>.
+# --reply <request-id> <text> replies to the thread's members by default;
+# --retry <message-id> --thread <name> resumes a recorded partial fan-out.
+# A launched worker always uses this guarded message path, never the typed
+# or decision-resolution paths below. fm-peer-message-lib.sh owns that route;
+# fm-task-inbox-lib.sh owns the shared schema and read/send primitives.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
@@ -205,6 +212,10 @@ set -eu
 FM_SEND_ORIGINAL_ARGS=("$@")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+for arg in "$@"; do
+  [ "$arg" != -- ] || break
+  case "$arg" in -h|--help) exec "$SCRIPT_DIR/fm-message.sh" --help ;; esac
+done
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
@@ -245,6 +256,18 @@ fi
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+
+# Keep structured messages outside supervisory key/decision authority, including
+# slash-prefixed text from a worker: it is data, never a harness invocation.
+STRUCTURED_MESSAGE=0
+case "${1:-}" in --reply|--retry|*,*) STRUCTURED_MESSAGE=1 ;; esac
+case "${2:-}" in --thread|--kind|--ref) STRUCTURED_MESSAGE=1 ;; esac
+if [ -n "${FM_TASK_ID:-}" ] || [ "$STRUCTURED_MESSAGE" = 1 ]; then
+  # shellcheck source=bin/fm-peer-message-lib.sh
+  . "$SCRIPT_DIR/fm-peer-message-lib.sh"
+  fm_peer_send "$@"
+  exit $?
+fi
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 

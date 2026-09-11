@@ -18,7 +18,7 @@ modules/<name>/
   src/adapters/      # files, forge, harness, procevent, terminal/CLI as needed
   src/index.mjs      # public exports; no startup side effects
   tests/            # core.test.mjs, usecases.test.mjs, adapters.test.mjs, fakes
-  docs/README.md     # Usage, Layout, Ports, Configuration, Limits, Verification
+  README.md         # Why it exists, How to run, How to configure, Telemetry, Development
   config.json       # application defaults, only when configurable
   config.schema.json
   personas/         # only when the application actually invokes a model
@@ -42,11 +42,16 @@ Load edited personas per invocation; each English Markdown persona states purpos
 ## Application contract
 
 `run -- start` starts manually in the foreground; `status` prints once; `--frames N --out DIR` exports bounded frames; `--clean` prints a static all-row view; `--no-ui` runs without animation; honor `NO_COLOR`.
+Every command and subcommand supports `-h` and `--help`, listing every verb and flag with a one-line description and one example each, without starting the application or requiring credentials.
+Each module's root `README.md` has these sections in order: `Why it exists` (3-5 lines), `How to run` (fresh-checkout commands), `How to configure` (every key, default, and file location), `Telemetry` (paths and reading commands), and `Development` (tests and fakes).
+Desktop applications use a mostly static lo-fi/synthwave idle scene, with a small blink, flicker, drifting cloud, breathing glow, or thread twitch every few seconds at 1-4 fps, never constant fast motion; preserve `--clean` and `NO_COLOR` output.
+Libraries and one-shot commands do not invent an idle animation or timer.
 The application owns signals, frame timing and file-change debounce; `fm-tui-core` never starts a timer.
 Keep runtime writes under `FM_HOME/state/<name>/`, including any database, plus registered process-event records; never auto-start or perform actions from untrusted evidence.
 Only a thin `bin/fm-<name>.sh` wrapper lives outside the module; event adapters live in `src/adapters/procevent.sh` and use the existing process-event owner, never direct wake-queue append.
-The [shared reader](fm-state-reader/docs/README.md) owns that executable delivery seam and its durability limits.
-Service requests and replies use the shared crew-talk message contract through a message port, never a private inbox wire format; until its adapter is available, test that port with an in-memory fake.
+The [shared reader](fm-state-reader/README.md) owns that executable delivery seam and its durability limits.
+Service requests and replies consume the shared [MessagePort](fm-state-reader/src/ports/messages.d.ts), [adapter](fm-state-reader/src/adapters/messages.mjs), and [fake](fm-state-reader/tests/fake-messages.mjs), never an application-private inbox wire format.
+The adapter delegates to existing guarded message owners; services without supported lifecycle admission remain on the fake rather than claiming a task identity.
 A service appends daily JSONL under `state/<name>/telemetry/YYYY-MM-DD.jsonl` with this record shape: `{"ts":"UTC ISO-8601","module":"name","event":"port.exit","requestId":null,"threadId":null,"actor":"name","inputs":{"ids":[],"bytes":0},"decision":null,"reasons":[],"stepsMs":{},"model":null,"harness":null,"effort":null,"tokens":null,"cost":null,"outcome":"accepted","evidencePath":null,"counters":{}}`.
 Outcome is `accepted`, `rejected`, or `error` after a step and null at entry; unknown measurements remain null, never invented zeros.
 Log adapter entry/exit and errors with refusal reasons; pure core functions return decision evidence for the use case to log rather than doing I/O themselves.
