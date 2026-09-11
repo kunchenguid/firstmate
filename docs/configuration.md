@@ -273,6 +273,8 @@ The age it is measured against is how long a worker has been RUNNING whenever a 
 A worker's task age is also shown in its own column when the pane is wide enough.
 `FM_SESSION_STALE_DAYS` sets that threshold and defaults to 3 days.
 The same threshold drives the unasked `SESSIONS_STALE:` lines a session start prints through [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh); set `FM_BOOTSTRAP_STALE_SESSIONS=0` to opt a home out of those lines.
+Those lines are capped, and the cap keeps one line for every kind that has an overdue row, then gives what is left to this home's own workers, background sessions, and services ahead of the machine-wide review pages, oldest first within each.
+Whatever does not fit is counted on a closing line pointing at the view, so nothing falls away silently.
 Because the review pages are machine-wide, only the main home names them on those unasked lines; a secondmate home leaves them to it rather than every home on the machine repeating the same lines at every session start.
 The pages themselves stay in the view and in `--json` for every home.
 

@@ -800,6 +800,63 @@ test_stale_session_line_names_the_pid() {
   pass "inventory: the unasked line names an overdue background session by its pid"
 }
 
+# THE UNASKED LINES ARE A BUDGET, AND AGE ALONE SPENT IT ON THE WRONG ROWS. The
+# review pages are machine-wide and the longest-lived rows in the listing, so
+# ranking the eight lines by age alone handed them to old review pages and
+# dropped this home's own overdue work under the cap - a worker abandoned for
+# days and a second background session working in one home, which is the case
+# that caused the damage this overview exists to prevent.
+test_this_homes_overdue_work_outranks_machine_wide_review_pages() {
+  local home spec daemon out pid artifact days shown n=0
+  local -a pages=()
+  home=$(make_home crowded-lines)
+  write_worker "$home" forgotten-worker 3
+  finish_backlog "$home"
+  mkdir -p "$home/data/board/lavish"
+  # Nine open review pages, every one of them older than this home's own work:
+  # the six ages measured against the captain's real listing (11, 10, 8, 8, 4
+  # and 4 days), plus three more of the fifteen pages it holds open crossing the
+  # threshold too.
+  for days in 11 10 8 8 6 5 4 4 4; do
+    artifact="$home/data/board/lavish/page-$n.html"
+    printf '<html></html>\n' > "$artifact"
+    touch -t "$(date -u -r $((NOW_EPOCH - days * DAY)) +%Y%m%d%H%M 2>/dev/null \
+      || date -u -d "@$((NOW_EPOCH - days * DAY))" +%Y%m%d%H%M)" "$artifact"
+    pages+=("$artifact" open 0)
+    n=$((n + 1))
+  done
+  write_lavish_stub "$FAKEBIN" "${pages[@]}"
+  spec="$home/children"
+  printf '%s|sess-a --session-id aaaa --agent claude\n' "$home" > "$spec"
+  start_daemon_tree "$home" "$spec"
+  daemon=$DAEMON_PID
+  printf '%s\n' "$daemon" > "$home/state/.lock"
+
+  # A fixture session is seconds old, so the threshold comes down to it - which
+  # makes every page overdue as well, and that is what puts the eight lines
+  # under the pressure the real listing puts them under.
+  out=$(FM_SESSION_STALE_DAYS=0 run_in_session "$home" "$INVENTORY" --stale-lines) \
+    || fail "--stale-lines failed with a crowded review listing"
+  pid=$(FM_SESSION_STALE_DAYS=0 run_in_session "$home" "$INVENTORY" --json \
+    | jq -r '.rows[] | select(.kind == "harness-session") | select(.close != null) | .id' | head -1)
+  [ -n "$pid" ] || fail "the fixture session was not listed as this home's"
+
+  assert_contains "$out" "SESSIONS_STALE: worker forgotten-worker" \
+    "old review pages must never crowd out this home's own forgotten worker"
+  assert_contains "$out" "SESSIONS_STALE: background session $pid" \
+    "old review pages must never crowd out a second background session in this home"
+  assert_contains "$out" "SESSIONS_STALE: review page" \
+    "a kind with an overdue row must keep a line of its own"
+  assert_contains "$out" "more - see bin/fm-session-view.sh" \
+    "what the cap dropped must still be pointed at, never dropped silently"
+  shown=$(printf '%s\n' "$out" | LC_ALL=C grep -c 'review page' || true)
+  [ "${shown:-0}" -lt 9 ] \
+    || fail "the cap must still bound the unasked lines, got $shown review page lines"
+
+  kill_spawned
+  pass "inventory: this home's own overdue work outranks machine-wide review pages"
+}
+
 test_row_without_a_safe_close_stays_out_of_the_unasked_line() {
   local home json out
   home=$(make_home manual-close)
@@ -859,6 +916,16 @@ EOF
     || fail "an old task with a fresh worker must not be flagged as overdue"
   [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "fresh-worker") | .task_age_days')" = 30 ] \
     || fail "the task age must still be reported, separately from running time"
+  # The process that supplied that running time is the one thing the captain can
+  # act on, so the row hands over its pid rather than dropping it. Nothing here
+  # ends it: the number and the cleanup command are his to use.
+  local worker_pid
+  worker_pid=$(printf '%s' "$json" | jq -r '.rows[] | select(.id == "fresh-worker") | .pid')
+  case "$worker_pid" in
+    ''|null|*[!0-9]*) fail "a worker aged from a live process must carry that process id, got '$worker_pid'" ;;
+  esac
+  [ "$(ps -o ppid= -p "$worker_pid" 2>/dev/null | tr -d ' ')" = "$daemon" ] \
+    || fail "the pid on the worker row must be the live process working in its worktree"
   # The very process that supplied that running time works in a worktree INSIDE
   # this home, so a bare containment test would report it a second time as a
   # standalone background session carrying a raw kill - alongside the worker row
@@ -987,6 +1054,51 @@ test_review_page_with_queued_notes_needs_confirmation() {
     || fail "queued captain notes must make closing a review page need confirmation first"
 
   pass "inventory: a review page holding queued notes is never presented as safe to close"
+}
+
+# A directory the captain names himself can hold a comma - "Acme, Inc" is an
+# ordinary client folder, and his artifacts already live under directories he
+# names - while the Lavish listing separates its own fields with one. Reading
+# those fields from the left cut the path in half: the row named a directory
+# that does not exist, the page lost its age entirely, and the close command he
+# is told to paste could not run.
+test_a_review_path_with_a_comma_reaches_lavish_whole() {
+  local home json artifact dir close out stage
+  home=$(make_home reviews-comma)
+  finish_backlog "$home"
+  dir="$home/data/board/Acme, Inc/lavish"
+  mkdir -p "$dir"
+  artifact="$dir/index.html"
+  printf '<html></html>\n' > "$artifact"
+  touch -t "$(date -u -r $((NOW_EPOCH - 5 * DAY)) +%Y%m%d%H%M 2>/dev/null \
+    || date -u -d "@$((NOW_EPOCH - 5 * DAY))" +%Y%m%d%H%M)" "$artifact"
+  write_lavish_stub "$FAKEBIN" "$artifact" open 0
+
+  json=$(run_inventory "$home" --json) || fail "inventory failed for a review path with a comma"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "review") | .belongs_to')" = "$dir" ] \
+    || fail "a review row must name the whole directory its artifact lives in"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "review") | "\(.age_days) \(.age_source)"')" \
+    = "5 file-mtime" ] \
+    || fail "a page whose path holds a comma must still be aged from its own artifact"
+  [ "$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "review") | .detail')" \
+    = "open http://127.0.0.1:4387/session/sid0" ] \
+    || fail "the status and url must still be read from the fields that hold them"
+
+  stage="$TMP_ROOT/comma-stage"
+  mkdir -p "$stage"
+  cat > "$stage/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'argc=%s\narg2=%s\n' "$#" "${2:-}"
+SH
+  chmod +x "$stage/lavish-axi"
+  close=$(printf '%s' "$json" | jq -r '.rows[] | select(.kind == "review") | .close')
+  out=$(PATH="$stage:$PATH" bash -c "$close") \
+    || fail "the printed close command must run as a single command"
+  assert_contains "$out" "argc=2" \
+    "an artifact path with a comma must reach lavish-axi as one argument"
+  assert_contains "$out" "arg2=$artifact" "the artifact path must arrive unaltered"
+
+  pass "inventory: a review path containing a comma stays whole, aged, and closeable"
 }
 
 test_unreadable_source_is_disclosed_not_counted_as_zero() {
@@ -1754,12 +1866,14 @@ test_close_commands_stay_pasteable_when_paths_contain_spaces
 test_unsettled_worker_state_is_never_presented_as_safe
 test_stale_rows_carry_their_exact_close_command
 test_stale_session_line_names_the_pid
+test_this_homes_overdue_work_outranks_machine_wide_review_pages
 test_worker_age_is_running_time_not_task_age
 test_worker_with_no_live_process_is_aged_by_its_task
 test_row_without_a_safe_close_stays_out_of_the_unasked_line
 test_captain_held_work_stays_out_of_the_unasked_line
 test_review_pages_are_listed_and_aged
 test_review_page_with_queued_notes_needs_confirmation
+test_a_review_path_with_a_comma_reaches_lavish_whole
 test_unreadable_source_is_disclosed_not_counted_as_zero
 test_view_is_readable_narrow_and_without_colour
 test_view_refuses_a_cadence_below_the_floor

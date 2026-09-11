@@ -503,21 +503,28 @@ within_a_worker_worktree() {  # <cwd>
   return 1
 }
 
-# Longest-running harness process working in <dir>. Longest rather than newest
-# because a worker's own process tree can be several harness processes deep, and
-# the outermost one is the incarnation that has actually been up the whole time.
-worker_runtime_seconds() {  # <worktree>
-  local dir best='' pid age cwd
+# Longest-running harness process working in <dir>, as `pid<TAB>seconds`.
+# Longest rather than newest because a worker's own process tree can be several
+# harness processes deep, and the outermost one is the incarnation that has
+# actually been up the whole time.
+#
+# THE PID TRAVELS WITH THE AGE. A worker aged from a live process IS a live
+# process, which the row contract says carries its pid; dropping it left the
+# captain with a running worker and no number to act on, while every
+# harness-session row carried one. Nothing here ends it: the row hands over the
+# pid and the cleanup command, and the decision stays his.
+worker_runtime_process() {  # <worktree>
+  local dir best='' best_pid='' pid age cwd
   [ -n "$1" ] || return 1
   dir=$(physical_path "$1")
   while IFS=$'\t' read -r pid age cwd; do
     [ -n "$pid" ] || continue
     path_within "$cwd" "$dir" || continue
     case "$age" in ''|*[!0-9]*) continue ;; esac
-    if [ -z "$best" ] || [ "$age" -gt "$best" ]; then best=$age; fi
+    if [ -z "$best" ] || [ "$age" -gt "$best" ]; then best=$age; best_pid=$pid; fi
   done < "$WORKER_PROCS"
   [ -n "$best" ] || return 1
-  printf '%s\n' "$best"
+  printf '%s\t%s\n' "$best_pid" "$best"
 }
 
 # --- 1. workers, from the fleet snapshot (the single owner of fleet state) ----
@@ -544,7 +551,7 @@ collect_workers() {
   fi
   note_source fleet-snapshot 1 ''
   local id kind repo window worktree since state hold_kind
-  local busy close safety cnote age age_source held task_age
+  local busy close safety cnote age age_source held task_age pid runtime
   # The worktrees come from the snapshot, so the process scan can be narrowed to
   # the directories that can possibly host a worker before any pid is verified.
   local -a worktrees=()
@@ -579,7 +586,9 @@ collect_workers() {
     fi
     age=''
     age_source=''
-    if [ -n "$worktree" ] && age=$(worker_runtime_seconds "$worktree"); then
+    pid=''
+    if [ -n "$worktree" ] && runtime=$(worker_runtime_process "$worktree"); then
+      IFS=$'\t' read -r pid age <<<"$runtime"
       age_source=process
     elif [ -n "$task_age" ]; then
       age=$task_age
@@ -619,7 +628,7 @@ collect_workers() {
     held=0
     [ "$hold_kind" != captain ] || held=1
     emit_row worker "$id" "$kind" "${repo:-$id}" "${window:+window $window}${worktree:+ in $worktree}" \
-      '' "${age:-}" "$age_source" "$close" "$safety" "$cnote" "$held" "${task_age:-}"
+      "$pid" "${age:-}" "$age_source" "$close" "$safety" "$cnote" "$held" "${task_age:-}"
   done < <(jq -r '
       .tasks[]? |
       [ .id,
@@ -696,12 +705,17 @@ collect_reviews() {
         line = $0
         sub(/^[[:space:]]+/, "", line)
         if (line == "") next
-        # file,status,"url",pending - the file path never contains a comma in a
-        # Lavish artifact path, and the url is the only quoted field.
+        # file,status,"url",pending. The three trailing fields are fixed and
+        # comma-free, so they are read from the RIGHT and everything before them
+        # is the path - the captain keeps artifacts under directories he names
+        # himself, and one called "Acme, Inc" would otherwise truncate the label,
+        # lose the page its age, and print an `end` command that cannot run.
         n = split(line, f, ",")
         if (n < 4) next
-        url = f[3]; gsub(/^"|"$/, "", url)
-        printf "%s\t%s\t%s\t%s\n", f[1], f[2], url, f[n]
+        url = f[n - 1]; gsub(/^"|"$/, "", url)
+        file = f[1]
+        for (i = 2; i <= n - 3; i++) file = file "," f[i]
+        printf "%s\t%s\t%s\t%s\n", file, f[n - 2], url, f[n]
       }' "$out")
 }
 
@@ -1121,8 +1135,21 @@ printf '%s\n' "$JSON" | jq -r --argjson cap 8 --argjson reviews "$REVIEW_LINES" 
     elif $r.kind == "worker" then "worker \($r.id)"
     elif $r.kind == "review" then "review page \($r.label)"
     else "service \($r.label // $r.id)" end;
-  # Oldest first across every kind, so the cap below can only ever drop the
-  # least overdue lines.
+  # WHAT THE CAP MAY DROP. Ranking by age alone equated least overdue with least
+  # important, and that is wrong here: the review pages are MACHINE-WIDE and are
+  # the longest-lived rows on the machine, so measured against a real listing six
+  # of these eight lines went to review pages before the overdue work of THIS
+  # home was reached. A worker abandoned for days and a second background session
+  # in one home - the case that caused the real damage - fell under the cap while
+  # old review pages filled it. So the budget is spent in two steps. Every kind
+  # that has an overdue row keeps one line, so no kind can disappear entirely.
+  # The remaining lines go to the rows of this home - workers, background
+  # sessions, services - ahead of the machine-wide review pages, oldest first,
+  # because a forgotten worker of this home costs the captain more than an old
+  # review page of the same age. Nothing dropped is lost silently: the count at
+  # the end points at the full view.
+  def scope_rank: if .kind == "review" then 1 else 0 end;
+  def by_urgency: sort_by([scope_rank, -(.age_seconds // 0), .kind, .id]);
   # The same main-home-only rule the review rows follow, and for the same reason:
   # Lavish is the one MACHINE-WIDE collector here, so its failure is a single
   # condition that every firstmate home on this machine would otherwise repeat on
@@ -1130,8 +1157,12 @@ printf '%s\n' "$JSON" | jq -r --argjson cap 8 --argjson reviews "$REVIEW_LINES" 
   # reporting from every home.
   ([.sources[] | select(.ok | not)
     | select($reviews == 1 or .name != "lavish") | .name] | join(", ")) as $unreadable
-  | [.rows[] | select(.notify) | select($reviews == 1 or .kind != "review")]
-  | sort_by(-(.age_seconds // 0)) as $stale
+  | ([.rows[] | select(.notify) | select($reviews == 1 or .kind != "review")]
+     | by_urgency) as $ordered
+  | (($ordered | map(.kind) | unique
+      | map(. as $kind | $ordered | map(select(.kind == $kind)) | .[0:1]) | add) // []
+     | by_urgency) as $reserved
+  | ($reserved + ($ordered - $reserved)) as $stale
   | (if $unreadable == "" then empty
      else "SESSIONS_STALE: could not check everything - \($unreadable) unreadable; run bin/fm-session-view.sh"
      end),

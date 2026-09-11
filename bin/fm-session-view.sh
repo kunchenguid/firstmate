@@ -95,12 +95,19 @@ esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-session-view: jq not found" >&2; exit 1; }
 
+# Whether the REAL stdout is a terminal, decided once, before anything captures
+# it. --watch renders a frame into a variable first, and inside that capture
+# stdout is a pipe, so asking at that point would answer for the pipe and quietly
+# strip the colour from a pane that has it.
+STDOUT_IS_TTY=0
+[ -t 1 ] && STDOUT_IS_TTY=1
+
 use_color() {
   case "$COLOR" in
     always) return 0 ;;
     never) return 1 ;;
   esac
-  [ -z "${NO_COLOR:-}" ] && [ -t 1 ]
+  [ -z "${NO_COLOR:-}" ] && [ "$STDOUT_IS_TTY" = 1 ]
 }
 
 term_width() {
@@ -246,11 +253,24 @@ fi
 
 # Redraw in place. Cursor-home then clear, rather than a full terminal reset, so
 # the pane stops flickering and the captain's scrollback survives.
+#
+# THE FRAME IS BUILT BEFORE THE PANE IS CLEARED. Clearing first left the pane
+# blank for the whole of every pass - the second or two a normal collection
+# costs, and up to the sum of the per-source bounds when one of them wedges.
+# That is the same cleared-and-frozen pane those bounds exist to prevent, just
+# time-boxed. So the frame is rendered into a variable and the pane is cleared
+# only once there is something to put in its place; a pass that could not read
+# the inventory at all leaves the previous frame standing rather than wiping it
+# for an error.
 trap 'exit 0' INT TERM
 while :; do
-  if [ -t 1 ]; then
-    printf '\033[H\033[2J'
+  if frame=$(render_once); then
+    if [ "$STDOUT_IS_TTY" = 1 ]; then
+      printf '\033[H\033[2J'
+    fi
+    printf '%s\n' "$frame"
+  else
+    printf 'fm-session-view: could not read the inventory this pass\n' >&2
   fi
-  render_once || printf 'fm-session-view: could not read the inventory this pass\n' >&2
   sleep "$INTERVAL"
 done
