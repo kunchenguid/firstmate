@@ -33,7 +33,7 @@ test('forge failure withholds PR claims, and URL 1 cannot bind URL 10', () => {
 });
 test('message meaning is pure and confirmation requires current evidence', () => {
   const findings = measure({ ...state, workers: [worker] }, c), id = findings[0].id;
-  const message = { schema: 'fm-message.v1', id: 'msg-test', thread: 'test', at: '2026-09-11', from: 'main', to: ['moiras'], kind: 'request', ref: null, text: `confirm ${id}` };
+  const message = { schema: 'fm-message.v1', id: 'msg-test', thread: 'test', at: '2026-09-11', from: 'main', to: ['fm-moiras'], kind: 'request', ref: null, text: `confirm ${id}` };
   assert.match(answer(message, { ...state, findings }), /confirm recorded.*no task action/);
   assert.throws(() => answer(message, { ...state, findings: [] }), /evidence changed/);
   assert.throws(() => answer({ ...message, to: 'other' }, { ...state, findings }), /Not a Moiras request/);

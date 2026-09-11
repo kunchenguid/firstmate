@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
+import { processStats } from './resources.mjs';
+const segmentBytes = 1048576;
 export function json(file) {
   let fd;
   try {
@@ -21,7 +23,7 @@ export function journal(home) {
     if (!fs.lstatSync(target).isDirectory() || fs.lstatSync(target).isSymbolicLink()) throw Error('Unsafe Moiras directory');
   }
   const file = key => {
-    if (!/^(?:snapshot|quiet|episodes|replies)\.json$|^events\/[a-f0-9]{24}\.json(?:\.sent)?$/.test(key)) throw Error('Invalid journal key');
+    if (!/^(?:snapshot|quiet|episodes|replies)\.json$|^events\/[a-f0-9]{24}\.json(?:\.(?:sent|delivery))?$/.test(key)) throw Error('Invalid journal key');
     const target = path.join(dir, key);
     if (fs.realpathSync(path.dirname(target)) !== path.dirname(target)) throw Error('Unsafe journal directory');
     return target;
@@ -33,27 +35,65 @@ export function journal(home) {
     fs.writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
     try { fs.renameSync(tmp, target); } finally { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); }
   };
+  let retainedDay;
   return { get: key => json(file(key)), set,
+    resources() {
+      const lock = path.join(dir, 'running');
+      if (!fs.existsSync(lock)) return null;
+      if (!fs.lstatSync(lock).isDirectory()) throw Error('Unsafe server lease');
+      const owner = json(path.join(lock, 'owner.json'));
+      if (!owner || typeof owner !== 'object') return null;
+      const sample = processStats(owner.pid);
+      return sample?.started === owner.started ? sample : null;
+    },
     claim() {
-      const lock = path.join(dir, 'running'), owner = randomUUID();
+      const sample = processStats(process.pid);
+      if (!sample) throw Error('Cannot identify server process');
+      const lock = path.join(dir, 'running'), owner = { id: randomUUID(), pid: sample.pid, started: sample.started };
       try { fs.mkdirSync(lock, { mode: 0o700 }); } catch { throw Error('Moiras lock exists or is unavailable; inspect before retrying'); }
       fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify(owner), { mode: 0o600, flag: 'wx' });
       let released = false;
-      return () => { if (released) return; if (fs.realpathSync(lock) !== lock || json(path.join(lock, 'owner.json')) !== owner) throw Error('Moiras lock changed; not removed'); fs.unlinkSync(path.join(lock, 'owner.json')); fs.rmdirSync(lock); released = true; };
+      return () => { if (released) return; if (fs.realpathSync(lock) !== lock || JSON.stringify(json(path.join(lock, 'owner.json'))) !== JSON.stringify(owner)) throw Error('Moiras lock changed; not removed'); fs.unlinkSync(path.join(lock, 'owner.json')); fs.rmdirSync(lock); released = true; };
     },
     append(record) {
-      const target = path.join(dir, 'telemetry', `${record.ts.slice(0, 10)}.jsonl`);
-      if (!/^\d{4}-\d\d-\d\dT/.test(record.ts) || fs.realpathSync(path.dirname(target)) !== path.dirname(target)) throw Error('Unsafe telemetry path');
-      const fd = fs.openSync(target, fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
-      try { fs.writeFileSync(fd, JSON.stringify(record) + '\n'); } finally { fs.closeSync(fd); }
+      if (!/^\d{4}-\d\d-\d\dT/.test(record.ts) || !Number.isFinite(Date.parse(record.ts))) throw Error('Unsafe telemetry time');
+      const day = record.ts.slice(0, 10), logs = path.join(dir, 'telemetry'), target = path.join(logs, `${day}.jsonl`);
+      if (fs.realpathSync(logs) !== logs) throw Error('Unsafe telemetry path');
+      const text = JSON.stringify(record) + '\n', bytes = Buffer.byteLength(text);
+      if (bytes > segmentBytes) throw Error('Telemetry record exceeds 1 MiB');
+      if (retainedDay !== day) {
+        const cutoff = new Date(Date.parse(day) - 86400000).toISOString().slice(0, 10);
+        for (const name of fs.readdirSync(logs)) if (/^\d{4}-\d\d-\d\d(?:\.1)?\.jsonl$/.test(name) && name.slice(0, 10) < cutoff) {
+          const old = path.join(logs, name);
+          if (!fs.lstatSync(old).isFile()) throw Error('Unsafe expired telemetry file');
+          fs.unlinkSync(old);
+        }
+        retainedDay = day;
+      }
+      const open = () => fs.openSync(target, fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 0o600);
+      let fd = open();
+      try {
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile() || stat.size > segmentBytes) throw Error('Telemetry segment exceeds budget; archive it before retrying');
+        // ponytail: rotation across CLI/server writers is best-effort; serialize if lossless telemetry is required.
+        if (stat.size + bytes > segmentBytes) {
+          fs.closeSync(fd); fd = undefined;
+          const backup = path.join(logs, `${day}.1.jsonl`);
+          if (fs.existsSync(backup) && !fs.lstatSync(backup).isFile()) throw Error('Unsafe telemetry backup');
+          fs.renameSync(target, backup); fd = open();
+        }
+        fs.writeFileSync(fd, text);
+      } finally { if (fd !== undefined) fs.closeSync(fd); }
     },
     async stats(now) {
       const days = [...new Set([now, now - 86400].map(t => new Date(t * 1000).toISOString().slice(0, 10)))];
-      const result = { events: 0, requests: 0, errors: 0, tokens: null, cost: null, unknownCosts: 0, durationMs: 0 }, requests = new Set();
-      for (const day of days) {
-        const target = path.join(dir, 'telemetry', `${day}.jsonl`);
+      const result = { events: 0, requests: 0, errors: 0, tokens: null, cost: null, unknownCosts: 0, durationMs: 0, rotated: false }, requests = new Set();
+      for (const day of days) for (const suffix of ['', '.1']) {
+        const target = path.join(dir, 'telemetry', `${day}${suffix}.jsonl`);
         if (!fs.existsSync(target)) continue;
         if (fs.realpathSync(target) !== target || !fs.lstatSync(target).isFile()) throw Error('Unsafe telemetry file');
+        if (fs.statSync(target).size > segmentBytes) throw Error('Telemetry segment exceeds budget; stats incomplete');
+        if (suffix) result.rotated = true;
         const stream = fs.createReadStream(target, { flags: fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW });
         try { for await (const line of createInterface({ input: stream, crlfDelay: Infinity })) {
           let row; try { row = JSON.parse(line); } catch { throw Error('Malformed telemetry row; stats incomplete'); }

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { safe } from '../../../fm-state-reader/src/index.mjs';
+export const serviceId = 'fm-moiras';
 export const digest = text => createHash('sha256').update(text).digest('hex').slice(0, 24);
 const held = text => /^(done|paused|parked|needs-decision)(?:\s|:)/.test(text);
 const failures = w => w.lines.map(l => l.match(/(?:^|:\s*)(?:FAIL(?:ED)?|failing test|test failed)[: ]+(.+)/i)?.[1]);
@@ -48,7 +49,7 @@ export function measure(s, c) {
   return findings;
 }
 export function answer(message, snapshot) {
-  if (message.kind !== 'request' || !Array.isArray(message.to) || !message.to.includes('moiras')) throw Error('Not a Moiras request');
+  if (message.kind !== 'request' || !Array.isArray(message.to) || !message.to.includes(serviceId)) throw Error('Not a Moiras request');
   const [op, value, ...extra] = message.text.trim().split(/\s+/);
   if (extra.length || !value) throw Error('Use ask TASK, confirm ID, or dismiss ID');
   if (op === 'ask') {

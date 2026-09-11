@@ -16,6 +16,7 @@ export interface Journal {
   append(record: object): void;
   stats(now: number): Promise<object>;
   claim(): () => void;
+  resources(): { pid: number; rssBytes: number; cpuPercent: number; cpuSeconds: number; started: string; sampledAt: string } | null;
 }
 export interface Publisher { publish(id: string): Promise<unknown>; captured(id: string): boolean }
 export interface ReasoningRole { harness: string; model: string; effort: string; persona: string }

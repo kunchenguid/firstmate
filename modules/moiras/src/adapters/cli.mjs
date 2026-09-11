@@ -4,7 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { display, terminal, plain } from '../../../fm-tui-core/src/index.mjs';
-import { thread, measure } from '../core/findings.mjs';
+import { thread, measure, serviceId } from '../core/findings.mjs';
 import { frame, plainStatus } from '../core/frame.mjs';
 import { config, defaultConfig, toolRoot } from './config.mjs';
 import { state } from './state.mjs';
@@ -17,6 +17,7 @@ import { explain } from '../usecases/explain.mjs';
 import { run } from './command.mjs';
 const flags = {
   help: ['boolean', 'Show every verb and flag without starting or needing credentials', '-h'],
+  json: ['boolean', 'Status as JSON, including the running server PID, RSS and CPU (null when unavailable)', 'status --json'],
   config: ['string', 'Configuration JSON file (default: modules/moiras/config.json)', '--config settings.json'],
   'no-ui': ['boolean', 'Run the observer with plain event lines, without animation', 'start --no-ui'],
   clean: ['boolean', 'Print every task once in ASCII, with no animation or escapes (also when NO_COLOR is set)', 'start --clean'],
@@ -34,7 +35,7 @@ const clean = opt.clean || process.env.NO_COLOR !== undefined;
 const help = () => ['Moiras - manual, advisory terminal observer', ...[
   ['start', 'Start the foreground observer; Ctrl+C stops it', 'start --no-llm'],
   ['status', 'Print a fresh all-task snapshot once', 'status'],
-  ['stats', 'Summarize the last 24 hours of local telemetry', 'stats'],
+  ['stats', 'Summarize retained local telemetry from the last 24 hours', 'stats'],
   ['reason ROLE TASK', 'Explicitly spend one bounded model call; print an advisory, never act or publish it', 'reason clotho example-task'],
 ].map(([verb, text, example]) => `${verb}: ${text}\n  Example: fm-moiras ${example}`),
 ...Object.entries(flags).map(([name, [, text, example]]) => `${name === 'help' ? '-h / ' : ''}--${name}: ${text}\n  Example: fm-moiras ${example}`)].join('\n') + '\n';
@@ -49,6 +50,7 @@ async function main() {
   const verb = positionals[0] ?? 'start';
   if (!['start', 'status', 'stats', 'reason'].includes(verb) || (verb === 'reason' ? positionals.length !== 3 : positionals.length > 1)) throw Error('Use start, status, stats or reason ROLE TASK; -h lists all options');
   if (verb === 'reason' && (opt['no-llm'] || opt.demo || opt.frames !== undefined)) throw Error('reason requires real evidence and explicit model permission; remove --no-llm, --demo and --frames');
+  if (opt.json && (verb !== 'status' || opt.demo || opt.frames !== undefined)) throw Error('--json is only supported by real status');
   dimensions();
   const home = opt.demo ? toolRoot : fs.realpathSync(process.env.FM_HOME ?? toolRoot), configFile = path.resolve(opt.config ?? defaultConfig), c = config(configFile);
   if (opt.demo) demo.findings = measure(demo, c);
@@ -69,7 +71,10 @@ async function main() {
     for (let i = 0; i < count; i++) fs.writeFileSync(path.join(opt.out, `${String(i).padStart(3, '0')}.txt`), clean ? plainStatus(data) : plain(frame(data, at + i * 250, ...dimensions())), { flag: 'wx' });
     return;
   }
-  if (verb === 'status') { emit(plainStatus(await snapshot())); return; }
+  if (verb === 'status') {
+    const data = await snapshot();
+    emit(opt.json ? JSON.stringify({ ...data, server: await audit.step('process.read', () => store.resources()) }) + '\n' : plainStatus(data)); return;
+  }
   if (verb === 'reason') {
     const controller = new AbortController(), cancel = () => controller.abort();
     process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
@@ -89,7 +94,7 @@ async function main() {
   const stop = async () => { if (closing) return; closing = true; controller.abort(); try { await observer?.stop(); } finally { restore(); } };
   process.once('SIGINT', stop); process.once('SIGTERM', stop); process.once('exit', () => { closing = true; restore(); });
   try {
-    if (!opt.demo) emit(`Moiras reads ${home}/state; writes state/moiras and registered events. No task actions. Two-way channel awaits service admission.\n`);
+    if (!opt.demo) emit(`Moiras reads ${home}/state; writes state/moiras and registered events. No task actions. Startup registers the shared ${serviceId} channel.\n`);
     observer = opt.demo ? { data: () => demo, stop: async () => {} } : await observe({ home, root: toolRoot, configFile, signal: controller.signal, notify: text => { if (!view?.animated && !closing) emit(text + '\n'); } });
     if (closing) { await observer.stop(); return; }
     const started = performance.now(), idleSeed = randomUUID();
@@ -99,7 +104,7 @@ async function main() {
       if (view.animated) view.draw(frame({ ...data, idleSeed, renderNow: data.demo ? data.now : Date.now() / 1000 }, performance.now() - started, ...size));
       else if (!staticPrinted) { emit(plainStatus(data)); staticPrinted = true; }
     };
-    draw(); if (view.animated) timer = setInterval(() => { try { draw(); } catch { void stop(); process.exitCode = 1; } }, 250);
+    draw(); if (view.animated) timer = setInterval(() => { try { draw(); } catch { void stop(); process.exitCode = 1; } }, 1000);
   } catch (error) { await stop(); throw error; }
 }
 main().catch(error => { console.error(`Moiras: ${error.message}`); process.exitCode = 1; });

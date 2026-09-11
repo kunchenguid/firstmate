@@ -15,7 +15,7 @@ test('real state -> module rules -> registered capture; shared messaging is expl
   const original = { 'sample.meta': 'harness=pi\nmodel=small\nbusy_gen=g1\n', 'sample.status': 'FAIL alpha\nFAIL alpha\n',
     'sample.busy-gen': 'g1', 'sample.busy-state': 'gen=g1 state=busy ts=1', '.last-watcher-beat': '' };
   for (const [name, text] of Object.entries(original)) fs.writeFileSync(path.join(state, name), text);
-  let messages = fakeMessages([{ name: '001.msg', message: { schema: 'fm-message.v1', id: 'msg-' + '2'.repeat(32), thread: 'test', at: '2026-09-11', from: 'supervisor', to: ['moiras'], kind: 'request', ref: null, text: 'ask sample' } }]);
+  let messages = fakeMessages([{ name: '001.msg', message: { schema: 'fm-message.v1', id: 'msg-' + '2'.repeat(32), thread: 'test', at: '2026-09-11', from: 'supervisor', to: ['fm-moiras'], kind: 'request', ref: null, text: 'ask sample' } }]);
   const start = () => observe({ home, root: toolRoot, configFile: defaultConfig, messages });
   try {
     observer = await start();
@@ -24,15 +24,15 @@ test('real state -> module rules -> registered capture; shared messaging is expl
     await wait(() => fs.existsSync(capture) && messages.calls.some(c => c.method === 'acknowledge'), 1200);
     assert.equal(JSON.parse(fs.readFileSync(capture, 'utf8')).id, event.id);
     assert.match(fs.readFileSync(path.join(state, '.wake-queue'), 'utf8'), /procevent fm-state-reader moiras-/);
-    assert.match(messages.calls.find(c => c.method === 'send').text, /sample: busy/);
+    assert.match(messages.calls.find(c => c.method === 'send' && c.options.kind === 'reply').text, /sample: busy/);
     for (const [name, text] of Object.entries(original)) assert.equal(fs.readFileSync(path.join(state, name), 'utf8'), text);
     await observer.stop(); journal(home).set('quiet.json', {});
     fs.unlinkSync(path.join(state, `moiras/events/${event.id}.json.sent`));
-    messages = fakeMessages([{ name: '002.msg', message: { schema: 'fm-message.v1', id: 'msg-' + '3'.repeat(32), thread: 'test', at: '2026-09-11', from: 'supervisor', to: ['moiras'], kind: 'request', ref: null, text: `confirm ${event.id}` } }]);
+    messages = fakeMessages([{ name: '002.msg', message: { schema: 'fm-message.v1', id: 'msg-' + '3'.repeat(32), thread: 'test', at: '2026-09-11', from: 'supervisor', to: ['fm-moiras'], kind: 'request', ref: null, text: `confirm ${event.id}` } }]);
     observer = await start();
     await wait(() => messages.calls.some(c => c.method === 'acknowledge'), 1200);
     assert.ok(!fs.existsSync(path.join(state, `procevent-inbox/moiras-${event.id}.2.result`)));
-    assert.match(messages.calls.find(c => c.method === 'send').text, /confirm recorded.*no task action/);
+    assert.match(messages.calls.find(c => c.method === 'send' && c.options.kind === 'reply').text, /confirm recorded.*no task action/);
     for (const [name, text] of Object.entries(original)) assert.equal(fs.readFileSync(path.join(state, name), 'utf8'), text);
     fs.writeFileSync(path.join(state, 'sample.status'), 'working: fixed\n');
     await wait(() => !observer.data().findings.some(f => f.rule === 'stop-loop'));

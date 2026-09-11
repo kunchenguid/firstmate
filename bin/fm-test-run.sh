@@ -756,7 +756,7 @@ tests/fm-model-catalog-inheritance.test.sh 448
 tests/fm-model-catalog-lib.test.sh 65
 tests/fm-model-telemetry.test.sh 1141
 tests/fm-model-usage.test.sh 69
-tests/fm-moiras.test.sh 3829
+tests/fm-moiras.test.sh 101520
 tests/fm-modules.test.sh 2541
 tests/fm-muse-harness.test.sh 935
 tests/fm-muse-signals-live-e2e.test.sh 205

@@ -7,14 +7,16 @@ import { forge } from './forge.mjs';
 import { journal } from './journal.mjs';
 import { telemetry } from './telemetry.mjs';
 import { inspect } from '../usecases/inspect.mjs';
-export async function observe({ home, root, configFile, messages = null, notify = () => {}, signal }) {
+import { serviceId } from '../core/findings.mjs';
+import { serviceMessages } from '../../../fm-state-reader/src/index.mjs';
+export async function observe({ home, root, configFile, messages, notify = () => {}, signal }) {
   config(configFile); // Reject configuration before creating state.
   const store = journal(home), release = store.claim(), eventPort = publisher(home, root);
   const controller = new AbortController(), cancel = () => controller.abort();
   signal?.addEventListener('abort', cancel, { once: true }); if (signal?.aborted) cancel();
   let stopped = false, active = null, pending = false, debounce, deadline, closeSource = () => {}, current, ready;
   const firstSnapshot = new Promise(resolve => { ready = resolve; });
-  const changed = () => { if (!stopped) { clearTimeout(debounce); debounce = setTimeout(update, 150); } };
+  const changed = () => { if (!stopped && !debounce) debounce = setTimeout(() => { debounce = null; void update(); }, 1000); };
   const update = async () => {
     if (stopped) return;
     if (active) { pending = true; return; }
@@ -27,7 +29,7 @@ export async function observe({ home, root, configFile, messages = null, notify 
         closeSource = await audit.step('state.watch', () => source.watch(error => { if (error) notify('State watch failed; restart after inspecting the filesystem'); changed(); }));
         const now = Date.now() / 1000;
         await inspect({ source, forge: { read: repos => forge.read(repos, controller.signal) }, journal: store, publisher: eventPort, messages, audit,
-          onSnapshot: data => { current = data; if (!messages) current.facts.push('Two-way channel unavailable: standalone service admission is pending'); ready(); },
+          onSnapshot: data => { current = data; if (!messages) current.facts.push('Two-way channel disabled by caller'); ready(); },
           onNotice: notify }, c, now);
         clearTimeout(deadline);
         const boundaries = [c.repositories.length ? now + c.forgeSeconds : Infinity, current.beaconAt === null ? Infinity : current.beaconAt + c.beaconSeconds + 1,
@@ -43,13 +45,23 @@ export async function observe({ home, root, configFile, messages = null, notify 
     })();
     try { await active; } finally { active = null; if (pending) { pending = false; void update(); } }
   };
-  let configWatch;
+  let configWatch, ownedMessages, stopping;
   try {
+    if (messages === undefined && !controller.signal.aborted) {
+      ownedMessages = await serviceMessages({ home, root, name: serviceId });
+      messages = ownedMessages;
+    }
     configWatch = fs.watch(path.dirname(configFile), (_, name) => { if (!name || String(name) === path.basename(configFile)) changed(); }).on('error', changed);
     await Promise.race([firstSnapshot, update()]);
-  } catch (error) { closeSource(); release(); signal?.removeEventListener('abort', cancel); throw error; }
-  return { data: () => current, stop: async () => {
+  } catch (error) {
+    configWatch?.close(); closeSource();
+    try { await ownedMessages?.close(); } finally { release(); signal?.removeEventListener('abort', cancel); }
+    throw error;
+  }
+  return { data: () => current, stop: () => stopping ??= (async () => {
     stopped = true; cancel(); clearTimeout(debounce); clearTimeout(deadline); closeSource(); configWatch.close();
-    await active; closeSource(); clearTimeout(deadline); clearTimeout(debounce); signal?.removeEventListener('abort', cancel); release();
-  } };
+    await active; closeSource(); clearTimeout(deadline); clearTimeout(debounce); signal?.removeEventListener('abort', cancel);
+    // The shared port logs its own lifecycle; failed observation logging must not block cleanup.
+    try { await ownedMessages?.close(); } finally { release(); }
+  })() };
 }

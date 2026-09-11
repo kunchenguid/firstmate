@@ -22,8 +22,8 @@ export function frame(data, elapsed = 0, width = 100, height = 30) {
     centers.forEach(c => put(c - 1, 6, '─', 2));
     const eyeX = Math.round(centers[holder] + (centers[(holder + 1) % 3] - centers[holder]) * eased) - 2;
     put(eyeX, 6 - Math.round(2 * Math.sin(Math.PI * t)), '(◉)', 3);
-    // One half-second beat per four-second window, suppressed during transfer.
-    const idle = phase < 6000 && time % 4000 >= 3500 ? parseInt(digest(`${data.idleSeed ?? 0}:${Math.floor(time / 4000)}`).slice(0, 8), 16) % 3 : -1;
+    // A one-second beat per four-second window survives the low-resource redraw cadence.
+    const idle = phase < 6000 && time % 4000 >= 3000 ? parseInt(digest(`${data.idleSeed ?? 0}:${Math.floor(time / 4000)}`).slice(0, 8), 16) % 3 : -1;
     const sway = idle === 0 ? 1 : 0, tick = idle === 1 ? 1 : 0, blink = idle === 2;
     put(Math.max(3, centers[0] - 12) + sway, 9, '│', 3); put(Math.max(2, centers[0] - 13) + sway, 10, '╶┼╴', 3);
     put(centers[1] + 7, 8 + tick, '├', 4); put(centers[1] + 7, 9 + tick, '┤', 4); put(centers[1] + 7, 10 + tick, '├', 4);

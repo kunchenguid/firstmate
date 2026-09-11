@@ -37,6 +37,50 @@ The guard checks strict semantic success, absence of the requested sentinel file
 A Pi OpenAI Codex provider result does not verify the native `codex` executable, which this adapter does not support.
 Other executables and task runtime lifecycle controls are outside this adapter's integration surface.
 
+## Moiras resource budget
+
+Verified on 2026-09-11 with Node v24.15.0, macOS 14.8.1, arm64.
+The [module README](../../modules/moiras/README.md#resource-budget) owns current resource reporting, scheduling and telemetry retention.
+
+```sh
+bin/fm-test-run.sh --per-script-timeout-secs 240 tests/fm-moiras.test.sh tests/fm-modules.test.sh
+bin/fm-test-run.sh --per-script-timeout-secs 240 tests/fm-moiras.test.sh
+```
+
+The real foreground CLI ran in a 100x30 PTY with 70 local task records, no repository queries and no model calls.
+The test compared the reported lease-owner PID to the launched server, measured cumulative server CPU across an idle window after warmup, sampled RSS once per second, then verified terminal restoration and null server status after shutdown.
+Selected measured fields from the final module-only repeat:
+
+| Field | Value |
+| --- | --- |
+| Idle window | 31.120611332997214 seconds |
+| Maximum sampled RSS | 52,412,416 bytes |
+| Measured idle CPU | 0.44986262802478383% |
+| Native `ps` CPU at the final query | 0.3% |
+| Animated terminal / restored / stopped server | true / true / null |
+| Regression results | 37/37 module, 15/15 shared |
+
+The enforced limits are 60,000,000 RSS bytes and less than 1% CPU over at least 30 seconds; the measurement is not the lifetime-average CPU of the querying command.
+`ps` supplies RSS, native CPU percent and process birth; Linux cumulative CPU uses procfs ticks and `getconf CLK_TCK` because Linux `ps` rounds CPU time to seconds.
+The Linux resource branch has not been measured on a live Linux host in this record; the same portable guard exercises it when run there.
+These idle measurements exclude transient provider/forge subprocesses and do not claim identical results for every workload or Node version.
+
+## Moiras shared service channel
+
+Verified on 2026-09-11 with Node v24.15.0, macOS 14.8.1, arm64, using the same canonical command in [resource verification](#moiras-resource-budget).
+The [module's shared-channel guide](../../modules/moiras/README.md#shared-channel) owns usage and limits.
+
+The real CLI channel guard launches a separate service process in an isolated operational home, with an inherited task hint deliberately unsuitable for authentication.
+It verifies native service registration, first-inbox discovery, supervisor `ask` and `confirm` replies with matching references and threads, proposal notes to the supervisor, unchanged task bytes after confirmation, restart deduplication, and registration/lease cleanup after SIGINT.
+No task harness or model is launched; the caller is the isolated home's supervisor identity, not a claim of an operator-authored production-home round trip.
+
+```text
+37 module tests passed; 15 shared tests passed.
+```
+
+The same run's resource check includes real service registration and still passes the Node RSS and idle CPU limits.
+The shared transport's separate append-only telemetry remains outside Moiras retention; these tests do not establish a global telemetry-storage bound.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

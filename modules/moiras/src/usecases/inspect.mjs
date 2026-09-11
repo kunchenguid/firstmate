@@ -1,4 +1,4 @@
-import { answer, digest, episodes, measure, thread } from '../core/findings.mjs';
+import { answer, digest, episodes, measure, serviceId, thread } from '../core/findings.mjs';
 // One serialized observation. The caller supplies I/O, time and request-scoped telemetry.
 export async function inspect({ source, forge, journal, publisher, messages, audit, onSnapshot = () => {}, onNotice = () => {} }, config, now) {
   let trace = audit;
@@ -20,15 +20,32 @@ export async function inspect({ source, forge, journal, publisher, messages, aud
   current.findings = measure(current, config);
   await set('episodes.json', loops);
   await set('snapshot.json', current); onSnapshot(current);
+  const deliver = async (record, save, to, text, options) => {
+    if (record.state === 'sending' && !record.receipt) throw Error('Message delivery uncertain; inspect the shared thread ledger before recovery');
+    if (!record.receipt) {
+      record.state = 'sending'; await save();
+      record.receipt = await step('message.send', () => messages.send(to, text, options), to);
+      await save();
+    } else if (record.receipt.partial) {
+      record.receipt = await step('message.retry', () => messages.retry(record.receipt.id, record.receipt.thread), [record.receipt.id]);
+      await save();
+    }
+    if (record.receipt.partial) throw Error('Message fan-out remains partial; retained receipt will be retried');
+  };
   const emit = async event => {
     const key = `events/${event.id}.json`, stored = await get(key);
     if (!stored) await set(key, event);
     else if (stored.id !== event.id) throw Error('Event identity mismatch');
-    if (await get(`${key}.sent`) || await step('event.captured', () => publisher.captured(event.id), [event.id])) return;
-    await step('event.publish', () => publisher.publish(event.id), [event.id]);
-    await set(`${key}.sent`, { at: now });
     const notice = `${event.rule}: ${event.task}; default ${event.default}; ${event.id}`;
-    notices.push(notice); onNotice(notice);
+    if (!(await get(`${key}.sent`)) && !(await step('event.captured', () => publisher.captured(event.id), [event.id]))) {
+      await step('event.publish', () => publisher.publish(event.id), [event.id]);
+      await set(`${key}.sent`, { at: now });
+      notices.push(notice); onNotice(notice);
+    }
+    if (messages && event.rule !== 'reply') {
+      const deliveryKey = `${key}.delivery`, delivery = await get(deliveryKey) ?? {};
+      await deliver(delivery, () => set(deliveryKey, delivery), ['supervisor'], `${notice}; evidence: ${event.evidence.join(' | ')}`, { kind: 'note' });
+    }
   };
   for (const event of current.findings) {
     const key = `${event.rule}:${event.task}`;
@@ -38,7 +55,7 @@ export async function inspect({ source, forge, journal, publisher, messages, aud
   }
   for (const { name, message } of inbox) {
     trace = audit.forRequest(message.id, message.thread);
-    if (!message.to.includes('moiras')) throw Error('Misrouted service message');
+    if (!message.to.includes(serviceId)) throw Error('Misrouted service message');
     if (message.kind !== 'request') {
       trace.decision('message', 'observed', [message.kind]);
       await step('message.acknowledge', () => messages.acknowledge(name), [message.id]); continue;
@@ -52,16 +69,8 @@ export async function inspect({ source, forge, journal, publisher, messages, aud
       catch (error) { text = error.message; trace.decision('request', 'refused', [text], message.id); }
       reply = replies[message.id] = { signature, text, state: 'prepared', recordedAt: now }; await set('replies.json', replies);
     }
-    if (reply.state === 'sending' && !reply.receipt) throw Error('Reply delivery uncertain; inspect the shared thread ledger before recovery');
-    if (!reply.receipt) {
-      reply.state = 'sending'; await set('replies.json', replies);
-      reply.receipt = await step('message.send', () => messages.send([message.from], reply.text, { kind: 'reply', ref: message.id, ...(message.thread ? { thread: message.thread } : {}) }), [message.id]);
-      await set('replies.json', replies);
-    } else if (reply.receipt.partial) {
-      reply.receipt = await step('message.retry', () => messages.retry(reply.receipt.id, reply.receipt.thread), [reply.receipt.id]);
-      await set('replies.json', replies);
-    }
-    if (reply.receipt.partial) throw Error('Reply fan-out remains partial; retained receipt will be retried');
+    await deliver(reply, () => set('replies.json', replies), [message.from], reply.text,
+      { kind: 'reply', ref: message.id, ...(message.thread ? { thread: message.thread } : {}) });
     await emit({ id: digest(`reply:${message.id}`), rule: 'reply', task: message.from, evidence: [reply.text], default: 'read', at: now });
     await step('message.acknowledge', () => messages.acknowledge(name), [message.id]);
   }

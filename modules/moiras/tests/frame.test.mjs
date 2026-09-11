@@ -30,6 +30,7 @@ test('reviewed arc stays among the hoods, and a seeded idle beat moves only one 
       const crop = (ms, n) => plain(frame({ idleSeed }, ms, width, 30)).split('\n').slice(7, 13).map(row => row.slice(Math.floor(width * n / 3), Math.floor(width * (n + 1) / 3))).join('\n');
       const moved = [0, 1, 2].filter(n => crop(1000, n) !== crop(3500, n));
       assert.equal(moved.length, 1); choices.add(moved[0]);
+      assert.deepEqual([0, 1, 2].filter(n => crop(1000, n) !== crop(3000, n)), moved, 'idle beat must survive one-second sampling');
       for (const n of [0, 1, 2]) assert.equal(crop(1000, n), crop(4000, n));
     }
   }
@@ -64,7 +65,7 @@ test('CLI help works on every verb without a home; clean preview is ASCII and co
   const cli = path.join(toolRoot, 'bin/fm-moiras.sh');
   for (const verb of ['start', 'status', 'stats', 'reason']) {
     const { stdout } = await run(cli, [verb, '-h'], { env: { ...process.env, FM_HOME: '/nonexistent-moiras-home' } });
-    assert.equal((stdout.match(/Example: fm-moiras/g) ?? []).length, 15); assert.match(stdout, /--at-ms/); assert.match(stdout, /-h \/ --help/);
+    assert.equal((stdout.match(/Example: fm-moiras/g) ?? []).length, 16); assert.match(stdout, /--at-ms/); assert.match(stdout, /-h \/ --help/);
   }
   await assert.rejects(run(cli, ['reason', 'clotho', 'sample', '--no-llm'], { env: { ...process.env, FM_HOME: '/nonexistent-moiras-home' } }), /explicit model permission/);
   const { stdout } = await run(cli, ['--demo', '--clean'], { env: { ...process.env, NO_COLOR: '' } });
