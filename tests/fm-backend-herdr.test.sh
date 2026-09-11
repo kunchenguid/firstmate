@@ -632,6 +632,25 @@ test_registered_agent_with_an_unreadable_process_view_is_unknown() {
   pass "herdr stale registration: an unreadable process view refuses instead of guessing either way"
 }
 
+test_registered_agent_with_an_empty_foreground_over_a_real_shell_settles_via_descendant_walk() {
+  local sleep_bin shell_pid out
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  # A real, childless shell process stands in for the pane's shell, and the
+  # foreground list is empty - the exec-to-shell handoff shape the flake fix
+  # targets. Unlike unreadable-no-foreground above (a synthetic pid absent
+  # from `ps`), this shell_pid is real, so the descendant walk can run to
+  # completion and prove the empty array settles to stale-agent, not
+  # unreadable.
+  "$sleep_bin" 300 &
+  shell_pid=$!
+  out=$(stale_registration_case empty-foreground idle \
+    "$(printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[]}}}' "$shell_pid" "$shell_pid")")
+  kill "$shell_pid" 2>/dev/null || true
+  [ "$out" = "stale-agent dead refused" ] \
+    || fail "an empty foreground list over a real childless shell must settle to stale-agent via the descendant walk, not unreadable, got '$out'"
+  pass "herdr stale registration: an empty foreground list over a real shell is not unreadable, it settles via the descendant walk"
+}
+
 test_projection_reclaim_rollback_refuses_a_stale_registration() {
   local out
   out=$(bash -c '. "$0/bin/backends/herdr.sh"
@@ -5171,6 +5190,7 @@ test_exhausted_settle_window_keeps_a_non_shell_foreground_live
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive
 test_agent_descendant_under_a_spaced_install_path_stays_alive
 test_registered_agent_with_an_unreadable_process_view_is_unknown
+test_registered_agent_with_an_empty_foreground_over_a_real_shell_settles_via_descendant_walk
 test_projection_reclaim_rollback_refuses_a_stale_registration
 test_busy_state_never_reports_a_shell_only_pane_busy
 test_cli_caches_the_selected_client_within_a_process
