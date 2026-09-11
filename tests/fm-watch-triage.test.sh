@@ -4505,6 +4505,39 @@ test_afk_signal_records_heartbeat_endpoint() {
   pass "an afk signal records its captured heartbeat endpoint"
 }
 
+# An accumulated no-change streak must not decay the away-mode heartbeat
+# cadence: the away branch hands every scheduled heartbeat to the daemon
+# precisely so an expired external wait surfaces within one base cadence, so a
+# grown streak while away both delays the next heartbeat past HEARTBEAT and
+# survives the return to delay the first attended heartbeat. Reproduces the
+# 2026-09-10/11 overnight gap (8 heartbeats in 7.5h, 2h blind spots).
+test_afk_heartbeat_cadence_pins_backoff_and_holds_streak_reset() {
+  local dir state fakebin out drain_out pid back
+  dir=$(make_case afk-heartbeat-pin); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'working: routine overnight note\n' > "$state/routine.status"
+  sig=$(seen_sig "$state/routine.status"); printf '%s' "$sig" > "$state/.seen-routine_status"
+  date '+%s' > "$state/.afk"   # away posture: the daemon owns triage
+  # A streak grown by earlier absorbed heartbeats: without the pin it would
+  # push the next heartbeat to FM_HEARTBEAT * 2^9 = 1024s out.
+  echo 9 > "$state/.heartbeat-streak"
+  # The last heartbeat is 300s stale: overdue at the base cadence, far inside
+  # the decayed one, so only the pin makes this heartbeat fire now.
+  back=$(( $(date +%s) - 300 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/.last-heartbeat"
+  else touch -m -d "@$back" "$state/.last-heartbeat"; fi
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=2 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a grown streak delayed the away heartbeat past the base cadence"; }
+  grep -Fx "heartbeat" "$out" >/dev/null || fail "away watcher exited without a heartbeat wake: $(cat "$out")"
+  [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" = 1 ] \
+    || fail "away heartbeat left the streak grown at $(cat "$state/.heartbeat-streak" 2>/dev/null) instead of holding it at wake's single increment"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the pinned away heartbeat failed"
+  grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "pinned away heartbeat was not queued for the daemon"
+  pass "the away posture pins the heartbeat cadence and a grown streak cannot survive it"
+}
+
 test_afk_present_reverts_watcher_to_one_shot() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case afk-coherence); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4895,6 +4928,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
+test_afk_heartbeat_cadence_pins_backoff_and_holds_streak_reset
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_captain_held_never_rechecked_while_away_record_exists

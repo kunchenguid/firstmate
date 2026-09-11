@@ -2443,18 +2443,29 @@ EOF
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
-  # surfaced non-heartbeat wake.
+  # surfaced non-heartbeat wake. While the away posture stands, the interval is
+  # pinned to the base HEARTBEAT and the away branch holds the streak at zero:
+  # the away-mode daemon consumes every heartbeat, an away fleet is exactly when
+  # an expired external wait must surface within one base cadence rather than
+  # the idle ceiling, and a decayed schedule must not survive the return.
   streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
+  afk_hb=0
+  afk_present && afk_hb=1
+  [ "$afk_hb" = 1 ] && hb=$HEARTBEAT
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present; then
+    if [ "$afk_hb" = 1 ]; then
+      # Hold the streak at zero before wake() adds its one: the pinned interval
+      # makes an accumulated streak meaningless while away, and a grown streak
+      # must not delay the first post-return heartbeat.
+      echo 0 > "$STATE/.heartbeat-streak"
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
