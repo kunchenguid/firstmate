@@ -388,14 +388,17 @@ test_lock_claim_records_holder_identity() {
   rc=0
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
+    # Resolve the holder pid in this frame: inside $(...) BASHPID is the
+    # substitution child, whose /proc start time never matches the holder.
+    fm_current_pid holder || exit 6
     fm_lock_try_acquire "$2" || exit 7
     recorded=$(cat "$2/pid-identity" 2>/dev/null || true)
     [ -n "$recorded" ] || exit 8
-    current=$(fm_pid_identity "${BASHPID:-$$}" 2>/dev/null) || exit 9
+    current=$(fm_pid_identity "$holder" 2>/dev/null) || exit 9
     [ "$recorded" = "$current" ] || exit 10
     recorded=$(cat "$2/pid-start" 2>/dev/null || true)
     [ -n "$recorded" ] || exit 11
-    current=$(fm_pid_start_identity "${BASHPID:-$$}" 2>/dev/null) || exit 12
+    current=$(fm_pid_start_identity "$holder" 2>/dev/null) || exit 12
     [ "$recorded" = "$current" ] || exit 13
     fm_lock_release "$2"
   ' _ "$LIB" "$lockdir" || rc=$?

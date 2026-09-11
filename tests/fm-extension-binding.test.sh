@@ -648,6 +648,20 @@ after=$(find "$H_ABSENT" -mindepth 1 -print | LC_ALL=C sort)
 [ "$before" = "$after" ] || fail "absent-registry inspection created home state: $after"
 pass "an absent home-local registry is inert, state-free, and ignores project/environment discovery"
 
+# --- lifecycle lock release survives the shell claim's full record shape ------
+# fm-procevent.sh claims the lifecycle lock with fm_lock_claim, which records
+# the holder's identity and start time beside its pid, then execs into the host,
+# which releases the lock. A release that only knows about "pid" cannot remove
+# the owner directory, and its ENOTEMPTY then masks every real lifecycle
+# outcome. A refused retirement reaches that release through its finally path
+# without needing an installed package.
+H_LOCK_RELEASE="$HOMES/lock-release"
+new_home "$H_LOCK_RELEASE"
+expect_failure "binding-missing" env FM_HOME="$H_LOCK_RELEASE" "$HOST" retire-binding org.example.lock-release --if-binding-digest "sha256:$(printf '%064d' 0)"
+lock_residue=$(find "$H_LOCK_RELEASE/state/procevent" -mindepth 1 -maxdepth 1 -name '.extension-binding-lifecycle.lock*' -print 2>/dev/null)
+[ -z "$lock_residue" ] || fail "a refused retirement left lifecycle lock residue: $lock_residue"
+pass "a refused lifecycle command reports its own outcome and fully releases the lifecycle lock"
+
 # --- manifest, path, mode, owner, link, and tree validation -----------------
 P_GOOD="$PACKAGES/good"
 make_package "$P_GOOD" org.example.good ext-good

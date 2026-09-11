@@ -1417,11 +1417,13 @@ TEARDOWN_CONTENT_CHECK_NOTE=
 # reports both its old and its new path. Prints git's own quoted path per line, the
 # same quoting the comparison below produces, so the two sets compare exactly.
 # Returns non-zero only when the set cannot be established, never when it is empty:
-# commits that changed no path put no content at risk.
+# commits that changed no path put no content at risk, and no commit at all means
+# the fetch the caller just ran put every HEAD commit on a remote-tracking ref -
+# the "not on any remote" premise was a stale view of the remote, not lost work.
 at_risk_commit_paths() {
   local commits types
   commits=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
-  [ -n "$commits" ] || return 1
+  [ -n "$commits" ] || return 0
   # diff-tree --stdin diffs the whole list in one process, but it SKIPS an object
   # it cannot read and still exits 0 - which would silently shrink the at-risk set
   # and make the check permissive. So every commit is proven readable first, and
