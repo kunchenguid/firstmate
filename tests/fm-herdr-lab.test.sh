@@ -64,6 +64,11 @@ case "$1 ${2:-}" in
     [ "${FM_FAKE_HERDR_DELETE_FAIL:-}" != 1 ] || exit 93
     printf '%s\n' deleted > "$state/$session"
     ;;
+  "terminal title")
+    reason=no_foreground_client
+    [ ! -f "$state/$session.foreground" ] || reason=$(cat "$state/$session.foreground")
+    jq -nc --arg reason "$reason" '{result:{reason:$reason,type:"client_window_title"}}'
+    ;;
   *)
     printf '%s\n' '{"ok":true}'
     ;;
@@ -83,6 +88,7 @@ run_with_fake() {
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
+    FM_HERDR_LAB_VIEWER_TIMEOUT="${FM_HERDR_LAB_VIEWER_TIMEOUT:-1}" \
     "$@"
 }
 
@@ -234,6 +240,98 @@ SH
   pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
 }
 
+
+# The pty attachment itself needs a real Herdr client, so the live guard
+# tests/fm-herdr-attached-viewer-live-e2e.test.sh owns that proof. What is
+# portable is who the helper will ever attach to, and who it will signal.
+test_viewer_refuses_unowned_sessions() {
+  local name="fm-lab-viewer-guard-$$" status=0 out
+  : > "$FAKE_LOG"
+  out=$(run_with_fake fm_herdr_lab_viewer_start "$name" 2>&1) || status=$?
+  expect_code 1 "$status" "a session without an ownership tripwire must not be attached to"
+  assert_contains "$out" "does not own" \
+    "the viewer refusal did not name the missing ownership record"
+  [ ! -s "$FAKE_LOG" ] \
+    || fail "the unowned-session refusal reached Herdr instead of refusing first"
+
+  status=0
+  run_with_fake fm_herdr_lab_viewer_start default >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "the default session must never be attached to"
+  pass "fm-herdr-lab: the viewer attaches only to a session this lab owns"
+}
+
+test_viewer_stop_only_signals_owned_processes() {
+  local name="fm-lab-viewer-stop-$$" record status=0 holder_pid
+  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-stop fixture provision failed"
+  record=$(run_with_fake fm_herdr_lab_viewer_record_path "$name")
+
+  # No record: a client attached by someone else is not ours to kill.
+  printf '%s\n' cleared > "$FAKE_STATE/$name.foreground"
+  run_with_fake fm_herdr_lab_viewer_stop "$name" \
+    || fail "stopping with no recorded viewer must succeed without touching a foreign client"
+  [ "$(cat "$FAKE_STATE/$name.foreground")" = cleared ] \
+    || fail "an unrecorded foreground client was detached by the lab helper"
+
+  # A recorded viewer is signalled until it exits and the session reports no
+  # foreground client again.
+  sleep 20 &
+  holder_pid=$!
+  printf 'launcher=%s\nviewer=%s\n' "$holder_pid" "$holder_pid" > "$record"
+  status=0
+  run_with_fake fm_herdr_lab_viewer_stop "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "stop must fail while the session still reports a foreground client"
+  kill -0 "$holder_pid" 2>/dev/null && fail "stop left the recorded viewer process running"
+  assert_present "$record" "a failed detach discarded the viewer record it still needs"
+
+  printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
+  run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "stop failed once the client had detached"
+  assert_absent "$record" "a confirmed detach left the viewer record behind"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after viewer stop failed"
+  pass "fm-herdr-lab: viewer stop signals only recorded processes and confirms the detach"
+}
+
+test_teardown_refuses_while_viewer_attached() {
+  local name="fm-lab-viewer-teardown-$$" record status=0 holder_pid
+  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-teardown fixture provision failed"
+  record=$(run_with_fake fm_herdr_lab_viewer_record_path "$name")
+  printf '%s\n' cleared > "$FAKE_STATE/$name.foreground"
+  sleep 20 &
+  holder_pid=$!
+  printf 'launcher=%s\nviewer=%s\n' "$holder_pid" "$holder_pid" > "$record"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "teardown must refuse while an owned viewer is still attached"
+  [ "$(cat "$FAKE_STATE/$name")" = running ] \
+    || fail "the refused teardown stopped the lab session anyway"
+  assert_no_grep "session delete $name" "$FAKE_LOG" \
+    "the refused teardown still reached the destructive delete"
+
+  printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after the viewer detached failed"
+  pass "fm-herdr-lab: teardown refuses to destroy a session an attached viewer still holds"
+}
+
+test_viewer_launcher_refuses_unsafe_arguments() {
+  local launcher="$ROOT/bin/fm-herdr-lab-viewer.py" status=0
+  command -v python3 >/dev/null 2>&1 || { pass "fm-herdr-lab: viewer launcher argument guard (skipped, no python3)"; return; }
+  python3 "$launcher" default 40 120 "$TMP_ROOT/pid" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "the launcher must refuse the default session"
+  status=0
+  python3 "$launcher" arbitrary-session 40 120 "$TMP_ROOT/pid" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "the launcher must refuse a non-lab session name"
+  status=0
+  python3 "$launcher" fm-lab-args 0 120 "$TMP_ROOT/pid" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "a zero-row grid is the exact defect this helper exists to avoid"
+  status=0
+  python3 "$launcher" fm-lab-args 40 0 "$TMP_ROOT/pid" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "a zero-column grid is the exact defect this helper exists to avoid"
+  status=0
+  python3 "$launcher" fm-lab-args 40 120 relative-pidfile >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "the launcher must refuse a relative pidfile path"
+  assert_absent "$TMP_ROOT/pid" "a refused launch still wrote a pid record"
+  pass "fm-herdr-lab: the viewer launcher refuses unsafe sessions and zero-sized grids"
+}
+
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
@@ -241,3 +339,7 @@ test_changed_default_trips_after_teardown
 test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch
+test_viewer_refuses_unowned_sessions
+test_viewer_stop_only_signals_owned_processes
+test_teardown_refuses_while_viewer_attached
+test_viewer_launcher_refuses_unsafe_arguments

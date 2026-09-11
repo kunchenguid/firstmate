@@ -884,6 +884,39 @@ Part C is the case the suite could not reach before: a doomed pane whose shell h
 On 0.7.5 that fallback exposed a bounded four-sample wrong-focus window and restored the anchor exactly; on 0.8.0 the same fallback exposed none, which is why default-on projection is floored at 0.8.0 rather than mitigated further below it.
 The suite also cross-checks its own Part A measurement against the floor classifier on whatever release it runs, so a drifted protocol-to-release mapping fails there rather than silently gating on the wrong thing.
 
+### Attached foreground viewer
+
+A pseudo-terminal registers as a Herdr foreground client only when its window grid is non-zero.
+`script` and a bare `pty.fork()` from a non-tty parent both start at 0x0, which is why PR #4131 could validate only the detached half of the teardown focus guard and left its four attached-client scenarios untested.
+`bin/fm-herdr-lab-viewer.py` sets the size on the master fd before the fork and scrubs the inherited `HERDR_*` variables, which makes the attached scenarios reachable from a headless runner.
+
+Measured on 2026-09-11 against Herdr 0.9.0 protocol 22 on macOS 26.5.2 aarch64 with Python 3.14.6:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-herdr-attached-viewer-live-e2e.test.sh
+```
+
+```text
+ok - attached viewer: a pty sized before the fork registers as a real Herdr foreground client
+ok - attached viewer: a live client on the target tab refuses the close and keeps the pane
+ok - attached viewer: focus moving onto the target between planning and mutation still blocks the close
+ok - attached viewer: a close preserves the fresh non-target focus the viewer moved to
+ok - attached viewer: the projection seeded-tab prune refuses while a live client watches it
+ok - attached viewer: detaching releases the refusal, so the guard tracks the client and not the pointer
+```
+
+Both halves of the recipe are load-bearing, and each was measured by removing it from the helper and re-running the guard on the same host and release.
+Dropping the `TIOCSWINSZ` call and dropping the environment scrub each produced the same failure the untested scenarios reported:
+
+```text
+fm-herdr-lab: lab viewer did not become the foreground client of 'fm-lab-fm-herdr-attache-71064-7965' within 8 seconds (last reason: no_foreground_client)
+not ok - could not attach a real foreground Herdr viewer over a sized pty
+```
+
+Re-run this guard after every Herdr upgrade.
+A release that changed the foreground-client contract, the window-grid requirement, or the nested-viewer refusal would fail here first, and the detached regressions would keep passing while saying nothing about it.
+
 ### Presentation version floor
 
 Default-on presentation projection is floored at Herdr 0.8.0.
