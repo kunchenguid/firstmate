@@ -154,7 +154,7 @@
 # stay out of the startup digest; the same never-bound-a-held-or-blocked-row
 # rule applies, recognized there from the title line's own hold/blocked-by
 # markers.
-# Full bodies are targeted follow-up only: `tasks-axi show <id> --full` when
+# Full bodies are targeted follow-up only: `bin/fm-tasks-axi.sh show <id> --full` when
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
 #
@@ -386,7 +386,7 @@ print_file_or_absent() {
 }
 
 print_backlog_pointer() {
-  printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
+  printf 'Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
 }
 
 # A queued title line whose own text already marks it held or blocked. The
@@ -453,8 +453,8 @@ strip_axi_help() {
 # and every other line it prints (its count, its public-followup line) passes
 # through untouched. Whatever is cut is disclosed exactly.
 print_ready_queued_bounded() {
-  local ready=$1 path=$2
-  printf '%s\n' "$ready" | awk -v max="$QUEUED_LIMIT" -v path="$path" '
+  local ready=$1
+  printf '%s\n' "$ready" | awk -v max="$QUEUED_LIMIT" '
     /^help\[/ { exit }
     /^ready\[/ { rows = 1; print; next }
     rows && /^[[:space:]]/ {
@@ -467,7 +467,7 @@ print_ready_queued_bounded() {
       if (total > 0) {
         printf "(shown %d of %d ready queued item(s))\n", shown, total
         if (total > shown) {
-          printf "(%d more queued - tasks-axi ready --file %s)\n", total - shown, path
+          printf "(%d more queued - bin/fm-tasks-axi.sh ready)\n", total - shown
         }
       }
     }
@@ -494,7 +494,7 @@ print_backlog_tasks_axi_compact() {
     printf '\nblocked queued:\n'
     printf '%s\n' "$blocked" | strip_axi_help
     printf '\nready queued (dispatchable now):\n'
-    print_ready_queued_bounded "$ready" "$path"
+    print_ready_queued_bounded "$ready"
     return 0
   fi
   printf 'tasks-axi compact listing failed; falling back to title-line rendering.\n'
@@ -814,7 +814,7 @@ Go to a source directly only when:
   - an individual full status log is needed for older wake-event history, or a
     status line was capped and its tail matters (each task's full log path is
     printed with its tail),
-  - a full task body is needed (tasks-axi show <id> --full, or data/backlog.md),
+  - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md),
   - the backlog listing disclosed omitted queued items and this turn needs them,
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
     turn needs their verdict (bin/fm-startup-network.sh report),

@@ -208,9 +208,11 @@ require_tools() {
   command -v tasks-axi >/dev/null 2>&1 || die "tasks-axi is required" 1
 }
 
-# Every tasks-axi call runs from the home whose backlog owns the obligation, the
-# same convention bin/fm-captain-hold.sh uses for typed backlog state.
-tx() { (cd "$FM_HOME" && tasks-axi "$@"); }
+# Every tasks-axi call addresses $FM_HOME/data, the home whose backlog owns the
+# obligation, through bin/fm-tasks-axi.sh. An inherited FM_DATA_OVERRIDE is
+# cleared because a caller such as a secondmate teardown names the parent home
+# in FM_HOME while its own data override is still in the environment.
+tx() { FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" "$@"; }
 
 # obligation_json <id>: the complete typed obligation payload on stdout, empty
 # when the backlog simply has no such public-followup item, and a non-zero exit
@@ -285,7 +287,7 @@ cmd_register() {
   payload=$(obligation_json "$id") \
     || die "could not read the backlog through tasks-axi" 1
   [ -n "$payload" ] \
-    || die "no public-followup obligation '$id' in this home's backlog; create it with tasks-axi public-followup add before registering" 1
+    || die "no public-followup obligation '$id' in this home's backlog; create it with bin/fm-tasks-axi.sh public-followup add before registering" 1
 
   # The relation must already be bound, so a registration can never describe a
   # binding tasks-axi does not have.
@@ -293,7 +295,7 @@ cmd_register() {
     '(.public_followup.work_relations // [])
        | map(select(.relation_id == $r and .work_ref.home_id == $h and .work_ref.task_id == $w))
        | length > 0' >/dev/null 2>&1 \
-    || die "obligation '$id' has no bound relation '$relation' for $work_home/$work_id; run tasks-axi public-followup bind-work first" 1
+    || die "obligation '$id' has no bound relation '$relation' for $work_home/$work_id; run bin/fm-tasks-axi.sh public-followup bind-work first" 1
 
   [ -n "$platform" ] || platform=$(pf_field "$payload" '.public_followup.request.platform')
   [ -n "$request" ] || request=$(pf_field "$payload" '.public_followup.request.request_id')

@@ -2639,7 +2639,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   if fm_backlog_row_probe "$DATA" "$ID"; then
     BACKLOG_ROW_STATE=$FM_BACKLOG_ROW_STATE
   elif [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
-    echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (tasks-axi add $ID '<title>' --kind $KIND) and re-run" >&2
+    echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (bin/fm-tasks-axi.sh add $ID '<title>' --kind $KIND) and re-run" >&2
     exit 1
   else
     echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
