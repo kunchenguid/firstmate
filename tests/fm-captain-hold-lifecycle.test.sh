@@ -3844,6 +3844,166 @@ SH
   pass "cleanup refuses a ship row when its captain hold cannot be read"
 }
 
+# perl's JSON::PP is packaged separately on minimal installs (hit live on a bare
+# Fedora perl), and every task-field read here decodes through it. Without the
+# up-front guard the decode returns an empty string inside a command
+# substitution and the command carries on against silently blank fields, so a
+# perl that cannot load the module must stop the run with the install hint.
+test_missing_json_decoder_fails_with_install_hint() {
+  local home out rc
+  home=$(make_home missing-json-decoder)
+  cat > "$home/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+echo "Can't locate JSON/PP.pm in @INC" >&2
+exit 2
+SH
+  chmod +x "$home/fakebin/perl"
+
+  set +e
+  out=$(run_captain "$home" diverged 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a perl without JSON::PP should fail the run, got success: $out"
+  printf '%s\n' "$out" | grep -F 'perl JSON::PP module is required' >/dev/null \
+    || fail "the failure should name the missing perl JSON::PP module: $out"
+  printf '%s\n' "$out" | grep -F "sudo dnf install perl-JSON-PP" >/dev/null \
+    || fail "the failure should carry the per-platform install hint: $out"
+  pass "a perl without JSON::PP stops the run with an actionable install hint"
+}
+
+# The binding commands write, remove, and read one small key=value file and
+# never decode a task field, so a home that has not installed JSON::PP yet must
+# keep binding its channels - bin/fm-bearings-board.sh binds its board source on
+# every serve and would otherwise abort on exactly the hosts this guard targets.
+test_binding_commands_survive_a_missing_json_decoder() {
+  local home out rc
+  home=$(make_home binding-without-json-decoder)
+  cat > "$home/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+echo "Can't locate JSON/PP.pm in @INC" >&2
+exit 2
+SH
+  chmod +x "$home/fakebin/perl"
+
+  out=$(run_captain "$home" bind sample-board sample-origin 2>&1) \
+    || fail "bind should not need the perl JSON::PP module: $out"
+  out=$(run_captain "$home" binding sample-board 2>&1) \
+    || fail "binding should not need the perl JSON::PP module: $out"
+  [ "$out" = sample-origin ] \
+    || fail "binding should report the recorded origin, got: $out"
+  out=$(run_captain "$home" unbind sample-board 2>&1) \
+    || fail "unbind should not need the perl JSON::PP module: $out"
+
+  set +e
+  run_captain "$home" binding sample-board >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unbound source should not report a binding"
+  pass "bind, binding, and unbind keep working without the perl JSON::PP module"
+}
+
+# open's default (no --identity) path only asks fm_backlog_row_probe whether
+# the row is a still-open captain hold; it never decodes a task field, though
+# it does still shell out to plain perl (no JSON::PP) to validate the data
+# directory string. Both bin/fm-teardown.sh and bin/fm-bearings-board.sh call
+# it exactly this way - without --identity - so a home whose perl lacks only
+# the JSON::PP module must keep resolving it, or a minimal-install host would
+# refuse to tear down a ship task or would hide a captain call it must show.
+test_open_survives_a_missing_json_decoder() {
+  local home out rc real_perl
+  home=$(make_home open-without-json-decoder)
+  real_perl=$(command -v perl || true)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-open-call - Existing task pending captain choice (repo: sample) (kind: ship) (since 2026-01-01)
+
+## Done
+EOF
+  run_captain "$home" hold sample-open-call --reason "captain route choice pending" >/dev/null \
+    || fail "hold failed while setting up the missing-decoder open fixture"
+
+  # Only the JSON::PP module load fails, matching the real minimal-install
+  # host: base perl is present (fm_backlog_data_absolute uses it for
+  # moduleless byte validation), just not the separately packaged JSON::PP.
+  cat > "$home/fakebin/perl" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+    *JSON::PP*)
+      echo "Can't locate JSON/PP.pm in @INC" >&2
+      exit 2
+      ;;
+  esac
+done
+exec "$real_perl" "\$@"
+SH
+  chmod +x "$home/fakebin/perl"
+
+  set +e
+  out=$(run_captain "$home" open sample-open-call 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "open without --identity should not need the perl JSON::PP module: $out"
+  [ -z "$out" ] || fail "open without --identity should print nothing, got: $out"
+  pass "open without --identity keeps reporting a captain call without the perl JSON::PP module"
+}
+
+# verify only decodes a task field when the reviewed inventory actually named
+# decision keys (the resolve_entry/verify_hold_durable loop); an inventory
+# completed with --none - the documented normal outcome for a scout task with
+# no captain calls at all - records an empty decision_keys and never reaches
+# that loop. bin/fm-teardown.sh treats any non-zero verify exit as a refused
+# completion gate and blocks the ship, so a host missing only the perl
+# JSON::PP module must still be able to verify the overwhelming majority of
+# scout tasks that never held a captain call.
+test_verify_survives_a_missing_json_decoder() {
+  local home id out
+  home=$(make_home verify-without-json-decoder)
+  id=sample-verify-no-keys
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review a sample finding with no captain calls" \
+    --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample finding\n\nNo captain choice is needed here.\n' > "$home/data/$id/report.md"
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "explicit no-call inventory failed while setting up the missing-decoder verify fixture"
+
+  cat > "$home/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+echo "Can't locate JSON/PP.pm in @INC" >&2
+exit 2
+SH
+  chmod +x "$home/fakebin/perl"
+
+  out=$(run_captain "$home" verify "$id" 2>&1) \
+    || fail "verify with no reviewed decision keys should not need the perl JSON::PP module: $out"
+  pass "verify with no reviewed decision keys keeps working without the perl JSON::PP module"
+}
+
+# reconcile list only reads .request files off disk and never decodes a task
+# field, so it must keep working on a host missing the perl JSON::PP module
+# exactly like the binding commands do.
+test_reconcile_list_survives_a_missing_json_decoder() {
+  local home out
+  home=$(make_home reconcile-list-without-json-decoder)
+  cat > "$home/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+echo "Can't locate JSON/PP.pm in @INC" >&2
+exit 2
+SH
+  chmod +x "$home/fakebin/perl"
+
+  out=$(run_captain "$home" reconcile list 2>&1) \
+    || fail "reconcile list should not need the perl JSON::PP module: $out"
+  [ "$out" = "reconcile-requests: 0" ] \
+    || fail "reconcile list should report an empty queue, got: $out"
+  pass "reconcile list keeps working without the perl JSON::PP module"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -3894,3 +4054,8 @@ test_complete_accepts_a_migrated_inventory_on_beads
 test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
+test_missing_json_decoder_fails_with_install_hint
+test_binding_commands_survive_a_missing_json_decoder
+test_open_survives_a_missing_json_decoder
+test_verify_survives_a_missing_json_decoder
+test_reconcile_list_survives_a_missing_json_decoder

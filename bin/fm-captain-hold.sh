@@ -361,17 +361,32 @@ show_field() {  # <show-output> <field>
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
 }
 
+# perl's JSON::PP is packaged separately on minimal installs, so a home can
+# have perl and still lack the decoder every show-field read below depends on.
+# Without this guard the decode yields an empty string inside a command
+# substitution and the caller silently reads a missing field instead of
+# failing, so the decoding commands prove the module once, up front, in the
+# main shell. The binding commands never decode a task field, so they stay
+# usable on a home that has not installed the module yet.
+JSONPP_INSTALL_HINT="Fedora/RHEL: 'sudo dnf install perl-JSON-PP', Debian/Ubuntu: 'sudo apt install libjson-pp-perl', macOS/other: 'cpan JSON::PP'"
+
+require_json_decoder() {
+  perl -MJSON::PP -e1 >/dev/null 2>&1 \
+    || fail "perl JSON::PP module is required to decode task fields; install the OS package - $JSONPP_INSTALL_HINT"
+}
+
 decode_shown_value() {  # <shown-field>
-  local value=$1
+  local value=$1 decoded
   case "$value" in
     \"*\")
-      printf '%s' "$value" | perl -MJSON::PP -e '
+      decoded=$(printf '%s' "$value" | perl -MJSON::PP -e '
         local $/;
         my $value = decode_json(<STDIN>);
         binmode STDOUT, ":raw";
         utf8::encode($value) if utf8::is_utf8($value);
         print $value;
-      '
+      ') || fail "decoding a task field through perl JSON::PP failed; install the OS package - $JSONPP_INSTALL_HINT"
+      printf '%s' "$decoded"
       ;;
     *) printf '%s' "$value" ;;
   esac
@@ -1442,6 +1457,7 @@ reconcile_close() {
   done
   validate_slug task-id "$id"
   [ -n "$evidence_file" ] || fail "--evidence-file is required; a moot call closes on evidence, never on assertion"
+  require_json_decoder
   load_decision "$evidence_file"
   acquire_task_control_lock "$id"
   reconcile_request_read "$id" \
@@ -1513,6 +1529,7 @@ reconcile_note() {
   [ -n "$note" ] || fail "note file must not be empty"
   [ "$(printf '%s' "$note" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
     || fail "note file exceeds 8192 bytes"
+  require_json_decoder
   acquire_task_control_lock "$id"
   reconcile_request_read "$id" \
     || fail "task $id has no pending board-created reconcile request"
@@ -1646,6 +1663,7 @@ command_verify() {
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed captain-call inventory"
   keys=$(meta_value "$meta" decision_keys)
   if [ -n "$keys" ]; then
+    require_json_decoder
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
       if ! resolved=$(resolve_entry "$origin" "$entry"); then
@@ -1838,6 +1856,7 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
     state=${FM_BACKLOG_ROW_STATE%% *}
     if [ "$state" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
       if [ "$identity" -eq 1 ]; then
+        require_json_decoder
         show=$(task_show "$id") || {
           printf 'fm-captain-hold: captain call %s is open but its record could not be read\n' "$id" >&2
           exit 2
@@ -1860,17 +1879,17 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
 }
 
 case "${1:-}" in
-  hold) shift; command_hold "$@" ;;
-  answer) shift; command_answer "$@" ;;
-  answers) shift; command_answers "$@" ;;
-  reconcile-requests) shift; command_reconcile_requests "$@" ;;
+  hold) shift; require_json_decoder; command_hold "$@" ;;
+  answer) shift; require_json_decoder; command_answer "$@" ;;
+  answers) shift; require_json_decoder; command_answers "$@" ;;
+  reconcile-requests) shift; require_json_decoder; command_reconcile_requests "$@" ;;
   bind) shift; command_bind "$@" ;;
   unbind) shift; command_unbind "$@" ;;
   binding) shift; command_binding "$@" ;;
-  complete) shift; command_complete "$@" ;;
+  complete) shift; require_json_decoder; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
-  diverged) shift; command_diverged "$@" ;;
+  diverged) shift; require_json_decoder; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
