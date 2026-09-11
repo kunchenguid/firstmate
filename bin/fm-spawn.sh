@@ -894,9 +894,9 @@ case "$TASK_CLASS" in
   *) echo "error: --task-class is not a recognized model telemetry class" >&2; exit 1 ;;
 esac
 
-# --relaunch reuses an existing task's endpoint, worktree, project, and kind,
-# so every axis this block resolves for a fresh spawn instead comes from that
-# task's own durable record below. Contradicting it on the command line is a
+# --relaunch reuses an existing task's endpoint, worktree, project, kind, and
+# access, so every axis this block resolves for a fresh spawn instead comes from
+# that task's own durable record below. Contradicting it on the command line is a
 # refusal rather than a silently-ignored flag.
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "$BACKEND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2; exit 1; }
@@ -945,11 +945,14 @@ fi
 }
 # Reader/writer access axis (scouts only): closed-set validated here so an
 # unknown value or a misapplied kind refuses before any fleet mutation.
+# A --relaunch does not yet know the recorded kind, so the scout-only check
+# waits until that record is adopted below rather than testing the default
+# KIND=ship.
 case "$ACCESS" in
   reader|writer) ;;
   *) echo "error: --access must be reader or writer (got '$ACCESS')" >&2; exit 1 ;;
 esac
-if [ "$ACCESS_SET" -eq 1 ] && [ "$KIND" != scout ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$ACCESS_SET" -eq 1 ] && [ "$KIND" != scout ]; then
   echo "error: --access applies only to scout spawns; a ship delivers a project change through an isolated worktree and a secondmate operates its own home" >&2
   exit 1
 fi
@@ -1892,6 +1895,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  if ! RELAUNCH_ACCESS=$(fm_meta_optional_exact_value "$RELAUNCH_META" access); then
+    echo "error: existing task $ID records ambiguous access metadata; expected exactly zero or one non-empty access= value - repair $RELAUNCH_META before relaunching so a duplicate axis cannot launder a writer pool lease into a reader scratch record" >&2
+    exit 1
+  fi
+  if [ "$ACCESS_SET" -eq 0 ]; then
+    case "$RELAUNCH_ACCESS" in
+      ''|writer) ACCESS=writer ;;
+      reader) ACCESS=reader ;;
+      *)
+        echo "error: existing task $ID records unknown access '$RELAUNCH_ACCESS'; this is record damage - repair $RELAUNCH_META before relaunching so the damaged axis cannot be laundered into a clean writer or reader record" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  if [ "$ACCESS_SET" -eq 1 ] && [ "$KIND" != scout ]; then
+    echo "error: --access applies only to scout spawns; a ship delivers a project change through an isolated worktree and a secondmate operates its own home" >&2
+    exit 1
+  fi
   if [ "$RESUME_SESSION_SET" -eq 1 ]; then
     [ "$MODEL_SET" -eq 1 ] || MODEL=$(fm_meta_get "$RELAUNCH_META" model)
     [ "$EFFORT_SET" -eq 1 ] || EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
@@ -3682,6 +3703,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
+  if [ "$ACCESS" = reader ]; then
+    validate_reader_scratch "$WT" || exit 1
+  fi
   WT_TARGET=$T
   SES=${T%%:*}
 else
@@ -4152,7 +4176,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
       exit 1
     fi
   fi
-  [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+  if [ "$KIND" != secondmate ] && [ "$ACCESS" != reader ]; then
+    validate_spawn_worktree "relaunch" "$T"
+  fi
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reader ]; then
   fm_lock_acquire_wait "$TREEHOUSE_ACQUISITION_LOCK" || {
     echo "error: treehouse acquisition exclusion could not be acquired" >&2
@@ -5042,7 +5068,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind access mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)

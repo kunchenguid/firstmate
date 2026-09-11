@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-backend-hometag-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -173,6 +175,44 @@ EOF
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
   TASK_TMPS+=("/tmp/fm-$id")
+}
+
+# add_reader_scout_task <case-dir> <id>
+# Checkout-free scratch at the home-scoped reader temp root spawn itself uses.
+add_reader_scout_task() {
+  local dir=$1 id=$2
+  local home="$dir/home" proj="$dir/proj" task_tmp scratch head text_file
+  fm_git_init_commit "$proj"
+  mkdir -p "$home/data/$id" "$home/state"
+  task_tmp=$(
+    FM_HOME=$home FM_ROOT=$ROOT fm_reader_task_tmp "$id" || exit 1
+    printf '%s\n' "$FM_READER_TASK_TMP"
+  ) || fail "could not derive the reader temp root for $id"
+  mkdir -p "$task_tmp/scratch"
+  scratch=$(cd "$task_tmp/scratch" && pwd -P)
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --scout --access reader >/dev/null 2>&1 \
+    || fail "could not scaffold a reader brief for $id"
+  text_file="$dir/reader-brief-text.txt"
+  printf 'Exercise reader relaunch for %s\n' "$id" > "$text_file"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$text_file" >/dev/null 2>&1 \
+    || fail "could not fill a reader brief for $id"
+  head=$(git -C "$proj" rev-parse HEAD)
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$scratch"
+    echo "project=$proj"
+    echo "harness=claude"
+    echo "kind=scout"
+    echo "access=reader"
+    echo "tasktmp=$task_tmp"
+    echo "model=default"
+    echo "effort=default"
+    echo "base_commit=$head"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$scratch" > "$dir/fake/cwd"
+  TASK_TMPS+=("$task_tmp")
 }
 
 run_control() {  # <case-dir> <args...>
@@ -1565,6 +1605,63 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# A reader scout has a checkout-free scratch directory rather than a Treehouse
+# worktree. The control path must preserve that scratch and let the launch owner
+# adopt the recorded reader access instead of defaulting to writer.
+test_recorded_reader_scout_relaunch_without_access_keeps_identity() {
+  local dir out rc scratch
+  dir=$(new_case reader-relaunch rl-reader)
+  add_reader_scout_task "$dir" rl-reader
+  scratch=$(meta_field "$dir" rl-reader worktree)
+
+  out=$(run_control "$dir" rl-reader relaunch --note "continue the recorded review"); rc=$?
+  expect_code 0 "$rc" "ordinary reader-scout relaunch without --access should succeed"$'\n'"$out"
+  assert_contains "$out" "relaunched rl-reader harness=claude from=claude" \
+    "the outcome should name the same-harness replacement"
+  assert_contains "$out" "worktree=$scratch" \
+    "the outcome should name the recorded reader scratch, not a writer worktree"
+  [ "$(meta_field "$dir" rl-reader kind)" = scout ] \
+    || fail "kind=scout must survive the relaunch"
+  [ "$(meta_field "$dir" rl-reader access)" = reader ] \
+    || fail "access=reader must be adopted into the replacement record"
+  [ "$(grep -c '^access=' "$dir/home/state/rl-reader.meta")" = 1 ] \
+    || fail "relaunch must keep exactly one access=reader record"
+  [ "$(meta_field "$dir" rl-reader worktree)" = "$scratch" ] \
+    || fail "the reader scratch must be reused, not replaced with a pool worktree"
+  [ "$(journal_field "$dir" rl-reader phase)" = complete ] \
+    || fail "the transaction journal should end complete"
+  [ "$(journal_field "$dir" rl-reader access)" = reader ] \
+    || fail "the checkpoint should record that it accounted for a reader scratch"
+  assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
+  assert_grep "encode launch-brief" "$dir/fake/literal" \
+    "the replacement should have been launched through the spawn handoff"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the replacement agent should be running on the recorded harness"
+  [ ! -e /tmp/fm-rl-reader ] \
+    || fail "reader relaunch allocated a writer temp root at /tmp/fm-rl-reader"
+  pass "fm-control relaunch: a recorded reader scout relaunches in place without --access"
+}
+
+test_direct_spawn_relaunch_adopts_recorded_reader_access() {
+  local dir out rc scratch
+  dir=$(new_case reader-spawn-relaunch rl-reader-spawn)
+  add_reader_scout_task "$dir" rl-reader-spawn
+  scratch=$(meta_field "$dir" rl-reader-spawn worktree)
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl-reader-spawn --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "direct spawn relaunch should adopt recorded reader access"$'\n'"$out"
+  assert_contains "$out" "spawned rl-reader-spawn harness=claude kind=scout access=reader" \
+    "the launch handoff should retain reader access"
+  assert_contains "$out" "worktree=$scratch" \
+    "the direct relaunch should retain the recorded scratch"
+  [ "$(grep -c '^access=' "$dir/home/state/rl-reader-spawn.meta")" = 1 ] \
+    || fail "direct relaunch must keep exactly one access=reader record"
+  [ ! -e /tmp/fm-rl-reader-spawn ] \
+    || fail "direct reader relaunch allocated a writer temp root"
+  pass "fm-spawn relaunch: a recorded reader access axis is adopted without --access"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
@@ -1618,3 +1715,5 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_recorded_reader_scout_relaunch_without_access_keeps_identity
+test_direct_spawn_relaunch_adopts_recorded_reader_access

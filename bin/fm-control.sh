@@ -694,10 +694,31 @@ resolve_relaunch_profile() {
 CHECKPOINT_LINES=()
 safe_checkpoint() {
   local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
+  local recorded_access inside_git_dir
   CHECKPOINT_LINES=()
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
   wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || die "task $ID's recorded worktree $WT cannot be resolved"
+  if ! recorded_access=$(fm_meta_optional_exact_value "$META" access); then
+    die "task $ID records ambiguous access metadata; refusing to relaunch until $META has exactly zero or one non-empty access= value"
+  fi
+  case "$recorded_access" in
+    ''|writer) ;;
+    reader)
+      [ "$KIND" = scout ] \
+        || die "task $ID records access=reader but kind=$KIND; refusing to relaunch a non-scout as a reader"
+      wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
+      inside_git_dir=$(git -C "$WT" rev-parse --is-inside-git-dir 2>/dev/null || true)
+      if [ -n "$wt_top" ] || [ "$inside_git_dir" = true ]; then
+        die "task $ID's recorded reader scratch $WT is inside a git checkout or git dir; refusing to relaunch without a checkout-free scratch"
+      fi
+      CHECKPOINT_LINES+=("access=reader" "scratch=$wt_real")
+      return 0
+      ;;
+    *)
+      die "task $ID records unknown access '$recorded_access'; refusing to relaunch until the access axis is repaired"
+      ;;
+  esac
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null) \
     || die "task $ID's recorded worktree $WT is not a git worktree; refusing to relaunch without a checkout whose unlanded work can be accounted for"
   wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || wt_top_real=$wt_top
