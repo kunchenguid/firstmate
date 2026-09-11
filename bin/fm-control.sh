@@ -53,6 +53,12 @@
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
 #
+# Pool tasks retain their recorded candidate during ordinary relaunch, including
+# secondmates. --quota-exhausted <private-event.json> permits another candidate
+# only for a positively stopped task and exact native terminal quota evidence.
+# The pool owner validates and records evidence before this control transaction
+# can change instructions or stop an agent. See docs/configuration.md.
+#
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
 # endpoint, or discarding work stays with bin/fm-teardown.sh, which owns the
@@ -152,9 +158,16 @@ CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
+CONTROL_POOL=
+CONTROL_ROUTE_RECEIPT=
+QUOTA_EXHAUSTED=
+POOL_CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/dispatch-pools.json"
 
 control_cleanup() {
   local status=$?
+  if [ "$status" -ne 0 ] && [ -n "$CONTROL_ROUTE_RECEIPT" ]; then
+    "$SCRIPT_DIR/fm-dispatch-pool.sh" finish "$POOL_CONFIG" "$STATE" "$ID" "$CONTROL_ROUTE_RECEIPT" failed >/dev/null || true
+  fi
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
@@ -204,6 +217,7 @@ for control_arg in "$@"; do
       --*) die "--$control_want_value requires a value" ;;
     esac
     case "$control_want_value" in
+      quota_exhausted) QUOTA_EXHAUSTED=$control_arg ;;
       harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
@@ -218,6 +232,8 @@ for control_arg in "$@"; do
     continue
   fi
   case "$control_arg" in
+    --quota-exhausted) control_want_value=quota_exhausted ;;
+    --quota-exhausted=*) QUOTA_EXHAUSTED=${control_arg#--quota-exhausted=} ;;
     --harness) control_want_value=harness ;;
     --harness=*) NEW_HARNESS=${control_arg#--harness=}; HARNESS_SET=1 ;;
     --model) control_want_value=model ;;
@@ -241,7 +257,7 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] && [ -z "$QUOTA_EXHAUSTED" ] \
     || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
@@ -622,6 +638,23 @@ resolve_relaunch_profile() {
      && [ "$PRIOR_RECORDED_HARNESS" != "$PRIOR_HARNESS" ]; then
     die "task $ID records harness '$PRIOR_RECORDED_HARNESS', whose original launch command cannot be reconstructed from its recorded basename; relaunching without --harness would substitute the canonical adapter '$PRIOR_HARNESS' for the command actually running. Pass an explicit --harness to choose the replacement runtime deliberately"
   fi
+  CONTROL_POOL=$(fm_meta_get "$META" route_pool)
+  if [ -n "$CONTROL_POOL" ]; then
+    [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] || die 'pool task profile is pinned; concrete overrides are refused'
+    pool_mode=pinned
+    if [ -n "$QUOTA_EXHAUSTED" ]; then
+      # The current Codex notify producer binds completed turns, not failures.
+      # Do not admit a supplied positive event as a substitute for that producer.
+      die 'terminal quota failover unsupported: Codex TUI has no verified native terminal-error producer'
+    fi
+    pool_route=$("$SCRIPT_DIR/fm-dispatch-pool.sh" reserve "$POOL_CONFIG" "$STATE" "$ID" "$CONTROL_POOL" "$pool_mode" "$QUOTA_EXHAUSTED") || die 'pool relaunch admission refused before stopping the existing agent'
+    CONTROL_ROUTE_RECEIPT=$(printf '%s' "$pool_route" | jq -r .id)
+    TARGET_HARNESS=$(printf '%s' "$pool_route" | jq -r .candidate.harness)
+    TARGET_MODEL=$(printf '%s' "$pool_route" | jq -r .candidate.model)
+    TARGET_EFFORT=$(printf '%s' "$pool_route" | jq -r .candidate.effort)
+    return 0
+  fi
+  [ -z "$QUOTA_EXHAUSTED" ] || die 'terminal quota failover requires an existing pool task'
   CONFIG_HARNESS=
   CONFIG_MODEL=
   CONFIG_EFFORT=
@@ -832,10 +865,14 @@ do_relaunch() {
   # per-task harness wiring before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
-  spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
-  [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
-  [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+  if [ -n "$CONTROL_POOL" ]; then
+    spawn_args=("$ID" --relaunch --pool "$CONTROL_POOL")
+  else
+    spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
+    [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
+    [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  fi
+  if FM_CONTROL_POOL_RECEIPT="$CONTROL_ROUTE_RECEIPT" FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
   else

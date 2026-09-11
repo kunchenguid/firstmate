@@ -309,3 +309,27 @@ make_stubs() {
   fm_test_fake_sleep_noop "$fakebin"
   printf '%s\n' "$fakebin"
 }
+
+# Native pool protocol fixture; no vendor process or endpoint is launched.
+fm_test_pool_codex() {
+cat > "$1/codex" <<'JS'
+#!/usr/bin/env node
+const readline=require('readline');
+const limit={limitId:'codex',primary:{usedPercent:Number(process.env.POOL_USED||10),resetsAt:process.env.POOL_STALE?'bad':Math.floor(Date.now()/1000)+3600},secondary:null,individualLimit:null,spendControlReached:false,rateLimitReachedType:null};
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const r=JSON.parse(line);if(!r.id)return;let result;
+ if(r.method==='initialize')result={userAgent:'codex-fixture',codexHome:process.env.CODEX_HOME};
+ if(r.method==='account/read')result={account:process.env.POOL_NO_AUTH?null:{type:'chatgpt',email:'fixture@example.invalid'},requiresOpenaiAuth:true};
+ if(r.method==='account/rateLimits/read')result={accountId:'fixture-account',rateLimits:limit,rateLimitsByLimitId:{codex:limit}};
+ if(r.method==='model/list')result={data:['gpt-6-astra','gpt-5.6-sol'].map(model=>({id:model,model,hidden:false,supportedReasoningEfforts:[{reasoningEffort:'low'}]})),nextCursor:null};
+ console.log(JSON.stringify({id:r.id,result}));
+});
+JS
+chmod +x "$1/codex"
+}
+
+fm_test_pool_config() {
+cat > "$1" <<'JSON'
+{"schemaVersion":1,"defaults":{"crewmate":"test","secondmate":"test"},"pools":{"test":[{"id":"a","harness":"codex","model":"gpt-6-astra","effort":"low","provider":"openai","authCarrier":"codex-chatgpt","carrier":"codex-native","weight":2},{"id":"b","harness":"codex","model":"gpt-5.6-sol","effort":"low","provider":"openai","authCarrier":"codex-chatgpt","carrier":"codex-native","weight":1}]}}
+JSON
+}

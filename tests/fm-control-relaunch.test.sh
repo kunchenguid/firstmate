@@ -19,8 +19,8 @@
 #      agent exited.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
@@ -1561,6 +1561,67 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+prepare_pool_task() {
+  local dir=$1 receipt
+  add_ship_task "$dir" t1 codex
+  printf codex > "$dir/fake/command"
+  printf codex > "$dir/fake/becomes"
+  mkdir -p "$dir/home/config" "$dir/user-home/.codex"
+  fm_test_pool_codex "$dir/fakebin"
+  fm_test_pool_config "$dir/home/config/dispatch-pools.json"
+  mv "$dir/home/state/t1.meta" "$dir/prior.meta"
+  receipt=$(PATH="$dir/fakebin:$PATH" CODEX_HOME="$dir/user-home/.codex" \
+    "$ROOT/bin/fm-dispatch-pool.sh" reserve "$dir/home/config/dispatch-pools.json" "$dir/home/state" t1 test) || fail 'could not prepare pool receipt'
+  mv "$dir/prior.meta" "$dir/home/state/t1.meta"
+  printf '%s' "$receipt" > "$dir/receipt.json"
+  printf 'route_pool=test\nroute_candidate=a\nroute_generation=1\nroute_receipt=%s\nspawn_gen=fixture-generation\nnative_thread_id=fixture-thread\n' \
+    "$(printf '%s' "$receipt" | jq -r .id)" >> "$dir/home/state/t1.meta"
+  # Native metadata records the concrete selection, not a launcher default.
+  sed -i.bak 's/model=default/model=gpt-6-astra/; s/effort=default/effort=low/' "$dir/home/state/t1.meta"
+}
+
+test_pool_control_relaunch() {
+  local dir out rc prior
+  dir=$(new_case pool-control)
+  prepare_pool_task "$dir"
+  prior=$(meta_field "$dir" t1 worktree)
+  out=$(run_control "$dir" t1 relaunch --note 'Continue the same task.'); rc=$?
+  assert_equals 0 "$rc" "pool relaunch failed: $out"
+  assert_equals a "$(meta_field "$dir" t1 route_candidate)" 'ordinary relaunch changed pool candidate'
+  assert_equals 2 "$(meta_field "$dir" t1 route_generation)" 'pool generation not advanced'
+  assert_equals "$prior" "$(meta_field "$dir" t1 worktree)" 'pool relaunch changed worktree'
+  assert_equals 2 "$(jq '.receipts|length' "$dir/home/state/dispatch-pools.json")" 'prior route receipt not retained'
+  pass 'native control relaunch preserves candidate, task, worktree and receipt history'
+}
+
+test_pool_terminal_control_failover() {
+  local dir out rc original
+  dir=$(new_case pool-terminal)
+  prepare_pool_task "$dir"
+  node - "$dir" <<'JS'
+const fs=require('fs'),root=process.argv[2],r=JSON.parse(fs.readFileSync(root+'/receipt.json'));
+fs.writeFileSync(root+'/home/state/exhaustion.json',JSON.stringify({schemaVersion:1,task:'t1',generation:1,candidate:r.candidate.id,receipt:r.id,provider:r.candidate.provider,authIdentity:r.evidence.identity,terminal:true,kind:'quota_exhausted',observedAt:Date.now(),spawnGeneration:'fixture-generation',nativeEvent:{method:'error',params:{threadId:'fixture-thread',willRetry:false,error:{codexErrorInfo:'usageLimitExceeded'}}}}));
+JS
+  original=$(cat "$dir/home/state/t1.meta")
+  out=$(run_control "$dir" t1 relaunch --note 'Quota exhausted.' --quota-exhausted "$dir/home/state/exhaustion.json"); rc=$?
+  [ "$rc" -ne 0 ] || fail 'live task was quota-migrated'
+  assert_equals "$original" "$(cat "$dir/home/state/t1.meta")" 'live refusal changed metadata'
+  printf zsh > "$dir/fake/command"
+  out=$(run_control "$dir" t1 relaunch --note 'Continue after terminal quota exhaustion.' --quota-exhausted "$dir/home/state/exhaustion.json"); rc=$?
+  [ "$rc" -ne 0 ] || fail 'unverified native terminal producer was admitted'
+  assert_contains "$out" 'no verified native terminal-error producer' 'unsupported boundary not named'
+  assert_equals "$original" "$(cat "$dir/home/state/t1.meta")" 'terminal refusal changed task state'
+  pass 'native control refuses quota migration without a verified terminal-error producer'
+
+}
+
+if [ "${FM_POOL_TEST_ONLY:-0}" = 1 ]; then
+  test_pool_control_relaunch
+  test_pool_terminal_control_failover
+  exit 0
+fi
+test_pool_control_relaunch
+test_pool_terminal_control_failover
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

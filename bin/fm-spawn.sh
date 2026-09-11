@@ -43,6 +43,10 @@
 #   the new incarnation. The replacement still never starts outside the copy
 #   holding the work: a Herdr shell that has drifted out of the recorded
 #   worktree is told once to return, and only a shell that will not go refuses.
+#   --pool <name> selects config/dispatch-pools.json through native serialized
+#   admission. Its optional kind default applies without this flag. Explicit
+#   pools refuse concrete profile overrides and remote secondmate routing;
+#   task metadata pins the selection across relaunch. See docs/configuration.md.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -500,6 +504,12 @@ fm_refuse_if_gate_agent
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 KIND_SET=0
+POOL=
+POOL_SET=0
+POOL_RECEIPT=
+POOL_GENERATION=
+POOL_CANDIDATE=
+POOL_ROUTE=
 HARNESS_ARG=
 MODEL=
 EFFORT=
@@ -523,6 +533,7 @@ for a in "$@"; do
       --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
     esac
     case "$want_value" in
+      pool) POOL=$a; POOL_SET=1 ;;
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
@@ -539,6 +550,8 @@ for a in "$@"; do
     --scout) KIND=scout; KIND_SET=1 ;;
     --secondmate) KIND=secondmate; KIND_SET=1 ;;
     --relaunch) RELAUNCH=1 ;;
+    --pool) want_value=pool ;;
+    --pool=*) POOL=${a#--pool=}; POOL_SET=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -557,6 +570,7 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$POOL_SET" -eq 0 ] || [ -n "$POOL" ] || { echo "error: --pool requires a non-empty value" >&2; exit 1; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
@@ -652,6 +666,12 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
+  fi
+  if [ -n "$POOL" ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo 'error: candidate pools require local carrier evidence; remote secondmate pools are unsupported' >&2
+    return 1
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
@@ -969,6 +989,9 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$status" -ne 0 ] && [ -n "$POOL_RECEIPT" ]; then
+    "$SCRIPT_DIR/fm-dispatch-pool.sh" finish "$CONFIG/dispatch-pools.json" "$STATE" "$ID" "$POOL_RECEIPT" failed >/dev/null || true
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -1160,6 +1183,10 @@ spawn_herdr_presentation_order_lock_release() {
 # the single path verbatim. A failed pair is reported and skipped; the rest still launch;
 # exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
 # one (task ids are bare slugs), so they fall straight through to the logic below.
+if [ "$RELAUNCH" = 0 ] && [ -z "$POOL" ] && { [ -e "$CONFIG/dispatch-pools.json" ] || [ -L "$CONFIG/dispatch-pools.json" ]; }; then
+  pool_default=$("$SCRIPT_DIR/fm-dispatch-pool.sh" default "$CONFIG/dispatch-pools.json" "$STATE" "$KIND") || exit 1
+  POOL=$(printf '%s' "$pool_default" | jq -r .pool)
+fi
 idpart=${POS[0]:-}
 idpart=${idpart%%=*}
 if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ]; then
@@ -1167,12 +1194,13 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
-  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -z "$POOL" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
   rc=0
   shared_args=()
+  [ -z "$POOL" ] || shared_args+=(--pool "$POOL")
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
@@ -1421,6 +1449,40 @@ else
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+
+# Pool selection belongs to native admission, after existing endpoint validation
+# and before any new worktree/endpoint allocation. A relaunch is pinned unless
+# fm-control supplies its exact preflighted terminal-exhaustion reservation.
+if [ "$RELAUNCH" = 1 ]; then
+  recorded_pool=$(fm_meta_get "$RELAUNCH_META" route_pool)
+  if [ -n "$recorded_pool" ]; then
+    [ -z "$POOL" ] || [ "$POOL" = "$recorded_pool" ] || { echo 'error: existing task pool is pinned' >&2; exit 1; }
+    POOL=$recorded_pool
+  elif [ -n "$POOL" ]; then
+    echo 'error: cannot retrofit a pool onto an existing task' >&2; exit 1
+  fi
+fi
+if [ -n "$POOL" ]; then
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] || {
+    echo 'error: --pool cannot be combined with concrete profile overrides' >&2; exit 1;
+  }
+  if [ "$RELAUNCH" = 0 ] && [ -n "$ARG3" ]; then
+    echo 'error: --pool cannot be combined with a positional launch command' >&2; exit 1
+  fi
+  pool_mode=fresh
+  [ "$RELAUNCH" = 0 ] || pool_mode=pinned
+  if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_POOL_RECEIPT:-}" ]; then
+    POOL_ROUTE=$("$SCRIPT_DIR/fm-dispatch-pool.sh" verify "$CONFIG/dispatch-pools.json" "$STATE" "$ID" "$FM_CONTROL_POOL_RECEIPT") || exit 1
+  else
+    POOL_ROUTE=$("$SCRIPT_DIR/fm-dispatch-pool.sh" reserve "$CONFIG/dispatch-pools.json" "$STATE" "$ID" "$POOL" "$pool_mode") || exit 1
+  fi
+  POOL_RECEIPT=$(printf '%s' "$POOL_ROUTE" | jq -r .id)
+  POOL_GENERATION=$(printf '%s' "$POOL_ROUTE" | jq -r .generation)
+  POOL_CANDIDATE=$(printf '%s' "$POOL_ROUTE" | jq -r .candidate.id)
+  ARG3=$(printf '%s' "$POOL_ROUTE" | jq -r .candidate.harness)
+  MODEL=$(printf '%s' "$POOL_ROUTE" | jq -r .candidate.model)
+  EFFORT=$(printf '%s' "$POOL_ROUTE" | jq -r .candidate.effort)
+fi
 
 shell_quote() {
   printf "'"
@@ -3878,10 +3940,11 @@ else
 fi
 SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
-  awk -F= '
+  awk -v pool="$POOL" -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx route_pool route_generation route_candidate route_receipt", keys, " ")
       for (i in keys) owned[keys[i]] = 1
+      if (pool != "") owned["native_thread_id"] = 1
     }
     !($1 in owned)
   ' "$RELAUNCH_META"
@@ -3900,6 +3963,12 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ -n "$POOL_RECEIPT" ]; then
+    echo "route_pool=$POOL"
+    echo "route_generation=$POOL_GENERATION"
+    echo "route_candidate=$POOL_CANDIDATE"
+    echo "route_receipt=$POOL_RECEIPT"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -4033,6 +4102,21 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+if [ -n "$POOL_RECEIPT" ]; then
+  # Allocation can outlive the admission evidence. Revalidate the same carrier
+  # and account immediately before delivery; never draw a replacement here.
+  "$SCRIPT_DIR/fm-dispatch-pool.sh" verify "$CONFIG/dispatch-pools.json" "$STATE" "$ID" "$POOL_RECEIPT" >/dev/null || exit 1
+  pool_binary=$(printf '%s' "$POOL_ROUTE" | jq -r .evidence.binary)
+  pool_auth_home=$(printf '%s' "$POOL_ROUTE" | jq -r .evidence.authHome)
+  LAUNCH=${LAUNCH/#codex /$(shell_quote "$pool_binary") -c $(shell_quote 'model_provider="openai"') }
+  LAUNCH="CODEX_HOME=$(shell_quote "$pool_auth_home") $LAUNCH"
+  if [ "$KIND" != secondmate ]; then
+    pool_notify=$(jq -cn --arg script "$SCRIPT_DIR/fm-dispatch-pool-notify.sh" --arg config "$CONFIG/dispatch-pools.json" --arg state "$STATE" --arg task "$ID" --arg receipt "$POOL_RECEIPT" --arg generation "$SPAWN_GEN" '["bash",$script,$config,$state,$task,$receipt,$generation]')
+    # Override only the worker template's notification, preserving its marker.
+    # Secondmates retain their existing configured notification unchanged.
+    LAUNCH=${LAUNCH/\"\$(__OPINPUT__/ -c $(shell_quote "notify=$pool_notify") \"\$(__OPINPUT__}
+  fi
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -4322,6 +4406,10 @@ fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
 
+if [ -n "$POOL_RECEIPT" ]; then
+  "$SCRIPT_DIR/fm-dispatch-pool.sh" finish "$CONFIG/dispatch-pools.json" "$STATE" "$ID" "$POOL_RECEIPT" launched >/dev/null || exit 1
+fi
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
+[ -z "$POOL_RECEIPT" ] || SPAWN_DELIVERY="$SPAWN_DELIVERY pool=$POOL candidate=$POOL_CANDIDATE route_receipt=$STATE/dispatch-pools.json#$POOL_RECEIPT"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

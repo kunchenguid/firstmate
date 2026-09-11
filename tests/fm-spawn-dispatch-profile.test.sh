@@ -1297,6 +1297,48 @@ test_non_claude_harness_ignores_claude_permission_mode() {
 }
 
 test_worker_launch_delivers_role_scope
+test_native_candidate_pools() {
+  local rec id out status target
+  id=native-pool-ship
+  rec=$(make_spawn_case native-pool-ship codex "$id")
+  read_case_record "$rec"
+  fm_test_pool_codex "$FAKEBIN_DIR"
+  fm_test_pool_config "$HOME_DIR/config/dispatch-pools.json"
+  mkdir -p "$HOME_DIR/user-home/.codex"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1); status=$?
+  assert_equals 0 "$status" "native pool ship failed: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-6-astra low
+  assert_grep 'route_pool=test' "$HOME_DIR/state/$id.meta" 'pool not recorded'
+  assert_grep 'route_generation=1' "$HOME_DIR/state/$id.meta" 'route generation absent'
+  assert_grep 'model_provider=' "$LAUNCH_LOG" 'provider pin absent'
+  assert_grep 'CODEX_HOME=' "$LAUNCH_LOG" 'auth home pin absent'
+  [ "$(jq -r '.receipts[0].status' "$HOME_DIR/state/dispatch-pools.json")" = launched ] || fail 'route delivery receipt not committed'
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail 'existing pool task was relaunched by replay'
+  [ "$(jq '.receipts|length' "$HOME_DIR/state/dispatch-pools.json")" = 1 ] || fail 'replayed native spawn redrew route'
+  pass 'native spawn consumes pool config, pins carrier and records delivered route'
+
+  id=native-pool-secondmate
+  rec=$(make_spawn_case native-pool-secondmate codex "$id")
+  read_case_record "$rec"
+  target="$CASE_DIR/secondmate"
+  mkdir -p "$target"
+  make_seeded_secondmate_home "$target" "$id"
+  fm_test_pool_codex "$FAKEBIN_DIR"
+  fm_test_pool_config "$HOME_DIR/config/dispatch-pools.json"
+  mkdir -p "$HOME_DIR/user-home/.codex"
+  out=$(run_spawn "$HOME_DIR" "$target" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$target" --secondmate 2>&1); status=$?
+  assert_equals 0 "$status" "native secondmate pool failed: $out"
+  assert_grep 'route_pool=test' "$HOME_DIR/state/$id.meta" 'secondmate pool not recorded'
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-6-astra low
+  pass 'native secondmate spawn consumes its configured pool'
+}
+
+if [ "${FM_POOL_TEST_ONLY:-0}" = 1 ]; then
+  test_native_candidate_pools
+  exit 0
+fi
+test_native_candidate_pools
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
