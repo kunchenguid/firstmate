@@ -212,7 +212,9 @@
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
-#   never falls back to pi.
+#   never falls back to pi. Writer launches pre-register the exact worktree
+#   in Pi's trust store before any task state is created; the launch
+#   carries the same PI_CODING_AGENT_DIR so Pi reads that store.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -4304,6 +4306,24 @@ if [ "$TREEHOUSE_NEW_ALLOCATION" -eq 1 ] || { [ "$RELAUNCH" -eq 0 ] && [ "$KIND"
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
+PI_TRUST_AGENT_DIR=
+if [ "$KIND" != secondmate ] && [ "$ACCESS" != reader ]; then
+  case "$HARNESS" in
+    pi|pi-signed)
+      if [ -z "${PI_CODING_AGENT_DIR:-}" ] && [ -z "${HOME:-}" ]; then
+        echo "error: refusing Pi spawn because neither HOME nor PI_CODING_AGENT_DIR is available" >&2
+        exit 1
+      fi
+      PI_TRUST_AGENT_DIR=${PI_CODING_AGENT_DIR:-${HOME:-}/.pi/agent}
+      if ! PI_CODING_AGENT_DIR="$PI_TRUST_AGENT_DIR" \
+        "$FM_ROOT/bin/fm-pi-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
+        echo "error: could not pre-register Pi workspace trust for $WT; refusing to launch a Pi worker that would wedge on the trust dialog; inspect window $T" >&2
+        exit 1
+      fi
+      ;;
+  esac
+fi
+
 if [ "$HARNESS" = kimi ]; then
   KIMI_TRUST_STATUS=0
   kimi_prest_trust_workspace "$WT" || KIMI_TRUST_STATUS=$?
@@ -5293,6 +5313,10 @@ if [ "$HARNESS" = claude ] && [ -n "$CLAUDE_ACCOUNT_CONFIG_DIR" ]; then
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+if [ "$KIND" != secondmate ] && [ "$ACCESS" != reader ] \
+  && { [ "$HARNESS" = pi ] || [ "$HARNESS" = pi-signed ]; }; then
+  LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$PI_TRUST_AGENT_DIR") $LAUNCH"
+fi
 # A no-mistakes ship resolves its private NM_HOME at intake (finding 1): carry it
 # across the pane process boundary as a shell-quoted prefix assignment on the
 # literal launch command, the same verified channel that ships CLAUDE_CONFIG_DIR
@@ -5414,6 +5438,8 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
+# The single Enter here submits the literal launch command to the pane shell.
+# Pi trust was registered above, so this is not a trust-dialog fallback.
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then

@@ -1,7 +1,7 @@
 # Pi and Pi-signed
 
 The combined contract is genuine: Pi and the signed wrapper expose the same verified CLI and TUI behavior.
-Verified on 2026-07-27 with Pi and Pi-signed 0.82.0 unless a fact gives another version.
+Verified on 2026-09-10 with Pi 0.85.1 unless a fact gives another version; Pi-signed facts retain their stated verification version.
 
 ## Operating facts
 
@@ -30,9 +30,12 @@ The router's Detection section owns how launch markers and ancestry select betwe
 Keep the instructions as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
 
-A project trust dialog can appear on the first Pi run in any not-yet-trusted directory, including a clean worktree.
-Accept it with Enter and verify the instructions begin processing.
-The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same pooled slot skip it.
+## Project trust
+`bin/fm-spawn.sh` runs `bin/fm-pi-trust.sh` before launching a Pi task and records the exact canonical worktree path as `true` in the trust store.
+Pi 0.85.1 persists this store at `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/trust.json` as a JSON object mapping canonical directory paths to `true`, `false`, or `null`.
+The launch carries the same `PI_CODING_AGENT_DIR` value, so Pi reads the store that was pre-registered.
+The single Enter sent after the literal launch command submits that command to the pane shell; it is not a trust-dialog fallback.
+A trust dialog after this pre-registration is a failed launch gate, not an instruction to answer it.
 
 ## Worker turn-end extension
 

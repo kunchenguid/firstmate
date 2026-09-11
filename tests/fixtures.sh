@@ -99,7 +99,8 @@ fm_test_fake_gh_axi() {
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
 # firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
 # set, each send-keys -l payload is appended one per line. Optional
-# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
+# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows. FM_FAKE_EVENT_LOG records the literal/key sequence, and
+# FM_FAKE_LAUNCH_TOKEN makes the fake verify a trust entry before that launch payload is accepted.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -122,14 +123,33 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
-      for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+    prev=
+    payload=
+    for a in "$@"; do
+      if [ "$prev" = "-l" ]; then
+        payload=$a
+      fi
+      prev=$a
+    done
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ] && [ -n "$payload" ]; then
+      printf '%s\n' "$payload" >> "$FM_FAKE_LAUNCH_LOG"
+    fi
+    if [ -n "${FM_FAKE_EVENT_LOG:-}" ]; then
+      if [ -n "$payload" ]; then
+        printf 'literal\n' >> "$FM_FAKE_EVENT_LOG"
+        if [ -n "${FM_FAKE_LAUNCH_TOKEN:-}" ] && [[ "$payload" == *"$FM_FAKE_LAUNCH_TOKEN"* ]]; then
+          node -e 'const fs=require("node:fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.exit(j[process.argv[2]]===true?0:1)' \
+            "$FM_FAKE_TRUST_STORE" "$FM_FAKE_TRUST_PATH" \
+            || { printf 'trust-missing\n' >> "$FM_FAKE_EVENT_LOG"; exit 1; }
+          printf 'launch-trust-present\n' >> "$FM_FAKE_EVENT_LOG"
         fi
-        prev=$a
-      done
+      elif [ "$prev" = Enter ]; then
+        if grep -Fqx 'launch-trust-present' "$FM_FAKE_EVENT_LOG" 2>/dev/null; then
+          printf 'launch-submit:Enter\n' >> "$FM_FAKE_EVENT_LOG"
+        else
+          printf 'setup:Enter\n' >> "$FM_FAKE_EVENT_LOG"
+        fi
+      fi
     fi
     exit 0
     ;;
