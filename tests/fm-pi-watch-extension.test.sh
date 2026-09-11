@@ -2,8 +2,8 @@
 # Tests for the tracked Pi primary watcher extension and Pi secondmate wiring.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -72,6 +72,142 @@ export const Type = {
   },
 };
 JS
+}
+
+test_pi_spawn_marks_the_task_process() {
+  local case_dir home project worktree fakebin calls id out status
+  case_dir="$TMP_ROOT/pi-task-marker-spawn"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  calls="$case_dir/tmux-calls.log"
+  id=pi-task-marker-z1
+  fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake" gh gh-axi)
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;; esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n' ;;
+  has-session|new-session|new-window|kill-window|list-windows) ;;
+  send-keys) printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG" ;;
+esac
+SH
+  cat > "$fakebin/pi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Options: --tui-mode <mode>'
+fi
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/pi"
+  fm_test_spawn_home "$home" pi
+  fm_test_spawn_brief "$home" "$id"
+  fm_git_worktree "$project" "$worktree" pi-task-marker
+  fm_test_write_active_treehouse_fake "$fakebin" "$worktree"
+  : > "$calls"
+
+  out=$(FM_FAKE_TMUX_CALL_LOG="$calls" fm_test_run_spawn "$home" "$worktree" "$fakebin" \
+    "$id" "$project" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "Pi task launch should succeed"
+  assert_grep "export FM_TASK_ID=$id" "$calls" \
+    "Pi task launch did not mark its process before loading extensions"
+  pass "Pi task launch marks its process before project-local extensions load"
+}
+
+test_pi_primary_extensions_stand_down_for_task_workers() {
+  local repo home plugin guard supervisor out status
+  repo="$TMP_ROOT/pi-worker-role-root"
+  home="$TMP_ROOT/pi-worker-role-home"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  guard="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  supervisor="$repo/.pi/extensions/lib/fm-sessionstart-supervisor.mjs"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$guard"
+  cp "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$supervisor"
+  cat > "$repo/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_HOME:?}/state/.lock"
+: > "${FM_HOME:?}/state/.last-watcher-beat"
+SH
+  chmod +x "$repo/bin/fm-sessionstart-run.sh"
+  out=$(PLUGIN="$plugin" GUARD="$guard" SUPERVISOR="$supervisor" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    node --input-type=module 2>&1 <<'EOF'
+import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const state = `${process.env.FM_HOME}/state`;
+const supervisorMarker = `${state}/supervisor-ran`;
+const supervisorCode = 'require("node:fs").writeFileSync(process.env.FM_SUPERVISOR_MARKER, "ran")';
+const makePi = () => {
+  const handlers = new Map();
+  const tools = [];
+  const commands = [];
+  return {
+    handlers,
+    tools,
+    commands,
+    api: {
+      on(name, handler) { handlers.set(name, handler); },
+      registerTool(tool) { tools.push(tool.name); },
+      registerCommand(name) { commands.push(name); },
+      sendUserMessage: async () => {},
+      events: { on() {}, emit() {} },
+    },
+  };
+};
+
+process.env.FM_TASK_ID = "worker-role-fixture";
+const watch = await import(pathToFileURL(process.env.PLUGIN).href);
+const guard = await import(pathToFileURL(process.env.GUARD).href);
+const worker = makePi();
+watch.default(worker.api);
+guard.default(worker.api);
+if (worker.handlers.size || worker.tools.length || worker.commands.length) {
+  throw new Error("worker marker registered a primary extension surface");
+}
+if (existsSync(`${state}/.lock`) || existsSync(`${state}/.last-watcher-beat`)) {
+  throw new Error("worker marker created session state");
+}
+let result = spawnSync(process.execPath, [process.env.SUPERVISOR, process.execPath, "-e", supervisorCode], {
+  env: { ...process.env, FM_SUPERVISOR_MARKER: supervisorMarker },
+});
+if (result.status !== 0 || existsSync(supervisorMarker)) {
+  throw new Error("worker marker ran the session-start supervisor");
+}
+
+delete process.env.FM_TASK_ID;
+const primary = makePi();
+watch.default(primary.api);
+guard.default(primary.api);
+if (!primary.tools.includes("fm_watch_arm_pi") || !primary.commands.includes("fm-watch-arm-pi")) {
+  throw new Error("unmarked primary did not register watcher tools");
+}
+primary.handlers.get("session_start")?.({ reason: "startup" }, {
+  sessionManager: { getSessionId: () => "primary-role-fixture" },
+});
+await primary.handlers.get("before_agent_start")?.({}, {
+  sessionManager: { getSessionId: () => "primary-role-fixture" },
+});
+for (let i = 0; i < 50 && !existsSync(`${state}/.last-watcher-beat`); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(`${state}/.lock`) || !existsSync(`${state}/.last-watcher-beat`)) {
+  throw new Error("unmarked primary did not run session start");
+}
+result = spawnSync(process.execPath, [process.env.SUPERVISOR, process.execPath, "-e", supervisorCode], {
+  env: { ...process.env, FM_SUPERVISOR_MARKER: supervisorMarker },
+});
+if (result.status !== 0 || !existsSync(supervisorMarker)) {
+  throw new Error("unmarked primary did not run the session-start supervisor");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi primary extensions and session-start supervisor must stand down for a task worker"
+  [ -z "$out" ] || fail "Pi worker-role isolation test printed output: $out"
+  pass "Pi primary extensions and session-start supervisor stand down for a task worker while primaries stay active"
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
@@ -4272,6 +4408,8 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_pi_spawn_marks_the_task_process
+test_pi_primary_extensions_stand_down_for_task_workers
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop

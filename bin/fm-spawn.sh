@@ -4339,6 +4339,9 @@ if [ "$KIND" != secondmate ]; then
     echo "error: existing task base commit is invalid; refusing to replace its launch boundary" >&2
     exit 1
   fi
+  # Project-local primary hooks use this task marker to stand down even when a
+  # trusted task worktree auto-loads them.
+  spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
 fi
 
 # Go's build temp nested inside the per-task temp root (TASK_TMP, named above

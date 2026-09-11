@@ -2,8 +2,8 @@
 # Behavior tests for the verified Kimi Code CLI crewmate adapter.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
 # from inside Cursor, Claude, Pi, or Grok inherits those markers, which outrank
@@ -18,6 +18,7 @@ TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
 KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
+NODE_BIN=$(command -v node) || fail "test needs node"
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
@@ -131,9 +132,10 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_fake_exit0 "$fakebin" gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
+  ln -s "$NODE_BIN" "$fakebin/node"
   printf '%s\n' "$fakebin"
 }
 
@@ -146,16 +148,10 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$home/.kimi-code"
   printf '# Kimi test config\ndefault_model = "test"\n' > "$home/.kimi-code/config.toml"
-  cat > "$home/data/$id/brief.md" <<'EOF'
-# Task
-## Captain's intent
-Exercise Kimi dispatch.
-
-## Firstmate spec
-Verify launch and delivery behavior.
-EOF
+  fm_test_spawn_brief "$home" "$id" "Exercise Kimi dispatch."
   printf 'kimi\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  fm_test_write_active_treehouse_fake "$fakebin" "$wt"
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
   : > "$case_dir/pointer.log"
@@ -205,8 +201,8 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
-    || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
+  assert_contains "$launch" "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" \
+    "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
@@ -464,8 +460,8 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$fallback' --auto" ] \
-    || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
+  assert_contains "$launch" "'$fallback' --auto" \
+    "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
 

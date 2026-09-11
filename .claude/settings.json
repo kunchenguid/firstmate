@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -z \"${GROK_AGENT:-}${GROK_HOOK_EVENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-sessionstart-nudge.sh"
+            "command": "[ -z \"${FM_TASK_ID:-}\" ] || exit 0; [ -z \"${GROK_AGENT:-}${GROK_HOOK_EVENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-sessionstart-nudge.sh"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -z \"${GROK_AGENT:-}${GROK_HOOK_EVENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-sessionstart-nudge.sh post-compact"
+            "command": "[ -z \"${FM_TASK_ID:-}\" ] || exit 0; [ -z \"${GROK_AGENT:-}${GROK_HOOK_EVENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-sessionstart-nudge.sh post-compact"
           }
         ]
       }
@@ -59,11 +59,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -z \"${GROK_AGENT:-}${GROK_HOOK_EVENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh --claude --stow-harness claude"
+            "command": "[ -z \"${FM_TASK_ID:-}\" ] || exit 0; [ -z \"${GROK_AGENT:-}${GROK_HOOK_EVENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh --claude --stow-harness claude"
           },
           {
             "type": "command",
-            "command": "[ -z \"${GROK_AGENT:-}${GROK_HOOK_EVENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-claude-stop-autoarm.sh",
+            "command": "[ -z \"${FM_TASK_ID:-}\" ] || exit 0; [ -z \"${GROK_AGENT:-}${GROK_HOOK_EVENT:-}\" ] || exit 0; exec \"$CLAUDE_PROJECT_DIR\"/bin/fm-claude-stop-autoarm.sh",
             "asyncRewake": true,
             "timeout": 28800
           }

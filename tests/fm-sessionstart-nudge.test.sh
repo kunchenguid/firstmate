@@ -214,6 +214,24 @@ test_claude_compact_hook_delivers_post_compact_reanchor() {
   pass "Claude compact SessionStart hook delivers the exact post-compact re-anchor"
 }
 
+test_claude_primary_hooks_stand_down_for_task_workers() {
+  local commands command out status count=0
+  commands=$(jq -r '[.hooks.SessionStart[]?.hooks[]?.command, .hooks.Stop[]?.hooks[]?.command] | .[]' \
+    "$ROOT/.claude/settings.json") || fail "could not read the tracked Claude primary hooks"
+  while IFS= read -r command; do
+    [ -n "$command" ] || continue
+    count=$((count + 1))
+    status=0
+    out=$(FM_TASK_ID=worker-role-fixture CLAUDE_PROJECT_DIR="$ROOT" sh -c "$command" 2>&1) || status=$?
+    expect_code 0 "$status" "Claude primary hook $count must stand down for a task worker"
+    [ -z "$out" ] || fail "Claude primary hook $count ran despite the task marker: $out"
+  done <<EOF
+$commands
+EOF
+  [ "$count" -eq 4 ] || fail "expected two SessionStart and two Stop primary hooks, got $count"
+  pass "Claude session-start and Stop primary hooks stand down for task workers"
+}
+
 test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
@@ -1308,6 +1326,7 @@ test_owned_lock_is_silent
 test_owned_primary_post_compact_reanchors_read_only
 test_unknown_mode_is_silent
 test_claude_compact_hook_delivers_post_compact_reanchor
+test_claude_primary_hooks_stand_down_for_task_workers
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit

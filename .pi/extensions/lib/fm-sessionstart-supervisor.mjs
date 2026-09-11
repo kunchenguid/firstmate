@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+if (process.env.FM_TASK_ID) process.exit(0);
+
 const [runner, ...args] = process.argv.slice(2);
 let runnerCode;
 let outputBytes = 0;
