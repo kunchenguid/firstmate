@@ -822,6 +822,21 @@ else
       esac
     fi
   fi
+  AGY_TYPED_DEFERRED=0
+  AGY_TYPED_VERDICT=
+  if [ "$INBOX_PLANE" = 0 ] && [ "$TARGET_BACKEND" != remote ] \
+    && [ -n "$TARGET_SELECTOR" ] && [ "$TARGET_HARNESS" = agy ]; then
+    AGY_TYPED_VERDICT=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" \
+      "$EXPECTED_LABEL" "$TARGET_HARNESS" 2>/dev/null) || AGY_TYPED_VERDICT=unknown
+    case "$AGY_TYPED_VERDICT" in
+      empty) ;;
+      *)
+        AGY_TYPED_DEFERRED=1
+        [ -n "$AGY_TYPED_VERDICT" ] || AGY_TYPED_VERDICT=unknown
+        INBOX_PLANE=1
+        ;;
+    esac
+  fi
   if [ "$INBOX_PLANE" = 1 ] && [ "$TARGET_BACKEND" = remote ]; then
     # Remote inbox leg: the message becomes a durable record in the remote
     # home's steering inbox, written idempotently by the host-local leg, then
@@ -984,6 +999,10 @@ else
       exit 1
     fi
     fm_lock_release "$INBOX_META_LOCK"
+    if [ "$AGY_TYPED_DEFERRED" = 1 ]; then
+      echo "fm-send: agy composer is $AGY_TYPED_VERDICT; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring without touching the pane" >&2
+      exit 1
+    fi
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.

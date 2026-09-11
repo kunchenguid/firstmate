@@ -385,7 +385,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch
+  local rec id out status launch marker_log harness_log
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
@@ -398,7 +398,21 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "env -u ANTIGRAVITY_AGENT custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  cat > "$FAKEBIN_DIR/custom-agent" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "${ANTIGRAVITY_AGENT:-unset}" > "$FM_RAW_MARKER_LOG"
+FM_ROOT_OVERRIDE="$FM_RAW_ROOT" "$FM_RAW_ROOT/bin/fm-harness.sh" > "$FM_RAW_HARNESS_LOG"
+SH
+  chmod +x "$FAKEBIN_DIR/custom-agent"
+  marker_log="$CASE_DIR/raw-marker.log"
+  harness_log="$CASE_DIR/raw-harness.log"
+  FM_RAW_MARKER_LOG="$marker_log" FM_RAW_HARNESS_LOG="$harness_log" \
+    FM_RAW_ROOT="$ROOT" PATH="$FAKEBIN_DIR:$PATH" ANTIGRAVITY_AGENT=1 \
+    bash -c "$launch" || fail "the raw launch command could not execute"
+  [ "$(cat "$marker_log")" = unset ] || fail "raw launches inherited ANTIGRAVITY_AGENT"
+  [ "$(cat "$harness_log")" != agy ] || fail "raw launch process was detected as AGY"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 

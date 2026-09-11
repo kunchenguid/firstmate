@@ -4079,6 +4079,9 @@ case "$HARNESS" in
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u ANTIGRAVITY_AGENT $LAUNCH"
     ;;
 esac
+if [ "$RAW_LAUNCH" = 1 ]; then
+  LAUNCH="env -u ANTIGRAVITY_AGENT $LAUNCH"
+fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

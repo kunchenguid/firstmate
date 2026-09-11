@@ -68,6 +68,12 @@ case "${1:-}" in
   capture-pane)
     if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
+    elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = agy-pending ]; then
+      printf '────────────────\n> leftover txt\n────────────────\n'
+    elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = agy-unknown ]; then
+      printf '────────────────\n> leftover txt\n'
+    elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = agy-empty ]; then
+      printf '────────────────\n> \n────────────────\n'
     else
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
@@ -210,6 +216,37 @@ test_harness_invocations_stay_typed() {
   pass "fm-send planes: slash and codex \$skill invocations stay typed; plain \$-text rides the inbox"
 }
 
+test_agy_native_defers_pending_and_unknown() {
+  local dir err rc rec body typed want
+  for state in agy-pending agy-unknown; do
+    want=${state#agy-}
+    dir=$(setup_case "$state" agy); err="$dir/send.err"
+    run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER="$state" -- t1 "/no-mistakes"; rc=$?
+    [ "$rc" -ne 0 ] || fail "an AGY $state native steer must defer nonzero"
+    rec="$dir/home/state/t1.inbox/001.msg"
+    [ -f "$rec" ] || fail "an AGY $state native steer was not durably recorded"
+    body=$(record_body _ "$rec")
+    [ "$body" = /no-mistakes ] || fail "an AGY $state inbox record changed the steer: $body"
+    [ ! -s "$dir/send.log" ] || fail "an AGY $state deferral touched the pane: $(cat "$dir/send.log")"
+    assert_contains "$(cat "$err")" "agy composer is $want" \
+      "an AGY $state deferral did not report its composer verdict"
+    assert_contains "$(cat "$err")" "watcher will re-ring" \
+      "an AGY $state deferral did not name watcher recovery"
+  done
+  pass "fm-send: AGY native pending and unknown composers defer into the inbox"
+}
+
+test_agy_native_empty_remains_typed() {
+  local dir err rc
+  dir=$(setup_case agy-empty agy); err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=agy-empty -- t1 "/no-mistakes"; rc=$?
+  expect_code 0 "$rc" "an AGY native steer with an empty composer should submit"
+  assert_contains "$(cat "$dir/send.log")" "/no-mistakes" \
+    "an empty AGY composer should receive the native steer"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "an empty AGY native steer must not use the inbox"
+  pass "fm-send: AGY native empty composers remain on the typed plane"
+}
+
 test_explicit_target_stays_typed() {
   local dir err
   dir=$(setup_case explicit); err="$dir/send.err"
@@ -344,6 +381,8 @@ test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
 test_harness_invocations_stay_typed
+test_agy_native_defers_pending_and_unknown
+test_agy_native_empty_remains_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery
