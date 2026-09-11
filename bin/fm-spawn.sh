@@ -185,6 +185,18 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   A worktree `treehouse get` hands back is also cross-checked against every
+#   locally registered Firstmate home's state/*.meta before it is accepted: if
+#   another task's own recorded worktree or home already canonicalizes to the
+#   same slot, that slot is contested rather than exclusively this task's, and
+#   proceeding could run two workers in one working copy or, on that other
+#   task's later teardown, have its worktree hard-reset out from under this one
+#   (spawn_worktree_slot_conflict_task; bin/fm-teardown.sh's
+#   require_exclusive_worktree_slot_record is the teardown-side half of the
+#   same guard). A contested slot sends `treehouse get` again into the same
+#   pane rather than adopting it, bounded by FM_SPAWN_SLOT_CONFLICT_RETRIES
+#   (default 3); exhausting every attempt on a contested slot refuses the
+#   launch rather than proceeding, naming the task already holding it.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -3027,6 +3039,76 @@ rovo_endpoint_cleanup() {
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
 }
 
+canonical_existing_dir() {  # <path>
+  local target=$1
+  [ -n "$target" ] || return 1
+  [ -d "$target" ] || return 1
+  (CDPATH='' cd -- "$target" && pwd -P)
+}
+
+# Treehouse's own pool bookkeeping can hand a fresh spawn the same slot path a
+# still-live OTHER task's state/<id>.meta already records - the collision
+# bin/fm-teardown.sh's require_exclusive_worktree_slot_record guards from the
+# teardown side by refusing to return a slot another live task's meta claims
+# (AGENTS.md's worktree-pool-collision guard pair). This fresh task has no
+# meta of its own yet, so every locally registered Firstmate home's *.meta is
+# a candidate other owner. Prints "<other-task-id> <field>" and returns 0 on a
+# genuine collision; returns 1 with nothing printed when the slot is
+# exclusively ours, including when $1 itself no longer resolves (nothing left
+# to compare against); returns 2 when a local Firstmate registry could not be
+# read or resolved, so the caller cannot trust the scan was complete.
+spawn_worktree_slot_conflict_task() {  # <candidate-worktree>
+  local candidate=$1 slot root home reg line child known existing i=0
+  local -a homes states
+  slot=$(canonical_existing_dir "$candidate") || return 1
+  root=$(fm_firstmate_root_home "$FM_HOME") || return 2
+  homes=("$root")
+  states=("$STATE")
+  while [ "$i" -lt "${#homes[@]}" ]; do
+    home=${homes[$i]}
+    i=$((i + 1))
+    known=0
+    for existing in "${states[@]}"; do
+      [ "$existing" != "$home/state" ] || known=1
+    done
+    [ "$known" = 1 ] || states+=("$home/state")
+    reg="$home/data/secondmates.md"
+    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
+    [ -f "$reg" ] && [ ! -L "$reg" ] || return 2
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "- "*)
+          secondmate_registry_parse_line "$line" || return 2
+          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || return 2
+          known=0
+          for existing in "${homes[@]}"; do
+            [ "$existing" != "$child" ] || known=1
+          done
+          [ "$known" = 1 ] || homes+=("$child")
+          ;;
+      esac
+    done < "$reg"
+  done
+  local state_dir meta_file meta_id field meta_path meta_slot
+  for state_dir in "${states[@]}"; do
+    for meta_file in "$state_dir"/*.meta; do
+      [ -f "$meta_file" ] && [ ! -L "$meta_file" ] || continue
+      meta_id=$(basename "$meta_file" .meta)
+      [ "$meta_id" != "$ID" ] || continue
+      for field in worktree home; do
+        meta_path=$(fm_meta_get "$meta_file" "$field")
+        [ -n "$meta_path" ] || continue
+        meta_slot=$(canonical_existing_dir "$meta_path") || continue
+        [ "$meta_slot" = "$slot" ] || continue
+        printf '%s %s\n' "$meta_id" "$field"
+        return 0
+      done
+    done
+  done
+  return 1
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -3061,66 +3143,115 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # A slot treehouse hands back can still collide with another live task's
+  # recorded worktree (see spawn_worktree_slot_conflict_task above); on a
+  # collision, send 'treehouse get' again into the same pane rather than
+  # adopting the contested slot. treehouse nests a fresh subshell inside the
+  # current one and hands out a different worktree, so the abandoned
+  # contested slot is left with one harmless idle nested shell rather than
+  # anything of this task's ever being recorded or touched there. Bounded so
+  # a pool stuck handing out only contested slots fails loudly instead of
+  # looping forever.
+  SLOT_CONFLICT_RETRIES=${FM_SPAWN_SLOT_CONFLICT_RETRIES:-3}
+  slot_attempt=0
+  rejected_wt_real=""
+  while :; do
+    slot_attempt=$((slot_attempt + 1))
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Target the stable window id, not the name: if the name is ever lost (e.g. an
-  # automatic-rename slips through), display-message -t <bad-name> falls back to the
-  # active client's window, which would misread firstmate's OWN pane path as the
-  # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # The project comparison is physical: spawn_worktree_isolated screens each
-  # read against PROJ_ABS_REAL, not PROJ_ABS, because a symlinked project prefix
-  # would otherwise make the pane's OS-level cwd read differ from PROJ_ABS on
-  # the very first poll, before the pane has actually moved.
-  #
-  # A single read that already looks isolated is not proof the pane settled
-  # there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path passes spawn_worktree_isolated too (it resolves to a real,
-  # distinct worktree top-level), so accepting it on one read alone silently
-  # records the wrong worktree= in state/<id>.meta. Require two consecutive
-  # reads to agree on the same isolated path before accepting it; a mismatch
-  # just becomes the new candidate rather than resetting the wait, so a pane
-  # that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  #
-  # Every candidate is screened with the isolation guard's own predicate, so a
-  # read of the project itself or of the repository primary checkout is treated
-  # as the transient it is and the wait continues, instead of being adopted and
-  # then refused by the guard.
-  # A candidate the screen rejects is never adopted, so a host where the pane
-  # never reaches an isolated worktree spends the whole window before refusing.
-  # That wait is deliberate - telling a transient apart from a terminal
-  # misconfiguration would need machinery this path does not want - so the
-  # refusal has to be self-explaining instead: carry the last path seen and the
-  # reason it was rejected, and report both at the deadline.
-  candidate=""
-  last_seen=""
-  last_reason="the pane reported no path"
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    [ -z "$p" ] || last_seen="$p"
-    if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
-      p_real=$(real_path_or_raw "$p")
-      last_reason="it is an isolated worktree, but no second read agreed with it"
-      if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-        WT="$p"
-        break
+    # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+    # Target the stable window id, not the name: if the name is ever lost (e.g. an
+    # automatic-rename slips through), display-message -t <bad-name> falls back to the
+    # active client's window, which would misread firstmate's OWN pane path as the
+    # worktree and tangle a hook into the primary checkout. The window id never lies.
+    # The project comparison is physical: spawn_worktree_isolated screens each
+    # read against PROJ_ABS_REAL, not PROJ_ABS, because a symlinked project prefix
+    # would otherwise make the pane's OS-level cwd read differ from PROJ_ABS on
+    # the very first poll, before the pane has actually moved.
+    #
+    # A single read that already looks isolated is not proof the pane settled
+    # there: on some tmux/WSL setups a brand-new window's pane_current_path
+    # transiently reports an unrelated stale path (seen live as another real git
+    # checkout entirely) before the shell catches up with treehouse get's cd. That
+    # stale path passes spawn_worktree_isolated too (it resolves to a real,
+    # distinct worktree top-level), so accepting it on one read alone silently
+    # records the wrong worktree= in state/<id>.meta. Require two consecutive
+    # reads to agree on the same isolated path before accepting it; a mismatch
+    # just becomes the new candidate rather than resetting the wait, so a pane
+    # that is already settled by the first real read only costs the one existing
+    # inter-poll sleep as confirmation, not a whole extra cycle on top.
+    #
+    # Every candidate is screened with the isolation guard's own predicate, so a
+    # read of the project itself or of the repository primary checkout is treated
+    # as the transient it is and the wait continues, instead of being adopted and
+    # then refused by the guard.
+    # A candidate the screen rejects is never adopted, so a host where the pane
+    # never reaches an isolated worktree spends the whole window before refusing.
+    # That wait is deliberate - telling a transient apart from a terminal
+    # misconfiguration would need machinery this path does not want - so the
+    # refusal has to be self-explaining instead: carry the last path seen and the
+    # reason it was rejected, and report both at the deadline.
+    #
+    # On a retry, the pane starts out still sitting in the just-rejected
+    # worktree from the previous attempt, and that worktree is itself a real,
+    # isolated git worktree - it would pass the same two-consecutive-reads
+    # check before the newly resent 'treehouse get' has actually run, since
+    # spawn_send_text_line returns as soon as the keys are injected, not once
+    # the shell has interpreted them. A candidate matching the just-rejected
+    # slot is never accepted as settled, no matter how many reads agree on
+    # it: the wait keeps polling (still bounded by this loop's own deadline)
+    # until the pane reports a genuinely different isolated path, since only
+    # a different path proves the new 'treehouse get' actually ran.
+    candidate=""
+    last_seen=""
+    last_reason="the pane reported no path"
+    WT=""
+    for _ in $(seq 1 60); do
+      p=$(spawn_current_path "$WT_TARGET" || true)
+      [ -z "$p" ] || last_seen="$p"
+      if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
+        p_real=$(real_path_or_raw "$p")
+        if [ -n "$rejected_wt_real" ] && [ "$p_real" = "$rejected_wt_real" ]; then
+          candidate=""
+          last_reason="it is the same worktree slot rejected on the previous attempt"
+        elif [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+          WT="$p"
+          break
+        else
+          last_reason="it is an isolated worktree, but no second read agreed with it"
+          candidate="$p_real"
+        fi
+      else
+        candidate=""
+        [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
-      candidate="$p_real"
-    else
-      candidate=""
-      [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
+      sleep 1
+    done
+    if [ -z "$WT" ]; then
+      echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+      exit 1
     fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
-    exit 1
-  fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+    validate_spawn_worktree "treehouse get" "$T"
+
+    SLOT_CONFLICT_RC=0
+    SLOT_CONFLICT=$(spawn_worktree_slot_conflict_task "$WT") || SLOT_CONFLICT_RC=$?
+    if [ "$SLOT_CONFLICT_RC" -eq 2 ]; then
+      echo "error: could not verify worktree slot '$WT' is exclusive to task $ID (a local Firstmate registry could not be read or resolved); refusing to launch into a potentially contested slot; inspect window $T" >&2
+      exit 1
+    fi
+    if [ "$SLOT_CONFLICT_RC" -ne 0 ]; then
+      break
+    fi
+    SLOT_CONFLICT_ID=${SLOT_CONFLICT%% *}
+    SLOT_CONFLICT_FIELD=${SLOT_CONFLICT#* }
+    rejected_wt_real=$(real_path_or_raw "$WT")
+    echo "warning: treehouse handed task $ID the worktree slot '$WT', but task $SLOT_CONFLICT_ID's recorded $SLOT_CONFLICT_FIELD already claims it; requesting another slot (attempt $slot_attempt/$SLOT_CONFLICT_RETRIES)" >&2
+    if [ "$slot_attempt" -ge "$SLOT_CONFLICT_RETRIES" ]; then
+      echo "error: treehouse kept handing task $ID a worktree slot another live task's meta already records after $SLOT_CONFLICT_RETRIES attempts (last: '$WT', claimed by task $SLOT_CONFLICT_ID's $SLOT_CONFLICT_FIELD); refusing to launch into a contested slot; inspect window $T" >&2
+      exit 1
+    fi
+  done
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
