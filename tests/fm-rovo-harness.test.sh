@@ -128,7 +128,8 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_test_fake_treehouse_lease "$fakebin"
+  fm_fake_exit0 "$fakebin" gh-axi gh
   fm_fake_exit0 "$fakebin" rovo
   printf '%s\n' "$fakebin"
 }
@@ -300,6 +301,12 @@ test_rovo_readiness_gate_precedes_pointer() {
     || fail "a failed rovo readiness gate must tear down the exact endpoint it created instead of leaking an orphaned --yolo process"
   status_line_at_epoch "$line" >/dev/null \
     || fail "new rovo spawn failure has unknown emission time: $line"
+  n=$(grep -c "kill-window.*fm-$id" "$CASE_DIR/tmux-calls.log" || true)
+  [ "$n" = 1 ] \
+    || fail "a failed fresh rovo spawn closed the window $n times; it should close once"
+  n=$(printf '%s\n' "$out" | grep -cF "closing window firstmate:fm-$id" || true)
+  [ "$n" = 1 ] \
+    || fail "a failed fresh rovo spawn reported the window close $n times; it should report once"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf 'Rovo readiness failure CLI output:\n%s\nPersisted status:\n%s\n' "$out" "$line"
   fi

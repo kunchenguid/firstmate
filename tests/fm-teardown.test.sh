@@ -2041,6 +2041,10 @@ case "\${1:-} \${2:-}" in
       printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"$case_dir/herdr.sock"}]}'
     fi
     ;;
+  "pane process-info")
+    pid=\${FM_FAKE_HERDR_SHELL_PID:-4242}
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"wG:pQ","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"sleep","argv0":"sleep"}]}}}\n' "\$pid" "\$pid" "\$pid"
+    ;;
   "pane close")
     : > "\${FM_FAKE_HERDR_CLOSED:?}"
     ;;
@@ -3307,6 +3311,42 @@ test_leaked_worktree_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's worktree is reaped by teardown, not left surviving"
 }
 
+test_herdr_teardown_does_not_reap_seated_pane_shell() {
+  local case_dir rc pid leaked
+  case_dir=$(make_case herdr-keep-pane-shell)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  land_shippable_commit "$case_dir"
+
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  leaked=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "herdr-keep-pane-shell: pane-shell sleeper did not start"
+  kill -0 "$leaked" 2>/dev/null || fail "herdr-keep-pane-shell: leaked sleeper did not start"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$case_dir/herdr.log" FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
+    FM_FAKE_HERDR_SHELL_PID="$pid" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "herdr-keep-pane-shell: teardown should still succeed"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "herdr-keep-pane-shell: seated pane shell was reaped as a leaked descendant"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  if kill -0 "$leaked" 2>/dev/null; then
+    kill -KILL "$leaked" 2>/dev/null || true
+    fail "herdr-keep-pane-shell: a non-pane leaked worktree process survived teardown"
+  fi
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "herdr-keep-pane-shell: teardown did not reap the non-pane leaked process"
+  pass "herdr teardown leaves the seated pane shell for the locked close and still reaps other worktree processes"
+}
+
 test_leaked_tasktmp_process_is_reaped() {
   local case_dir rc pid
   case_dir=$(make_case leaked-tasktmp-reap)
@@ -3741,6 +3781,7 @@ test_not_found_status_after_abort_confirms_completion
 test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
+test_herdr_teardown_does_not_reap_seated_pane_shell
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
