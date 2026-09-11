@@ -505,12 +505,17 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
 # fm_backend_zellij_composer_capture: bounded styled tail of the pane. When
 # --ansi is unsupported (an older zellij), the caller falls back to the plain
 # dump and a styled=0 descriptor - see fm_backend_zellij_composer_state.
-fm_backend_zellij_composer_capture() {  # <target> [expected-label]
+fm_backend_zellij_composer_capture() {  # <target> [expected-label] [harness]
   fm_backend_zellij_target_ready "$1" "${2:-}" || return 1
-  local out
-  out=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action dump-screen --pane-id "$FM_BACKEND_ZELLIJ_PANE" --ansi 2>/dev/null) || return 1
+  local out harness=${3:-} lines
+  lines=$(fm_composer_capture_lines_for_harness "$harness")
+  if [ "$harness" = agy ]; then
+    out=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action dump-screen --pane-id "$FM_BACKEND_ZELLIJ_PANE" --ansi --full 2>/dev/null) || return 1
+  else
+    out=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action dump-screen --pane-id "$FM_BACKEND_ZELLIJ_PANE" --ansi 2>/dev/null) || return 1
+  fi
   [ -n "$out" ] || return 1
-  printf '%s' "$out" | tail -n "$FM_COMPOSER_CAPTURE_LINES"
+  printf '%s' "$out" | tail -n "$lines"
 }
 
 # fm_backend_zellij_composer_state: thin adapter - capture plus capabilities
@@ -522,11 +527,12 @@ fm_backend_zellij_composer_capture() {  # <target> [expected-label]
 # unconditional-exit-0 CLI quirk (file header) yields an empty dump, which
 # classifies unknown - never a confirmation.
 fm_backend_zellij_composer_state() {  # <target> [expected-label] [harness] -> empty|pending|pending-unproven|unknown
-  local target=$1 expected_label=${2:-} harness=${3:-} cap caps verdict
-  if cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label"); then
-    caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
-  elif cap=$(fm_backend_zellij_capture "$target" "$FM_COMPOSER_CAPTURE_LINES" "$expected_label") && [ -n "$cap" ]; then
-    caps=$(printf 'styled=0\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+  local target=$1 expected_label=${2:-} harness=${3:-} cap caps verdict capture_lines
+  capture_lines=$(fm_composer_capture_lines_for_harness "$harness")
+  if cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label" "$harness"); then
+    caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$capture_lines")
+  elif cap=$(fm_backend_zellij_capture "$target" "$capture_lines" "$expected_label") && [ -n "$cap" ]; then
+    caps=$(printf 'styled=0\ncursor=0\nidentity=0\nrows=%s' "$capture_lines")
   else
     printf 'unknown'
     return 0
@@ -537,17 +543,19 @@ fm_backend_zellij_composer_state() {  # <target> [expected-label] [harness] -> e
 }
 
 fm_backend_zellij_composer_content() {  # <target> [expected-label] [harness]
-  local target=$1 expected_label=${2:-} harness=${3:-} cap caps
-  cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label") || return 1
-  caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+  local target=$1 expected_label=${2:-} harness=${3:-} cap caps capture_lines
+  capture_lines=$(fm_composer_capture_lines_for_harness "$harness")
+  cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label" "$harness") || return 1
+  caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$capture_lines")
   fm_composer_extract_selected_content "$caps" "$cap" '' "$harness"
 }
 
 fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expected-label] [harness]
-  local target=$1 before=$2 text=$3 expected_label=${4:-} harness=${5:-} cap caps after expected
+  local target=$1 before=$2 text=$3 expected_label=${4:-} harness=${5:-} cap caps after expected capture_lines
   [ -n "$text" ] || return 1
-  cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label") || return 1
-  caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+  capture_lines=$(fm_composer_capture_lines_for_harness "$harness")
+  cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label" "$harness") || return 1
+  caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$capture_lines")
   after=$(fm_composer_extract_selected_content "$caps" "$cap" '' "$harness") || return 1
   fm_composer_normalize_spaces_var before
   fm_composer_normalize_spaces_var text

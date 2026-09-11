@@ -436,6 +436,14 @@ FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:
 # boxes) from ever competing with the live composer.
 FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-20}
 
+fm_composer_capture_lines_for_harness() {  # [harness]
+  if [ "${1:-}" = agy ]; then
+    printf '200'
+  else
+    printf '%s' "$FM_COMPOSER_CAPTURE_LINES"
+  fi
+}
+
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.

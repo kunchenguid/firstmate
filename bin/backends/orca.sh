@@ -228,8 +228,8 @@ if (r.terminal && Array.isArray(r.terminal.tail)) {
 # backward-paged read: the composer is bottom-anchored, and paging back into
 # scrollback is what let a stale startup banner (codex's bordered
 # "permissions" box) compete with - and once outrank - the live composer.
-fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
-  fm_backend_orca_capture "$1" "$FM_COMPOSER_CAPTURE_LINES"
+fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label] [harness]
+  fm_backend_orca_capture "$1" "$(fm_composer_capture_lines_for_harness "${3:-}")"
 }
 
 # fm_backend_orca_composer_caps: static capability facts, not logic (see the
@@ -237,8 +237,8 @@ fm_backend_orca_composer_capture() {  # <terminal-id> [expected-label]
 # plain text; whether it can emit ANSI is unverified (orca is not installed
 # on the verification machine), so styled stays 0 - the conservative
 # degradation - until a live capture proves otherwise.
-fm_backend_orca_composer_caps() {
-  printf 'styled=0\ncursor=0\nidentity=0\nrows=%s\n' "$FM_COMPOSER_CAPTURE_LINES"
+fm_backend_orca_composer_caps() {  # [harness]
+  printf 'styled=0\ncursor=0\nidentity=0\nrows=%s\n' "$(fm_composer_capture_lines_for_harness "${1:-}")"
 }
 
 # fm_backend_orca_composer_state: thin adapter - capture plus capabilities in,
@@ -247,8 +247,8 @@ fm_backend_orca_composer_caps() {
 # unconfirmed) lives in bin/fm-composer-lib.sh.
 fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] [harness] -> empty|pending|pending-unproven|unknown
   local cap verdict harness=${3:-}
-  cap=$(fm_backend_orca_composer_capture "$1") || { printf 'unknown'; return 0; }
-  verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$cap" '' '' "$harness")
+  cap=$(fm_backend_orca_composer_capture "$1" "${2:-}" "$harness") || { printf 'unknown'; return 0; }
+  verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps "$harness")" "$cap" '' '' "$harness")
   [ "$verdict" != need-identity ] || verdict=unknown
   printf '%s' "$verdict"
 }

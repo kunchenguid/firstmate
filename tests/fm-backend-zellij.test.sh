@@ -1165,6 +1165,35 @@ test_composer_state_reads_styled_dump() {
   pass "fm_backend_zellij_composer_state: classifies the real claude-in-zellij --ansi dump as empty"
 }
 
+test_agy_composer_capture_preserves_long_draft() {
+  local dir fb out state content
+  dir="$TMP_ROOT/composer-agy-long"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  {
+    printf '────────────────\n>\n'
+    i=1
+    while [ "$i" -le 30 ]; do
+      printf 'AGY_LONG_ROW_%02d\n' "$i"
+      i=$((i + 1))
+    done
+    printf '────────────────\n'
+  } > "$dir/responses/2.out"
+  zellij_pane_response "$dir" 3 7 3
+  cp "$dir/responses/2.out" "$dir/responses/4.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_COMPOSER_CAPTURE_LINES=20 FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; state=$(fm_backend_zellij_composer_state firstmate:7 "" agy); content=$(fm_backend_zellij_composer_content firstmate:7 "" agy); printf "%s\\n%s" "$state" "$content"' "$ROOT" )
+  state=${out%%$'\n'*}
+  content=${out#*$'\n'}
+  [ "$state" = pending ] || fail "a 30-row AGY draft should classify pending, got '$state'"
+  assert_contains "$content" "AGY_LONG_ROW_01" "long AGY draft extraction lost its first row"
+  assert_contains "$content" "AGY_LONG_ROW_30" "long AGY draft extraction lost its last row"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--ansi'$'\x1f''--full' \
+    "AGY composer capture did not request the bounded full scrollback read"
+  pass "fm_backend_zellij_composer_state: AGY preserves a 30-row draft beyond the default tail"
+}
+
 test_composer_state_dead_pane_is_unknown() {
   # The unconditional-exit-0 CLI quirk (file header): a dead target dumps
   # nothing. Both the styled and the plain fallback come back empty, so the
@@ -1352,6 +1381,7 @@ test_send_text_submit_accepts_wrapped_bare_text
 test_send_text_submit_preserves_agent_glyph_within_wrapped_content
 test_send_text_submit_rejects_stale_composer_above_live_shell
 test_composer_state_reads_styled_dump
+test_agy_composer_capture_preserves_long_draft
 test_composer_state_dead_pane_is_unknown
 test_send_text_submit_send_failed_when_session_absent
 test_send_text_submit_send_failed_when_pane_absent

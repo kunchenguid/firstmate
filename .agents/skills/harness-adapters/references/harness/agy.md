@@ -12,6 +12,8 @@ Antigravity CLI `agy` is a verified worker adapter for CREWMATE and SCOUT tasks 
 - Firstmate-owned `PreInvocation` and `Stop` hooks provide the semantic busy source, while `PostToolUse` refreshes the shared progress marker; all are retired with the task.
 - An agy Escape interruption has no verified cancellation acknowledgement, so control and data interruption paths preserve an unconfirmed semantic state.
 - The shared composer classifier owns agy prompt recognition, draft preservation, multiline extraction, and cursor or cursorless capability handling.
+- Non-tmux composer reads use a bounded 200-row tail for agy so both measured boundaries survive long drafts; other harnesses retain the normal 20-row tail.
+- The inbox doorbell defers both pending and unknown agy composer verdicts and rings only after a proven empty result; the watcher records the deferral and retries.
 - Raw agy launches remain unwired and classify as unknown.
 - The exact current measurements and refresh commands are maintained in [`docs/verification/agy.md`](../../../../../docs/verification/agy.md).
 

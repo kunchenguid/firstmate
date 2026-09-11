@@ -271,17 +271,14 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
+# Returns 0 rang, 1 skipped because the composer is not proven safe to ring
 # (the watcher re-rings later), 2 the backend send failed, 3 skipped because
 # the endpoint is positively dead or missing (nothing typed; recovery owns the
 # record). No return value is delivery proof; the acknowledgement move is the
 # only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict defers,
-# because there our Enter could submit someone's real half-typed content.
-# `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
-# CONSTANT line the worker recovers semantically, while skipping on ambiguous
-# verdicts would starve a harness whose idle screen the classifier cannot
-# positively identify (that classifier is advisory here by design).
+# For agy, both `pending` and `unknown` defer because its boundary contract is
+# only safe when the composer is proven empty; the watcher re-rings later.
+# Other harnesses retain the pending-only policy.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict inbox_dir task_id state_dir meta harness
   inbox_dir=${rec%/*}
@@ -299,6 +296,9 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" "$harness" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending) return 1 ;;
+    unknown)
+      [ "$harness" = agy ] && return 1
+      ;;
   esac
   # Accepted residual race: terminal input and Enter are separate delivery
   # steps, so an agent exiting after the liveness check could leave a bare

@@ -3061,12 +3061,13 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> [harness] -> empty|pending|pending-unproven|unknown
-  local target=$1 harness=${2:-} cap caps verdict identity
+  local target=$1 harness=${2:-} cap caps verdict identity capture_lines
+  capture_lines=$(fm_composer_capture_lines_for_harness "$harness")
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
-    caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
-  elif cap=$(fm_backend_herdr_capture "$target" "$FM_COMPOSER_CAPTURE_LINES"); then
-    caps=$(printf 'styled=0\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+  if cap=$(fm_backend_herdr_capture_ansi "$target" "$capture_lines" 2>/dev/null); then
+    caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$capture_lines")
+  elif cap=$(fm_backend_herdr_capture "$target" "$capture_lines"); then
+    caps=$(printf 'styled=0\ncursor=0\nidentity=1\nrows=%s' "$capture_lines")
   else
     printf 'unknown'
     return 0

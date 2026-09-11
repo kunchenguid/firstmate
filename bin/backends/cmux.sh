@@ -535,14 +535,14 @@ fm_backend_cmux_capture() {  # <target> <lines> [expected-label]
 # text"), which is why the capability descriptor below declares styled=0: the
 # shared classifier then degrades a glyph row carrying trailing text to
 # `unknown` instead of misreading an idle suggestion as unsent input.
-fm_backend_cmux_composer_capture() {  # <target> [expected-label]
-  fm_backend_cmux_capture "$1" "$FM_COMPOSER_CAPTURE_LINES" "${2:-}"
+fm_backend_cmux_composer_capture() {  # <target> [expected-label] [harness]
+  fm_backend_cmux_capture "$1" "$(fm_composer_capture_lines_for_harness "${3:-}")" "${2:-}"
 }
 
 # fm_backend_cmux_composer_caps: static capability facts, not logic (see the
 # capability model in bin/fm-composer-lib.sh).
-fm_backend_cmux_composer_caps() {
-  printf 'styled=0\ncursor=0\nidentity=0\nrows=%s\n' "$FM_COMPOSER_CAPTURE_LINES"
+fm_backend_cmux_composer_caps() {  # [harness]
+  printf 'styled=0\ncursor=0\nidentity=0\nrows=%s\n' "$(fm_composer_capture_lines_for_harness "${1:-}")"
 }
 
 # fm_backend_cmux_composer_state: thin adapter - capture plus capabilities in,
@@ -553,8 +553,8 @@ fm_backend_cmux_composer_caps() {
 # sentinel resolves to unknown.
 fm_backend_cmux_composer_state() {  # <target> [expected-label] [harness] -> empty|pending|pending-unproven|unknown
   local cap verdict harness=${3:-}
-  cap=$(fm_backend_cmux_composer_capture "$1" "${2:-}") || { printf 'unknown'; return 0; }
-  verdict=$(fm_composer_classify_screen "$(fm_backend_cmux_composer_caps)" "$cap" '' '' "$harness")
+  cap=$(fm_backend_cmux_composer_capture "$1" "${2:-}" "$harness") || { printf 'unknown'; return 0; }
+  verdict=$(fm_composer_classify_screen "$(fm_backend_cmux_composer_caps "$harness")" "$cap" '' '' "$harness")
   [ "$verdict" != need-identity ] || verdict=unknown
   printf '%s' "$verdict"
 }
