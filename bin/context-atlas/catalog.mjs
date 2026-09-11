@@ -154,24 +154,36 @@ export function createAtlas({ root, read = false, exclusions = [], tools, active
       if (!generation) refresh();
       result.generation = generation;
       if (p.gen !== undefined && p.gen !== generation) return finish({ ...result, outcome: 'stale_snapshot', freshness: 'stale' });
-      if (p.op === 'catalog' || p.op === 'resolve') {
+      const queryRead = p.op === 'read' && p.q !== undefined;
+      if (queryRead && (p.ref !== undefined || !p.q)) return finish(result);
+      if (queryRead && !p.gen) return finish({ ...result, outcome: 'generation_required' });
+      let selected;
+      let selectionReason;
+      if (p.op === 'catalog' || p.op === 'resolve' || queryRead) {
         if (p.op === 'resolve' && !p.q) return finish(result);
         const q = p.q ?? '';
         const kind = q.startsWith('f:') ? 'file' : q.startsWith('t:') ? 'tool' : null;
         const term = kind ? q.slice(2) : q;
-        const pool = ordered.filter(e => !kind || e.kind === kind);
+        const pool = ordered.filter(e => (!kind || e.kind === kind) && (!queryRead || e.kind === 'file'));
         const exact = pool.filter(e => e.identity === term);
         const matches = exact.length ? exact : pool.filter(e => e.identity.toLowerCase().includes(term.toLowerCase()));
-        const start = (p.at ?? 1) - 1;
-        const candidates = matches.slice(start, start + Math.min(p.count ?? MAX_ITEMS, MAX_ITEMS)).map(item);
-        result = { ...result, selection: exact.length ? 'exact_identity' : 'literal_substring', outcome: matches.length === 0 ? 'not_found' : p.op === 'catalog' ? 'catalog' : matches.length === 1 ? 'resolved' : 'ambiguous', candidates, total: matches.length, more: start + candidates.length < matches.length };
-        if (matches.length === 1) result.identity = matches[0].identity;
-        return finish(result);
+        selectionReason = exact.length ? 'exact_identity' : 'literal_substring';
+        if (queryRead && matches.length === 1) {
+          selected = matches[0];
+        } else {
+          // For a query read, at/count are line controls, never candidate paging.
+          const start = queryRead ? 0 : (p.at ?? 1) - 1;
+          const limit = queryRead ? MAX_ITEMS : Math.min(p.count ?? MAX_ITEMS, MAX_ITEMS);
+          const candidates = matches.slice(start, start + limit).map(item);
+          result = { ...result, selection: selectionReason, outcome: matches.length === 0 ? 'not_found' : p.op === 'catalog' ? 'catalog' : matches.length === 1 ? 'resolved' : 'ambiguous', candidates, total: matches.length, more: start + candidates.length < matches.length };
+          if (matches.length === 1) result.identity = matches[0].identity;
+          return finish(result);
+        }
       }
       if (!p.gen) return finish({ ...result, outcome: 'generation_required' });
-      const e = entries.get(p.ref);
+      const e = selected ?? entries.get(p.ref);
       if (!e) return finish({ ...result, outcome: 'unknown_handle' });
-      result = { ...result, identity: e.identity, selection: 'identity_handle', freshness: current(e) };
+      result = { ...result, identity: e.identity, selection: selected ? 'snapshot_' + selectionReason : 'identity_handle', freshness: current(e), ...(selected ? { ref: e.handle } : {}) };
       if (result.freshness !== 'fresh') return finish({ ...result, outcome: 'stale_handle' });
       if (p.op === 'inspect') {
         const info = e.kind === 'file' ? { fileBytes: e.size, readAuthorized: read } : metadata(tools().find(t => t.name === e.identity));

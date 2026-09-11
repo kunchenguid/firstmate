@@ -15,6 +15,10 @@
  *
  * atlas({op:"resolve",q:"f:README.md"}) -> generation and identity-backed ref.
  * atlas({op:"read",ref:"<returned ref>",gen:"<returned generation>",at:1,count:20})
+ * With a known generation, read may instead take q:"f:<literal file query>".
+ * Exactly one snapshot match reads immediately; ambiguity returns candidates.
+ * q and ref are mutually exclusive for reads. New files never retarget a query
+ * inside an older snapshot; selected-file freshness is checked before reading.
  * atlas({op:"resolve",q:"t:read"}) then op:"activate" -> original tool next call.
  * Other ops: catalog (q optional; at is 1-based pagination), inspect, refresh.
  * q is a literal identity substring, optionally f: or t:, never a shell command.
@@ -40,6 +44,7 @@ Scope: --atlas-root /absolute/git-root; --atlas-exclude relative/prefix,another
 atlas ops: catalog, resolve, inspect, read, activate, refresh.
 Resolve q is a literal identity substring (optional f: or t: prefix).
 Use the returned ref and generation as ref/gen for inspect/read/activate.
+Read may use a file q instead of ref, but still requires gen and one snapshot match.
 at/count select 1-based catalog pages or read lines. Refresh invalidates old gen.
 Limits: 8 candidates, 100 lines, 256 KiB files, 8 KiB JSON results.
 Read needs --atlas-read and uses a separate local text adapter, not the read tool.
@@ -95,7 +100,7 @@ export default function (pi: ExtensionAPI) {
   } });
   pi.registerTool({
     name: 'atlas', label: 'Context Atlas',
-    description: 'Index files/tools: catalog/resolve q (literal, optional f:/t:). inspect/read/activate require returned ref and generation as gen. Read at/count lines; activate original read-only tool for next call. refresh invalidates gen. Max 8 candidates, 100 lines, 8 KiB JSON. No writes or shell.',
+    description: 'Catalog/resolve literal q (f:/t:). Read ref+gen or file q+gen, at/count lines. Inspect/activate ref+gen; activate original tool next call. Refresh invalidates gen. Read-only, 8 KiB max.',
     parameters: Type.Object({
       op: StringEnum(['catalog', 'resolve', 'inspect', 'read', 'activate', 'refresh']),
       q: Type.Optional(Type.String({ maxLength: 400 })),

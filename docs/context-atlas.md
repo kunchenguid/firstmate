@@ -12,6 +12,7 @@ Use a selected Git repository root, not a subdirectory or a filesystem-wide root
 Additional exclusions can narrow that selection.
 
 The initial catalog contains metadata, not file contents.
+After acquiring a snapshot, reading a uniquely matching file query can avoid a separate discovery call without silently selecting newly added files.
 Reading eligible text requires separate explicit authorization for Atlas's local reader.
 If your environment has restrictions attached specifically to the original `read` tool, do not enable Atlas reads until those restrictions also authorize the new tool.
 Hidden, ignored, private, credential, dependency, and build paths are excluded conservatively, but this is not a secret scanner or an operating-system sandbox.
@@ -27,8 +28,8 @@ Do not combine deferral with another extension that independently manages the sa
 ## What the exploration establishes
 
 The [measurement record](verification/context-atlas.md) compares broad discovery, focused discovery, already-known tools, and Pi's default tool set.
-The experiment reduces initial schema bytes when several read-only tools can be deferred, but adds overhead when the default tool set is already small.
-A focused native file lookup also returns fewer bytes than Atlas's structured results.
+The experiment reduces initial schema bytes when several read-only tools can be deferred, with a smaller measured saving for the default four-tool set.
+A two-file flow also avoids one separate discovery call by reusing its snapshot, but a focused native file lookup still returns fewer bytes than Atlas's structured results.
 No token-billing, provider-cache, model-reasoning, or production latency improvement is claimed.
 Keep it optional unless measurements on your actual workflow justify it.
 

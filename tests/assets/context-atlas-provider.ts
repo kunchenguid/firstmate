@@ -62,7 +62,19 @@ export default function (pi: ExtensionAPI) {
             }
           }
           let name = 'atlas'; let args: any;
-          if (mode.startsWith('baseline')) {
+          if (mode==='baseline-twofiles') {
+            if(step===0) {name='find';args={pattern:'**/refund.ts'};}
+            else if(step===1) {assert.ok(result.includes(target));name='read';args={path:target,offset:2,limit:1};}
+            else if(step===2) {assert.ok(result.includes('export const refundLimit = 42;'));name='find';args={pattern:'**/charge.ts'};}
+            else if(step===3) {assert.ok(result.includes('src/payments/charge.ts'));name='read';args={path:'src/payments/charge.ts',offset:2,limit:1};}
+            else {assert.ok(result.includes('export const chargeLimit = 7;'));report.correct=true;}
+          } else if (mode==='atlas-twofiles-legacy' || mode==='atlas-twofiles-snapshot') {
+            if(step===0) args={op:'resolve',q:'f:refund.ts'};
+            else if(step===1) {assert.equal(result.outcome,'resolved');handle={ref:result.candidates[0].ref,gen:result.generation};args={op:'read',...handle,at:2,count:1};}
+            else if(step===2) {assert.equal(result.content,'export const refundLimit = 42;');args=mode==='atlas-twofiles-snapshot'?{op:'read',q:'f:charge.ts',gen:handle.gen,at:2,count:1}:{op:'resolve',q:'f:charge.ts',gen:handle.gen};}
+            else if(step===3 && mode==='atlas-twofiles-legacy') {assert.equal(result.outcome,'resolved');args={op:'read',ref:result.candidates[0].ref,gen:result.generation,at:2,count:1};}
+            else {assert.equal(result.content,'export const chargeLimit = 7;');report.correct=true;}
+          } else if (mode.startsWith('baseline')) {
             const knownTarget = mode==='baseline-tool' || mode==='baseline-default';
             if (step===0 && !knownTarget) { name='find';args={pattern:mode==='baseline-focused'?'**/refund.ts':'**/*',limit:200}; }
             else if ((step===1 && !knownTarget) || (step===0 && knownTarget)) {

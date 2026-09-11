@@ -45,7 +45,10 @@ These checks protect ordinary stale references and path mistakes, not an adversa
 
 Responses carry concrete identity or bounded candidates, generation, selection reason, freshness verdict, action outcome, truncation state, and exact UTF-8 JSON output bytes.
 Discovery explicitly reports freshness as not checked; inspection and action recheck the selected identity.
-Ambiguous literal matches return candidates rather than selecting the highest-ranked guess.
+Literal queries prefer an exact identity, otherwise use case-insensitive substring matching; ambiguity returns candidates rather than a guessed winner.
+A file query can combine resolution and reading only within an explicitly named existing snapshot and with exactly one match.
+It uses the stored identity and ordinary selected-file freshness checks, never retargets to a newly indexed path, and still requires the separate read grant.
+This avoids an extra lookup for a subsequent file without changing tool execution or introducing another cache.
 Oversized structured responses are replaced with a bounded refusal, never invalid JSON, a hidden full-output file, or silent truncation.
 Ordinary Pi schema-validation and extension-initialization errors remain Pi errors, outside the dispatcher response envelope.
 

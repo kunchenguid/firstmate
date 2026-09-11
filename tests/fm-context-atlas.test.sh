@@ -36,6 +36,17 @@ const resolve=q=>{const r=call({op:'resolve',q});assert.equal(r.outcome,'resolve
 const read=(h,extra={})=>call({op:'read',...h,...extra});
 const alpha=resolve('f:src/alpha.ts');
 assert.equal(read(alpha,{at:2,count:1}).content,'second');
+const queryRead=(q,gen=alpha.gen,extra={})=>call({op:'read',q,gen,...extra});
+assert.equal(call({op:'read',q:'f:src/alpha.ts'}).outcome,'generation_required');
+assert.equal(queryRead('f:src/alpha.ts',alpha.gen,{at:2,count:1}).content,'second');
+assert.equal(queryRead('f:src/alpha.ts').ref,alpha.ref);
+assert.equal(queryRead('f:src/alpha.ts').selection,'snapshot_exact_identity');
+const ambiguous=queryRead('f:alpha',alpha.gen,{at:999,count:1});
+assert.equal(ambiguous.outcome,'ambiguous');assert.equal(ambiguous.candidates.length,2);assert.equal(ambiguous.content,undefined);
+assert.equal(queryRead('f:src/alpha.ts','old').outcome,'stale_snapshot');
+assert.equal(queryRead('f:src/alpha.ts',alpha.gen,{ref:alpha.ref}).outcome,'invalid_request');
+assert.equal(queryRead('t:read').outcome,'not_found');
+assert.equal(queryRead('../outside.txt').outcome,'not_found');
 assert.equal(call({op:'inspect',...alpha}).info.readAuthorized,true);
 assert.equal(call({op:'resolve',q:'alpha'}).outcome,'ambiguous');
 assert.equal(call({op:'resolve',q:'f:alpha'}).candidates.length,2);
@@ -55,10 +66,12 @@ assert.equal(read(resolve('f:empty.txt')).content,'');
 assert.equal(read(alpha,{at:20}).outcome,'line_out_of_range');
 const denied=createAtlas({...options,read:false}); const dr=denied({op:'resolve',q:'f:src/alpha.ts'});
 assert.equal(denied({op:'read',ref:dr.candidates[0].ref,gen:dr.generation}).outcome,'read_not_authorized');
+assert.equal(denied({op:'read',q:'f:src/alpha.ts',gen:dr.generation}).outcome,'read_not_authorized');
 // Metadata-only indexing must not read an oversized, binary or private file.
 // Freshness catches an equal-size rewrite even when mtime is restored.
 const s=statSync(repo+'/src/alpha.ts');put('src/alpha.ts','other\nsecond\nthird\n');utimesSync(repo+'/src/alpha.ts',s.atime,s.mtime);
 assert.equal(read(alpha).outcome,'stale_handle');
+assert.equal(queryRead('f:src/alpha.ts').outcome,'stale_handle');
 call({op:'refresh'}); assert.equal(read(alpha).outcome,'stale_snapshot');
 const fresh=resolve('f:src/alpha.ts'); assert.notEqual(fresh.ref,alpha.ref);
 put('.gitignore','ignored/\ntracked-ignore.txt\nsrc/alpha.ts\n'); assert.equal(read(fresh).freshness,'excluded');
@@ -76,6 +89,13 @@ const off=disabled({op:'resolve',q:'t:read'});assert.equal(disabled({op:'activat
 const hugeTool=createAtlas({...options,tools:()=>[{name:'huge',description:'x'.repeat(10000),parameters:{type:'object'},sourceInfo:{source:'sdk',path:'fixture'}}]});
 const huge=hugeTool({op:'resolve',q:'t:huge'});assert.equal(hugeTool({op:'inspect',ref:huge.candidates[0].ref,gen:huge.generation}).outcome,'output_too_large');
 const abort=new AbortController();abort.abort();assert.equal(atlas({op:'catalog'},abort.signal).outcome,'cancelled');
+put('src/rebind.ts','original');call({op:'refresh'});
+const rebind=resolve('f:src/rebind.ts');
+put('src/new-rebind.ts','replacement');
+assert.equal(queryRead('f:rebind.ts',rebind.gen).content,'original');
+rmSync(repo+'/src/rebind.ts');
+const removed=queryRead('f:rebind.ts',rebind.gen);
+assert.equal(removed.outcome,'stale_handle');assert.equal(removed.identity,'src/rebind.ts');assert.equal(removed.content,undefined);
 for(let i=0;i<12;i++)put('page-'+i+'.txt','ok');call({op:'refresh'});
 const page=call({op:'catalog',q:'page-',count:100});assert.equal(page.candidates.length,8);assert.equal(page.more,true);
 const next=call({op:'catalog',q:'page-',at:9,gen:page.generation});assert.equal(next.candidates.length,4);
