@@ -13,6 +13,10 @@ const ARM_RETIRE_TIMEOUT_MS = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 
 const REARM_RETRY_BASE_MS = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const REARM_RETRY_MAX_MS = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const REARM_RETRY_LIMIT = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
+// OpenCode's session.idle carries only a sessionID, and a subagent child session
+// emits its own idle, so an ancestor walk is the only way to tell a captain's
+// session from a delegated one. Bounded because the walk is server-supplied.
+const SESSION_ANCESTOR_LIMIT = 4;
 
 let child = null;
 let activeSessionID = "";
@@ -183,6 +187,22 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
     setArmStatus("failed");
     settleReadiness("failed");
   }
+}
+
+async function resolveCaptainSession(client, sessionID) {
+  let current = sessionID;
+  for (let hop = 0; hop < SESSION_ANCESTOR_LIMIT && current; hop += 1) {
+    let parentID = "";
+    try {
+      parentID = (await client.session.get({ path: { id: current } }))?.data?.parentID ?? "";
+    } catch {
+      // A harness without the session lookup keeps the most-recently-idle rule.
+      return current;
+    }
+    if (!parentID) return current;
+    current = parentID;
+  }
+  return current;
 }
 
 async function sendPrompt(paths, client, sessionID, text) {
@@ -486,7 +506,12 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
   const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
   const paths = effectivePaths(root);
   globalThis[COORDINATOR_KEY] = {
-    ensureArmed: (sessionID, activeClient) => ensureArm(paths, sessionID, activeClient ?? client),
+    ensureArmed: async (sessionID, activeClient) => {
+      const sessionClient = activeClient ?? client;
+      const captainSessionID = await resolveCaptainSession(sessionClient, sessionID);
+      if (captainSessionID) activeSessionID = captainSessionID;
+      return ensureArm(paths, captainSessionID, sessionClient);
+    },
   };
 
   return {
@@ -494,11 +519,13 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
       if (event.type !== "session.idle") return;
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
-      // Remember the most recently idle session so an actionable wake is
-      // delivered to the captain's active session even when another session
-      // in this home armed the watcher first.
-      activeSessionID = sessionID;
-      void ensureArm(paths, sessionID, client);
+      // Remember the most recently idle captain session so an actionable wake is
+      // delivered to the session the captain is watching even when another
+      // session in this home armed the watcher first. A subagent child's idle
+      // resolves to the captain session that delegated it, never to the
+      // finished child transcript.
+      activeSessionID = await resolveCaptainSession(client, sessionID);
+      void ensureArm(paths, activeSessionID, client);
     },
   };
 };
