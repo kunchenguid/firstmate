@@ -1110,13 +1110,13 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   #   re-fire PERMANENTLY-WEDGED on every FM_WEDGE_MAX_ESCALATIONS polls).
   #
   # Both are honored for FM_CAP_HORIZON_SECS (default 24h); cap horizon
-  # expiry allows re-fire on either. No auto-lift on pause_state_class=working
-  # per v5 (the verdict can be a steady state during a wedge, not a recovery
-  # signal). Genuine busy->idle recovery (the hash-change branch in the outer
-  # loop) clears the window-scoped marker before this call, so a fresh stale
-  # hash arriving after recovery escalates normally. Pause-class transitions
-  # alone do NOT clear the window-scoped marker; only an actual state
-  # transition out of busy-mode does.
+  # expiry allows re-fire on either. No auto-lift exists anywhere: neither
+  # pause_state_class=working (per v5 - the verdict can be a steady state
+  # during a wedge, not a recovery signal) nor the hash-change/busy branch
+  # in the outer loop (v12: deliberate NO auto-lift, see the marker comment
+  # there) clears either marker. Pause-class transitions do not either.
+  # Only FM_CAP_HORIZON_SECS elapsing or an operator removing BOTH markers
+  # ends the suppression before the horizon.
   window_marker="$STATE/.wedge-permanent-$(window_key "$win")"
   if [ -e "$window_marker" ]; then
     marker_ts=$(cat "$window_marker" 2>/dev/null || true)
@@ -2822,10 +2822,8 @@ EOF
       # would re-introduce the v6/v7/v8 over-eager recovery the v9 design
       # removed (a pane can be classified idle on a hash change and still
       # be the same underlying wedge). The window-scoped marker is lifted
-      # only by (a) FM_CAP_HORIZON_SECS elapsing, (b) operator rm, or
-      # (c) the status log advancing past the wedge-fire timestamp (the
-      # actual recovery signal - implemented at the status-presentation
-      # site below).
+      # only by FM_CAP_HORIZON_SECS elapsing or an operator removing BOTH
+      # markers - no code path in this script clears it on its own.
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in

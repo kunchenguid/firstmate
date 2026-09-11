@@ -121,7 +121,7 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-wedge-cap-churning"
   printf 'busy wedged pane initial content\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-churning.meta"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/wedge-cap-churning.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-churning.status"
   sig=$(seen_sig "$state/wedge-cap-churning.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-churning_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -130,7 +130,10 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
   # v17 (2026-09-11): churn test now exercises busy_turn_bound_check →
   # wedge_timer_check instead of the idle hash-change branch, so the
   # window-scoped marker is actually checked against a fresh hash per
-  # poll. Crew state is busy, FM_BUSY_TURN_MAX_SECS=1, .meta aged past 1s.
+  # poll. The busy verdict comes from the production semantic busy-state
+  # contract (harness=pi + an armed .busy-state record written by the real
+  # fm-busy-event.sh writer - a bare crew-state string is NOT trusted by
+  # window_is_busy), FM_BUSY_TURN_MAX_SECS=1, .meta aged past 1s.
   printf 'busy: harness busy\n' > "$state/wedge-cap-churning.status"
   sig=$(seen_sig "$state/wedge-cap-churning.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-churning_status"
   touch -d '2 seconds ago' "$state/wedge-cap-churning.meta" 2>/dev/null || \
@@ -138,6 +141,8 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
   printf '1\n' > "$state/.count-$key"
   max=3
   export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "wedge-cap-churning" --state busy --source pi-ext --event poll >/dev/null \
+    || fail "could not arm the busy-state record for the churn fixture"
   marker_window="$state/.wedge-permanent-$key"
   marker_hash="$state/.wedge-permanent-$key-${pane_hash:0:12}"
 
@@ -149,7 +154,10 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
     reap "$pid"; fail "priming watch failed: $(cat "$out")"
   fi
   reap "$pid"
-  ack_stopped_cycle "$state" || fail "priming ack failed"
+  # The priming poll takes the busy route below the busy-turn bound, where
+  # wedge_timer_check only resets a missing timer - nothing actionable is
+  # queued, so there may be nothing to ack.
+  ack_stopped_cycle "$state" || true
   n=1
   while [ "$n" -le "$max" ]; do
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
@@ -331,7 +339,6 @@ test_wedge_cap_failed_window_marker_rolls_back_per_hash_v13() {
     set +e
     wait "$pid" 2>/dev/null
     round_status=$?
-    set -e
     if [ "$n" -eq "$max" ]; then
       # Round max is expected to exit 1: v13 rolls back the per-hash
       # marker after a failed window-scoped marker write and exits 1.
@@ -415,7 +422,6 @@ test_wedge_cap_rollback_resets_state_v14() {
     set +e
     wait "$pid" 2>/dev/null
     round_status=$?
-    set -e
     if [ "$n" -eq "$max" ]; then
       [ "$round_status" -eq 1 ] || fail "round max expected exit 1 (v14 cap-failure rollback), got $round_status: $(cat "$out")"
     else
@@ -549,6 +555,104 @@ test_wedge_cap_rollback_failure_sets_sentinel_v15() {
 
   unset FM_FAKE_CREW_STATE
   pass "v15 rollback-failed sentinel short-circuits the wedge path - no wake-amplification under persistent fs failure (closes Greptile P1 from v14 review)"
+}
+
+
+test_wedge_cap_rollback_sentinel_keyed_on_busy_route_v17() {
+  # v17 (2026-09-11): busy-pane regression for the rollback-failed sentinel.
+  # busy_turn_bound_check declares an empty `local key` on its fall-through
+  # path, and bash dynamic scoping used to shadow wedge_timer_check's key
+  # with that empty value when the cap path handed off to _wedge_cap_rollback
+  # - so on the busy route the sentinel was written as
+  # .wedge-rollback-failed- (empty key) while the next poll's keyed lookup
+  # reads .wedge-rollback-failed-<key>: the v15 short-circuit silently did
+  # not hold exactly where v17's fix targets it. Drive the REAL busy route
+  # (busy crew state + crossed busy-turn bound) through a failing
+  # window-marker write whose rollback reset also fails, then require the
+  # NEXT busy-route poll to short-circuit on the keyed sentinel.
+  local dir state fakebin out capture_file window key pane_hash sig pid max
+  local marker_window marker_hash sentinel esc esc_after round_status rollbacks
+  dir=$(make_case wedge-cap-busy-route-sentinel); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedge-cap-busy-sentinel"
+  printf 'busy wedged pane for v17 busy-route sentinel\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/fm-wedge-cap-busy-sentinel.meta"
+  printf 'busy: harness busy\n' > "$state/fm-wedge-cap-busy-sentinel.status"
+  sig=$(seen_sig "$state/fm-wedge-cap-busy-sentinel.status"); printf '%s' "$sig" > "$state/.seen-fm-wedge-cap-busy-sentinel_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "busy wedged pane for v17 busy-route sentinel")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  max=1
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  # The busy verdict comes from the production semantic busy-state contract:
+  # harness=pi in the meta plus an armed .busy-state record written by the
+  # real fm-busy-event.sh writer. A bare crew-state string is NOT trusted by
+  # window_is_busy, so without this the poll silently takes an idle absorb
+  # path and never reaches busy_turn_bound_check.
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "fm-wedge-cap-busy-sentinel" --state busy --source pi-ext --event poll >/dev/null \
+    || fail "could not arm the busy-state record for the busy-route fixture"
+  marker_window="$state/.wedge-permanent-$key"
+  marker_hash="$state/.wedge-permanent-$key-${pane_hash:0:12}"
+  sentinel="$state/.wedge-rollback-failed-$key"
+  esc="$state/.wedge-escalations-$key"
+
+  # Round 1: the cap fires on the busy route (max=1, fresh escalation), the
+  # window-scoped marker write fails (non-empty directory blocker), and the
+  # rollback's escalation-file reset ALSO fails (the escalation path is the
+  # same kind of blocker) - so the rollback must write the keyed sentinel
+  # and the cap path must exit 2.
+  mkdir -p "$esc/blocker"
+  mkdir -p "$marker_window/blocker"
+  touch -d '2 seconds ago' "$state/fm-wedge-cap-busy-sentinel.meta" 2>/dev/null || \
+    perl -e 'utime(time()-2, time()-2, $ARGV[0])' "$state/fm-wedge-cap-busy-sentinel.meta"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_BUSY_TURN_MAX_SECS=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max FM_ROLLBACK_SENTINEL_TTL_SECS=3600 "$WATCH" > "$out" &
+  pid=$!
+  round_status=0
+  wait_for_exit "$pid" 100 || round_status=$?
+  [ "$round_status" -ne 124 ] || fail "round 1 watch did not exit after the cap-failure rollback: $(cat "$out")"
+  [ -e "$sentinel" ] || { rollbacks=''; for f in "$state"/.wedge-rollback-failed*; do if [ -e "$f" ]; then rollbacks="$rollbacks $f"; fi; done; fail "round 1 wrote no sentinel at .wedge-rollback-failed-$key - the busy route built the sentinel name from an unscoped key (pre-v17 shadowing) or the rollback sentinel write is broken (found:${rollbacks:- none})"; }
+  [ "$round_status" -eq 2 ] || fail "round 1 expected exit 2 (rollback-failed sentinel set), got $round_status: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "round 1 ack failed"
+
+  # Round 2: restore a healthy fs (blockers gone, per-hash and window
+  # markers removed, timer re-aged, counter reset to 0) and drive one more
+  # busy-route poll. The keyed sentinel must short-circuit it: no
+  # PERMANENTLY-WEDGED wake, the sentinel-active triage line, the sentinel
+  # retained, and the escalation counter untouched. Pre-v17 the keyed
+  # lookup missed and this poll re-fired the cap - the queue-flood the
+  # sentinel exists to stop.
+  rm -rf "$marker_window" "$esc"
+  rm -f "$marker_hash"
+  printf '0\n' > "$esc"
+  touch -d '2 seconds ago' "$state/fm-wedge-cap-busy-sentinel.meta" 2>/dev/null || \
+    perl -e 'utime(time()-2, time()-2, $ARGV[0])' "$state/fm-wedge-cap-busy-sentinel.meta"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  rm -f "$state/.watch-triage.log"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_BUSY_TURN_MAX_SECS=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max FM_ROLLBACK_SENTINEL_TTL_SECS=3600 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    : # a pre-fix regression exits on its own after re-firing; assertions below catch it
+  fi
+  reap "$pid"
+  ack_stopped_cycle "$state" || true
+  if grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null; then
+    fail "busy-route poll re-fired PERMANENTLY-WEDGED despite the keyed rollback sentinel - the v15 short-circuit does not hold on the busy-pane route (pre-v17 empty-key shadowing): $(cat "$out")"
+  fi
+  if ! grep -F "rollback-failed sentinel active" "$state/.watch-triage.log" >/dev/null; then
+    fail "expected triage_log 'rollback-failed sentinel active' was not emitted on the busy route (triage file: $(cat "$state/.watch-triage.log" 2>/dev/null || echo missing))"
+  fi
+  [ -e "$sentinel" ] || fail "the short-circuit poll removed the keyed sentinel - it must remain until TTL expiry or operator rm"
+  esc_after=$(cat "$esc" 2>/dev/null || true)
+  [ "$esc_after" = "0" ] || fail "the sentinel short-circuit poll escalated anyway (counter now '$esc_after', expected untouched 0)"
+  unset FM_FAKE_CREW_STATE
+  pass "the rollback-failed sentinel is written and honored under its proper window key on the busy-pane route (closes the v17 dynamic-scoping shadowing)"
 }
 
 test_wedge_cap_fires_permanently_wedged_after_max_escalations() {
@@ -1220,6 +1324,7 @@ test_wedge_cap_marker_write_after_durable_wake_v13
 test_wedge_cap_failed_window_marker_rolls_back_per_hash_v13
 test_wedge_cap_rollback_resets_state_v14
 test_wedge_cap_rollback_failure_sets_sentinel_v15
+test_wedge_cap_rollback_sentinel_keyed_on_busy_route_v17
 test_wedge_cap_window_marker_silences_hash_churning_busy_pane
 test_wedge_cap_operator_can_rm_marker
 test_wedge_cap_validates_invalid_override

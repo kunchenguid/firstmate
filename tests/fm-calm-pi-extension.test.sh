@@ -3728,35 +3728,8 @@ const synthetic = entries.find((entry) => entry.type === "custom_message" && ent
 if (!synthetic || synthetic.display) process.exit(1);
 JS
   chrome=$(find_chrome) || { echo "skip: chrome or chromium not found for rendered export DOM assertions"; return 0; }
-  "$chrome" \
-    --headless=new \
-    --disable-gpu \
-    --no-sandbox \
-    --user-data-dir="$TMP_ROOT/chrome-profile" \
-    --virtual-time-budget=2000 \
-    --dump-dom \
-    "file://$export_file" >"$export_dom" 2>/dev/null &
-  chrome_pid=$!
-  chrome_wait=0
-  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 100 ]; do
-    grep -Fq '</html>' "$export_dom" 2>/dev/null && break
-    sleep 0.1
-    chrome_wait=$((chrome_wait + 1))
-  done
-  kill "$chrome_pid" 2>/dev/null || true
-  # Chrome can retain --headless=new after --dump-dom completes and ignore TERM,
-  # so an unbounded wait can hang after the complete DOM has been captured.
-  chrome_reap_wait=0
-  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_reap_wait" -lt 20 ]; do
-    sleep 0.1
-    chrome_reap_wait=$((chrome_reap_wait + 1))
-  done
-  if kill -0 "$chrome_pid" 2>/dev/null; then
-    kill -9 "$chrome_pid" 2>/dev/null || true
-  fi
-  wait "$chrome_pid" 2>/dev/null || true
-  grep -Fq '</html>' "$export_dom" 2>/dev/null \
-    || fail "could not render calm-mode HTML export DOM"
+  chrome_report=$(render_export_dom "$chrome" "$export_file" "$export_dom" "$version") \
+    || fail "could not render calm-mode HTML export DOM: $chrome_report"
   node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
 const dom = require("node:fs").readFileSync(process.argv[2], "utf8");
 const messages = dom.match(/<div id="messages">([\s\S]*?)<\/main>/)?.[1];

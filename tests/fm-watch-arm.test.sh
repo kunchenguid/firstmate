@@ -293,10 +293,8 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   # healthy recovery as "stayed live". Wait bounded for the exit instead - the
   # pre-fix path never exits at all, so the failure this case exists to catch
   # still exhausts the whole bound.
-  status=0
-  if ! wait_for_exit "$ARM_PID" 60; then
-    status=$?
-  fi
+  wait_for_exit "$ARM_PID" 60
+  status=$?
   if [ "$status" = 124 ]; then
     # End the fixture through an ordinary actionable status transition so this
     # failing pre-fix path leaves no child behind.
