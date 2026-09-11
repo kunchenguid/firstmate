@@ -211,6 +211,13 @@ require_tools() {
 # Every tasks-axi call runs from the home whose backlog owns the obligation, the
 # same convention bin/fm-captain-hold.sh uses for typed backlog state.
 tx() { (cd "$FM_HOME" && tasks-axi "$@"); }
+retention_tx() {
+  (
+    cd "$FM_HOME" || exit
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-decision-hold.sh" tasks-axi "$@"
+  )
+}
 
 # obligation_json <id>: the complete typed obligation payload on stdout, empty
 # when the backlog simply has no such public-followup item, and a non-zero exit
@@ -1027,7 +1034,7 @@ record_posted() {
     --argjson c "$chunks" --arg t "$(now_rfc3339)" \
     '{state:"posted", request_id:$r, platform:$p, attempt_count:$a,
       total_chunks:$c, posted_chunks:$c, posted_at:$t}' > "$tmp"
-  tx public-followup record-delivery "$id" --receipt-file "$tmp" >/dev/null 2>&1
+  retention_tx public-followup record-delivery "$id" --receipt-file "$tmp" >/dev/null 2>&1
   rc=$?
   rm -f -- "$tmp"
   return "$rc"

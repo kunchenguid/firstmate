@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -eu
+
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+SELF=$(node -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "${BASH_SOURCE[0]}")
+
+resolve_real_tasks_axi() {
+  local candidate physical
+  if [ -n "${FM_TASKS_AXI_REAL:-}" ]; then
+    candidate=$FM_TASKS_AXI_REAL
+    case "$candidate" in /*) ;; *) candidate=$(command -v -- "$candidate" 2>/dev/null || true) ;; esac
+    [ -n "$candidate" ] || return 1
+    physical=$(node -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "$candidate" 2>/dev/null || true)
+    [ -n "$physical" ] && [ "$physical" != "$SELF" ] || return 1
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    case "$candidate" in /*) ;; *) continue ;; esac
+    physical=$(node -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "$candidate" 2>/dev/null || true)
+    [ -n "$physical" ] || continue
+    [ "$physical" = "$SELF" ] && continue
+    printf '%s\n' "$candidate"
+    return 0
+  done < <(type -a -p tasks-axi 2>/dev/null || true)
+  return 1
+}
+
+REAL_TASKS_AXI=$(resolve_real_tasks_axi) || {
+  printf 'tasks-axi: real tasks-axi executable not found\n' >&2
+  exit 127
+}
+
+if [ "${FM_DECISION_RETENTION_ACTIVE:-}" = 1 ]; then
+  exec "$REAL_TASKS_AXI" "$@"
+fi
+
+case "${1:-}" in
+  done|close)
+    for arg in "$@"; do
+      [ "$arg" != --no-prune ] || exec "$REAL_TASKS_AXI" "$@"
+    done
+    ;;
+esac
+
+case "${1:-}:${2:-}" in
+  done:*|close:*|prune:*|public-followup:record-delivery|public-followup:waive)
+    FM_HOME=${FM_HOME:-$PWD} FM_TASKS_AXI_REAL=$REAL_TASKS_AXI \
+      exec "$SCRIPT_DIR/fm-decision-hold.sh" tasks-axi "$@"
+    ;;
+  *) exec "$REAL_TASKS_AXI" "$@" ;;
+esac
