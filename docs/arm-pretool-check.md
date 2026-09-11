@@ -12,8 +12,15 @@ A firstmate primary must arm `bin/fm-watch-arm.sh` or run `bin/fm-watch-checkpoi
 A shell background operator, pipeline, redirection, wrapper, or unrelated command list can hide failure or let the watcher child die with the tool call.
 The seatbelt rejects those command shapes before execution.
 
+The same classifier also refuses a broad process kill that selects processes by command line or name rather than by the caller's own ancestry, process group, or session.
+Worktrees are isolated but the process table is not: a match on what a process is running reaches every matching process on the host, including sibling lanes, parallel firstmate homes, and the captain's own sessions.
+The watcher prohibition is the highest-severity special case of this rule; see "General broad process kill" below.
+
 This policy is not a post-arm liveness guarantee.
 `bin/fm-guard.sh` and `bin/fm-turnend-guard.sh` apply their respective post-arm supervision predicates to the watcher lock and beacon after an allowed call.
+
+This policy reaches only agents that load this repository's project settings.
+No-mistakes gate agents run with `disable_project_settings: true` (see [`../.no-mistakes.yaml`](../.no-mistakes.yaml) and [`architecture.md`](architecture.md) "No-mistakes gate authority boundary"), so this PreToolUse seatbelt is not active inside a gate agent; for that surface the shared-process-table rule in `AGENTS.md` and the crewmate brief's wait-discipline rule are the containment.
 
 The classifier never executes, sources, evaluates, or expands any part of the submitted command.
 It tokenizes the bytes and classifies lexical execution positions only.
@@ -32,16 +39,17 @@ The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
 It passes both roots and the exact command string to the Node policy owner.
 
-The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch` byte sequence even after the classifier's decoders run.
+The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain any trigger substring even after the classifier's decoders run.
+Every deniable command carries one of a small set of trigger substrings after normalization: a protected watcher execution or a broad watcher kill contains `fm-watch`, and a general broad process kill contains `pkill`, `killall`, or the `pgrep` that feeds a kill.
 The fast path may allow only when both of these hold:
 
-1. The stripped text lacks the `fm-watch` watcher substring, after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines.
+1. The stripped text lacks every trigger substring (`fm-watch`, `pkill`, `killall`, `pgrep`), after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines.
 2. The raw command carries no quoting-decoder marker: a `$` immediately followed by a single quote (ANSI-C `$'...'`) or a double quote (bash locale `$"..."`).
 
-Any `fm-watch` match or any quoting-decoder marker delegates to the classifier.
-Normalizing first keeps this a strict superset: a protected watcher path obfuscated as `fm-watc\<newline>h-arm.sh` or `fm-"watch"-arm.sh` still delegates, and stripping only those non-alphanumeric bytes can never destroy an existing `fm-watch` run.
+Any trigger substring or any quoting-decoder marker delegates to the classifier.
+Normalizing first keeps this a strict superset: a protected watcher path obfuscated as `fm-watc\<newline>h-arm.sh` or `fm-"watch"-arm.sh`, and a kill verb obfuscated as `pk"ill"`, all still delegate, and stripping only those non-alphanumeric bytes can never destroy an existing trigger substring.
 The quoting-decoder marker closes the case the byte strip cannot: `bin/fm-$'\x77'atch-arm.sh` and `bin/fm-$"watch"-arm.sh` both resolve to `bin/fm-watch-arm.sh` only after the classifier decodes the encoded character, so a cheap byte strip would otherwise lose the `fm-watch` bytes and fast-allow them.
-This marker set is coupled to the classifier's decoder set in `bin/fm-arm-command-policy.mjs`: adding any new quote or expansion form the classifier decodes requires extending this marker set in the same change, or the prefilter stops being a strict superset.
+This trigger set and marker set are coupled to the classifier in `bin/fm-arm-command-policy.mjs`: adding any new denied command family, or any new quote or expansion form the classifier decodes, requires extending these sets in the same change, or the prefilter stops being a strict superset.
 The prefilter owns no semantic exception: it can only ever fast-allow a command that is definitely not a watcher command, so it never flips a classification and the classifier remains the single owner of every decision.
 
 The seatbelt's threat model is agent mistakes: no one accidentally writes an ANSI-C- or locale-obfuscated watcher path, and deliberate obfuscation is the post-arm liveness guard's territory.
@@ -125,6 +133,16 @@ When the command carries such grammar and its raw bytes reference both a `fm-wat
 This backstop mirrors the protected-execution fail-closed rule and covers forms like `while true; do pkill -f fm-watch; done`, `for x in 1; do pkill -f fm-watch; done`, `case x in x) pkill -f fm-watch ;; esac`, and `until false; do kill $(pgrep -f fm-watch); done`.
 It is gated on the grammar being unsupported: in grammar the classifier does model, command-position analysis is authoritative, so data mentions such as `echo 'pkill -f fm-watch'` and a loop that only names the watcher without a kill verb such as `for f in 1; do echo fm-watch; done` remain allowed.
 
+## General broad process kill
+
+The watcher rule above is the highest-severity case of a wider one: any kill that selects processes by command line or name reaches every match on the shared process table, not just the caller's own tree, so it can hit a sibling lane.
+The classifier denies this class with `broad-process-kill`:
+
+- `pkill` or `killall` that does not select by the caller's own ancestry, process group, or session. A scoping flag - `-P`/`--parent`, `-g`/`--pgroup`, or `-s`/`--session` - makes the kill caller-scopeable and is allowed; `killall` has no such flag and is always broad, as is `-G` (a real unix group id, not a process group). Path-qualified, `command`, and `sudo` forms are recognized through the same wrapper unwrapping as the watcher rule.
+- An executed `kill` fed by an unscoped `pgrep` - by command substitution (`kill $(pgrep -f X)`), through a variable (`p=$(pgrep -f X); kill $p`), or by the pipe form `pgrep -f X | xargs kill`. A `pgrep` that itself selects by ancestry, group, or session (for example `pgrep -P $$`) is caller-scoped, so the kill it feeds is allowed.
+
+The classifier judges the shape, not runtime identity: it permits the caller-scopeable forms without proving the argument value is the caller's own, exactly as the watcher rule permits `pkill -P <pid>` regardless of the pid. A specific `kill <pid>` is allowed, because a literal pid carries no evidence of a foreign origin in the command text; a discover-then-literal-kill across two commands is therefore outside what a command-shape seatbelt can catch, and the shared-process-table rule in `AGENTS.md` is the containment for it. Read-only discovery (`pgrep -f X`, `ps aux | grep X`) and quoted data (`echo 'pkill -f X'`) are never kills and are allowed. Unsupported compound grammar carrying a broad kill fails closed the same way the watcher backstop does.
+
 ## Stable reason codes
 
 Every semantic deny includes one stable code in square brackets before its prose reason.
@@ -137,6 +155,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `watcher-bundled` | The outer command list is not the blessed setup-plus-final tree. |
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
+| `broad-process-kill` | An actual process kill selects by command line or name (not by the caller's own ancestry, process group, session, or a specific pid), so it can reach a sibling lane on the shared process table. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
 | `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
 
@@ -234,8 +253,9 @@ Every native-path automatic marker was present and every deny sentinel remained 
 ## Automated validation
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
-Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
-The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
+Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms, so the harness adapter wiring - unchanged in mechanism since the 2026-07-09 live record above - carries the broad-process-kill deny exactly as it carries the watcher denies.
+The matrix `K` series and the `test_broad_process_kill_contract` direct assertions cover the general broad-process-kill class, including the exact 2026-09-10 cross-lane incident shape (a kill fed by an unscoped `pgrep -f <phrase>`), the `pkill`/`killall`/pipe variants, and the paired caller-scoped forms that must remain allowed.
+The suite also verifies the widened transport prefilter delegates the `pkill`/`killall`/`pgrep` trigger substrings, real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:
 

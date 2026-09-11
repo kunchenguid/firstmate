@@ -141,6 +141,21 @@ matrix_case E15 allow '$FM_HOME/bin/fm-watch-arm.sh'
 matrix_case E16 allow '~/firstmate/bin/fm-watch-checkpoint.sh --seconds 180'
 matrix_case E17 allow 'for f in 1; do echo fm-watch; done'
 
+# K-series: the general broad-process-kill class, driven through the full
+# transport (prefilter + all five harness renderings) so the widened prefilter
+# is proven to delegate these to the classifier rather than fast-allowing them.
+# K01/K02 are the exact shape of the 2026-09-10 cross-lane incident: a kill fed
+# by an unscoped `pgrep -f <phrase>` that matched a sibling lane's argv.
+matrix_case K01 deny 'pkill -f "lavish-axi poll"'
+matrix_case K02 deny 'kill $(pgrep -f "lavish-axi poll")'
+matrix_case K03 deny 'pgrep -f "lavish-axi poll" | xargs kill'
+matrix_case K04 deny 'killall claude'
+matrix_case K05 deny 'pkill node'
+matrix_case K06 allow 'pkill -P 12345'
+matrix_case K07 allow 'kill $(pgrep -P $$)'
+matrix_case K08 allow 'pgrep -f "lavish-axi poll" | head'
+matrix_case K09 allow 'kill 76803'
+
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
 trap fm_test_cleanup EXIT
@@ -183,7 +198,7 @@ run_matrix_entry() {
   fi
 
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
-  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
+  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|broad-process-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
   if [ "$entry" = claude ]; then
     [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
@@ -220,6 +235,7 @@ test_direct_policy_contract() {
   assert_policy direct-broad-pkill $'deny\tbroad-watcher-kill' "pkill -f '/bin/fm-watch.sh'"
   assert_policy direct-loop-broad-pkill $'deny\tbroad-watcher-kill' 'while true; do pkill -f fm-watch; done'
   assert_policy direct-loop-broad-kill-pgrep $'deny\tbroad-watcher-kill' 'until false; do kill $(pgrep -f fm-watch); done'
+  assert_policy direct-watcher-pgrep-xargs-kill $'deny\tbroad-watcher-kill' 'pgrep -f fm-watch | xargs kill'
   assert_policy direct-loop-no-kill-allowed allow 'for f in 1; do echo fm-watch; done'
   assert_policy direct-pipeline $'deny\twatcher-pipeline' 'bin/fm-watch-arm.sh | cat'
   assert_policy direct-leading-redirection $'deny\twatcher-redirection' '>/tmp/out bin/fm-watch-arm.sh'
@@ -237,6 +253,49 @@ test_direct_policy_contract() {
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
   assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
+}
+
+# The general broad-process-kill class (docs/arm-pretool-check.md). A kill that
+# selects processes by command line or name reaches every match on the shared
+# process table, not just the caller's own tree, so it can hit a sibling lane -
+# the 2026-09-10 cross-lane incident. This is the class-closing generalization of
+# the watcher-only broad-kill rule, and these paired allow/deny assertions are
+# its regression: each asserts the exact verdict and fails if the guard stops
+# refusing the unscoped shape OR starts refusing a caller-scoped one.
+test_broad_process_kill_contract() {
+  # The exact 2026-09-10 incident shape: a kill fed by an unscoped `pgrep -f
+  # <phrase>` (and the equivalent pipe and pkill forms) that matched a sibling
+  # lane's argv rather than the fixture stub it meant to reap.
+  assert_policy incident-kill-cmdsub $'deny\tbroad-process-kill' 'kill $(pgrep -f "lavish-axi poll")'
+  assert_policy incident-pkill-f $'deny\tbroad-process-kill' 'pkill -f "lavish-axi poll"'
+  assert_policy incident-pgrep-xargs-kill $'deny\tbroad-process-kill' 'pgrep -f "lavish-axi poll" | xargs kill'
+  # Selecting by process name (default, or -x) is machine-wide too.
+  assert_policy bpk-pkill-name $'deny\tbroad-process-kill' 'pkill node'
+  assert_policy bpk-pkill-exact-name $'deny\tbroad-process-kill' 'pkill -x claude'
+  assert_policy bpk-killall $'deny\tbroad-process-kill' 'killall claude'
+  # -G is a real unix group id, not a process group, so it is still broad.
+  assert_policy bpk-pkill-gid $'deny\tbroad-process-kill' 'pkill -G staff -f node'
+  # Via a wrapper and via a variable holding the unscoped match.
+  assert_policy bpk-sudo-pkill $'deny\tbroad-process-kill' 'sudo pkill -f node'
+  assert_policy bpk-var-unscoped $'deny\tbroad-process-kill' 'p=$(pgrep -f node); kill $p'
+  # Unsupported grammar carrying a broad kill fails closed, like the watcher case.
+  assert_policy bpk-loop $'deny\tbroad-process-kill' 'while true; do pkill -f node; done'
+
+  # Caller-scoped kills - the safe forms the guard must NOT refuse - selecting by
+  # parent, process group, or session, or by a specific pid the caller chose.
+  assert_policy bpk-allow-parent allow 'pkill -P 12345'
+  assert_policy bpk-allow-pgroup allow 'pkill -g 0'
+  assert_policy bpk-allow-parent-long allow 'pkill --parent 12345 -f node'
+  assert_policy bpk-allow-session allow 'pkill -s 4242'
+  assert_policy bpk-allow-kill-parent-pgrep allow 'kill $(pgrep -P $$)'
+  assert_policy bpk-allow-var-scoped allow 'p=$(pgrep -P $$); kill $p'
+  assert_policy bpk-allow-pgrep-scoped-xargs allow 'pgrep -P $$ | xargs kill'
+  assert_policy bpk-allow-literal-pid allow 'kill 76803'
+  assert_policy bpk-allow-literal-signal allow 'kill -9 "$pid"'
+  # Read-only discovery and quoted data are never kills.
+  assert_policy bpk-allow-readonly-pgrep allow 'pgrep -f "lavish-axi poll" | head'
+  assert_policy bpk-allow-ps-grep allow 'ps aux | grep node'
+  assert_policy bpk-allow-data-mention allow "echo 'pkill -f node'"
 }
 
 # --- CLI parsing -------------------------------------------------------------
@@ -348,7 +407,29 @@ test_prefilter_is_strict_superset() {
   "$CHECK" --command "echo 'pkill -f fm-watch'" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a benign fm-watch-substring command must be classified and allowed, got exit $rc"
-  pass "transport prefilter is a strict superset: non-fm-watch fast-allows, every fm-watch and quoting-decoder-marker command reaches the classifier"
+  # The widened trigger set: a general broad process kill carries no fm-watch
+  # bytes, so the prefilter must delegate on the pkill/killall/pgrep substrings
+  # or it would fast-allow the very shape the classifier now denies.
+  "$CHECK" --command 'pkill -f node' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a non-watcher pkill, not fast-allow it, got exit $rc"
+  "$CHECK" --command 'killall node' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a killall, not fast-allow it, got exit $rc"
+  "$CHECK" --command 'kill $(pgrep -f node)' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a kill fed by an unscoped pgrep, not fast-allow it, got exit $rc"
+  # Obfuscation across a quote split loses the literal pkill bytes; the prefilter
+  # normalizes quotes first, so it still delegates and the classifier still denies.
+  "$CHECK" --command 'pk"ill" -f node' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a quote-split pkill, not fast-allow it, got exit $rc"
+  # A benign command that only mentions a trigger word as data still reaches the
+  # classifier and is allowed there.
+  "$CHECK" --command "echo 'run pgrep then kill by hand'" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a benign pgrep-substring data command must be classified and allowed, got exit $rc"
+  pass "transport prefilter is a strict superset: only trigger-free commands fast-allow; every fm-watch, broad-kill, and quoting-decoder-marker command reaches the classifier"
 }
 
 # --- fail-open ----------------------------------------------------------------
@@ -456,6 +537,7 @@ test_shellcheck_clean() {
 
 test_full_acceptance_matrix
 test_direct_policy_contract
+test_broad_process_kill_contract
 test_command_equals_form
 test_background_flag_accepted_and_non_gating
 test_unknown_flag_errors
