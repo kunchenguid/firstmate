@@ -465,6 +465,38 @@ EOF
   assert_not_contains "$out" "must contain nonempty" \
     "a filled ship brief mentioning placeholder tokens failed content validation"
 
+  # bin/fm-brief.sh --issue quotes the issue verbatim into the intent, so a
+  # human who wrote the token in the issue must not brick the brief.
+  id=delivery-quoted-token-ship
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "quoted-token ship brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "The reporter wrote:
+> {TASK}
+Restore the scaffold's replacement." \
+    "Touch only the replacement helper."
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+    "an intent quoting the token as issue text was refused as unfilled"
+
+  # A subsection scaffolded with surrounding context - bin/fm-brief.sh --issue
+  # writes the issue around a retained {TASK} - is never exactly the whole
+  # subsection, so a token still standing alone on its line is unfilled.
+  id=delivery-composed-ship
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "composed-ship brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Context for the ask.
+{TASK}
+Only that work is in scope." \
+    "Touch only the redirect guard."
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of a composed but unfilled intent should exit non-zero"
+  assert_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+    "an unfilled {TASK} surrounded by context passed the placeholder gate"
+  assert_absent "$home/state/$id.meta" "a composed unfilled brief wrote task metadata"
+
   id=delivery-legacy-fenced-headings
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<'EOF'
@@ -790,6 +822,39 @@ EOF
   pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
 }
 
+# A task dispatched from a GitLab issue never carries standing merge authority:
+# the human who opened the issue reviews and merges each merge request and
+# closes the issue afterwards, so the spawn that decides a ship task's merge
+# posture refuses --yolo on for such a task.
+test_issue_tasks_keep_merge_authority_with_the_human() {
+  local rec home proj fakebin out status
+  local url='https://gitlab.example.test/grp/proj/-/issues/42'
+  rec=$(make_home issue-yolo)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" delivery-issue-e1 direct-PR
+  printf '\n# GitLab issue\nIssue contract: issue=%s\n' "$url" >> "$home/data/delivery-issue-e1/brief.md"
+
+  out=$(run_spawn "$home" "$fakebin" delivery-issue-e1 "$proj" claude --mode direct-PR --yolo on --issue "$url")
+  status=$?
+  [ "$status" -ne 0 ] || fail "an issue-sourced ship spawn carrying --yolo on should exit non-zero"
+  assert_contains "$out" "cannot ship with --yolo on" "the refusal did not explain the issue's merge authority"
+  assert_absent "$home/state/delivery-issue-e1.meta" "a refused issue spawn wrote task metadata"
+
+  # --yolo off on the same task clears the merge-authority check and only fails
+  # later, at the refusing tmux.
+  out=$(run_spawn "$home" "$fakebin" delivery-issue-e1 "$proj" claude --mode direct-PR --yolo off --issue "$url")
+  assert_not_contains "$out" "cannot ship with --yolo on" "an issue task shipping --yolo off was refused"
+
+  # A ship task with no issue keeps the ordinary posture, so the guard cannot
+  # leak into every other spawn.
+  write_brief "$home" delivery-issue-e2 direct-PR
+  out=$(run_spawn "$home" "$fakebin" delivery-issue-e2 "$proj" claude --mode direct-PR --yolo on)
+  assert_not_contains "$out" "cannot ship with --yolo on" "an ordinary ship spawn lost its merge posture"
+  pass "fm-spawn: an issue-sourced ship task refuses standing merge authority"
+}
+
 test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
@@ -801,4 +866,6 @@ test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
 test_spawn_and_promote_require_filled_task_subsections
+test_issue_tasks_keep_merge_authority_with_the_human
+
 echo "# all fm-task-delivery tests passed"

@@ -868,6 +868,431 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
+# --- --issue: briefs scaffolded from a GitLab issue ---------------------------
+
+# A fake glab that answers the three requests `fm-gitlab-issue.sh show` makes,
+# from fixture files, and records every endpoint it was asked for. No case
+# reaches the network.
+issue_fakebin() {  # <case-dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+set -u
+shift
+endpoint=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --hostname | --method | -X | --input | --header | -H) shift 2 ;;
+    --paginate) shift ;;
+    -*) shift ;;
+    *) endpoint=$1; shift ;;
+  esac
+done
+printf '%s\n' "$endpoint" >> "$FM_TEST_GLAB_LOG"
+fix=$FM_TEST_GLAB_FIX
+[ ! -e "$fix/fail" ] || { echo "fake glab: 401 Unauthorized" >&2; exit 1; }
+case "$endpoint" in
+  user) cat "$fix/user.json" ;;
+  *"/notes?"*) cat "$fix/notes.json" ;;
+  *) cat "$fix/issue.json" ;;
+esac
+SH
+  chmod +x "$fakebin/glab"
+  printf '%s\n' "$fakebin"
+}
+
+# One issue whose own text is hostile to the brief's structure: the title is an
+# ATX heading, the description opens a level-2 heading and a fenced block whose
+# body is another heading, and a comment closes with an unbalanced fence.
+issue_fixtures() {  # <case-dir>
+  local fix=$1/fix
+  mkdir -p "$fix"
+  cat > "$fix/user.json" <<'JSON'
+{"id": 77, "username": "fm-bot", "name": "Firstmate Bot"}
+JSON
+  cat > "$fix/issue.json" <<'JSON'
+{
+  "iid": 42, "project_id": 9, "title": "# Login page loops", "state": "opened",
+  "description": "## Steps\n1. open /login\n\n```\n# not a heading\n```\nIt loops.",
+  "labels": ["fm::todo"],
+  "author": {"id": 5, "username": "alice", "name": "Alice"},
+  "web_url": "https://gitlab.example.test/grp/sub/proj/-/issues/42",
+  "references": {"full": "grp/sub/proj#42"}
+}
+JSON
+  cat > "$fix/notes.json" <<'JSON'
+[{"id": 3, "system": false, "created_at": "2026-09-01T10:00:00.000Z",
+  "body": "## also on mobile\n```", "author": {"id": 5, "username": "bob", "name": "Bob"}}]
+JSON
+  printf '%s\n' "$fix"
+}
+
+# run_issue_brief <case-dir> <brief args...>: scaffold with the fake glab.
+run_issue_brief() {
+  local dir=$1 fakebin fix
+  shift
+  fakebin=$(issue_fakebin "$dir")
+  fix=$(issue_fixtures "$dir")
+  : > "$dir/requests.log"
+  FM_ROOT_OVERRIDE='' FM_HOME="$dir/home" \
+    FM_TEST_GLAB_FIX="$fix" FM_TEST_GLAB_LOG="$dir/requests.log" \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-brief.sh" "$@" 2>&1
+}
+
+ISSUE_URL='https://gitlab.example.test/grp/sub/proj/-/issues/42'
+# The fixture issue reports project path grp/sub/proj, and a brief must name
+# that same project - by its name here, by its full path where noted.
+ISSUE_REPO='proj'
+
+# --issue writes the issue itself into `## Captain's intent` as context, so the
+# worker reads the original request without calling GitLab, and quotes every
+# line of it so the human's own headings and fences cannot restructure the
+# brief. `{TASK}` stays inside that subsection for firstmate to fill with this
+# subtask's own work. The small-merge-request contract is generated build
+# guidance and stays outside `# Task`, where a no-mistakes `--intent` can never
+# pick it up.
+test_issue_fills_the_intent_and_carries_the_merge_request_contract() {
+  local dir brief out intent
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-ship"
+  mkdir -p "$dir/home/data"
+  out=$(run_issue_brief "$dir" issue-ship-a1 "$ISSUE_REPO" --mode direct-PR --issue "$ISSUE_URL" --issue-part 1/2)
+  brief="$dir/home/data/issue-ship-a1/brief.md"
+  assert_contains "$out" "issue=#42" "the scaffold line did not name the issue"
+  assert_contains "$out" "replace {TASK} and {FIRSTMATE_SPEC}" \
+    "the scaffold did not ask for both fills an --issue brief still leaves"
+  assert_grep '{TASK}' "$brief" "--issue overwrote the placeholder firstmate fills with this subtask's work"
+  assert_grep '{FIRSTMATE_SPEC}' "$brief" "--issue filled the firstmate spec, which stays firstmate's to write"
+
+  assert_grep 'GitLab issue #42 in grp/sub/proj' "$brief" "the brief does not name the issue and its project"
+  assert_grep "$ISSUE_URL" "$brief" "the brief does not carry the canonical issue URL"
+  assert_grep '> # Login page loops' "$brief" "the issue title is not quoted into the brief"
+  assert_grep '> ## Steps' "$brief" "the issue description is not quoted into the brief"
+  assert_grep '> # not a heading' "$brief" "the fenced line inside the description was not quoted verbatim"
+  assert_grep '> @bob at 2026-09-01T10:00:00.000Z:' "$brief" "the issue comments are not in the brief"
+  assert_grep '> ## also on mobile' "$brief" "a comment body is not quoted into the brief"
+
+  # The quoting is what keeps the issue's own markup from ending the intent
+  # subsection or swallowing the sections after it.
+  intent=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$brief" "## Captain's intent" )
+  assert_contains "$intent" '> ## Steps' "the issue text is not inside ## Captain's intent"
+  assert_contains "$intent" '> ## also on mobile' "the intent stopped at a heading written inside the issue"
+  assert_not_contains "$intent" 'Ship exactly one merge request' \
+    "the generated merge-request contract leaked into the captain's intent"
+  ( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_heading_present "$brief" "## Firstmate spec" ) \
+    || fail "an unbalanced fence in the issue swallowed the ## Firstmate spec subsection"
+
+  assert_grep "Issue contract: issue=$ISSUE_URL" "$brief" "the brief records no machine-readable issue contract"
+  assert_grep 'Ship exactly one merge request for this task by default' "$brief" "the one-merge-request default is missing"
+  # shellcheck disable=SC2016 # The backticks are literal brief text, not a command substitution.
+  assert_grep '`#42 [1/2] <what this task changes>`' "$brief" "the merge request title shape is missing"
+  assert_grep 'Related to #42' "$brief" "the merge request description rule is missing"
+  # shellcheck disable=SC2016 # The backticks are literal brief text, not a command substitution.
+  assert_grep 'never carry `Closes`' "$brief" "the brief does not forbid a closing keyword"
+  assert_grep 'reviews the whole diff in one reading' "$brief" "the small-diff rule is missing"
+  assert_grep 'regression test ships with the first subtask' "$brief" "the regression-test rule is missing"
+  assert_grep 'this merge request must contain it' "$brief" \
+    "subtask 1 was not told outright that the regression test is its own merge request's"
+  assert_grep 'never close it, never change its labels' "$brief" "the brief does not leave the issue to the human"
+  pass "fm-brief: --issue fills the captain's intent from the issue and carries the small-merge-request contract"
+}
+
+# Every subtask dispatched from an issue exists to produce one small merge
+# request, and local-only opens none, so the pairing is refused rather than
+# packing two mutually exclusive delivery contracts into one brief. An ordinary
+# brief is completely unchanged.
+test_issue_refuses_the_mode_that_ships_no_merge_request() {
+  local dir out status plain
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-local-only"
+  mkdir -p "$dir/home/data"
+  out=$(run_issue_brief "$dir" issue-local-b1 "$ISSUE_REPO" --mode local-only --issue "$ISSUE_URL" --issue-part 1/1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--issue with --mode local-only should exit non-zero"
+  assert_contains "$out" "local-only opens no merge request" "the refusal did not give the reason"
+  assert_absent "$dir/home/data/issue-local-b1/brief.md" "a local-only issue pairing still wrote a brief"
+  [ ! -s "$dir/requests.log" ] || fail "a refused local-only pairing still reached GitLab"
+
+  # No --issue: byte-for-byte the brief firstmate scaffolded before this flag.
+  plain="$dir/home/data/issue-none-b2/brief.md"
+  run_issue_brief "$dir" issue-none-b2 myproj --mode local-only >/dev/null
+  assert_grep '{TASK}' "$plain" "a brief without --issue lost its captain-intent placeholder"
+  assert_grep 'Delivery contract: mode=local-only' "$plain" "an ordinary local-only brief lost its delivery contract"
+  assert_no_grep '# GitLab issue' "$plain" "a brief without --issue grew an issue section"
+  pass "fm-brief: --issue refuses local-only, and no --issue changes nothing"
+}
+
+# The merge request lands on GitLab, so a direct-PR issue brief names glab and
+# says so outranks the shared definition of done's GitHub gh-axi sentence, which
+# stays as it is for every other direct-PR task.
+test_issue_direct_pr_opens_the_merge_request_with_glab() {
+  local dir brief issue_section dod
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-direct-pr"
+  mkdir -p "$dir/home/data"
+  run_issue_brief "$dir" issue-dpr-j1 "$ISSUE_REPO" --mode direct-PR --issue "$ISSUE_URL" --issue-part 1/2 >/dev/null
+  brief="$dir/home/data/issue-dpr-j1/brief.md"
+
+  issue_section=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$brief" "# GitLab issue" )
+  assert_contains "$issue_section" 'glab mr create' "a direct-PR issue brief does not name glab for the merge request"
+  assert_contains "$issue_section" 'overrides the definition of done' \
+    "the brief leaves the worker to infer which tool wins"
+  assert_contains "$issue_section" 'gh-axi' "the precedence sentence does not name the sentence it overrides"
+
+  # The shared gh-axi contract is untouched: it is still what a direct-PR brief
+  # carries, and the issue block is what supersedes it for this task.
+  dod=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$brief" "# Definition of done" )
+  assert_contains "$dod" 'open a PR with' "the direct-PR done gate changed"
+  pass "fm-brief: a direct-PR issue brief opens its merge request with glab and says so wins over gh-axi"
+}
+
+# Every refusal happens before a brief exists, and a malformed URL never reaches
+# GitLab: the URL rules are the ones bin/fm-gitlab-issue-lib.sh owns.
+test_issue_refusals_write_no_brief() {
+  local dir out status bad
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-refusals"
+  mkdir -p "$dir/home/data"
+  for bad in \
+    'https://gitlab.example.test/grp/proj/-/merge_requests/3' \
+    'https://gitlab.example.test/grp/proj/-/issues/0' \
+    'https://gitlab.example.test/proj/-/issues/3' \
+    'https://gitlab.example.test:8443/grp/proj/-/issues/3' \
+    'http://gitlab.example.test/grp/proj/-/issues/3' \
+    'https://github.com/owner/repo/-/issues/3'; do
+    out=$(run_issue_brief "$dir" issue-bad-c1 myproj --mode direct-PR --issue "$bad")
+    status=$?
+    [ "$status" -ne 0 ] || fail "--issue accepted '$bad'"
+    assert_contains "$out" "not a GitLab issue URL" "the refusal did not name the URL shape: $bad"
+    assert_absent "$dir/home/data/issue-bad-c1/brief.md" "a refused URL still wrote a brief: $bad"
+    [ ! -s "$dir/requests.log" ] || fail "a refused URL still reached GitLab: $bad"
+  done
+
+  out=$(run_issue_brief "$dir" issue-sm-c2 --secondmate --no-projects --issue "$ISSUE_URL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a secondmate charter carrying --issue should exit non-zero"
+  assert_contains "$out" "--issue applies only to ship briefs" \
+    "the secondmate refusal did not explain the scope"
+  assert_absent "$dir/home/data/issue-sm-c2/brief.md" "a refused charter still wrote a brief"
+  [ ! -s "$dir/requests.log" ] || fail "a refused charter still reached GitLab"
+
+  # A scout delivers a report and no merge request, so it is not issue work.
+  out=$(run_issue_brief "$dir" issue-scout-c4 myproj --scout --issue "$ISSUE_URL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout brief carrying --issue should exit non-zero"
+  assert_contains "$out" "--issue applies only to ship briefs" \
+    "the scout refusal did not explain the scope"
+  assert_absent "$dir/home/data/issue-scout-c4/brief.md" "a refused scout brief was still written"
+  [ ! -s "$dir/requests.log" ] || fail "a refused scout brief still reached GitLab"
+
+  # An issue that cannot be read refuses instead of writing a brief whose
+  # captain intent the worker cannot act on.
+  mkdir -p "$dir/fix"
+  touch "$dir/fix/fail"
+  out=$(run_issue_brief "$dir" issue-unread-c3 "$ISSUE_REPO" --mode direct-PR --issue "$ISSUE_URL" --issue-part 1/1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unreadable issue should refuse the scaffold"
+  assert_contains "$out" "could not read $ISSUE_URL" "the refusal did not name the issue it could not read"
+  assert_absent "$dir/home/data/issue-unread-c3/brief.md" "an unreadable issue still wrote a brief"
+  rm -f "$dir/fix/fail"
+  pass "fm-brief: --issue refuses a bad URL, a charter, and an unreadable issue without writing a brief"
+}
+
+# Under --mode no-mistakes the pipeline is what opens the merge request, so the
+# brief makes setting its title and description the worker's last step, and the
+# single owner of the definition of done holds the task open until that step is
+# done instead of ending at CI green.
+test_issue_no_mistakes_puts_the_merge_request_step_inside_the_done_gate() {
+  local dir brief dod issue_section
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-no-mistakes"
+  mkdir -p "$dir/home/data"
+
+  run_issue_brief "$dir" issue-nm-g1 "$ISSUE_REPO" --mode no-mistakes --issue "$ISSUE_URL" --issue-part 2/3 >/dev/null
+  brief="$dir/home/data/issue-nm-g1/brief.md"
+  issue_section=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$brief" "# GitLab issue" )
+  assert_contains "$issue_section" 'set the open merge request'"'"'s title and description' \
+    "a no-mistakes issue brief never tells the worker to set the merge request metadata"
+  assert_contains "$issue_section" 'edits the metadata of an already-open merge request' \
+    "the brief does not distinguish that step from the fixes the pipeline owns"
+
+  # The done gate is the part that decides when the worker stops, so the step
+  # has to sit inside it rather than after "you are finished".
+  dod=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$brief" "# Definition of done" )
+  assert_contains "$dod" 'GitLab issue' "the no-mistakes done gate does not point at the merge-request step"
+  assert_not_contains "$dod" 'You are finished.' \
+    "the no-mistakes done gate still ends at CI green for an issue-sourced task"
+
+  # Without --issue the gate is exactly the one every other no-mistakes task
+  # gets, and no merge-request step is invented for it.
+  run_issue_brief "$dir" issue-nm-g2 "$ISSUE_REPO" --mode no-mistakes >/dev/null
+  dod=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$dir/home/data/issue-nm-g2/brief.md" "# Definition of done" )
+  assert_contains "$dod" 'You are finished.' "an ordinary no-mistakes task lost its done gate"
+
+  # direct-PR opens its own merge request, so it gets no pipeline step and its
+  # done gate is untouched.
+  run_issue_brief "$dir" issue-nm-g3 "$ISSUE_REPO" --mode direct-PR --issue "$ISSUE_URL" --issue-part 3/3 >/dev/null
+  brief="$dir/home/data/issue-nm-g3/brief.md"
+  assert_no_grep 'glab mr update' "$brief" "a direct-PR brief was told to amend a pipeline-opened merge request"
+  dod=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_heading_body "$brief" "# Definition of done" )
+  assert_contains "$dod" 'open a PR with' "the direct-PR done gate changed"
+  pass "fm-brief: a no-mistakes issue brief carries the merge-request metadata step inside its done gate"
+}
+
+# The required merge request title carries this task's position among the
+# issue's subtasks, so the caller that planned the split states it and a brief
+# can never leave a placeholder position to reach a real merge request title.
+test_issue_part_is_required_and_renders_concretely() {
+  local dir brief out status bad
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-part"
+  mkdir -p "$dir/home/data"
+
+  run_issue_brief "$dir" issue-part-h1 "$ISSUE_REPO" --mode no-mistakes --issue "$ISSUE_URL" --issue-part 2/3 >/dev/null
+  brief="$dir/home/data/issue-part-h1/brief.md"
+  # shellcheck disable=SC2016 # The backticks are literal brief text, not a command substitution.
+  assert_grep '`#42 [2/3] <what this task changes>`' "$brief" "the resolved subtask position is not in the title form"
+  assert_no_grep 'n/N' "$brief" "the brief kept a placeholder position"
+
+  # The scaffold knows this is not subtask 1, so the regression test is stated
+  # as subtask 1's rather than left to whatever the spec restates.
+  assert_grep "regression test ships with subtask 1's merge request" "$brief" \
+    "subtask 2/3 was not told where the regression test for a reproduced bug ships"
+  assert_no_grep 'this merge request must contain it' "$brief" \
+    "subtask 2/3 was told to carry the regression test that ships with subtask 1"
+
+  # An issue with no position is a caller mistake, and it is loud here rather
+  # than a mis-formed merge request title later.
+  out=$(run_issue_brief "$dir" issue-part-h2 "$ISSUE_REPO" --mode no-mistakes --issue "$ISSUE_URL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "--issue without --issue-part should exit non-zero"
+  assert_contains "$out" "--issue requires --issue-part" "the refusal did not name the missing position"
+  assert_absent "$dir/home/data/issue-part-h2/brief.md" "a brief with no subtask position was still written"
+
+  out=$(run_issue_brief "$dir" issue-part-h3 "$ISSUE_REPO" --mode no-mistakes --issue-part 2/3)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--issue-part without --issue should exit non-zero"
+  assert_contains "$out" "pass it with --issue" "the refusal did not tie --issue-part to --issue"
+  assert_absent "$dir/home/data/issue-part-h3/brief.md" "a refused --issue-part still wrote a brief"
+
+  for bad in 3 0/3 4/3 1/2/3 '' 'a/b' '1/'; do
+    out=$(run_issue_brief "$dir" issue-part-h4 "$ISSUE_REPO" --mode no-mistakes --issue "$ISSUE_URL" --issue-part "$bad")
+    status=$?
+    [ "$status" -ne 0 ] || fail "--issue-part accepted '$bad'"
+    assert_contains "$out" "--issue-part" "the refusal did not name the flag: $bad"
+    assert_absent "$dir/home/data/issue-part-h4/brief.md" "a refused --issue-part still wrote a brief: $bad"
+  done
+  pass "fm-brief: --issue requires a subtask position and renders it concretely"
+}
+
+# The `## Captain's intent` subsection is verbatim what a no-mistakes run passes
+# as `--intent`, so for subtask n/N it has to ask for this subtask's work alone:
+# the issue is context, the scope sentence disowns the issue's other subtasks,
+# and this subtask's work is the retained `{TASK}` fill that closes the
+# subsection. The scope sentence must survive whatever firstmate fills in, and
+# until that fill happens the composed subsection is never the bare token, so
+# the dispatch gate has to catch a token still standing alone on its line.
+issue_fill_intent() {  # <brief> <out> <intent-fill> [<spec-fill>]
+  local content
+  content=$(cat "$1")
+  content=${content//'{TASK}'/$3}
+  content=${content//'{FIRSTMATE_SPEC}'/${4:-Touch only the redirect guard.}}
+  printf '%s\n' "$content" > "$2"
+}
+
+test_issue_intent_asks_for_this_subtask_only() {
+  local dir brief intent filled
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-intent-scope"
+  mkdir -p "$dir/home/data"
+  run_issue_brief "$dir" issue-scope-k1 "$ISSUE_REPO" --mode no-mistakes --issue "$ISSUE_URL" --issue-part 2/3 >/dev/null
+  brief="$dir/home/data/issue-scope-k1/brief.md"
+  intent=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$brief" "## Captain's intent" )
+
+  assert_contains "$intent" '> # Login page loops' "the subtask intent lost the issue title"
+  assert_contains "$intent" '> ## Steps' "the subtask intent lost the issue description"
+  assert_contains "$intent" '> ## also on mobile' "the subtask intent lost the issue comments"
+  assert_contains "$intent" '{TASK}' "the intent leaves no place for this subtask's own work"
+  assert_contains "$intent" 'subtask 2 of the 3' "the intent does not name this task's own position"
+  assert_contains "$intent" 'NOT its acceptance criteria' \
+    "the intent does not disown the issue's other subtasks as acceptance criteria"
+
+  ( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_placeholders_present "$brief" ) \
+    || fail "a brief whose subtask work is still {TASK} passed the placeholder gate"
+
+  # Once firstmate fills both subsections, the same brief is dispatchable.
+  filled="$dir/filled.md"
+  issue_fill_intent "$brief" "$filled" 'Rate-limit the login redirect.'
+  ( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_placeholders_present "$filled" ) \
+    && fail "a filled --issue brief was still refused as unfilled"
+  ( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_content_valid "$filled" ) \
+    || fail "a filled --issue brief failed Task content validation"
+  intent=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$filled" "## Captain's intent" )
+  assert_contains "$intent" 'Rate-limit the login redirect.' \
+    "the filled subtask work is not part of the intent the pipeline receives"
+  assert_not_contains "$intent" 'Touch only the redirect guard.' \
+    "the firstmate spec leaked into the intent"
+
+  # An unfenced heading in the fill ends the subsection, so anything rendered
+  # after the fill would silently leave the --intent the pipeline receives.
+  filled="$dir/filled-heading.md"
+  issue_fill_intent "$brief" "$filled" 'Rework the redirect guard.
+## Acceptance
+- the guard returns 429'
+  intent=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$filled" "## Captain's intent" )
+  assert_contains "$intent" 'subtask 2 of the 3' \
+    "a heading in the subtask work truncated this task's position out of the intent"
+  assert_contains "$intent" 'NOT its acceptance criteria' \
+    "a heading in the subtask work truncated the scope limitation out of the intent"
+  pass "fm-brief: an --issue subtask's intent carries the issue as context and asks for that subtask only"
+}
+
+# An issue that was never split has no other subtasks to disown, and the issue
+# itself is that single task's ask, so it stays acceptance criteria rather than
+# being demoted to background reading.
+test_issue_intent_keeps_an_unsplit_issue_as_criteria() {
+  local dir brief intent
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-intent-single"
+  mkdir -p "$dir/home/data"
+  run_issue_brief "$dir" issue-single-l1 "$ISSUE_REPO" --mode no-mistakes --issue "$ISSUE_URL" --issue-part 1/1 >/dev/null
+  brief="$dir/home/data/issue-single-l1/brief.md"
+  intent=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$brief" "## Captain's intent" )
+
+  assert_contains "$intent" '> ## Steps' "the single-subtask intent lost the issue itself"
+  assert_contains "$intent" 'subtask 1 of the 1' "the intent does not name this task's own position"
+  assert_contains "$intent" 'context AND its acceptance criteria' \
+    "an unsplit issue is not stated to be this task's acceptance criteria"
+  assert_not_contains "$intent" 'NOT its acceptance criteria' \
+    "an unsplit issue's own content was disowned as acceptance criteria"
+  pass "fm-brief: an unsplit issue stays its single subtask's acceptance criteria"
+}
+
+# A merge request's bare `#<iid>` resolves against its own project, so the task
+# must be paired with an issue from that same project.
+test_issue_must_belong_to_the_briefed_project() {
+  local dir out status
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (--issue reads the issue through jq)"; return 0; }
+  dir="$TMP_ROOT/issue-project"
+  mkdir -p "$dir/home/data"
+
+  out=$(run_issue_brief "$dir" issue-proj-i1 other-repo --mode direct-PR --issue "$ISSUE_URL" --issue-part 1/1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an issue from another project should exit non-zero"
+  assert_contains "$out" "grp/sub/proj" "the refusal did not name the issue's own project"
+  assert_contains "$out" "other-repo" "the refusal did not name the project the brief is for"
+  assert_absent "$dir/home/data/issue-proj-i1/brief.md" "a cross-project pairing still wrote a brief"
+
+  # The full namespaced path names the same project, so it is accepted too.
+  out=$(run_issue_brief "$dir" issue-proj-i2 grp/sub/proj --mode direct-PR --issue "$ISSUE_URL" --issue-part 1/1)
+  status=$?
+  expect_code 0 "$status" "the issue's own full project path should be accepted: $out"
+  assert_grep 'Related to #42' "$dir/home/data/issue-proj-i2/brief.md" "the accepted pairing lost the issue reference"
+  pass "fm-brief: --issue must name an issue in the briefed project"
+}
+
 test_worker_role_scope
 test_script_parses
 test_no_heredoc_in_command_substitution
@@ -891,3 +1316,12 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_issue_fills_the_intent_and_carries_the_merge_request_contract
+test_issue_refuses_the_mode_that_ships_no_merge_request
+test_issue_direct_pr_opens_the_merge_request_with_glab
+test_issue_no_mistakes_puts_the_merge_request_step_inside_the_done_gate
+test_issue_part_is_required_and_renders_concretely
+test_issue_intent_asks_for_this_subtask_only
+test_issue_intent_keeps_an_unsplit_issue_as_criteria
+test_issue_must_belong_to_the_briefed_project
+test_issue_refusals_write_no_brief
