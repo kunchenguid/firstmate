@@ -270,7 +270,7 @@ family_for_basename() {
     fm-bearings-board.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
-    fm-classify-decision-key.test.sh|\
+    fm-classify-decision-key.test.sh|fm-context-atlas.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
@@ -334,7 +334,7 @@ family_for_basename() {
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
-    fm-cursor-primary-live-e2e.test.sh|\
+    fm-cursor-primary-live-e2e.test.sh|fm-context-atlas-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|\
@@ -1301,6 +1301,14 @@ families_for_changed_path() {
       # A single test file change selects only that script via basename family
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
+      ;;
+    bin/context-atlas.ts|bin/context-atlas/*)
+      printf '%s\n' __script__:fm-context-atlas.test.sh
+      printf '%s\n' __script__:fm-context-atlas-live-e2e.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      ;;
+    tests/assets/context-atlas-provider.ts)
+      printf '%s\n' __script__:fm-context-atlas-live-e2e.test.sh
       ;;
     bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
       # Deliberately the WHOLE family, not just the two contract tests. This

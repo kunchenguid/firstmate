@@ -297,6 +297,14 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/context-atlas.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/context-atlas-design.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },
@@ -431,6 +439,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/context-atlas.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",
