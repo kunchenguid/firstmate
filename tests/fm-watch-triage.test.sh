@@ -4022,6 +4022,19 @@ seed_captured_procevent_result() {  # <dir>
     sleep 0.1
     i=$((i + 1))
   done
+  # The runner publishes that wake BEFORE it releases its claim and exits, so a
+  # retire that lands in that gap reads the exiting runner's ownership as
+  # uncertain and refuses with "cannot confirm runner identity" - the pipeline
+  # saw exactly that under load. Wait, bounded, for the release the publish
+  # promises, so retire meets a source nothing owns instead of racing the
+  # runner's last milliseconds. The bound keeps a runner that never releases a
+  # real failure at retire rather than a hang here.
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -e "$dir/claims/delivery-src.claim" ] || break
+    sleep 0.1
+    i=$((i + 1))
+  done
   pe_case "$dir" retire delivery-src >/dev/null || return 1
   [ -s "$dir/state/.wake-queue" ]
 }
@@ -4199,7 +4212,16 @@ test_procevent_launch_failed_episodes_are_each_delivered() {
   status=0
   surface_once "$dir" "$out" 30 || status=$?
   case "$status" in
-    0|124) ;;
+    124) ;;
+    0)
+      # The one wake this tolerates is the recovery path named above, by its
+      # exact reason line. A wake for any other reason would mean either that
+      # the ordinary surface delivered the repeated key after all, or that
+      # something unrelated fired inside the window - and both are failures of
+      # exactly what this test guards, so neither may pass as "recovery".
+      grep -F 'check: rearm-resurface' "$out" >/dev/null \
+        || fail "an already-surfaced launch-failed key woke the watcher, and the reason was not the one tolerated recovery path (expected the exact line 'check: rearm-resurface'; if that path was reworded, update this expectation, do not restore the strict silence check): $(cat "$out")"
+      ;;
     *) fail "the watcher failed on an already-surfaced launch-failed key (status $status): $(cat "$out")" ;;
   esac
   ! grep -F "failed to start: procevent:lf-src:launch-failed:1-2-100-7" "$out" >/dev/null \
