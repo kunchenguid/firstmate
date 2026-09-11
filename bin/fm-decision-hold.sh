@@ -4,9 +4,11 @@
 # The separate "decision" concept collapsed into the one primitive the captain
 # cares about: a task held for the captain. bin/fm-captain-hold.sh owns every
 # surviving behavior; this shim only maps the retired command surface onto it so
-# in-flight work briefed before the collapse keeps working for one release, and
-# it will be removed in the release after the collapse lands.
-#
+# in-flight work briefed before the collapse keeps working for one release.
+# Removal milestone: delete this file in the first tagged firstmate release
+# after 2026-09-11 once `git grep -l fm-decision-hold` outside this file,
+# its tests, and the captain-hold compatibility notes is empty.
+
 # Mapping (old -> new):
 #   id <origin> <key>                      -> prints the legacy <origin>-decision-<key> identity
 #   hold <origin> <key> --title --reason [--repo]
