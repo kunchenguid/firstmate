@@ -18,7 +18,7 @@
 # primary checkout is the alarm.
 
 # Resolve the default branch name of the git repo at <dir>: prefer origin/HEAD,
-# then fall back to a local main/master. Echoes the name, or returns 1.
+# then fall back to a local main (legacy master as a secondary fallback). Echoes the name, or returns 1.
 fm_default_branch() {
   local dir=$1 ref branch
   ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
