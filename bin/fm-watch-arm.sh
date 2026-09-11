@@ -185,6 +185,24 @@ cycle_log_append() {
 # verifies its watcher, update that predecessor's final record in place so the
 # one-record-per-cycle ledger captures the actual successor outcome without an
 # extra synthetic lifecycle row.
+predecessor_arm_is_genuine() {
+  local predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-}
+  case "$predecessor" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ -f "$CYCLE_LOG" ] || return 1
+  awk -F '\t' -v target="arm_pid=$predecessor" '
+    $1 == target {
+      found = 0
+      for (i = 1; i <= NF; i++) {
+        if ($i == "successor=none") found = 1
+      }
+      latest = found
+    }
+    END { exit latest ? 0 : 1 }
+  ' "$CYCLE_LOG" 2>/dev/null
+}
+
 cycle_mark_predecessor_successor() {
   local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-} i tmp
   case "$predecessor" in
@@ -397,6 +415,13 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
 esac
 
+# Only a recorded arm cycle may hand recovery handling to its successor. Direct
+# ordinary arms can inherit this environment variable from a long-lived parent;
+# treat an unproven value as ordinary instead of suppressing durable wake recovery.
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ] && ! predecessor_arm_is_genuine; then
+  FM_WATCH_PREDECESSOR_ARM_PID=
+fi
+
 if [ "$mode" = handling-delivered ]; then
   fm_pid_alive "$handling_watcher_pid" \
     && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME" \
@@ -478,7 +503,7 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
-  "$WATCH" >"$child_out" &
+  FM_WATCH_HANDLING_SUCCESSOR=0 "$WATCH" >"$child_out" &
 fi
 child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"

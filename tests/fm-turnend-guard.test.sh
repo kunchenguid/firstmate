@@ -2062,6 +2062,28 @@ test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy() {
   pass "fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)"
 }
 
+test_hook_claude_mode_blocks_when_autoarm_mutex_is_unclassified() {
+  local dir out status holder dead_pid
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-unclassified-mutex")
+  : > "$dir/state/task1.meta"
+  dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
+  mkdir "$dir/state/.watch.lock" "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$dead_pid" > "$dir/state/.watch.lock/pid"
+  touch -t 200001010000 "$dir/state/.last-watcher-beat"
+  sleep 60 &
+  holder=$!
+  printf '%s\n' "$holder" > "$dir/state/.claude-autoarm.lock/pid"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 2 "$status" "the synchronous guard must loudly block an unclassified auto-arm mutex with no watcher"
+  assert_contains "$out" "TURN WOULD END BLIND" "the unclassified mutex fallback must carry the blind-turn banner"
+  assert_contains "$out" "Stop-owned auto-arm did not claim" "the fallback must name the missing auto-arm claim"
+  assert_present "$dir/state/.claude-autoarm.lock" "the synchronous guard must not steal an unclassified mutex"
+  pass "fm-turnend-guard --claude: an unclassified auto-arm mutex with no watcher blocks loudly"
+}
+
 test_hook_claude_mode_reblocks_x_mode_without_tasks() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-x-mode")
@@ -2966,6 +2988,7 @@ test_declared_stdout_sink_none_keeps_the_turn_end_silent
 test_block_banner_marks_every_reason_line
 test_grok_legacy_resume_carries_the_coincident_warning
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
+test_hook_claude_mode_blocks_when_autoarm_mutex_is_unclassified
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open

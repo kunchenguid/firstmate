@@ -145,21 +145,39 @@ test_stale_watch_lock_reclaimed() {
   pass "killed watcher stale lock is reclaimed"
 }
 
-test_live_stale_watch_lock_is_actionable() {
-  local dir state fakebin out err status
-  dir=$(make_case live-stale-lock)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  out="$dir/watch.out"
-  err="$dir/watch.err"
-  mkdir "$state/.watch.lock"
-  printf '%s\n' "$$" > "$state/.watch.lock/pid"
-  touch -t 200001010000 "$state/.last-watcher-beat"
-  status=0
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
-  [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
-  grep -F 'heartbeat is stale' "$err" >/dev/null || fail "watcher did not explain the stale live lock"
-  pass "live watcher lock with stale heartbeat is actionable"
+test_live_watch_lock_distinguishes_beacon_state() {
+  local row dir state fakebin out err status
+  for row in stale fresh missing; do
+    dir=$(make_case "live-$row-lock")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    err="$dir/watch.err"
+    mkdir "$state/.watch.lock"
+    printf '%s\n' "$$" > "$state/.watch.lock/pid"
+    status=0
+    case "$row" in
+      stale)
+        touch -t 200001010000 "$state/.last-watcher-beat"
+        PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+        [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
+        grep -F 'heartbeat is stale' "$err" >/dev/null || fail "watcher did not explain the stale live lock"
+        ;;
+      fresh)
+        touch "$state/.last-watcher-beat"
+        PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+        [ "$status" -eq 0 ] || fail "watcher rejected a live lock with a fresh heartbeat"
+        grep -F "watcher: already running pid $$" "$out" >/dev/null || fail "watcher did not report the fresh live lock"
+        ;;
+      missing)
+        touch -t 200001010000 "$state/.watch.lock"
+        PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+        [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live holder without a heartbeat"
+        grep -F 'no heartbeat exists' "$err" >/dev/null || fail "watcher did not explain the missing heartbeat"
+        ;;
+    esac
+  done
+  pass "live watcher lock distinguishes stale, fresh, and missing heartbeats"
 }
 
 test_guard_warnings() {
@@ -1408,7 +1426,7 @@ test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
-test_live_stale_watch_lock_is_actionable
+test_live_watch_lock_distinguishes_beacon_state
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock

@@ -65,9 +65,10 @@
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
-# On any uncertainty such as unresolvable ancestry, malformed lock state, or
-# lock contention, it exits 0 and leaves continuity to the synchronous guard and
-# the model.
+# Before this hook verifies its own session-lock ownership, uncertainty such as
+# unresolvable ancestry or malformed lock state exits 0.
+# Once that ownership is verified, a contended auto-arm ledger mutex with no
+# healthy watcher exits 2 so the synchronous Stop guard is never the only alarm.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -159,18 +160,35 @@ fi
 # is superseded by taking the next generation (fm_autoarm_claim_open and
 # fm_autoarm_claim_next in bin/fm-wake-lib.sh own the contract). No mutex is
 # held past this point. A micro-mutex contention with a bare hold is another
-# participant's short ledger section and the next Stop firing simply retries,
-# while a role-carrying hold is a legacy lock-holding claim from a
-# pre-generation build (or the guard's own terminal-check), which the legacy
-# shim defers to while genuinely deciding and reclaims once when proven
-# abandoned.
+# participant's short ledger section; when it cannot prove a healthy watcher,
+# this hook rewakes loudly instead of silently depending on a later Stop firing.
+# A role-carrying hold is a legacy lock-holding claim from a pre-generation build
+# (or the guard's own terminal-check), which the legacy shim defers to while
+# genuinely deciding and reclaims once when proven abandoned.
 fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
 fm_autoarm_claim_next "$STATE" "$GRACE"
 CLAIM_RC=$?
 if [ "$CLAIM_RC" -ne 0 ]; then
   [ "$CLAIM_RC" -eq 2 ] && exit 0
+  # A winner's atomic ledger write follows its lock acquisition.
+  # Give that short publish window time to become an open claim before rewaking.
+  for _ in 1 2 3 4 5; do
+    sleep 0.02
+    fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
+  done
   ROLE=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
-  [ -n "$ROLE" ] || exit 0
+  if [ -z "$ROLE" ]; then
+    # A bare mutex is normally a tiny ledger-write window. It has no claimant
+    # identity to defer to, so a watcher lapse must stay loud rather than wait
+    # silently for another Stop hook that may never arrive.
+    fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" && exit 0
+    if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+      printf 'firstmate watcher auto-arm FAILED - auto-arm ledger lock is contended by pid %s, and no live watcher with a fresh beacon was verified.\n' "$FM_LOCK_HELD_PID" >&2
+    else
+      printf 'firstmate watcher auto-arm FAILED - could not claim the auto-arm ledger, and no live watcher with a fresh beacon was verified.\n' >&2
+    fi
+    exit 2
+  fi
   fm_autoarm_release_abandoned "$STATE" "$GRACE" || exit 0
   fm_autoarm_claim_next "$STATE" "$GRACE" || exit 0
 fi

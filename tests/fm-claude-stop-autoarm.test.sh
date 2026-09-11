@@ -635,6 +635,48 @@ test_owner_mutex_contention_preserves_failure_episode_reset() {
   pass "auto-arm: owner-mutex contention preserves successor episode state"
 }
 
+test_unclassified_owner_mutex_rewakes_only_when_unhealthy() {
+  local row dir out status holder watcher watcher_identity dead_pid
+  for row in dead-watcher healthy-watcher; do
+    dir=$(make_primary_dir "$TMP_ROOT/unclassified-owner-mutex-$row")
+    : > "$dir/state/task.meta"
+    write_arm_fixture "$dir" actionable
+    sleep 60 &
+    holder=$!
+    mkdir "$dir/state/.claude-autoarm.lock"
+    printf '%s\n' "$holder" > "$dir/state/.claude-autoarm.lock/pid"
+    case "$row" in
+      dead-watcher)
+        dead_pid=999999
+        while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
+        mkdir "$dir/state/.watch.lock"
+        printf '%s\n' "$dead_pid" > "$dir/state/.watch.lock/pid"
+        touch -t 200001010000 "$dir/state/.last-watcher-beat"
+        out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+        expect_code 2 "$status" "a contended auto-arm mutex with no live watcher must rewake loudly"
+        assert_contains "$out" "auto-arm ledger lock is contended" "the unrecovered watcher lapse must name its blocked claim"
+        [ ! -e "$dir/state/arm-ran" ] || fail "a contended auto-arm mutex started an uncoordinated watcher"
+        ;;
+      healthy-watcher)
+        sleep 60 &
+        watcher=$!
+        watcher_identity=$(watcher_identity "$dir" "$watcher") || fail "could not identify healthy watcher fixture"
+        record_watcher_lock "$dir" "$watcher" "$watcher_identity"
+        touch "$dir/state/.last-watcher-beat"
+        out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+        expect_code 0 "$status" "a contended auto-arm mutex with a healthy watcher must stay silent"
+        [ -z "$out" ] || fail "healthy watcher contention produced a rewake: $out"
+        [ ! -e "$dir/state/arm-ran" ] || fail "a healthy watcher contention started a duplicate watcher"
+        kill "$watcher" 2>/dev/null || true
+        wait "$watcher" 2>/dev/null || true
+        ;;
+    esac
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+  done
+  pass "auto-arm: an unclassified owner mutex fails loud only when no healthy watcher exists"
+}
+
 test_arms_for_x_mode_poll_need_without_inflight() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/x-need")
@@ -1216,6 +1258,7 @@ test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_owner_mutex_contention_preserves_failure_episode_reset
+test_unclassified_owner_mutex_rewakes_only_when_unhealthy
 test_arms_for_x_mode_poll_need_without_inflight
 test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner

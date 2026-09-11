@@ -140,11 +140,12 @@ drain_ack_pair() {  # <drain-stderr>
   printf '%s\t%s\n' "$sequence" "$generation"
 }
 
-start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
-  local home=$1 state=$2 fakebin=$3 armout=$4 predecessor=${5:-} i
+start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid] [handling-successor]
+  local home=$1 state=$2 fakebin=$3 armout=$4 predecessor=${5:-} handling_successor=${6:-} i
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" \
+    FM_WATCH_HANDLING_SUCCESSOR="$handling_successor" \
     "$WATCH_ARM" --restart > "$armout" &
   ARM_PID=$!
   i=0
@@ -289,7 +290,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
     'check: process-event result captured: remote-reply-ios:7'
   append_wake "$state" check startup-network 'check: startup-network'
 
-  start_rearm_arm "$home" "$state" "$fakebin" "$armout"
+  start_rearm_arm "$home" "$state" "$fakebin" "$armout" '' 1
   # Staying live is what fails here, so wait for the exit rather than budget a
   # wall-clock interval for one: the check interval and heartbeat are parked and
   # no further status change arrives, so a re-arm that did not surface the
@@ -371,6 +372,24 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   kill "$ARM_PID" 2>/dev/null || true
   wait "$ARM_PID" 2>/dev/null || true
   pass "watch-arm: re-arm surfaces every queued wake and an open remote decision after downtime"
+}
+
+test_stale_predecessor_is_ignored_without_predecessor_ledger() {
+  local dir home state fakebin armout row
+  dir=$(make_case stale-predecessor-baton)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  row=$(printf '1700000000\t7\tcheck\tstale-predecessor\tcheck: stale predecessor recovery')
+  printf '%s\n' "$row" > "$state/.wake-queue"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$armout" stale-predecessor 0
+  wait_for_exit "$ARM_PID" 80 || fail "stale predecessor arm did not settle into recovery"
+  grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+    || fail "an unproven predecessor baton suppressed durable recovery: $(cat "$armout")"
+  pass "watch-arm: an unproven predecessor baton is treated as an ordinary arm"
 }
 
 test_marker_publish_failure_retains_recovery_evidence() {
@@ -812,6 +831,7 @@ test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
+test_stale_predecessor_is_ignored_without_predecessor_ledger
 test_marker_publish_failure_retains_recovery_evidence
 test_delivery_gap_wake_is_recovered_once
 test_interrupted_handling_is_redrained_on_rearm
