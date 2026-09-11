@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Shared session-lock harness identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
+# ONE owner of the "which live, non-zombie verified-harness process holds this
+# home's session lock, and does the current process prove that same session by
+# ancestry?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
-# bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
+# bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook belongs to the
 # lock-owning primary session before it may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
 
@@ -145,24 +146,151 @@ EOF
   printf '%s\n' "$outermost"
 }
 
-# True if $1 is a live process that looks like a verified harness.
+fm_claude_process_argv_json() {  # <process-pid>
+  local pid=$1 proc_path platform
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  command -v node >/dev/null 2>&1 || return 1
+  if [ -n "${FM_PROC_ROOT:-}" ]; then
+    proc_path="$FM_PROC_ROOT/$pid/cmdline"
+  else
+    platform=$(uname -s 2>/dev/null) || return 1
+    case "$platform" in
+      Linux) proc_path="/proc/$pid/cmdline" ;;
+      Darwin)
+        [ -x /usr/bin/ruby ] || return 1
+        /usr/bin/ruby - "$pid" <<'RB'
+require "fiddle/import"
+require "json"
+
+module LibC
+  extend Fiddle::Importer
+  dlload Fiddle.dlopen(nil)
+  extern "int sysctl(int*, unsigned int, void*, size_t*, void*, size_t)"
+end
+
+pid = Integer(ARGV.fetch(0), 10)
+raise unless pid.positive?
+mib = [1, 49, pid].pack("i*")
+size = [0].pack("J")
+raise unless LibC.sysctl(mib, 3, nil, size, nil, 0).zero?
+length = size.unpack1("J")
+raise unless length > 4 && length <= 8 * 1024 * 1024
+buffer = "\0" * length
+raise unless LibC.sysctl(mib, 3, buffer, size, nil, 0).zero?
+raw = buffer.byteslice(0, size.unpack1("J"))
+argc = raw.unpack1("i")
+raise unless argc.positive? && argc <= 65_536
+offset = raw.index("\0", 4) + 1
+offset += 1 while offset < raw.bytesize && raw.getbyte(offset).zero?
+argv = []
+argc.times do
+  finish = raw.index("\0", offset)
+  raise unless finish
+  value = raw.byteslice(offset, finish - offset).force_encoding(Encoding::UTF_8)
+  raise unless value.valid_encoding?
+  argv << value
+  offset = finish + 1
+end
+STDOUT.write(JSON.generate(argv))
+RB
+        return $?
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  node -e '
+const fs = require("fs");
+try {
+  const raw = fs.readFileSync(process.argv[1]);
+  if (raw.length === 0 || raw[raw.length - 1] !== 0) throw new Error();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const argv = [];
+  let start = 0;
+  for (let index = 0; index < raw.length; index += 1) {
+    if (raw[index] !== 0) continue;
+    argv.push(decoder.decode(raw.subarray(start, index)));
+    start = index + 1;
+  }
+  process.stdout.write(JSON.stringify(argv));
+} catch (_) {
+  process.exit(1);
+}
+' "$proc_path"
+}
+
+fm_claude_process_is_daemon() {  # <process-pid>
+  local process_pid=$1 args=${2:-} argv_json
+  if argv_json=$(fm_claude_process_argv_json "$process_pid"); then
+    printf '%s' "$argv_json" | node -e '
+const fs = require("fs");
+try {
+  const argv = JSON.parse(fs.readFileSync(0, "utf8"));
+  if (!Array.isArray(argv) || argv.some(value => typeof value !== "string")) throw new Error();
+  if (argv.length < 3 || argv[1] !== "daemon" || argv[2] !== "run") throw new Error();
+} catch (_) {
+  process.exit(1);
+}
+'
+    return $?
+  fi
+  [ -n "$args" ] || args=$(ps -o args= -p "$process_pid" 2>/dev/null) || return 1
+  case " $args " in
+    *' daemon run '*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_claude_daemon_in_session_ancestry() {
+  local pids pid comm args
+  pids=$(fm_harness_ancestry_pids) || return 1
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || continue
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    fm_harness_process_matches "$comm" "$args" || continue
+    [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || continue
+    fm_claude_process_is_daemon "$pid" "$args" && return 0
+  done <<EOF
+$pids
+EOF
+  return 1
+}
+
+fm_harness_pid_zombie() {  # <pid>
+  local pid=$1 proc_root stat_line state
+  local -a stat_fields
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${stat_fields[0]:-}" = Z ]
+    return
+  fi
+  state=$(ps -o stat= -p "$pid" 2>/dev/null) || return 1
+  state=${state#"${state%%[![:space:]]*}"}
+  case "$state" in Z*) return 0 ;; esac
+  return 1
+}
+
+# True if $1 is a live, non-zombie process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
   kill -0 "$pid" 2>/dev/null || return 1
+  fm_harness_pid_zombie "$pid" && return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   fm_harness_process_matches "$comm" "$args"
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
-# of the current process: this script runs inside the session that owns the
-# home's fleet lock. Membership is the honest test of that question, because the
-# lock owner sits at an unknown depth in a contiguous Claude run - it is the
-# outermost pid when the hook fires inside the session's own nested worker chain,
-# and an inner pid when a harness-named daemon parents the session. A missing
-# lock, a malformed lock, a lock held by a harness outside this ancestry, or an
-# ancestry that cannot be resolved all fail closed.
-fm_session_lock_owned_by_self() {
+# of the current process.
+# Membership is the proof that this script runs inside the session that owns
+# the home's fleet lock, because the lock owner sits at an unknown depth in a
+# contiguous Claude run.
+# A missing lock, a malformed lock, a lock held by a harness outside this
+# ancestry, or an ancestry that cannot be resolved all fail closed.
+fm_session_lock_owned_by_self() {  # <state-dir> [root-unused]
   local state=$1 lock_pid pids pid
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in

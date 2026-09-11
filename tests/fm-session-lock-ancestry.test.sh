@@ -38,7 +38,7 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # liveness questions are decided by the process table alone.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  FM_PROC_ROOT="$fakebin/proc" PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return 0; }
     $expr
@@ -220,6 +220,72 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+write_claude_daemon_argv_ps() {  # <fakebin> <argv...>
+  local fakebin=$1
+  shift
+  mkdir -p "$fakebin/proc/900"
+  printf '%s\0' "$@" > "$fakebin/proc/900/cmdline"
+  {
+    printf '%s' "$1"
+    shift
+    printf ' %s' "$@"
+    printf '\n'
+  } > "$fakebin/args-900"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  700:comm=|701:comm=) printf '%s\n' claude ;;
+  700:args=|701:args=) printf '%s\n' claude ;;
+  700:ppid=|701:ppid=) printf '%s\n' 1 ;;
+  900:comm=) printf '%s\n' claude ;;
+  900:args=) cat "$script_dir/args-900" ;;
+  900:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  *:ppid=) printf '%s\n' 900 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+
+write_claude_daemon_spawned_by_ps() {  # <fakebin> <spawned-cwd> <spawned-pid> [label]
+  local fakebin=$1 spawned_cwd=$2 spawned_pid=$3 label=${4:-claude} json
+  json="{\"label\":\"$label\",\"cwd\":\"$spawned_cwd\",\"pid\":$spawned_pid}"
+  write_claude_daemon_argv_ps "$fakebin" \
+    /Users/u/.local/bin/claude daemon run --keep-alive --spawned-by "$json"
+}
+
+test_claude_daemon_spawned_by_metadata_does_not_claim_foreground_lock_owner() {
+  local dir root state fakebin
+  dir="$TMP_ROOT/daemon-spawned-by"
+  root="$dir/home"
+  state="$root/state"
+  mkdir -p "$state"
+  printf '700\n' > "$state/.lock"
+
+  fakebin=$(fm_fakebin "$dir")
+  write_claude_daemon_spawned_by_ps "$fakebin" "$root" 700
+  lib_eval "$fakebin" "fm_claude_daemon_in_session_ancestry" \
+    || fail "test fixture did not detect the Claude daemon in ancestry"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state'"; then
+    fail "spawned-by metadata claimed the home without an ancestry-owned session lock"
+  fi
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state' '$root'"; then
+    fail "spawned-by metadata claimed the home through the optional root argument"
+  fi
+  pass "session-lock: Claude daemon spawned-by metadata is not an ownership proof"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -232,6 +298,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
   cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
@@ -362,6 +429,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_claude_daemon_spawned_by_metadata_does_not_claim_foreground_lock_owner
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
