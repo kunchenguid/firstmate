@@ -91,3 +91,59 @@ fm_quota_json_valid() {
     )
   ' >/dev/null 2>&1
 }
+
+fm_quota_provider_for_harness() {
+  case "$1" in
+    omp)
+      case "${2:-}" in
+        openai-codex/*) printf 'codex\n' ;;
+        claude-bridge/*) printf 'claude\n' ;;
+        *) return 1 ;;
+      esac
+      ;;
+    claude) printf 'claude\n' ;;
+    codex) printf 'codex\n' ;;
+    opencode) printf 'codex\n' ;;
+    pi|pi-signed)
+      case "${2:-}" in
+        openai-codex/*) printf 'codex\n' ;;
+        *) printf 'pi\n' ;;
+      esac
+      ;;
+    grok) printf 'grok\n' ;;
+    kimi) printf 'kimi\n' ;;
+    cursor) printf 'cursor\n' ;;
+    muse) printf 'meta\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_quota_scope_model_for_harness() {
+  case "$1" in
+    omp) printf '%s\n' "${2#*/}" ;;
+    pi|pi-signed)
+      case "$2" in
+        openai-codex/*) printf '%s\n' "${2#*/}" ;;
+        *) printf '%s\n' "$2" ;;
+      esac
+      ;;
+    *) printf '%s\n' "$2" ;;
+  esac
+}
+
+fm_quota_snapshot_has_candidate_availability() {
+  local snapshot=$1 harness=$2 model=$3 provider scope_model
+  provider=$(fm_quota_provider_for_harness "$harness" "$model") || return 1
+  scope_model=$(fm_quota_scope_model_for_harness "$harness" "$model") || return 1
+  printf '%s\n' "$snapshot" | jq -e --arg provider "$provider" --arg model "$scope_model" '
+    ($model | sub("^model:"; "")) as $model_token |
+    [.providers[]? | select(.provider == $provider)] as $providers |
+    ($providers | length) == 1 and
+    (($providers[0].quotaSemantics.effectiveAvailability // []) |
+      any(.[]; .scope as $scope |
+        $scope == "all_models" or $scope == "all_products" or
+        ($model_token != "" and $model_token != "default" and
+         (($scope | startswith("model:")) or ($scope | startswith("product:"))) and
+         ($model_token == ($scope | sub("^(model|product):"; ""))))))
+  ' >/dev/null 2>&1
+}

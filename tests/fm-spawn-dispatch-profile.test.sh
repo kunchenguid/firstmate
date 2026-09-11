@@ -38,6 +38,11 @@ make_spawn_fakebin() {
 shift
 exec "$@"
 SH
+cat > "$fakebin/opencode" <<'SH'
+#!/usr/bin/env bash
+set -u
+exec /bin/sh "${!#}"
+SH
   cat > "$fakebin/cursor-agent" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --list-models ]; then
@@ -46,7 +51,19 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+account_id=${CODEX_HOME##*/}
+jq -n --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg account_id "$account_id" '
+  {schemaVersion: 5, generatedAt: $generated_at,
+   providers: [{provider: "codex", quotaSemantics: {status: "known", effectiveAvailability: [{
+       scope: "all_models", status: "known", effectivePercentRemaining: 50,
+       runway: {status: "through_reset"}}]}}],
+   accounts: [{provider: "codex", email: "hidden", organization: "none",
+               accountId: $account_id, identityStatus: "verified"}]}'
+SH
+  chmod +x "$fakebin/timeout" "$fakebin/opencode" "$fakebin/cursor-agent" "$fakebin/quota-axi"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -118,22 +135,26 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
-test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
-  id=profile-off-z1
-  rec=$(make_spawn_case profile-off claude "$id")
+test_omitted_structured_model_is_refused_before_launch() {
+  local rec id explicit_id out status
+  id=profile-default-astra-z1
+  explicit_id=profile-explicit-codex-z1a
+  rec=$(make_spawn_case profile-default-astra codex "$id" "$explicit_id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
   status=$?
-  expect_code 0 "$status" "claude spawn without profile flags should succeed"
-  assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  expect_code 1 "$status" "an omitted structured Codex model must refuse before it can use an Astra default"
+  assert_contains "$out" "must identify an exact model" "omitted structured Codex model did not require a concrete identity"
+  assert_absent "$HOME_DIR/state/$id.meta" "omitted structured Codex model wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "omitted structured Codex model typed a launch command"
 
-  launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
-  [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and types the claude launch instructions"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$explicit_id" "$PROJ_DIR" \
+    --harness codex --model gpt-5 --effort medium)
+  status=$?
+  expect_code 0 "$status" "an explicit concrete non-Astra Codex model should remain launchable: $out"
+  assert_meta_profile "$HOME_DIR/state/$explicit_id.meta" codex gpt-5 medium
+  pass "structured launches require a concrete effective model"
 }
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
@@ -143,7 +164,7 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   read_case_record "$rec"
 
   out=$(CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet)
   status=$?
   expect_code 0 "$status" "claude spawn under Cursor markers should succeed"
   launch=$(cat "$LAUNCH_LOG")
@@ -169,7 +190,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --model openai-codex/gpt-5.6-sol 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with relative home overrides should succeed"
@@ -198,7 +219,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$relative_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$relative_id" "$PROJ_DIR" --mode no-mistakes --yolo off --model openai-codex/gpt-5.6-sol 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with relative FM_HOME defaults should succeed"
@@ -218,7 +239,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off --model openai-codex/gpt-5.6-sol 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with absolute symlink-spelled FM_HOME defaults should succeed"
@@ -246,7 +267,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --model openai-codex/gpt-5.6-sol 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with absolute symlink-spelled overrides should succeed"
@@ -366,7 +387,7 @@ test_active_dispatch_profile_allows_positional_harness() {
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
-test_active_dispatch_profile_allows_raw_launch_command() {
+test_active_dispatch_profile_allows_direct_raw_launch_command() {
   local rec id out status launch
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
@@ -374,14 +395,14 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+    "$id" "$PROJ_DIR" "opencode --model gpt-5")
   status=$?
-  expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
-  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  expect_code 0 "$status" "a direct supported raw launch command should satisfy active dispatch-profile requirement"
+  assert_contains "$out" "spawned $id harness=opencode" "spawn did not report raw command harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode gpt-5 default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  assert_contains "$launch" "opencode --model gpt-5" "raw launch command lost its explicit model"
+  pass "active crew-dispatch profile allows a direct supported raw command"
 }
 
 test_claude_threads_model_and_effort() {
@@ -432,6 +453,748 @@ test_codex_omits_invalid_max_effort() {
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
+}
+
+# A logged-in Codex home, from fm-spawn's point of view: a directory holding an
+# auth.json whose contents nothing reads.
+make_codex_home() {
+  local path=$1
+  mkdir -p "$path"
+  : > "$path/auth.json"
+  printf '%s\n' "$path"
+}
+
+enable_astra_receipt_profile() {
+  local home=$1
+  printf '%s\n' '{"default":{"harness":"codex","model":"gpt-6-astra","effort":"high","requiresSelectionReceipt":true}}' \
+    > "$home/config/crew-dispatch.json"
+}
+
+make_selection_receipt() {  # <case-dir> <name> <task> <model> [created-at] [snapshot-generated-at] [codex-home]
+  local case_dir=$1 name=$2 task=$3 model=$4 created_at=${5:-} snapshot_at=${6:-} codex_home=${7:-} snapshot receipt digest account_hash account_id
+  snapshot="$case_dir/$name.quota-axi.json"
+  receipt="$case_dir/$name.receipt.json"
+  [ -n "$created_at" ] || created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  [ -n "$snapshot_at" ] || snapshot_at=$created_at
+  if [ -n "$codex_home" ]; then
+    account_id=${codex_home##*/}
+    jq -n --arg generated_at "$snapshot_at" --arg account_id "$account_id" '
+      {schemaVersion: 5, generatedAt: $generated_at,
+       providers: [{provider: "codex", quotaSemantics: {status: "known", effectiveAvailability: [{
+           scope: "all_models", status: "known", effectivePercentRemaining: 50,
+           runway: {status: "through_reset"}}]}}],
+       accounts: [{provider: "codex", email: "hidden", organization: "none",
+                   accountId: $account_id, identityStatus: "verified"}]}' > "$snapshot"
+    account_hash=$(jq -cS '.accounts[] | select(.provider == "codex")' "$snapshot" | shasum -a 256 | awk '{print $1}')
+  else
+    printf 'bin: quota-axi\ngeneratedAt: "%s"\nquota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:\n  codex,all_models,50,0,through_reset,established,weekly,"%s"\nexhaustion[0]:\nattention[0]:\n' "$snapshot_at" "$snapshot_at" > "$snapshot"
+    account_hash=
+  fi
+  digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
+  jq -n --arg created_at "$created_at" --arg task "$task" --arg model "$model" --arg codex_home "$codex_home" \
+    --arg snapshot "$snapshot" --arg digest "$digest" --arg account_hash "$account_hash" '
+      ($codex_home | if . == "" then null else . end) as $home
+      | ($account_hash | if . == "" then null else . end) as $account_hash
+      | {version: 4, createdAt: $created_at, task: $task, harness: "codex",
+       model: $model, effort: "high", effectiveWorkerModel: $model,
+       taskFit: "bounded dispatch verification",
+       candidates: [{harness: "codex", model: $model, effort: "high",
+                     home: $home, disposition: "selected", rationale: "current account evidence"}],
+       catalogEvidence: ["synthetic authoritative catalog evidence"],
+       codexHome: $home,
+       quotaEvidence: {source: "quota-axi", model: $model, codexHome: $home, snapshotSha256: $digest, accountSha256: $account_hash},
+       quotaSnapshot: {path: $snapshot, sha256: $digest}}' > "$receipt"
+  printf '%s\n' "$receipt"
+}
+
+test_codex_home_exports_selected_account_into_the_launch() {
+  local rec id out status launch codex_home
+  id=profile-codex-home-z3b
+  rec=$(make_spawn_case profile-codex-home codex "$id")
+  read_case_record "$rec"
+  codex_home=$(make_codex_home "$CASE_DIR/codex-personal")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort high --codex-home "$codex_home")
+  status=$?
+  expect_code 0 "$status" "codex spawn naming a logged-in home should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_grep "codex_home=$codex_home" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the Codex home this task was dispatched against"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_home' env -u CURSOR_AGENT" \
+    "codex launch did not export the selected Codex home into the worker environment"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"'" \
+    "exporting a Codex home changed the rest of the codex launch"
+  pass "a codex profile's Codex home is exported into that worker's launch and recorded"
+}
+
+test_codex_without_home_launches_unchanged() {
+  local rec id out status launch
+  id=profile-codex-nohome-z3c
+  rec=$(make_spawn_case profile-codex-nohome codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5)
+  status=$?
+  expect_code 0 "$status" "codex spawn without a named home should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME=" \
+    "a profile with no home must not pin the worker to any Codex home"
+  assert_not_contains "$(cat "$HOME_DIR/state/$id.meta")" "codex_home=" \
+    "a profile with no home must not record one"
+  pass "a codex profile without a home launches exactly as before"
+}
+
+test_codex_home_refuses_unusable_paths_before_launch() {
+  local rec id out status label path expect
+  id=profile-codex-home-bad-z3d
+  rec=$(make_spawn_case profile-codex-home-bad codex "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/codex-never-logged-in"
+
+  while IFS='^' read -r label path expect; do
+    [ -n "$label" ] || continue
+    : > "$LAUNCH_LOG"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --codex-home "$CASE_DIR/$path")
+    status=$?
+    expect_code 1 "$status" "$label should refuse the spawn"
+    assert_contains "$out" "$expect" "$label refusal did not name the actionable problem"
+    assert_absent "$HOME_DIR/state/$id.meta" "$label refusal wrote task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$label refusal typed a launch command"
+  done <<'ROWS'
+missing codex home directory^codex-missing^--codex-home directory not found
+codex home with no login^codex-never-logged-in^has no auth.json
+ROWS
+
+  : > "$LAUNCH_LOG"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --codex-home relative/.codex)
+  status=$?
+  expect_code 1 "$status" "a relative Codex home should refuse the spawn"
+  assert_contains "$out" "--codex-home must be an absolute path" \
+    "relative Codex home refusal did not name the actionable problem"
+  assert_absent "$HOME_DIR/state/$id.meta" "relative Codex home refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "relative Codex home refusal typed a launch command"
+  pass "an unusable Codex home refuses the spawn instead of falling back to the default account"
+}
+
+test_codex_home_refuses_control_bytes_before_launch() {
+  local rec id out status codex_home
+  id=profile-codex-home-control-z3e
+  rec=$(make_spawn_case profile-codex-home-control codex "$id")
+  read_case_record "$rec"
+  codex_home="$CASE_DIR/"$'codex\nwindow=other-target'
+  make_codex_home "$codex_home" >/dev/null
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --codex-home "$codex_home")
+  status=$?
+  expect_code 1 "$status" "a Codex home containing a control byte should refuse the spawn"
+  assert_contains "$out" "--codex-home contains an invalid control byte" \
+    "control-byte refusal did not name the actionable problem"
+  assert_absent "$HOME_DIR/state/$id.meta" "control-byte refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "control-byte refusal typed a launch command"
+  pass "a control byte in a Codex home refuses before launch or metadata publication"
+}
+
+test_codex_home_is_refused_for_other_harnesses() {
+  local rec id out status codex_home
+  id=profile-claude-home-z3e
+  rec=$(make_spawn_case profile-claude-home claude "$id")
+  read_case_record "$rec"
+  codex_home=$(make_codex_home "$CASE_DIR/codex-personal")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness claude --codex-home "$codex_home")
+  status=$?
+  expect_code 1 "$status" "a non-codex harness carrying a Codex home should refuse the spawn"
+  assert_contains "$out" "--codex-home applies only to the codex harness" \
+    "non-codex refusal did not explain which axis was misapplied"
+  assert_absent "$HOME_DIR/state/$id.meta" "non-codex Codex home refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "non-codex Codex home refusal typed a launch command"
+  pass "only the codex harness accepts a Codex home"
+}
+
+test_astra_without_a_profile_requires_primary_evidence() {
+  local rec id out status receipt
+  id=profile-astra-unconfigured-z3f
+  rec=$(make_spawn_case profile-astra-unconfigured codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high)
+  status=$?
+  expect_code 1 "$status" "an unconfigured Astra spawn without a receipt should refuse"
+  assert_contains "$out" "requires a current --selection-receipt" "unconfigured Astra refusal did not require primary evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "unconfigured Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unconfigured Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "codex --model gpt-6-a''stra")
+  status=$?
+  expect_code 1 "$status" "an obfuscated raw Astra spawn without a profile should refuse"
+  assert_contains "$out" "must use shell-simple syntax" "unconfigured obfuscated Astra refusal did not identify the uninspectable command"
+  assert_absent "$HOME_DIR/state/$id.meta" "unconfigured obfuscated Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unconfigured obfuscated Astra refusal typed a launch command"
+
+  # shellcheck disable=SC2016 # Command substitution is deliberate raw-launch input.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    '$(printf codex) --model gpt-6-astra')
+  status=$?
+  expect_code 1 "$status" "a command-substituted raw Astra spawn without a profile should refuse"
+  assert_contains "$out" "must begin with a direct, supported harness executable" "command-substituted raw Astra refusal did not identify the direct-harness requirement"
+  assert_absent "$HOME_DIR/state/$id.meta" "command-substituted Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "command-substituted Astra refusal typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" unconfigured "$id" gpt-6-astra)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 0 "$status" "a current receipt should allow an unconfigured Astra spawn: $out"
+  pass "Astra always requires primary selection evidence"
+}
+
+test_astra_qualified_and_raw_models_cannot_bypass_evidence() {
+  local rec id fuzzy_id out status
+  id=profile-astra-qualified-z3fg
+  fuzzy_id=profile-astra-omp-fuzzy-z3fgh
+  rec=$(make_spawn_case profile-astra-qualified omp "$id" "$fuzzy_id")
+  read_case_record "$rec"
+  enable_astra_receipt_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness omp --model openai-codex/gpt-6-astra --effort high)
+  status=$?
+  expect_code 1 "$status" "a qualified Astra model without a receipt should refuse"
+  assert_contains "$out" "requires a current --selection-receipt" "qualified Astra bypassed the receipt gate"
+  assert_absent "$HOME_DIR/state/$id.meta" "qualified Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "qualified Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$fuzzy_id" "$PROJ_DIR" \
+    --harness omp --model astra --effort high)
+  status=$?
+  expect_code 1 "$status" "a structured omp fuzzy model selector should refuse before launch"
+  assert_contains "$out" "must identify an exact model" "structured omp fuzzy selector refusal did not require a fully qualified model"
+  assert_absent "$HOME_DIR/state/$fuzzy_id.meta" "structured omp fuzzy selector refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "structured omp fuzzy selector refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "codex --model gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "a raw Astra command should refuse before launch"
+  assert_contains "$out" "selecting Astra are not inspectable" "raw Astra refusal did not identify the uninspectable command"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "codex --model gpt-6-a''stra")
+  status=$?
+  expect_code 1 "$status" "a shell-obfuscated raw Astra command should refuse before launch"
+  assert_contains "$out" "must use shell-simple syntax" "obfuscated raw Astra refusal did not identify the uninspectable command"
+  assert_absent "$HOME_DIR/state/$id.meta" "obfuscated raw Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "obfuscated raw Astra refusal typed a launch command"
+  pass "qualified and raw Astra launch paths cannot bypass primary evidence"
+}
+
+test_raw_model_capable_harnesses_require_inspectable_non_astra_launches() {
+  local rec opencode_astra_id omp_astra_id omp_fuzzy_id pi_astra_id pi_signed_astra_id newline_id option_terminator_id opencode_safe_id pi_safe_id absolute_codex_safe_id unclassified_id out status
+  opencode_astra_id=profile-raw-opencode-astra-z3fga
+  omp_astra_id=profile-raw-omp-astra-z3fgb
+  omp_fuzzy_id=profile-raw-omp-fuzzy-z3fgg
+  pi_astra_id=profile-raw-pi-astra-z3fgc
+  pi_signed_astra_id=profile-raw-pi-signed-astra-z3fgd
+  newline_id=profile-raw-newline-z3fgh
+  option_terminator_id=profile-raw-option-terminator-z3fgc
+  opencode_safe_id=profile-raw-opencode-safe-z3fgd
+  pi_safe_id=profile-raw-pi-safe-z3fge
+  absolute_codex_safe_id=profile-raw-absolute-codex-safe-z3fge
+  unclassified_id=profile-raw-unclassified-z3fgf
+  rec=$(make_spawn_case profile-raw-model-capable codex "$opencode_astra_id" "$omp_astra_id" "$omp_fuzzy_id" "$pi_astra_id" "$pi_signed_astra_id" "$newline_id" "$option_terminator_id" "$opencode_safe_id" "$pi_safe_id" "$absolute_codex_safe_id" "$unclassified_id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$opencode_astra_id" "$PROJ_DIR" \
+    "opencode --model gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "a raw OpenCode Astra command should refuse before launch"
+  assert_contains "$out" "selecting Astra are not inspectable" "raw OpenCode Astra refusal did not identify selection evidence"
+  assert_absent "$HOME_DIR/state/$opencode_astra_id.meta" "raw OpenCode Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw OpenCode Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$omp_astra_id" "$PROJ_DIR" \
+    "omp --model openai-codex/gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "a raw omp Astra command should refuse before launch"
+  assert_contains "$out" "selecting Astra are not inspectable" "raw omp Astra refusal did not identify selection evidence"
+  assert_absent "$HOME_DIR/state/$omp_astra_id.meta" "raw omp Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw omp Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$omp_fuzzy_id" "$PROJ_DIR" \
+    "omp --model astra")
+  status=$?
+  expect_code 1 "$status" "a raw omp fuzzy model selector should refuse before launch"
+  assert_contains "$out" "must identify an exact model" "raw omp fuzzy selector refusal did not require a fully qualified model"
+  assert_absent "$HOME_DIR/state/$omp_fuzzy_id.meta" "raw omp fuzzy selector refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw omp fuzzy selector refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$pi_astra_id" "$PROJ_DIR" \
+    "pi --model openai-codex/gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "a raw Pi Astra command should refuse before launch"
+  assert_contains "$out" "selecting Astra are not inspectable" "raw Pi Astra refusal did not identify selection evidence"
+  assert_absent "$HOME_DIR/state/$pi_astra_id.meta" "raw Pi Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw Pi Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$pi_signed_astra_id" "$PROJ_DIR" \
+    "pi-signed --model openai-codex/gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "a raw Pi-signed Astra command should refuse before launch"
+  assert_contains "$out" "selecting Astra are not inspectable" "raw Pi-signed Astra refusal did not identify selection evidence"
+  assert_absent "$HOME_DIR/state/$pi_signed_astra_id.meta" "raw Pi-signed Astra refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw Pi-signed Astra refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$newline_id" "$PROJ_DIR" \
+    $'codex\ncodex --model gpt-5')
+  status=$?
+  expect_code 1 "$status" "a newline-separated raw command must refuse before its first command can use an Astra default"
+  assert_contains "$out" "must use shell-simple syntax" "raw newline refusal did not identify the uninspectable command"
+  assert_absent "$HOME_DIR/state/$newline_id.meta" "raw newline command wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw newline command typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$option_terminator_id" "$PROJ_DIR" \
+    "codex -- --model gpt-5")
+  status=$?
+  expect_code 1 "$status" "a raw option terminator must refuse before launch"
+  assert_contains "$out" "exactly one explicit --model" "raw option terminator refusal did not identify the canonical model requirement"
+  assert_absent "$HOME_DIR/state/$option_terminator_id.meta" "raw option terminator refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw option terminator refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$opencode_safe_id" "$PROJ_DIR" \
+    "opencode --model gpt-5")
+  status=$?
+  expect_code 0 "$status" "a canonical raw OpenCode non-Astra command should remain launchable: $out"
+  assert_meta_profile "$HOME_DIR/state/$opencode_safe_id.meta" opencode gpt-5 default
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$pi_safe_id" "$PROJ_DIR" \
+    "pi --model openai-codex/gpt-5.6-terra")
+  status=$?
+  expect_code 0 "$status" "a canonical raw Pi non-Astra command should remain launchable: $out"
+  assert_meta_profile "$HOME_DIR/state/$pi_safe_id.meta" pi openai-codex/gpt-5.6-terra default
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$absolute_codex_safe_id" "$PROJ_DIR" \
+    "$FAKEBIN_DIR/codex --model gpt-5")
+  status=$?
+  expect_code 0 "$status" "a direct raw Codex executable path with an explicit non-Astra model should remain launchable: $out"
+  assert_meta_profile "$HOME_DIR/state/$absolute_codex_safe_id.meta" codex gpt-5 default
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$unclassified_id" "$PROJ_DIR" \
+    "unclassified-agent --model gpt-6-astra")
+  status=$?
+  expect_code 1 "$status" "an unclassified raw harness should refuse before launch"
+  assert_contains "$out" "must begin with a direct, supported harness executable" "unclassified raw harness refusal did not identify the structured-launch requirement"
+  assert_absent "$HOME_DIR/state/$unclassified_id.meta" "unclassified raw harness refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unclassified raw harness refusal typed a launch command"
+  pass "raw model-capable launches require exact non-Astra model identities"
+}
+
+test_raw_launch_classifier_requires_direct_supported_harness() {
+  local rec id out status index label command
+  local -a labels commands
+  id=profile-raw-launcher-classifier-z3fgd
+  labels=(time env command exec nice nohup custom-agent)
+  commands=(
+    "time opencode --model gpt-6-astra"
+    "env opencode --model gpt-6-astra"
+    "command omp --model openai-codex/gpt-6-astra"
+    "exec codex --model gpt-6-astra"
+    "nice opencode --model gpt-6-astra"
+    "nohup omp --model openai-codex/gpt-6-astra"
+    "custom-agent --model gpt-6-astra"
+  )
+  rec=$(make_spawn_case profile-raw-launcher-classifier codex "$id")
+  read_case_record "$rec"
+
+  for index in "${!labels[@]}"; do
+    label=${labels[$index]}
+    command=${commands[$index]}
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$command")
+    status=$?
+    expect_code 1 "$status" "a $label-prefixed raw command should refuse before launch"
+    assert_contains "$out" "must begin with a direct, supported harness executable" "$label prefix refusal did not identify the unsupported launcher"
+    assert_absent "$HOME_DIR/state/$id.meta" "$label prefix refusal wrote task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$label prefix refusal typed a launch command"
+  done
+  pass "raw launch classification requires a direct supported harness"
+}
+
+test_raw_codex_home_override_is_refused() {
+  local rec id out status codex_home launch
+  id=profile-raw-codex-home-z3fh
+  rec=$(make_spawn_case profile-raw-codex-home codex "$id")
+  read_case_record "$rec"
+  codex_home=$(make_codex_home "$CASE_DIR/codex-personal")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "CODEX_HOME=/wrong-account codex --model gpt-5" --codex-home "$codex_home")
+  status=$?
+  expect_code 1 "$status" "a raw Codex home override should refuse"
+  assert_contains "$out" "cannot assign CODEX_HOME" "raw home override refusal did not identify the conflicting account selection"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw home override refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw home override refusal typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "codex --model gpt-5; env CODEX_HO''ME=/wrong-account codex --model gpt-5" --codex-home "$codex_home")
+  status=$?
+  expect_code 1 "$status" "a compound raw Codex command should refuse for a selected home"
+  assert_contains "$out" "cannot prove their effective model" "compound raw Codex refusal did not identify the non-canonical command"
+  assert_absent "$HOME_DIR/state/$id.meta" "compound raw Codex command wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "compound raw Codex command typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "codex --model gpt-5" --codex-home "$codex_home")
+  status=$?
+  expect_code 0 "$status" "a canonical non-Astra raw Codex command should retain the selected home"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_home'" "canonical raw Codex launch did not retain the selected home"
+  pass "a named Codex home cannot be overridden by a raw command"
+}
+
+test_raw_secondmate_codex_home_requires_a_canonical_launch() {
+  local rec rejected_id permitted_id out status codex_home rejected_home permitted_home launch
+  rejected_id=profile-raw-secondmate-home-z3fi
+  permitted_id=profile-raw-secondmate-home-z3fj
+  rec=$(make_spawn_case profile-raw-secondmate-home codex "$rejected_id" "$permitted_id")
+  read_case_record "$rec"
+  codex_home=$(make_codex_home "$CASE_DIR/codex-personal")
+  rejected_home="$CASE_DIR/rejected-secondmate-home"
+  permitted_home="$CASE_DIR/permitted-secondmate-home"
+  make_seeded_secondmate_home "$rejected_home" "$rejected_id"
+  make_seeded_secondmate_home "$permitted_home" "$permitted_id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$rejected_id" "$rejected_home" \
+    --secondmate --harness "codex --model gpt-5; CODEX_HO''ME=$CASE_DIR/other codex --model gpt-5" --codex-home "$codex_home")
+  status=$?
+  expect_code 1 "$status" "a selected-home raw secondmate command must refuse a compound Codex launch"
+  assert_contains "$out" "cannot prove their effective model" "compound raw secondmate refusal did not identify the canonical-launch boundary"
+  assert_absent "$HOME_DIR/state/$rejected_id.meta" "compound raw secondmate command wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "compound raw secondmate command typed a launch command"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$permitted_id" "$permitted_home" \
+    --secondmate --harness "codex --model gpt-5" --codex-home "$codex_home")
+  status=$?
+  expect_code 0 "$status" "a canonical raw secondmate command should retain its selected Codex home: $out"
+  assert_meta_profile "$HOME_DIR/state/$permitted_id.meta" codex gpt-5 default
+  assert_grep "codex_home=$codex_home" "$HOME_DIR/state/$permitted_id.meta" "canonical raw secondmate metadata lost the selected Codex home"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_home'" "canonical raw secondmate launch did not retain the selected Codex home"
+  assert_contains "$launch" "codex --model gpt-5" "canonical raw secondmate launch lost its explicit model"
+  pass "selected-home raw secondmates require one canonical Codex launch"
+}
+
+test_astra_receipt_binds_the_selected_codex_home() {
+  local rec id out status receipt codex_home launch snapshot digest account_hash
+  id=profile-astra-home-z3g
+  rec=$(make_spawn_case profile-astra-home codex "$id")
+  read_case_record "$rec"
+  enable_astra_receipt_profile "$HOME_DIR"
+  codex_home=$(make_codex_home "$CASE_DIR/codex-personal")
+
+  receipt=$(make_selection_receipt "$CASE_DIR" wrong-home "$id" gpt-6-astra)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --codex-home "$codex_home" --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a receipt measured for the ambient Codex home should not permit a named-home Astra spawn"
+  assert_contains "$out" "not a valid version 4 primary selection receipt" "wrong-home receipt did not name the binding failure"
+  assert_absent "$HOME_DIR/state/$id.meta" "wrong-home receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "wrong-home receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" wrong-account "$id" gpt-6-astra '' '' "$codex_home")
+  snapshot=$(jq -r '.quotaSnapshot.path' "$receipt")
+  jq '.accounts[0].accountId = "different-account"' "$snapshot" > "$snapshot.tmp"
+  mv "$snapshot.tmp" "$snapshot"
+  digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
+  account_hash=$(jq -cS '.accounts[] | select(.provider == "codex")' "$snapshot" | shasum -a 256 | awk '{print $1}')
+  jq --arg digest "$digest" --arg account_hash "$account_hash" \
+    '.quotaEvidence.snapshotSha256 = $digest | .quotaEvidence.accountSha256 = $account_hash | .quotaSnapshot.sha256 = $digest' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --codex-home "$codex_home" --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a receipt whose source account differs from the selected Codex home should refuse"
+  assert_contains "$out" "does not match the selected Codex home" "wrong-account receipt did not identify the selected home mismatch"
+  assert_absent "$HOME_DIR/state/$id.meta" "wrong-account receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "wrong-account receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" matching-home "$id" gpt-6-astra '' '' "$codex_home")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --codex-home "$codex_home" --selection-receipt "$receipt")
+  status=$?
+  expect_code 0 "$status" "a receipt bound to the selected Codex home should permit the Astra spawn: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$codex_home'" "matching-home receipt did not reach the named Codex account launch"
+  pass "Astra receipts bind quota evidence to the selected Codex home"
+}
+
+test_astra_receipt_requires_selected_provider_availability() {
+  local rec id out status receipt snapshot digest generated_at
+  id=profile-astra-provider-z3i
+  rec=$(make_spawn_case profile-astra-provider codex "$id")
+  read_case_record "$rec"
+  enable_astra_receipt_profile "$HOME_DIR"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" claude-only "$id" gpt-6-astra)
+  snapshot=$(jq -r '.quotaSnapshot.path' "$receipt")
+  generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -n --arg generated_at "$generated_at" '
+    {schemaVersion: 5, generatedAt: $generated_at,
+     providers: [{provider: "claude", quotaSemantics: {status: "known", effectiveAvailability: [{
+       scope: "all_models", status: "known", effectivePercentRemaining: 50,
+       runway: {status: "through_reset"}}]}}]}' > "$snapshot"
+  digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
+  jq --arg digest "$digest" \
+    '.quotaEvidence.snapshotSha256 = $digest | .quotaSnapshot.sha256 = $digest' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a Claude-only snapshot should not permit a Codex Astra spawn"
+  assert_contains "$out" "does not contain current quota-axi availability" "provider mismatch did not identify unavailable Codex quota evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "provider-mismatched receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "provider-mismatched receipt typed a launch command"
+  pass "Astra receipts require quota evidence for the selected provider"
+}
+
+test_pi_openai_codex_receipt_uses_codex_quota() {
+  local rec id out status receipt snapshot digest generated_at
+  id=profile-pi-codex-provider-z3j
+  rec=$(make_spawn_case profile-pi-codex-provider pi "$id")
+  read_case_record "$rec"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" pi-only "$id" openai-codex/gpt-6-astra)
+  jq '.harness = "pi" | .candidates[0].harness = "pi"' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  snapshot=$(jq -r '.quotaSnapshot.path' "$receipt")
+  generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -n --arg generated_at "$generated_at" '
+    {schemaVersion: 5, generatedAt: $generated_at,
+     providers: [{provider: "pi", quotaSemantics: {status: "known", effectiveAvailability: [{
+       scope: "all_models", status: "known", effectivePercentRemaining: 50,
+       runway: {status: "through_reset"}}]}}]}' > "$snapshot"
+  digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
+  jq --arg digest "$digest" \
+    '.quotaEvidence.snapshotSha256 = $digest | .quotaSnapshot.sha256 = $digest' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness pi --model openai-codex/gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a Pi-only snapshot should not permit a Pi Codex Astra spawn"
+  assert_contains "$out" "does not contain current quota-axi availability" "Pi-only quota evidence did not reject the Codex model"
+  assert_absent "$HOME_DIR/state/$id.meta" "Pi-only receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "Pi-only receipt typed a launch command"
+
+  jq -n --arg generated_at "$generated_at" '
+    {schemaVersion: 5, generatedAt: $generated_at,
+     providers: [{provider: "codex", quotaSemantics: {status: "known", effectiveAvailability: [{
+       scope: "all_models", status: "known", effectivePercentRemaining: 50,
+       runway: {status: "through_reset"}}]}}]}' > "$snapshot"
+  digest=$(shasum -a 256 "$snapshot" | awk '{print $1}')
+  jq --arg digest "$digest" \
+    '.quotaEvidence.snapshotSha256 = $digest | .quotaSnapshot.sha256 = $digest' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness pi --model openai-codex/gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 0 "$status" "Codex quota evidence should permit a Pi Codex Astra spawn: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-6-astra high
+  pass "Pi openai-codex Astra receipts require Codex quota evidence"
+}
+
+test_astra_dispatch_requires_a_current_primary_selection_receipt() {
+  local rec id out status receipt launch digest snapshot account_hash
+  id=profile-astra-receipt-z3f
+  rec=$(make_spawn_case profile-astra-receipt codex "$id")
+  read_case_record "$rec"
+  enable_astra_receipt_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high)
+  status=$?
+  expect_code 1 "$status" "an Astra profile without a receipt should refuse"
+  assert_contains "$out" "requires a current --selection-receipt" "missing receipt refusal did not identify the configured gate"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing receipt typed a launch command"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort medium)
+  status=$?
+  expect_code 1 "$status" "changing effort must not bypass a model's receipt requirement"
+  assert_contains "$out" "requires a current --selection-receipt" "effort change bypassed the configured receipt gate"
+  assert_absent "$HOME_DIR/state/$id.meta" "effort bypass attempt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "effort bypass attempt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" stale "$id" gpt-6-astra 2000-01-01T00:00:00Z)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a stale Astra receipt should refuse"
+  assert_contains "$out" "stale or future-dated" "stale receipt refusal did not name freshness"
+  assert_absent "$HOME_DIR/state/$id.meta" "stale receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "stale receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" stale-snapshot "$id" gpt-6-astra "$(date -u +%Y-%m-%dT%H:%M:%SZ)" 2000-01-01T00:00:00Z)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a fresh receipt over an old quota snapshot should refuse"
+  assert_contains "$out" "quota snapshot is stale or future-dated" "stale snapshot refusal did not name source freshness"
+  assert_absent "$HOME_DIR/state/$id.meta" "stale snapshot wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "stale snapshot typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" wrong-task another-task gpt-6-astra)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a receipt for another task should refuse"
+  assert_contains "$out" "not a valid version 4 primary selection receipt" "wrong-task refusal did not name receipt identity"
+  assert_absent "$HOME_DIR/state/$id.meta" "wrong-task receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "wrong-task receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" wrong-model "$id" gpt-5.6-terra)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a receipt for another model should refuse"
+  assert_contains "$out" "not a valid version 4 primary selection receipt" "wrong-model refusal did not name receipt identity"
+  assert_absent "$HOME_DIR/state/$id.meta" "wrong-model receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "wrong-model receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" missing-effective-model "$id" gpt-6-astra)
+  jq 'del(.effectiveWorkerModel)' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a receipt missing effective worker model should refuse"
+  assert_contains "$out" "not a valid version 4 primary selection receipt" "missing effective model refusal did not name receipt evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing effective model receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing effective model receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" mismatched-effective-model "$id" gpt-6-astra)
+  jq '.effectiveWorkerModel = "gpt-5.6-terra"' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a mismatched effective worker model should refuse"
+  assert_contains "$out" "not a valid version 4 primary selection receipt" "effective model mismatch did not name receipt evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "mismatched effective model receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "mismatched effective model receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" non-quota-axi-evidence "$id" gpt-6-astra)
+  jq '.quotaEvidence.source = "unverified"' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "quota evidence from another source should refuse"
+  assert_contains "$out" "not a valid version 4 primary selection receipt" "quota evidence source refusal did not name receipt evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "non-quota-axi evidence wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "non-quota-axi evidence typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" no-selected-match "$id" gpt-6-astra)
+  jq '.candidates[0].disposition = "not-selected"' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a receipt without a selected matching candidate should refuse"
+  assert_contains "$out" "not a valid version 4 primary selection receipt" "candidate accounting refusal did not name receipt identity"
+  assert_absent "$HOME_DIR/state/$id.meta" "candidate accounting refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "candidate accounting refusal typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" multiple-selected "$id" gpt-6-astra)
+  jq '.candidates += [{
+    harness: "codex",
+    model: "gpt-5.6-terra",
+    effort: "high",
+    disposition: "selected",
+    rationale: "A different candidate cannot also be selected."
+  }]' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a receipt with two selected candidates should refuse"
+  assert_contains "$out" "not a valid version 4 primary selection receipt" "multiple-selection refusal did not name receipt identity"
+  assert_absent "$HOME_DIR/state/$id.meta" "multiple-selection receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "multiple-selection receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" tampered "$id" gpt-6-astra)
+  printf 'generatedAt: "%s"\nquota: [tampered]\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$CASE_DIR/tampered.quota-axi.json"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a receipt with a tampered snapshot should refuse"
+  assert_contains "$out" "snapshot digest does not match" "tampered snapshot refusal did not name digest evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "tampered receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "tampered receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" malformed-snapshot "$id" gpt-6-astra)
+  printf 'generatedAt: "%s"\nquota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:\n  codex,all_models,50,0,through_reset,established,weekly,"%s"\nexhaustion[0]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:\nattention[0]:\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$CASE_DIR/malformed-snapshot.quota-axi.json"
+  digest=$(shasum -a 256 "$CASE_DIR/malformed-snapshot.quota-axi.json" | awk '{print $1}')
+  jq --arg digest "$digest" '.quotaEvidence.snapshotSha256 = $digest | .quotaSnapshot.sha256 = $digest' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a timestamp-only quota snapshot should not be accepted as quota-axi evidence"
+  assert_contains "$out" "not valid quota-axi TOON or JSON evidence" "malformed snapshot refusal did not name quota-axi schema evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "malformed snapshot receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "malformed snapshot receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" wrong-schema-snapshot "$id" gpt-6-astra)
+  jq -n --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{
+    schemaVersion: 4,
+    generatedAt: $generated_at,
+    providers: [{
+      provider: "codex",
+      state: {status: "fresh"},
+      windows: [],
+      credits: {},
+      quotaSemantics: {status: "known", effectiveAvailability: []}
+    }]
+  }' > "$CASE_DIR/wrong-schema-snapshot.quota-axi.json"
+  digest=$(shasum -a 256 "$CASE_DIR/wrong-schema-snapshot.quota-axi.json" | awk '{print $1}')
+  jq --arg path "$CASE_DIR/wrong-schema-snapshot.quota-axi.json" --arg digest "$digest" \
+    '.quotaEvidence.snapshotSha256 = $digest | .quotaSnapshot.path = $path | .quotaSnapshot.sha256 = $digest' "$receipt" > "$receipt.tmp"
+  mv "$receipt.tmp" "$receipt"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 1 "$status" "a non-schema-5 JSON snapshot should refuse"
+  assert_contains "$out" "not valid quota-axi TOON or JSON evidence" "wrong-schema snapshot refusal did not name quota-axi schema evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "wrong-schema snapshot receipt wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "wrong-schema snapshot receipt typed a launch command"
+
+  receipt=$(make_selection_receipt "$CASE_DIR" valid "$id" gpt-6-astra)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model gpt-6-astra --effort high --selection-receipt "$receipt")
+  status=$?
+  expect_code 0 "$status" "a current matching receipt should allow the Astra dispatch: $out"
+  assert_grep "selection_receipt=$receipt" "$HOME_DIR/state/$id.meta" "valid receipt path was not recorded"
+  assert_grep "selection_receipt_sha256=$(shasum -a 256 "$receipt" | awk '{print $1}')" "$HOME_DIR/state/$id.meta" \
+    "receipt byte hash was not recorded separately from the quota snapshot hash"
+  assert_grep "effective_worker_model=gpt-6-astra" "$HOME_DIR/state/$id.meta" \
+    "valid receipt did not record its exact effective worker model"
+  assert_grep "quota_evidence_source=quota-axi" "$HOME_DIR/state/$id.meta" \
+    "valid receipt did not record its quota evidence source"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-6-astra'" "valid receipt did not reach the selected model launch"
+  pass "Astra dispatch validates primary evidence before metadata or launch and accepts one current matching receipt"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -709,7 +1472,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
 
       out=$(FM_TEST_PI_VERSION="$version" \
         run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-        "$id" "$PROJ_DIR")
+        "$id" "$PROJ_DIR" --model openai-codex/gpt-5.6-sol)
       status=$?
       expect_code 0 "$status" "$harness $version spawn should succeed"
       launch=$(cat "$LAUNCH_LOG")
@@ -742,7 +1505,8 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off \
+      --model openai-codex/gpt-5.6-sol 2>&1)
   status=$?
   expect_code 1 "$status" "a missing pi-signed executable should refuse the spawn"
   assert_contains "$out" "pi-signed executable not found on PATH" \
@@ -815,7 +1579,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   # (bin/fm-claude-trust.sh), so an unwritable directory is a genuine blocker.
   # The forwarding assertion below is what this case proves and is unchanged.
   out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet)
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
@@ -832,7 +1596,7 @@ test_claude_omits_config_dir_prefix_when_unset() {
 
   # run_spawn pins CLAUDE_CONFIG_DIR empty by default, exercising the single-store
   # default path where fm-spawn adds no prefix.
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet)
   status=$?
   expect_code 0 "$status" "claude spawn without CLAUDE_CONFIG_DIR should succeed"
   launch=$(cat "$LAUNCH_LOG")
@@ -848,7 +1612,7 @@ test_non_claude_harness_ignores_config_dir() {
   read_case_record "$rec"
 
   out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5)
   status=$?
   expect_code 0 "$status" "codex spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
@@ -942,20 +1706,20 @@ printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
 SH
     out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated \
       run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'")
+      "$id" "$PROJ_DIR" --harness "opencode --model gpt-5 $probe")
     status=$?
     expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
     launch=$(cat "$LAUNCH_LOG")
     for pane_shell in /bin/sh /bin/bash /bin/zsh; do
       [ -x "$pane_shell" ] || continue
-      pane_path=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      pane_path=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:/usr/bin:/bin" TERM=xterm \
         TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
-        "$pane_shell" -c "printf %s \"\$PATH\"") \
+        "$pane_shell" -c "PATH='$FAKEBIN_DIR':\$PATH; export PATH; printf %s \"\$PATH\"") \
         || fail "could not read $pane_shell startup PATH"
-      result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:/usr/bin:/bin" TERM=xterm \
       TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
       FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' \
-      "$pane_shell" -c "$launch") || fail "allowlist=$setting emitted launch failed in $pane_shell"
+      "$pane_shell" -c "PATH='$FAKEBIN_DIR':\$PATH; export PATH; $launch") || fail "allowlist=$setting emitted launch failed in $pane_shell"
       case "$setting" in
         absent|missing-config) expected=$(printf '%s\n' synthetic-unrelated "$value" '' unset) ;;
         enabled) expected=$(printf '%s\n' unset "$value" '' unset) ;;
@@ -975,7 +1739,7 @@ test_launch_environment_invalid_config_refuses() {
   read_case_record "$rec"
   for bad in 'FM_TEST_ALLOWED=value' 'NAME;false' '1INVALID' '*'; do
     printf '%s\n' "$bad" > "$HOME_DIR/config/launch-env-allowlist"
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5)
     status=$?
     expect_code 1 "$status" "invalid allowlist must refuse spawn"
     assert_contains "$out" 'launch-env-allowlist' "refusal must identify the config file"
@@ -1008,7 +1772,7 @@ test_launch_environment_inaccessible_config_refuses() {
       fi
       chmod 600 "$blocked" || fail "could not remove configuration search permission"
       out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-        "$id" "$PROJ_DIR" --harness codex --backend tmux)
+        "$id" "$PROJ_DIR" --harness codex --model gpt-5 --backend tmux)
       status=$?
       chmod 700 "$blocked" || fail "could not restore configuration search permission"
       expect_code 1 "$status" "inaccessible $setting with $presence allowlist must refuse spawn: $out"
@@ -1173,9 +1937,9 @@ printf '%s\n' "$@" > "$FM_ROLE_PROMPT"
 SH
     chmod +x "$FAKEBIN_DIR/codex"
     if [ "$kind" = scout ]; then
-      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --model gpt-5)
     else
-      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off)
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off --model gpt-5)
     fi
     expect_code 0 "$?" "$kind worker spawn failed: $out"
     launch=$(cat "$LAUNCH_LOG")
@@ -1204,7 +1968,7 @@ SH
 }
 
 test_worker_launch_delivers_role_scope
-test_no_profile_keeps_claude_profile_defaults
+test_omitted_structured_model_is_refused_before_launch
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -1214,10 +1978,25 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
-test_active_dispatch_profile_allows_raw_launch_command
+test_active_dispatch_profile_allows_direct_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
+test_codex_home_exports_selected_account_into_the_launch
+test_codex_without_home_launches_unchanged
+test_codex_home_refuses_unusable_paths_before_launch
+test_codex_home_refuses_control_bytes_before_launch
+test_codex_home_is_refused_for_other_harnesses
+test_astra_without_a_profile_requires_primary_evidence
+test_astra_qualified_and_raw_models_cannot_bypass_evidence
+test_raw_model_capable_harnesses_require_inspectable_non_astra_launches
+test_raw_launch_classifier_requires_direct_supported_harness
+test_raw_codex_home_override_is_refused
+test_raw_secondmate_codex_home_requires_a_canonical_launch
+test_astra_receipt_binds_the_selected_codex_home
+test_astra_receipt_requires_selected_provider_availability
+test_pi_openai_codex_receipt_uses_codex_quota
+test_astra_dispatch_requires_a_current_primary_selection_receipt
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

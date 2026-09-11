@@ -173,6 +173,24 @@ Neither this per-source shape nor `state.authStatus` exists before quota-axi 0.1
 Grok also reports `credits.remaining: 0` alongside `percentRemaining: 41` on a healthy account.
 That zero is a prepaid balance, not the subscription window, and is never headroom.
 
+## A Codex home selects the account that is measured and dispatched
+
+Verified 2026-09-04 against quota-axi 0.1.36 and codex-cli 0.153.0, on a machine holding two logged-in Codex homes.
+
+`CODEX_HOME` selects which Codex home the CLI uses, and `codex --help` documents that home as the root its layered configuration is read from.
+`quota-axi` resolves the same variable and reads exactly one home per invocation, so a per-account measurement is one snapshot per home rather than one snapshot filtered by account:
+
+```sh
+quota-axi auth --json                                  # codex auth-json path: <home>/.codex/auth.json, status available
+CODEX_HOME=<home>/.codex-second quota-axi auth --json   # codex auth-json path: <home>/.codex-second/auth.json, status available
+CODEX_HOME=<empty-dir> quota-axi auth --json            # codex auth-json path: <empty-dir>/auth.json, status missing
+```
+
+The reported path follows `CODEX_HOME` and an unauthenticated home reports `missing` rather than falling back to `~/.codex`, which is what makes the per-home measurement in `.agents/skills/quota-array-dispatch/SKILL.md` real evidence instead of a relabelled default-home reading.
+`quota-axi --full` distinguishes the two homes by identity in its `accounts[]` row: the `codex` row's `accountId` was `<account-a>` for the default home and `<account-b>` for the second home in the same session.
+That row is the account evidence the skill requires before a candidate naming a home is dispatched.
+Firstmate's home validators do not read an `auth.json`; `bin/fm-bootstrap.sh` and `bin/fm-spawn.sh` test only for that file's presence, while quota-axi owns the authenticated quota measurement.
+
 ## Standalone Grok discovery probe
 
 Verified 2026-07-30 on `grok 0.2.117 (f1c06093089f) [stable]`.
@@ -197,8 +215,10 @@ Re-run the two commands above and update this section and the pinned version tog
 
 `tests/fm-vendor-auth-probe.test.sh` drives the real script against a fake vendor CLI that records every invocation's argv and anything readable on stdin.
 It asserts that the script accepts no harness, model, or provider input, never calls `quota-axi`, exits alike for every probe result because it renders no verdict, invokes only the two fixed non-destructive argv forms with stdin closed, holds a real bound even when the configured bound is zero or malformed, and never echoes raw vendor output.
-`tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile and harness refusals.
-`tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.
+`tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile and harness refusals, including the Codex home export, its recorded value, and every refusal that keeps an unusable home from falling back to the default account.
+`tests/fm-secondmate-safety.test.sh` owns the secondmate routes for that flag: a local secondmate pins and records its own account, a logged-out home refuses before the secondmate exists, and the remote route refuses the flag before any remote routing.
+`tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic and the configured Codex home's validation diagnostics, including that a malformed home invalidates the file while a home this machine cannot use is reported per home and leaves the other account's candidates and home-free rules dispatchable.
+`tests/fm-control-relaunch.test.sh` owns carrying that recorded home into a same-harness replacement, carrying and revalidating it when a raw launch command resolves to codex, and dropping it on a harness switch.
 `tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake schema-5 snapshot per case, served as quota-axi's default TOON.
 It covers TOON-first `spendPriority` ranking among candidates that pass eligibility, reasoning-class, and runway-feasibility gates, explicit accounting for unmeasurable runway, the strongest-reasoning constraint, and the runway feasibility floor over a higher `spendPriority`.
 The skill's primary path is that default TOON; `--json` is the documented defensive fallback, and this section records the producer `--json` shape that fallback consumes.

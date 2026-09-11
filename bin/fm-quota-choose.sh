@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-quota-choose.sh [--snapshot <path>] [--candidate <harness:model>]...
+#   fm-quota-choose.sh --normalize [--snapshot <path>]
 #
 # Reads one already-captured quota-axi default TOON or JSON snapshot from the
 # provided file, or from stdin when --snapshot is omitted. For each --candidate
@@ -23,17 +24,26 @@
 # reasoning-class or runway-feasibility gates; it only answers which ordered
 # candidate remains eligible under the captured quota evidence.
 #
-# Multi-provider limitation: this helper maps each harness to ONE primary
-# provider family (see provider_for_harness below) and checks quota for that
-# family only. Some harnesses can run models from several providers - for
-# example, Pi and OpenCode may dispatch xAI, Anthropic, or other models - so a
-# candidate whose established provider differs from the harness's primary family
-# is checked against the wrong quota row. This is an accepted limitation of the
-# optional helper. Authoritative multi-provider routing - including provider
-# discovery from the harness catalog and quota matching by that explicit
-# provider - is owned by AGENTS.md section 4 and the quota-array-dispatch skill,
-# not by this helper. Use this helper only when the brief already fixed the
-# candidate order and every candidate's provider is the harness's primary family.
+# Per-home limitation: candidates are `harness:model` only, and the snapshot is
+# a single already-captured one, so a codex candidate that names its own Codex
+# home (docs/configuration.md "Crew dispatch profiles") cannot be expressed here:
+# every candidate would be scored against whichever account produced the one
+# snapshot. Such candidates need one snapshot per home, which is the
+# quota-array-dispatch skill's procedure, not this helper's. This is stated
+# rather than half-supported so a caller never reads a per-home choice out of a
+# single-home measurement.
+#
+# Multi-provider limitation: this helper maps each harness to ONE established
+# provider family (see fm_quota_provider_for_harness) and checks quota for that
+# family only. Pi's openai-codex/<id> family is the documented exception: it
+# authenticates through Codex, so it checks the codex row against bare <id>.
+# Other Pi and OpenCode models may dispatch xAI, Anthropic, or other providers,
+# and a candidate outside an established mapping is checked against the wrong
+# quota row. This is an accepted limitation of the optional helper.
+# Authoritative multi-provider routing - including provider discovery from the
+# harness catalog and quota matching by that explicit provider - is owned by
+# AGENTS.md section 4 and the quota-array-dispatch skill. Use this helper only
+# when the brief already fixed the candidate order and provider mapping.
 #
 # omp (Oh My Pi) has no single primary family, so its candidate model prefix
 # selects the family: openai-codex/<id> checks the codex row and
@@ -65,6 +75,7 @@ usage() {
 
 CANDIDATES=()
 SNAPSHOT_SOURCE=
+NORMALIZE=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -78,6 +89,10 @@ while [ "$#" -gt 0 ]; do
       CANDIDATES+=("$2")
       shift 2
       ;;
+    --normalize)
+      NORMALIZE=1
+      shift
+      ;;
     -h|--help|help) usage ;;
     --) shift; break ;;
     -*) die "unknown option: $1" ;;
@@ -90,7 +105,7 @@ while [ "$#" -gt 0 ]; do
   CANDIDATES+=("$1"); shift
 done
 
-[ "${#CANDIDATES[@]}" -gt 0 ] || die "no candidates supplied"
+[ "$NORMALIZE" -eq 1 ] || [ "${#CANDIDATES[@]}" -gt 0 ] || die "no candidates supplied"
 
 # A candidate is <harness>:<model>. A bare harness with no colon means the
 # default model. Reject empty harnesses and characters that cannot form a safe
@@ -308,33 +323,10 @@ fi
 
 printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi provider data"
 
-# provider_for_harness <harness> [<model>]
-# Map a firstmate harness name to its primary quota-axi provider family.
-# Multi-provider harnesses (Pi, OpenCode) map to their primary family only; see
-# the header limitation note. omp is keyed on the candidate model prefix instead
-# and has no family for any other prefix (see the header). Authoritative
-# multi-provider routing is owned by AGENTS.md section 4 and the
-# quota-array-dispatch skill, not this helper.
-provider_for_harness() {
-  case "$1" in
-    omp)
-      case "${2:-}" in
-        openai-codex/*)  printf 'codex\n' ;;
-        claude-bridge/*) printf 'claude\n' ;;
-        *)               return 1 ;;
-      esac
-      ;;
-    claude)       printf 'claude\n' ;;
-    codex)        printf 'codex\n' ;;
-    opencode)     printf 'codex\n' ;;
-    pi|pi-signed) printf 'pi\n' ;;
-    grok)         printf 'grok\n' ;;
-    kimi)         printf 'kimi\n' ;;
-    cursor)       printf 'cursor\n' ;;
-    muse)         printf 'meta\n' ;;
-    *)            return 1 ;;
-  esac
-}
+if [ "$NORMALIZE" -eq 1 ]; then
+  printf '%s\n' "$QUOTA_JSON"
+  exit 0
+fi
 
 # effective_for_provider_model <provider> <model>
 # Print the most constraining applicable quota evidence for the provider/model
@@ -371,7 +363,7 @@ for c in "${CANDIDATES[@]}"; do
   [ "$model" = "$c" ] && model="default"
   [ -n "$model" ] || die "invalid candidate: $c"
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
-  provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
+  fm_quota_provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
     omp) die "omp quota mapping covers only the openai-codex and claude-bridge prefixes: $model" ;;
     *) die "unknown harness: $harness" ;;
   esac
@@ -382,9 +374,8 @@ for c in "${CANDIDATES[@]}"; do
   harness=${c%%:*}
   model=${c#*:}
   [ "$model" = "$c" ] && model="default"
-  provider=$(provider_for_harness "$harness" "$model")
-  scope_model=$model
-  [ "$harness" != omp ] || scope_model=${model#*/}
+  provider=$(fm_quota_provider_for_harness "$harness" "$model")
+  scope_model=$(fm_quota_scope_model_for_harness "$harness" "$model")
   effective=$(effective_for_provider_model "$provider" "$scope_model")
   if [ -z "$effective" ] || [ "$effective" = "null" ]; then
     continue

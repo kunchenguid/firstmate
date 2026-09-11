@@ -395,7 +395,8 @@ Every claude launch's inline `--settings` JSON also carries `"attribution":{"com
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes concrete `--harness`, `--model`, and `--effort` flags plus `--codex-home <home>` whenever the selected Codex candidate carries `home`.
+When a selected profile requires a primary selection receipt, firstmate also passes its current `--selection-receipt <path>`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
@@ -408,33 +409,81 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>" }
+        { "harness": "<adapter>", "model": "<concrete model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "home": "<optional absolute Codex home, codex only>", "requiresSelectionReceipt": true }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
   ],
   "default": [
-    { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
+    { "harness": "<adapter>", "model": "<concrete model>", "effort": "<optional effort>", "home": "<optional absolute Codex home, codex only>", "requiresSelectionReceipt": true }
   ]
 }
 ```
 
 Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
-The single-object form stays fully backward-compatible, and every profile needs `harness`.
-Profile `model` and `effort` fields and rule `why` are optional.
+The single-object form stays fully backward-compatible, and every crew or scout profile needs `harness` and a concrete `model`.
+Profile `effort` and rule `why` fields are optional.
 `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
-An omitted model or effort means the selected harness uses its own default for that axis.
+An omitted effort means the selected harness uses its own default for that axis.
+Crew and scout launches with an omitted or unprovable model are refused before dispatch rather than using a harness default.
+The optional `home` field names the absolute Codex home (`CODEX_HOME`) a candidate runs against, which is how one firstmate home dispatches across two logged-in Codex accounts.
+It is valid only for `harness: "codex"`, and any other harness carrying it is a `CREW_DISPATCH` configuration error.
+[`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) owns how such a candidate's quota is measured, and `fm-spawn.sh` exports `CODEX_HOME=<home>` into that one worker's launch while recording the choice in the task's own record.
+A profile with no `home` omits `--codex-home` and launches against whatever ambient default Codex account the worker's environment resolves.
+Bootstrap and `fm-spawn.sh` both refuse a path containing control bytes, a relative path, a missing directory, or a directory holding no `auth.json`, so a mistyped home is an actionable error rather than a silent fall back to `~/.codex`; neither ever reads that file's contents.
+`requiresSelectionReceipt` is optional and can only be literal `true` on a profile with an explicit harness and model.
+Every Astra crew or scout launch, and every non-Astra crew or scout launch whose matching harness/model profile sets this field, refuses before a worker endpoint, worktree, or backlog record changes unless Firstmate supplies a current version-4 selection receipt.
+The receipt binds the task and selected harness/model/effort, the exact effective worker model, selected Codex home, task-fit rationale, candidate accounting, catalog evidence, and quota evidence that identifies `quota-axi`, that model, the selected Codex home, the SHA-256 of one saved `quota-axi` snapshot, and, for a named Codex home, the SHA-256 of its source-owned quota-axi account object.
+`fm-spawn.sh` and `fm-control.sh` verify the schema, tuple, effective-worker-model equality, exactly one selected candidate that matches the tuple, quota-evidence source/model/snapshot binding, receipt and snapshot digests, applicable provider availability, and a 15-minute maximum age by default (`FM_DISPATCH_RECEIPT_MAX_AGE_SECONDS` may narrow or extend that local bound).
+The saved quota snapshot must itself be current normal quota-axi TOON output or the normalized JSON fallback shape, including its structural quota evidence, so a fresh receipt cannot bless stale or hand-authored quota evidence.
+For a named Codex home, the snapshot must include quota-axi's full Codex account object, such as `quota-axi --provider codex --full --json` output, so Firstmate can compare only that object's hash with a fresh read from that home without recording account bytes.
+They record the effective worker model and quota-evidence source alongside the receipt hashes in task metadata, but do not infer a provider, score candidates, or select a route.
+Every guarded relaunch requires a newly current receipt too, rather than reusing the task's prior dispatch evidence.
+The two refusals differ in blast radius at bootstrap: a home the file states wrongly is a schema fault that invalidates the file, while a correctly stated home this machine cannot use right now is reported per home so `codex logout` on one account never disables the other account's candidates or rules naming no home.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 Except for `ultra`, which refuses unsupported profiles under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
 Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
+A two-account Codex rule looks like this, with one candidate per logged-in home:
+
+```json
+{
+  "rules": [
+    {
+      "when": "long autonomous coding runs",
+      "use": [
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high", "home": "/Users/example/.codex" },
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high", "home": "/Users/example/.codex-personal" }
+      ],
+      "why": "two logged-in Codex accounts; whichever home has headroom takes the task"
+    }
+  ]
+}
+```
+
+An Astra profile is always protected by the durable primary-evidence gate, and may state the requirement explicitly for operator visibility:
+
+```json
+{
+  "default": {
+    "harness": "codex",
+    "model": "gpt-6-astra",
+    "effort": "high",
+    "requiresSelectionReceipt": true
+  }
+}
+```
+
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+Each profile in those facts renders its slash-separated harness, model, and effort axes followed by `@<home>` when the candidate names one, so the two sides of a two-account Codex rule stay distinguishable; only the configured path is printed and nothing inside that home is read.
+Malformed JSON, an empty or malformed rule/default array, an unverified harness, an effort value unsupported by that harness, a `home` that is empty, relative, control-byte-bearing, or on a non-codex harness, or a misplaced `requiresSelectionReceipt` is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+A well-formed `home` whose directory is missing or holds no `auth.json` is instead reported once per home as `CREW_DISPATCH: codex home unavailable: <path> - ...`, which makes only the candidates naming that home ineligible and leaves the rest of the file dispatchable.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+An inherited `home` is an absolute path on the machine that wrote it, so on a home whose machine holds no such Codex login it simply reports the per-home unavailable diagnostic above and takes those candidates out of that home's dispatch while every other profile still runs.
 
 ## Toolchain
 

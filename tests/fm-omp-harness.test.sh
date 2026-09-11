@@ -204,8 +204,10 @@ test_spawn_model_validation_scoped_to_listed_providers() {
   id=omp-model-fuzzy-q4
   out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model astra)
   status=$?
-  expect_code 0 "$status" "a bare fuzzy pattern is omp's own matcher's job: $out"
-  pass "fm-spawn: omp model validation is scoped to providers the listing can prove"
+  expect_code 1 "$status" "a bare fuzzy pattern must refuse before OMP resolves it: $out"
+  assert_contains "$out" "must identify an exact model" "bare fuzzy OMP refusal did not require a fully qualified model"
+  assert_absent "$HOME_DIR/state/$id.meta" "a bare fuzzy OMP refusal must publish no record"
+  pass "fm-spawn: omp model validation requires exact dispatch identities"
 }
 
 test_secondmate_launch_relies_on_discovery() {
@@ -307,7 +309,7 @@ test_busy_extension_lifecycle() {
   local rec id=omp-busy-q5 out state ext
   rec=$(make_spawn_case busy omp "$id")
   read_case_record "$rec"
-  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp)
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model ollama/qwen3:8b)
   expect_code 0 $? "omp spawn should succeed: $out"
   state="$HOME_DIR/state"
   ext="$state/$id.omp-ext.ts"
