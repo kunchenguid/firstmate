@@ -26,11 +26,15 @@
 # as it does after a pool-cap refusal. The fake tmux below therefore also
 # answers `#{pane_current_command}` (treehouse for the first
 # FM_FAKE_TREEHOUSE_READS path reads, then the shell named by
-# FM_FAKE_PANE_SHELL) and `capture-pane` (FM_FAKE_PANE_TAIL), and the later
-# cases pin that a fetch outlasting the old 60s budget still spawns, that an
-# acquisition past its own bound is reported as still running, that a
-# refusal fails fast with the pane's own reason, and that an unreadable
-# foreground is named as such.
+# FM_FAKE_PANE_SHELL) and `capture-pane` (FM_FAKE_PANE_TAIL, replaced by
+# FM_FAKE_PANE_TAIL_LATE once the path read count passes
+# FM_FAKE_PANE_TAIL_LATE_READS). The later cases pin that a fetch outlasting
+# the old 60s budget still spawns, that an acquisition past its own bound is
+# reported as still running, that a refusal fails fast with the pane's own
+# reason, and that an unreadable foreground (an empty FM_FAKE_PANE_SHELL)
+# stays on the settle bound with the pane text standing in: it gives up at
+# 60s, an "Entered worktree" line starts the settle phase, and an error line
+# fails fast.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -80,7 +84,16 @@ case "$*" in
   *"#{pane_tty}"*) printf '\n'; exit 0 ;;
 esac
 case "${1:-}" in
-  capture-pane) printf '%b' "${FM_FAKE_PANE_TAIL:-}"; exit 0 ;;
+  capture-pane)
+    n=0
+    [ ! -f "${FM_FAKE_PANE_COUNTFILE:-}" ] || n=$(cat "$FM_FAKE_PANE_COUNTFILE")
+    if [ -n "${FM_FAKE_PANE_TAIL_LATE_READS:-}" ] && [ "$n" -gt "$FM_FAKE_PANE_TAIL_LATE_READS" ]; then
+      printf '%b' "${FM_FAKE_PANE_TAIL_LATE:-}"
+    else
+      printf '%b' "${FM_FAKE_PANE_TAIL:-}"
+    fi
+    exit 0
+    ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
@@ -139,12 +152,15 @@ EOF
 
 # Foreground knobs for the fake pane, reset per case: how many polls report
 # treehouse in the foreground, which shell name follows (empty = the
-# foreground cannot be read at all), the pane's rendered tail, and the
-# acquisition bound under test.
+# foreground cannot be read at all), the pane's rendered tail (and the tail
+# that replaces it after a given number of path reads), and the acquisition
+# bound under test.
 reset_settle_knobs() {
   TREEHOUSE_READS=0
   PANE_SHELL=zsh
   PANE_TAIL=
+  PANE_TAIL_LATE=
+  PANE_TAIL_LATE_READS=
   ACQUIRE_TIMEOUT=
 }
 reset_settle_knobs
@@ -158,7 +174,9 @@ run_settle_spawn() {
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     FM_FAKE_TREEHOUSE_READS="$TREEHOUSE_READS" FM_FAKE_PANE_SHELL="$PANE_SHELL" \
-    FM_FAKE_PANE_TAIL="$PANE_TAIL" FM_SPAWN_ACQUIRE_TIMEOUT="$ACQUIRE_TIMEOUT" \
+    FM_FAKE_PANE_TAIL="$PANE_TAIL" FM_FAKE_PANE_TAIL_LATE="$PANE_TAIL_LATE" \
+    FM_FAKE_PANE_TAIL_LATE_READS="$PANE_TAIL_LATE_READS" \
+    FM_SPAWN_ACQUIRE_TIMEOUT="$ACQUIRE_TIMEOUT" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -366,10 +384,15 @@ test_pool_cap_refusal_fails_fast_with_the_pane_reason() {
   pass "a treehouse refusal fails fast and relays the pane's own reason"
 }
 
-# A backend that cannot read the pane's foreground gets today's path-only
-# poll under the larger acquisition bound, and the refusal names that gap
-# instead of guessing which way treehouse went.
-test_unreadable_foreground_waits_the_acquisition_bound_and_says_so() {
+# A backend that cannot read the pane's foreground has no positive evidence
+# that an acquisition is under way, so its path-only poll is charged to the
+# 60s settle bound and never to the acquisition bound: the per-project
+# Treehouse lock is held across the wait, and a blind 600s hold would block
+# the pool returns that free a slot. The pane text stands in for the
+# foreground, and an error line printed BEFORE the echoed command (shell
+# startup noise) must not be read as treehouse's verdict. The refusal names
+# the gap instead of guessing which way treehouse went.
+test_unreadable_foreground_gives_up_at_the_settle_bound() {
   local rec id out status reads
   id=settle-blind-z8
   rec=$(make_primary_case settle-blind "$id" 100000)
@@ -377,23 +400,98 @@ test_unreadable_foreground_waits_the_acquisition_bound_and_says_so() {
   fm_test_fake_sleep_noop "$FAKEBIN_DIR"
   reset_settle_knobs
   PANE_SHELL=
-  ACQUIRE_TIMEOUT=3
+  ACQUIRE_TIMEOUT=100
+  PANE_TAIL='error: prompt plugin failed to load\n$ treehouse get\nFetching origin...\n'
 
   out=$(run_settle_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a pane that never reported a worktree"$'\n'"$out"
-  assert_contains "$out" "cannot read the pane's foreground process" \
+  assert_contains "$out" "no isolated worktree appeared within 60s" \
+    "spawn did not give up at the settle bound"
+  assert_contains "$out" "could not read the pane's foreground process" \
     "spawn did not say the foreground was unreadable"
-  assert_contains "$out" "3s acquisition bound (FM_SPAWN_ACQUIRE_TIMEOUT)" \
-    "spawn did not wait under the acquisition bound"
+  assert_contains "$out" "neither treehouse's 'Entered worktree' line nor an error" \
+    "spawn did not say the pane text showed no verdict"
+  assert_contains "$out" "foreground now: unreadable on backend 'tmux'" \
+    "spawn did not report the unreadable foreground"
+  assert_not_contains "$out" "acquisition bound" \
+    "spawn charged an unreadable foreground to the acquisition bound"
+  assert_not_contains "$out" "did not enter" \
+    "spawn claimed treehouse did not enter a worktree without any evidence"
+  assert_not_contains "$out" "reported an error" \
+    "spawn read shell startup noise printed before the command as treehouse's verdict"
+  reads=$(cat "$COUNTFILE")
+  { [ "$reads" -ge 61 ] && [ "$reads" -le 62 ]; } \
+    || fail "an unreadable foreground must give up at the 60s settle bound, but the spawn polled $reads times"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an unreadable foreground gives up at the 60s settle bound and names the gap"
+}
+
+# On a backend without a foreground reader, treehouse's own "Entered worktree"
+# line is the evidence that the acquisition finished, and it starts the settle
+# phase: the pane's path then has the full 60s to settle on the worktree. The
+# fetch here takes 40 polls, the entry line then appears, and the path settles
+# 40 polls after that (80 project reads in all, past the plain settle bound)
+# under an acquisition bound too short to have carried the wait on its own.
+# An error line the nested shell prints after the entry must not undo it.
+test_unreadable_foreground_entered_line_starts_the_settle_phase() {
+  local rec id out status reads
+  id=settle-blind-entered-z9
+  rec=$(make_settle_case settle-blind-entered "$id" 80 project)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  PANE_SHELL=
+  ACQUIRE_TIMEOUT=20
+  PANE_TAIL='$ treehouse get\nFetching origin...\n'
+  PANE_TAIL_LATE_READS=40
+  PANE_TAIL_LATE="\$ treehouse get\nFetching origin...\n🌳 Entered worktree at $WT_DIR. Type 'exit' to return.\nerror: prompt plugin failed to load\n"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should proceed into the settle phase once the pane shows treehouse's entry line"$'\n'"$out"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the worktree treehouse entered"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -gt 60 ] || fail "the path was meant to settle past the plain 60-read settle bound, but the spawn only polled $reads times"
+  [ "$reads" -eq 82 ] || fail "expected the 80 project reads plus the two agreeing worktree reads, got $reads"
+  pass "an entry line in the pane text starts the settle phase on a backend without a foreground reader"
+}
+
+# The pool-cap refusal on a backend without a foreground reader: treehouse's
+# error line lands in the pane text after the echoed command, and the spawn
+# must fail as soon as it appears and relay that line, instead of waiting out
+# any bound. The acquisition bound here is long enough to prove that.
+test_unreadable_foreground_refusal_line_fails_fast() {
+  local rec id out status reads
+  id=settle-blind-refused-z10
+  rec=$(make_settle_case settle-blind-refused "$id" 100000 project)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  PANE_SHELL=
+  ACQUIRE_TIMEOUT=100
+  PANE_TAIL='$ treehouse get\n'
+  PANE_TAIL_LATE_READS=2
+  PANE_TAIL_LATE="\$ treehouse get\nError: all 16 worktrees are in use or dirty (max_trees = 16). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml\n\$ \n\n"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane whose treehouse get refused"$'\n'"$out"
+  assert_contains "$out" "treehouse get reported an error in the pane" \
+    "spawn did not report the error line treehouse printed"
+  assert_contains "$out" "| Error: all 16 worktrees are in use or dirty (max_trees = 16)" \
+    "spawn did not relay treehouse's own refusal line from the pane"
   assert_contains "$out" "foreground now: unreadable on backend 'tmux'" \
     "spawn did not report the unreadable foreground"
   assert_not_contains "$out" "did not enter" \
-    "spawn claimed treehouse did not enter a worktree without any evidence"
+    "spawn claimed treehouse did not enter a worktree instead of relaying its error"
+  assert_not_contains "$out" "exited without entering" \
+    "spawn claimed to know the shell was back in the project without a foreground read"
   reads=$(cat "$COUNTFILE")
-  [ "$reads" -le 5 ] || fail "the 3s acquisition bound was not honoured for an unreadable foreground: the spawn polled $reads times"
+  [ "$reads" -le 4 ] || fail "the refusal line should fail the spawn at once, but the spawn polled $reads times"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
-  pass "an unreadable foreground waits the acquisition bound and is named as unreadable"
+  pass "a refusal line in the pane text fails fast on a backend without a foreground reader"
 }
 
 test_single_stale_first_read_is_not_accepted
@@ -403,6 +501,8 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_slow_fetch_past_the_old_budget_still_spawns
 test_acquisition_past_its_bound_is_reported_as_still_running
 test_pool_cap_refusal_fails_fast_with_the_pane_reason
-test_unreadable_foreground_waits_the_acquisition_bound_and_says_so
+test_unreadable_foreground_gives_up_at_the_settle_bound
+test_unreadable_foreground_entered_line_starts_the_settle_phase
+test_unreadable_foreground_refusal_line_fails_fast
 
 echo "# all fm-spawn-worktree-settle tests passed"

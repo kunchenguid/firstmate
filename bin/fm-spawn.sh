@@ -193,22 +193,33 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
-#   That wait has two bounds. While the pane's foreground process is still
-#   `treehouse get` (or a child of it such as `git fetch origin` -> `ssh`), the
-#   acquisition is in progress and the spawn waits up to FM_SPAWN_ACQUIRE_TIMEOUT
-#   seconds (default 600; a non-numeric or zero value uses the default), because
-#   treehouse fetches BEFORE it enters the worktree subshell and the pane's cwd
-#   reads the project for that whole fetch. Only once the foreground is a shell
-#   again does the 60s path-settle bound apply. tmux and herdr read that
-#   foreground (bin/backends/tmux.sh and bin/backends/herdr.sh
-#   fm_backend_<backend>_foreground_processes); zellij and cmux have no such
-#   reader, so they poll the path alone under the larger bound. A shell that is
-#   back in the project directory after treehouse was seen running means
-#   treehouse exited without entering (the pool at its max_trees cap, say), and
-#   the spawn fails at once. Every refusal from this wait prints what the
-#   evidence shows - still running, exited without entering, or unreadable -
-#   followed by the pane's foreground process and its last lines verbatim, so
-#   treehouse's own reason reaches the operator.
+#   That wait has two bounds. While a foreground reader positively shows the
+#   pane's foreground process to be `treehouse get` (or a child of it such as
+#   `git fetch origin` -> `ssh`), the acquisition is in progress and the spawn
+#   waits up to FM_SPAWN_ACQUIRE_TIMEOUT seconds (default 600; a non-numeric or
+#   zero value uses the default), because treehouse fetches BEFORE it enters
+#   the worktree subshell and the pane's cwd reads the project for that whole
+#   fetch. Every other poll counts against the 60s path-settle bound. tmux and
+#   herdr read that foreground (bin/backends/tmux.sh and bin/backends/herdr.sh
+#   fm_backend_<backend>_foreground_processes). zellij and cmux have no such
+#   reader, and a read can fail on any backend; those polls read the pane's
+#   own text instead: treehouse's "Entered worktree" line starts the settle
+#   phase, and an `error:` line or the max_trees pool-cap line after the
+#   echoed command fails the spawn at once with the pane's last lines. A shell
+#   that is back in the project directory after treehouse was seen running
+#   means treehouse exited without entering (the pool at its cap, say), and the
+#   spawn fails at once. Every refusal from this wait prints what the evidence
+#   shows - still running, exited without entering, printed an error, or
+#   unreadable - followed by the pane's foreground process and its last lines
+#   verbatim, so treehouse's own reason reaches the operator.
+#   The per-project Treehouse lock (fm_treehouse_project_lock_path, taken
+#   before the task pane exists and released only after the launch) is held
+#   across that whole wait. While it is held, every sibling spawn for the
+#   project refuses to race it and every bin/fm-teardown.sh return of a pool
+#   worktree for the project is REFUSED. That is why the long bound needs
+#   positive evidence: a blind wait would hold the lock for up to
+#   FM_SPAWN_ACQUIRE_TIMEOUT seconds in the exact window when the pool is
+#   full and a return is the one action that frees a slot.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -3054,13 +3065,33 @@ spawn_pane_tail() {  # <target> <lines>
     | tail -n "$2"
 }
 
+# spawn_pane_signal: what the pane's own text says about `treehouse get`, for
+# a poll whose foreground could not be read. Only the lines after the last
+# echoed `treehouse get` count, so a shell's startup noise is never taken for
+# treehouse's verdict; when no echo is in the capture (it scrolled out, or the
+# pane does not echo) every line counts, and whatever scrolled the echo out
+# took the noise with it. An "Entered worktree" line wins over any error line
+# around it, because the nested shell's own startup may print errors after
+# treehouse has already entered.
+#   entered  treehouse printed its "Entered worktree" line
+#   refused  an `error:` line or the max_trees pool-cap line, with no entry
+spawn_pane_signal() {  # <target> -> entered|refused|(nothing)
+  fm_backend_capture "$BACKEND" "$1" 200 "$W" 2>/dev/null \
+    | awk '
+        index($0, "treehouse get") { verdict = ""; next }
+        index($0, "Entered worktree") { verdict = "entered"; next }
+        verdict == "" && ($0 ~ /^[[:space:]]*[Ee]rror:/ || index($0, "worktrees are in use")) { verdict = "refused" }
+        END { if (verdict != "") print verdict }
+      '
+}
+
 # spawn_worktree_wait_refuse: the post-`treehouse get` wait failed; say what
 # the evidence shows, then the foreground and the pane's own last lines.
 # `did not enter` is claimed only for the one case the evidence supports (the
 # shell is back in the project after treehouse was seen running); a still
 # running acquisition and an unreadable foreground are named as such.
-spawn_worktree_wait_refuse() {  # <kind> <elapsed> <report> <treehouse-seen> <last-seen> <last-reason>
-  local kind=$1 elapsed=$2 report=$3 seen=$4 last_seen=$5 last_reason=$6
+spawn_worktree_wait_refuse() {  # <kind> <elapsed> <report> <treehouse-seen> <treehouse-entered> <last-seen> <last-reason>
+  local kind=$1 elapsed=$2 report=$3 seen=$4 entered=$5 last_seen=$6 last_reason=$7
   local acquire_bound observed summary tail
   acquire_bound=$(spawn_acquire_bound)
   if [ "$seen" = 1 ]; then
@@ -3075,8 +3106,15 @@ spawn_worktree_wait_refuse() {  # <kind> <elapsed> <report> <treehouse-seen> <la
     acquiring)
       echo "error: treehouse get is still running after the ${acquire_bound}s acquisition bound (FM_SPAWN_ACQUIRE_TIMEOUT) and has not entered a worktree yet; the acquisition may still finish on its own in the pane, and a longer bound would have waited for it (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
       ;;
+    printed-refusal)
+      echo "error: treehouse get reported an error in the pane ${elapsed}s after it was sent, and no isolated worktree appeared; this backend could not read the pane's foreground process, so the pane's last lines below carry the reason; inspect window $T" >&2
+      ;;
     unknown)
-      echo "error: no isolated worktree appeared within the ${acquire_bound}s acquisition bound (FM_SPAWN_ACQUIRE_TIMEOUT), and this backend cannot read the pane's foreground process, so treehouse get may still be running or may have refused (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+      if [ "$entered" = 1 ]; then
+        echo "error: treehouse get printed its 'Entered worktree' line, but no isolated worktree appeared within 60s after it; this backend could not read the pane's foreground process, and the pane's path reader never showed the worktree (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+      else
+        echo "error: no isolated worktree appeared within 60s; this backend could not read the pane's foreground process, and the pane printed neither treehouse's 'Entered worktree' line nor an error, so treehouse get may still be running (a slow fetch, say) or may never have started (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+      fi
       ;;
     *)
       echo "error: no isolated worktree appeared within 60s while the pane's foreground was a shell, not treehouse get; $observed (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
@@ -3346,9 +3384,15 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   #   other      something else holds the foreground (a prompt helper, say):
   #              not an acquisition, so it counts against the settle bound.
   #   unknown    zellij and cmux have no foreground reader, and a read can
-  #              fail on any backend: today's path-only poll, but under the
-  #              larger acquisition bound, because a slow fetch is the known
-  #              way to end up here and nothing can rule it out.
+  #              fail on any backend: the path-only poll, charged to the
+  #              settle bound, with the pane's own text standing in for the
+  #              foreground (spawn_pane_signal). Treehouse's "Entered
+  #              worktree" line starts the settle phase afresh; an error or
+  #              pool-cap line fails the spawn at once with the pane's last
+  #              lines. A slow fetch on these backends is therefore given up
+  #              on at the settle bound, with a refusal that says so: the
+  #              per-project Treehouse lock is held across this wait (see the
+  #              header), so nothing waits longer without positive evidence.
   # The fail-fast requires treehouse to have been seen first: right after the
   # command is sent, a shell in the project is also what a pane looks like
   # before treehouse has started at all.
@@ -3359,6 +3403,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   acquire_secs=0
   settle_secs=0
   treehouse_seen=0
+  treehouse_entered=0
   project_shell_reads=0
   wait_failure=""
   fg_report=""
@@ -3378,7 +3423,24 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
     fi
     fg_report=$(spawn_foreground_processes "$WT_TARGET" 2>/dev/null || true)
-    case "$(spawn_worktree_phase "$fg_report")" in
+    phase=$(spawn_worktree_phase "$fg_report")
+    if [ "$phase" = unknown ]; then
+      case "$(spawn_pane_signal "$WT_TARGET")" in
+        entered)
+          treehouse_seen=1
+          if [ "$treehouse_entered" = 0 ]; then
+            treehouse_entered=1
+            settle_secs=0
+          fi
+          ;;
+        refused)
+          treehouse_seen=1
+          wait_failure=printed-refusal
+          break
+          ;;
+      esac
+    fi
+    case "$phase" in
       acquiring)
         treehouse_seen=1
         project_shell_reads=0
@@ -3388,8 +3450,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
           break
         fi
         ;;
-      shell)
-        if [ "$treehouse_seen" = 1 ] && [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$PROJ_ABS_REAL" ]; then
+      *)
+        if [ "$phase" = shell ] && [ "$treehouse_seen" = 1 ] && [ "$treehouse_entered" = 0 ] \
+          && [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$PROJ_ABS_REAL" ]; then
           project_shell_reads=$((project_shell_reads + 1))
           if [ "$project_shell_reads" -ge 2 ]; then
             wait_failure=refused
@@ -3401,22 +3464,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         settle_secs=$((settle_secs + 1))
         if [ "$settle_secs" -gt 60 ]; then
           wait_failure=settle
-          break
-        fi
-        ;;
-      other)
-        project_shell_reads=0
-        settle_secs=$((settle_secs + 1))
-        if [ "$settle_secs" -gt 60 ]; then
-          wait_failure=settle
-          break
-        fi
-        ;;
-      *)
-        project_shell_reads=0
-        acquire_secs=$((acquire_secs + 1))
-        if [ "$acquire_secs" -gt "$acquire_bound" ]; then
-          wait_failure=unknown
+          [ "$phase" != unknown ] || wait_failure=unknown
           break
         fi
         ;;
@@ -3424,7 +3472,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    spawn_worktree_wait_refuse "${wait_failure:-settle}" "$((acquire_secs + settle_secs))" "$fg_report" "$treehouse_seen" "$last_seen" "$last_reason"
+    spawn_worktree_wait_refuse "${wait_failure:-settle}" "$((acquire_secs + settle_secs))" "$fg_report" "$treehouse_seen" "$treehouse_entered" "$last_seen" "$last_reason"
     exit 1
   fi
 

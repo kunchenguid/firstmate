@@ -69,7 +69,10 @@ Every pane operation passes an explicit `--pane-id` because a new session can fo
 `pane_cwd` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
 Worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
 This active probe is scoped to spawn-time worktree discovery and is not advertised as a general live-cwd API.
-Zellij exposes no per-pane foreground process either, so that discovery cannot tell a slow `git fetch origin` inside `treehouse get` from a refusal; it polls the path alone under the larger `FM_SPAWN_ACQUIRE_TIMEOUT` bound owned by the [`fm-spawn.sh` header](../bin/fm-spawn.sh), and a refusal names the foreground as unreadable.
+Zellij exposes no per-pane foreground process either, so that discovery cannot tell a slow `git fetch origin` inside `treehouse get` from a refusal.
+The pane text stands in for the foreground: treehouse's own `Entered worktree` line starts the 60-second path-settle bound, and an `error:` line or the `max_trees` pool-cap line after the echoed command fails the spawn at once with the pane's last lines.
+A pane that shows neither gives up at that same bound, and the refusal names the foreground as unreadable.
+The larger `FM_SPAWN_ACQUIRE_TIMEOUT` bound needs a foreground reader that shows treehouse running, because the spawn holds the per-project Treehouse lock across the wait; the [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns both bounds.
 
 `new-tab` has no no-focus flag and temporarily focuses the created tab in attached clients.
 The adapter records the previously active tab and immediately restores it with `go-to-tab-by-id`.
