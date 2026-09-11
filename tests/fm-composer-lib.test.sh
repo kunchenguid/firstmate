@@ -668,22 +668,24 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
 
 test_agy_prompt_requires_footer_proof() {
   local caps=$'styled=0\ncursor=1' out
-  out=$(fm_composer_classify_screen "$caps" $'>\n? for shortcuts Gemini 3.8 Flash · low' 0)
+  out=$(fm_composer_classify_screen "$caps" $'────────\n>\n────────\n? for shortcuts' 1)
   [ "$out" = empty ] || fail "an idle agy prompt with its footer must read empty, got '$out'"
-  out=$(fm_composer_classify_screen "$caps" $'> draft\n? for shortcuts Gemini 3.8 Flash · low' 0)
+  out=$(fm_composer_classify_screen "$caps" $'────────\n> draft\n────────\n? for shortcuts' 1)
   [ "$out" = pending ] || fail "typed agy prompt text must read pending, got '$out'"
-  out=$(fm_composer_classify_screen "$caps" $'>\nnot the agy footer' 0)
-  [ "$out" = unknown ] || fail "a bare > without the agy footer must stay unknown, got '$out'"
-  pass "fm_composer_classify_screen: agy requires its independent shortcuts footer"
+  out=$(fm_composer_classify_screen "$caps" $'> ' 0)
+  [ "$out" = empty ] || fail "a lone empty agy prompt must read empty, got '$out'"
+  pass "fm_composer_classify_screen: agy uses positional boundary proof"
 }
 
 test_agy_prompt_requires_footer_proof_without_cursor() {
   local out
-  out=$(fm_composer_classify_screen 'styled=0' $'>\n? for shortcuts Gemini 3.8 Flash · low')
+  out=$(fm_composer_classify_screen 'styled=0' $'────────\n>\n────────\n? for shortcuts')
   [ "$out" = empty ] || fail "cursorless idle agy prompt must read empty, got '$out'"
-  out=$(fm_composer_classify_screen 'styled=0' $'> draft\n? for shortcuts Gemini 3.8 Flash · low')
+  out=$(fm_composer_classify_screen 'styled=0' $'────────\n> draft\n────────\n? for shortcuts')
   [ "$out" = pending ] || fail "cursorless typed agy prompt must read pending, got '$out'"
-  pass "fm_composer_classify_screen: cursorless agy shape is classified structurally"
+  out=$(fm_composer_classify_screen 'styled=0' $'> ')
+  [ "$out" = empty ] || fail "cursorless lone empty agy prompt must read empty, got '$out'"
+  pass "fm_composer_classify_screen: cursorless agy uses positional boundary proof"
 }
 
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
@@ -699,15 +701,15 @@ test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
   extract=$(fm_composer_extract_selected_content "$cursorless_caps" "$screen")
   [ "$extract" = 'first line second line' ] \
     || fail "cursorless agy extraction lost multiline draft content: '$extract'"
-  screen=$'────────\n> first line\n────────\n? for shortcuts\n────────\nGemini 3.8 Flash · low'
+  screen=$'────────\n> first line\n? for shortcuts\n────────\nGemini 3.8 Flash · low'
   out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 3)
   [ "$out" = pending ] \
     || fail "a multiline agy draft containing furniture-looking rows must read pending, got '$out'"
   extract=$(fm_composer_extract_selected_content "$cursor_caps" "$screen")
-  [ "$extract" = 'first line ──────── ? for shortcuts' ] \
+  [ "$extract" = 'first line ? for shortcuts' ] \
     || fail "agy extraction dropped furniture-looking multiline draft content: '$extract'"
-  screen=$'output\n>\n? for shortcuts\n$ live shell'
-  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 1)
+  screen=$'output\n────────\n>\n────────\n? for shortcuts\n$ live shell'
+  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2)
   [ "$out" = empty ] || fail "the cursor-anchored agy prompt must remain empty beside a lower shell, got '$out'"
   out=$(fm_composer_classify_screen "$cursorless_caps" "$screen")
   [ "$out" = unknown ] || fail "cursorless agy selection must reject a lower shell, got '$out'"
@@ -720,10 +722,10 @@ test_agy_prompt_accepts_supported_model_footers() {
     'Claude Sonnet 4.6 · low' \
     'GPT-OSS 120B · medium' \
     'Gemini 3.8 Flash · high'; do
-    out=$(fm_composer_classify_screen "$caps" $'> draft\n'"$footer" 0)
+    out=$(fm_composer_classify_screen "$caps" $'────────\n> draft\n────────\n'"$footer" 1)
     [ "$out" = pending ] \
       || fail "agy footer '$footer' must classify an unsent draft pending, got '$out'"
-    extract=$(fm_composer_extract_selected_content "$caps" $'> draft\n'"$footer")
+    extract=$(fm_composer_extract_selected_content "$caps" $'────────\n> draft\n────────\n'"$footer")
     [ "$extract" = 'draft' ] \
       || fail "agy footer '$footer' must preserve the draft, got '$extract'"
   done
@@ -733,7 +735,7 @@ test_agy_prompt_accepts_supported_model_footers() {
 test_agy_prompt_preserves_structural_draft_rows() {
   local screen out extract caps
   for caps in "$CAPS_TMUX" 'styled=0'; do
-    screen=$'> first\n> second\nClaude Sonnet 4.6 · low'
+    screen=$'────────\n> first\n> second\n────────\nClaude Sonnet 4.6 · low'
     if [ "$caps" = "$CAPS_TMUX" ]; then
       out=$(fm_composer_classify_screen "$caps" "$screen" 1)
     else
@@ -744,7 +746,7 @@ test_agy_prompt_preserves_structural_draft_rows() {
     extract=$(fm_composer_extract_selected_content "$caps" "$screen")
     [ "$extract" = 'first > second' ] \
       || fail "agy draft rows beginning with > were not preserved, got '$extract'"
-    screen=$'> run this:\n$ make test\nGPT-OSS 120B · medium'
+    screen=$'────────\n> run this:\n$ make test\n────────\nGPT-OSS 120B · medium'
     if [ "$caps" = "$CAPS_TMUX" ]; then
       out=$(fm_composer_classify_screen "$caps" "$screen" 1)
     else
@@ -759,11 +761,42 @@ test_agy_prompt_preserves_structural_draft_rows() {
   pass "fm_composer: agy preserves prompt and shell-looking multiline rows"
 }
 
+test_agy_prompt_uses_complete_positional_boundaries() {
+  local caps boundary screen out extract
+  for caps in "$CAPS_TMUX" 'styled=0'; do
+    for boundary in '════' '━━━━' '----'; do
+      screen="$boundary"$'\n> draft\n'"$boundary"
+      if [ "$caps" = "$CAPS_TMUX" ]; then
+        out=$(fm_composer_classify_screen "$caps" "$screen" 1)
+      else
+        out=$(fm_composer_classify_screen "$caps" "$screen")
+      fi
+      [ "$out" = pending ] \
+        || fail "agy boundary '$boundary' must classify the draft pending, got '$out'"
+      extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+      [ "$extract" = draft ] \
+        || fail "agy boundary '$boundary' must preserve the draft, got '$extract'"
+    done
+    screen=$'────────\n> first\nsecond · low\n────────\nGemini 3.8 Flash · low'
+    if [ "$caps" = "$CAPS_TMUX" ]; then
+      out=$(fm_composer_classify_screen "$caps" "$screen" 1)
+    else
+      out=$(fm_composer_classify_screen "$caps" "$screen")
+    fi
+    [ "$out" = pending ] \
+      || fail "a model-looking draft continuation must classify pending, got '$out'"
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+    [ "$extract" = 'first second · low' ] \
+      || fail "a model-looking draft continuation was dropped, got '$extract'"
+  done
+  pass "fm_composer: agy uses the complete positional boundary contract"
+}
+
 test_agy_prompt_preserves_furniture_looking_drafts() {
   local caps=$'styled=0\ncursor=1' out extract screen
   for draft in '? for shortcuts' '────────'; do
-    screen=$'> '"$draft"$'\n? for shortcuts\nGemini 3.8 Flash · low'
-    out=$(fm_composer_classify_screen "$caps" "$screen" 0)
+    screen=$'────────\n> '"$draft"$'\n────────\n? for shortcuts'
+    out=$(fm_composer_classify_screen "$caps" "$screen" 1)
     [ "$out" = pending ] \
       || fail "agy draft '$draft' must classify pending, got '$out'"
     extract=$(fm_composer_extract_selected_content "$caps" "$screen")
@@ -809,6 +842,7 @@ test_agy_prompt_requires_footer_proof_without_cursor
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts
 test_agy_prompt_accepts_supported_model_footers
 test_agy_prompt_preserves_structural_draft_rows
+test_agy_prompt_uses_complete_positional_boundaries
 test_agy_prompt_preserves_furniture_looking_drafts
 
 test_queued_enter_verdict_busy_pending_is_empty() {

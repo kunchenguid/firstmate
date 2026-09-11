@@ -659,8 +659,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local agy_prompt_row=-1 agy_footer_row=-1 agy_model_row=-1
-  local agy_bottom_separator=-1 agy_end_row=-1
+  local agy_prompt_row=-1 agy_boundary_row=-1 agy_last_nonempty_row=-1
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
   while IFS= read -r line; do
@@ -720,16 +719,13 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         fi
         ;;
     esac
-    if fm_composer_idle_matches "$trimmed" \
-      "${FM_COMPOSER_AGY_FOOTER_RE:-$FM_COMPOSER_AGY_FOOTER_RE_DEFAULT}" sensitive; then
-      agy_footer_row=$row
-    fi
-    if _fm_composer_agy_model_footer "$trimmed"; then
-      agy_model_row=$row
-    fi
-    if [ "$agy_prompt_row" -ge 0 ] && [ "$row" -gt "$agy_prompt_row" ] \
-       && _fm_composer_agy_separator_row "$trimmed"; then
-      agy_bottom_separator=$row
+    if [ "$agy_prompt_row" -ge 0 ] && [ "$row" -ge "$agy_prompt_row" ]; then
+      [ -n "$trimmed" ] && agy_last_nonempty_row=$row
+      if [ "$row" -gt "$agy_prompt_row" ] \
+         && [ "$agy_boundary_row" -lt 0 ] \
+         && _fm_composer_agy_boundary_row "$trimmed"; then
+        agy_boundary_row=$row
+      fi
     fi
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
@@ -853,21 +849,15 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   done <<EOF
 $pane
 EOF
-  local agy_signal_row=-1
-  if [ "$agy_footer_row" -gt "$agy_prompt_row" ]; then
-    agy_signal_row=$agy_footer_row
+  local agy_end_row=-1
+  if [ "$agy_prompt_row" -ge 0 ]; then
+    if [ "$agy_boundary_row" -ge 0 ]; then
+      agy_end_row=$((agy_boundary_row - 1))
+    else
+      agy_end_row=$agy_last_nonempty_row
+    fi
   fi
-  if [ "$agy_model_row" -gt "$agy_prompt_row" ] \
-     && { [ "$agy_signal_row" -lt 0 ] || [ "$agy_model_row" -lt "$agy_signal_row" ]; }; then
-    agy_signal_row=$agy_model_row
-  fi
-  if [ "$agy_bottom_separator" -gt "$agy_prompt_row" ] \
-     && { [ "$agy_footer_row" -gt "$agy_bottom_separator" ] \
-          || [ "$agy_model_row" -gt "$agy_bottom_separator" ]; }; then
-    agy_signal_row=$agy_bottom_separator
-  fi
-  if [ "$agy_prompt_row" -ge 0 ] && [ "$agy_signal_row" -gt "$agy_prompt_row" ]; then
-    agy_end_row=$((agy_signal_row - 1))
+  if [ "$agy_prompt_row" -ge 0 ] && [ "$agy_end_row" -ge "$agy_prompt_row" ]; then
     FM_COMPOSER_SCAN_AGY_ROW=$agy_prompt_row
     FM_COMPOSER_SCAN_AGY_END=$agy_end_row
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$agy_prompt_row" ] \
@@ -1050,12 +1040,12 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
-_fm_composer_agy_separator_row() {  # <trimmed-row>
+_fm_composer_agy_boundary_row() {  # <trimmed-row>
   local row=$1
   case "$row" in
-    ''|*[!─-]*) return 1 ;;
+    ''|*[!─-╿=_-]*) return 1 ;;
   esac
-  [ "${#row}" -ge 8 ]
+  return 0
 }
 
 _fm_composer_agy_model_footer() {  # <trimmed-row>
@@ -1183,7 +1173,7 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_LEFTBAR_START
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_LEFTBAR_END
   fi
-  if [ "$FM_COMPOSER_SCAN_AGY_ROW" -gt "$generic" ]; then
+  if [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ]; then
     generic=$FM_COMPOSER_SCAN_AGY_ROW
     FM_COMPOSER_SELECTED_KIND=agy
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_AGY_ROW
@@ -1356,6 +1346,15 @@ EOF
     if [ "$FM_COMPOSER_SCAN_UNSAFE" = 1 ]; then
       printf 'unknown'; return 0
     fi
+    if [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
+       && [ "$cy" -ge "$FM_COMPOSER_SCAN_AGY_ROW" ] \
+       && { [ "$cy" -le "$FM_COMPOSER_SCAN_AGY_END" ] || \
+            { [ "$cy" -eq $((FM_COMPOSER_SCAN_AGY_END + 1)) ] \
+              && _fm_composer_agy_boundary_row "$(_fm_composer_screen_row "$cy" "$plain")"; }; }; then
+      _fm_composer_classify_agy_rows "$screen" "$styled" \
+        "$FM_COMPOSER_SCAN_AGY_ROW" "$FM_COMPOSER_SCAN_AGY_END"
+      return 0
+    fi
     if [ "$FM_COMPOSER_SCAN_BOX_TOP" -ge 0 ]; then
       _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SCAN_BOX_AMBIG" \
         "$((FM_COMPOSER_SCAN_BOX_TOP + 1))" "$((FM_COMPOSER_SCAN_BOX_BOTTOM - 1))"
@@ -1366,15 +1365,6 @@ EOF
        && [ "$cy" -le "$FM_COMPOSER_SCAN_LEFTBAR_END" ]; then
       _fm_composer_classify_leftbar "$screen" "$styled" \
         "$FM_COMPOSER_SCAN_LEFTBAR_START" "$FM_COMPOSER_SCAN_LEFTBAR_END"
-      return 0
-    fi
-    if [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
-       && [ "$cy" -ge "$FM_COMPOSER_SCAN_AGY_ROW" ] \
-       && { [ "$cy" -le "$FM_COMPOSER_SCAN_AGY_END" ] || \
-            { [ "$cy" -eq $((FM_COMPOSER_SCAN_AGY_END + 1)) ] \
-              && _fm_composer_agy_separator_row "$(_fm_composer_screen_row "$cy" "$plain")"; }; }; then
-      _fm_composer_classify_agy_rows "$screen" "$styled" \
-        "$FM_COMPOSER_SCAN_AGY_ROW" "$FM_COMPOSER_SCAN_AGY_END"
       return 0
     fi
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ] && [ "$cy" -eq "$FM_COMPOSER_SCAN_BARE_ROW" ]; then
