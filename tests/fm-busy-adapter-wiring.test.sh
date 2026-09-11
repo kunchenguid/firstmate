@@ -443,6 +443,27 @@ test_agy_hooks_refuse_symlinked_root() {
   pass "agy spawn refuses symlinked hook roots without touching their targets"
 }
 
+test_agy_hooks_refuse_symlinked_file() {
+  local rec id=busy-agy-file-symlink out status state target settings
+  rec=$(make_spawn_case agy-file-symlink agy "$id")
+  read_case_record "$rec"
+  state="$HOME_DIR/state"
+  target="$CASE_DIR/foreign-hooks.json"
+  settings="$state/$id.agy-hooks/.agents/hooks.json"
+  printf '%s\n' untouched > "$target"
+  mkdir -p "$(dirname "$settings")"
+  ln -s "$target" "$settings"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "agy spawn must refuse a symlinked hook file: $out"
+  assert_contains "$out" "$settings" \
+    "agy file-symlink refusal must name the hook file: $out"
+  [ "$(cat "$target")" = untouched ] \
+    || fail "agy spawn modified the symlinked hook target"
+  assert_absent "$target.tmp" "agy spawn must not create a target-side temporary file"
+  pass "agy spawn refuses symlinked hook files without touching their targets"
+}
+
 test_agy_hooks_stale_incarnation_harmless() {
   local rec id=busy-agy-2 out state settings
   rec=$(make_spawn_case agy-stale agy "$id")
@@ -582,6 +603,7 @@ test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_agy_hooks_semantic_lifecycle
 test_agy_hooks_refuse_symlinked_root
+test_agy_hooks_refuse_symlinked_file
 test_agy_hooks_stale_incarnation_harmless
 test_agy_hooks_are_removed_by_teardown
 test_non_agy_hooks_are_preserved_by_teardown

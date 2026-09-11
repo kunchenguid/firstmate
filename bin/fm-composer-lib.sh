@@ -1047,17 +1047,21 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
 }
 
 _fm_composer_agy_boundary_row() {  # <trimmed-row>
-  local row=$1 hex
-  [ -n "$row" ] || return 1
-  hex=$(LC_ALL=C printf '%s' "$row" | LC_ALL=C od -An -tx1 -v | LC_ALL=C tr -d '[:space:]') || return 1
-  [ -n "$hex" ] || return 1
-  while [ -n "$hex" ]; do
-    case "$hex" in
-      2d*|3d*|5f*) hex=${hex#??} ;;
-      e294[89ab][0-9a-f]*) hex=${hex#??????} ;;
-      e295[89ab][0-9a-f]*) hex=${hex#??????} ;;
-      *) return 1 ;;
+  local LC_ALL=C s=$1 b1 b2 b3
+  s=${s// /}
+  [ -n "$s" ] || return 1
+  while [ -n "$s" ]; do
+    case "$s" in
+      -*|=*|_*) s=${s:1}; continue ;;
     esac
+    [ ${#s} -ge 3 ] || return 1
+    printf -v b1 '%d' "'${s:0:1}"
+    printf -v b2 '%d' "'${s:1:1}"
+    printf -v b3 '%d' "'${s:2:1}"
+    [ "$b1" -eq 226 ] || return 1
+    [ "$b2" -eq 148 ] || [ "$b2" -eq 149 ] || return 1
+    [ "$b3" -ge 128 ] && [ "$b3" -le 191 ] || return 1
+    s=${s:3}
   done
   return 0
 }

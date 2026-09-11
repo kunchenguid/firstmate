@@ -2162,6 +2162,56 @@ agy_prepare_hook_root() {
   AGY_HOOK_SETTINGS=$agents_real/hooks.json
 }
 
+agy_prepare_hook_file() {
+  local path=$1 state_root=$2 parent_real owner
+  if [ -L "$path" ]; then
+    echo "error: refusing symlinked agy hook file $path" >&2
+    return 1
+  fi
+  parent_real=$(cd -P -- "$(dirname -- "$path")" && pwd -P) || {
+    echo "error: could not resolve agy hook file parent $path" >&2
+    return 1
+  }
+  case "$parent_real/" in
+    "$state_root/"*) ;;
+    *)
+      echo "error: agy hook file escaped firstmate state: $path" >&2
+      return 1
+      ;;
+  esac
+  if [ -e "$path" ]; then
+    [ -L "$path" ] && {
+      echo "error: refusing symlinked agy hook file $path" >&2
+      return 1
+    }
+    [ -f "$path" ] || {
+      echo "error: refusing non-regular agy hook file $path" >&2
+      return 1
+    }
+    owner=$(stat -c %u "$path" 2>/dev/null || stat -f %u "$path" 2>/dev/null) || {
+      echo "error: could not inspect agy hook file $path" >&2
+      return 1
+    }
+    [ "$owner" = "$(id -u)" ] || {
+      echo "error: refusing agy hook file not owned by the current user $path" >&2
+      return 1
+    }
+  fi
+}
+
+agy_write_hook_file() {
+  local path=$1 state_root=$2
+  agy_prepare_hook_file "$path" "$state_root" || return 1
+  if [ ! -e "$path" ]; then
+    if ! (set -C; : > "$path"); then
+      echo "error: could not create agy hook file $path" >&2
+      return 1
+    fi
+  fi
+  agy_prepare_hook_file "$path" "$state_root" || return 1
+  cat > "$path"
+}
+
 # rovo confines every file-tool operation (open_files, create_file, grep, ...)
 # to its worktree by default; toolPermissions.allowedExternalPaths
 # (~/.rovo/config.yml) is the only lift, and it must be granted at launch
@@ -3548,7 +3598,7 @@ EOF
         a_stop=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 && touch $(shell_quote "$TURNEND") || true; printf '{}'")
         agy_prepare_hook_root "$STATE_REAL/$ID.agy-hooks" "$STATE_REAL" || exit 1
         [ "$RELAUNCH" -eq 1 ] || SPAWN_FRESH_WIRING_PENDING=1
-        cat > "$AGY_HOOK_SETTINGS" <<EOF
+        agy_write_hook_file "$AGY_HOOK_SETTINGS" "$STATE_REAL" <<EOF || exit 1
 {"firstmate":{"PreInvocation":[{"command":"$a_pre"}],"PostToolUse":[{"command":"$a_progress"}],"Stop":[{"command":"$a_stop"}]}}
 EOF
       fi
