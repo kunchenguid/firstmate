@@ -1134,6 +1134,9 @@ clear_relaunch_harness_wiring() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     if [ -d "$path" ] && [ ! -L "$path" ]; then
+      if [ "$harness" != agy ] || [ "$path" != "$state/$id.agy-hooks" ]; then
+        return 1
+      fi
       rm -rf -- "$path" || return 1
     else
       rm -f -- "$path" || return 1
@@ -3450,7 +3453,7 @@ EOF
         busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
         busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source agy-hook"
         a_pre=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '{}'")
-        a_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true; printf '{}'")
+        a_stop=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 && touch $(shell_quote "$TURNEND") || true; printf '{}'")
         AGY_HOOK_ROOT="$STATE_REAL/$ID.agy-hooks"
         mkdir -p "$AGY_HOOK_ROOT/.agents"
         cat > "$AGY_HOOK_ROOT/.agents/hooks.json" <<EOF

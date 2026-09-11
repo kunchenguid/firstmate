@@ -424,11 +424,34 @@ test_agy_hooks_stale_incarnation_harmless() {
   state="$HOME_DIR/state"
   settings="$state/$id.agy-hooks/.agents/hooks.json"
   "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  rm -f "$state/$id.turn-ended"
   run_agy_hook "$settings" PreInvocation >/dev/null \
     || fail "a stale agy hook must still exit 0"
   [ "$(classify agy "$id" "$state")" = "busy fm-spawn" ] \
     || fail "a stale agy hook must not change the current incarnation"
-  pass "agy hook events from a superseded incarnation are harmless"
+  run_agy_hook "$settings" Stop >/dev/null \
+    || fail "a stale agy Stop hook must still exit 0"
+  [ ! -e "$state/$id.turn-ended" ] \
+    || fail "a stale agy Stop hook must not publish the replacement turn-ended wake"
+  [ "$(classify agy "$id" "$state")" = "busy fm-spawn" ] \
+    || fail "a stale agy Stop hook must not change the current incarnation"
+  pass "agy hook events from a superseded incarnation cannot publish state or wake markers"
+}
+
+test_agy_hooks_are_removed_by_teardown() {
+  local rec id=busy-agy-teardown out state settings teardown_out teardown_rc=0
+  rec=$(make_spawn_case agy-teardown agy "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "agy spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$state/$id.agy-hooks"
+  assert_present "$settings/.agents/hooks.json" "agy teardown fixture did not write hooks"
+  teardown_out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1) || teardown_rc=$?
+  expect_code 0 "$teardown_rc" "agy teardown should succeed: $teardown_out"
+  assert_absent "$settings" "normal teardown must remove agy's private hook directory"
+  pass "agy private hook directories are retired by normal teardown"
 }
 
 test_raw_agy_launch_has_no_semantic_wiring() {
@@ -503,6 +526,7 @@ test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_agy_hooks_semantic_lifecycle
 test_agy_hooks_stale_incarnation_harmless
+test_agy_hooks_are_removed_by_teardown
 test_raw_agy_launch_has_no_semantic_wiring
 test_raw_gemini_launch_has_no_semantic_wiring
 test_gemini_is_refused_as_a_secondmate

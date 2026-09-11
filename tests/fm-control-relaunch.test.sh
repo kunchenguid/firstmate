@@ -532,6 +532,23 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
 }
 
+test_unexpected_directory_at_file_wiring_refuses_for_claude() {
+  local dir out rc=0 hook
+  dir=$(new_case wrongtype rl44)
+  add_ship_task "$dir" rl44 claude
+  hook="$dir/wt/.claude/settings.local.json"
+  mkdir -p "$hook/nested"
+  printf 'user content\n' > "$hook/nested/file"
+  out=$(run_control "$dir" rl44 relaunch --note "preserve wrong-type wiring") || rc=$?
+  expect_code 1 "$rc" "a Claude file-path directory must refuse relaunch"
+  assert_contains "$out" "could not retire claude wiring" \
+    "the refusal should identify the unsupported directory artifact"
+  [ -f "$hook/nested/file" ] || fail "an unexpected Claude directory must not be recursively deleted"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "a refused relaunch must not launch a replacement"
+  pass "relaunch keeps recursive deletion restricted to agy's owned directory artifact"
+}
+
 test_harness_switch_does_not_carry_the_old_profile_axes() {
   local dir out rc
   dir=$(new_case profile rl5)
@@ -1566,6 +1583,7 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
+test_unexpected_directory_at_file_wiring_refuses_for_claude
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
