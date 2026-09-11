@@ -8,20 +8,24 @@ import { files, snapshot, publishEvent } from '../src/index.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const home = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fm-modules-')); fs.mkdirSync(path.join(dir, 'state')); return fs.realpathSync(dir); };
 test('real filesystem adapter composes with snapshot, watches events and rejects private paths', async () => {
-  const dir = home(); let close;
+  const dir = home(); let close, timer, writer;
   try {
     fs.writeFileSync(path.join(dir, 'state/a.meta'), 'harness=pi\nmodel=small');
     const source = files(dir), now = Date.now() / 1000; assert.equal(snapshot(source, now).workers[0].harness, 'pi');
     assert.throws(() => source.read('state/a.meta/../../.pi/auth.json'), /allow-list/);
     fs.symlinkSync(path.join(dir, 'state/a.meta'), path.join(dir, 'state/b.meta')); assert.equal(source.read('state/b.meta'), null); assert.equal(snapshot(source, now).workers.length, 1);
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(Error('watch event missing')), 5000);
-      close = source.watch(error => { clearTimeout(timer); error ? reject(error) : resolve(); });
-      fs.writeFileSync(path.join(dir, 'state/a.status'), 'working: changed');
+      // Hang backstop only: filesystem notification latency is not a performance contract.
+      timer = setTimeout(() => reject(Error('watch event missing')), 60000);
+      close = source.watch(error => { error ? reject(error) : resolve(); });
+      // fs.watch has no portable ready event; keep producing changes until one is observed.
+      const write = () => fs.writeFileSync(path.join(dir, 'state/a.status'), 'working: changed');
+      writer = setInterval(write, 100);
+      write();
     });
     assert.equal(snapshot(source, now).workers[0].last, 'working: changed');
     fs.writeFileSync(path.join(dir, 'state/a.status'), '0123456789'); assert.equal(files(dir, { maxBytes: 5 }).read('state/a.status').text, '56789');
-  } finally { close?.(); fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { clearTimeout(timer); clearInterval(writer); close?.(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 test('real module event uses registered capture and wake, never changes the original task', async () => {
   const dir = home(), id = '0123456789abcdef01234567', previous = process.env.FM_PROCEVENT_CLAIM_ROOT;
