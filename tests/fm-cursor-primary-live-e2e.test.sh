@@ -177,6 +177,8 @@ LIVE_PARKS=$(pgrep -f "$HOME_DIR/bin/fm-turnend-guard-cursor.sh" 2>/dev/null | w
 pass "cursor primary: the captain keeps control and the older park stands down after the next stop claim"
 
 # --- 4. away-mode escalation delivery ---------------------------------------
+# inject_msg types only a short pointer to a digest file, so the token below
+# lives only in that file: seeing it on the pane proves Cursor read the digest.
 
 : > "$HOME_DIR/state/.afk"
 AWAY_TOKEN="AWAY_ACK_$$"

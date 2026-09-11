@@ -131,7 +131,7 @@ So a guard false-positive becomes a visible stall, never an unbounded silent no-
 
 ### Submit model
 
-The digest is typed **once** (`send-keys -l` on tmux, `pane send-text` on
+The pointer line is typed **once** (`send-keys -l` on tmux, `pane send-text` on
 herdr - both literal, non-submitting sends), then submitted with Enter and
 **verified** through the selected backend's submit primitive.
 Enter is retried (Enter only, never a retype) until the backend confirms the
@@ -149,7 +149,7 @@ The daemon still clears its buffer only on the backend's `empty` success verdict
 
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, presents every durable wake after each actionable watcher close, classifies each presented record in bash, and acknowledges the presented generation only after routing completes.
 It self-handles the routine majority without consuming a firstmate turn.
-Captain-relevant events, plus a bounded recheck of a declared external wait that is still declared, escalate to firstmate's context as one pre-read, single-line, batched digest.
+Captain-relevant events, plus a bounded recheck of a declared external wait that is still declared, escalate to firstmate's context as one pre-read, batched digest.
 The captain-relevant verb set, declared-wait vocabulary, status-span classifier, and presentation-marker contract live in shared `bin/fm-classify-lib.sh`, while each supervisor owns its routing and fleet scan as a consumer of that policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
 
@@ -175,17 +175,15 @@ Classify each wake this way:
   The daemon runs its own cheap bash fleet scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for captain-relevant events still unread by the per-wake classifier.
 - An unknown wake reason escalates fail-safe, while status-read uncertainty follows the shared one-report-without-position-advance contract referenced under Dedupe below.
 
-Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
-immediate) and flushed as one single-line digest prefixed with the current
-operational prefix, carrying pre-read status summaries and a recommended action.
-The single-line format makes the submission unambiguous across harnesses, and
-the operational prefix lets firstmate distinguish it from a real captain message.
+Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 = immediate) and flushed as one digest carrying pre-read status summaries and a recommended action.
+The daemon writes that digest to its own `state/.subsuper-digest-*` file and types only one short line: the operational prefix, then `Supervisor escalate: read the digest at <file>`.
+On that line, read the named file and handle every event in it; the line is internal escalation like any other marked message.
+The operational prefix lets firstmate distinguish it from a real captain message.
 
 ### Injection hardening
 
-- **Single-line digest** - embedded newlines are collapsed to a literal
-  separator before injection, so submission is unambiguous regardless of
-  harness.
+- **Short pointer line** - the digest never travels through the composer, because a long typed line reaches the harness in several terminal reads and loses its head, prefix included.
+  The typed line only names the digest file, stays within `INJECT_LINE_MAX_BYTES`, and has its newlines collapsed so Enter is unambiguous; `bin/fm-supervise-daemon.sh` `inject_msg` owns the mechanism and [`docs/verification/runtime-backends.md`](../../../docs/verification/runtime-backends.md) "Away-mode transport" the evidence.
 - **Busy and composer guards on the supervisor pane** - before injecting, the daemon runs the detected-primary-harness rendered busy guard and reads `fm_backend_composer_state` directly.
   Only `empty` permits injection; `pending` protects half-typed or swallowed input, and `unknown` protects unreadable panes and bare dead-shell prompts.
   Every other result preserves the buffer for retry, so the daemon never merges its digest into the captain's half-typed line or types it into a shell.
@@ -203,7 +201,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
   applicable, and a backend-independent active alert. A
   composer false-positive surfaces as a visible stall, never an unbounded silent
   no-op.
-- **Verified type-once submit model** - the digest is typed once (`send-keys -l`
+- **Verified type-once submit model** - the pointer line is typed once (`send-keys -l`
   on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit
   primitive reports `empty` as its caller-facing success verdict.
@@ -211,8 +209,8 @@ the operational prefix lets firstmate distinguish it from a real captain message
   For herdr's idle-baseline path it means native agent-state observed a turn start, the shared classifier proved the composer cleared, or the shared queued-Enter verdict proved delivery while busy.
   This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
 - **Marker strip** - `strip_injection_marker` removes the current operational
-  prefix or legacy bare marker before classification or relay, so the digest
-  text firstmate sees is clean.
+  prefix or legacy bare marker before classification or relay, so the text
+  firstmate sees is clean.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
 - **Dedupe across signal/stale/scan** - all three paths use the shared status presentation markers defined by `bin/fm-classify-lib.sh`, so a successfully classified span is not re-escalated by another path in the same digest.

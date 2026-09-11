@@ -361,7 +361,7 @@ family_for_basename() {
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
     fm-calm-claude-mod-plugin.test.sh|fm-calm-claude-mod-live-e2e.test.sh|\
-    fm-herdr-submit-confirm-live-e2e.test.sh)
+    fm-herdr-submit-confirm-live-e2e.test.sh|fm-afk-inject-prefix-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -667,6 +667,7 @@ portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-contract.test.sh 15645
 tests/fm-afk-inject-e2e.test.sh 35889
+tests/fm-afk-inject-prefix-live-e2e.test.sh 23
 tests/fm-afk-pi-herdr-return-e2e.test.sh 45
 tests/fm-afk-return.test.sh 20385
 tests/fm-agy-harness.test.sh 47933
