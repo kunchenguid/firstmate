@@ -90,7 +90,9 @@
 #   route independently; relaunches and persistent supervisors retain their
 #   existing explicit routing paths. No service is auto-started.
 #   --task-class records the intake classification in model telemetry; absent stays
-#   unresolved for compatibility. --exploration records firstmate's deliberate
+#   unresolved for compatibility, and a fresh ship or scout spawn prints one stderr
+#   warning naming that default without changing the recorded value.
+#   --exploration records firstmate's deliberate
 #   model/effort rotation, requires both axes explicitly, and is accepted only
 #   for a ship classified as bounded-implementation-proven-root-fix behind the
 #   no-mistakes delivery path.
@@ -1866,6 +1868,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+if [ "$RELAUNCH" -eq 0 ] && [ "$TASK_CLASS_SET" -eq 0 ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+  echo "warning: --task-class absent; model telemetry records taskClass=unresolved" >&2
+fi
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
     echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2

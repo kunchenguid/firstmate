@@ -41,12 +41,13 @@ EOF
 
 run_spawn() {
   local home=$1 worktree=$2 fakebin=$3 id=$4 project=$5
+  shift 5
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$worktree" TMUX='fake,1,0' \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$project" --harness pi --mode direct-PR --yolo off 2>&1
+    "$SPAWN" "$id" "$project" --harness pi --mode direct-PR --yolo off "$@" 2>&1
 }
 
 write_treehouse_refusal_fake() {
@@ -533,9 +534,42 @@ test_telemetry_consumer_reads_refusal() {
   pass "the spawn-failures consumer lists a recorded lease refusal"
 }
 
+test_absent_task_class_warns_unresolved() {
+  local case_data id out status ledger warning
+  warning='warning: --task-class absent; model telemetry records taskClass=unresolved'
+  id=task-class-absent-z9
+  case_data=$(make_case task-class-absent "$id")
+  read_case "$case_data"
+  fm_test_write_active_treehouse_fake "$FAKEBIN_DIR"
+  out=$(run_spawn "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 0 "$status" "a ship launch without --task-class should still spawn: $out"
+  assert_contains "$out" "$warning" \
+    "a ship launch without --task-class did not warn that telemetry records unresolved"
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  jq -e 'select(.eventType=="attempt-intake") | .intake.taskClass=="unresolved"' "$ledger" >/dev/null \
+    || fail "absent --task-class changed the recorded intake class"
+
+  id=task-class-set-z10
+  case_data=$(make_case task-class-set "$id")
+  read_case "$case_data"
+  fm_test_write_active_treehouse_fake "$FAKEBIN_DIR"
+  out=$(run_spawn "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR" \
+    --task-class rote-reversible-edit)
+  status=$?
+  expect_code 0 "$status" "a ship launch with --task-class should still spawn: $out"
+  assert_not_contains "$out" "$warning" \
+    "an explicit --task-class still printed the absent-flag warning"
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  jq -e 'select(.eventType=="attempt-intake") | .intake.taskClass=="rote-reversible-edit"' "$ledger" >/dev/null \
+    || fail "explicit --task-class was not recorded on intake"
+  pass "absent --task-class warns once; an explicit class keeps the warning off"
+}
+
 test_lease_cause_builder
 test_lease_refusal_records_reason
 test_lease_refusal_surfaces_actionable_treehouse_error
+test_absent_task_class_warns_unresolved
 test_lease_refusal_without_path_records_reason
 test_recorded_writer_refusal_records_reason
 test_ledger_write_failure_does_not_retry
