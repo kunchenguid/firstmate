@@ -44,9 +44,10 @@
 # Aging is a projection safety net only; the durable
 # deferral remains re-holding with --until.
 #
-# Charted Next gates are ordered by durable filed date, newest first, before the
-# FM_BEARINGS_GATES bound is applied. Gates without a comparable filed date keep
-# their input order after dated gates.
+# Ordinary Charted Next gates are ordered by durable filed date, newest first,
+# before the FM_BEARINGS_GATES bound is applied. Gates without a comparable filed
+# date keep their input order after dated gates. The synthetic (return-catchup)
+# posture row is reserved ahead of that ordering and bound so it always surfaces.
 #
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
