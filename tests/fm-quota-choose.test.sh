@@ -247,10 +247,8 @@ fi
 [ "$err" = "error: unknown harness: bogus" ] || fail "unknown harness returned: $err"
 ok "unknown harness fails closed"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate agy:default 2>&1); then
-  fail "trailing unsupported harness was hidden by an earlier selection"
-fi
-[ "$err" = "error: unknown harness: agy" ] || fail "trailing unsupported harness returned: $err"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate agy:default)
+[ "$out" = "claude default" ] || fail "trailing agy candidate changed the earlier selection: $out"
 
 if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate 'claude:' 2>&1); then
   fail "trailing empty model was hidden by an earlier selection"
@@ -551,11 +549,12 @@ fi
 [ "$out" = "none" ] || fail "exhausted Meta quota returned: $out"
 ok "Muse uses Meta quota"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:default 2>&1); then
-  fail "unsupported harness unexpectedly dispatched"
-fi
-[ "$err" = "error: unknown harness: agy" ] || fail "unsupported harness returned: $err"
-ok "unsupported harness is rejected"
+agy_warning="$LAB/agy-warning"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:gemini-3.8-flash 2>"$agy_warning")
+[ "$out" = "agy gemini-3.8-flash" ] || fail "agy candidate was not kept eligible: $out"
+grep -Fxq 'warning: agy gemini-3.8-flash remains eligible with unmeasurable quota headroom' \
+  "$agy_warning" || fail "agy candidate did not disclose unmeasurable quota headroom"
+ok "agy candidate remains eligible with disclosed unmeasurable quota"
 
 jq '.providers += [.providers[] | select(.provider == "claude")]' "$LAB/captured.json" > "$DUPLICATE"
 if err=$(call_choose --snapshot "$DUPLICATE" --candidate claude:default 2>&1); then

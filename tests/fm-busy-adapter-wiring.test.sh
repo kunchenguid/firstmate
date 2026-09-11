@@ -459,6 +459,29 @@ SH
   pass "agy private hook directories are retired by normal teardown"
 }
 
+test_non_agy_hooks_are_preserved_by_teardown() {
+  local rec id=busy-claude-agy-name out state hooks teardown_out teardown_rc=0
+  rec=$(make_spawn_case claude-agy-name claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "non-agy spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$state/$id.agy-hooks"
+  mkdir -p "$hooks"
+  printf '%s\n' sentinel > "$hooks/unrelated"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/treehouse"
+  teardown_out=$(PATH="$FAKEBIN_DIR:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1) || teardown_rc=$?
+  expect_code 0 "$teardown_rc" "non-agy teardown should succeed: $teardown_out"
+  assert_present "$hooks/unrelated" \
+    "teardown must preserve a same-ID agy hook directory owned by another harness"
+  pass "non-agy teardown preserves same-ID agy hook artifacts"
+}
+
 test_raw_agy_launch_has_no_semantic_wiring() {
   local rec id=busy-agy-raw out state
   rec=$(make_spawn_case agy-raw agy "$id")
@@ -532,6 +555,7 @@ test_gemini_hooks_stale_incarnation_harmless
 test_agy_hooks_semantic_lifecycle
 test_agy_hooks_stale_incarnation_harmless
 test_agy_hooks_are_removed_by_teardown
+test_non_agy_hooks_are_preserved_by_teardown
 test_raw_agy_launch_has_no_semantic_wiring
 test_raw_gemini_launch_has_no_semantic_wiring
 test_gemini_is_refused_as_a_secondmate

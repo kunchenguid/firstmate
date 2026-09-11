@@ -707,6 +707,20 @@ test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
   pass "fm_composer_classify_screen: agy uses cursor divergence and model-footer proof for multiline drafts"
 }
 
+test_agy_prompt_preserves_furniture_looking_drafts() {
+  local caps=$'styled=0\ncursor=1' out extract screen
+  for draft in '? for shortcuts' '────────'; do
+    screen=$'> '"$draft"$'\n? for shortcuts\nGemini 3.8 Flash · low'
+    out=$(fm_composer_classify_screen "$caps" "$screen" 0)
+    [ "$out" = pending ] \
+      || fail "agy draft '$draft' must classify pending, got '$out'"
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+    [ "$extract" = "$draft" ] \
+      || fail "agy draft '$draft' must extract verbatim, got '$extract'"
+  done
+  pass "fm_composer: agy preserves prompt-row drafts that resemble furniture"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -741,6 +755,7 @@ test_selected_content_is_composer_scoped_and_wrap_normalized
 test_agy_prompt_requires_footer_proof
 test_agy_prompt_requires_footer_proof_without_cursor
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts
+test_agy_prompt_preserves_furniture_looking_drafts
 
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out

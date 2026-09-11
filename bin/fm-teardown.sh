@@ -422,6 +422,7 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+TEARDOWN_META_HARNESS=$(fm_meta_get "$META" harness)
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0
@@ -2937,8 +2938,18 @@ preflight_firstmate_home_herdr_children() {  # <home>
   done
 }
 
+retire_agy_hook_root() {
+  local hook_root=$1 record_label=$2
+  if [ -e "$hook_root" ] || [ -L "$hook_root" ]; then
+    if ! rm -rf -- "$hook_root" || [ -e "$hook_root" ] || [ -L "$hook_root" ]; then
+      echo "error: agy hook root $hook_root could not be removed; retaining $record_label" >&2
+      return 1
+    fi
+  fi
+}
+
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_harness child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2947,6 +2958,7 @@ cleanup_firstmate_home_children() {
     child_wt=$(meta_value "$child_meta" worktree)
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
+    child_harness=$(meta_value "$child_meta" harness)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
     if [ "$child_backend" = orca ]; then
@@ -3027,6 +3039,9 @@ cleanup_firstmate_home_children() {
         fi
       fi
     fi
+    if [ "$child_harness" = agy ]; then
+      retire_agy_hook_root "$sub_state/$child_id.agy-hooks" "child $child_id's durable identity record" || return 1
+    fi
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
@@ -3043,6 +3058,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
       "$sub_state/.$child_id.branch-outcome-index"
+    [ "$child_harness" = agy ] || continue
     rm -rf "$sub_state/$child_id.agy-hooks"
   done
 }
@@ -3444,6 +3460,9 @@ if [ "$KIND" = secondmate ]; then
     || { echo "error: receiver wake cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
   remove_secondmate_registry_entry "$ID"
 fi
+if [ "$TEARDOWN_META_HARNESS" = agy ]; then
+  retire_agy_hook_root "$STATE/$ID.agy-hooks" "$ID's durable task record" || exit 1
+fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
@@ -3461,7 +3480,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/.$ID.branch-outcome-index"
-rm -rf "$STATE/$ID.agy-hooks"
+[ "$TEARDOWN_META_HARNESS" = agy ] && rm -rf "$STATE/$ID.agy-hooks"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.

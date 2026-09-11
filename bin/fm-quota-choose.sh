@@ -9,8 +9,9 @@
 # in order, it maps <harness> to its primary provider family, then applies the
 # provider-wide scopes and exact model or product scopes for <model>. A candidate
 # is eligible only when no applicable runway is `exhausted_now` and its known
-# effective percent remaining is greater than zero. The first eligible
-# candidate is printed as "<harness> <model>" and the script exits 0.
+# effective percent remaining is greater than zero, except agy whose quota
+# headroom is unmeasurable. The first eligible candidate is printed as
+# "<harness> <model>" and the script exits 0.
 # If no candidate is quota-eligible, it prints "none" and exits 1.
 #
 # Candidates are accepted as `--candidate <harness:model>` or as positional
@@ -332,6 +333,7 @@ provider_for_harness() {
     kimi)         printf 'kimi\n' ;;
     cursor)       printf 'cursor\n' ;;
     muse)         printf 'meta\n' ;;
+    agy)          printf 'agy\n' ;;
     *)            return 1 ;;
   esac
 }
@@ -383,6 +385,11 @@ for c in "${CANDIDATES[@]}"; do
   model=${c#*:}
   [ "$model" = "$c" ] && model="default"
   provider=$(provider_for_harness "$harness" "$model")
+  if [ "$harness" = agy ]; then
+    printf 'warning: agy %s remains eligible with unmeasurable quota headroom\n' "$model" >&2
+    chosen="$harness $model"
+    break
+  fi
   scope_model=$model
   [ "$harness" != omp ] || scope_model=${model#*/}
   effective=$(effective_for_provider_model "$provider" "$scope_model")

@@ -885,7 +885,8 @@ _fm_composer_classify_agy_rows() {  # <screen> <styled> <first-row> <last-row>
       case "$content" in '>'*) content=${content#>} ;; esac
     fi
     fm_composer_normalize_trim_var content
-    if [ -n "$content" ] && ! _fm_composer_agy_furniture_row "$content"; then
+    if [ -n "$content" ] \
+       && { [ "$row" -eq "$first" ] || ! _fm_composer_agy_furniture_row "$content"; }; then
       text_seen=1
       break
     fi
@@ -1285,7 +1286,8 @@ EOF
       agy)
         case "$content" in '>'*) content=${content#>} ;; esac
         fm_composer_normalize_trim_var content
-        if _fm_composer_agy_furniture_row "$content"; then
+        if [ "$row" -gt "$FM_COMPOSER_SELECTED_FIRST" ] \
+           && _fm_composer_agy_furniture_row "$content"; then
           content=
         fi
         ;;
