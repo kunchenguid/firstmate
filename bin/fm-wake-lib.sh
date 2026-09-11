@@ -922,7 +922,7 @@ fm_recovery_marker_reopen_announced() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+  local lockdir=$1 pid steal cur rc steal_owner primary_owner current failure
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -984,8 +984,10 @@ fm_lock_try_acquire() {
   fi
 
   if ! fm_lock_try_acquire "$steal"; then
+    failure=${FM_LOCK_FAILURE:-}
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    FM_LOCK_FAILURE=$failure
     return 1
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
@@ -1029,7 +1031,13 @@ fm_lock_try_acquire() {
     FM_LOCK_OWNER_DIR=
     return 1
   fi
-  fm_lock_remove_path "$lockdir" || true
+  if { [ -e "$lockdir" ] || [ -L "$lockdir" ]; } \
+    && ! fm_lock_remove_path "$lockdir"; then
+    FM_LOCK_FAILURE=stale-remove
+    fm_lock_release "$steal"
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
   rc=1
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
     rc=0
@@ -1048,6 +1056,9 @@ fm_lock_try_acquire() {
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
+    case "${FM_LOCK_FAILURE:-}" in
+      owner-create|stale-remove) return 1 ;;
+    esac
     sleep 0.1
   done
 }
@@ -1097,6 +1108,9 @@ fm_lock_acquire_wait_bounded() {
   if fm_lock_try_acquire "$lockdir"; then
     return 0
   fi
+  case "${FM_LOCK_FAILURE:-}" in
+    owner-create|stale-remove) return 1 ;;
+  esac
 
   fm_current_pid caller_pid || return 1
   # shellcheck disable=SC2016 # Positional parameters expand in the child shell.

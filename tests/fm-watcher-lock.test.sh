@@ -344,6 +344,53 @@ EOF
   pass "a lock creation failure with no existing lock returns at once, never steals"
 }
 
+test_malformed_stale_steal_refuses_without_spinning() {
+  local dir state lockdir fakebin attempts pid i rc=0 count
+  dir=$(make_case malformed-stale-steal)
+  state="$dir/state"
+  lockdir="$state/.pending-reply-0123456789abcdef.lock"
+  fakebin="$dir/fakebin"
+  attempts="$dir/ln-attempts"
+  /bin/ln -s "$lockdir.owner-missing" "$lockdir"
+  mkdir "$lockdir.steal"
+  : > "$lockdir.steal/unexpected"
+  touch -t 200001010000 "$lockdir.steal"
+  : > "$attempts"
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+printf 'attempt\n' >> "$FM_LOCK_LN_ATTEMPTS"
+exec /bin/ln "$@"
+SH
+  chmod +x "$fakebin/ln"
+
+  PATH="$fakebin:$PATH" FM_LOCK_LN_ATTEMPTS="$attempts" FM_LOCK_STALE_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_acquire_wait "$2"' _ "$LIB" "$lockdir" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 20 ] && is_live_non_zombie "$pid"; do
+    count=$(wc -l < "$attempts" 2>/dev/null || printf 0)
+    [ "$count" -le 3 ] || {
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      fail "malformed stale steal retried ln more than three times ($count)"
+    }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$pid" && {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "malformed stale steal never returned from fm_lock_acquire_wait"
+  }
+  wait "$pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "malformed stale steal was unexpectedly acquired"
+  count=$(wc -l < "$attempts" 2>/dev/null || printf 0)
+  [ "$count" -le 3 ] || fail "malformed stale steal retried ln more than three times ($count)"
+  [ -d "$lockdir.steal" ] || fail "malformed stale steal directory was removed"
+  [ ! -e "$lockdir.steal.steal" ] || fail "malformed stale steal left a recursive steal lock"
+  pass "malformed pending-reply steal lock refuses once without spinning"
+}
+
 test_lock_reclaims_crashed_steal_without_primary() {
   local dir state lockdir owner_file owner dead out rc=0 pid
   dir=$(make_case lock-crashed-steal)
@@ -1431,6 +1478,7 @@ test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_create_failure_returns_promptly_without_stealing
+test_malformed_stale_steal_refuses_without_spinning
 test_lock_reclaims_crashed_steal_without_primary
 test_lock_live_steal_without_primary_is_contention
 test_lock_stale_steal_single_winner_under_concurrency

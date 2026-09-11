@@ -104,6 +104,7 @@
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
 #   FM_PENDING_REPLY_NOW          optional fixed epoch for deterministic tests
+#   FM_PENDING_REPLY_LOCK_WAIT_SECS bounded per-correlation lock wait (default 5)
 
 # shellcheck source=bin/fm-marker-lib.sh
 _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PENDING_REPLY_LIB_DIR="."
@@ -133,6 +134,20 @@ fm_pending_reply_grace_secs() {
     ''|*[!0-9]*) g=$FM_PENDING_REPLY_GRACE_DEFAULT ;;
   esac
   printf '%s' "$g"
+}
+
+fm_pending_reply_lock_wait_secs() {
+  local seconds=${FM_PENDING_REPLY_LOCK_WAIT_SECS:-5}
+  case "$seconds" in ''|*[!0-9]*|0) seconds=5 ;; esac
+  printf '%s' "$seconds"
+}
+
+fm_pending_reply_lock_acquire() {  # <lock-path> <corr-id>
+  if fm_lock_acquire_wait_bounded "$1" "$(fm_pending_reply_lock_wait_secs)"; then
+    return 0
+  fi
+  FM_PENDING_REPLY_LOCK_WAIT_FAILED=1
+  return 1
 }
 
 # Directory holding durable pending-reply records for <state-dir>.
@@ -485,7 +500,7 @@ fm_pending_reply_confirm_delivery() {  # <state-dir> <corr_id>
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
+  fm_pending_reply_lock_acquire "$lock" "$corr" || return 1
   _fm_pending_reply_confirm_delivery_locked "$@" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
@@ -566,7 +581,7 @@ fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
+  fm_pending_reply_lock_acquire "$lock" "$corr" || return 1
   _fm_pending_reply_reconcile_delivery_locked "$@" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
@@ -597,7 +612,7 @@ fm_pending_reply_reset_known_undelivered() {  # <state-dir> <corr_id>
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
+  fm_pending_reply_lock_acquire "$lock" "$corr" || return 1
   _fm_pending_reply_reset_known_undelivered_locked "$@" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
@@ -718,7 +733,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
   lock="$state/.pending-reply-$corr.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
+  fm_pending_reply_lock_acquire "$lock" "$corr" || return 1
   _fm_pending_reply_try_resolve_locked "$@" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
@@ -1208,7 +1223,7 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   lock="$state/.pending-reply-$corr.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
+  fm_pending_reply_lock_acquire "$lock" "$corr" || return 1
   _fm_pending_reply_close_escalation_locked "$@" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
@@ -1274,7 +1289,7 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   lock="$state/.pending-reply-$corr.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$lock" || return 1
+  fm_pending_reply_lock_acquire "$lock" "$corr" || return 1
   _fm_pending_reply_maybe_escalate_locked "$@" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
@@ -1508,14 +1523,26 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Scan every pending record for this parent state. Safe to call every poll.
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
+fm_pending_reply_tick_note_lock_skip() {  # <corr-id>
+  local corr=$1
+  [ "${FM_PENDING_REPLY_LOCK_WAIT_FAILED:-0}" = 1 ] || return 1
+  case ",${FM_PENDING_REPLY_TICK_SKIPPED_CORRS:-}," in
+    *,"$corr",*) ;;
+    *) FM_PENDING_REPLY_TICK_SKIPPED_CORRS="${FM_PENDING_REPLY_TICK_SKIPPED_CORRS:+$FM_PENDING_REPLY_TICK_SKIPPED_CORRS,}$corr" ;;
+  esac
+  return 0
+}
+
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
   local -a observation_tasks=() observation_values=()
+  FM_PENDING_REPLY_TICK_SKIPPED_CORRS=
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
+    FM_PENDING_REPLY_LOCK_WAIT_FAILED=0
     case "$(basename "$rec")" in
       .*) continue ;;
     esac
@@ -1527,9 +1554,11 @@ fm_pending_reply_tick() {  # <state-dir>
       # Cheap no-op unless an escalation for this record is still open; this is
       # the retry that makes the close converge after a transient write failure.
       fm_pending_reply_close_escalation "$state" "$corr" || true
+      fm_pending_reply_tick_note_lock_skip "$corr" && continue
       continue
     fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
+    fm_pending_reply_tick_note_lock_skip "$corr" && continue
     phase=$(fm_pending_reply_get "$rec" phase)
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
     if [ -z "$delivered" ]; then

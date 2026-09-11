@@ -2323,7 +2323,16 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   watcher_heartbeat
+  FM_PENDING_REPLY_LOCK_WAIT_SECS=$WATCH_STEP_TIMEOUT
   fm_pending_reply_tick "$STATE" || true
+  if [ -n "${FM_PENDING_REPLY_TICK_SKIPPED_CORRS:-}" ]; then
+    pending_reply_ifs=$IFS
+    IFS=,
+    for pending_reply_corr in $FM_PENDING_REPLY_TICK_SKIPPED_CORRS; do
+      triage_log "pending-reply reconciliation skipped for $pending_reply_corr after bounded lock wait (${FM_LOCK_FAILURE:-contention})"
+    done
+    IFS=$pending_reply_ifs
+  fi
 
   # Evaluate automatic quota pressure from one snapshot before any later cycle
   # path can send another supervised invocation.

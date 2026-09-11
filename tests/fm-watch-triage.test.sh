@@ -1575,6 +1575,37 @@ test_pending_reply_escalation_signal_payload_marked_for_branch_exclusion() {
   pass "a pending-reply second-mate escalation is marked for main-only routing"
 }
 
+test_pending_reply_lock_failure_is_bounded_and_logged() {
+  local dir state fakebin out corr lock pid
+  dir=$(make_case pending-reply-lock-failure); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; corr=0123456789abcdef
+  mkdir -p "$state/pending-replies"
+  cat > "$state/pending-replies/$corr" <<EOF
+schema=fm-pending-reply.v1
+corr_id=$corr
+task_id=mate
+delivered_epoch=1
+phase=awaiting_report
+EOF
+  lock="$state/.pending-reply-$corr.lock"
+  /bin/ln -s "$lock.owner-missing" "$lock"
+  mkdir "$lock.steal"
+  : > "$lock.steal/unexpected"
+  touch -t 200001010000 "$lock.steal"
+  watch_bg "$state" "$fakebin" "$out" env FM_LOCK_STALE_AFTER=0 FM_WATCHER_STALE_GRACE=3 FM_WATCH_STEP_TIMEOUT=1
+  pid=$!
+  wait_poll_cycle "$state" "$pid" 100 || {
+    reap "$pid"
+    fail "watcher blocked on a malformed pending-reply lock"
+  }
+  grep -F "pending-reply reconciliation skipped for $corr" "$state/.watch-triage.log" >/dev/null \
+    || { reap "$pid"; fail "watcher did not log the skipped pending-reply correlation"; }
+  [ "$(beacon_age "$state")" -lt 3 ] \
+    || { reap "$pid"; fail "watcher beacon went stale while refusing the pending-reply lock"; }
+  reap "$pid"
+  pass "malformed pending-reply lock skips one correlation without stalling the watcher"
+}
+
 test_ordinary_blocked_signal_payload_remains_branch_eligible() {
   local dir state fakebin out status_file pid
   dir=$(make_case ordinary-blocked-payload); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4889,6 +4920,7 @@ test_needs_decision_signal_payload_marked_for_branch_exclusion
 test_needs_decision_reconciliation_required_still_marked
 test_captain_held_signal_payload_marked_for_branch_exclusion
 test_pending_reply_escalation_signal_payload_marked_for_branch_exclusion
+test_pending_reply_lock_failure_is_bounded_and_logged
 test_ordinary_blocked_signal_payload_remains_branch_eligible
 test_routine_signal_payload_not_marked_needs_decision
 test_actionable_signal_survives_a_later_routine_append
