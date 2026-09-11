@@ -1538,11 +1538,14 @@ _fm_composer_agy_strip_ghost() {
   '
 }
 
-# agy 1.2.0 uses a shell-like > inside solid rules. Require native identity,
-# an idle agent and the immediate shortcuts or accept-edits footer; a trust or
-# help dialog must never become an injection target just because old rules
-# remain on screen. Content is read through the agy ghost strip so the palette
-# placeholder never reads as typed input.
+# agy uses a shell-like > inside solid rules. Require native identity, an
+# idle agent and the footer row directly below the close rule: 1.2.0 showed a
+# `? for shortcuts`/`accept-edits · <model> · <effort>` footer that changed
+# with typed input, while 1.2.1 replaced it with a constant status bar
+# (`user@host:pwd | ctx: <pct> ... · 7d: <pct> | <model>`) anchored on its
+# ` | ctx: ` meter; a trust or help dialog must never become an injection
+# target just because old rules remain on screen. Content is read through the
+# agy ghost strip so the palette placeholder never reads as typed input.
 _fm_composer_agy_verdict() {  # <screen> <styled> <agent-status>
   local screen=$1 styled=$2 status=$3 row raw plain content pending=0
   [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] || { printf 'unknown'; return; }
@@ -1550,7 +1553,7 @@ _fm_composer_agy_verdict() {  # <screen> <styled> <agent-status>
   raw=$(_fm_composer_screen_row "$((FM_COMPOSER_SCAN_PI_CLOSE + 1))" "$screen")
   plain=$(printf '%s' "$raw" | fm_composer_strip_ansi)
   fm_composer_normalize_trim_var plain
-  case "$plain" in '? for shortcuts '*' · '*|'accept-edits · '*) ;; *) printf 'unknown'; return ;; esac
+  case "$plain" in '? for shortcuts '*' · '*|'accept-edits · '*|*' | ctx: '*) ;; *) printf 'unknown'; return ;; esac
   row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
   while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")

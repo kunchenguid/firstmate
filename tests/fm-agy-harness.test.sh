@@ -77,3 +77,28 @@ plain_classify() { fm_composer_classify_screen "$plain_caps" "$1" '' "${2-}"; }
 [ "$(plain_classify "$placeholder_screen" $'agy\tidle')" = unknown ] \
   || fail "unstyled placeholder trusted without styling proof"
 pass "agy palette placeholder stays ghost while typed input stays pending"
+
+# Live 2026-09-11 shapes from a real Antigravity CLI 1.2.1 spawn: the footer
+# became a constant status bar (host:pwd | ctx: meter | quota windows | model)
+# that no longer changes with typed input.
+bar_idle_row="${esc}[0m${esc}[38;5;12m>${esc}[0m"
+bar_typed_row="${esc}[0m${esc}[1m> hello${esc}[0m"
+foot_bar='marcin@ai-workspace:/tmp | ctx: 2% (21.1k/1M) | 5h: 5% (resets 15:24) · 7d: 20% | Gemini 3.8 Flash (High)'
+bar_idle_screen="$rule
+$bar_idle_row
+$rule
+$foot_bar"
+bar_typed_screen="$rule
+$bar_typed_row
+$rule
+$foot_bar"
+[ "$(classify "$bar_idle_screen" $'agy\tidle')" = empty ] || fail "1.2.1 bar-footer idle not empty"
+[ "$(classify "$bar_typed_screen" $'agy\tidle')" = pending ] || fail "1.2.1 bar-footer typed input lost"
+[ "$(classify "$bar_typed_screen" $'agy\tworking')" = unknown ] || fail "1.2.1 working bar-footer accepted"
+broken_bar="${foot_bar/| ctx: /| ctxt: }"
+broken_bar_screen="$rule
+$bar_idle_row
+$rule
+$broken_bar"
+[ "$(classify "$broken_bar_screen" $'agy\tidle')" = unknown ] || fail "bar footer accepted without its ctx meter"
+pass "agy 1.2.1 status-bar footer carries both idle and typed verdicts"

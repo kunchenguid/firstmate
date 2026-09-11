@@ -1805,7 +1805,7 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 ## Antigravity (agy)
 
 agy runs crewmate and scout work only; the adapter tool record at `.agents/skills/harness-adapters/references/harness/agy.md` owns the facts.
-The evidence below was produced on 2026-09-10 against Antigravity CLI 1.2.0 on Linux through the Herdr backend inside a named lab session, with the `gemini-3.8-flash-low` model at effort `low`.
+The evidence below was produced on 2026-09-10 against Antigravity CLI 1.2.0 on Linux through the Herdr backend inside a named lab session, with the `gemini-3.8-flash-low` model at effort `low`, and refreshed on 2026-09-11 after an in-fleet auto-update to 1.2.1 changed the composer footer into a constant status bar; the guard below passed end to end against both releases.
 
 The refresh command after any agy upgrade is the live guard:
 

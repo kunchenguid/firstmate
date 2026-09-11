@@ -1,6 +1,6 @@
 # Antigravity CLI
 
-Verified with Antigravity CLI 1.2.0 on Linux on 2026-09-10.
+Verified with Antigravity CLI 1.2.0 and, after an in-fleet auto-update, 1.2.1 on Linux on 2026-09-10 and 2026-09-11.
 Crewmate and scout only; primary and secondmate supervision are unsupported.
 
 | Fact | Observed behavior |
@@ -11,7 +11,7 @@ Crewmate and scout only; primary and secondmate supervision are unsupported.
 | Autonomy | A Bash command ran without a permission prompt after folder trust was accepted. |
 | Model | `--model <id>`; `agy models` lists account-available identifiers. `gemini-3.8-flash-low` completed the live probe. |
 | Effort | CLI help advertises `--effort low\|medium\|high`; low and medium launches displayed the selected effort. |
-| Composer | `>` between solid horizontal rules, followed by a mode/model footer. Empty input shows `? for shortcuts`; typed input hides that hint. A fresh composer before its first submitted prompt shows a mode placeholder (`Accept-edits mode: ...`) in a palette-dim color the shared ghost stripper keeps, so that transient window classifies `pending`; the settled post-turn composer classifies `empty`, and a turn under way classifies `unknown`. Native identity is required to distinguish this shell-like glyph safely. |
+| Composer | `>` between solid horizontal rules, followed by a footer row. In 1.2.0 the footer was `? for shortcuts` plus `accept-edits · <model> · <effort>`, and typed input hid the hint; a fresh composer before its first prompt showed a mode placeholder (`Accept-edits mode: ...`) in a palette-dim color the shared ghost stripper keeps, so that transient window classifies `pending`. In 1.2.1 the footer became a constant status bar (`user@host:pwd | ctx: <pct> (...) | 5h: ... · 7d: ... | <model>`) that no longer changes with typed input. The settled post-turn composer classifies `empty`, and a turn under way classifies `unknown`, under both footers. Native identity is required to distinguish this shell-like glyph safely. |
 | Interrupt | One Escape interrupted the turn and left an empty composer. A running `sleep 30` remained listed as a background task after interruption; interruption does not prove child-command termination. |
 | Exit | `/exit` followed by one Enter returned to the shell and printed a conversation resume command. |
 | Resume | `agy --conversation <id>` restored the observed conversation history. CLI help also advertises `--continue` / `-c`; that alternative was not exercised. |

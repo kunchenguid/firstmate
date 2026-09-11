@@ -81,7 +81,10 @@ for ((i=0; i<120; i++)); do
     lab pane send-keys "$pane" Enter
     trusted=1
   fi
-  if [ -f "$FM_HOME/detected" ] && [[ "$screen" == *'? for shortcuts'* ]]; then
+  # 1.2.0 settled with a `? for shortcuts` hint; 1.2.1 replaced the footer
+  # with a constant status bar anchored on its ` | ctx: ` meter.
+  if [ -f "$FM_HOME/detected" ] \
+     && { [[ "$screen" == *'? for shortcuts'* ]] || [[ "$screen" == *'| ctx: '* ]]; }; then
     ready=1
     break
   fi
