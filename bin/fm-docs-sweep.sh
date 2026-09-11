@@ -11,8 +11,9 @@
 # scoped file inventory with byte/token estimates, exact-duplicate groups,
 # near-duplicate candidates (same-basename files across repos), conflict
 # candidates (canonical instruction files in different repos that share a
-# section heading with diverging bodies), broken local links, stale inline code-path references, and open TODO/
-# checklist extraction, all as bounded JSON to stdout (or --out <path>).
+# section heading with diverging bodies), broken local links, stale inline
+# code-path references, and open TODO/checklist extraction, all as bounded
+# JSON to stdout (or --out <path>).
 #
 # It never calls a model, never touches the network, never deletes or writes
 # a file (unless --out names one), never mutates a Beads store, and never
