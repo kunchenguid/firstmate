@@ -667,7 +667,7 @@ test_selected_content_is_composer_scoped_and_wrap_normalized() {
 }
 
 test_agy_prompt_requires_footer_proof() {
-  local caps='styled=0 cursor=1' out
+  local caps=$'styled=0\ncursor=1' out
   out=$(fm_composer_classify_screen "$caps" $'>\n? for shortcuts Gemini 3.8 Flash · low' 0)
   [ "$out" = empty ] || fail "an idle agy prompt with its footer must read empty, got '$out'"
   out=$(fm_composer_classify_screen "$caps" $'> draft\n? for shortcuts Gemini 3.8 Flash · low' 0)
@@ -684,6 +684,27 @@ test_agy_prompt_requires_footer_proof_without_cursor() {
   out=$(fm_composer_classify_screen 'styled=0' $'> draft\n? for shortcuts Gemini 3.8 Flash · low')
   [ "$out" = pending ] || fail "cursorless typed agy prompt must read pending, got '$out'"
   pass "fm_composer_classify_screen: cursorless agy shape is classified structurally"
+}
+
+test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
+  local cursor_caps=$'styled=1\ncursor=1' cursorless_caps='styled=0' out screen extract
+  screen=$'────────\n> first line\n  second line\n────────\nGemini 3.8 Flash · low'
+  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2)
+  [ "$out" = pending ] || fail "a styled agy multiline draft under the cursor must read pending, got '$out'"
+  out=$(fm_composer_classify_screen "$cursorless_caps" "$screen")
+  [ "$out" = pending ] || fail "a cursorless agy multiline draft must read pending, got '$out'"
+  extract=$(fm_composer_extract_selected_content "$cursor_caps" "$screen")
+  [ "$extract" = 'first line second line' ] \
+    || fail "styled agy extraction lost multiline draft content: '$extract'"
+  extract=$(fm_composer_extract_selected_content "$cursorless_caps" "$screen")
+  [ "$extract" = 'first line second line' ] \
+    || fail "cursorless agy extraction lost multiline draft content: '$extract'"
+  screen=$'output\n>\n? for shortcuts\n$ live shell'
+  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 1)
+  [ "$out" = empty ] || fail "the cursor-anchored agy prompt must remain empty beside a lower shell, got '$out'"
+  out=$(fm_composer_classify_screen "$cursorless_caps" "$screen")
+  [ "$out" = unknown ] || fail "cursorless agy selection must reject a lower shell, got '$out'"
+  pass "fm_composer_classify_screen: agy uses cursor divergence and model-footer proof for multiline drafts"
 }
 
 test_bare_shell_glyphs_are_unknown
@@ -719,6 +740,7 @@ test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
 test_agy_prompt_requires_footer_proof
 test_agy_prompt_requires_footer_proof_without_cursor
+test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts
 
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out

@@ -400,6 +400,9 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # `? for shortcuts` footer, so the shell-looking prompt is accepted only with
 # that independent footer proof.
 FM_COMPOSER_AGY_FOOTER_RE_DEFAULT='^\?[[:space:]]+for shortcuts([[:space:]]|$)'
+# Antigravity hides the shortcuts footer while a draft is present, but keeps
+# the model-and-effort footer below the composer region.
+FM_COMPOSER_AGY_MODEL_RE_DEFAULT='^Gemini[[:space:]].*[[:space:]]·[[:space:]](low|medium|high)$'
 # omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
 # git, and context cells. Verified live through Herdr on omp 18.1.11:
@@ -647,6 +650,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_BARE_ROW=-1
   FM_COMPOSER_SCAN_SHELL_ROW=-1
   FM_COMPOSER_SCAN_AGY_ROW=-1
+  FM_COMPOSER_SCAN_AGY_END=-1
   FM_COMPOSER_SCAN_LEFTBAR_START=-1
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
   FM_COMPOSER_SCAN_PI_PAIR_FOUND=0
@@ -655,7 +659,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local agy_prompt_row=-1 agy_footer_row=-1
+  local agy_prompt_row=-1 agy_footer_row=-1 agy_model_row=-1 agy_end_row=-1
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
   while IFS= read -r line; do
@@ -714,11 +718,19 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       "${FM_COMPOSER_AGY_FOOTER_RE:-$FM_COMPOSER_AGY_FOOTER_RE_DEFAULT}" sensitive; then
       agy_footer_row=$row
     fi
+    if _fm_composer_agy_model_footer "$trimmed"; then
+      agy_model_row=$row
+    fi
+    if [ "$agy_prompt_row" -ge 0 ] && [ "$row" -gt "$agy_prompt_row" ] \
+       && [ "$agy_end_row" -lt "$agy_prompt_row" ] \
+       && _fm_composer_agy_separator_row "$trimmed"; then
+      agy_end_row=$((row - 1))
+    fi
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
     # lower shell prompts as staleness evidence for cursorless selection.
     if [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
-      FM_COMPOSER_SCAN_SHELL_ROW=$row
+      [ "$row" -eq "$agy_prompt_row" ] || FM_COMPOSER_SCAN_SHELL_ROW=$row
     elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_BARE_ROW=$row
     fi
@@ -836,27 +848,43 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   done <<EOF
 $pane
 EOF
-  if [ "$agy_prompt_row" -ge 0 ] && [ "$agy_footer_row" -gt "$agy_prompt_row" ]; then
+  local agy_signal_row=-1
+  if [ "$agy_footer_row" -gt "$agy_prompt_row" ]; then
+    agy_signal_row=$agy_footer_row
+  fi
+  if [ "$agy_model_row" -gt "$agy_prompt_row" ] \
+     && { [ "$agy_signal_row" -lt 0 ] || [ "$agy_model_row" -lt "$agy_signal_row" ]; }; then
+    agy_signal_row=$agy_model_row
+  fi
+  if [ "$agy_prompt_row" -ge 0 ] && [ "$agy_signal_row" -gt "$agy_prompt_row" ]; then
+    if [ "$agy_end_row" -lt "$agy_prompt_row" ]; then
+      agy_end_row=$((agy_signal_row - 1))
+    fi
     FM_COMPOSER_SCAN_AGY_ROW=$agy_prompt_row
+    FM_COMPOSER_SCAN_AGY_END=$agy_end_row
   fi
   if [ -n "$cy" ] && [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ]; then
     FM_COMPOSER_SCAN_UNSAFE=1
   fi
 }
 
-# _fm_composer_classify_agy_row: classify Antigravity CLI's prompt row after
-# the scanner has proved the independent footer signal below it.
-_fm_composer_classify_agy_row() {  # <screen> <styled> <row>
-  local screen=$1 styled=$2 row=$3 raw content
-  raw=$(_fm_composer_screen_row "$row" "$screen")
-  content=$(_fm_composer_row_content "$raw" "$styled")
-  fm_composer_normalize_trim_var content
-  case "$content" in
-    '>'*) content=${content#>} ;;
-    *) printf 'unknown'; return 0 ;;
-  esac
-  fm_composer_normalize_trim_var content
-  [ -n "$content" ] && printf 'pending' || printf 'empty'
+_fm_composer_classify_agy_rows() {  # <screen> <styled> <first-row> <last-row>
+  local screen=$1 styled=$2 first=$3 last=$4 row raw content text_seen=0
+  row=$first
+  while [ "$row" -le "$last" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$screen")
+    content=$(_fm_composer_row_content "$raw" "$styled")
+    if [ "$row" -eq "$first" ]; then
+      case "$content" in '>'*) content=${content#>} ;; esac
+    fi
+    fm_composer_normalize_trim_var content
+    if [ -n "$content" ] && ! _fm_composer_agy_furniture_row "$content"; then
+      text_seen=1
+      break
+    fi
+    row=$((row + 1))
+  done
+  if [ "$text_seen" = 1 ]; then printf 'pending'; else printf 'empty'; fi
 }
 
 # 0 when a mismatched bottom border reads as a legitimate TITLE: the trimmed
@@ -1006,6 +1034,23 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
+_fm_composer_agy_separator_row() {  # <trimmed-row>
+  local row=$1
+  case "$row" in
+    ''|*[!─-]*) return 1 ;;
+  esac
+  [ "${#row}" -ge 8 ]
+}
+
+_fm_composer_agy_model_footer() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_AGY_MODEL_RE:-$FM_COMPOSER_AGY_MODEL_RE_DEFAULT}" sensitive
+}
+
+_fm_composer_agy_furniture_row() {  # <trimmed-row>
+  _fm_composer_agy_separator_row "$1" || _fm_composer_agy_model_footer "$1" || \
+    fm_composer_idle_matches "$1" "${FM_COMPOSER_AGY_FOOTER_RE:-$FM_COMPOSER_AGY_FOOTER_RE_DEFAULT}" sensitive
+}
+
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
 # through <cursor-row> is non-blank and carries no structural edge - the
 # contiguity proof that those rows are the bare composer's wrapped input
@@ -1131,7 +1176,7 @@ _fm_composer_select_cursorless() {
     generic=$FM_COMPOSER_SCAN_AGY_ROW
     FM_COMPOSER_SELECTED_KIND=agy
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_AGY_ROW
-    FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_AGY_ROW
+    FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_AGY_END
   fi
   if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
@@ -1146,7 +1191,8 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_PI_CLOSE - 1))
   fi
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
-     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
+     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ] \
+     && [ "$FM_COMPOSER_SELECTED_KIND" != agy ]; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi
@@ -1231,6 +1277,10 @@ EOF
         ;;
       agy)
         case "$content" in '>'*) content=${content#>} ;; esac
+        fm_composer_normalize_trim_var content
+        if _fm_composer_agy_furniture_row "$content"; then
+          content=
+        fi
         ;;
       box)
         if [ "$prompt_row" -lt 0 ] \
@@ -1308,8 +1358,10 @@ EOF
       return 0
     fi
     if [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
-       && [ "$cy" -eq "$FM_COMPOSER_SCAN_AGY_ROW" ]; then
-      _fm_composer_classify_agy_row "$screen" "$styled" "$cy"
+       && [ "$cy" -ge "$FM_COMPOSER_SCAN_AGY_ROW" ] \
+       && [ "$cy" -le "$FM_COMPOSER_SCAN_AGY_END" ]; then
+      _fm_composer_classify_agy_rows "$screen" "$styled" \
+        "$FM_COMPOSER_SCAN_AGY_ROW" "$FM_COMPOSER_SCAN_AGY_END"
       return 0
     fi
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ] && [ "$cy" -eq "$FM_COMPOSER_SCAN_BARE_ROW" ]; then
@@ -1382,8 +1434,8 @@ EOF
         "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
       ;;
     agy)
-      _fm_composer_classify_agy_row "$screen" "$styled" \
-        "$FM_COMPOSER_SELECTED_FIRST"
+      _fm_composer_classify_agy_rows "$screen" "$styled" \
+        "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
       ;;
   esac
 }
