@@ -292,6 +292,19 @@ EOF
   done
   [ -f "$state/$task.progress" ] \
     || die "agy ($version): PostToolUse did not refresh progress during a real tool call"
+  lifecycle_natural_brief="Run \`printf AGY_LIFECYCLE_DONE\` exactly once, then stop."
+  FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-send.sh" "$task" \
+    "$lifecycle_natural_brief" >/dev/null 2>&1 \
+    || die "agy ($version): natural turn could not be submitted"
+  for _ in $(seq 1 120); do
+    if [ -f "$state/$task.turn-ended" ] && grep -Fq 'state=idle' "$state/$task.busy-state" 2>/dev/null; then
+      turn_end=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$turn_end" -eq 1 ] || die "agy ($version): natural Stop did not publish idle and turn-ended state"
   lifecycle_tool_brief="Run the exact shell command \`sleep 60\` and wait for it to finish. Do not run any other command."
   FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-send.sh" "$task" \
@@ -310,19 +323,6 @@ EOF
   grep -Fq 'unknown fm-interrupt' "$state/$task.busy-state" 2>/dev/null || \
     grep -Fq 'state=unknown' "$state/$task.busy-state" \
     || die "agy ($version): data-plane interrupt did not preserve unknown semantic state"
-  lifecycle_natural_brief="Run \`printf AGY_LIFECYCLE_DONE\` exactly once, then stop."
-  FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-send.sh" "$task" \
-    "$lifecycle_natural_brief" >/dev/null 2>&1 \
-    || die "agy ($version): natural turn could not be submitted"
-  for _ in $(seq 1 120); do
-    if [ -f "$state/$task.turn-ended" ] && grep -Fq 'state=idle' "$state/$task.busy-state" 2>/dev/null; then
-      turn_end=1
-      break
-    fi
-    sleep 1
-  done
-  [ "$turn_end" -eq 1 ] || die "agy ($version): natural Stop did not publish idle and turn-ended state"
   TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-control.sh" "$task" exit >/dev/null 2>&1 \
     || die "agy ($version): exit command failed"
