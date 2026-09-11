@@ -8,6 +8,7 @@
 #
 # This file is sourced, never executed. It defines:
 #   fmx_env_get <key> <file>   - read one KEY=VALUE from a .env-style file
+#   fmx_relay_active <home>    - whether the relay has a pairing token
 #   fmx_load_config            - resolve FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
 #                                and FMX_THREAD_MAX (env wins over .env)
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
@@ -73,6 +74,17 @@ fmx_env_get() {
     \'*\') val=${val#\'}; val=${val%\'} ;;
   esac
   printf '%s' "$val"
+}
+
+fmx_relay_active() {
+  local home=$1 token
+  if [ -n "${FMX_PAIRING_TOKEN+x}" ]; then
+    [ -n "${FMX_PAIRING_TOKEN-}" ]
+    return $?
+  fi
+  [ -f "$home/.env" ] || return 1
+  token=$(fmx_env_get FMX_PAIRING_TOKEN "$home/.env")
+  [ -n "$token" ]
 }
 
 fmx_poll_shim_content() {

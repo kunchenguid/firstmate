@@ -3158,6 +3158,29 @@ test_local_work_home_emit_path_is_unchanged() {
   pass "a local work home's emit path is unchanged"
 }
 
+test_public_followup_relay_activation_matches_x_mode() {
+  local home out rc
+  home="$TMP_ROOT/relay-activation-contract"
+  mkdir -p "$home"
+
+  out=$(FM_HOME="$home" bash -c '. "$1/bin/fm-x-lib.sh"; . "$1/bin/fm-public-followup-lib.sh"; fm_pf_relay_active "$2"' bash "$ROOT" "$home" 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "a relay-disabled home must be inactive: $out"
+  [ -z "$out" ] || fail "a relay-disabled home must be quiet, got: $out"
+
+  printf 'FMX_PAIRING_TOKEN=test-token\n' > "$home/.env"
+  out=$(FM_HOME="$home" bash -c '. "$1/bin/fm-x-lib.sh"; . "$1/bin/fm-public-followup-lib.sh"; fm_pf_relay_active "$2"' bash "$ROOT" "$home" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "a pairing token in .env must activate the relay"
+  [ -z "$out" ] || fail "a relay-enabled home must be quiet, got: $out"
+
+  out=$(FM_HOME="$home" FMX_PAIRING_TOKEN='' bash -c '. "$1/bin/fm-x-lib.sh"; . "$1/bin/fm-public-followup-lib.sh"; fm_pf_relay_active "$2"' bash "$ROOT" "$home" 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "an empty environment token must override .env"
+  [ -z "$out" ] || fail "an environment-disabled relay must be quiet, got: $out"
+  pass "public-followup relay activation matches X-mode token precedence"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
 # register regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -3184,6 +3207,7 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds
 test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings
 test_secondmate_teardown_rejects_unsafe_durable_parent_records
 test_secondmate_teardown_rejects_nul_bearing_durable_parent_record
+test_public_followup_relay_activation_matches_x_mode
 test_relay_disabled_unmarked_teardown_skips_public_path
 test_relay_disabled_parent_allows_marked_child_teardown
 test_secondmate_parent_binding_matches_literal_id
