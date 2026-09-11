@@ -13,3 +13,4 @@ __pycache__/
 config/
 
 .tools/
+.herdr-mail/

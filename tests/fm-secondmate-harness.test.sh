@@ -15,14 +15,17 @@
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
 #      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
-#      config/startup-memory-budget, and config/trace-context -
+#      config/poteto-mode, config/startup-memory-budget, and config/trace-context -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, runtime-backend default, Herdr
-#      presentation choice, startup-memory budget, and trace context inherit the
+#      presentation choice, Poteto mode brief default, startup-memory budget, and
+#      trace context inherit the
 #      primary's settings. For config/herdr-presentation-spaces, an absent
 #      primary file and an absent destination file both mean the same
 #      unconfigured default, so the generic absence mirror converges that item
 #      without deciding its release-dependent floor.
+#      For config/poteto-mode, an absent primary file mirrors as absence (default
+#      on for ship and scout briefs); explicit on/off propagate.
 #      It is primary-authoritative
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
 #      config push).
@@ -299,6 +302,7 @@ test_propagate_lib() {
   printf 'tmux\n' > "$src/backend"
   : > "$src/herdr-presentation-spaces"
   : > "$src/trace-context"
+  printf 'on\n' > "$src/poteto-mode"
   stdout="$d/clean-copy.out"
   stderr="$d/clean-copy.err"
   propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr" || fail "propagate returned non-zero"
@@ -309,6 +313,7 @@ test_propagate_lib() {
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ "$(cat "$dest/backend")" = tmux ] || fail "backend not propagated"
   [ -f "$dest/herdr-presentation-spaces" ] || fail "herdr-presentation-spaces not propagated"
+  [ "$(cat "$dest/poteto-mode")" = on ] || fail "poteto-mode not propagated"
   printf 'herdr\n' > "$dest/backend"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/backend")" = tmux ] || fail "primary backend did not overwrite a divergent destination"
@@ -349,13 +354,14 @@ test_propagate_lib() {
   # 4. removing the source mirrors absence downstream (primary-authoritative)
   printf 'herdr\n' > "$dest/backend"
   rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" \
-    "$src/backend" "$src/herdr-presentation-spaces" "$src/trace-context"
+    "$src/backend" "$src/herdr-presentation-spaces" "$src/poteto-mode" "$src/trace-context"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
   [ -e "$dest/backend" ] && fail "backend absence not mirrored downstream"
   [ -e "$dest/herdr-presentation-spaces" ] && fail "herdr-presentation-spaces absence not mirrored downstream"
+  [ -e "$dest/poteto-mode" ] && fail "poteto-mode absence not mirrored downstream"
   [ -e "$dest/trace-context" ] && fail "trace-context absence not mirrored downstream"
 
   rm -f "$dest/crew-harness"
@@ -2215,11 +2221,17 @@ SH
       "$ROOT/bin/fm-config-push.sh" > "$first_out" 2>&1
   ) &
   first_pid=$!
-  for _ in $(seq 1 100); do
-    [ -e "$entered" ] && break
+  # Wait until the fake send-keys path creates $entered, or until the child
+  # exits first (reap and fail with its status and captured output). The suite
+  # runner's outer timeout covers a true hang; do not guess a local duration.
+  while [ ! -e "$entered" ]; do
+    if ! kill -0 "$first_pid" 2>/dev/null; then
+      wait "$first_pid"
+      first_status=$?
+      fail "first config push exited $first_status before pointer delivery; output: $(cat "$first_out" 2>/dev/null || true)"
+    fi
     sleep 0.02
   done
-  [ -e "$entered" ] || fail "first config push did not reach pointer delivery"
   first_instr=$(reread_instruction_path "$w/sm") \
     || fail "first concurrent push did not publish its generation"
   printf 'two\n' > "$w/home/config/crew-harness"

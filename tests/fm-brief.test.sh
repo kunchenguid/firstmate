@@ -901,6 +901,228 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
+assert_poteto_section_after_herdr() {
+  local brief=$1 label=$2
+  awk '
+    /^# Herdr / { herdr=1; next }
+    herdr && /^# / {
+      if ($0 != "# Poteto mode") {
+        print "expected # Poteto mode as the next top-level heading after Herdr, got: " $0
+        exit 1
+      }
+      poteto=1
+      exit 0
+    }
+    END {
+      if (!herdr) { print "missing Herdr section"; exit 1 }
+      if (!poteto) { print "missing Poteto mode section after Herdr"; exit 1 }
+    }
+  ' "$brief" >/dev/null \
+    || fail "$label: Poteto mode section must sit directly after the Herdr section"
+}
+
+test_poteto_mode_default_on_for_ship_and_scout() {
+  local home kind brief id
+  home="$TMP_ROOT/poteto-default-home"
+  mkdir -p "$home/data"
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="poteto-default-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --scout >/dev/null 2>&1 \
+        || fail "default-on scout scaffold failed"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$kind" >/dev/null 2>&1 \
+        || fail "default-on $kind scaffold failed"
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Poteto mode" "$brief" "$kind brief missing default-on Poteto mode section"
+    assert_grep "Run this task under the \`poteto-mode\` skill" "$brief" \
+      "$kind brief missing poteto-mode invocation line"
+    assert_grep "rename your OWN agent pane to the skill's orchestrator name" "$brief" \
+      "$kind unguarded brief missing own-pane rename authorization"
+    assert_grep "split panes inside that run tab" "$brief" \
+      "$kind unguarded brief missing run-tab split authorization"
+    assert_grep "watchdog panes that YOU started" "$brief" \
+      "$kind unguarded brief missing watchdog authorization"
+    assert_grep "never touch a tab, pane, or agent belonging to another run or to the captain's fleet" "$brief" \
+      "$kind unguarded brief missing fleet-scoped non-interference rule"
+    assert_grep "the delivery path satisfies that step" "$brief" \
+      "$kind brief missing delivery-path satisfaction wording"
+    assert_grep "If your tool cannot load the skill, proceed with this brief as written." "$brief" \
+      "$kind brief missing skill-absent fallback"
+    assert_grep "Name any fallback and its reason in your \`done:\` line." "$brief" \
+      "$kind brief missing done-line fallback naming"
+    assert_poteto_section_after_herdr "$brief" "$kind"
+  done
+  pass "fm-brief.sh: Poteto mode is default-on for all ship modes and scout"
+}
+
+test_poteto_mode_absent_from_secondmate_charter() {
+  local home brief
+  home="$TMP_ROOT/poteto-secondmate-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
+    "$ROOT/bin/fm-brief.sh" poteto-sm --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate charter scaffold failed"
+  brief="$home/data/poteto-sm/brief.md"
+  assert_no_grep "# Poteto mode" "$brief" \
+    "secondmate charter must never receive the Poteto mode section"
+  pass "fm-brief.sh: Poteto mode is absent from secondmate charters"
+}
+
+test_poteto_mode_invalid_still_scaffolds_secondmate() {
+  local home brief status=0
+  home="$TMP_ROOT/poteto-invalid-secondmate-home"
+  mkdir -p "$home/data" "$home/config"
+  printf 'bogus\n' > "$home/config/poteto-mode"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
+    "$ROOT/bin/fm-brief.sh" poteto-sm-bad --secondmate --no-projects >/dev/null 2>&1 || status=$?
+  expect_code 0 "$status" "invalid poteto-mode must not block secondmate charter scaffolding"
+  brief="$home/data/poteto-sm-bad/brief.md"
+  assert_present "$brief" "invalid poteto-mode blocked secondmate charter write"
+  assert_no_grep "# Poteto mode" "$brief" \
+    "secondmate charter must never receive the Poteto mode section"
+  pass "fm-brief.sh: invalid poteto-mode still scaffolds a secondmate charter"
+}
+
+test_poteto_mode_off_omits_section() {
+  local home brief
+  home="$TMP_ROOT/poteto-off-home"
+  mkdir -p "$home/data" "$home/config"
+  printf 'off\n' > "$home/config/poteto-mode"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-off sample --mode no-mistakes >/dev/null 2>&1 \
+    || fail "poteto-mode=off scaffold failed"
+  brief="$home/data/poteto-off/brief.md"
+  assert_no_grep "# Poteto mode" "$brief" "poteto-mode=off must omit the section"
+  pass "fm-brief.sh: config/poteto-mode=off omits the Poteto mode section"
+}
+
+test_poteto_mode_explicit_on_includes_section() {
+  local home brief
+  home="$TMP_ROOT/poteto-on-home"
+  mkdir -p "$home/data" "$home/config"
+  printf 'on\n' > "$home/config/poteto-mode"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-on sample --mode no-mistakes >/dev/null 2>&1 \
+    || fail "poteto-mode=on scaffold failed"
+  brief="$home/data/poteto-on/brief.md"
+  assert_grep "# Poteto mode" "$brief" "explicit on must include the Poteto mode section"
+  pass "fm-brief.sh: config/poteto-mode=on includes the Poteto mode section"
+}
+
+test_poteto_mode_invalid_refuses_without_writing() {
+  local home err status=0
+  home="$TMP_ROOT/poteto-invalid-home"
+  mkdir -p "$home/data" "$home/config"
+  printf 'maybe\n' > "$home/config/poteto-mode"
+  err="$home/invalid.err"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-bad sample --mode no-mistakes >/dev/null 2>"$err" || status=$?
+  expect_code 1 "$status" "invalid poteto-mode must exit 1"
+  assert_grep "$home/config/poteto-mode" "$err" "refusal must name the config file"
+  assert_grep '"on"' "$err" "refusal must name accepted values"
+  assert_grep '"off"' "$err" "refusal must name accepted values"
+  assert_absent "$home/data/poteto-bad/brief.md" "invalid poteto-mode must write no brief"
+  [ ! -d "$home/data/poteto-bad" ] || fail "invalid poteto-mode created a task data directory"
+  pass "fm-brief.sh: invalid poteto-mode exits 1 and writes no brief"
+}
+
+test_poteto_mode_parser_boundaries() {
+  local home err status brief target
+  home="$TMP_ROOT/poteto-parser-home"
+  mkdir -p "$home/data" "$home/config"
+
+  printf 'o n\n' > "$home/config/poteto-mode"
+  err="$home/internal-ws.err"; status=0
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-internal-ws sample --mode no-mistakes \
+    >/dev/null 2>"$err" || status=$?
+  expect_code 1 "$status" "internal whitespace must be refused"
+  assert_grep "got 'o n'" "$err" "internal whitespace refusal must preserve the raw value"
+  assert_absent "$home/data/poteto-internal-ws/brief.md" "internal whitespace wrote a brief"
+
+  : > "$home/config/poteto-mode"
+  err="$home/empty.err"; status=0
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-empty sample --mode no-mistakes \
+    >/dev/null 2>"$err" || status=$?
+  expect_code 1 "$status" "empty poteto-mode file must be refused"
+  assert_grep "got ''" "$err" "empty file refusal must report an empty value"
+  assert_absent "$home/data/poteto-empty/brief.md" "empty poteto-mode wrote a brief"
+
+  printf ' \t\n' > "$home/config/poteto-mode"
+  err="$home/ws-only.err"; status=0
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-ws-only sample --mode no-mistakes \
+    >/dev/null 2>"$err" || status=$?
+  expect_code 1 "$status" "whitespace-only poteto-mode must be refused"
+  assert_absent "$home/data/poteto-ws-only/brief.md" "whitespace-only poteto-mode wrote a brief"
+
+  printf 'on\r\n' > "$home/config/poteto-mode"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-crlf sample --mode no-mistakes >/dev/null 2>&1 \
+    || fail "CRLF on must be accepted"
+  brief="$home/data/poteto-crlf/brief.md"
+  assert_grep "# Poteto mode" "$brief" "CRLF on must include the Poteto mode section"
+
+  target="$home/config/poteto-mode-target"
+  printf 'on\n' > "$target"
+  rm -f "$home/config/poteto-mode"
+  ln -s "$target" "$home/config/poteto-mode"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-symlink sample --mode no-mistakes >/dev/null 2>&1 \
+    || fail "symlink to a valid poteto-mode file must be accepted"
+  brief="$home/data/poteto-symlink/brief.md"
+  assert_grep "# Poteto mode" "$brief" "symlink on must include the Poteto mode section"
+
+  rm -f "$home/config/poteto-mode"
+  ln -s "$home/config/missing-poteto-target" "$home/config/poteto-mode"
+  err="$home/broken-symlink.err"; status=0
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-broken-link sample --mode no-mistakes \
+    >/dev/null 2>"$err" || status=$?
+  expect_code 1 "$status" "broken poteto-mode symlink must be refused"
+  assert_grep "broken symlink" "$err" "broken symlink refusal must name the defect"
+  assert_absent "$home/data/poteto-broken-link/brief.md" "broken symlink wrote a brief"
+
+  rm -f "$home/config/poteto-mode"
+  mkdir "$home/config/poteto-mode"
+  err="$home/directory.err"; status=0
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-dir sample --mode no-mistakes \
+    >/dev/null 2>"$err" || status=$?
+  expect_code 1 "$status" "directory at poteto-mode path must be refused"
+  assert_grep "not a readable regular file" "$err" "directory refusal must name the defect"
+  assert_absent "$home/data/poteto-dir/brief.md" "directory poteto-mode wrote a brief"
+  rmdir "$home/config/poteto-mode"
+
+  printf 'on\n' > "$home/config/poteto-mode"
+  chmod a-r "$home/config/poteto-mode" || fail "could not make poteto-mode unreadable"
+  err="$home/unreadable.err"; status=0
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-unreadable sample --mode no-mistakes \
+    >/dev/null 2>"$err" || status=$?
+  chmod u+r "$home/config/poteto-mode" || true
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "fm-brief.sh: poteto-mode parser boundaries (unreadable skipped as root)"
+    return 0
+  fi
+  expect_code 1 "$status" "unreadable poteto-mode must be refused"
+  assert_grep "could not read" "$err" "unreadable refusal must name the read failure"
+  assert_absent "$home/data/poteto-unreadable/brief.md" "unreadable poteto-mode wrote a brief"
+  pass "fm-brief.sh: poteto-mode parser boundaries"
+}
+
+test_poteto_mode_herdr_lab_runs_in_host() {
+  local home brief
+  home="$TMP_ROOT/poteto-lab-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" poteto-lab sample --mode no-mistakes --herdr-lab >/dev/null 2>&1 \
+    || fail "--herdr-lab poteto scaffold failed"
+  brief="$home/data/poteto-lab/brief.md"
+  assert_grep "# Poteto mode" "$brief" "--herdr-lab brief missing Poteto mode section"
+  assert_grep "run the skill's playbook in-host and perform each role yourself" "$brief" \
+    "--herdr-lab brief missing in-host playbook line"
+  assert_grep "do not start role agents" "$brief" \
+    "--herdr-lab brief must forbid starting role agents"
+  assert_no_grep "rename your OWN agent pane" "$brief" \
+    "--herdr-lab brief must not authorize role agents"
+  assert_grep "the delivery path satisfies that step" "$brief" \
+    "--herdr-lab brief missing delivery-path satisfaction wording"
+  assert_poteto_section_after_herdr "$brief" "herdr-lab"
+  pass "fm-brief.sh: --herdr-lab Poteto mode runs in-host without role-agent authorization"
+}
+
 test_worker_role_scope
 test_script_parses
 test_no_heredoc_in_command_substitution
@@ -925,3 +1147,11 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
+test_poteto_mode_default_on_for_ship_and_scout
+test_poteto_mode_absent_from_secondmate_charter
+test_poteto_mode_invalid_still_scaffolds_secondmate
+test_poteto_mode_off_omits_section
+test_poteto_mode_explicit_on_includes_section
+test_poteto_mode_invalid_refuses_without_writing
+test_poteto_mode_parser_boundaries
+test_poteto_mode_herdr_lab_runs_in_host

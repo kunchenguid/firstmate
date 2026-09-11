@@ -36,6 +36,12 @@
 #   after scaffolding and the caller-supplied repo string cannot reliably
 #   identify this repo. Briefs made without it carry a loud declaration so an
 #   omitted contract cannot be silent.
+# Ship and scout briefs carry a `# Poteto mode` section directly after the Herdr
+# section when enabled. Unguarded briefs authorize the skill's role-agent
+# lifecycle inside one run tab (rename own pane, splits, role and watchdog panes
+# you start); --herdr-lab briefs run the playbook in-host instead. Secondmate
+# charters never receive the section. docs/configuration.md "Poteto mode" owns
+# the config values and when the section is enabled.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -108,6 +114,7 @@ resolve_directory_input() {
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
   DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
 else
@@ -185,7 +192,6 @@ fi
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
-mkdir -p "$DATA/$ID"
 
 ASK_USER_BLOCK=
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
@@ -215,6 +221,7 @@ EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
+mkdir -p "$DATA/$ID"
 SECONDMATE_PROJECTS=""
 idx=1
 while [ "$idx" -lt "${#POS[@]}" ]; do
@@ -311,6 +318,36 @@ fi
 exit 0
 fi
 
+# Ship and scout only: resolve config/poteto-mode before any brief side effects.
+# docs/configuration.md "Poteto mode" owns the accepted values and defaults.
+POTETO_MODE=on
+POTETO_MODE_FILE="$CONFIG/poteto-mode"
+if [ -e "$POTETO_MODE_FILE" ] || [ -L "$POTETO_MODE_FILE" ]; then
+  if [ -L "$POTETO_MODE_FILE" ] && [ ! -e "$POTETO_MODE_FILE" ]; then
+    echo "error: $POTETO_MODE_FILE: poteto-mode path is a broken symlink (need a readable regular file with \"on\" or \"off\", or absent)" >&2
+    exit 1
+  fi
+  if [ ! -f "$POTETO_MODE_FILE" ]; then
+    echo "error: $POTETO_MODE_FILE: poteto-mode path exists but is not a readable regular file (need a regular file with \"on\" or \"off\", or absent)" >&2
+    exit 1
+  fi
+  if ! POTETO_MODE_VALUE=$(cat "$POTETO_MODE_FILE"); then
+    echo "error: $POTETO_MODE_FILE: could not read poteto-mode config" >&2
+    exit 1
+  fi
+  POTETO_MODE_VALUE=$(printf '%s' "$POTETO_MODE_VALUE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  case "$POTETO_MODE_VALUE" in
+    on) POTETO_MODE=on ;;
+    off) POTETO_MODE=off ;;
+    *)
+      echo "error: $POTETO_MODE_FILE: must be absent, \"on\", or \"off\" (got '$POTETO_MODE_VALUE')" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+mkdir -p "$DATA/$ID"
+
 REPO=${POS[1]}
 
 if [ "$HERDR_LAB" -eq 1 ]; then
@@ -345,6 +382,36 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+POTETO_SECTION=
+if [ "$POTETO_MODE" = on ]; then
+  if [ "$HERDR_LAB" -eq 1 ]; then
+    IFS= read -r -d '' POTETO_SECTION <<'EOF' || true
+# Poteto mode
+Run this task under the `poteto-mode` skill: invoke it (`/poteto-mode`, or your tool's skill loader) before any task work and follow the playbook it matches.
+The lab contract above governs every Herdr call, so run the skill's playbook in-host and perform each role yourself; do not start role agents.
+If your tool cannot load the skill, proceed with this brief as written.
+If the skill loads but Herdr is unavailable here (no `herdr` command or no `HERDR_PANE_ID`), follow its playbook in-host and perform each role yourself.
+Name any fallback and its reason in your `done:` line.
+This brief's safety rules, status protocol, and Definition of done win over the skill on any conflict.
+Where the skill's playbook requires a review, validation, or shipping step that this brief's Definition of done already covers, the delivery path satisfies that step; do not run an additional independent review pass for the delivery path's sake and do not open a second PR.
+EOF
+  else
+    IFS= read -r -d '' POTETO_SECTION <<'EOF' || true
+# Poteto mode
+Run this task under the `poteto-mode` skill: invoke it (`/poteto-mode`, or your tool's skill loader) before any task work and follow the playbook it matches.
+This section authorizes the skill's own role agents: you may rename your OWN agent pane to the skill's orchestrator name, create one run tab, split panes inside that run tab, and start, message, and close role agents and watchdog panes that YOU started through the skill's scripts, and that is not the Herdr lifecycle work the Herdr section above gates.
+Never stop, delete, or restart a Herdr session or server, and never touch a tab, pane, or agent belonging to another run or to the captain's fleet.
+Role agents work only inside this worktree, and the skill's run store (`.herdr-mail/`) is never committed.
+If your tool cannot load the skill, proceed with this brief as written.
+If the skill loads but Herdr is unavailable here (no `herdr` command or no `HERDR_PANE_ID`), follow its playbook in-host and perform each role yourself.
+Name any fallback and its reason in your `done:` line.
+This brief's safety rules, status protocol, and Definition of done win over the skill on any conflict.
+Where the skill's playbook requires a review, validation, or shipping step that this brief's Definition of done already covers, the delivery path satisfies that step; do not run an additional independent review pass for the delivery path's sake and do not open a second PR.
+EOF
+  fi
+  POTETO_SECTION=$'\n'"${POTETO_SECTION%$'\n'}"
+fi
+
 IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 # Task
 ## Captain's intent
@@ -366,7 +433,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $TASK_SECTION
 
-$HERDR_SECTION
+$HERDR_SECTION$POTETO_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -452,7 +519,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $TASK_SECTION
 
-$HERDR_SECTION
+$HERDR_SECTION$POTETO_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

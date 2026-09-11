@@ -191,6 +191,15 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Poteto mode (config/poteto-mode)
+
+The optional local, gitignored `config/poteto-mode` file controls whether ship and scout briefs include the default-on Poteto mode section; secondmate charters never read it.
+Absence enables the section.
+A readable regular file (or a symlink to one) whose value is `on` or `off` after trimming only leading and trailing whitespace enables or omits the section; internal whitespace is not normalized.
+An empty or whitespace-only file, any other value, a non-regular path (directory, FIFO, or similar), a broken symlink, or a file that cannot be read makes `bin/fm-brief.sh` refuse a ship or scout scaffold and write no brief.
+The file is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); an absent primary file mirrors as absence (still the default-on behavior for that home's ship and scout briefs).
+`bin/fm-brief.sh`'s header owns where the section sits, which kinds receive it, and the unguarded versus `--herdr-lab` variants.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.
