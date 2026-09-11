@@ -5,69 +5,8 @@
 # repos with no PR CI where the usual "checks green" fm-pr-check.sh trigger
 # never fires.
 #
-# Matrix:
-#   (a) a verified merge records pr= and pr_head=
-#   (b) merge is refused when gh pr merge itself fails (no silent success)
-#   (c) extra gh-axi pr merge args are forwarded after number and --repo
-#   (d) merge is refused before gh-axi when task meta is missing
-#   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
-#   (f) malformed PR URL fails fast without calling gh-axi
-#   (g) explicit merge method is not overridden by the default --squash
-#   (h) repo override args fail fast because the repo comes from the URL,
-#       including a bundled short-option cluster that carries -R
-#   (i) a GitLab MR URL resolves and merges through glab instead of erroring
-#   (j) glab is addressed by the host from the URL, never an assumed one
-#   (k) no merge method is imposed on GitLab, so the project's own one applies
-#   (l) each pre-merge condition refuses independently, and all of them report
-#   (m) a stale recorded pr_head= is reported and the live head is verified
-#   (n) an unreadable merge request state refuses rather than merging blind
-#   (o) glab or jq absent refuses before any state is recorded
-#   (p) --sha in extra args fails fast on both forges
-#   (q) a GitLab refusal still leaves pr= recorded and the merge poll armed
-#   (r) GitHub success is accepted only after the PR is read back as merged
-#   (s) an open GitHub PR that is neither merged nor queued fails verification
-#   (t) a GitHub PR in the merge queue is reported as queued, not merged
-#   (u) a queue-required refusal names the exact compatible retry flags
-#   (v) a failed poll setup cannot be reported as a verified GitHub merge
-#   (w) a zero-exit queue-required refusal keeps merge semantics unchanged
-#   (x) an unreadable outcome after a successful merge call keeps the PR
-#       recorded and the merge poll armed
-#   (y) agreeing queue rules still produce exact retry flags
-#   (z) conflicting queue rules report ambiguous retry guidance
-#   (aa) missing gh refuses a GitHub merge before recording
-#   (ab) a landed merge whose fallback outcome read fails keeps its poll armed
-#   (ac) a successful merge in a secondmate home reports the landed PR upward
-#       once, on the route its parent binding names, and a repeat merge of the
-#       same PR does not duplicate that line
-#   (ad) a refused or failed merge reports nothing
-#   (ae) a successful merge in a main home leaves a durable wake naming the PR
-#   (af) a secondmate home with no usable parent binding says so loudly instead
-#       of merging in silence
-#   (ag) an accepted queued GitHub merge emits nothing and leaves its poll armed
-#   (ah) an accepted queued GitLab merge emits nothing and leaves its poll armed
-#   (ai) an uncommitted marker retry never loses the durable outcome
-#   (aj) distinct merged PRs for a reused task each survive queue deduplication
-#   (ak) pr= is already recorded when the forge call that can land the merge runs
-#   (al) a failed gh read falls back to the gh-axi view, which can prove a merge
-#   (am) a failed merge command still names an outcome read that proves a landed
-#       or queued pull request, without masking the forge failure
-#   (an) a refusal after a zero-exit merge quotes the forge's own output, marked
-#       apart from the wrapper's verdict and never leaked to stdout
-#   (ao) a caller-requested auto-merge on a queue-less base refuses and says
-#       auto-merge is armed with nothing merged or queued yet
-#   (ap) a caller-requested auto-merge whose merge command failed refuses
-#       without ever claiming auto-merge was armed
-#   (aq) an outcome read that fails after a zero-exit merge still quotes the
-#       forge's own output, the only evidence left
-#   (ar) auto-merge with the queue's own method that is still unqueued refuses
-#       without echoing back the flags just used, and names the next step
-#   (as) a caller method the queue does not use still gets exact retry flags
-#   (at) an unrecognised queue method still names the queue requirement and
-#       guesses no method
-#   (au) unreadable branch rules are reported apart from a queue-less base
-#   (av) a base branch with no queue rule says nothing about a merge queue
-#   (aw) an unmerged gh-axi fallback cannot substitute for the failed
-#       queue-aware outcome read
+# The test_* functions below name the covered merge, refusal, live-head,
+# away-authority, outcome-publication, and recovery behavior directly.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -90,8 +29,8 @@ MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
-# Build a fresh sandbox for one test case: a state dir with a task meta and a
-# fakebin with a gh-axi mock that records how it was invoked. Echoes the case dir.
+# Build a fresh sandbox for one test case: a state dir with task metadata and a
+# directory for its forge-command mocks. Echoes the case directory.
 make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
@@ -1577,7 +1516,7 @@ test_gitlab_merge_failure_propagates() {
 # Each pre-merge condition, driven one at a time, so no condition can be
 # carried by another. The refusal names that condition, no merge is attempted,
 # and pr= is still recorded and the poll still armed exactly as the GitHub path
-# leaves them when gh-axi itself fails.
+# leaves them when live verification or the gh merge fails.
 test_gitlab_each_condition_refuses_independently() {
   local case_dir rc name expected spec
   set -- \

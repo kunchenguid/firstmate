@@ -16,9 +16,10 @@
 # --match-head-commit, so a push that lands between that read and the merge
 # fails the merge instead of landing commits nothing verified. Reading that
 # state needs gh and jq, and either one absent stops the merge before any
-# state is recorded. An attended --allow-red <check-name> waives only the
-# named checks and still requires every other check green and still binds the
-# head; it is refused while the away-posture record exists, and it never
+# state is recorded. An attended --allow-red <check-name> may be passed once,
+# with the name as a separate argument; it waives only checks with that exact
+# name, still requires every other check green, and still binds the head. It is
+# refused while the away-posture record exists, and it never
 # applies on GitLab, where a merge already requires the head pipeline to have
 # succeeded. After gh returns success, GitHub's live state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
@@ -67,14 +68,18 @@
 # recorded as an `answer --release` before this entrypoint is invoked. While
 # state/.afk-contract exists, a merge for this task also proceeds only if its
 # meta yolo=on or its id is in that record's merge-grant list; otherwise it is
-# held for the captain return. The grant lapses when the record is archived.
+# held for the captain return. An unreadable record refuses rather than being
+# skipped. Neither posture releases a captain hold, and the grant lapses when
+# the record is archived.
 # The lock ends when the local forge command returns; docs/captain-hold-lifecycle.md owns
 # the accepted asynchronous-landing and merge-to-cleanup residuals.
 #
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha or --match-head-commit because the head comes only from the
-# live read. Auto-merge (--auto), a protection bypass (--admin), and branch
+# live read. An existing task-meta pr= must equal the requested canonical URL;
+# a task cannot be rebound here. Auto-merge (--auto), a protection bypass
+# (--admin), and branch
 # deletion (--delete-branch, -d and short-flag clusters, and GitLab's
 # --remove-source-branch) are refused by default; --attended-override, parsed
 # before the optional -- separator, re-enables those forge flags for an
@@ -559,8 +564,8 @@ EOF
 # Read one live GitHub pull request view after gh returns. The selected
 # fields distinguish a landed pull request from a merge-queue entry and retain
 # the concrete state needed for a refusal. gh supplies the complete queue-aware
-# view when available; gh-axi remains the degradation path that can prove a
-# landed merge without making gh a prerequisite for the merge abstraction.
+# view; if that post-merge read becomes unavailable, gh-axi is the degradation
+# path that can prove only a landed merge. gh remains a pre-merge prerequisite.
 FM_PR_GITHUB_STATE=
 FM_PR_GITHUB_MERGED=
 FM_PR_GITHUB_QUEUED=
