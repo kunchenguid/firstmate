@@ -216,6 +216,11 @@ if [ "${1:-}" = api ]; then
   done
   if [ "$method" = GET ]; then
     case "$path" in
+      */actions/permissions)
+        jq -rn --argjson enabled "${FM_FAKE_GH_ACTIONS_ENABLED:-true}" \
+          "{enabled: \$enabled} | $filter"
+        exit
+        ;;
       */pulls/*/reviews)
         [ -z "${FM_FAKE_GH_REVIEWS_UNREADABLE:-}" ] || {
           echo 'gh: could not read the pull request reviews' >&2
@@ -264,6 +269,10 @@ SH
 # that regressed back onto the wrapper's conditional envelopes.
 case "${1:-} ${2:-}" in
   "pr checks")
+    if [ -n "${FM_FAKE_GH_CHECKS_NO_REPORT:-}" ]; then
+      echo 'no checks reported on the branch' >&2
+      exit 1
+    fi
     printf 'summary: "%s"\n' "${FM_FAKE_GH_CHECKS_SUMMARY:-2 passed, 0 failed, 2 total}"
     ;;
   "api GET"|"api /"*|"api repos"*)
@@ -2517,6 +2526,57 @@ test_secondmate_without_parent_binding_is_loud() {
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
 }
 
+
+test_no_checks_with_actions_disabled_permits_merge() {
+  local case_dir rc
+  case_dir=$(make_case no-checks-actions-disabled)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_FAKE_GH_CHECKS_NO_REPORT=1 FM_FAKE_GH_ACTIONS_ENABLED=false \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/11 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-checks-actions-disabled: disabled Actions should permit the merge"
+  assert_grep 'no CI on this repository: Actions disabled; local evidence is the gate' \
+    "$case_dir/stderr" \
+    "no-checks-actions-disabled: the no-CI gate was not reported loudly"
+  assert_grep '/actions/permissions' "$case_dir/gh.log" \
+    "no-checks-actions-disabled: Actions permission was not checked"
+  assert_merge_call "$case_dir" 11 example/repo \
+    "no-checks-actions-disabled: merge did not run without --allow-red"
+  pass "fm-pr-merge permits a no-check PR only when Actions is disabled"
+}
+
+test_no_checks_with_actions_enabled_refuses_merge() {
+  local case_dir rc
+  case_dir=$(make_case no-checks-actions-enabled)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_FAKE_GH_CHECKS_NO_REPORT=1 FM_FAKE_GH_ACTIONS_ENABLED=true \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/11 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-checks-actions-enabled: enabled Actions should refuse the merge"
+  assert_grep 'error: refusing to merge non-green PR' "$case_dir/stderr" \
+    "no-checks-actions-enabled: refusal did not preserve the red-check guard"
+  assert_grep 'no checks reported on the branch' "$case_dir/stderr" \
+    "no-checks-actions-enabled: raw no-check output was not retained"
+  assert_grep '/actions/permissions' "$case_dir/gh.log" \
+    "no-checks-actions-enabled: Actions permission was not checked"
+  assert_no_merge_call "$case_dir" \
+    "no-checks-actions-enabled: enabled Actions did not block the merge"
+  pass "fm-pr-merge refuses a no-check PR when Actions remains enabled"
+}
 
 test_non_green_pr_requires_explicit_override() {
   local case_dir rc
@@ -4974,6 +5034,8 @@ test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud
+test_no_checks_with_actions_disabled_permits_merge
+test_no_checks_with_actions_enabled_refuses_merge
 test_non_green_pr_requires_explicit_override
 test_firstmate_merge_clears_a_stale_missing_review_receipt
 test_firstmate_merge_missing_review_requires_distinct_override

@@ -126,12 +126,15 @@
 # before a missing-review merge attempt and cleared by an ordinary merge.
 #
 # A non-green GitHub PR requires --allow-red before the optional -- separator.
-# That flag records external authority rather than creating it: before the merge
-# attempt the override is written to state/<id>.meta as red_override_ts=,
-# red_override_pr=, red_override_head= and red_override_condition=, bound to the
-# canonical pull request URL and the exact live head and naming what was
-# observed to be non-green. A receipt that cannot be written refuses the merge
-# before the forge command runs, and an ordinary green merge clears a stale one.
+# A PR with no reported checks is exempt from that override only when the
+# repository's Actions permission is explicitly disabled; an enabled or
+# unreadable permission keeps the no-check refusal. The override records
+# external authority rather than creating it: before the merge attempt the
+# override is written to state/<id>.meta as red_override_ts=, red_override_pr=,
+# red_override_head= and red_override_condition=, bound to the canonical pull
+# request URL and the exact live head and naming what was observed to be
+# non-green. A receipt that cannot be written refuses the merge before the forge
+# command runs, and an ordinary green merge clears a stale one.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--allow-red] [--allow-missing-review] [-- <extra forge merge args>]
 set -eu
 
@@ -1199,6 +1202,30 @@ require_released_captain_hold() {
   esac
 }
 
+# Classify the raw `gh pr checks` response before applying the merge guard.
+# GitHub reports an empty check set as a non-zero command with this message, so
+# that state must stay distinct from a red or pending check result.
+github_checks_state() {  # <output> <command-status>
+  local output=$1 command_status=$2
+  if printf '%s\n' "$output" | grep -Fqi 'no checks reported on the branch'; then
+    printf '%s\n' none
+  elif [ "$command_status" -eq 0 ] && printf '%s\n' "$output" \
+    | grep -Eq '^summary: "[0-9]+ passed, 0 failed(, [0-9]+ skipped)?, [1-9][0-9]* total"$'; then
+    printf '%s\n' green
+  else
+    printf '%s\n' red
+  fi
+}
+
+# Confirm the only safe exemption for an empty check set. A failed or malformed
+# permission read is not evidence that Actions is disabled, so it refuses.
+github_actions_disabled() {
+  local output
+  output=$(gh api "/repos/$PR_OWNER/$PR_REPO/actions/permissions" \
+    --jq '.enabled == false' 2>/dev/null) || return 1
+  [ "$output" = true ]
+}
+
 FM_PR_GITHUB_MERGE_ACCEPTED=false
 
 # The single gate every statement about what the forge accepted, armed, or
@@ -1395,13 +1422,17 @@ case "$PROVIDER" in
     # post-call evidence; it must not let a non-green PR reach the forge call.
     CHECKS_OUTPUT=
     MERGEABLE_OUTPUT=
+    CHECKS_STATUS=0
+    CHECKS_STATE=red
     CHECKS_GREEN=0
     MERGEABLE_GREEN=0
-    if CHECKS_OUTPUT=$(gh-axi pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>&1); then
-      if printf '%s\n' "$CHECKS_OUTPUT" \
-        | grep -Eq '^summary: "[0-9]+ passed, 0 failed(, [0-9]+ skipped)?, [1-9][0-9]* total"$'; then
-        CHECKS_GREEN=1
-      fi
+    CHECKS_OUTPUT=$(gh-axi pr checks "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>&1) || CHECKS_STATUS=$?
+    CHECKS_STATE=$(github_checks_state "$CHECKS_OUTPUT" "$CHECKS_STATUS")
+    if [ "$CHECKS_STATE" = green ]; then
+      CHECKS_GREEN=1
+    elif [ "$CHECKS_STATE" = none ] && github_actions_disabled; then
+      echo 'no CI on this repository: Actions disabled; local evidence is the gate' >&2
+      CHECKS_GREEN=1
     fi
     if MERGEABLE_OUTPUT=$(gh api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" \
       --jq '.mergeable == true and .mergeable_state == "clean"' 2>&1); then
