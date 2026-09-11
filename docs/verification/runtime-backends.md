@@ -918,6 +918,33 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
 
+### Presentation lock scope
+
+On 2026-09-11, Herdr 0.9.0 passed the presentation E2E suite after limiting the session lock to creation, ordering, and restart-binding publication.
+The run used a generated non-default session and the lifecycle helper's task-bound protected-controller checks; teardown verified the protected controller remained unchanged.
+With the lab helper and protection environment configured as documented in the backend guide, the verification command was:
+
+```sh
+bin/fm-test-run.sh tests/fm-backend-herdr-presentation-e2e.test.sh
+```
+
+The run passed 23 assertions covering concurrent creation, abort cleanup, cross-home ordering, exact restart reclaim, and focus preservation:
+
+```text
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=2800826
+```
+
+The portable continuity check pauses two launch RPCs while a third endpoint is torn down, asserting the session lock is free, both version 2 journals remain unchanged, and surviving workspace order is preserved:
+
+```sh
+FM_TEST_ONLY=test_projected_launch_releases_session_lock bin/fm-test-run.sh tests/fm-spawn-worktree-settle.test.sh
+```
+
+```text
+ok - two projected spawns and teardown complete while launches are paused, preserving order and restart bindings
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=122102
+```
+
 ### Workspace-removal focus safety
 
 The focus-flash regression ran on 2026-08-05 against both Herdr 0.7.5 protocol 17 and Herdr 0.8.0 protocol 19 on macOS aarch64, with the 0.7.5 run using the pinned upstream release binary first on `PATH`:

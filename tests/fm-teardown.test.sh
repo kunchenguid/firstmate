@@ -62,6 +62,11 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+# The runner clears inherited FM_HOME; never let the checkout's private home
+# markers turn these isolated state fixtures into a real-home cleanup.
+export FM_HOME="$TMP_ROOT/home"
+unset FM_PUBLIC_FOLLOWUP_PRIMARY_HOME
+mkdir -p "$FM_HOME"
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
@@ -2299,6 +2304,41 @@ SH
   chmod +x "$case_dir/fakebin/herdr"
 }
 
+test_herdr_flat_teardown_waits_through_short_contention() {
+  local case_dir lock holder rc=0 i
+  case_dir=$(make_case herdr-short-contention)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  lock=$(FM_FAKE_HERDR_LOG="$case_dir/herdr.log" FM_FAKE_HERDR_CLOSED="$case_dir/closed" PATH="$case_dir/fakebin:$PATH" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path default' "$ROOT")
+  # Release after six seconds of actual acquire waits, not fixture/setup time.
+  # The old five-second budget refuses before this holder can release.
+  # shellcheck disable=SC2016 # Arguments expand in the generated sleep stub.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" >> %q\nexec /bin/sleep "$@"\n' "$case_dir/waits" > "$case_dir/fakebin/sleep"
+  chmod +x "$case_dir/fakebin/sleep"
+  bash -c '
+    . "$0/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$1" || exit 1
+    touch "$2/ready"
+    for i in $(seq 1 600); do
+      [ ! -e "$2/finish" ] || break
+      if [ -f "$2/waits" ] && awk "{s+=\$1} END {exit !(s>=6)}" "$2/waits"; then break; fi
+      /bin/sleep 0.1
+    done
+    fm_lock_release "$1"
+  ' "$ROOT" "$lock" "$case_dir" &
+  holder=$!
+  for i in $(seq 1 100); do [ ! -e "$case_dir/ready" ] || break; sleep 0.1; done
+  FM_FAKE_HERDR_LOG="$case_dir/herdr.log" FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  touch "$case_dir/finish"
+  wait "$holder" || fail "short-contention holder failed"
+  expect_code 0 "$rc" "teardown refused recoverable presentation contention: $(< "$case_dir/stderr")"
+  [ -e "$case_dir/closed" ] && [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "teardown did not confirm close and retire the endpoint"
+  pass "Herdr teardown waits beyond five seconds for a short presentation mutation"
+}
+
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
   local case_dir log closed lock ready release holder_pid rc thlog
   case_dir=$(make_case herdr-orphan-refusal)
@@ -3956,6 +3996,7 @@ test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
+test_herdr_flat_teardown_waits_through_short_contention
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes

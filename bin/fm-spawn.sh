@@ -151,7 +151,8 @@
 #   metadata are unchanged.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
-#   canonical socket, outside any home's state/) through launch handoff. Lock
+#   canonical socket, outside any home's state/) through creation, ordering and
+#   restart-binding publication, releasing before worktree allocation or launch. Lock
 #   contention warns and falls back to the ordinary flat layout before any
 #   projection mutation. The exact response-derived new workspace is inserted
 #   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
@@ -870,7 +871,7 @@ for a in "$@"; do
     --dispatch-provider=*) DISPATCH_PROVIDER=${a#--dispatch-provider=}; DISPATCH_PROVIDER_SET=1 ;;
     --dispatch-model-family) want_value=dispatch-model-family ;;
     --dispatch-model-family=*) DISPATCH_MODEL_FAMILY=${a#--dispatch-model-family=}; DISPATCH_MODEL_FAMILY_SET=1 ;;
-    --matched-rule) want_value=matched-rule ;;
+    --matched-rule) want_value='matched-rule' ;;
     --matched-rule=*) MATCHED_RULE=${a#--matched-rule=}; MATCHED_RULE_SET=1 ;;
     --quota-decision) want_value=quota-decision ;;
     --quota-decision=*) QUOTA_DECISION=${a#--quota-decision=}; QUOTA_DECISION_SET=1 ;;
@@ -1743,21 +1744,12 @@ trap spawn_abort_cleanup EXIT
 # <session> is required so secondmate and primary spawns serialize against the
 # same session without writing any other home's state directory.
 spawn_herdr_presentation_order_lock_acquire() {  # [session] [max_attempts]
-  local session=${1:-} max_attempts=${2:-50} attempt lock_path
+  local session=${1:-} max_attempts=${2:-50} lock_path
   [ -n "$session" ] || session=$(fm_backend_herdr_session)
-  case "$max_attempts" in ''|*[!0-9]*|0) return 1 ;; esac
   lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
   HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
-  attempt=0
-  while [ "$attempt" -lt "$max_attempts" ]; do
-    if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
-      HERDR_PRESENTATION_ORDER_LOCK_HELD=1
-      return 0
-    fi
-    sleep 0.1
-    attempt=$((attempt + 1))
-  done
-  return 1
+  fm_backend_herdr_presentation_lock_acquire "$lock_path" "$max_attempts" || return 1
+  HERDR_PRESENTATION_ORDER_LOCK_HELD=1
 }
 
 clear_relaunch_harness_wiring() {
@@ -4053,12 +4045,8 @@ case "$BACKEND" in
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
           exit 1
         }
-        # Recovery holds this lock across worktree and launch setup, so a peer
-        # recovery may legitimately need longer than the ordinary 5s projection
-        # fallback budget. Exact recovery has no safe flat fallback: give a
-        # competing spawn time to finish the existing 60-second worktree-settle
-        # window plus launch handoff, rather than failing under a loaded runner.
-        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" 700 || {
+        # Exact recovery has no safe flat fallback on lock contention.
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
           echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
           exit 1
         }
@@ -4193,6 +4181,10 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    # Creation/reclaim has already published the exact restart binding.
+    # Keep the task lock and abort journal, not the session-wide lock, while
+    # allocating the worktree and starting the harness. Abort reacquires it.
+    spawn_herdr_presentation_order_lock_release
     spawn_timing_finish herdr "$SPAWN_TIMING_HERDR_START"
     ;;
   zellij)
@@ -5840,7 +5832,6 @@ else
 fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
-  spawn_herdr_presentation_order_lock_release
 fi
 # The single Enter here submits the literal launch command to the pane shell.
 # Herdr's pane run already submits atomically, so only other backends need it.

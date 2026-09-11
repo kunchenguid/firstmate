@@ -41,9 +41,8 @@ export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
 # remains the sole process which appends the real trailing session flag.
-# The adapter's deliberately session-independent version read cannot pass the
-# helper's leading-option guard, so the wrapper sends only that read straight
-# to the absolute real binary with the same explicit trailing lab session.
+# Resolve the adapter's session-independent version read through the guarded
+# lab status call too; no real CLI call bypasses the lifecycle helper.
 cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -74,7 +73,9 @@ for arg in "$@"; do
   esac
 done
 if [ "${1:-}" = --version ]; then
-  exec env PATH="$HERDR_ORIGINAL_PATH" "$REAL_HERDR" "$@" --session "$HERDR_LAB_SESSION"
+  version=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" status --json | jq -er '.client.version') || exit 1
+  printf 'herdr %s\n' "$version"
+  exit 0
 fi
 focus_snapshot() {
   local list row workspace tab tabs
@@ -269,8 +270,8 @@ export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 # parent this suite sets up, not on the developer's own workspace.
 herdr_forget_inherited_pane
 
-HERDR_LAB_SESSION=$(PATH="$HERDR_ORIGINAL_PATH" \
-  "$HERDR_LAB_HELPER" name fm-herdr-presentation-projection)
+HERDR_LAB_SESSION=${HERDR_LAB_SESSION:-$(PATH="$HERDR_ORIGINAL_PATH" \
+  "$HERDR_LAB_HELPER" name fm-herdr-presentation-projection)}
 export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
@@ -290,9 +291,12 @@ cleanup_all() {
 $RECORDED_WORKTREES
 EOF
   if [ "$LAB_READY" -eq 1 ]; then
-    PATH="$HERDR_ORIGINAL_PATH" \
-      "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" >/dev/null 2>&1 || true
     LAB_READY=0
+    PATH="$HERDR_ORIGINAL_PATH" \
+      "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || {
+        printf 'not ok - protected controller or lab teardown verification failed\n' >&2
+        exit 1
+      }
   fi
   rm -rf "$TMP_ROOT"
 }

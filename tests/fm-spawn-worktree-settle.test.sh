@@ -26,6 +26,16 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
+PRESENTATION_PIDS=
+cleanup_presentation_test() {
+  local pid
+  if [ -d "${FM_PRESENTATION_FIXTURE:-}" ]; then
+    touch "$FM_PRESENTATION_FIXTURE/continue"
+  fi
+  for pid in $PRESENTATION_PIDS; do wait "$pid" 2>/dev/null || true; done
+  fm_test_cleanup
+}
+trap cleanup_presentation_test EXIT
 
 # make_settle_fakebin <dir> builds a fake tmux whose `#{pane_current_path}`
 # query returns FM_FAKE_PANE_STALE for the first FM_FAKE_PANE_STALE_READS
@@ -221,6 +231,119 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+run_presentation_spawn() {  # <id> <launch>
+  (
+    unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH
+    export HERDR_SESSION=fmtest
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+      "$1" "$PROJ_DIR" "$2" --backend herdr --mode local-only --yolo off
+  )
+}
+
+prepare_presentation_peer() {  # <name>
+  local rec
+  rec=$(make_primary_case "$1" "$1" 0)
+  read_settle_record "$rec"
+  printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "$ROOT/tests/herdr-presentation-fixture.py" > "$FAKEBIN_DIR/herdr"
+  chmod +x "$FAKEBIN_DIR/herdr"
+  fm_test_write_active_treehouse_fake "$FAKEBIN_DIR" "$WT_DIR"
+  fm_fake_exit0 "$FAKEBIN_DIR" no-mistakes gh-axi
+  printf 'on\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+}
+
+# Exercise the production adapter, journal publisher, lock and launcher together.
+# A paused launch is a continuity assertion, not merely an eventual cleanup check.
+test_projected_launch_releases_session_lock() {
+  local rec id pid lock pane ready=0 base_path=$PATH
+  local first_home peer_pid retired_home retired_fake peer_home starting expected
+  id=launch-probe
+  rec=$(make_primary_case presentation-launch "$id" 0)
+  read_settle_record "$rec"
+  export FM_PRESENTATION_FIXTURE="$TMP_ROOT/presentation-launch/server"
+  mkdir -p "$FM_PRESENTATION_FIXTURE"
+  printf '%s\n' '{"next":1,"workspaces":[{"workspace_id":"w1","label":"firstmate","active_tab_id":"w1:t1","focused":true}],"tabs":[{"workspace_id":"w1","tab_id":"w1:t1","label":"parent","focused":true}],"panes":[{"workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1"}]}' > "$FM_PRESENTATION_FIXTURE/server.json"
+  printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "$ROOT/tests/herdr-presentation-fixture.py" > "$FAKEBIN_DIR/herdr"
+  chmod +x "$FAKEBIN_DIR/herdr"
+  fm_test_write_active_treehouse_fake "$FAKEBIN_DIR" "$WT_DIR"
+  printf 'on\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+  run_presentation_spawn "$id" 'sh -c "launch-probe"' \
+    > "$FM_PRESENTATION_FIXTURE/spawn.out" 2> "$FM_PRESENTATION_FIXTURE/spawn.err" &
+  pid=$!
+  PRESENTATION_PIDS=$pid
+  for _ in $(seq 1 600); do
+    for pane in "$FM_PRESENTATION_FIXTURE"/*.starting; do
+      [ -e "$pane" ] && ready=1
+    done
+    if [ "$ready" = 1 ] || ! kill -0 "$pid" 2>/dev/null; then break; fi
+    sleep 0.1
+  done
+  if [ "$ready" != 1 ]; then
+    wait "$pid" || true
+    fail "projected launch never reached the paused harness: $(< "$FM_PRESENTATION_FIXTURE/spawn.err")"
+  fi
+  lock=$(PATH="$FAKEBIN_DIR:$base_path" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT")
+  if ! bash -c '. "$0/bin/fm-wake-lib.sh"; fm_lock_try_acquire "$1" && fm_lock_release "$1"' "$ROOT" "$lock"; then
+    touch "$FM_PRESENTATION_FIXTURE/continue"
+    wait "$pid" || true
+    fail "session presentation lock remained held while the harness was starting"
+  fi
+  # Version 2 binds the exact endpoint before the lock-free launch interval.
+  if ! rg -qx 'version=2' "$HOME_DIR/state/$id.herdr-presentation"; then
+    touch "$FM_PRESENTATION_FIXTURE/continue"
+    wait "$pid" || true
+    fail "restart binding was not published before launch: $(< "$FM_PRESENTATION_FIXTURE/spawn.err")"
+  fi
+  first_home=$HOME_DIR
+  cp "$first_home/state/$id.herdr-presentation" "$FM_PRESENTATION_FIXTURE/binding.before"
+  prepare_presentation_peer retire-probe
+  retired_home=$HOME_DIR; retired_fake=$FAKEBIN_DIR
+  run_presentation_spawn retire-probe 'sleep 600' > "$FM_PRESENTATION_FIXTURE/retire-spawn.out" \
+    || fail "could not prepare the endpoint to retire: $(< "$FM_PRESENTATION_FIXTURE/retire-spawn.out")"
+  prepare_presentation_peer peer-probe
+  peer_home=$HOME_DIR
+  run_presentation_spawn peer-probe 'sh -c "launch-probe"' > "$FM_PRESENTATION_FIXTURE/peer.out" &
+  peer_pid=$!
+  PRESENTATION_PIDS="$PRESENTATION_PIDS $peer_pid"
+  starting=0
+  for _ in $(seq 1 600); do
+    starting=0
+    for pane in "$FM_PRESENTATION_FIXTURE"/*.starting; do
+      if [ -e "$pane" ]; then starting=$((starting + 1)); fi
+    done
+    if [ "$starting" = 2 ] || ! kill -0 "$peer_pid" 2>/dev/null; then break; fi
+    sleep 0.1
+  done
+  [ "$starting" = 2 ] || fail "second spawn did not reach concurrent launch: $(< "$FM_PRESENTATION_FIXTURE/peer.out")"
+  rg -qx 'version=2' "$peer_home/state/peer-probe.herdr-presentation" \
+    || fail "concurrent spawn did not publish its exact restart binding"
+  cp "$peer_home/state/peer-probe.herdr-presentation" "$FM_PRESENTATION_FIXTURE/peer-binding.before"
+  expected=$(jq -c '[.workspaces[] | select(.label | contains("retire-probe") | not) | .workspace_id]' "$FM_PRESENTATION_FIXTURE/server.json")
+  FM_HOME="$retired_home" FM_STATE_OVERRIDE="$retired_home/state" \
+    FM_DATA_OVERRIDE="$retired_home/data" FM_CONFIG_OVERRIDE="$retired_home/config" \
+    PATH="$retired_fake:$base_path" "$ROOT/bin/fm-teardown.sh" retire-probe --force \
+    > "$FM_PRESENTATION_FIXTURE/teardown.out" 2>&1 \
+    || fail "teardown failed while both harnesses were starting: $(< "$FM_PRESENTATION_FIXTURE/teardown.out")"
+  [ ! -e "$retired_home/state/retire-probe.meta" ] || fail "concurrent teardown retained endpoint metadata"
+  [ "$(jq -c '[.workspaces[].workspace_id]' "$FM_PRESENTATION_FIXTURE/server.json")" = "$expected" ] \
+    || fail "concurrent teardown changed surviving workspace order"
+  [ ! -e "$FM_PRESENTATION_FIXTURE/continue" ] || fail "launches were not paused during teardown"
+  touch "$FM_PRESENTATION_FIXTURE/continue"
+  wait "$pid" || fail "projected launch failed after release: $(< "$FM_PRESENTATION_FIXTURE/spawn.err")"
+  wait "$peer_pid" || fail "concurrent projected launch failed after release: $(< "$FM_PRESENTATION_FIXTURE/peer.out")"
+  cmp -s "$first_home/state/$id.herdr-presentation" "$FM_PRESENTATION_FIXTURE/binding.before" \
+    || fail "launch changed the recorded restart binding after releasing the session lock"
+  cmp -s "$peer_home/state/peer-probe.herdr-presentation" "$FM_PRESENTATION_FIXTURE/peer-binding.before" \
+    || fail "concurrent launch changed its recorded restart binding"
+  pass "two projected spawns and teardown complete while launches are paused, preserving order and restart bindings"
+}
+
+# Optional focused evidence entry; the ordinary CI invocation still runs all cases.
+if [ "${FM_TEST_ONLY:-}" = test_projected_launch_releases_session_lock ]; then
+  test_projected_launch_releases_session_lock
+  exit 0
+fi
+
+test_projected_launch_releases_session_lock
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted

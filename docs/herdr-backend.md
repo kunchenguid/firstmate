@@ -112,6 +112,8 @@ The normal `fm-<id>` task tab is created in the exact new workspace returned by 
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.
+Creation and exact restart reclaim release the session presentation lock after endpoint creation, ordering, and restart-binding publication, before worktree allocation, trust registration, or harness launch; the task-id lock remains held and abort cleanup reacquires the session lock before touching panes.
+The shared bounded contention policy for spawn, abort, and teardown lives in `fm_backend_herdr_presentation_lock_acquire` in `bin/backends/herdr.sh`; the opportunistic session-start sweep remains nonblocking.
 
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.

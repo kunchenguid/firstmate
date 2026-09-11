@@ -2416,7 +2416,7 @@ test_kill_refuses_when_presentation_lock_is_unavailable() {
         printf "%s\n" "$*" >> "$CLI_LOG"
         return 0
       }
-      sleep() { :; }
+      sleep() { printf "%s\n" "$1" >> "$ATTEMPTS.sleeps"; }
       fm_backend_herdr_kill fmtest:w2:p2
     ' 2>&1)
     status=$?
@@ -2427,6 +2427,9 @@ test_kill_refuses_when_presentation_lock_is_unavailable() {
     attempts=$(wc -l < "$dir/attempts" | tr -d ' ')
     if [ "$mode" = contended ]; then
       [ "$attempts" = 50 ] || fail "contended presentation lock did not use the bounded wait: $attempts attempts"
+      awk 'NR == 1 && $1 != 0.25 {exit 1} $1 < previous || $1 > 2 {exit 1}
+        {total += $1; previous = $1} END {if (total <= 5 || total > 60) exit 1}' "$dir/attempts.sleeps" \
+        || fail "presentation contention did not use bounded increasing backoff beyond five seconds"
     else
       [ "$attempts" = 0 ] || fail "unresolved presentation lock path attempted acquisition: $attempts"
     fi

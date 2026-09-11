@@ -3220,23 +3220,35 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane>
   fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane" || true
 }
 
+# Shared bounded contention policy for spawn, abort and destructive cleanup.
+# At most 50 attempts by default, backing off from 250ms to 1s (47.75s of
+# sleeps), with a 60s elapsed ceiling even for an explicit larger attempt cap.
+# Session-start's opportunistic stale-shell sweep deliberately stays try-only.
+fm_backend_herdr_presentation_lock_acquire() {  # <lock-path> [max-attempts]
+  local path=$1 max_attempts=${2:-50} attempt=0 delay=0.25 deadline=$((SECONDS + 60))
+  case "$max_attempts" in ''|*[!0-9]*|0) return 1 ;; esac
+  while [ "$attempt" -lt "$max_attempts" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    fm_lock_try_acquire "$path" && return 0
+    case "${FM_LOCK_FAILURE:-}" in owner-create|stale-remove) return 1 ;; esac
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || break
+    sleep "$delay"
+    case "$delay" in 0.25) delay=0.5 ;; *) delay=1 ;; esac
+  done
+  return 1
+}
+
 fm_backend_herdr_kill() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
-  local lock_path attempt=0 lock_held=0
+  local lock_path lock_held=0
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
     # shellcheck source=bin/fm-wake-lib.sh
     . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
   fi
-  if lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session"); then
-    while [ "$attempt" -lt 50 ]; do
-      if fm_lock_try_acquire "$lock_path"; then
-        lock_held=1
-        break
-      fi
-      sleep 0.1
-      attempt=$((attempt + 1))
-    done
+  if lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") \
+    && fm_backend_herdr_presentation_lock_acquire "$lock_path"; then
+    lock_held=1
   fi
   if [ "$lock_held" = 1 ]; then
     fm_backend_herdr_kill_serialized "$session" "$pane"
