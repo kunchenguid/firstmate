@@ -396,9 +396,9 @@ FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.|^Plan, s
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
 # text, and only the run's LAST row is ever matched against it.
 FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
-# Antigravity CLI's idle composer is an ASCII `>` row followed by its stable
-# `? for shortcuts` footer, so the shell-looking prompt is accepted only with
-# that independent footer proof.
+# Antigravity CLI's ASCII `>` prompt is accepted only with a stable shortcuts
+# or model footer, or with the paired horizontal boundaries that remain visible
+# while a draft hides both footers.
 FM_COMPOSER_AGY_FOOTER_RE_DEFAULT='^\?[[:space:]]+for shortcuts([[:space:]]|$)'
 # Antigravity hides the shortcuts footer while a draft is present, but keeps
 # the model-and-effort footer below the composer region.
