@@ -6,6 +6,10 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Optional Pi Context Atlas
+
+The [Context Atlas verification record](context-atlas.md) owns the 2026-09-11 Pi 0.85.1 explicit-load proof, token-free refresh command, measurements, and unaffected harness/backend inspection.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
