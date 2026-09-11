@@ -2342,12 +2342,32 @@ spawn_worktree_isolated() {  # <path>
     SPAWN_WT_REASON="it is not inside a git worktree"
     return 1
   fi
-  if [ "$wt_real" != "$wt_top_real" ]; then
+  # Compare by filesystem identity (device and inode), not path text. On a
+  # case-insensitive filesystem `git rev-parse --show-toplevel` returns the
+  # canonical spelling while bash's `pwd -P` builtin does not case-fold, so a
+  # genuine isolated worktree reached under a variant spelling (".../WT1" for
+  # ".../wt1") compares unequal as text and was refused with a misleading
+  # "not a worktree root". The same identity compare keeps the primary checkout
+  # refused under any spelling, and names the real reason rather than that
+  # accidental one.
+  #
+  # `-ef` is also false when either side cannot be stat'd, so each side is
+  # confirmed an existing directory first: an unresolvable side must read as
+  # "refuse", never as "distinct".
+  if [ ! -d "$wt_real" ] || [ ! -d "$wt_top_real" ]; then
+    SPAWN_WT_REASON="its worktree root did not resolve to a directory"
+    return 1
+  fi
+  if [ ! "$wt_real" -ef "$wt_top_real" ]; then
     SPAWN_WT_REASON="it is a subdirectory of worktree root '$wt_top_real', not a worktree root"
     return 1
   fi
-  if [ "$wt_real" = "$PROJ_ABS_REAL" ]; then
-    SPAWN_WT_REASON="it is the spawning project itself"
+  if [ -z "$PROJ_ABS_REAL" ] || [ ! -d "$PROJ_ABS_REAL" ]; then
+    SPAWN_WT_REASON="the spawning project did not resolve to a directory"
+    return 1
+  fi
+  if [ "$wt_real" -ef "$PROJ_ABS_REAL" ]; then
+    SPAWN_WT_REASON="it is the spawning project itself, under another name"
     return 1
   fi
   # The primary checkout uses the repository's common git dir as its own git
@@ -2357,11 +2377,12 @@ spawn_worktree_isolated() {  # <path>
     && wt_git_dir=$(cd "$wt_git_dir" 2>/dev/null && pwd -P) || wt_git_dir=
   proj_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
     && proj_common=$(cd "$proj_common" 2>/dev/null && pwd -P) || proj_common=
-  if [ -z "$wt_git_dir" ] || [ -z "$proj_common" ]; then
+  if [ -z "$wt_git_dir" ] || [ -z "$proj_common" ] \
+     || [ ! -d "$wt_git_dir" ] || [ ! -d "$proj_common" ]; then
     SPAWN_WT_REASON="its git directory could not be resolved"
     return 1
   fi
-  if [ "$wt_git_dir" = "$proj_common" ]; then
+  if [ "$wt_git_dir" -ef "$proj_common" ]; then
     SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
     return 1
   fi
