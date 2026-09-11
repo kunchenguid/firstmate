@@ -415,48 +415,41 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
         sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind|hold-until):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
-    # A local-only landing note names the branch the task actually landed on, so
-    # it is no longer always "local main": bin/fm-teardown.sh writes "local
-    # <recorded delivery target branch>" and bin/fm-landed-lib.sh reads it back
-    # as the artifact of that Done row. Two restrictions keep the read off
-    # ordinary prose. It applies only to a DONE row, because a note exists only
-    # at completion. And on the row itself it applies only to the SEPARATED
-    # form, because an unseparated tail is how an ordinary title ends ("Add
-    # support for local sockets"); the unseparated form therefore keeps reading
-    # the one literal every pre-existing row was written with. The continuation
-    # line the markdown backend actually writes the note on is matched whole, so
-    # it widens without either restriction beyond the Done one.
-    def note_pattern($state):
-      if $state == "done" then "local[[:space:]]+[^[:space:])]+" else "local main" end;
-    def strip_title_artifacts($state):
+    # The ROW form of a local-only landing note stays the one literal
+    # "local main" every pre-existing row was written with. A row carries the
+    # note inside prose, where "local <word>" is how an ordinary title ends
+    # ("Cache results - local only", "Add support for local sockets"), so
+    # reading a branch name there costs a mangled title and a phantom artifact
+    # and buys nothing: the markdown backend writes a note on a continuation
+    # line under the row, never inline on it. The continuation-line read below
+    # is the one that follows the recorded delivery target branch.
+    def strip_title_artifacts:
       sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
-      | sub("[[:space:]]+-[[:space:]]+" + note_pattern($state) + "$"; "")
+      | sub("[[:space:]]+-[[:space:]]+local main$"; "")
       | sub("[[:space:]]+local main$"; "")
       | sub("[[:space:]]+-[[:space:]]*$"; "");
-    def clean_title($state):
+    def clean_title:
       strip_trailing_metadata
-      | strip_title_artifacts($state)
+      | strip_title_artifacts
       | gsub("[[:space:]]+"; " ")
       | trim;
-    def title_of($rest; $state):
+    def title_of($rest):
       $rest
       | gsub(wrapped_url_pattern; "")
       | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
       | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
-      | clean_title($state);
+      | clean_title;
     def blocked_by_ids($rest):
       [ $rest | scan("blocked-by:[[:space:]]+(?<id>[^[:space:])]+)") | .[0] ]
       | reduce .[] as $id ([]; if index($id) == null then . + [$id] else . end);
-    def blocked_reason($rest; $state):
+    def blocked_reason($rest):
       cap($rest; ".*blocked-by:[[:space:]]*[^[:space:])]+[[:space:]]+-[[:space:]]*(?<v>.*)$") as $reason
       | if $reason == null then null
-        else ($reason | clean_title($state) | if . == "" then null else . end)
+        else ($reason | clean_title | if . == "" then null else . end)
         end;
-    def local_note($rest; $state):
-      ($rest | strip_trailing_metadata) as $stripped
-      | cap($stripped; ".*(?:^|[[:space:]]+-[[:space:]]+)(?<v>" + note_pattern($state) + ")$")
-        // cap($stripped; ".*(?:^|[[:space:]])(?<v>local main)$");
+    def local_note($rest):
+      cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
     def completion($rest):
       (metadata_word($rest; "merged")) as $merged
       | (metadata_word($rest; "reported")) as $reported
@@ -483,7 +476,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              structured:true,
              id:($m.id | trim),
              checked:($m.check | test("[xX]")),
-             title:title_of($rest; $section),
+             title:title_of($rest),
              repo:metadata($rest; "repo"),
              kind:kind_of($rest),
              priority:metadata($rest; "priority"),
@@ -493,7 +486,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              hold_set:null,
              blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
              blocked_by_ids:blocked_by_ids($rest),
-             blocked_reason:blocked_reason($rest; $section),
+             blocked_reason:blocked_reason($rest),
              since:metadata_word($rest; "since"),
              merged:metadata_word($rest; "merged"),
              reported:metadata_word($rest; "reported"),
@@ -502,7 +495,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              links:links($rest),
              pr_url:((links($rest) | map(select(test("/pull/[0-9]+"))) | .[0]) // null),
              report_path:cap($rest; ".*(?<v>data/[^[:space:])]+/report\\.md).*"),
-             local_note:local_note($rest; $section),
+             local_note:local_note($rest),
              raw:$line,
              body_lines:[],
              body_excerpt:null}
@@ -527,6 +520,13 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     | .records |= map(
         if (.body_lines | length) > 0 then
           .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
+          # The continuation line is where the markdown backend writes a
+          # local-only landing note, and bin/fm-teardown.sh writes it as
+          # "local <recorded delivery target branch>" rather than always
+          # "local main", so this read follows that branch. It is matched as a
+          # whole line and only on a DONE row - a note exists only at
+          # completion - so it cannot take a bite out of a title the way a row
+          # read would.
           | .local_note = (.local_note
               // (if .state != "done"
                     or any(.body_lines[];
