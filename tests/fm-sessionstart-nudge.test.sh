@@ -6,6 +6,8 @@
 # throwaway home, so they prove routing by the digest that actually appears,
 # not by inspecting the wrapper's source. docs/sessionstart-nudge.md owns the
 # tier assignment and the source table these pin.
+# The separate-home cases additionally prove the portable two-stage contract:
+# canonical home initialization finishes before every SessionStart entry point.
 set -u
 
 # Run the whole suite beneath one long-lived fixture harness, matching the real
@@ -31,6 +33,7 @@ unset NO_MISTAKES_GATE
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 RUN="$ROOT/bin/fm-sessionstart-run.sh"
+INIT="$ROOT/bin/fm-home-init.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
@@ -49,6 +52,11 @@ make_primary() {
 run_nudge() {
   local root=$1
   FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+}
+
+run_nudge_home() {  # <root> <home>
+  local root=$1 home=$2
+  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" "$NUDGE"
 }
 
 expect_silent_zero() {
@@ -120,7 +128,16 @@ test_missing_state_is_silent() {
   make_primary "$root"
   rmdir "$root/state"
   expect_silent_zero "missing state nudge" run_nudge "$root"
-  pass "fm-sessionstart-nudge: a checkout without state is silent"
+  assert_absent "$root/state" "the nudge initialized state instead of remaining mutation-free"
+  pass "fm-sessionstart-nudge: an uninitialized root home is silent and unchanged"
+}
+
+test_absent_home_is_silent_without_mutation() {
+  local root="$TMP_ROOT/absent-nudge-root" home="$TMP_ROOT/absent-nudge-home"
+  make_primary "$root"
+  expect_silent_zero "absent home nudge" run_nudge_home "$root" "$home"
+  assert_absent "$home" "the nudge initialized an absent home"
+  pass "fm-sessionstart-nudge: an absent home is silent and unchanged until canonical initialization"
 }
 
 test_owned_lock_is_silent() {
@@ -194,6 +211,22 @@ run_hook() {  # <root> [args...]
     FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
 }
 
+run_hook_home() {  # <root> <home> [args...]
+  local root=$1 home=$2
+  shift 2
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    PATH="$RUN_PATH" "$RUN" "$@"
+}
+
+run_direct_home() {  # <root> <home> [args...]
+  local root=$1 home=$2
+  shift 2
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" PATH="$RUN_PATH" \
+    "$ROOT/bin/fm-session-start.sh" "$@"
+}
+
 run_hook_pi() {  # <root> [args...]
   local root=$1
   shift
@@ -219,6 +252,285 @@ test_run_startup_runs_the_full_digest() {
   assert_not_contains "$out" "FIRSTMATE_OP" "a run-tier open also emitted the nudge instruction"
   assert_contains "$out" "NEXT STEP" "the run wrapper did not deliver a complete digest"
   pass "run wrapper: startup runs the full digest and never also nudges"
+}
+
+test_direct_session_start_home_matrix() {
+  local root home override out status
+
+  root="$TMP_ROOT/direct-absent-root"
+  home="$TMP_ROOT/direct-absent-home"
+  make_run_primary "$root"
+  status=0
+  out=$(run_direct_home "$root" "$home" --source startup </dev/null) || status=$?
+  expect_code 0 "$status" "direct absent home startup"
+  assert_contains "$out" "READ-ONLY SESSION" "direct startup did not refuse an absent home"
+  assert_absent "$home" "direct startup created an absent home"
+
+  root="$TMP_ROOT/direct-root-no-state"
+  make_run_primary "$root"
+  rmdir "$root/state"
+  status=0
+  out=$(run_direct_home "$root" "$root" --source startup </dev/null) || status=$?
+  expect_code 0 "$status" "direct root home without state"
+  assert_contains "$out" "READ-ONLY SESSION" "direct startup did not refuse an uninitialized root home"
+  assert_absent "$root/state" "direct startup initialized root-relative state"
+
+  root="$TMP_ROOT/direct-existing-root"
+  home="$TMP_ROOT/direct-existing-home"
+  make_run_primary "$root"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  status=0
+  out=$(run_direct_home "$root" "$home" --source startup </dev/null) || status=$?
+  expect_code 0 "$status" "direct existing home startup"
+  assert_contains "$out" "lock acquired: harness pid" "direct startup regressed an existing home"
+  assert_present "$home/state/.lock" "direct startup did not preserve the existing-home lock path"
+
+  root="$TMP_ROOT/direct-invalid-root"
+  home="$TMP_ROOT/direct-invalid-home"
+  override="$TMP_ROOT/direct-invalid-override"
+  make_run_primary "$root"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  status=0
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$override" \
+    PATH="$RUN_PATH" "$ROOT/bin/fm-session-start.sh" --source startup </dev/null) || status=$?
+  expect_code 0 "$status" "direct missing noncanonical state override"
+  assert_contains "$out" "READ-ONLY SESSION" "a missing noncanonical override was not refused"
+  assert_absent "$override" "direct startup created a missing noncanonical state override"
+  assert_present "$home/state" "direct startup damaged the initialized home behind a noncanonical override"
+
+  root="$TMP_ROOT/direct-nonempty-root"
+  home="$TMP_ROOT/direct-nonempty-home"
+  make_run_primary "$root"
+  mkdir -p "$home/data"
+  printf '%s\n' private > "$home/data/existing"
+  status=0
+  out=$(run_direct_home "$root" "$home" --source startup </dev/null) || status=$?
+  expect_code 0 "$status" "direct nonempty home without state"
+  assert_contains "$out" "READ-ONLY SESSION" "a nonempty separate home without state was silently adopted"
+  assert_absent "$home/state" "direct startup initialized state in a nonempty separate home"
+
+  pass "direct session start preserves initialized homes and never initializes a home"
+}
+
+assert_minimal_home() {  # <home> <label>
+  local home=$1 label=$2 name
+  [ -d "$home" ] && [ ! -L "$home" ] || fail "$label is not a safe home directory"
+  for name in data state config projects; do
+    [ -d "$home/$name" ] && [ ! -L "$home/$name" ] \
+      || fail "$label is missing safe $name/"
+  done
+}
+
+test_canonical_home_init_converges_public_entries() {
+  local root="$TMP_ROOT/init-entry-root" root_home home nudge_out direct_out run_out init_out status
+  make_run_primary "$root"
+
+  home="$TMP_ROOT/init-nudge-home"
+  status=0
+  init_out=$("$INIT" "$home" 2>&1) || status=$?
+  expect_code 0 "$status" "canonical initialization for nudge"
+  assert_contains "$init_out" "home initialized: " "initializer did not report its created home"
+  assert_minimal_home "$home" "nudge-initialized home"
+  nudge_out=$(run_nudge_home "$root" "$home") || fail "nudge rejected a canonically initialized home"
+  [ "$nudge_out" = "$NUDGE_LINE" ] || fail "initialized home printed unexpected nudge: $nudge_out"
+  assert_absent "$home/state/.lock" "nudge mutated the initialized home"
+  direct_out=$(run_direct_home "$root" "$home" --source startup </dev/null)
+  assert_contains "$direct_out" "lock acquired: harness pid" \
+    "the nudge's canonical command did not use the initialized home's lock"
+  assert_present "$home/state/.lock" "manual SessionStart did not use the initialized home's state"
+
+  home="$TMP_ROOT/init-run-home"
+  "$INIT" "$home" >/dev/null || fail "canonical initialization for run tier failed"
+  status=0
+  run_out=$(run_hook_home "$root" "$home" --source startup </dev/null) || status=$?
+  expect_code 0 "$status" "run tier after canonical initialization"
+  assert_contains "$run_out" "$FULL_BANNER$home" "run tier stood down for an initialized home"
+  assert_contains "$run_out" "lock acquired: harness pid" "run tier did not use the initialized home"
+  assert_present "$home/state/.lock" "run tier did not use the initialized home's state"
+
+  home="$TMP_ROOT/init-direct-home"
+  "$INIT" "$home" >/dev/null || fail "canonical initialization for direct SessionStart failed"
+  status=0
+  direct_out=$(run_direct_home "$root" "$home" --source startup </dev/null) || status=$?
+  expect_code 0 "$status" "direct SessionStart after canonical initialization"
+  assert_contains "$direct_out" "lock acquired: harness pid" \
+    "direct SessionStart did not use the initialized home"
+  assert_present "$home/state/.lock" "direct SessionStart did not use the initialized home's state"
+  init_out=$("$INIT" "$home") || fail "initializer was not idempotent for a ready home"
+  assert_contains "$init_out" "home ready: " "idempotent initializer did not report the ready home"
+
+  root_home="$TMP_ROOT/init-tracked-root"
+  make_run_primary "$root_home"
+  rmdir "$root_home/state"
+  status=0
+  init_out=$(FM_ROOT_OVERRIDE="$root_home" "$INIT" "$root_home" 2>&1) || status=$?
+  expect_code 0 "$status" "canonical tracked-root initialization"
+  assert_contains "$init_out" "home initialized: " "tracked-root initializer did not report success"
+  assert_minimal_home "$root_home" "initialized tracked root"
+  nudge_out=$(run_nudge "$root_home") || fail "nudge rejected an initialized tracked root"
+  [ "$nudge_out" = "$NUDGE_LINE" ] || fail "initialized tracked root printed unexpected nudge: $nudge_out"
+
+  pass "fm-home-init: nudge, run, and manual SessionStart converge only after canonical initialization"
+}
+
+test_home_init_refuses_populated_incomplete_home() {
+  local home="$TMP_ROOT/init-populated-home" out status=0
+  mkdir -p "$home/data"
+  printf '%s\n' private > "$home/data/existing"
+  out=$("$INIT" "$home" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "initializer adopted a populated incomplete home"
+  assert_contains "$out" "populated incomplete home" \
+    "initializer lost the populated-incomplete-home diagnostic"
+  assert_absent "$home/state" "initializer added state to a populated incomplete home"
+  assert_absent "$home/config" "initializer added config to a populated incomplete home"
+  assert_absent "$home/projects" "initializer added projects to a populated incomplete home"
+  assert_contains "$(cat "$home/data/existing")" private \
+    "initializer changed existing private content while refusing it"
+  pass "fm-home-init: populated incomplete homes are never silently adopted"
+}
+
+make_path_swap_bash_env() {  # <path>
+  local path=$1
+  cat > "$path" <<'SH'
+_fm_sessionstart_swap_path() {
+  trap - DEBUG
+  : > "$FM_SWAP_MARKER"
+  if [ -e "$FM_SWAP_HOME" ] || [ -L "$FM_SWAP_HOME" ]; then
+    mv -- "$FM_SWAP_HOME" "$FM_SWAP_SAVED"
+  fi
+  ln -s -- "$FM_SWAP_TARGET" "$FM_SWAP_HOME"
+}
+
+_fm_sessionstart_swap_on_debug() {
+  case "$FM_SWAP_STAGE:$1" in
+    before-probe:*'probe=$(mktemp'*) _fm_sessionstart_swap_path ;;
+    before-owned-lock-recheck:*'old=$(cat "$LOCK"'*) _fm_sessionstart_swap_path ;;
+    after-claim:*CLAIM_LOCK_HELD=1*) _fm_sessionstart_swap_path ;;
+    before-lock-publish:*publish_session_lock*) _fm_sessionstart_swap_path ;;
+    after-lock-publish:*verify_session_lock_publication*) _fm_sessionstart_swap_path ;;
+  esac
+}
+set -T
+trap '_fm_sessionstart_swap_on_debug "$BASH_COMMAND"' DEBUG
+SH
+}
+
+test_existing_override_path_replacement_stays_bound() {
+  local stage root home state target saved hook marker out status
+  for stage in before-probe after-claim before-lock-publish after-lock-publish; do
+    root="$TMP_ROOT/override-$stage-root"
+    home="$TMP_ROOT/override-$stage-home"
+    state="$TMP_ROOT/override-$stage-state"
+    target="$TMP_ROOT/override-$stage-target"
+    saved="$TMP_ROOT/override-$stage-saved"
+    hook="$TMP_ROOT/override-$stage.bash-env"
+    marker="$TMP_ROOT/override-$stage.marker"
+    make_run_primary "$root"
+    mkdir -p "$home" "$state" "$target"
+    make_path_swap_bash_env "$hook"
+    status=0
+    out=$(env BASH_ENV="$hook" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$state" FM_SWAP_STAGE="$stage" FM_SWAP_HOME="$state" \
+      FM_SWAP_TARGET="$target" FM_SWAP_SAVED="$saved" FM_SWAP_MARKER="$marker" \
+      "$ROOT/bin/fm-lock.sh" session-start 2>&1) || status=$?
+    [ "$status" -ne 0 ] || fail "session-start accepted an existing override replacement at $stage"
+    assert_present "$marker" "the existing-override $stage replacement did not run"
+    assert_contains "$out" "operate read-only until resolved" \
+      "the existing-override $stage replacement lost the refusal diagnostic"
+    assert_absent "$target/.lock" "$stage redirected the session lock"
+    assert_absent "$target/.lock.acquire" "$stage redirected claim cleanup"
+    assert_absent "$saved/.lock" "$stage retained a refused session lock"
+    assert_absent "$saved/.lock.acquire" "$stage retained the transaction claim"
+    assert_absent "$home/state" "$stage created or claimed an unbound default state directory"
+  done
+  pass "fm-lock: every existing-state transaction phase stays on one physical binding"
+}
+
+# A refused transaction may only take back what it published itself. When this
+# session already holds the lock from an earlier acquisition, a later refused
+# start that removed it would leave the original home unlocked and claimable by
+# a second session while this one still runs.
+test_owned_lock_survives_existing_override_path_replacement() {
+  local root="$TMP_ROOT/owned-lock-root" home="$TMP_ROOT/owned-lock-home"
+  local state="$TMP_ROOT/owned-lock-state" target="$TMP_ROOT/owned-lock-target"
+  local saved="$TMP_ROOT/owned-lock-saved" hook="$TMP_ROOT/owned-lock.bash-env"
+  local marker="$TMP_ROOT/owned-lock.marker" owner out status=0
+  make_run_primary "$root"
+  mkdir -p "$home/data" "$home/config" "$home/projects" "$state" "$target"
+  out=$(env -u FM_SESSION_START_STAGE_FILE FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-lock.sh" session-start 2>&1) || status=$?
+  expect_code 0 "$status" "the acquisition that establishes this session's lock"
+  assert_present "$state/.lock" "the establishing acquisition published no session lock"
+  owner=$(cat "$state/.lock")
+
+  make_path_swap_bash_env "$hook"
+  status=0
+  out=$(env BASH_ENV="$hook" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_SWAP_STAGE=before-owned-lock-recheck \
+    FM_SWAP_HOME="$state" FM_SWAP_TARGET="$target" FM_SWAP_SAVED="$saved" \
+    FM_SWAP_MARKER="$marker" "$ROOT/bin/fm-lock.sh" session-start 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "session-start followed a replacement while this session already held the lock"
+  assert_present "$marker" "the owned-lock replacement did not run"
+  assert_contains "$out" "operate read-only until resolved" \
+    "the owned-lock replacement lost the refusal diagnostic"
+  assert_present "$saved/.lock" "the refusal removed a session lock it never published"
+  [ "$(cat "$saved/.lock")" = "$owner" ] \
+    || fail "the refusal rewrote the session lock an earlier acquisition published"
+  assert_absent "$saved/.lock.acquire" "the refusal retained the transaction claim"
+  assert_absent "$target/.lock" "the owned-lock replacement redirected the session lock"
+  assert_absent "$target/.lock.acquire" "the owned-lock replacement redirected claim cleanup"
+  assert_absent "$home/state" \
+    "the owned-lock replacement created or claimed an unbound default state directory"
+  pass "fm-lock: a refused transaction keeps the lock an earlier acquisition of this session published"
+}
+
+test_existing_noncanonical_override_uses_bound_state_only() {
+  local root="$TMP_ROOT/override-bound-root" home="$TMP_ROOT/override-bound-home"
+  local state="$TMP_ROOT/override-bound-state" out status=0
+  make_run_primary "$root"
+  mkdir -p "$home/data" "$home/config" "$home/projects" "$state"
+  out=$(env -u FM_SESSION_START_STAGE_FILE FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-lock.sh" session-start 2>&1) || status=$?
+  expect_code 0 "$status" "session-start with an existing noncanonical state override"
+  assert_contains "$out" "lock acquired: harness pid" \
+    "session-start rejected an existing noncanonical state override"
+  assert_present "$state/.lock" "session-start did not publish in the bound override"
+  assert_absent "$home/state" "session-start created an unbound default state directory"
+  pass "fm-lock: an existing noncanonical override owns the whole lock transaction"
+}
+
+test_home_init_concurrency_converges() {
+  local root="$TMP_ROOT/init-concurrency-root" home="$TMP_ROOT/init-concurrency-home"
+  local coord="$TMP_ROOT/init-concurrency-coord" ready pids i pid count status
+  make_run_primary "$root"
+  ready="$coord/ready"
+  mkdir -p "$ready"
+  pids=
+  i=1
+  while [ "$i" -le 12 ]; do
+    (
+      : > "$ready/$i"
+      while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 12 ]; do sleep 0.01; done
+      status=0
+      "$INIT" "$home" > "$coord/out.$i" 2>&1 || status=$?
+      printf '%s\n' "$status" > "$coord/status.$i"
+    ) &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do wait "$pid" 2>/dev/null || true; done
+  for status in "$coord"/status.*; do
+    [ "$(cat "$status")" -eq 0 ] || fail "a concurrent initializer failed: $(cat "$status")"
+  done
+  count=$(grep -h -c '^home initialized: ' "$coord"/out.* | awk '{ total += $1 } END { print total + 0 }')
+  [ "$count" -eq 1 ] || fail "concurrent initialization reported $count creators"
+  assert_minimal_home "$home" "concurrently initialized home"
+  assert_absent "$home/state/.lock" "home initialization started SessionStart"
+  run_direct_home "$root" "$home" --source startup </dev/null >/dev/null \
+    || fail "SessionStart rejected the concurrently initialized home"
+  assert_present "$home/state/.lock" "SessionStart did not lock the concurrently initialized home"
+  pass "fm-home-init: concurrent calls serialize and converge on one minimal home"
 }
 
 test_run_clear_and_compact_reemit() {
@@ -1020,9 +1332,17 @@ test_gate_common_dir_is_silent
 test_unmarked_linked_worktree_is_silent
 test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
+test_absent_home_is_silent_without_mutation
 test_owned_lock_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
+test_direct_session_start_home_matrix
+test_canonical_home_init_converges_public_entries
+test_home_init_refuses_populated_incomplete_home
+test_existing_override_path_replacement_stays_bound
+test_owned_lock_survives_existing_override_path_replacement
+test_existing_noncanonical_override_uses_bound_state_only
+test_home_init_concurrency_converges
 test_run_clear_and_compact_reemit
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh
 test_run_compact_without_completion_refreshes_before_finishing_startup
