@@ -157,6 +157,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/handover/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -375,6 +379,10 @@
     {
       "path": "docs/secondmate-parent-channel.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/session-handover.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/scripts.md",

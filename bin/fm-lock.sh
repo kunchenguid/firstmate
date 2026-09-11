@@ -3,8 +3,19 @@
 # Writes the harness (agent) process PID found by walking the shell's ancestry,
 # which lives as long as the firstmate session - unlike the transient subshell
 # PID of any one tool call, which is dead moments after it is written.
-# Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
-#        fm-lock.sh status    print holder and liveness; always exits 0
+#
+# A live holder keeps the helm. Acquisition never takes it: this file measures
+# nothing about how busy the other session is, and it never stops one. What it
+# does guarantee is that the refusal names the holder and the one command that
+# clears the recorded helm, so the captain can act on it without guessing.
+#
+# Usage: fm-lock.sh                 acquire; exit 1 unless ownership is verified
+#        fm-lock.sh status          print holder and liveness; always exits 0
+#        fm-lock.sh release         release the helm, but only if this session
+#                                   holds it; already-free is success
+#        fm-lock.sh clear --pid N   captain override: drop the helm recorded for
+#                                   pid N without touching that session. Refuses
+#                                   unless N is the recorded holder.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +40,60 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if fm_harness_pid_alive "$old"; then
+    echo "lock: held by live harness pid $old"
+    printf 'clear it with: %s clear --pid %s\n' "$0" "$old"
+  else
+    echo "lock: stale (pid $old dead or not a harness)"
+  fi
+  exit 0
+fi
+
+if [ "${1:-}" = "release" ]; then
+  if [ ! -e "$LOCK" ]; then echo "lock: already free"; exit 0; fi
+  if ! fm_session_lock_owned_by_self "$STATE"; then
+    echo "error: this session does not hold the lock, so it cannot release it; run 'fm-lock.sh status' to see what does" >&2
+    exit 1
+  fi
+  rm -f "$LOCK" 2>/dev/null || {
+    echo "error: cannot remove the session lock $LOCK" >&2
+    exit 1
+  }
+  echo "lock released: this session no longer holds the helm"
+  exit 0
+fi
+
+# The captain override. It drops the RECORDED helm and nothing else: the other
+# session keeps running, which is why the message says to quit it. Requiring the
+# holder pid means a stale reading of "status" cannot clear a helm that has since
+# changed hands.
+if [ "${1:-}" = "clear" ]; then
+  shift
+  want=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --pid) shift; want=${1:-} ;;
+      *) echo "usage: fm-lock.sh clear --pid <holder-pid>" >&2; exit 2 ;;
+    esac
+    shift
+  done
+  case "$want" in
+    ''|*[!0-9]*) echo "usage: fm-lock.sh clear --pid <holder-pid>" >&2; exit 2 ;;
+  esac
+  if [ ! -f "$LOCK" ]; then echo "lock: already free"; exit 0; fi
+  old=$(cat "$LOCK" 2>/dev/null) || {
+    echo "error: session lock is unreadable; remove $LOCK by hand after checking what holds it" >&2
+    exit 1
+  }
+  if [ "$old" != "$want" ]; then
+    echo "error: pid $want does not hold the lock (pid $old does); re-read 'fm-lock.sh status' before clearing" >&2
+    exit 1
+  fi
+  rm -f "$LOCK" 2>/dev/null || {
+    echo "error: cannot remove the session lock $LOCK" >&2
+    exit 1
+  }
+  printf 'lock cleared: pid %s no longer holds the helm. That session is still running and was not touched - quit it so two sessions do not work the same fleet.\n' "$old"
   exit 0
 fi
 
@@ -62,7 +126,10 @@ if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
     exit 0
   fi
   if fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+    {
+      echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved"
+      printf 'clear it with: %s clear --pid %s - that drops the recorded helm without touching the other session, so quit that session too.\n' "$0" "$old"
+    } >&2
     exit 1
   fi
 fi
@@ -87,7 +154,10 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     exit 1
   }
   if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+    {
+      echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved"
+      printf 'clear it with: %s clear --pid %s - that drops the recorded helm without touching the other session, so quit that session too.\n' "$0" "$old"
+    } >&2
     exit 1
   fi
 fi

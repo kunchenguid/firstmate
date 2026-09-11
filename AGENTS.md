@@ -87,6 +87,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
   captain-shared.md  main-authoritative shared captain preferences propagated read-only to secondmate homes; LOCAL, gitignored, owned by secondmate-provisioning
+  handover.md        advisory handover record left for the next session, with data/handover-prev.md holding the one before it; LOCAL, gitignored, owned by bin/fm-handover.sh (section 8)
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin fleet navigation registry recording each project's standing delivery posture; firstmate-private, parsed for mechanical sync and seeding by fm-project-mode.sh (section 6)
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
@@ -138,6 +139,7 @@ state/               runtime records and signals; gitignored
   .watcher-down      private generation-bound recovery state coupling watcher downtime, durable wake presentation, and post-handling acknowledgement; never touch
   .<id>.open-decisions-cursor  per-task byte cursor and folded open-decision set bounding the OPEN DECISIONS scan's cost to new status-log appends; written only by fm-classify-lib.sh's status_open_decisions_incremental, removed by teardown, safe to delete (forces one full re-fold)
   .status-presentation-cursor .status-presentation-lock  fleet-wide per-task status identity plus independent annotation and outcome-backstop byte offsets, with a serialization lock preventing already-presented lines from replaying while preserving delayed signal annotations; owned by fm-classify-lib.sh, with each task's row retired by teardown
+  .handover          handover lifecycle progress: prepared, released, and picked up; bin/fm-handover.sh (section 8)
   .afk-contract      the away-posture record: the captain's verbatim away words, expected return, reach profile, spend cap, and structured mandate clauses; written only by bin/fm-afk-contract.sh after the captain confirms the read-back, archived under afk-contracts/ at return; its presence IS the away posture in every harness
   afk-contracts/     archived away-posture records: one final record per away window keyed by entry time, plus any superseded mandates from that window
   .afk               durable away-mode daemon flag on the harnesses that still launch the daemon (never on Pi); present = sub-supervisor may inject escalations (set by the daemon entry, cleared on user return)
@@ -187,13 +189,16 @@ When that section reports its checks still in progress it names exactly what is 
    The same drain prints every still-unread `note:` line and pending-reply resolution since the last presentation in an unbounded `UNREAD STATUS` section, so an answer buried under a later routine line is not dropped; those lines are not re-printed after that presentation.
    It also prints a bounded `RECORD DIVERGENCE` section naming every captain call the status log reads as resolved while its backlog task is still held; nothing is closed for you, and `captain-hold-lifecycle` owns the reconciliation.
    When the lock could not be acquired and verified, the queue is left untouched because no session mutation is authorized, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
-4. **Supervision operating instructions** - after the wake queue and before both digests, the digest emits exactly one operating block for the detected primary harness, followed by the read-once contract that governs them.
+4. **Handover** - any handover a previous session released, printed in full, before the long supervision block.
+   Act on what is printed; a printed handover is complete, so never re-read the record itself.
+   Only the session holding the helm may pick it up.
+5. **Supervision operating instructions** - after the wake queue and before both digests, the digest emits exactly one operating block for the detected primary harness, followed by the read-once contract that governs them.
    The script itself never starts supervision; the emitted harness protocol owns the exact wait or wake mechanism.
-5. **Fleet-state digest** - after that read-once contract and ahead of the context digest, the compact backlog listing owned by `bin/fm-session-start.sh`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the away posture (`state/.afk-contract`, plus the `state/.afk` daemon flag where a daemon runs); and one cheap alive/dead read of each task's recorded backend endpoint.
+6. **Fleet-state digest** - after that read-once contract and ahead of the context digest, the compact backlog listing owned by `bin/fm-session-start.sh`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the away posture (`state/.afk-contract`, plus the `state/.afk` daemon flag where a daemon runs); and one cheap alive/dead read of each task's recorded backend endpoint.
    That liveness line is a fast presence check only, not a full state read - when you need a crew's actual current state (a run-step, not just "is the pane there"), read it with `bin/fm-crew-state.sh <id>` as before; the digest deliberately skips that deeper, slower read for every task so it stays fast and bounded.
-6. **Network checks** - after the fleet-state digest, the deferred stage's result, or an explicit statement of what it has not confirmed yet.
+7. **Network checks** - after the fleet-state digest, the deferred stage's result, or an explicit statement of what it has not confirmed yet.
    A read-only session runs no network checks at all and says so.
-7. **Context digest and next step** - last of the bulk sections, the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited, followed by the closing reminder.
+8. **Context digest and next step** - last of the bulk sections, the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited, followed by the closing reminder.
    A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use the firstmate repo's built-in defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
    The closing reminder points back to the emitted supervision block and preserves only the lock, afk, Relay, and read-once reminders.
 
@@ -442,6 +447,15 @@ Guard warnings do not replace the contract.
 Queued wakes must be presented before other action and acknowledged only after handling, stale liveness must be repaired through the emitted protocol, and the worktree-tangle warning must be resolved without touching unlanded work.
 The spawn assertion and generated ship brief must both enforce that project work starts in an isolated disposable worktree, never the primary checkout.
 Harness-aware turn-end guards are structural backstops, not permission to omit the live cycle.
+
+### Handover
+
+Replacing this session with a fresh one is the captain's call, and nothing measures this session to make it for them.
+Load the `handover` skill when the captain invokes `/handover` or asks to hand over, and when a session start surfaces a handover a previous session released.
+The record is advisory and durable records win every disagreement with it; never assert a fact in it that no record supports.
+`bin/fm-handover.sh release` refuses until every open thread is backed by a durable record - fix what it names and run it again, never work around it, because once the outgoing session is gone a bad handover cannot be redone.
+A session that does not hold the helm may read a waiting handover but never prepares or consumes one: consuming it there leaves the session that does take the helm told nothing is waiting.
+A fresh session never takes the helm from a live holder; relay what holds it and the clearing command the refusal printed, and never clear the helm from a session the captain has not agreed to give up.
 
 ### Away-mode stub
 

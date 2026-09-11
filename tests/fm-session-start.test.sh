@@ -1041,6 +1041,66 @@ EOF
   pass "the read-once contract is stated once, ahead of the sources it governs"
 }
 
+# A replacement session must find a released handover EARLY, take the helm, and
+# still drain the queued events that survived the gap. This is the whole point of
+# the handover: the previous session's context is gone, so anything it did not put
+# on disk and surface at the top is lost.
+test_replacement_session_leads_with_the_handover_and_takes_the_helm() {
+  local rec root home fakebin out handover_line fleet_line
+  rec=$(new_world handover-pickup)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  fm_write_meta "$home/state/alpha-task.meta" "window=fm-sess:alpha" "kind=ship"
+  {
+    printf '# Backlog\n\n## In flight\n'
+    printf -- '- [ ] alpha-task - a task (repo: alpha) (kind: ship)\n'
+  } > "$home/data/backlog.md"
+
+  # A handover prepared and released by the previous session, exactly as
+  # bin/fm-handover.sh leaves it. Only the session holding the helm may prepare
+  # one, and the fake ps reports every pid as a live claude, so the fixture
+  # records its own pid as the holder and execs prepare in that same process.
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    sh -c 'printf "%s\n" "$$" > "$1/state/.lock"; shift; exec "$@"' _ "$home" \
+    "$ROOT/bin/fm-handover.sh" prepare \
+    --next "merge the open PR once its checks pass" \
+    --worker alpha-task="halfway through the second review round" >/dev/null 2>&1 \
+    || fail "could not prepare the handover fixture"
+  printf 'released=%s\nreleased_at=fixture\n' "$(date +%s)" >> "$home/state/.handover"
+  # The previous session released the helm, so the replacement finds it free.
+  rm -f "$home/state/.lock"
+
+  # An event queued during the gap between the two sessions.
+  printf '%s\t1\tsignal\talpha-task\tdone\n' "$(date +%s)" > "$home/state/.wake-queue"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "lock acquired" "the replacement must take the helm"
+  assert_contains "$out" "HANDOVER FROM THE PREVIOUS SESSION" "a released handover must be surfaced"
+  assert_contains "$out" "Next step: merge the open PR once its checks pass" \
+    "the handover's concrete next step must reach the replacement"
+  assert_contains "$out" "halfway through the second review round" \
+    "the replacement must learn what each live worker was mid-way through"
+  assert_contains "$out" "ADVISORY" "the handover must reach the replacement labeled advisory"
+  assert_contains "$out" "do NOT re-read" \
+    "a digest that prints the record in full must say not to re-read it"
+  assert_contains "$out" "fm-handover.sh consume" \
+    "the session that took the helm must be told how to pick the handover up"
+  assert_contains "$out" "alpha-task" "the queued event that survived the gap must be drained and printed"
+
+  handover_line=$(printf '%s\n' "$out" | grep -n '^HANDOVER FROM THE PREVIOUS SESSION$' | head -1 | cut -d: -f1)
+  fleet_line=$(printf '%s\n' "$out" | grep -n '^FLEET STATE$' | head -1 | cut -d: -f1)
+  [ -n "$handover_line" ] && [ -n "$fleet_line" ] \
+    || fail "the handover did not appear as a headed section: $out"
+  [ "$handover_line" -lt "$fleet_line" ] \
+    || fail "the handover must precede the bulk fleet-state digest, not follow it"
+  pass "session start leads with a released handover, and the helm transfers"
+}
+
 test_herdr_backend_diagnostics_follow_real_session_start() {
   local mode rec root home fakebin mask out
   for mode in configured autodetected; do
@@ -1950,7 +2010,7 @@ EOF
   assert_contains "$out" "RUNTIME BOUND" "the truncation banner did not name the bound it hit"
   assert_contains "$out" 'stopped during the "bootstrap" stage' "the truncation banner did not name the incomplete stage"
   assert_contains "$out" "RECONCILE these stages" "the truncation banner did not tell the agent what to reconcile"
-  assert_contains "$out" "wake-queue supervision-instructions read-once fleet-state network-checks context next-step" \
+  assert_contains "$out" "wake-queue handover supervision-instructions read-once fleet-state network-checks context next-step" \
     "the truncation banner did not list every stage that never ran"
   assert_not_contains "$out" "NEXT STEP" "a truncated digest claimed to have reached its closing reminder"
   assert_absent "$home/state/.session-start-complete" \
@@ -2630,6 +2690,7 @@ test_trace_context_effective_state_is_frozen_after_lock
 test_session_lock_concurrent_single_winner
 test_output_ordering_diagnostics_lead
 test_read_once_contract_is_stated_once_before_its_subject
+test_replacement_session_leads_with_the_handover_and_takes_the_helm
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate
 test_deferred_relaunch_is_always_reported

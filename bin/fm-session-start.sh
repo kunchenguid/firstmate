@@ -39,26 +39,30 @@
 #   3. wake-drain     - presents durable wakes and advances recovery handling
 #                       state, so it only runs when locked. The local bounded
 #                       inactive-outcome startup scan runs in the deferred worker.
-#   4. supervision-instructions - the one emitted operating block for the
+#   4. handover       - a handover a previous session released, printed in full
+#                       rather than pointed at. Read-only, so it runs in both
+#                       locked and lock-refused mode; only the session that holds
+#                       the helm may consume it.
+#   5. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
-#   5. read-once contract - the do-not-re-read contract covering every source
+#   6. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
-#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   7. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
 #                       endpoint-liveness read:
 #                       read-only, always runs.
-#   7. network checks - the result of the deferred network stage started back at
+#   8. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
-#   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   9. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
-#   9. closing reminder - prints the context-specific watcher next step; this
+#  10. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
-# Those nine names are also the runtime-bound stage list below, so a truncated
+# Those ten names are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran.
 #
 # NO NETWORK ON THE BLOCKING PATH. This digest runs on a session-open hook that
@@ -261,7 +265,7 @@ done
 # The ordered stage list is the contract behind the truncation banner: the child
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
-SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+SESSION_START_STAGES='lock bootstrap wake-queue handover supervision-instructions read-once fleet-state network-checks context next-step'
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
@@ -745,7 +749,32 @@ else
   fi
 fi
 
-# --- 4. supervision operating instructions ----------------------------------
+# --- 4. handover from the previous session ----------------------------------
+# A released handover is the one thing a replacement must read before it acts, so
+# the record itself prints here rather than a pointer to it. A pointer would cost
+# the replacement a second read of a file this digest already holds, and the whole
+# point of the read-once contract below is that it does not pay that twice.
+#
+# A lock-refused session still sees all of it and is told not to consume it.
+# Information is never withheld from a refused session; only the ability to mutate
+# is, exactly as the rest of session start works. A refused session that consumed
+# the record would leave the session that actually takes the helm told nothing is
+# waiting.
+stage handover
+if "$SCRIPT_DIR/fm-handover.sh" pending 2>/dev/null; then
+  section "HANDOVER FROM THE PREVIOUS SESSION"
+  "$SCRIPT_DIR/fm-handover.sh" show 2>&1 || true
+  printf '\nThis record is ADVISORY. Reconcile every line against the durable records it\n'
+  printf 'names and against the digests below; those win on any disagreement.\n'
+  if [ "$READ_ONLY" -eq 1 ]; then
+    printf 'READ-ONLY: this session does not hold the helm, so it must NOT consume this\n'
+    printf 'handover. Leave it waiting for the session that takes the helm.\n'
+  else
+    printf 'Run bin/fm-handover.sh consume once you have picked it up.\n'
+  fi
+fi
+
+# --- 5. supervision operating instructions ----------------------------------
 stage supervision-instructions
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
@@ -791,7 +820,7 @@ fi
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
 
-# --- 5. read-once contract -------------------------------------------------
+# --- 6. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is
 # exactly what drops a closing reminder, and this contract is what stops the
 # next turn from re-reading everything the digest just printed. Because it now
@@ -807,6 +836,8 @@ and data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
+A handover printed above was printed in full too, so do NOT re-read
+data/handover.md either.
 
 Go to a source directly only when:
   - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
@@ -822,7 +853,7 @@ Go to a source directly only when:
     which case that stage's sources were never emitted and must be reconciled.
 EOF
 
-# --- 6. fleet-state digest ---------------------------------------------
+# --- 7. fleet-state digest ---------------------------------------------
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
 # truncated tail must never take.
 stage fleet-state
@@ -907,7 +938,7 @@ if fm_pf_relay_active "$FM_HOME" \
   fi
 fi
 
-# --- 7. network checks ------------------------------------------------------
+# --- 8. network checks ------------------------------------------------------
 # Deliberately here and not later: these lines are actionable (a stuck clone, a
 # secondmate that could not be relaunched, broken GitHub auth), and the section
 # after this one is the curated memory a truncated tail is meant to take first.
@@ -926,7 +957,7 @@ else
   "$SCRIPT_DIR/fm-startup-network.sh" harvest --pid $$ 2>&1 || true
 fi
 
-# --- 8. context digest -----------------------------------------------------
+# --- 9. context digest -----------------------------------------------------
 # Last of the bulk sections deliberately: curated memory is stable session to
 # session, already governed by config/startup-memory-budget, and recoverable
 # with one targeted read, so it is the cheapest thing for a truncated tail to
@@ -939,7 +970,7 @@ print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
-# --- 9. closing reminder -----------------------------------------------
+# --- 10. closing reminder -----------------------------------------------
 stage next-step
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
