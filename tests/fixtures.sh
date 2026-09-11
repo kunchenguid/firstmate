@@ -94,12 +94,14 @@ fm_test_fake_gh_axi() {
 # fm_test_fake_tmux_spawn <fakebin>
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
 # firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
-# set, each send-keys -l payload is appended one per line. Optional
-# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
+# set, each send-keys -l payload is appended one per line. When FM_FAKE_CMD_LOG
+# is set, each SUBMITTED text line is appended instead - the two are disjoint
+# because a launch command is sent literally and a typed shell command is not.
+# Optional FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
-# cleanup and option operations are no-ops. Launch logging is env-gated, so
-# suites that do not set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
+# cleanup and option operations are no-ops. Both logs are env-gated, so suites
+# that set neither keep a silent send-keys.
 fm_test_fake_tmux_spawn() {
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'
@@ -118,14 +120,22 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
-      for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
+    prev=
+    literal=
+    for a in "$@"; do
+      if [ "$prev" = "-l" ]; then
+        literal=1
+        if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
-        prev=$a
-      done
+      fi
+      prev=$a
+    done
+    # A submitted text line (`send-keys -t T "<text>" Enter`) carries no -l, so
+    # the launch log above never sees it. FM_FAKE_CMD_LOG records those - the
+    # shell commands a spawn types into the pane, `treehouse get` among them.
+    if [ -z "$literal" ] && [ -n "${FM_FAKE_CMD_LOG:-}" ] && [ "${*: -1}" = Enter ]; then
+      printf '%s\n' "${@: -2:1}" >> "$FM_FAKE_CMD_LOG"
     fi
     exit 0
     ;;
