@@ -118,7 +118,7 @@ Nothing else advances that marker: an unrelated reply, an empty reply, or a repl
 A triggered or consumed presentation pending its run boundary is not resent or widened; once that run settles, the extension presents the then-current sequence set.
 An idle next-prompt-only copy is different: newly changed captain sequence membership replaces it with a bounded active presentation rather than waiting for human input.
 Each presentation has a fresh identity, and the context hook excludes superseded or duplicate processing copies from model input while preserving the transcript and every unrelated message; a queued copy retained by Pi cannot restore an obsolete request's authority.
-The first two presentations of a given sequence set open a turn of their own; after that the request rides the captain's next prompt so an ignored request cannot become an unbounded loop of empty turns, while changed sequence membership and a session replacement each start that budget over.
+The first two presentations of a given sequence set open a turn when main is idle or join its running turn as a follow-up; after that the request rides the captain's next prompt so an ignored request cannot become an unbounded loop of empty turns, while changed sequence membership and a session replacement each start that budget over.
 An unrelated settlement cannot consume a request sent after that run acknowledged its previous one.
 Rejected `fm_branch_processed` calls throw through Pi's tool-error contract, preserving the precise refusal and leaving the processed marker unchanged.
 Routine outcomes never enter this path and stay turn-free.
