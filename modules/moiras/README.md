@@ -1,0 +1,73 @@
+# Moiras
+
+## Why it exists
+
+Moiras turns scattered task records into a calm, readable terminal scene.
+Clotho shows the current work, Lachesis measures the evidence, and Atropos proposes what deserves inspection.
+It observes and explains; it never interrupts tasks, merges changes, or deletes work.
+Missing signals remain unknown rather than becoming permission to act.
+
+## How to run
+
+From a fresh checkout, install Node 20+, Bash, jq and Perl; configured repository queries also need authenticated `gh-axi`.
+Every command supports `-h` / `--help`, listing every verb and flag with a description and example, without credentials or an operational home.
+
+```sh
+bin/fm-moiras.sh -h
+bin/fm-moiras.sh start --demo
+FM_HOME=/path/to/home bin/fm-moiras.sh start --no-llm
+FM_HOME=/path/to/home bin/fm-moiras.sh status
+FM_HOME=/path/to/home bin/fm-moiras.sh stats
+bin/fm-moiras.sh --demo --frames 24 --out frames --width 100 --height 30
+```
+
+Startup is manual and foreground-only; Ctrl+C stops it, draining at most the current registered capture rather than discarding it.
+The current observer publishes one-way findings; production two-way messaging awaits shared standalone-service admission and is explicitly marked unavailable.
+It never borrows a task or supervisor identity; message use cases use the shared fake until admission is available.
+`--clean` and `NO_COLOR` (even empty) print all tasks once in static ASCII without animation or escapes; `--no-ui` keeps plain event output.
+The original half/full-block silhouettes hold the shared eye for six seconds, then ease it between hoods on a shallow two-second arc at four frames per second; resize rebuilds the display, while ordinary frames update only changed cells.
+During holds, one four-second window can contain one half-second spindle sway, measuring tick or scissors blink, never simultaneous; the live scene randomly seeds the choices once per launch, while exports use a reproducible seed.
+Proposal lines show the first eight characters of the evidence-derived id, including in the demonstration; `status` keeps full ids for the confirmation contract.
+Frame export samples every 250 ms starting at scene time 4000 ms to include an eye transfer; `--at-ms` changes that start, and existing frame files are never overwritten.
+
+## How to configure
+
+Defaults live in `modules/moiras/config.json`; `--config FILE` selects another JSON file, validated against `config.schema.json` before runtime state is created.
+The observer reloads edited configuration and rebuilds state/pool subscriptions; new parent directories need a configuration touch or restart because native watches cover existing directories only.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `beaconSeconds` | `300` | Watcher silence threshold in seconds. |
+| `idleSeconds` | `900` | Both status age and generation-matched idle age must exceed this. |
+| `loopSeconds` | `5400` | Duration of an observed repeated-failure episode, never inferred from old status alone. |
+| `loopAttempts` | `2` | Matching failure-status threshold, integer 2-3; evidence is not proof of distinct command executions. |
+| `poolRatio` | `0.9` | Lease fraction threshold, 0.01-1; incomplete pools stay unknown. |
+| `quietSeconds` | `300` | Minimum interval for each rule/task pair; an unchanged captured event is not republished. |
+| `forgeSeconds` | `60` | Repository refresh interval, minimum 30 seconds; no repository timer when unconfigured. |
+| `repositories` | `[]` | Explicit GitHub `owner/repo` names; an empty list disables forge queries. |
+| `poolFiles` | `[]` | Explicit pool files, absolute or relative to `FM_HOME`; never inferred from task metadata. |
+| `roles.<role>.harness` | `pi` / `claude` / `codex` | Clotho / Lachesis / Atropos defaults for later explicit one-shot reasoning. |
+| `roles.<role>.model` | `default` / `haiku` / `default` | Independent model choice for those roles. |
+| `roles.<role>.effort` | `low` | Independent effort selection. |
+| `roles.<role>.persona` | `personas/<role>.md` | Editable English instructions relative to the config file's directory. |
+
+M1 is deterministic and does not invoke the role configurations or personas; live reasoning is a separately gated capability, not an implied effect of editing configuration.
+Forge failures withhold PR findings, and confirmation meaning requires the same current evidence id; confirmations only record a response, never execute its proposed action.
+
+## Telemetry
+
+Private append-only daily JSONL lives in `FM_HOME/state/moiras/telemetry/YYYY-MM-DD.jsonl`; read it with `jq . FILE` or use `fm-moiras stats` for the rolling last day.
+The [module template](../TEMPLATE.md) owns the record shape: correlate `requestId` and `threadId`, inspect adapter entry/exit, decisions/refusals, durations and cumulative per-request counters.
+The telemetry sink is not recursively instrumented; message text and raw provider output never belong in logs, and unknown token/cost measurements remain null.
+Tachikoma and Backpass can ingest this feed; Moiras starts no ingestion process.
+Snapshots, immutable findings, quiet receipts and reply receipts stay in `state/moiras`; the process-event owner additionally owns its registered-source records.
+A capture is not acknowledgement or exactly-once delivery, and uncertain reply delivery requires inspecting the shared thread ledger rather than sending replacement text.
+
+## Development
+
+Run `bin/fm-test-run.sh tests/fm-moiras.test.sh tests/fm-modules.test.sh` from the root, or `npm --prefix modules/moiras test`.
+Pure rules and scene composition live in `src/core`; `src/usecases/inspect.mjs` receives I/O and returns plain results; `src/adapters` owns effects.
+`StateSource` supplies bounded snapshots and notifications; `Forge` supplies projected PR records; `Journal` owns private records and telemetry; `Publisher` delivers immutable registered events.
+The shared `MessagePort` owns message envelopes, correlation and acknowledgements; the shared `Terminal` port owns output capability and writes.
+Tests use in-memory journals, sources and the canonical message fake, alongside real file/process composition; they do not claim standalone service admission from fake delivery.
+Only the two shared libraries and the existing process-event/message owners are external integration boundaries; no application imports another application.

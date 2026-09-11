@@ -1,0 +1,10 @@
+{
+  "name": "@firstmate/moiras",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.mjs",
+  "bin": { "fm-moiras": "./src/adapters/cli.mjs" },
+  "engines": { "node": ">=20" },
+  "scripts": { "run": "node src/adapters/cli.mjs", "test": "node --test tests/*.test.mjs" }
+}

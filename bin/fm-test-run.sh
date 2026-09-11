@@ -756,6 +756,7 @@ tests/fm-model-catalog-inheritance.test.sh 448
 tests/fm-model-catalog-lib.test.sh 65
 tests/fm-model-telemetry.test.sh 1141
 tests/fm-model-usage.test.sh 69
+tests/fm-moiras.test.sh 3829
 tests/fm-modules.test.sh 2541
 tests/fm-muse-harness.test.sh 935
 tests/fm-muse-signals-live-e2e.test.sh 205
@@ -1776,6 +1777,9 @@ families_for_changed_path() {
     tests/lib.sh|tests/*-helpers.sh|tests/*-fixture.sh|tests/fixtures.sh)
       families_for_test_reference "$(basename "$path")" \
         || printf '%s\n' "__unmapped__:$path"
+      ;;
+    bin/fm-moiras.sh|modules/moiras/*)
+      printf '%s\n' __script__:fm-moiras.test.sh
       ;;
     modules/TEMPLATE.md|modules/fm-tui-core/*|modules/fm-state-reader/*)
       printf '%s\n' __script__:fm-modules.test.sh

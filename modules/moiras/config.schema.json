@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["beaconSeconds", "idleSeconds", "loopSeconds", "loopAttempts", "poolRatio", "quietSeconds", "forgeSeconds", "repositories", "poolFiles", "roles"],
+  "properties": {
+    "beaconSeconds": {"type":"number", "minimum":1},
+    "idleSeconds": {"type":"number", "minimum":1},
+    "loopSeconds": {"type":"number", "minimum":1},
+    "loopAttempts": {"type":"integer", "minimum":2, "maximum":3},
+    "poolRatio": {"type":"number", "minimum":0.01, "maximum":1},
+    "quietSeconds": {"type":"number", "minimum":1},
+    "forgeSeconds": {"type":"number", "minimum":30},
+    "repositories": {"type":"array", "items":{"type":"string", "pattern":"^(?!\\.\\.?/)[\\w.-]+/(?!\\.\\.?$)[\\w.-]+$"}},
+    "poolFiles": {"type":"array", "items":{"type":"string", "minLength":1}},
+    "roles": {"type":"object", "additionalProperties":false, "required":["clotho","lachesis","atropos"], "properties":{
+      "clotho":{"$ref":"#/$defs/role"}, "lachesis":{"$ref":"#/$defs/role"}, "atropos":{"$ref":"#/$defs/role"}
+    }}
+  },
+  "$defs": {"role":{"type":"object", "additionalProperties":false, "required":["harness","model","effort","persona"], "properties":{
+    "harness":{"type":"string", "enum":["pi","claude","codex","default"]},
+    "model":{"type":"string", "pattern":"^[\\w./:-]+$"},
+    "effort":{"type":"string", "enum":["low","medium","high","xhigh","max"]},
+    "persona":{"type":"string", "pattern":"^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+\\.md$"}
+  }}}
+}

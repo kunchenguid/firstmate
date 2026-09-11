@@ -54,7 +54,7 @@ jobs:
         with:
           node-version: '22'
       - name: Verify shared module contracts, routing, and process-event composition
-        run: bin/fm-test-run.sh tests/fm-modules.test.sh tests/fm-peer-message.test.sh tests/fm-tachikoma.test.sh tests/fm-model-telemetry.test.sh tests/fm-model-usage.test.sh
+        run: bin/fm-test-run.sh tests/fm-modules.test.sh tests/fm-moiras.test.sh tests/fm-peer-message.test.sh tests/fm-tachikoma.test.sh tests/fm-model-telemetry.test.sh tests/fm-model-usage.test.sh
 
   critical-teardown:
     name: Critical teardown safety

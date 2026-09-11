@@ -1,0 +1,16 @@
+{
+  "beaconSeconds": 300,
+  "idleSeconds": 900,
+  "loopSeconds": 5400,
+  "loopAttempts": 2,
+  "poolRatio": 0.9,
+  "quietSeconds": 300,
+  "forgeSeconds": 60,
+  "repositories": [],
+  "poolFiles": [],
+  "roles": {
+    "clotho": { "harness": "pi", "model": "default", "effort": "low", "persona": "personas/clotho.md" },
+    "lachesis": { "harness": "claude", "model": "haiku", "effort": "low", "persona": "personas/lachesis.md" },
+    "atropos": { "harness": "codex", "model": "default", "effort": "low", "persona": "personas/atropos.md" }
+  }
+}
