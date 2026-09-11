@@ -56,7 +56,7 @@ function rawMentionsBroadKill(command) {
 // Conservative raw check for the general (any-target) broad process kill, used
 // only on grammar the AST cannot model, mirroring rawMentionsBroadKill for the
 // watcher. `pkill`/`killall` are kills-by-match by definition; a `pgrep` feeding
-// a `kill` or `xargs`, like any ps/pidof/fuser or pid-listing lsof alongside
+// a `kill` or `xargs`, like any ps/lsof/pidof/fuser alongside
 // one, is the discover-then-kill form, `fuser -k` is a kill by itself, and a
 // `kill` whose target is the literal pid -1 signals every process. A pkill/pgrep
 // occurrence whose own argument span carries a caller-scope flag is not broad,
@@ -74,11 +74,12 @@ function rawMentionsGeneralBroadKill(command) {
   if (unscoped(/\bpkill\b([^;|&\n)`]*)/g)) return true;
   if (!/\b(?:kill|xargs)\b/.test(normalized)) return false;
   if (unscoped(/\bpgrep\b([^;|&\n)`]*)/g)) return true;
-  return /\b(?:ps|pidof|fuser)\b/.test(normalized) || /\blsof\b[^;|&\n)`]*\s-[A-Za-z]*t/.test(normalized);
+  return /\b(?:ps|lsof|pidof|fuser)\b/.test(normalized);
 }
 
 function rawArgsSelectByCallerScope(args) {
-  return /(?:^|\s)(?:-[Pgs](?:[0-9]+|\$\S*)?|--(?:parent|pgroup|session)(?:=\S*)?)(?=\s|$)/.test(args);
+  const unquoted = args.replace(/"[^"]*"|'[^']*'/g, " ");
+  return /(?:^|\s)(?:-[Pgs](?:[0-9]+|\$\S*)?|--(?:parent|pgroup|session)(?:=\S*)?)(?=\s|$)/.test(unquoted);
 }
 
 function normalizeLineContinuations(source) {
@@ -786,17 +787,15 @@ function isUnscopedPgrep(position) {
 }
 
 // A process-selection-by-attribute discovery command whose output, fed to a
-// kill, reaches the shared process table: an unscoped pgrep, any ps, a pid-
-// listing lsof (-t or -Fp), pidof, or fuser. Caller-owned pid sources such as
+// kill, reaches the shared process table: an unscoped pgrep, any ps or lsof,
+// pidof, or fuser. Caller-owned pid sources such as
 // `cat pidfile`, `jobs -p`, or a literal are not discovery. `fuser -k` kills
 // its matches itself and is handled as a kill in analyzeProgram.
 function isUnscopedDiscovery(position) {
   if (!position.command) return false;
   const name = basename(position.command.value);
   if (name === "pgrep") return isUnscopedPgrep(position);
-  if (name === "ps" || name === "pidof" || name === "fuser") return true;
-  if (name === "lsof") return position.words.slice(position.index + 1).some((word) => /^-[A-Za-z]*t/.test(word.value) || /^-F[A-Za-z]*p/.test(word.value));
-  return false;
+  return ["ps", "lsof", "pidof", "fuser"].includes(name);
 }
 
 // The kill utility an xargs node runs, if any: "fed" for a plain `kill` (broad

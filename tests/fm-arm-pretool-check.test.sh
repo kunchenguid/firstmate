@@ -197,6 +197,11 @@ matrix_case K37 deny 'while true; do kill -9 -1; done'
 matrix_case K38 deny 'pgrep -f node | xargs --max-lines kill'
 matrix_case K39 allow 'if command -v pkill >/dev/null 2>&1; then echo y; fi'
 matrix_case K40 allow 'pgrep -f node | xargs kill -0'
+# K41-K43: a scope-looking flag inside a quoted pattern is not scope, and any
+# lsof invocation feeding a kill is discovery, like ps.
+matrix_case K41 deny 'while true; do pkill -f "node server.js -P 3000"; done'
+matrix_case K42 deny 'lsof -i :3000 | awk '"'"'NR>1{print $2}'"'"' | xargs kill -9'
+matrix_case K43 allow 'for p in $(pgrep -P "$$"); do kill $p; done'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -389,6 +394,14 @@ test_broad_process_kill_contract() {
   # in the same grammar is still denied.
   assert_policy bpk-if-pkill-executed $'deny\tbroad-process-kill' 'if true; then pkill -f node; fi'
   assert_policy bpk-if-killall-list-then-kill $'deny\tbroad-process-kill' 'if true; then killall -l; killall node; fi'
+  # A scope-looking flag inside a quoted -f pattern is pattern text, not scope.
+  assert_policy bpk-loop-quoted-pattern-P $'deny\tbroad-process-kill' 'while true; do pkill -f "node server.js -P 3000"; done'
+  assert_policy bpk-loop-quoted-pattern-g $'deny\tbroad-process-kill' "while true; do pkill -f 'gunicorn -g 2'; done"
+  assert_policy bpk-loop-quoted-pattern-pgrep $'deny\tbroad-process-kill' 'for p in $(pgrep -f "node -s 5"); do kill $p; done'
+  # Any lsof invocation feeding a kill is discovery, exactly like ps.
+  assert_policy bpk-lsof-table-awk-xargs $'deny\tbroad-process-kill' 'lsof -i :3000 | awk '"'"'NR>1{print $2}'"'"' | xargs kill -9'
+  assert_policy bpk-lsof-table-awk-cmdsub $'deny\tbroad-process-kill' 'kill -9 $(lsof -i :3000 | awk '"'"'NR>1{print $2}'"'"')'
+  assert_policy bpk-if-lsof-table-awk $'deny\tbroad-process-kill' 'if true; then lsof -i :3000 | awk '"'"'NR>1{print $2}'"'"' | xargs kill -9; fi'
 
   # Caller-scoped kills - the safe forms the guard must NOT refuse - selecting by
   # parent, process group, or session, or by a specific pid the caller chose.
@@ -433,6 +446,8 @@ test_broad_process_kill_contract() {
   assert_policy bpk-allow-pgrep-attached-xargs allow 'pgrep -P$$ | xargs kill'
   assert_policy bpk-allow-kill-pgrep-attached allow 'kill $(pgrep -P$$)'
   assert_policy bpk-allow-loop-scoped-attached allow 'for p in $(pgrep -P$$); do kill $p; done'
+  assert_policy bpk-allow-loop-scoped-quoted-value allow 'for p in $(pgrep -P "$$"); do kill $p; done'
+  assert_policy bpk-allow-loop-pkill-quoted-value allow 'for x in 1; do pkill -P "$pid"; done'
   assert_policy bpk-allow-session-signal allow 'pkill -HUP -s 4242'
   # The scoped cleanup idiom inside loop grammar the classifier cannot model is
   # still recognized as scoped by the raw fallback and allowed.
