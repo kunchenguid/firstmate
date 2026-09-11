@@ -123,6 +123,18 @@ done
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
+# Guard exits have their own record because the async arm has no guard result.
+# shellcheck disable=SC2329 # EXIT callback.
+log_claude_guard_exit() {
+  local rc=${1:-$?}
+  if [ "$CLAUDE_MODE" -eq 1 ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-claude-stop-log.sh" \
+      guard "$$" "${FM_AUTOARM_GEN:-none}" "$rc" guard not-run "${GUARD_REASON:-eligibility}" >/dev/null 2>&1 || true
+  fi
+  return "$rc"
+}
+trap log_claude_guard_exit EXIT
+
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
 PAYLOAD=$(cat 2>/dev/null || true)
@@ -168,6 +180,7 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # shellcheck disable=SC2329 # Invoked indirectly through the EXIT trap below.
 publish_stow_settlement() {
   local rc=$? activity=idle
+  log_claude_guard_exit "$rc"
   trap - EXIT
   if [ "$rc" -eq 2 ] || [ "$STOW_CONTINUATION" -eq 1 ]; then activity=busy; fi
   if [ -n "$STOW_HARNESS" ]; then
@@ -199,6 +212,7 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
+GUARD_REASON=supervision-predicate
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
@@ -207,6 +221,7 @@ fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
+  GUARD_REASON=healthy
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
   exit 2
@@ -236,6 +251,7 @@ fi
 
 block_stop() {
   local afk x_mode reason rule
+  GUARD_REASON=missing-recovery
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
@@ -465,6 +481,7 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
       fm_failure_episode_reset "$STATE" || exit 2
     fi
+    GUARD_REASON=autoarm-owns-recovery
     STOW_CONTINUATION=1
     exit 0
   fi
@@ -475,6 +492,7 @@ if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     fm_failure_episode_reset "$STATE" || exit 2
   fi
+  GUARD_REASON=autoarm-owns-recovery
   STOW_CONTINUATION=1
   exit 0
 fi

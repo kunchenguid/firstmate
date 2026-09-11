@@ -27,6 +27,7 @@ install_autoarm_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
+  cp "$ROOT/bin/fm-claude-stop-log.sh" "$dir/bin/fm-claude-stop-log.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
@@ -240,6 +241,54 @@ record_watcher_lock() {
 # --- registration contract ----------------------------------------------------
 
 # --- scope and gates ----------------------------------------------------------
+
+test_stop_outcome_log() {
+  local dir out status log
+  dir=$(make_primary_dir "$TMP_ROOT/stop-outcome")
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "logging must preserve an idle Stop exit"
+  [ -z "$out" ] || fail "logging produced hook feedback"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "logging must preserve an actionable Stop exit"
+  log=$(cat "$dir/state/.claude-autoarm.log" 2>/dev/null || true)
+  [ "$(printf '%s\n' "$log" | rg -c 'hook=autoarm')" = 2 ] || fail "Stop outcomes must append instead of overwriting"
+  assert_contains "$log" 'reason=no-supervision-need' "idle eligibility reason must survive the next Stop"
+  assert_contains "$log" 'epoch=1' "armed outcome must identify its generation"
+  assert_contains "$log" 'guard_exit=unknown' "async outcome must not invent a guard exit"
+  assert_contains "$log" 'exit=2' "rewake exit must be recorded"
+  assert_contains "$log" 'decision=arm' "arm decision must be recorded"
+  assert_contains "$log" 'arm_result=0' "arm exit must be recorded"
+  assert_contains "$log" 'reason=commit-rewake' "terminal reason must be recorded"
+  assert_contains "$log" "cwd=$PWD" "actual invocation directory must be recorded"
+  assert_contains "$log" "FM_HOME=$dir" "effective home must be recorded"
+  pass "auto-arm: idle and actionable Stops append diagnostic outcomes without changing exits"
+}
+
+test_stop_log_retention_and_concurrency() {
+  local dir log pid i
+  local -a pids=()
+  dir=$(make_primary_dir "$TMP_ROOT/stop-log")
+  log="$dir/state/.claude-autoarm.log"
+  for i in 1 2 3 4 5 6 7 8; do
+    FM_HOME="$dir" "$dir/bin/fm-claude-stop-log.sh" autoarm "$i" "$i" 0 skip not-run no-supervision-need &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do wait "$pid" || fail "concurrent logger failed"; done
+  [ "$(wc -l < "$log" | tr -d ' ')" = 8 ] || fail "concurrent outcomes were lost"
+  FM_HOME="$dir" "$dir/bin/fm-claude-stop-log.sh" guard 10 none 2 guard not-run $'missing\trecovery\n'
+  [ "$(wc -l < "$log" | tr -d ' ')" = 9 ] || fail "field separators created extra records"
+  rg -q 'guard_exit=2' "$log" || fail "guard exit was not recorded"
+  rg -q 'reason=missing recovery $' "$log" || fail "field separators were not sanitized"
+  awk 'BEGIN { for(i=1;i<=2000;i++) printf "at=1\treason=%0300d\n",i }' >> "$log"
+  FM_HOME="$dir" "$dir/bin/fm-claude-stop-log.sh" autoarm 9 9 2 arm 1 exhausted
+  [ "$(wc -c < "$log" | tr -d ' ')" -le 262144 ] || fail "log exceeded byte retention ceiling"
+  [ "$(wc -l < "$log" | tr -d ' ')" -le 1000 ] || fail "log exceeded line retention ceiling"
+  rg -q 'reason=exhausted$' "$log" || fail "retention discarded the latest outcome"
+  [ "$(rg -c '^at=' "$log")" = "$(wc -l < "$log" | tr -d ' ')" ] || fail "retention left a partial record"
+  pass "auto-arm: concurrent log appends preserve outcomes and retention keeps complete recent records"
+}
 
 test_inert_in_child_worktree() {
   local base dir out status
@@ -1240,6 +1289,8 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+test_stop_outcome_log
+test_stop_log_retention_and_concurrency
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming

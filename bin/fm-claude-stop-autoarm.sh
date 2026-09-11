@@ -96,6 +96,19 @@ esac
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
+# Keep diagnostic evidence even when eligibility exits before a claim exists.
+DECISION=skip
+ARM_RESULT=not-run
+REASON=payload
+# shellcheck disable=SC2329 # EXIT callback.
+autoarm_log_exit() {
+  local rc=$?
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-claude-stop-log.sh" \
+    autoarm "$$" "${MY_GEN:-${FM_AUTOARM_GEN:-none}}" "$rc" "$DECISION" "$ARM_RESULT" "$REASON" >/dev/null 2>&1 || true
+  return "$rc"
+}
+trap autoarm_log_exit EXIT
+
 # fm-watch.sh touches the liveness beacon once per cycle, immediately before
 # its terminal wait, so a healthy watcher's beacon can legitimately age up to
 # FM_POLL seconds between touches (docs/turnend-guard.md "Guard grace and the
@@ -114,9 +127,11 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # the declared multi-hour timeout - the exact wedge grok 1.0.0 produced
 # (docs/turnend-guard.md "Harness integrations"). Cursor's own park adapter owns
 # its turn boundary, so stand down on a Cursor-delivered payload.
+REASON=foreign-host
 fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 
 # --- scope: genuine primary checkout only -----------------------------------
+REASON=not-primary
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
@@ -127,21 +142,25 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # uncertainty rather than stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
+  REASON=missing-or-malformed-session-lock
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
   esac
+  REASON=other-live-session
   fm_harness_pid_alive "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
 fi
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
+REASON=away-owned
 [ -e "$STATE/.afk" ] && exit 0
 
 # --- need: whatever bin/fm-supervision-lib.sh counts as supervision need ------
 need_supervision() {
   fm_supervision_needed "$STATE" "$GRACE"
 }
+REASON=no-supervision-need
 need_supervision || exit 0
 
 # --- stale session-lock recovery ---------------------------------------------
@@ -149,6 +168,7 @@ need_supervision || exit 0
 # remain the single acquisition owner, then re-verify current-session identity
 # before touching any auto-arm state.
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
+  REASON='session-lock-recovery-refused'
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
 fi
@@ -165,7 +185,9 @@ fi
 # A role-carrying hold is a legacy lock-holding claim from a pre-generation build
 # (or the guard's own terminal-check), which the legacy shim defers to while
 # genuinely deciding and reclaims once when proven abandoned.
+REASON='open-claim'
 fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
+REASON=claim-refused
 fm_autoarm_claim_next "$STATE" "$GRACE"
 CLAIM_RC=$?
 if [ "$CLAIM_RC" -ne 0 ]; then
@@ -193,6 +215,7 @@ if [ "$CLAIM_RC" -ne 0 ]; then
   fm_autoarm_claim_next "$STATE" "$GRACE" || exit 0
 fi
 MY_GEN=$FM_AUTOARM_MY_GEN
+REASON=missing-generation
 [ -n "$MY_GEN" ] || exit 0
 
 # Commit <outcome> (optionally with the once-per-episode notice marker) for
@@ -204,6 +227,7 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # even an already-printed banner is never delivered by a losing generation.
 autoarm_commit() {  # <outcome> [marker-file]
   local outcome=$1 marker=${2:-} session_pid recovery
+  REASON="commit-$outcome"
   if [ "$outcome" = rewake ]; then
     fm_session_lock_owned_by_self "$STATE" || return 2
     session_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
@@ -223,11 +247,13 @@ autoarm_commit() {  # <outcome> [marker-file]
 # Best-effort ownership-checked record for exit-0 paths, where supersession
 # changes nothing about the action taken.
 autoarm_record() {  # <outcome>
+  REASON=$1
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
 }
 
 # X mode cadence: source the generated config so an X instance polls at its
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).
+REASON=load-config
 # shellcheck source=/dev/null
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
 
@@ -246,17 +272,22 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
   # watcher/wake state: re-verify generation ownership before every arm
   # invocation, first attempt and retries alike.
+  REASON=superseded
   if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
+  DECISION=arm
+  REASON=arm-running
   attempt=$((attempt + 1))
   OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
+  ARM_RESULT=0
   if [ -n "$OUT" ]; then
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
+    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || ARM_RESULT=$?
   else
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
+    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || ARM_RESULT=$?
   fi
+  REASON=arm-closed
 
   # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress
   # every subsequent classification and handoff.
