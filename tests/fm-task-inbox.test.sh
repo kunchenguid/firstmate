@@ -521,7 +521,7 @@ test_watcher_rerings_idle_pane_quietly() {
   sleep 2.5
   : > "$log"
   sleep 2.5
-  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  fm_test_reap "$pid"
   [ ! -s "$log" ] || fail "the watcher kept ringing after the ack:"$'\n'"$(cat "$log")"
   pass "watcher: an unhandled aged message on an idle pane re-rings without waking firstmate, and the ack silences it"
 }
@@ -538,7 +538,7 @@ test_watcher_waits_on_busy_pane() {
     FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=99
   pid=$!
   sleep 4
-  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  fm_test_reap "$pid"
   [ ! -s "$log" ] || fail "a busy pane should wait, not ring:"$'\n'"$(cat "$log")"
   [ ! -s "$state/.wake-queue" ] || fail "a busy wait queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
   pass "watcher: a busy pane just waits - the record is durable and no doorbell is typed"
@@ -555,7 +555,7 @@ test_watcher_quiet_on_healthy_inbox() {
   pid=$!
   sleep 4
   kill -0 "$pid" 2>/dev/null || fail "the watcher exited on a healthy empty inbox:"$'\n'"$(cat "$out")"
-  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  fm_test_reap "$pid"
   [ ! -s "$log" ] || fail "an empty inbox rang a doorbell:"$'\n'"$(cat "$log")"
   [ ! -s "$state/.wake-queue" ] || fail "an empty inbox queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
   pass "watcher: a healthy or empty inbox stays completely silent"
@@ -583,7 +583,7 @@ test_watcher_ack_silences_unwritable_ladder() {
   sleep 2
   kill -0 "$pid" 2>/dev/null \
     || fail "the watcher escalated ladder failure after the record was acknowledged:"$'\n'"$(cat "$out")"
-  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  fm_test_reap "$pid"
   rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
   [ "$rings" = 1 ] || fail "acknowledgement should silence retries, got $rings doorbells:"$'\n'"$(cat "$log")"
   [ ! -s "$state/.wake-queue" ] \

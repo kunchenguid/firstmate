@@ -161,6 +161,31 @@ fm_test_reap_procevent_homes() {
 FM_TEST_STUB_MAX_BLOCK_SECONDS=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
 export FM_TEST_STUB_MAX_BLOCK_SECONDS
 
+# fm_test_reap <pid> stops a background child of this shell and collects it:
+# TERM, up to FM_TEST_REAP_GRACE_SECONDS for the child to exit, then KILL.
+# A bare `kill; wait` can block until the CI job times out: bash 5.2, the
+# ubuntu-latest bash, occasionally drops a TERM whose trap fires while it is
+# parsing a command substitution ("trap: line 2: unexpected EOF while looking
+# for matching `)'") and keeps running. bash 5.3 does not. The escalation is
+# reported so a dropped TERM stays visible instead of silently passing.
+FM_TEST_REAP_GRACE_SECONDS=${FM_TEST_REAP_GRACE_SECONDS:-5}
+
+fm_test_reap() {  # <pid>
+  local pid=$1 i=0 stat
+  kill "$pid" 2>/dev/null || true
+  while [ "$i" -lt $((FM_TEST_REAP_GRACE_SECONDS * 10)) ]; do
+    stat=$(ps -o stat= -p "$pid" 2>/dev/null) || break
+    case "$stat" in *Z*) break ;; esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$i" -ge $((FM_TEST_REAP_GRACE_SECONDS * 10)) ]; then
+    printf '# fm_test_reap: pid %s ignored TERM for %ss; sent KILL\n' "$pid" "$FM_TEST_REAP_GRACE_SECONDS" >&2
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
 fm_test_cleanup() {
   local d
   fm_test_reap_procevent_homes

@@ -199,7 +199,7 @@ record_pi_state() {  # <state-dir> <id> <busy|idle>
     --source pi-ext --event turn-boundary
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+reap() { fm_test_reap "$1"; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
