@@ -26,10 +26,10 @@
 # It costs three real model turns.
 set -u
 
-if [ "${FM_PLAINENGLISH_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_PLAINENGLISH_LIVE_E2E=1 to run the live reply-shape reminder guard"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_PLAINENGLISH_LIVE_E2E claude
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
@@ -41,7 +41,6 @@ fail() {
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
 
-command -v claude >/dev/null 2>&1 || fail "claude is not installed, so this guard would verify nothing"
 VERSION=$(claude --version 2>/dev/null | head -n 1)
 
 # Outside the repo on purpose: the lab is its own git repo, and nesting one
