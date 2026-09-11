@@ -376,7 +376,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "custom-agent --flag")
   status=$?
-  expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
+  expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement: $out"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
@@ -1202,6 +1202,345 @@ SH
   done
   pass "fm-spawn: actual ship/scout launch commands deliver the worker role contract"
 }
+
+# Record every backend retirement a spawn performs: window kills and treehouse
+# invocations, the latter with the physical directory they ran from.
+arm_retire_log() {
+  RETIRE_LOG="$CASE_DIR/retire.log"
+  export FM_RETIRE_LOG="$RETIRE_LOG"
+  : > "$RETIRE_LOG"
+  mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux-unlogged"
+  cat > "$FAKEBIN_DIR/tmux" <<'SH'
+#!/bin/bash
+[ "${1:-}" != kill-window ] || printf 'tmux %s\n' "$*" >> "$FM_RETIRE_LOG"
+if [ -n "${FM_FAKE_PANE_DRIFT:-}" ]; then
+  case "$*" in
+    *'#{pane_current_path}'*)
+      n=$(( $(cat "$FM_RETIRE_LOG.reads" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$FM_RETIRE_LOG.reads"
+      if [ "$n" -gt "$FM_FAKE_PANE_DRIFT_AFTER" ]; then printf '%s\n' "$FM_FAKE_PANE_DRIFT"; exit 0; fi ;;
+  esac
+fi
+exec "$(dirname "$0")/tmux-unlogged" "$@"
+SH
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/bin/bash
+printf 'treehouse %s in %s\n' "$*" "$(pwd -P)" >> "$FM_RETIRE_LOG"
+SH
+  chmod +x "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/treehouse"
+}
+
+# Run the delivered command, not just its spelling: Pi's process cwd changes,
+# while the invoking endpoint shell and durable worktree identity stay rooted.
+test_pi_start_directory_contract() {
+  local rec id out launch expected before harness
+  for harness in pi pi-signed; do
+    id="start-$harness"
+    rec=$(make_spawn_case "$id" "$harness" "$id")
+    read_case_record "$rec"
+    arm_retire_log
+    mkdir -p "$WT_DIR/games/a b's"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --start-dir "games/a b's" --model codex-native/gpt-6-astra --effort high)
+    expect_code 0 "$?" "nested $harness spawn failed: $out"
+    assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "root identity changed"
+    assert_grep "start_dir=games/a b's" "$HOME_DIR/state/$id.meta" "relative directory was not persisted"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" "$harness" codex-native/gpt-6-astra high
+    launch=$(cat "$LAUNCH_LOG")
+    cat > "$FAKEBIN_DIR/$harness" <<'CAPTURE'
+#!/bin/sh
+if [ "${1:-}" = --help ]; then exit 0; fi
+pwd -P > "$FM_START_CAPTURE"
+printf '%s\n' "$@" >> "$FM_START_CAPTURE"
+CAPTURE
+    chmod +x "$FAKEBIN_DIR/$harness"
+    expected=$(cd "$WT_DIR/games/a b's" && pwd -P)
+    (cd "$WT_DIR" && FM_START_CAPTURE="$CASE_DIR/capture" sh -c "$launch" && pwd -P > "$CASE_DIR/after") || fail "nested launch failed"
+    assert_grep "$expected" "$CASE_DIR/capture" "Pi did not start in nested directory"
+    assert_grep 'codex-native/gpt-6-astra' "$CASE_DIR/capture" "native model lost"
+    assert_grep 'high' "$CASE_DIR/capture" "effort lost"
+    assert_grep "$HOME_DIR/state/$id.pi-ext.ts" "$CASE_DIR/capture" "absolute worker extension lost"
+    [ "$(cat "$CASE_DIR/after")" = "$(cd "$WT_DIR" && pwd -P)" ] || fail "endpoint shell left root"
+
+    # A fake stopped endpoint supplies only the backend inputs; actual relaunch
+    # performs the same metadata adoption and isolated-root checks as production.
+    mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux-base"
+    cat > "$FAKEBIN_DIR/tmux" <<'TMUX'
+#!/bin/bash
+case "$*" in
+  *'#{pane_current_command}'*) echo zsh; exit 0 ;;
+  'list-windows '*) printf '%s\n' "fm-$FM_START_ID"; exit 0 ;;
+esac
+exec "$(dirname "$0")/tmux-base" "$@"
+TMUX
+    chmod +x "$FAKEBIN_DIR/tmux"
+    before=$(sed -n 's/^spawn_gen=//p' "$HOME_DIR/state/$id.meta")
+    out=$(FM_START_ID="$id" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch)
+    expect_code 0 "$?" "relaunch failed: $out"
+    [ "$before" != "$(sed -n 's/^spawn_gen=//p' "$HOME_DIR/state/$id.meta")" ] || fail "relaunch did not replace generation"
+    launch=$(cat "$LAUNCH_LOG")
+    (cd "$WT_DIR" && FM_START_CAPTURE="$CASE_DIR/relaunch" sh -c "$launch") || fail "relaunch command failed"
+    assert_grep "$expected" "$CASE_DIR/relaunch" "relaunch lost start directory"
+    assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "relaunch changed root identity"
+    out=$(FM_START_ID="$id" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch --harness codex)
+    expect_code 1 "$?" "relaunch into unsupported harness accepted: $out"
+    assert_contains "$out" 'supports only canonical Pi' "relaunch did not explain unsupported harness"
+    # The relaunch command carries its own `;`-separated prefix; a directory
+    # that vanished after spawn must still end the subshell before Pi runs.
+    rm -d "$WT_DIR/games/a b's"
+    out=$(cd "$WT_DIR" && FM_START_CAPTURE="$CASE_DIR/relaunch-missing" sh -c "$launch" 2>&1)
+    expect_code 1 "$?" "relaunch command ran without its start directory: $out"
+    assert_contains "$out" 'start directory changed before launch' 'missing-directory launch refusal absent'
+    [ ! -f "$CASE_DIR/relaunch-missing" ] || fail 'harness executed after its start directory vanished'
+    out=$(FM_START_ID="$id" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch)
+    expect_code 1 "$?" "relaunch accepted missing start directory: $out"
+    assert_contains "$out" 'not an accessible directory' "missing relaunch directory diagnostic absent"
+    assert_no_grep 'kill-window' "$RETIRE_LOG" "relaunch refusal closed the task's own endpoint"
+    assert_no_grep 'treehouse return' "$RETIRE_LOG" "relaunch refusal returned the task's own worktree"
+    assert_grep "start_dir=games/a b's" "$HOME_DIR/state/$id.meta" "relaunch refusal dropped the recorded start directory"
+    assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "relaunch refusal changed root identity"
+  done
+  pass 'Pi/Pi-signed nested startup executes in contained cwd, preserves root shell and metadata through relaunch, and never starts without its directory'
+}
+
+test_start_directory_refusals() {
+  local rec out value axis proj_real
+  rec=$(make_spawn_case start-refusals pi refused)
+  read_case_record "$rec"
+  arm_retire_log
+  proj_real=$(cd "$PROJ_DIR" && pwd -P)
+  mkdir -p "$WT_DIR/games" "$CASE_DIR/outside"
+  ln -s "$CASE_DIR/outside" "$WT_DIR/escape"
+  printf 'escape\n' >> "$(git -C "$WT_DIR" rev-parse --git-path info/exclude)"
+  mkdir -p "$WT_DIR/a"$'\n'"b"
+  for value in '' /tmp .. games/../../outside "a"$'\n'"b"; do
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" refused "$PROJ_DIR" --start-dir="$value")
+    expect_code 1 "$?" "invalid directory was accepted: $value: $out"
+    assert_contains "$out" '--start-dir' "directory refusal is unexplained"
+    [ ! -f "$HOME_DIR/state/refused.meta" ] || fail "invalid directory published metadata"
+    [ ! -s "$RETIRE_LOG" ] || fail "refusal before allocation retired a resource: $(cat "$RETIRE_LOG")"
+  done
+  # These are only refusable once `treehouse get` has produced the slot, so the
+  # refusal must give back that clean slot and close its window itself.
+  for value in missing escape; do
+    : > "$RETIRE_LOG"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" refused "$PROJ_DIR" --start-dir="$value")
+    expect_code 1 "$?" "invalid directory was accepted: $value: $out"
+    assert_contains "$out" '--start-dir' "directory refusal is unexplained"
+    [ ! -f "$HOME_DIR/state/refused.meta" ] || fail "invalid directory published metadata"
+    assert_contains "$out" "returned pooled worktree '$WT_DIR' and asked tmux to close window" "post-allocation refusal did not report retiring its slot"
+    assert_grep "treehouse return --force $WT_DIR in $proj_real" "$RETIRE_LOG" "allocated slot was not returned from the project for $value"
+    assert_grep 'kill-window' "$RETIRE_LOG" "new window was not closed for $value"
+    assert_grep 'fm-refused' "$RETIRE_LOG" "a window other than the refused launch's own was closed for $value"
+  done
+  # Ownership is proven at retirement time, not assumed: an endpoint that no
+  # longer sits in the slot after the two discovery reads means the slot is
+  # not provably this launch's own, so nothing is returned or closed.
+  : > "$RETIRE_LOG"
+  out=$(FM_FAKE_PANE_DRIFT="$CASE_DIR/outside" FM_FAKE_PANE_DRIFT_AFTER=2 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" refused "$PROJ_DIR" --start-dir=missing)
+  expect_code 1 "$?" "drifted endpoint refusal did not fail: $out"
+  assert_contains "$out" 'not an accessible directory' 'directory refusal is unexplained after endpoint drift'
+  assert_contains "$out" "cannot be proven this launch's own" 'drifted endpoint was not named as the reason to keep the slot'
+  [ ! -s "$RETIRE_LOG" ] || fail "unproven slot was retired after endpoint drift: $(cat "$RETIRE_LOG")"
+  [ ! -f "$HOME_DIR/state/refused.meta" ] || fail "drifted refusal published metadata"
+  rm -f "$RETIRE_LOG.reads"
+  cat > "$FAKEBIN_DIR/orca" <<'SH'
+#!/bin/sh
+printf '%s\n' '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}'
+SH
+  chmod +x "$FAKEBIN_DIR/orca"
+  for axis in claude codex opencode grok kimi cursor muse gemini rovo omp; do
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" refused "$PROJ_DIR" --harness "$axis" --start-dir .)
+    expect_code 1 "$?" "unsupported $axis accepted: $out"
+    assert_contains "$out" 'supports only canonical Pi' "unsupported harness not explicitly refused"
+  done
+  for axis in orca zellij cmux; do
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" refused "$PROJ_DIR" --backend "$axis" --start-dir .)
+    expect_code 1 "$?" "unsupported $axis accepted: $out"
+    assert_contains "$out" 'supports only canonical Pi' "unsupported backend not explicitly refused"
+  done
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" refused "$PROJ_DIR" 'pi --model custom' --start-dir .)
+  expect_code 1 "$?" "raw launch accepted: $out"
+  assert_contains "$out" 'supports only canonical Pi' "raw launch not explicitly refused"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" refused --relaunch --start-dir .)
+  expect_code 1 "$?" "relaunch override accepted: $out"
+  assert_contains "$out" 'cannot override' "relaunch override diagnostic missing"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" refused "$PROJ_DIR" --secondmate --start-dir .)
+  expect_code 1 "$?" "secondmate accepted start directory: $out"
+  assert_contains "$out" 'not secondmates' 'secondmate refusal missing'
+  [ ! -f "$HOME_DIR/state/refused.meta" ] || fail "an unsupported axis published metadata"
+  # Without an origin the slot is never reset to a base, so a clean tree still
+  # cannot prove its commits landed; the refusal keeps slot and window and
+  # names the manual return.
+  git -C "$PROJ_DIR" remote remove origin
+  git -C "$WT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -q --allow-empty -m unlanded
+  : > "$RETIRE_LOG"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" refused "$PROJ_DIR" --start-dir=missing)
+  expect_code 1 "$?" "origin-less refusal did not fail: $out"
+  assert_contains "$out" 'not an accessible directory' 'directory refusal is unexplained for an origin-less slot'
+  assert_contains "$out" 'cannot be proven landed' 'origin-less slot was not named as unprovable'
+  assert_contains "$out" "treehouse return --force '$WT_DIR'" 'origin-less refusal did not name the manual return'
+  [ ! -s "$RETIRE_LOG" ] || fail "origin-less slot with an unlanded commit was retired: $(cat "$RETIRE_LOG")"
+  [ ! -f "$HOME_DIR/state/refused.meta" ] || fail "origin-less refusal published metadata"
+  [ "$(git -C "$WT_DIR" log -1 --format=%s)" = unlanded ] || fail 'origin-less refusal discarded the unlanded commit'
+  pass 'invalid directories and unsupported start-directory axes fail explicitly without task publication; refused fresh allocations are returned only with ownership proof'
+}
+
+# A stateful herdr stand-in for a projected spawn: workspaces and tabs carry
+# focus, `pane get` reports the pane's cwd until the pane is closed and a
+# pane_not_found body afterwards, and every call records who holds the
+# presentation lock at that moment, so lock discipline is observable.
+make_spawn_herdr_statefake() {  # <fakebin> <state-file>
+  local fakebin=$1 state=$2
+  printf '%s\n' '{"next":3,"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t2"}],"tabs":[{"tab_id":"w1:t2","label":"1","workspace_id":"w1","pane_id":"w1:p2","focused":true}]}' > "$state"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+STATE=$FM_FAKE_HERDR_STATE
+holder=$(cat "$FM_FAKE_HERDR_LOCK/pid" 2>/dev/null || echo none)
+{ printf 'lock=%s' "$holder"; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "$FM_HERDR_LOG"
+jq_state() { jq "$@" "$STATE"; }
+save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
+cmd=${1:-}; sub=${2:-}
+ws=""; label=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --workspace) ws=${args[$((i+1))]:-} ;;
+    --label) label=${args[$((i+1))]:-} ;;
+  esac
+done
+case "$cmd $sub" in
+  "status --json") printf '{"client":{"version":"0.8.2","protocol":20},"server":{"running":true}}\n' ;;
+  "session list") printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s"}]}\n' "$FM_FAKE_HERDR_SOCKET" ;;
+  "workspace list") jq_state '{result:{workspaces:.workspaces}}' ;;
+  "workspace create")
+    n=$(jq_state -r '.next'); wsid="w$n"; tabid="w$n:t$((n + 1))"; paneid="w$n:p$((n + 1))"
+    jq_state --arg wsid "$wsid" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" \
+      '.workspaces += [{workspace_id:$wsid, label:$wlabel, focused:false, active_tab_id:$tabid}]
+       | .tabs += [{tab_id:$tabid, label:"1", workspace_id:$wsid, pane_id:$paneid, focused:true}]
+       | .next += 2' | save
+    jq -n --arg wsid "$wsid" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" \
+      '{result:{workspace:{workspace_id:$wsid,label:$wlabel},tab:{tab_id:$tabid},root_pane:{pane_id:$paneid}}}' ;;
+  "tab list") jq_state --arg w "$ws" '{result:{tabs:[.tabs[]|select(.workspace_id==$w)]}}' ;;
+  "tab create")
+    n=$(jq_state -r '.next'); tabid="$ws:t$n"; paneid="$ws:p$n"
+    jq_state --arg w "$ws" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" \
+      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid, focused:false}] | .next += 1' | save
+    jq -n --arg tabid "$tabid" --arg paneid "$paneid" '{result:{tab:{tab_id:$tabid},root_pane:{pane_id:$paneid}}}' ;;
+  "pane list") jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}' ;;
+  "pane get")
+    pane=${3:-}
+    row=$(jq_state -c --arg p "$pane" '[.tabs[]|select(.pane_id==$p)][0] // empty')
+    if [ -n "$row" ]; then
+      printf '%s' "$row" | jq --arg cwd "$FM_FAKE_HERDR_CWD" '{result:{pane:{pane_id:.pane_id, tab_id:.tab_id, workspace_id:.workspace_id, foreground_cwd:$cwd}}}'
+    else
+      jq -n --arg p "$pane" '{error:{code:"pane_not_found",message:("pane " + $p + " not found")}}'
+      exit 1
+    fi ;;
+  "pane close")
+    pane=${3:-}
+    jq_state --arg p "$pane" '.tabs |= [.[]|select(.pane_id != $p)]' | save ;;
+  "agent get") printf '{"error":{"code":"agent_not_found","message":"no agent"}}\n' ;;
+  "pane process-info") printf '{"result":{"type":"unavailable"}}\n' ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
+}
+
+# On projected Herdr the refused launch's pane belongs to the armed abort
+# cleanup, which closes it under the presentation lock this process holds from
+# projection until exit. Closing it directly would re-enter that lock and
+# release it before the cleanup ran.
+test_start_directory_refusal_on_projected_herdr_keeps_the_presentation_lock() {
+  local rec out sock_real key lock proj_real state log
+  rec=$(make_spawn_case start-herdr pi refused)
+  read_case_record "$rec"
+  arm_retire_log
+  mkdir -p "$HOME_DIR/config"
+  printf 'on\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+  state="$CASE_DIR/herdr-state.json"
+  log="$CASE_DIR/herdr.log"
+  : > "$log"
+  make_spawn_herdr_statefake "$FAKEBIN_DIR" "$state"
+  sock_real="$(cd "$CASE_DIR" && pwd -P)/herdr.sock"
+  key=$(printf '%s\0%s' default "$sock_real" | shasum -a 256 | awk '{print $1}')
+  lock="/tmp/firstmate-herdr-presentation/order-${key:0:32}.lock"
+  proj_real=$(cd "$PROJ_DIR" && pwd -P)
+  out=$(
+    unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
+    export FM_FAKE_HERDR_STATE="$state" FM_HERDR_LOG="$log" FM_FAKE_HERDR_LOCK="$lock" \
+      FM_FAKE_HERDR_SOCKET="$CASE_DIR/herdr.sock" FM_FAKE_HERDR_CWD="$WT_DIR"
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" refused "$PROJ_DIR" --backend herdr --start-dir=missing
+  )
+  expect_code 1 "$?" "projected herdr start-directory refusal did not fail: $out"
+  assert_contains "$out" 'not an accessible directory' 'directory refusal is unexplained on projected herdr'
+  assert_contains "$out" "returned pooled worktree '$WT_DIR'; projected herdr pane default:w3:p5 is closed by this launch's abort cleanup" \
+    'projected refusal did not defer its pane to the abort cleanup'
+  assert_grep "treehouse return --force $WT_DIR in $proj_real" "$RETIRE_LOG" 'projected refusal did not return the slot from the project'
+  [ ! -f "$HOME_DIR/state/refused.meta" ] || fail 'projected refusal published metadata'
+  assert_grep $'\x1f''pane'$'\x1f''run'$'\x1f''w3:p5'$'\x1f''treehouse get' "$log" 'the projected task pane never received treehouse get'
+  [ "$(grep -c $'\x1f''pane'$'\x1f''close'$'\x1f''w3:p5'$'\x1f' "$log")" = 1 ] || fail "the task pane was not closed exactly once:"$'\n'"$(cat "$log")"
+  jq -e '[.tabs[] | select(.workspace_id == "w3")] | length == 0' "$state" >/dev/null || fail 'the projected workspace still holds panes after cleanup'
+  # From the moment the lock is first seen held, every later herdr call up to
+  # the last one must still see the same holder: the lock is released only
+  # after the abort cleanup finished.
+  awk -F"$(printf '\037')" '
+    { split($1, kv, "="); holder = kv[2] }
+    holder != "none" && first == "" { first = holder }
+    first != "" && holder != first { bad = NR }
+    END { if (first == "") { print "lock never held"; exit 1 } if (bad) { print "lock released before herdr call " bad; exit 1 } }
+  ' "$log" || fail "presentation lock was not held through the abort cleanup:"$'\n'"$(cat "$log")"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail 'presentation lock was left held after exit'
+  pass 'a projected herdr start-directory refusal returns its slot and leaves its pane to the locked abort cleanup'
+}
+
+
+test_start_directory_root_batch_and_retarget() {
+  local rec out launch id
+  rec=$(make_spawn_case start-root-batch pi start-root start-a start-b)
+  read_case_record "$rec"
+  mkdir -p "$WT_DIR/game" "$CASE_DIR/outside"
+  ln -s game "$WT_DIR/game-link"
+  printf 'game-link\n' >> "$(git -C "$WT_DIR" rev-parse --git-path info/exclude)"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" start-root "$PROJ_DIR" --start-dir .)
+  expect_code 0 "$?" "explicit root failed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  cat > "$FAKEBIN_DIR/pi" <<'CAPTURE'
+#!/bin/sh
+[ "${1:-}" != --help ] || exit 0
+pwd -P > "$FM_START_CAPTURE"
+CAPTURE
+  (cd "$WT_DIR" && FM_START_CAPTURE="$CASE_DIR/root" sh -c "$launch") || fail 'explicit root launch failed'
+  [ "$(cat "$CASE_DIR/root")" = "$(cd "$WT_DIR" && pwd -P)" ] || fail 'explicit root changed cwd'
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "start-a=$PROJ_DIR" "start-b=$PROJ_DIR" --harness pi --start-dir game-link)
+  expect_code 0 "$?" "batch failed: $out"
+  for id in start-a start-b; do
+    assert_grep 'start_dir=game-link' "$HOME_DIR/state/$id.meta" "batch dropped relative directory"
+    assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "batch changed root identity"
+  done
+  # Execute the contained symlink first, then retarget the same delivered command.
+  launch=$(tail -n 1 "$LAUNCH_LOG")
+  (cd "$WT_DIR" && FM_START_CAPTURE="$CASE_DIR/contained" sh -c "$launch") || fail 'contained symlink launch failed'
+  [ "$(cat "$CASE_DIR/contained")" = "$(cd "$WT_DIR/game" && pwd -P)" ] || fail 'contained symlink did not resolve to game'
+  rm "$WT_DIR/game-link"
+  ln -s "$CASE_DIR/outside" "$WT_DIR/game-link"
+  out=$(cd "$WT_DIR" && FM_START_CAPTURE="$CASE_DIR/escaped" sh -c "$launch" 2>&1)
+  expect_code 1 "$?" "retargeted directory ran the harness: $out"
+  assert_contains "$out" 'start directory changed before launch' 'retarget refusal missing'
+  [ ! -f "$CASE_DIR/escaped" ] || fail 'harness executed after symlink escape'
+  pass 'explicit root and batch startup work; a launch-time symlink retarget refuses before harness execution'
+}
+
+
+test_start_directory_root_batch_and_retarget
+
+test_pi_start_directory_contract
+test_start_directory_refusals
+test_start_directory_refusal_on_projected_herdr_keeps_the_presentation_lock
 
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults

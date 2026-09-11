@@ -1607,6 +1607,41 @@ It verifies native `ultra` on initial and operational turns and after restart, s
 Its native App Server peer and watcher-close process are deterministic fixtures; it does not claim a real backend or a live model was tested by that command.
 `tests/fm-busy-state.test.sh`, `tests/fm-busy-adapter-wiring.test.sh`, and `tests/fm-watch-triage.test.sh` cover separate progress notification, unchanged semantic busy state, rejection of a superseded worker's events, and progress refreshing the busy-age bound without fabricating a completed turn.
 
+### Pi worker startup below the worktree root
+
+Verified on 2026-09-09 with Pi 0.85.1, `pi-codex-native` 0.2.1, and Herdr 0.8.2 protocol 20.
+A credentialed disposable game fixture used a fresh named Herdr lab through `fm-herdr-lab.sh`, worker-only storage directories, and the normal spawn, steering, and control entrypoints.
+Pi and both native thread starts reported the same game subdirectory, with native `gpt-6-astra` and `high` effort.
+The worker followed a game-local instruction sentinel, read a game-local resource, acknowledged a durable steering message, and repeated the instruction proof after ordinary relaunch.
+The generated worker extension emitted busy, settled, turn-end, and native-progress signals; relaunch changed both generation tokens while preserving the endpoint, `worktree`, and `start_dir` fields.
+Guarded teardown succeeded and the default-session tripwire was identical before and after.
+The fixture allocator entered a preallocated linked worktree containing the committed default base; this verifies the launch and lifecycle contract, not Treehouse allocation itself.
+The command entrypoints were:
+
+```sh
+bin/fm-spawn.sh native-smoke "$fixture_project" --scout --harness pi --model codex-native/gpt-6-astra --effort high --backend herdr --start-dir games/demo
+bin/fm-send.sh native-smoke "$fixture_steering_instruction"
+bin/fm-control.sh native-smoke relaunch --note "$fixture_relaunch_instruction"
+bin/fm-control.sh native-smoke exit
+```
+
+Refresh portable command execution, containment, root identity, and relaunch coverage with:
+
+```sh
+bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
+```
+
+```text
+ok - explicit root and batch startup work; a launch-time symlink retarget refuses before harness execution
+ok - Pi/Pi-signed nested startup executes in contained cwd, preserves root shell and metadata through relaunch, and never starts without its directory
+ok - invalid directories and unsupported start-directory axes fail explicitly without task publication; refused fresh allocations are returned only with ownership proof
+ok - a projected herdr start-directory refusal returns its slot and leaves its pane to the locked abort cleanup
+```
+
+Those portable cases execute the delivered shell command against an argv/cwd capture executable and drive a projected Herdr spawn against a stateful fake CLI; they do not claim a live Pi-signed, tmux, or Herdr model run.
+`tests/fm-control-relaunch.test.sh` proves a relaunch refuses a missing, escaping, or unsupported recorded start directory before the running worker is sent anything.
+The supported startup-directory contract and explicit unsupported-axis refusals are owned by `bin/fm-spawn.sh --help`.
+
 ## Oh My Pi (omp)
 
 omp runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#omp-oh-my-pi-native-delivery-2026-09-05) owns the primary evidence.

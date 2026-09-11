@@ -42,6 +42,11 @@
 #              already recorded for it.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
+#              A recorded start_dir must still satisfy bin/fm-spawn.sh --help's
+#              start-directory contract (supported harness/backend/kind, an
+#              accessible directory inside the worktree) before the old agent
+#              is stopped, so a launch that owner must refuse never costs the
+#              running agent.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
@@ -304,6 +309,7 @@ LABEL="fm-$ID"
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
+START_DIR=
 [ -n "$KIND" ] || KIND=ship
 
 HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
@@ -661,6 +667,11 @@ resolve_relaunch_profile() {
   # transaction, where nothing has changed yet.
   fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" \
     || die "'$TARGET_HARNESS' is not verified to run a $KIND task, so relaunching $ID onto it would stop the running agent for a launch that must be refused; choose an adapter verified for this kind"
+  START_DIR=$(fm_meta_get "$META" start_dir)
+  if [ -n "$START_DIR" ]; then
+    fm_control_start_dir_axes_supported "$TARGET_HARNESS" "$BACKEND" "$KIND" \
+      || die "task $ID records start_dir '$START_DIR', which only canonical Pi/Pi-signed ship/scout launches on tmux or herdr support, so relaunching it onto $TARGET_HARNESS/$BACKEND would stop the running agent for a launch that must be refused; relaunch onto pi or pi-signed"
+  fi
   # A model or effort chosen for the previous harness does not transfer to a
   # different one, so an explicit harness change resets both axes unless the
   # caller names them too.
@@ -703,6 +714,10 @@ safe_checkpoint() {
   wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || wt_top_real=$wt_top
   [ "$wt_real" = "$wt_top_real" ] \
     || die "task $ID's recorded worktree $WT is not a worktree root (root is $wt_top); refusing to relaunch against an ambiguous checkout"
+  if [ -n "$START_DIR" ]; then
+    fm_control_start_dir_resolve "$WT" "$START_DIR" \
+      || die "task $ID's recorded start_dir $FM_CONTROL_START_DIR_REASON; the replacement must start there, so restore that directory before relaunching rather than stopping the agent for a launch that must be refused"
+  fi
   if head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null); then
     :
   elif head_ref=$(git -C "$WT" symbolic-ref -q HEAD 2>/dev/null); then

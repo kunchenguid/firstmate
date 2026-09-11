@@ -109,6 +109,48 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   return 0
 }
 
+# The start-directory contract (bin/fm-spawn.sh --help) has one owner here so
+# the launch owner and the relaunch transaction apply the same rule: the
+# launch refuses with it, and a relaunch asks it on the pre-stop side so a
+# running agent is never stopped for a launch that must then be refused. The
+# axes are the canonical adapter, session backend, and task kind; a raw launch
+# command is the launch owner's own extra refusal.
+fm_control_start_dir_axes_supported() {  # <harness> <backend> <kind>
+  case "${1-}:${2-}:${3-}" in
+    pi:tmux:ship|pi:tmux:scout|pi:herdr:ship|pi:herdr:scout) return 0 ;;
+    pi-signed:tmux:ship|pi-signed:tmux:scout|pi-signed:herdr:ship|pi-signed:herdr:scout) return 0 ;;
+  esac
+  return 1
+}
+
+# Resolves <start-dir> inside <worktree> to FM_CONTROL_START_DIR_PATH, its
+# physical directory. Returns 1, with FM_CONTROL_START_DIR_REASON naming the
+# cause, when it is not an accessible directory or its physical path leaves the
+# worktree root. Both results are variables, not output, so a caller keeps
+# them without a subshell.
+FM_CONTROL_START_DIR_PATH=
+FM_CONTROL_START_DIR_REASON=
+fm_control_start_dir_resolve() {  # <worktree> <start-dir>
+  local worktree=${1-} start_dir=${2-} path root
+  FM_CONTROL_START_DIR_PATH=
+  FM_CONTROL_START_DIR_REASON=
+  if ! path=$(CDPATH='' cd -- "$worktree/$start_dir" 2>/dev/null && pwd -P); then
+    FM_CONTROL_START_DIR_REASON="'$start_dir' is not an accessible directory in '$worktree'"
+    return 1
+  fi
+  root=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || root=$worktree
+  case "$path" in
+    "$root"|"$root"/*) ;;
+    *)
+      # shellcheck disable=SC2034 # Output globals read by sourcing callers.
+      FM_CONTROL_START_DIR_REASON="'$start_dir' physically escapes worktree '$worktree'"
+      return 1
+      ;;
+  esac
+  # shellcheck disable=SC2034 # Output globals read by sourcing callers.
+  FM_CONTROL_START_DIR_PATH=$path
+}
+
 # The key that cancels a running turn. Escape for every adapter except grok,
 # whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
 # gemini names its own key in the running turn's status row
