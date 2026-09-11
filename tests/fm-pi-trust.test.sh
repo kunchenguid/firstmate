@@ -65,6 +65,52 @@ test_primary_checkout_is_refused() {
   pass "fm-pi-trust.sh: refuses the primary checkout"
 }
 
+test_linked_worktree_from_same_origin_is_trusted() {
+  local out bare clone_a clone_b
+  CASE_DIR=$TMP_ROOT/shared-origin
+  PROJ=$CASE_DIR/clone-b
+  WT=$CASE_DIR/wt
+  AGENT=$CASE_DIR/pi-agent
+  bare=$CASE_DIR/origin.git
+  clone_a=$CASE_DIR/clone-a
+  clone_b=$PROJ
+  mkdir -p "$AGENT"
+  fm_git_init_commit "$CASE_DIR/source"
+  git clone --quiet --bare "$CASE_DIR/source" "$bare"
+  git clone --quiet "file://$bare" "$clone_a"
+  git clone --quiet "file://$bare" "$clone_b"
+  git -C "$clone_a" remote set-url origin 'https://GITHUB.com/Owner/Repo.git/'
+  git -C "$clone_b" remote set-url origin 'https://github.com/owner/repo'
+  git -C "$clone_a" worktree add --quiet -b linked "$WT"
+  out=$(run_trust)
+  expect_code 0 $? "a linked worktree from the same origin must be trusted: $out"
+  assert_trusted "$AGENT/trust.json" "$WT" "the same-origin linked worktree was not trusted"
+  pass "fm-pi-trust.sh: trusts a linked worktree whose clone differs but origin matches"
+}
+
+test_unrelated_project_is_refused() {
+  local out other
+  make_case unrelated
+  other=$CASE_DIR/other
+  fm_git_worktree "$other" "$CASE_DIR/other-wt" other-wt
+  out=$(PI_CODING_AGENT_DIR="$AGENT" HOME="$CASE_DIR/home" "$TRUST" "$WT" "$other" 2>&1)
+  expect_code 1 $? "an unrelated project must be refused: $out"
+  assert_contains "$out" "not a worktree of project" "the unrelated-project refusal was not reported"
+  [ ! -e "$AGENT/trust.json" ] || fail "the unrelated project's worktree was trusted"
+  pass "fm-pi-trust.sh: refuses a worktree from an unrelated project"
+}
+
+test_non_root_worktree_path_is_refused() {
+  local out
+  make_case non-root
+  mkdir "$WT/subdir"
+  out=$(PI_CODING_AGENT_DIR="$AGENT" HOME="$CASE_DIR/home" "$TRUST" "$WT/subdir" "$PROJ" 2>&1)
+  expect_code 1 $? "a non-root worktree path must be refused: $out"
+  assert_contains "$out" "not a worktree root" "the non-root refusal was not reported"
+  [ ! -e "$AGENT/trust.json" ] || fail "the non-root worktree path was trusted"
+  pass "fm-pi-trust.sh: refuses a non-root worktree path"
+}
+
 test_pi_spawn_pretrusts_before_launch_and_only_submits_shell_command() {
   local out fakebin events launch_log
   make_case spawn
@@ -96,4 +142,7 @@ test_pi_spawn_pretrusts_before_launch_and_only_submits_shell_command() {
 test_fresh_worktree_is_trusted
 test_existing_decisions_are_preserved
 test_primary_checkout_is_refused
+test_linked_worktree_from_same_origin_is_trusted
+test_unrelated_project_is_refused
+test_non_root_worktree_path_is_refused
 test_pi_spawn_pretrusts_before_launch_and_only_submits_shell_command

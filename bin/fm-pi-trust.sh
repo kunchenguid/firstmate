@@ -28,6 +28,38 @@ common_dir_of() {
   common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
   (cd -P -- "$dir" && real_dir "$common")
 }
+origin_url() { git -C "$1" remote get-url origin 2>/dev/null; }
+normalize_origin() {
+  local origin=$1 trimmed lower authority hostpart github=0
+  trimmed=$origin
+  while :; do
+    case "$trimmed" in
+      */) trimmed=${trimmed%/} ;;
+      *.git) trimmed=${trimmed%.git} ;;
+      *) break ;;
+    esac
+  done
+  lower=$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in
+    *://*)
+      authority=${lower#*://}
+      authority=${authority%%/*}
+      authority=${authority##*@}
+      authority=${authority%%:*}
+      [ "$authority" = github.com ] && github=1
+      ;;
+    *@*:*)
+      hostpart=${lower%%:*}
+      hostpart=${hostpart##*@}
+      [ "$hostpart" = github.com ] && github=1
+      ;;
+  esac
+  if [ "$github" -eq 1 ]; then
+    printf '%s\n' "$lower"
+  else
+    printf '%s\n' "$trimmed"
+  fi
+}
 
 WT_REAL=$(real_dir "$WT_ARG") || true
 [ -n "$WT_REAL" ] || refuse "worktree '$WT_ARG' is not an accessible directory"
@@ -46,7 +78,14 @@ WT_COMMON=$(common_dir_of "$WT_REAL") || true
 [ "$WT_GIT_DIR" != "$WT_COMMON" ] || refuse "'$WT_REAL' is a primary checkout, not an isolated worktree"
 PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
 [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
-[ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+if [ "$WT_COMMON" != "$PROJ_COMMON" ]; then
+  WT_ORIGIN=$(origin_url "$WT_REAL") || true
+  PROJ_ORIGIN=$(origin_url "$PROJ_REAL") || true
+  [ -n "$WT_ORIGIN" ] && [ -n "$PROJ_ORIGIN" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+  WT_ORIGIN_NORM=$(normalize_origin "$WT_ORIGIN")
+  PROJ_ORIGIN_NORM=$(normalize_origin "$PROJ_ORIGIN")
+  [ "$WT_ORIGIN_NORM" = "$PROJ_ORIGIN_NORM" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+fi
 
 command -v node >/dev/null 2>&1 || refuse "node is required to record Pi trust and was not found on PATH"
 
