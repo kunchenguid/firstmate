@@ -117,6 +117,10 @@ Two rules the commands cannot enforce for you:
 : Never append a raw result to a task's status history; that log is a bounded event record, not a payload channel.
 : A source whose adapter returns a terminal verdict for the captured result has already retired itself, so an ended review needs no cleanup from you and produces no further wake. Retire any other finished source with the adapter's `retire`, which stays safe and idempotent even for one that already retired. Retirement stops future completions; it is independent of acknowledging a result already captured, which only `handled` does.
 
+`process-event source stranded` or `process-event source failed to start` (queue keys `procevent:<source-id>:stranded:<claim-token>` and `procevent:<source-id>:launch-failed:<registration-identity>-<episode-nonce>`)
+: Nothing was captured: the source named in the payload is registered but nothing is confirmed to be collecting from it. There is no result file to read and no `handled` call to make; the ordinary drain acknowledgement consumes the row.
+: The payload says which shape it is and what clears it. Follow it exactly as the arming section above describes - a `start` is named only for the reused-pid strand, a leaderless group is a human check and reclaims itself once its group is empty, and a launch that never proved its claim closes its own episode if a later cycle finds the source owned.
+
 ## What the runner guarantees, exactly
 
 Supported by tests:
