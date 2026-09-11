@@ -166,6 +166,11 @@
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
 #
+# Slot path spelling: every return hands treehouse the spelling the pool's own
+# treehouse-state.json registered for that slot, resolved by bin/fm-wake-lib.sh's
+# fm_treehouse_return_path. A path no pool registers is passed through unchanged,
+# and failures stay loud either way.
+#
 # Pre-teardown cleanup sequence (runs once every landed/discard-work safety
 # refusal above has already passed, and BEFORE any worktree return, branch
 # delete, or backend kill below - a still-active run or a leaked process may
@@ -297,16 +302,15 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
 
-# A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
-# Require both its pool state and the same Git common directory as the recorded
-# project; an ordinary linked worktree is not evidence that Treehouse owns it.
+# Require both a pool registry (the managed-pool layout is owned by
+# bin/fm-wake-lib.sh's fm_treehouse_pool_state_file) and the same Git common
+# directory as the recorded project; an ordinary linked worktree is not evidence
+# that Treehouse owns it.
 is_treehouse_pool_slot() {  # <project> <worktree>
-  local project=$1 worktree=$2 slot pool state project_common slot_common
+  local project=$1 worktree=$2 slot project_common slot_common
   [ -d "$project" ] && [ -d "$worktree" ] || return 1
   slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
-  pool=$(dirname "$(dirname "$slot")")
-  state="$pool/treehouse-state.json"
-  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  fm_treehouse_pool_state_file "$slot" >/dev/null || return 1
   project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   project_common=$(CDPATH='' cd -- "$project_common" 2>/dev/null && pwd -P) || return 1
@@ -1567,11 +1571,15 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc slot
+
+  # Re-spell the path through $HOME at the return boundary; the helper owns the
+  # HOME resolution. It never reports "already reclaimed" - failures stay loud.
+  slot=$(fm_treehouse_return_path "$dir")
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse return --force "$slot" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -1596,7 +1604,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse return --force "$slot" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -1623,7 +1631,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse return --force "$slot" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0

@@ -1210,6 +1210,57 @@ fm_treehouse_project_lock_path() {  # <project-dir>
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
+# The pool state file that registers a treehouse pool slot, given the slot's
+# resolved path. A managed pool has the fixed <pool>/<slot>/<repo> layout with
+# its registry at the pool root; a plain symlink there is not a pool registry.
+fm_treehouse_pool_state_file() {  # <resolved-slot-dir>
+  local state
+  state="$(dirname "$(dirname "$1")")/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  printf '%s\n' "$state"
+}
+
+# The path spelling `treehouse return` accepts for a pool slot.
+#
+# Treehouse matches a return path against the spellings its pool registered
+# after only lexical cleaning - it resolves "." and ".." segments, collapses
+# doubled and trailing slashes, and makes a relative path absolute, but it never
+# resolves symlinks. Every worktree path Firstmate captures is physical instead:
+# a pane's OS-level cwd read at spawn, or `pwd -P`. Wherever the pool was
+# registered through a symlinked component, the two disagree and `treehouse
+# return` rejects the physical form as "not managed by treehouse" - which on a
+# bootc host, where /home is a symlink to /var/home and the pool root is $HOME-
+# rooted, is every pooled slot.
+#
+# So the spelling comes from the registration itself: the pool's
+# treehouse-state.json is the record treehouse matches against, and the entry
+# whose path resolves to the same directory as the slot is by definition the
+# spelling it will accept. Reading the registration - rather than assuming where
+# the pool root is rooted - is also what makes a symlinked pool root work: the
+# registry is located through the slot's resolved path, and each registered
+# spelling is compared after the same resolution.
+#
+# A path with no pool registry, or none registering it, is passed through
+# byte-identical rather than guessed at.
+#
+# Always prints a path and succeeds; the return itself stays responsible for
+# reporting failure, and nothing here treats a non-rewritten path as evidence
+# that the slot has already been reclaimed.
+fm_treehouse_return_path() {  # <slot-dir>
+  local dir=$1 slot state registered resolved
+  slot=$(CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P) || { printf '%s\n' "$dir"; return 0; }
+  state=$(fm_treehouse_pool_state_file "$slot") || { printf '%s\n' "$dir"; return 0; }
+  while IFS= read -r registered; do
+    [ -n "$registered" ] || continue
+    resolved=$(CDPATH='' cd -- "$registered" 2>/dev/null && pwd -P) || continue
+    if [ "$resolved" = "$slot" ]; then
+      printf '%s\n' "$registered"
+      return 0
+    fi
+  done < <(jq -r '.worktrees[]?.path // empty' "$state" 2>/dev/null)
+  printf '%s\n' "$dir"
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"

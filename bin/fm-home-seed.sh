@@ -576,13 +576,17 @@ seed_rollback_target() {
 }
 
 seed_return_treehouse_home() {
-  local home=$1 abs_home
+  local home=$1 abs_home slot
   abs_home=$(seed_rollback_target "$home" "treehouse-acquired home") || return 0
   if ! command -v treehouse >/dev/null 2>&1; then
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  ( cd "$FM_ROOT" && treehouse return --force "$abs_home" >/dev/null ) || {
+  # Return the lease under the spelling treehouse registered, since the rollback
+  # path only ever has a resolved path; see bin/fm-wake-lib.sh's
+  # fm_treehouse_return_path.
+  slot=$(fm_treehouse_return_path "$abs_home")
+  ( cd "$FM_ROOT" && treehouse return --force "$slot" >/dev/null ) || {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
