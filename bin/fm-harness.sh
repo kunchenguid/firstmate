@@ -56,13 +56,13 @@ detect_own() {
   # a human started by hand. Verified live on cursor-agent 2026.08.11-e8db854:
   # CURSOR_INVOKED_AS=cursor-agent is set on the agent process itself, and
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
-  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
-  [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
   # Antigravity CLI exports ANTIGRAVITY_AGENT=1 to child/tool processes, but
   # the live agy launcher itself exports no ANTIGRAVITY_* identity marker.
-  # This marker was measured in agy 1.2.0 and must outrank an inherited
-  # foreign marker; the ancestry arm below identifies the launcher TUI itself.
+  # This marker was measured in agy 1.2.0 and is the most specific verified
+  # identity, so it wins over every foreign marker.
   [ "${ANTIGRAVITY_AGENT:-}" = "1" ] && { echo agy; return; }
+  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
+  [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
   # Gemini is checked BEFORE claude for exactly cursor's reason above: the
   # Gemini CLI does NOT clear an inherited CLAUDECODE, so a gemini worker
   # launched from a claude primary carries BOTH markers and whichever is

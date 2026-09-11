@@ -3464,7 +3464,7 @@ if [ "$KIND" != secondmate ]; then
       if [ "$RAW_LAUNCH" -eq 0 ]; then
         # PreInvocation opens the semantic turn and Stop closes it.
         # Antigravity's Escape interrupt does not emit Stop in 1.2.0, so the
-        # control and data planes write fm-interrupt idle after delivering it.
+        # control and data planes write fm-interrupt unknown after delivering it.
         BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
           echo "error: failed to arm the busy-state contract for $ID" >&2
           exit 1

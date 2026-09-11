@@ -161,6 +161,22 @@ SH
     -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT PATH="$fakebin:$BASE_PATH" \
     GEMINI_CLI=1 "$ROOT/bin/fm-harness.sh")
   [ "$got" = gemini ] || fail "Gemini marker alone resolved '$got', expected gemini"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_INVOKED_AS \
+    -u GEMINI_CLI -u ANTIGRAVITY_AGENT PATH="$fakebin:$BASE_PATH" \
+    CURSOR_AGENT=1 "$ROOT/bin/fm-harness.sh")
+  [ "$got" = cursor ] || fail "Cursor marker alone resolved '$got', expected cursor"
+  got=$(env -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u GEMINI_CLI -u ANTIGRAVITY_AGENT PATH="$fakebin:$BASE_PATH" \
+    CLAUDECODE=1 "$ROOT/bin/fm-harness.sh")
+  [ "$got" = claude ] || fail "Claude marker alone resolved '$got', expected claude"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_INVOKED_AS \
+    -u GEMINI_CLI -u ANTIGRAVITY_AGENT PATH="$fakebin:$BASE_PATH" \
+    CURSOR_AGENT=1 ANTIGRAVITY_AGENT=1 "$ROOT/bin/fm-harness.sh")
+  [ "$got" = agy ] || fail "AGY marker lost to Cursor marker: '$got'"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT \
+    -u CURSOR_INVOKED_AS -u GEMINI_CLI PATH="$fakebin:$BASE_PATH" \
+    ANTIGRAVITY_AGENT=1 CLAUDECODE=1 "$ROOT/bin/fm-harness.sh")
+  [ "$got" = agy ] || fail "AGY marker lost to Claude marker: '$got'"
   got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT \
     -u CURSOR_INVOKED_AS -u GEMINI_CLI -u ANTIGRAVITY_AGENT \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
