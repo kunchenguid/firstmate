@@ -344,6 +344,14 @@ SH
   expect_code 0 "$status" "the bounded continuation stop should settle"
   [ "$(cat "$log")" = 'activity idle --harness codex' ] \
     || fail "bounded continuation never returned Codex to idle: $(cat "$log")"
+  rm -f "$dir/state/task1.meta"
+  : > "$log"
+  out=$(printf '%s' '{"stop_hook_active":false}' | FM_HOME="$dir" \
+    FM_STOW_ACTIVITY_BIN="$activity" FM_STOW_ACTIVITY_LOG="$log" \
+    bash "$dir/bin/fm-turnend-guard.sh" --claude --stow-harness claude 2>&1); status=$?
+  expect_code 0 "$status" "the tracked Claude Stop invocation should settle"
+  [ "$(cat "$log")" = 'activity idle --harness claude' ] \
+    || fail "the tracked Claude Stop invocation did not publish idle: $(cat "$log")"
   pass "fm-turnend-guard publishes idle only at final settlement"
 }
 
