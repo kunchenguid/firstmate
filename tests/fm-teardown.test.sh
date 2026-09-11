@@ -3872,6 +3872,41 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_reader_scratch_teardown_skips_treehouse_return() {
+  local case_dir scratch rc=0
+  case_dir=$(make_case reader-scratch-teardown)
+  scratch="$case_dir/tasktmp/scratch"
+  mkdir -p "$scratch" "$case_dir/data/task-x1"
+  printf 'findings\n' > "$case_dir/data/task-x1/report.md"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$scratch" \
+    "project=$case_dir/project" \
+    'kind=scout' \
+    'access=reader' \
+    "tasktmp=$case_dir/tasktmp" \
+    'decisions_reviewed=1'
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 1
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "reader-scratch-teardown: reader teardown should not require a pool return: $(cat "$case_dir/stderr")"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "reader-scratch-teardown: reader scratch was passed to treehouse return"
+  [ ! -d "$case_dir/tasktmp" ] \
+    || fail "reader-scratch-teardown: reader task scratch was not removed"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "reader-scratch-teardown: reader task record was not removed"
+  pass "reader scratch teardown skips treehouse return and removes its task temp root"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_skips_pipeline_retirement_when_nested_home_is_gone
 test_teardown_retires_pipeline_records_on_normal_remove
