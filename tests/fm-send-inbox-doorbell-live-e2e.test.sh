@@ -33,7 +33,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fm_live_gate opt-in FM_SEND_INBOX_LIVE_E2E tmux
+fm_live_gate opt-in FM_SEND_INBOX_LIVE_E2E,FM_AGY_LIFECYCLE_LIVE_E2E tmux
 
 unset NO_MISTAKES_GATE
 
@@ -186,21 +186,142 @@ check_harness_doorbell() {  # <name>
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
 }
 
-HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'claude codex opencode pi grok kimi muse agy'}
-for h in $HARNESSES; do
-  if command -v "$h" >/dev/null 2>&1; then
-    check_harness_doorbell "$h"
-  else
-    note "harness absent, not verified here: $h"
-  fi
-done
+if [ "${FM_AGY_LIFECYCLE_LIVE_E2E:-}" != 1 ]; then
+  HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'claude codex opencode pi grok kimi muse agy'}
+  for h in $HARNESSES; do
+    if command -v "$h" >/dev/null 2>&1; then
+      check_harness_doorbell "$h"
+    else
+      note "harness absent, not verified here: $h"
+    fi
+  done
 
-if [ "$FAILED" -ne 0 ]; then
-  printf 'not ok - live steering-inbox doorbell guard found failures above\n' >&2
-  exit 1
+  if [ "$FAILED" -ne 0 ]; then
+    printf 'not ok - live steering-inbox doorbell guard found failures above\n' >&2
+    exit 1
+  fi
+  if [ "$CHECKED" -eq 0 ]; then
+    printf 'not ok - live steering-inbox doorbell guard verified nothing (no harness installed?)\n' >&2
+    exit 1
+  fi
+  pass "live steering-inbox doorbell guard: $CHECKED harness(es) honored the doorbell contract"
 fi
-if [ "$CHECKED" -eq 0 ]; then
-  printf 'not ok - live steering-inbox doorbell guard verified nothing (no harness installed?)\n' >&2
-  exit 1
-fi
-pass "live steering-inbox doorbell guard: $CHECKED harness(es) honored the doorbell contract"
+
+run_agy_canonical_lifecycle() (
+  local task="live-agy-lifecycle-$$" lab project home status target version
+  local spawned=0 state capture busy=0 turn_end=0 verdict=unknown trust_seen=0
+  [ "${FM_AGY_LIFECYCLE_LIVE_E2E:-}" = 1 ] || return 0
+  die() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+  cleanup_lifecycle() {
+    if [ "$spawned" -eq 1 ]; then
+      TMUX_TMPDIR="$lab/tmux" tmux kill-server >/dev/null 2>&1 || true
+    fi
+    [ -z "${lab:-}" ] || rm -rf "$lab"
+  }
+  trap cleanup_lifecycle EXIT
+  command -v agy >/dev/null 2>&1 || die 'agy lifecycle guard requested but agy is absent'
+  command -v treehouse >/dev/null 2>&1 || die 'agy lifecycle guard requested but treehouse is absent'
+  version=$(agy --version 2>/dev/null | head -1 || printf 'version-unknown')
+  lab=$(mktemp -d "${TMPDIR:-/tmp}/fm-agy-lifecycle.XXXXXX")
+  project="$lab/project"
+  home="$lab/home"
+  status="$home/state/$task.status"
+  mkdir -p "$home/state" "$home/config" "$home/data/$task" "$lab/tmux"
+  git clone -q "$ROOT" "$project" || die "agy ($version): could not create the isolated lifecycle project"
+  git -C "$project" config user.email 'agy-lifecycle-test@example.invalid'
+  git -C "$project" config user.name 'agy lifecycle test'
+  printf 'tmux\n' > "$home/config/backend"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" "$task" lifecycle --scout \
+    >/dev/null || die "agy ($version): could not scaffold the lifecycle brief"
+  cat > "$home/data/$task/brief.md" <<EOF
+# Task
+
+Run the exact shell command `sleep 60` and wait for it to finish.
+Do not run any other command.
+EOF
+  TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-spawn.sh" "$task" "$project" --scout --harness agy --effort low --backend tmux \
+    >/dev/null || die "agy ($version): canonical fm-spawn could not launch"
+  spawned=1
+  state="$home/state"
+  target=$(awk -F= '/^window=/{print $2}' "$state/$task.meta")
+  [ -n "$target" ] || die "agy ($version): canonical spawn did not publish an endpoint"
+  [ -f "$state/$task.agy-hooks/.agents/hooks.json" ] \
+    || die "agy ($version): canonical spawn did not generate private hooks"
+  for _ in $(seq 1 120); do
+    capture=$(TMUX_TMPDIR="$lab/tmux" tmux capture-pane -p -t "$target" 2>/dev/null || true)
+    if [ "$trust_seen" -eq 0 ] && printf '%s\n' "$capture" | grep -qi 'trust'; then
+      TMUX_TMPDIR="$lab/tmux" tmux send-keys -t "$target" Enter || \
+        die "agy ($version): trust dialog could not be accepted"
+      trust_seen=1
+      sleep 1
+      continue
+    fi
+    if printf '%s\n' "$capture" | grep -Eq 'esc to cancel|Working|Generating'; then
+      busy=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$busy" -eq 1 ] || die "agy ($version): initial brief never reached a real running tool"
+  grep -Fq 'state=busy' "$state/$task.busy-state" \
+    || die "agy ($version): canonical spawn did not seed semantic busy state"
+  TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-control.sh" "$task" interrupt > "$lab/control.out" 2>&1 \
+    || die "agy ($version): control-plane interrupt failed"
+  grep -Fq 'cancel=unconfirmed' "$lab/control.out" \
+    || die "agy ($version): control-plane interrupt did not report unconfirmed cancellation"
+  grep -Fq 'state=unknown' "$state/$task.busy-state" \
+    || die "agy ($version): control-plane interrupt did not preserve unknown semantic state"
+  for _ in $(seq 1 60); do
+    verdict=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state "$2"' _ "$ROOT" "$target" 2>/dev/null || true)
+    [ "$verdict" = empty ] && break
+    sleep 1
+  done
+  [ "$verdict" = empty ] || die "agy ($version): control interrupt did not return to a proven empty composer"
+  FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-send.sh" "$task" \
+    'Run the exact shell command `sleep 60` and wait for it to finish. Do not run any other command.' \
+    >/dev/null 2>&1 || die "agy ($version): data-plane turn could not be submitted"
+  for _ in $(seq 1 120); do
+    capture=$(TMUX_TMPDIR="$lab/tmux" tmux capture-pane -p -t "$target" 2>/dev/null || true)
+    if printf '%s\n' "$capture" | grep -Eq 'esc to cancel|Working|Generating'; then
+      break
+    fi
+    sleep 1
+  done
+  TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-send.sh" "$task" --key Escape > "$lab/data.out" 2>&1 \
+    || die "agy ($version): data-plane interrupt failed"
+  grep -Fq 'unknown fm-interrupt' "$state/$task.busy-state" 2>/dev/null || \
+    grep -Fq 'state=unknown' "$state/$task.busy-state" \
+    || die "agy ($version): data-plane interrupt did not preserve unknown semantic state"
+  FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-send.sh" "$task" \
+    'Run `printf AGY_LIFECYCLE_DONE` exactly once, then stop.' >/dev/null 2>&1 \
+    || die "agy ($version): natural turn could not be submitted"
+  for _ in $(seq 1 120); do
+    if [ -f "$state/$task.turn-ended" ] && grep -Fq 'state=idle' "$state/$task.busy-state" 2>/dev/null; then
+      turn_end=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$turn_end" -eq 1 ] || die "agy ($version): natural Stop did not publish idle and turn-ended state"
+  TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-control.sh" "$task" exit >/dev/null 2>&1 \
+    || die "agy ($version): exit command failed"
+  mkdir -p "$home/data/$task"
+  : > "$home/data/$task/report.md"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-decision-hold.sh" complete "$task" --none \
+    >/dev/null 2>&1 || die "agy ($version): decision hold cleanup failed"
+  local teardown_out teardown_rc=0
+  teardown_out=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-teardown.sh" "$task" 2>&1) || teardown_rc=$?
+  [ "$teardown_rc" -eq 0 ] || die "agy ($version): teardown failed: $teardown_out"
+  [ ! -e "$state/$task.agy-hooks" ] || die "agy ($version): teardown left private hooks behind"
+  pass "agy ($version): canonical spawn, hooks, control/data interrupts, Stop, exit, and teardown passed"
+)
+
+run_agy_canonical_lifecycle || exit 1
