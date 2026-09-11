@@ -107,11 +107,6 @@ FM_REMOTE_JOB_EXIT=
 FM_REMOTE_JOB_ERROR=
 FM_REMOTE_JOB_REPAIRED=0
 
-fm_remote_job_die() {
-  printf 'error: %s\n' "$1" >&2
-  return 1
-}
-
 fm_remote_job_safe_id() {
   case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
 }
@@ -1074,14 +1069,6 @@ fm_remote_job_worker_identity_matches() { # <remote-root> <account-home>
   fi
   expected=$(fm_remote_job_code_identity "$root" "$account_home") || return 1
   [ "$actual" = "$expected" ]
-}
-
-fm_remote_job_worker_alive() { # <account-home>
-  local account_home=$1 pid
-  fm_remote_job_prepare_state "$account_home" || return 1
-  pid=$(cat "$(fm_remote_job_worker_pid_path)" 2>/dev/null || true)
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null
 }
 
 fm_remote_job_probe() { # <account-home>; a fresh worker heartbeat or active job proves readiness

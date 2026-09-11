@@ -24,7 +24,7 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
-. "$ROOT/bin/fm-marker-lib.sh"
+. "$ROOT/bin/fm-operational-input.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SEND="$ROOT/bin/fm-send.sh"

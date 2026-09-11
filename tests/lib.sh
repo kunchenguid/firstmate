@@ -58,6 +58,23 @@ unset FM_TASK_ID
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# --- per-home tasks config --------------------------------------------------
+#
+# .tasks.toml is per-home local (untracked), so tests that seed a synthetic
+# home write the default markdown-backend config themselves instead of
+# copying a tracked copy from the repo root.
+
+fm_test_write_tasks_config() {  # <home>
+  cat > "$1/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 10
+EOF
+}
+
 # --- reporters --------------------------------------------------------------
 
 fail() {

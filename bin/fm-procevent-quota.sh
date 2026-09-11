@@ -30,6 +30,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-stdlib.sh
+. "$SCRIPT_DIR/fm-stdlib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -54,14 +56,9 @@ CANONICAL_SOURCE_ID=
 PROVIDER=
 
 usage() {
-  awk '
-    NR == 1 { next }
-    /^#/ { sub(/^# ?/, ""); print; next }
-    { exit }
-  ' "${BASH_SOURCE[0]}"
+  usage_render_header "${BASH_SOURCE[0]}"
   exit 2
 }
-die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
 resolve_provider() {
   local LC_ALL=C

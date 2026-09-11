@@ -353,6 +353,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-stdlib.sh
+. "$SCRIPT_DIR/fm-stdlib.sh"
 
 usage() {
   # The whole leading comment block, ending at the first line that is not a
@@ -2069,17 +2071,6 @@ resolve_project_dir_arg() {
     projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
     *) printf '%s\n' "$path" ;;
   esac
-}
-
-path_is_ancestor_of() {
-  local ancestor=$1 path=$2
-  [ -n "$ancestor" ] || return 1
-  [ -n "$path" ] || return 1
-  [ "$ancestor" != "$path" ] || return 1
-  case "$path" in
-    "$ancestor"/*) return 0 ;;
-  esac
-  return 1
 }
 
 validate_firstmate_home_for_spawn() {
