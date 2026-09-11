@@ -944,6 +944,8 @@ test_teardown_cost_summary_null_without_intake_at() {
       || fail "cost-no-intake: pi_list_usd_total must stay null without a safe intake_at lower bound"
     [ "$(jq -r '.consumption.list_usd_total' "$cost_json")" = null ] \
       || fail "cost-no-intake: list_usd_total must stay null without a safe intake_at lower bound"
+    [ "$(jq -r '.relaunched' "$cost_json")" = null ] \
+      || fail "cost-no-intake: relaunched must stay null without a frozen intake record to compare against"
   }
   pass "teardown never computes consumption with an unbounded scan when intake_at is missing"
 }
