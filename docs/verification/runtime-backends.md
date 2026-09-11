@@ -888,7 +888,7 @@ The suite also cross-checks its own Part A measurement against the floor classif
 
 A pseudo-terminal registers as a Herdr foreground client only when its window grid is non-zero.
 `script` and a bare `pty.fork()` from a non-tty parent both start at 0x0, which is why PR #4131 could validate only the detached half of the teardown focus guard and left its four attached-client scenarios untested.
-`bin/fm-herdr-lab-viewer.py` sets the size on the master fd before the fork and scrubs the inherited `HERDR_*` variables, which makes the attached scenarios reachable from a headless runner.
+The guarded `viewer start` path fixes the pty at the proven 40-row by 120-column grid, sets that size on the master fd before the fork, and scrubs inherited `HERDR_*` variables, which makes the attached scenarios reachable from a headless runner.
 
 Measured on 2026-09-11 against Herdr 0.9.0 protocol 22 on macOS 26.5.2 aarch64 with Python 3.14.6:
 

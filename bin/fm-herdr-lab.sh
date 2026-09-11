@@ -26,8 +26,15 @@
 # Provision records the running default session as a fleet-state tripwire and
 # teardown requires that record to be identical afterward.
 # The viewer command attaches or detaches one real foreground Herdr client on
-# an owned lab session; bin/fm-herdr-lab-viewer.py owns the pty mechanics and
-# teardown refuses while an owned viewer is still attached.
+# an owned lab session over a fixed 40-row by 120-column pty;
+# bin/fm-herdr-lab-viewer.py owns the pty mechanics.
+# Start succeeds only when that session reports a foreground client and the
+# recorded viewer process still matches its launch identity.
+# Stop signals only identity-matched recorded processes and retains its
+# ownership record until detach is confirmed or the session is stopped or
+# absent; teardown refuses when that stop cannot be confirmed.
+# FM_HERDR_LAB_VIEWER_TIMEOUT sets the positive-integer wait in seconds for
+# viewer start and stop, and defaults to 30 when unset or empty.
 set -u
 
 fm_herdr_lab_error() {
