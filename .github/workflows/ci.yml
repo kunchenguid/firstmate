@@ -79,21 +79,12 @@ jobs:
           set -eu
           npm install -g @earendil-works/pi-coding-agent
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
-      - name: Install pinned Treehouse
-        run: |
-          set -eu
-          # tests/fm-treehouse-pool-root.test.sh pins the pool facts
-          # bin/fm-spawn.sh's per-home pool root relies on against the real
-          # binary; without it the suite could only skip.
-          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Run portable parallel shard 1
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           bin/fm-test-run.sh --lane portable-parallel-1 \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
-            --fail-on-gate-skip 'treehouse not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
         if: always()
@@ -127,20 +118,11 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      - name: Install pinned Treehouse
-        run: |
-          set -eu
-          # tests/fm-treehouse-pool-root.test.sh pins the pool facts
-          # bin/fm-spawn.sh's per-home pool root relies on against the real
-          # binary; without it the suite could only skip.
-          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Run portable parallel shard 2
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           bin/fm-test-run.sh --lane portable-parallel-2 \
-            --fail-on-gate-skip 'treehouse not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
       - name: Upload shard 2 timing artifact
         if: always()
@@ -209,6 +191,9 @@ jobs:
           # tests/fm-treehouse-pool-root.test.sh pins the pool facts
           # bin/fm-spawn.sh's per-home pool root relies on against the real
           # binary; without it the suite could only skip.
+          # This install belongs to whichever lane holds that test - today both
+          # portable-serial shards. Move it with the test if lanes are rebalanced,
+          # or its lane's --fail-on-gate-skip 'treehouse not found' fails the job.
           bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Run portable serial shard ${{ matrix.shard }}

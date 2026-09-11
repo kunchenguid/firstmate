@@ -1542,6 +1542,29 @@ exit=1
 
 An exported `TREEHOUSE_ROOT` never reaches the task pane because the spawn sends command text, not environment, and an empty pool under a fresh root is indistinguishable from a relocated one by listing alone; every check above therefore reads the common dir of the worktree actually handed out.
 
+### The `--root` floor, measured rather than inferred
+
+CI's pinned build must be a version that has the flag, so the pin was measured against the two versions in play instead of read off release notes. v2.0.1, the previous pin, has no `--root` at all: it is absent from `treehouse --help`, from `treehouse get --help`, and from `treehouse status --help`, and both subcommands reject it outright. v2.3.0 carries it as a global flag on `get`, `status`, and `return`. `bin/fm-install-treehouse.sh` is therefore pinned to v2.3.0 - the version every fact above was verified against and the one the operating machine runs - and `bin/fm-bootstrap.sh` probes `--root` beside `--lease`, naming the flag it did not find.
+
+```
+$ bin/fm-install-treehouse.sh "$T/bin"   # at the v2.0.1 pin
+$ "$T/bin/treehouse" --version
+v2.0.1
+$ (cd "$R" && "$T/bin/treehouse" get --root "$R/poolroot" --lease)
+unknown flag: --root
+$ (cd "$R" && "$T/bin/treehouse" status --root "$R/poolroot")
+unknown flag: --root
+$ "$T/bin/treehouse" get --help | grep -c root
+0
+$ treehouse --version   # the pin after the bump, and the installed build
+v2.3.0
+$ treehouse get --help | sed -n '/Global Flags:/,$p'
+Global Flags:
+      --root string   Worktree root directory, overriding TREEHOUSE_ROOT and config; relative paths (e.g. "." for an in-project pool) resolve from the repo root
+```
+
+v2.0.1 also predates `treehouse get --no-fetch` and `treehouse status --json`, both of which `tests/fm-treehouse-pool-root.test.sh` uses, so no pool-key comparison against it was possible - the flag gap, not a key-shape difference, is what forced the bump.
+
 ## Pi supervision branch
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
