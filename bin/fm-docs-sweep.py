@@ -51,7 +51,8 @@ LINK_RE = re.compile(r"\[[^\]\n]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 CODE_SPAN_RE = re.compile(r"`([^`\n]{2,200})`")
 HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*)$")
 CHECKLIST_RE = re.compile(r"^\s*[-*]\s*\[\s\]\s*(.*)$")
-TODO_RE = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b[:\s]*(.*)$", re.IGNORECASE)
+TODO_RE = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b[:\s]*(.*)$")
+FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
 PATH_LIKE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*/[A-Za-z0-9_./-]+$")
 
 
@@ -88,9 +89,10 @@ def read_text(path: Path) -> str:
 
 
 def find_repo_root(start_dir: Path, scan_root: Path, cache: dict) -> str:
-    """Nearest ancestor of start_dir (inclusive, bounded by scan_root) containing
-    a .git entry, as a path relative to scan_root. Falls back to "." when no
-    repo boundary is found within scope. Memoized per directory."""
+    """Nearest ancestor of start_dir (inclusive, climbing above scan_root if
+    needed) containing a .git entry: relative to scan_root when inside it,
+    absolute when scan_root is itself inside that repo. Falls back to "." when
+    no repo boundary exists at all. Memoized per directory."""
     key = start_dir
     if key in cache:
         return cache[key]
@@ -100,10 +102,15 @@ def find_repo_root(start_dir: Path, scan_root: Path, cache: dict) -> str:
         if (d / ".git").exists():
             found = d
             break
-        if d == scan_root or d == d.parent:
+        if d == d.parent:
             break
         d = d.parent
-    result = "." if found is None else str(found.relative_to(scan_root)) or "."
+    if found is None:
+        result = "."
+    elif found == scan_root or scan_root in found.parents:
+        result = str(found.relative_to(scan_root)) or "."
+    else:
+        result = str(found)
     cache[key] = result
     return result
 
@@ -127,7 +134,7 @@ def jaccard(a: set, b: set) -> float:
 
 def walk_files(root: Path, exts: set, exclude_dirs: set):
     for dirpath, dirnames, filenames in _os_walk(root):
-        dirnames[:] = [d for d in dirnames if d not in exclude_dirs and not d.startswith(".git")]
+        dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
         for name in filenames:
             if "." not in name:
                 continue
@@ -277,12 +284,20 @@ def find_near_duplicates(records: list, near_dup_threshold: float, max_items: in
 def extract_sections(text: str) -> list:
     """Split text on Markdown heading lines into (normalized_heading, body)
     pairs. Content before the first heading is dropped - it has no heading to
-    key a cross-file match on."""
+    key a cross-file match on. Lines inside fenced code blocks are body text,
+    never headings."""
     sections = []
     heading = None
     lines: list = []
+    fence = None
     for line in text.splitlines():
-        m = HEADING_RE.match(line)
+        f = FENCE_RE.match(line)
+        if f:
+            if fence is None:
+                fence = f.group(1)
+            elif f.group(1) == fence:
+                fence = None
+        m = None if fence is not None or f else HEADING_RE.match(line)
         if m:
             if heading is not None:
                 sections.append((heading, "\n".join(lines)))
@@ -372,7 +387,7 @@ def find_stale_references(records: list, root: Path, max_items: int) -> dict:
         if r.skipped_content or r.content is None:
             continue
         checked = 0
-        repo_dir = root / r.repo if r.repo != "." else root
+        repo_dir = (root / r.repo).resolve()
         for lineno, line in enumerate(r.content.splitlines(), start=1):
             if checked >= MAX_STALE_REF_CHECKS_PER_FILE:
                 break
@@ -385,7 +400,7 @@ def find_stale_references(records: list, root: Path, max_items: int) -> dict:
                 checked += 1
                 candidate = (repo_dir / token).resolve()
                 try:
-                    candidate.relative_to(root.resolve())
+                    candidate.relative_to(repo_dir)
                 except ValueError:
                     continue
                 if not candidate.exists():
@@ -409,7 +424,7 @@ def find_todos(records: list, max_items: int) -> dict:
             elif tm:
                 total += 1
                 if len(items) < max_items or max_items < 0:
-                    items.append({"file": r.rel, "line": lineno, "kind": tm.group(1).upper(), "text": line.strip()[:200]})
+                    items.append({"file": r.rel, "line": lineno, "kind": tm.group(1), "text": line.strip()[:200]})
     return {"total": total, "truncated": total > len(items), "items": items}
 
 

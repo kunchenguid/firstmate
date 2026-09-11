@@ -9,8 +9,9 @@
 # and the JSON output schema (`fm-docs-sweep.v1`) - run with --help for the
 # full flag list. The default operation is entirely read-only and model-free:
 # scoped file inventory with byte/token estimates, exact-duplicate groups,
-# near-duplicate and conflict candidates (same-basename files across repos),
-# broken local links, stale inline code-path references, and open TODO/
+# near-duplicate candidates (same-basename files across repos), conflict
+# candidates (canonical instruction files in different repos that share a
+# section heading with diverging bodies), broken local links, stale inline code-path references, and open TODO/
 # checklist extraction, all as bounded JSON to stdout (or --out <path>).
 #
 # It never calls a model, never touches the network, never deletes or writes

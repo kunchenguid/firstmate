@@ -65,6 +65,7 @@ See [missing](./missing-target.md) and check `bin/does-not-exist.sh`.
 
 - [ ] open task one
 TODO: fix this later
+Build a todo app with one small hack and a 555-xxx placeholder.
 EOF
 }
 
@@ -161,7 +162,7 @@ test_todo_and_checklist_extraction() {
   build_fixture "$tmp/fixture"
 
   out=$("$SWEEP" --root "$tmp/fixture" 2>&1)
-  assert_equals "2" "$(jget "$out" todos.total)" "one open checklist item and one TODO marker are both counted"
+  assert_equals "2" "$(jget "$out" todos.total)" "one open checklist item and one TODO marker are counted; lowercase prose 'todo'/'hack'/'xxx' is not"
   assert_contains "$out" "open task one" "checklist item text is extracted"
   assert_contains "$out" "fix this later" "TODO marker text is extracted"
   pass "fm-docs-sweep: open checklist items and TODO/FIXME markers are extracted with file:line"
@@ -185,18 +186,71 @@ test_max_items_bounds_output_and_reports_truncation() {
   pass "fm-docs-sweep: --max-items bounds listed items per category and reports truncation separately from total"
 }
 
-test_no_network_no_model_no_mutation() {
-  local tmp out before after
+test_default_sweep_creates_or_deletes_no_file_under_root() {
+  local tmp before after
   tmp=$(fm_test_tmproot fm-docs-sweep)
   build_fixture "$tmp/fixture"
   before=$(find "$tmp/fixture" -type f | sort)
 
-  out=$("$SWEEP" --root "$tmp/fixture" 2>&1)
-  expect_code 0 "$?" "default sweep must succeed with no side effects"
+  "$SWEEP" --root "$tmp/fixture" >/dev/null 2>&1
+  expect_code 0 "$?" "default sweep must succeed"
   after=$(find "$tmp/fixture" -type f | sort)
-  assert_equals "$before" "$after" "the default read-only sweep must not create, delete, or move any file in scope"
-  assert_contains "$out" "no network call, no model call" "the tool documents its own read-only/model-free contract in its output"
-  pass "fm-docs-sweep: the default operation is read-only and touches nothing under --root"
+  assert_equals "$before" "$after" "the default sweep must not create, delete, or move any file in scope"
+  pass "fm-docs-sweep: the default operation creates or deletes no file under --root"
+}
+
+test_github_dir_docs_are_scanned() {
+  local tmp out
+  tmp=$(fm_test_tmproot fm-docs-sweep)
+  mkdir -p "$tmp/fixture/repo/.github"
+  git -C "$tmp/fixture/repo" init -q
+  printf '# Contributing\n' > "$tmp/fixture/repo/.github/CONTRIBUTING.md"
+
+  out=$("$SWEEP" --root "$tmp/fixture" 2>&1)
+  assert_equals "1" "$(jget "$out" inventory.files)" "a doc under .github/ is part of the inventory"
+  pass "fm-docs-sweep: .github/ docs are scanned while .git/ stays excluded"
+}
+
+test_fenced_code_comments_are_not_headings() {
+  local tmp out
+  tmp=$(fm_test_tmproot fm-docs-sweep)
+  mkdir -p "$tmp/fixture/repoA" "$tmp/fixture/repoB"
+  git -C "$tmp/fixture/repoA" init -q
+  git -C "$tmp/fixture/repoB" init -q
+  cat > "$tmp/fixture/repoA/README.md" <<'EOF'
+# Setup
+
+```bash
+# run the installer now
+./install.sh --fast --skip-checks
+```
+EOF
+  cat > "$tmp/fixture/repoB/README.md" <<'EOF'
+# Setup
+
+~~~sh
+# run the installer now
+make bootstrap && make verify-everything
+~~~
+EOF
+
+  out=$("$SWEEP" --root "$tmp/fixture" 2>&1)
+  assert_equals "0" "$(jget "$out" conflict_candidates.total)" "a shell comment inside a code fence is not a shared section heading"
+  pass "fm-docs-sweep: comment lines inside fenced code blocks never become conflict headings"
+}
+
+test_scoped_subdir_root_resolves_refs_against_enclosing_repo() {
+  local tmp out
+  tmp=$(fm_test_tmproot fm-docs-sweep)
+  mkdir -p "$tmp/repo/bin" "$tmp/repo/docs"
+  git -C "$tmp/repo" init -q
+  : > "$tmp/repo/bin/real.sh"
+  printf 'Run `bin/real.sh`, not `bin/gone.sh`.\n' > "$tmp/repo/docs/guide.md"
+
+  out=$("$SWEEP" --root "$tmp/repo/docs" 2>&1)
+  assert_equals "1" "$(jget "$out" stale_references.total)" "only the missing path is stale when --root is a folder inside the repo"
+  assert_equals "bin/gone.sh" "$(jget "$out" stale_references.items.0.ref)" "the stale reference is the one that does not exist in the enclosing repo"
+  pass "fm-docs-sweep: a --root inside a repo resolves inline path refs against that repo's root"
 }
 
 test_out_flag_writes_file_instead_of_stdout() {
@@ -239,7 +293,10 @@ test_near_identical_section_is_not_a_conflict_candidate
 test_broken_link_and_stale_reference_detected
 test_todo_and_checklist_extraction
 test_max_items_bounds_output_and_reports_truncation
-test_no_network_no_model_no_mutation
+test_default_sweep_creates_or_deletes_no_file_under_root
+test_github_dir_docs_are_scanned
+test_fenced_code_comments_are_not_headings
+test_scoped_subdir_root_resolves_refs_against_enclosing_repo
 test_out_flag_writes_file_instead_of_stdout
 test_help_exits_zero_and_documents_read_only_contract
 test_invalid_root_fails_cleanly
