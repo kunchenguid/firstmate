@@ -155,6 +155,24 @@ matrix_case K06 allow 'pkill -P 12345'
 matrix_case K07 allow 'kill $(pgrep -P $$)'
 matrix_case K08 allow 'pgrep -f "lavish-axi poll" | head'
 matrix_case K09 allow 'kill 76803'
+# K10-K17: signal names are not scope flags; separated-value xargs options; and
+# discovery by ps/lsof feeding a kill through a pipe, substitution, or variable.
+matrix_case K10 deny 'pkill -HUP node'
+matrix_case K11 deny 'pkill -STOP -f "lavish-axi poll"'
+matrix_case K12 deny 'pgrep -f node | xargs -n 1 kill'
+matrix_case K13 deny 'ps aux | grep "lavish-axi poll" | awk '"'"'{print $2}'"'"' | xargs kill'
+matrix_case K14 deny 'kill $(ps aux | grep "lavish-axi poll" | awk '"'"'{print $2}'"'"')'
+matrix_case K15 deny 'lsof -ti :3000 | xargs kill -9'
+matrix_case K16 deny 'p=$(ps aux | grep node | awk '"'"'{print $2}'"'"'); kill $p'
+matrix_case K17 deny 'while true; do pkill -f node; done'
+# K18-K23: caller-owned pid sources, a scoped producer with a separated-value
+# xargs option, the scoped cleanup idiom inside a loop, and a kill -0 probe.
+matrix_case K18 allow 'kill $(cat pidfile)'
+matrix_case K19 allow 'echo 123 | xargs kill'
+matrix_case K20 allow 'kill $(jobs -p)'
+matrix_case K21 allow 'pgrep -P $$ | xargs -n 1 kill'
+matrix_case K22 allow 'for p in $(pgrep -P $$); do kill $p; done'
+matrix_case K23 allow 'kill -0 $(pgrep -f "lavish-axi poll")'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -280,6 +298,25 @@ test_broad_process_kill_contract() {
   assert_policy bpk-var-unscoped $'deny\tbroad-process-kill' 'p=$(pgrep -f node); kill $p'
   # Unsupported grammar carrying a broad kill fails closed, like the watcher case.
   assert_policy bpk-loop $'deny\tbroad-process-kill' 'while true; do pkill -f node; done'
+  # A signal name is not a scope flag, even when it contains P, g, or s.
+  assert_policy bpk-signal-hup $'deny\tbroad-process-kill' 'pkill -HUP node'
+  assert_policy bpk-signal-sighup $'deny\tbroad-process-kill' 'pkill -SIGHUP node'
+  assert_policy bpk-signal-stop $'deny\tbroad-process-kill' 'pkill -STOP -f "lavish-axi poll"'
+  assert_policy bpk-signal-pipe $'deny\tbroad-process-kill' 'pkill -PIPE node'
+  assert_policy bpk-signal-numeric $'deny\tbroad-process-kill' 'pkill -9 -f node'
+  # xargs options with a separated value must not hide the kill utility.
+  assert_policy bpk-xargs-n-sep $'deny\tbroad-process-kill' 'pgrep -f node | xargs -n 1 kill'
+  assert_policy bpk-xargs-I-sep $'deny\tbroad-process-kill' 'pgrep -f node | xargs -I {} kill'
+  assert_policy bpk-xargs-L-sep $'deny\tbroad-process-kill' 'pgrep -f node | xargs -L 1 kill'
+  assert_policy bpk-xargs-end-of-options $'deny\tbroad-process-kill' 'pgrep -f node | xargs -- kill'
+  # Discovery by ps/lsof/pidof/fuser feeding a kill is the same class as pgrep.
+  assert_policy bpk-ps-awk-xargs $'deny\tbroad-process-kill' 'ps aux | grep "lavish-axi poll" | grep -v grep | awk '"'"'{print $2}'"'"' | xargs kill'
+  assert_policy bpk-ps-cmdsub $'deny\tbroad-process-kill' 'kill $(ps aux | grep "lavish-axi poll" | awk '"'"'{print $2}'"'"')'
+  assert_policy bpk-lsof-xargs $'deny\tbroad-process-kill' 'lsof -ti :3000 | xargs kill -9'
+  assert_policy bpk-lsof-cmdsub $'deny\tbroad-process-kill' 'kill -9 $(lsof -t -i :3000)'
+  assert_policy bpk-pidof-cmdsub $'deny\tbroad-process-kill' 'kill $(pidof node)'
+  assert_policy bpk-fuser-xargs $'deny\tbroad-process-kill' 'fuser 3000/tcp 2>/dev/null | xargs kill'
+  assert_policy bpk-ps-var $'deny\tbroad-process-kill' 'p=$(ps aux | grep node | awk '"'"'{print $2}'"'"'); kill $p'
 
   # Caller-scoped kills - the safe forms the guard must NOT refuse - selecting by
   # parent, process group, or session, or by a specific pid the caller chose.
@@ -290,11 +327,26 @@ test_broad_process_kill_contract() {
   assert_policy bpk-allow-kill-parent-pgrep allow 'kill $(pgrep -P $$)'
   assert_policy bpk-allow-var-scoped allow 'p=$(pgrep -P $$); kill $p'
   assert_policy bpk-allow-pgrep-scoped-xargs allow 'pgrep -P $$ | xargs kill'
+  assert_policy bpk-allow-pgrep-scoped-xargs-sep allow 'pgrep -P $$ | xargs -n 1 kill'
   assert_policy bpk-allow-literal-pid allow 'kill 76803'
   assert_policy bpk-allow-literal-signal allow 'kill -9 "$pid"'
+  assert_policy bpk-allow-parent-attached allow 'pkill -P12345'
+  assert_policy bpk-allow-session-signal allow 'pkill -HUP -s 4242'
+  # The scoped cleanup idiom inside loop grammar the classifier cannot model is
+  # still recognized as scoped by the raw fallback and allowed.
+  assert_policy bpk-allow-loop-scoped allow 'for p in $(pgrep -P $$); do kill $p; done'
+  assert_policy bpk-allow-loop-scoped-pkill allow 'for x in 1; do pkill -P $$; done'
+  # Caller-owned pid sources are not attribute-selection discovery.
+  assert_policy bpk-allow-kill-pidfile allow 'kill $(cat pidfile)'
+  assert_policy bpk-allow-echo-xargs allow 'echo 123 | xargs kill'
+  assert_policy bpk-allow-cat-xargs allow 'cat pids | xargs kill'
+  assert_policy bpk-allow-kill-jobs allow 'kill $(jobs -p)'
+  # kill -0 sends no signal; it is a liveness probe.
+  assert_policy bpk-allow-kill-zero-probe allow 'kill -0 $(pgrep -f "lavish-axi poll")'
   # Read-only discovery and quoted data are never kills.
   assert_policy bpk-allow-readonly-pgrep allow 'pgrep -f "lavish-axi poll" | head'
   assert_policy bpk-allow-ps-grep allow 'ps aux | grep node'
+  assert_policy bpk-allow-lsof-readonly allow 'lsof -i :3000'
   assert_policy bpk-allow-data-mention allow "echo 'pkill -f node'"
 }
 
@@ -419,6 +471,20 @@ test_prefilter_is_strict_superset() {
   "$CHECK" --command 'kill $(pgrep -f node)' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "prefilter must delegate a kill fed by an unscoped pgrep, not fast-allow it, got exit $rc"
+  # Discovery by ps/lsof/pidof/fuser and the xargs pipe tail carry none of the
+  # pkill/killall/pgrep bytes, so they are their own trigger substrings.
+  "$CHECK" --command 'kill $(ps aux | grep node | awk '"'"'{print $2}'"'"')' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a kill fed by ps, not fast-allow it, got exit $rc"
+  "$CHECK" --command 'lsof -ti :3000 | xargs kill -9' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a kill fed by lsof, not fast-allow it, got exit $rc"
+  "$CHECK" --command 'kill $(pidof node)' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a kill fed by pidof, not fast-allow it, got exit $rc"
+  "$CHECK" --command 'kill $(fuser 3000/tcp 2>/dev/null)' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a kill fed by fuser, not fast-allow it, got exit $rc"
   # Obfuscation across a quote split loses the literal pkill bytes; the prefilter
   # normalizes quotes first, so it still delegates and the classifier still denies.
   "$CHECK" --command 'pk"ill" -f node' >/dev/null 2>&1

@@ -130,9 +130,10 @@ fi
 # Every deniable command resolves, AFTER the classifier's byte normalization, to
 # one of a small set of trigger substrings: a protected watcher execution or a
 # broad watcher kill contains "fm-watch", and a general broad process kill
-# contains "pkill", "killall", or the "pgrep" that feeds a kill. A command that
-# cannot contain any of those even after normalization can never be denied and is
-# fast-allowed without the Node policy owner.
+# contains "pkill", "killall", or a discovery command that feeds a kill - "pgrep",
+# "ps", "lsof", "pidof", "fuser" - or the "xargs" pipe tail that consumes one. A
+# command that cannot contain any of those even after normalization can never be
+# denied and is fast-allowed without the Node policy owner.
 # We mirror the classifier's cheapest byte transforms here (drop line-
 # continuation and escape backslashes, quotes, and newlines) so obfuscated forms
 # such as fm-watc\<newline>h-arm.sh, fm-"watch"-arm.sh, or pk"ill" still delegate.
@@ -161,7 +162,7 @@ case "$CMD" in
   *"\$'"*|*'$"'*) ;;
   *)
     case "$PREFILTER" in
-      *fm-watch*|*pkill*|*killall*|*pgrep*) ;;
+      *fm-watch*|*pkill*|*killall*|*pgrep*|*ps*|*lsof*|*pidof*|*fuser*|*xargs*) ;;
       *) exit 0 ;;
     esac
     ;;

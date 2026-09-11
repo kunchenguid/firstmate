@@ -56,11 +56,19 @@ function rawMentionsBroadKill(command) {
 // Conservative raw check for the general (any-target) broad process kill, used
 // only on grammar the AST cannot model, mirroring rawMentionsBroadKill for the
 // watcher. `pkill`/`killall` are kills-by-match by definition; a `pgrep` feeding
-// a `kill` or `xargs` is the discover-then-kill form.
+// a `kill` or `xargs` is the discover-then-kill form. An occurrence whose own
+// argument span carries a caller-scope flag is not broad, so the recommended
+// scoped cleanup idiom inside a loop stays allowed.
 function rawMentionsGeneralBroadKill(command) {
   const normalized = normalizeLineContinuations(command);
-  if (/\b(?:pkill|killall)\b/.test(normalized)) return true;
-  return /\bpgrep\b/.test(normalized) && /\b(?:kill|xargs)\b/.test(normalized);
+  if (/\bkillall\b/.test(normalized)) return true;
+  const unscoped = (verbPattern) => [...normalized.matchAll(verbPattern)].some((match) => !rawArgsSelectByCallerScope(match[1]));
+  if (unscoped(/\bpkill\b([^;|&\n)`]*)/g)) return true;
+  return unscoped(/\bpgrep\b([^;|&\n)`]*)/g) && /\b(?:kill|xargs)\b/.test(normalized);
+}
+
+function rawArgsSelectByCallerScope(args) {
+  return /(?:^|\s)(?:-[Pgs][0-9]*|--(?:parent|pgroup|session)(?:=\S*)?)(?=\s|$)/.test(args);
 }
 
 function normalizeLineContinuations(source) {
@@ -749,9 +757,10 @@ function selectsByCallerScope(args) {
   return args.some((word) => {
     const value = word.value;
     if (/^--(?:parent|pgroup|session)(?:=.*)?$/.test(value)) return true;
-    // Short options may cluster and attach a value (-P123, -g0); the scoping
-    // letters are the uppercase parent selector P and the lowercase g/s.
-    return /^-[A-Za-z]*[Pgs]/.test(value);
+    // Only a standalone scope option, optionally with an attached numeric value
+    // (-P123, -g0), scopes the kill; a signal name such as -HUP, -STOP, or
+    // -SIGPIPE is never a scope flag even though it contains one of the letters.
+    return /^-[Pgs][0-9]*$/.test(value);
   });
 }
 
@@ -763,27 +772,66 @@ function isUnscopedPgrep(position) {
   return !selectsByCallerScope(position.words.slice(position.index + 1));
 }
 
+// A process-selection-by-attribute discovery command whose output, fed to a
+// kill, reaches the shared process table: an unscoped pgrep, any ps, a pid-
+// listing lsof (-t or -Fp), pidof, or fuser. Caller-owned pid sources such as
+// `cat pidfile`, `jobs -p`, or a literal are not discovery.
+function isUnscopedDiscovery(position) {
+  if (!position.command) return false;
+  const name = basename(position.command.value);
+  if (name === "pgrep") return isUnscopedPgrep(position);
+  if (name === "ps" || name === "pidof" || name === "fuser") return true;
+  if (name === "lsof") return position.words.slice(position.index + 1).some((word) => /^-[A-Za-z]*t/.test(word.value) || /^-F[A-Za-z]*p/.test(word.value));
+  return false;
+}
+
 // `xargs kill`/`xargs pkill` (the pipe form of discover-then-kill). The utility
-// is the first non-option word after xargs; attached-value options (-n1, -P4,
-// -I{}) are skipped, and a separated value is left as the utility candidate,
-// which only ever misses toward allow, never toward a false deny.
-function nodeIsXargsKill(position) {
+// is the first non-option argument after xargs. An option whose value is
+// attached (-n1, -P4, -I{}) is one word; an option whose letter ends the token
+// and takes a value (-n 1, -I {}, -L 1) consumes the next argument too. The
+// arguments are read from the node's tokens rather than its words because the
+// lexer reads a bare `{}` replstr as an empty brace group, not a word.
+const XARGS_VALUE_OPTIONS = /[nILPsdEaJRS]$/;
+function nodeIsXargsKill(position, tokens) {
   if (!position.command) return false;
   if (!["xargs", "gxargs"].includes(basename(position.command.value))) return false;
-  for (const word of position.words.slice(position.index + 1)) {
-    if (word.value.startsWith("-")) continue;
-    return /(?:^|\/)(?:kill|pkill)$/.test(word.value);
+  const args = [];
+  let skipRedirectionTarget = false;
+  for (const token of tokens.slice(tokens.indexOf(position.command) + 1)) {
+    if (token.type === "redir") {
+      skipRedirectionTarget = !token.inlineTarget;
+      continue;
+    }
+    if (skipRedirectionTarget && token.type === "word") {
+      skipRedirectionTarget = false;
+      continue;
+    }
+    if (token.type === "word") args.push(token.value);
+    if (token.type === "group" && token.kind === "brace") args.push(`{${token.content}}`);
+  }
+  for (let i = 0; i < args.length; i += 1) {
+    const value = args[i];
+    if (value.startsWith("-")) {
+      if (value !== "--" && !value.startsWith("--") && XARGS_VALUE_OPTIONS.test(value)) i += 1;
+      continue;
+    }
+    return /(?:^|\/)(?:kill|pkill)$/.test(value);
   }
   return false;
 }
 
+// `kill -0` sends no signal; it is a liveness probe, not a kill.
+function isKillProbe(args) {
+  return args[0]?.value === "-0";
+}
+
 function analyzeProgram(command, context, depth = 0) {
   if (depth > 12) {
-    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), broadProcessKill: rawMentionsGeneralBroadKill(command), pgrepWatcher: false, pgrepUnscoped: false, watcherPids: new Set(), unscopedPids: new Set() };
+    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), broadProcessKill: rawMentionsGeneralBroadKill(command), pgrepWatcher: false, unscopedDiscovery: false, watcherPids: new Set(), unscopedPids: new Set() };
   }
   const lexed = new Lexer(command).tokenize();
   if (lexed.error) {
-    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), broadProcessKill: rawMentionsGeneralBroadKill(command), pgrepWatcher: false, pgrepUnscoped: false, watcherPids: new Set(), unscopedPids: new Set() };
+    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), broadProcessKill: rawMentionsGeneralBroadKill(command), pgrepWatcher: false, unscopedDiscovery: false, watcherPids: new Set(), unscopedPids: new Set() };
   }
   const program = splitProgram(lexed.tokens);
   const nodeInfos = [];
@@ -791,7 +839,7 @@ function analyzeProgram(command, context, depth = 0) {
   let broadKill = false;
   let broadProcessKill = false;
   let pgrepWatcher = false;
-  let pgrepUnscoped = false;
+  let unscopedDiscovery = false;
   let unsupported = false;
   let activeContext = {
     ...context,
@@ -812,7 +860,7 @@ function analyzeProgram(command, context, depth = 0) {
 
     let nodeNestedProtected = false;
     let nodePgrepWatcher = false;
-    let nodePgrepUnscoped = false;
+    let nodeUnscopedDiscovery = false;
     const substitutionResults = new Map();
     for (const payload of position.wrapperPayloads) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
@@ -820,7 +868,7 @@ function analyzeProgram(command, context, depth = 0) {
       broadKill ||= nested.broadKill;
       broadProcessKill ||= nested.broadProcessKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
-      nodePgrepUnscoped ||= nested.pgrepUnscoped;
+      nodeUnscopedDiscovery ||= nested.unscopedDiscovery;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
     for (const token of tokens) {
@@ -830,7 +878,7 @@ function analyzeProgram(command, context, depth = 0) {
         broadKill ||= nested.broadKill;
         broadProcessKill ||= nested.broadProcessKill;
         nodePgrepWatcher ||= nested.pgrepWatcher;
-        nodePgrepUnscoped ||= nested.pgrepUnscoped;
+        nodeUnscopedDiscovery ||= nested.unscopedDiscovery;
         if (nested.error && rawMentionsProtected(token.content)) unsupported = true;
       }
       if (token.type === "word") {
@@ -841,7 +889,7 @@ function analyzeProgram(command, context, depth = 0) {
           broadKill ||= nested.broadKill;
           broadProcessKill ||= nested.broadProcessKill;
           nodePgrepWatcher ||= nested.pgrepWatcher;
-          nodePgrepUnscoped ||= nested.pgrepUnscoped;
+          nodeUnscopedDiscovery ||= nested.unscopedDiscovery;
           if (nested.error && rawMentionsProtected(substitution.content)) unsupported = true;
         }
       }
@@ -867,7 +915,7 @@ function analyzeProgram(command, context, depth = 0) {
       broadKill ||= nested.broadKill;
       broadProcessKill ||= nested.broadProcessKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
-      nodePgrepUnscoped ||= nested.pgrepUnscoped;
+      nodeUnscopedDiscovery ||= nested.unscopedDiscovery;
       if (nested.error && rawMentionsProtected(shellPayload.value)) unsupported = true;
     }
     for (const payload of [literalEvalPayload, ...heredocPayloads, ...hereStringPayloads]) {
@@ -877,7 +925,7 @@ function analyzeProgram(command, context, depth = 0) {
       broadKill ||= nested.broadKill;
       broadProcessKill ||= nested.broadProcessKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
-      nodePgrepUnscoped ||= nested.pgrepUnscoped;
+      nodeUnscopedDiscovery ||= nested.unscopedDiscovery;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
 
@@ -890,20 +938,20 @@ function analyzeProgram(command, context, depth = 0) {
     if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
     if (isWatcherPgrep(position, nodeContext)) pgrepWatcher = true;
     // General broad process kill: pkill/killall that does not select by the
-    // caller's own ancestry/group/session, or a kill fed by an unscoped pgrep
-    // match, reaches sibling lanes on the shared process table.
+    // caller's own ancestry/group/session, or a kill fed by an unscoped
+    // discovery match, reaches sibling lanes on the shared process table.
     if ((commandName === "pkill" && !selectsByCallerScope(args)) || commandName === "killall") broadProcessKill = true;
-    if (commandName === "kill" && (nodePgrepUnscoped || args.some((word) => wordReferencesAny(word, nodeContext.unscopedPids)))) broadProcessKill = true;
-    if (isUnscopedPgrep(position)) pgrepUnscoped = true;
+    if (commandName === "kill" && !isKillProbe(args) && (nodeUnscopedDiscovery || args.some((word) => wordReferencesAny(word, nodeContext.unscopedPids)))) broadProcessKill = true;
+    if (isUnscopedDiscovery(position)) unscopedDiscovery = true;
     if (hasDynamicExecutionPayload(position, nodeContext) || wordReferencesAny(position.command, nodeContext.protectedVariables)) nodeNestedProtected = true;
     for (const word of position.words) {
       const name = assignmentName(word);
       if (!name) continue;
       if (word.subs.some((substitution) => substitutionResults.get(substitution)?.pgrepWatcher)) nodeContext.watcherPids.add(name);
-      if (word.subs.some((substitution) => substitutionResults.get(substitution)?.pgrepUnscoped)) nodeContext.unscopedPids.add(name);
+      if (word.subs.some((substitution) => substitutionResults.get(substitution)?.unscopedDiscovery)) nodeContext.unscopedPids.add(name);
     }
     pgrepWatcher ||= nodePgrepWatcher;
-    pgrepUnscoped ||= nodePgrepUnscoped;
+    unscopedDiscovery ||= nodeUnscopedDiscovery;
     nestedProtected ||= nodeNestedProtected;
     activeContext = nodeContext;
     if (position.unresolvedWrapperOption) unsupported = true;
@@ -914,17 +962,18 @@ function analyzeProgram(command, context, depth = 0) {
       nestedProtected: nodeNestedProtected,
       redirection: nodeHasRedirection(tokens),
       substitution: nodeHasUnsafeSubstitution(tokens),
-      pgrepUnscoped: isUnscopedPgrep(position),
+      unscopedDiscovery: isUnscopedDiscovery(position),
       pgrepWatcher: isWatcherPgrep(position, nodeContext),
-      xargsKill: nodeIsXargsKill(position),
+      xargsKill: nodeIsXargsKill(position, tokens),
     });
   }
 
-  // Pipe form of discover-then-kill: an unscoped `pgrep` whose output is piped
-  // into `xargs kill`/`xargs pkill`. Scan each maximal run of pipe-joined nodes
-  // for an unscoped (or watcher) pgrep upstream of an xargs-kill node.
+  // Pipe form of discover-then-kill: an unscoped discovery command whose output
+  // is piped into `xargs kill`/`xargs pkill`. Scan each maximal run of
+  // pipe-joined nodes for a discovery (or watcher pgrep) node upstream of an
+  // xargs-kill node.
   for (let i = 0; i < nodeInfos.length; i += 1) {
-    if (!nodeInfos[i].pgrepUnscoped) continue;
+    if (!nodeInfos[i].unscopedDiscovery) continue;
     for (let j = i; j < nodeInfos.length - 1 && ["|", "|&"].includes(program.separators[j]); j += 1) {
       if (nodeInfos[j + 1].xargsKill) {
         broadProcessKill = true;
@@ -939,9 +988,9 @@ function analyzeProgram(command, context, depth = 0) {
   const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
   const broadProcessKillFound = broadProcessKill || (unsupported && rawMentionsGeneralBroadKill(command));
   if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound || broadProcessKillFound)) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, broadProcessKill: broadProcessKillFound, pgrepWatcher, pgrepUnscoped, watcherPids: activeContext.watcherPids, unscopedPids: activeContext.unscopedPids, program, nodeInfos };
+    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, broadProcessKill: broadProcessKillFound, pgrepWatcher, unscopedDiscovery, watcherPids: activeContext.watcherPids, unscopedPids: activeContext.unscopedPids, program, nodeInfos };
   }
-  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, broadProcessKill: broadProcessKillFound, pgrepWatcher, pgrepUnscoped, watcherPids: activeContext.watcherPids, unscopedPids: activeContext.unscopedPids, program, nodeInfos };
+  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, broadProcessKill: broadProcessKillFound, pgrepWatcher, unscopedDiscovery, watcherPids: activeContext.watcherPids, unscopedPids: activeContext.unscopedPids, program, nodeInfos };
 }
 
 function xModePathAllowed(value, home) {
