@@ -18,10 +18,15 @@ bin/fm-moiras.sh start --demo
 FM_HOME=/path/to/home bin/fm-moiras.sh start --no-llm
 FM_HOME=/path/to/home bin/fm-moiras.sh status
 FM_HOME=/path/to/home bin/fm-moiras.sh stats
+FM_HOME=/path/to/home bin/fm-moiras.sh reason clotho example-task
 bin/fm-moiras.sh --demo --frames 24 --out frames --width 100 --height 30
 ```
 
 Startup is manual and foreground-only; Ctrl+C stops it, draining at most the current registered capture rather than discarding it.
+The first snapshot becomes visible before serial notification delivery finishes; a fresh snapshot is not proof that all findings have been captured.
+`start` and `status` never invoke models; `reason ROLE TASK` explicitly sends one bounded, sanitized evidence packet to the selected provider, prints an advisory and never acts on or publishes it.
+`reason` requires an existing task, authenticated Pi or Claude, and a configured persona; `--no-llm`, `--demo` and `--frames` forbid that invocation.
+The CLI checks its selected harness through `bin/fm-harness.sh validate`, including the active home's disabled-adapter policy, before invoking a provider.
 The current observer publishes one-way findings; production two-way messaging awaits shared standalone-service admission and is explicitly marked unavailable.
 It never borrows a task or supervisor identity; message use cases use the shared fake until admission is available.
 `--clean` and `NO_COLOR` (even empty) print all tasks once in static ASCII without animation or escapes; `--no-ui` keeps plain event output.
@@ -46,12 +51,15 @@ The observer reloads edited configuration and rebuilds state/pool subscriptions;
 | `forgeSeconds` | `60` | Repository refresh interval, minimum 30 seconds; no repository timer when unconfigured. |
 | `repositories` | `[]` | Explicit GitHub `owner/repo` names; an empty list disables forge queries. |
 | `poolFiles` | `[]` | Explicit pool files, absolute or relative to `FM_HOME`; never inferred from task metadata. |
-| `roles.<role>.harness` | `pi` / `claude` / `codex` | Clotho / Lachesis / Atropos defaults for later explicit one-shot reasoning. |
-| `roles.<role>.model` | `default` / `haiku` / `default` | Independent model choice for those roles. |
+| `roles.<role>.harness` | `pi` for all three | Runnable choices: `pi` or `claude`; native Codex is not supported. |
+| `roles.<role>.model` | `openai-codex/gpt-5.6-luna` / same / `openai-codex/gpt-6-astra` | Clotho / Lachesis / Atropos defaults; Claude can use `haiku`. |
 | `roles.<role>.effort` | `low` | Independent effort selection. |
 | `roles.<role>.persona` | `personas/<role>.md` | Editable English instructions relative to the config file's directory. |
 
-M1 is deterministic and does not invoke the role configurations or personas; live reasoning is a separately gated capability, not an implied effect of editing configuration.
+Editing role configuration never enables automatic reasoning.
+Reasoning uses a fresh external scratch directory, disables tools and customizations, closes stdin, and limits each call to 60 seconds, its persona to 8 KiB and its evidence prompt to 16 KiB.
+Malformed, incomplete, tool-using or semantic-error responses fail closed, even when the provider process exits successfully; Claude whole-answer code wrappers are stripped without accepting extra prose.
+The live guard and [dated verification](../../docs/verification/runtime-backends.md#moiras-one-shot-reasoning) distinguish the Pi OpenAI Codex provider from the unsupported native Codex executable.
 Forge failures withhold PR findings, and confirmation meaning requires the same current evidence id; confirmations only record a response, never execute its proposed action.
 
 ## Telemetry
@@ -59,6 +67,7 @@ Forge failures withhold PR findings, and confirmation meaning requires the same 
 Private append-only daily JSONL lives in `FM_HOME/state/moiras/telemetry/YYYY-MM-DD.jsonl`; read it with `jq . FILE` or use `fm-moiras stats` for the rolling last day.
 The [module template](../TEMPLATE.md) owns the record shape: correlate `requestId` and `threadId`, inspect adapter entry/exit, decisions/refusals, durations and cumulative per-request counters.
 The telemetry sink is not recursively instrumented; message text and raw provider output never belong in logs, and unknown token/cost measurements remain null.
+Reasoning entry/exit records include the selected harness/effort, reported model, token count and provider cost estimate when readable; estimates are not verified subscription charges.
 Tachikoma and Backpass can ingest this feed; Moiras starts no ingestion process.
 Snapshots, immutable findings, quiet receipts and reply receipts stay in `state/moiras`; the process-event owner additionally owns its registered-source records.
 A capture is not acknowledgement or exactly-once delivery, and uncertain reply delivery requires inspecting the shared thread ledger rather than sending replacement text.
@@ -66,8 +75,10 @@ A capture is not acknowledgement or exactly-once delivery, and uncertain reply d
 ## Development
 
 Run `bin/fm-test-run.sh tests/fm-moiras.test.sh tests/fm-modules.test.sh` from the root, or `npm --prefix modules/moiras test`.
+With authenticated Pi and Claude, `FM_MOIRAS_LIVE=1 bin/fm-test-run.sh --per-script-timeout-secs 420 tests/fm-moiras-live.test.sh` spends two bounded prompts per configured route, including an adversarial file-write request.
+`FM_MOIRAS_LIVE_CASE=pi-default|pi-atropos|claude-alternative` selects one route; omitted routes are explicitly skipped, not counted as passed.
 Pure rules and scene composition live in `src/core`; `src/usecases/inspect.mjs` receives I/O and returns plain results; `src/adapters` owns effects.
-`StateSource` supplies bounded snapshots and notifications; `Forge` supplies projected PR records; `Journal` owns private records and telemetry; `Publisher` delivers immutable registered events.
+`StateSource` supplies bounded snapshots and notifications; `Forge` supplies projected PR records; `Journal` owns private records and telemetry; `Publisher` delivers immutable registered events; `Reasoner` supplies one strict advisory with measured usage.
 The shared `MessagePort` owns message envelopes, correlation and acknowledgements; the shared `Terminal` port owns output capability and writes.
 Tests use in-memory journals, sources and the canonical message fake, alongside real file/process composition; they do not claim standalone service admission from fake delivery.
-Only the two shared libraries and the existing process-event/message owners are external integration boundaries; no application imports another application.
+Firstmate integration uses the two shared libraries and the existing harness-policy, process-event and message owners; no application imports another application.

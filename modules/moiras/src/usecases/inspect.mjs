@@ -1,6 +1,6 @@
 import { answer, digest, episodes, measure, thread } from '../core/findings.mjs';
 // One serialized observation. The caller supplies I/O, time and request-scoped telemetry.
-export async function inspect({ source, forge, journal, publisher, messages, audit }, config, now) {
+export async function inspect({ source, forge, journal, publisher, messages, audit, onSnapshot = () => {}, onNotice = () => {} }, config, now) {
   let trace = audit;
   const step = (...args) => trace.step(...args), get = key => step('journal.read', () => journal.get(key), [key]);
   const set = (key, value) => step('journal.write', () => journal.set(key, value), [key]);
@@ -19,6 +19,7 @@ export async function inspect({ source, forge, journal, publisher, messages, aud
   const current = { ...thread(raw, prs, forgeError), forgeAt, repositories: repos, channel: messages ? 'connected' : 'unavailable' };
   current.findings = measure(current, config);
   await set('episodes.json', loops);
+  await set('snapshot.json', current); onSnapshot(current);
   const emit = async event => {
     const key = `events/${event.id}.json`, stored = await get(key);
     if (!stored) await set(key, event);
@@ -26,7 +27,8 @@ export async function inspect({ source, forge, journal, publisher, messages, aud
     if (await get(`${key}.sent`) || await step('event.captured', () => publisher.captured(event.id), [event.id])) return;
     await step('event.publish', () => publisher.publish(event.id), [event.id]);
     await set(`${key}.sent`, { at: now });
-    notices.push(`${event.rule}: ${event.task}; default ${event.default}; ${event.id}`);
+    const notice = `${event.rule}: ${event.task}; default ${event.default}; ${event.id}`;
+    notices.push(notice); onNotice(notice);
   };
   for (const event of current.findings) {
     const key = `${event.rule}:${event.task}`;

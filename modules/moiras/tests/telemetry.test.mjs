@@ -13,3 +13,13 @@ test('telemetry preserves synchronous terminal writes, async results, redaction 
   trace.forRequest('request', 'thread').decision('reply', 'accepted');
   assert.equal(rows.at(-1).requestId, 'request'); assert.equal(rows.at(-1).threadId, 'thread');
 });
+test('reasoning records selected and reported model measurements, never the advisory text', async () => {
+  const rows = [], trace = telemetry({ append: row => rows.push(row) }, 'reason-test');
+  const role = { harness: 'pi', model: 'selected', effort: 'low', persona: 'private-path' };
+  await trace.step('reason', async () => ({ text: 'MOIRAS|observe|private-content', model: 'reported', tokens: 42, cost: 0.01 }), ['task'], 100, role);
+  assert.equal(rows[0].model, 'selected'); assert.equal(rows[0].harness, 'pi'); assert.equal(rows[0].effort, 'low');
+  assert.equal(rows[1].model, 'reported'); assert.equal(rows[1].tokens, 42); assert.equal(rows[1].cost, 0.01);
+  assert.ok(!JSON.stringify(rows).includes('private-'));
+  await assert.rejects(trace.step('reason', async () => { throw Error('unsupported'); }, [], 0, role));
+  assert.equal(rows.at(-1).model, 'selected'); assert.equal(rows.at(-1).cost, null); assert.equal(rows.at(-1).outcome, 'error');
+});

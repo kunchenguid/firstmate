@@ -17,7 +17,7 @@
     }}
   },
   "$defs": {"role":{"type":"object", "additionalProperties":false, "required":["harness","model","effort","persona"], "properties":{
-    "harness":{"type":"string", "enum":["pi","claude","codex","default"]},
+    "harness":{"type":"string", "enum":["pi","claude"]},
     "model":{"type":"string", "pattern":"^[\\w./:-]+$"},
     "effort":{"type":"string", "enum":["low","medium","high","xhigh","max"]},
     "persona":{"type":"string", "pattern":"^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+\\.md$"}

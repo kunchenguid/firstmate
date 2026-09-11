@@ -12,12 +12,15 @@ import { forge } from './forge.mjs';
 import { journal } from './journal.mjs';
 import { telemetry } from './telemetry.mjs';
 import { observe } from './service.mjs';
+import { reasoner } from './reason.mjs';
+import { explain } from '../usecases/explain.mjs';
+import { run } from './command.mjs';
 const flags = {
   help: ['boolean', 'Show every verb and flag without starting or needing credentials', '-h'],
   config: ['string', 'Configuration JSON file (default: modules/moiras/config.json)', '--config settings.json'],
   'no-ui': ['boolean', 'Run the observer with plain event lines, without animation', 'start --no-ui'],
   clean: ['boolean', 'Print every task once in ASCII, with no animation or escapes (also when NO_COLOR is set)', 'start --clean'],
-  'no-llm': ['boolean', 'Keep deterministic mode; M1 always invokes no models', 'start --no-llm'],
+  'no-llm': ['boolean', 'Forbid reasoning; start/status never invoke models regardless', 'start --no-llm'],
   demo: ['boolean', 'Preview the approved scene with synthetic data and no observer', 'start --demo'],
   frames: ['string', 'Export 1-600 numbered frames without starting a service', '--demo --frames 24 --out frames'],
   out: ['string', 'New frame output directory; existing frame files are not overwritten', '--frames 24 --out frames'],
@@ -32,6 +35,7 @@ const help = () => ['Moiras - manual, advisory terminal observer', ...[
   ['start', 'Start the foreground observer; Ctrl+C stops it', 'start --no-llm'],
   ['status', 'Print a fresh all-task snapshot once', 'status'],
   ['stats', 'Summarize the last 24 hours of local telemetry', 'stats'],
+  ['reason ROLE TASK', 'Explicitly spend one bounded model call; print an advisory, never act or publish it', 'reason clotho example-task'],
 ].map(([verb, text, example]) => `${verb}: ${text}\n  Example: fm-moiras ${example}`),
 ...Object.entries(flags).map(([name, [, text, example]]) => `${name === 'help' ? '-h / ' : ''}--${name}: ${text}\n  Example: fm-moiras ${example}`)].join('\n') + '\n';
 const integer = (v, fallback, min, max) => { const n = Number(v ?? fallback); if (!Number.isInteger(n) || n < min || n > max) throw Error(`Expected integer ${min}..${max}`); return n; };
@@ -43,16 +47,17 @@ const demo = { demo: true, now: 0, prs: [], beaconAge: 12, used: 2, capacity: 8,
 async function main() {
   if (opt.help) { process.stdout.write(help()); return; }
   const verb = positionals[0] ?? 'start';
-  if (positionals.length > 1 || !['start', 'status', 'stats'].includes(verb)) throw Error('Use start, status or stats; -h lists all options');
+  if (!['start', 'status', 'stats', 'reason'].includes(verb) || (verb === 'reason' ? positionals.length !== 3 : positionals.length > 1)) throw Error('Use start, status, stats or reason ROLE TASK; -h lists all options');
+  if (verb === 'reason' && (opt['no-llm'] || opt.demo || opt.frames !== undefined)) throw Error('reason requires real evidence and explicit model permission; remove --no-llm, --demo and --frames');
   dimensions();
   const home = opt.demo ? toolRoot : fs.realpathSync(process.env.FM_HOME ?? toolRoot), configFile = path.resolve(opt.config ?? defaultConfig), c = config(configFile);
   if (opt.demo) demo.findings = measure(demo, c);
   const store = opt.demo ? null : journal(home), audit = store && telemetry(store, randomUUID());
   const emit = text => audit ? audit.step('terminal.write', () => process.stdout.write(text), [], Buffer.byteLength(text)) : process.stdout.write(text);
-  const snapshot = async () => {
+  const snapshot = async signal => {
     if (opt.demo) return demo;
     let prs = [], failure = c.repositories.length ? '' : 'PRs: unconfigured';
-    try { prs = await audit.step('forge.read', () => forge.read(c.repositories), c.repositories); } catch { failure = 'Forge unavailable; PR findings withheld'; }
+    try { prs = await audit.step('forge.read', () => forge.read(c.repositories, signal), c.repositories); } catch { failure = 'Forge unavailable; PR findings withheld'; }
     const data = thread(await audit.step('state.read', () => state(home, c.poolFiles).read(Date.now() / 1000)), prs, failure);
     return { ...data, findings: measure(data, c) };
   };
@@ -65,6 +70,18 @@ async function main() {
     return;
   }
   if (verb === 'status') { emit(plainStatus(await snapshot())); return; }
+  if (verb === 'reason') {
+    const controller = new AbortController(), cancel = () => controller.abort();
+    process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
+    try {
+      if (Object.hasOwn(c.roles, positionals[1])) await audit.step('harness.validate',
+        () => run(path.join(toolRoot, 'bin/fm-harness.sh'), ['validate', c.roles[positionals[1]].harness],
+          { env: { ...process.env, FM_HOME: home }, signal: controller.signal, timeout: 10000 }), [c.roles[positionals[1]].harness]);
+      const result = await explain({ reasoner: reasoner(configFile, { signal: controller.signal }), audit }, c.roles, positionals[1], positionals[2], await snapshot(controller.signal));
+      emit(result.text + '\n');
+    } finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); }
+    return;
+  }
   let observer, timer, view, closing = false, lastSize = '', staticPrinted = false;
   const native = terminal(), port = { ...native, write: text => closing ? native.write(text) : emit(text), tty: native.tty && process.env.TERM !== 'dumb', color: native.color && process.env.TERM !== 'dumb' };
   const controller = new AbortController();

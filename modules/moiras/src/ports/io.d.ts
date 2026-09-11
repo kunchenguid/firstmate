@@ -18,4 +18,7 @@ export interface Journal {
   claim(): () => void;
 }
 export interface Publisher { publish(id: string): Promise<unknown>; captured(id: string): boolean }
+export interface ReasoningRole { harness: string; model: string; effort: string; persona: string }
+export interface Advisory { text: string; model: string | null; tokens: number | null; cost: number | null }
+export interface Reasoner { read(role: ReasoningRole, packet: object): Promise<Advisory> }
 export type { Message, MessagePort } from '../../../fm-state-reader/src/ports/messages.d.ts';

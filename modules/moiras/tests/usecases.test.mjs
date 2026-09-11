@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inspect } from '../src/usecases/inspect.mjs';
+import { explain } from '../src/usecases/explain.mjs';
 import { config, moduleRoot } from '../src/adapters/config.mjs';
 import { json } from '../src/adapters/journal.mjs';
 import { validate } from '../src/core/config.mjs';
@@ -15,6 +16,18 @@ test('fake-backed observation survives capture-before-marker interruption withou
   await inspect(p, c, 3000); assert.equal(p.published.length, 1);
   assert.ok(p.logs.some(r => r.event === 'event.publish.exit' && r.outcome === 'accepted'));
   assert.ok(p.logs.every(r => r.cost === null && r.counters.adapterCalls >= 0));
+});
+test('fresh observation is available before slow delivery, and notices stream after capture', async () => {
+  const p = fakes(reading), order = []; let release, entered;
+  const held = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { entered = resolve; });
+  p.publisher.publish = async id => { entered(); await held; p.captures.add(id); };
+  p.onSnapshot = data => { assert.equal(data.findings.length, 1); order.push('snapshot'); };
+  p.onNotice = () => order.push('notice');
+  const pending = inspect(p, config(), 2000);
+  await started;
+  try { assert.ok(p.records.has('snapshot.json'), 'readiness waited for delivery'); assert.deepEqual(order, ['snapshot']); }
+  finally { release(); await pending; }
+  assert.deepEqual(order, ['snapshot', 'notice']);
 });
 test('canonical messages reply only to requester, preserve correlation, and acknowledge last', async () => {
   const p = fakes(reading), c = config(), first = await inspect(p, c, 2000);
@@ -35,9 +48,26 @@ test('notes never cause reply loops; uncertain delivery never sends a replacemen
   await assert.rejects(inspect(p, c, 2001), /timeout/);
   await assert.rejects(inspect(p, c, 2002), /delivery uncertain/); assert.equal(calls, 1);
 });
+test('explicit reasoning carries evidence and measured telemetry, never invokes unknown requests', async () => {
+  const p = fakes(reading), c = config(), calls = [];
+  p.reasoner = { read: async (role, packet) => { calls.push({ role, packet }); return { text: 'MOIRAS|observe|sample is busy', tokens: 10, cost: .01, model: 'reported' }; } };
+  const snapshot = { now: 2000, findings: [], workers: [{ id: 'sample', age: 15, busy: 'busy', last: 'working: tests', lines: ['working: tests'] }] };
+  const before = structuredClone(snapshot);
+  assert.match((await explain(p, c.roles, 'clotho', 'sample', snapshot)).text, /sample is busy/);
+  assert.equal(calls[0].packet.statusAgeSeconds, 15); assert.equal(calls[0].packet.generationMatched, true);
+  assert.deepEqual(snapshot, before); assert.equal(p.published.length, 0);
+  assert.ok(p.logs.some(row => row.event === 'reason.exit' && row.tokens === 10 && row.cost === .01));
+  await assert.rejects(explain(p, c.roles, 'clotho', 'absent', snapshot), /Unknown task/);
+  await assert.rejects(explain(p, c.roles, 'unknown', 'sample', snapshot), /Unknown Fate/);
+  assert.equal(calls.length, 1);
+});
 test('schema-backed config rejects unknown fields, invalid paths and non-finite thresholds', () => {
   const c = config(), schema = json(`${moduleRoot}/config.schema.json`);
   assert.equal(c.loopAttempts, 2); assert.equal(c.roles.clotho.harness, 'pi');
   for (const patch of [{ extra: true }, { beaconSeconds: Infinity }, { loopAttempts: 2.5 }, { repositories: ['../escape'] }, { poolFiles: [''] }]) assert.throws(() => validate({ ...c, ...patch }, schema), /Invalid/);
   const altered = structuredClone(c); altered.roles.clotho.persona = '../secret.md'; assert.throws(() => validate(altered, schema), /Invalid/);
+  for (const harness of ['codex', 'default']) {
+    const invalid = structuredClone(c); invalid.roles.atropos.harness = harness;
+    assert.throws(() => validate(invalid, schema), /Invalid/);
+  }
 });

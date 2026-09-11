@@ -12,7 +12,8 @@ export async function observe({ home, root, configFile, messages = null, notify 
   const store = journal(home), release = store.claim(), eventPort = publisher(home, root);
   const controller = new AbortController(), cancel = () => controller.abort();
   signal?.addEventListener('abort', cancel, { once: true }); if (signal?.aborted) cancel();
-  let stopped = false, active = null, pending = false, debounce, deadline, closeSource = () => {}, current;
+  let stopped = false, active = null, pending = false, debounce, deadline, closeSource = () => {}, current, ready;
+  const firstSnapshot = new Promise(resolve => { ready = resolve; });
   const changed = () => { if (!stopped) { clearTimeout(debounce); debounce = setTimeout(update, 150); } };
   const update = async () => {
     if (stopped) return;
@@ -25,10 +26,9 @@ export async function observe({ home, root, configFile, messages = null, notify 
         const source = state(home, c.poolFiles); closeSource();
         closeSource = await audit.step('state.watch', () => source.watch(error => { if (error) notify('State watch failed; restart after inspecting the filesystem'); changed(); }));
         const now = Date.now() / 1000;
-        const result = await inspect({ source, forge: { read: repos => forge.read(repos, controller.signal) }, journal: store, publisher: eventPort, messages, audit }, c, now);
-        current = result.snapshot;
-        if (!messages) current.facts.push('Two-way channel unavailable: standalone service admission is pending');
-        for (const notice of result.notices) notify(notice);
+        await inspect({ source, forge: { read: repos => forge.read(repos, controller.signal) }, journal: store, publisher: eventPort, messages, audit,
+          onSnapshot: data => { current = data; if (!messages) current.facts.push('Two-way channel unavailable: standalone service admission is pending'); ready(); },
+          onNotice: notify }, c, now);
         clearTimeout(deadline);
         const boundaries = [c.repositories.length ? now + c.forgeSeconds : Infinity, current.beaconAt === null ? Infinity : current.beaconAt + c.beaconSeconds + 1,
           ...current.workers.filter(w => w.busy === 'idle').map(w => Math.max(w.changed ?? now, w.idleAt ?? now) + c.idleSeconds + 1),
@@ -46,7 +46,7 @@ export async function observe({ home, root, configFile, messages = null, notify 
   let configWatch;
   try {
     configWatch = fs.watch(path.dirname(configFile), (_, name) => { if (!name || String(name) === path.basename(configFile)) changed(); }).on('error', changed);
-    await update();
+    await Promise.race([firstSnapshot, update()]);
   } catch (error) { closeSource(); release(); signal?.removeEventListener('abort', cancel); throw error; }
   return { data: () => current, stop: async () => {
     stopped = true; cancel(); clearTimeout(debounce); clearTimeout(deadline); closeSource(); configWatch.close();

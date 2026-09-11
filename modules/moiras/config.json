@@ -9,8 +9,8 @@
   "repositories": [],
   "poolFiles": [],
   "roles": {
-    "clotho": { "harness": "pi", "model": "default", "effort": "low", "persona": "personas/clotho.md" },
-    "lachesis": { "harness": "claude", "model": "haiku", "effort": "low", "persona": "personas/lachesis.md" },
-    "atropos": { "harness": "codex", "model": "default", "effort": "low", "persona": "personas/atropos.md" }
+    "clotho": { "harness": "pi", "model": "openai-codex/gpt-5.6-luna", "effort": "low", "persona": "personas/clotho.md" },
+    "lachesis": { "harness": "pi", "model": "openai-codex/gpt-5.6-luna", "effort": "low", "persona": "personas/lachesis.md" },
+    "atropos": { "harness": "pi", "model": "openai-codex/gpt-6-astra", "effort": "low", "persona": "personas/atropos.md" }
   }
 }
