@@ -200,13 +200,21 @@
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
-#   task worktree. When an origin configuration is detected, spawn fetches it,
-#   resolves the current remote default branch, and resets to its tip. When none
-#   is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   task worktree, which spawn then moves onto the base the task must start
+#   from. When an origin configuration is detected, spawn fetches it, resolves
+#   the current remote default branch, and starts from its tip - except for a
+#   `mode=local-only` task, whose approved work bin/fm-merge-local.sh lands on
+#   the LOCAL default branch and never pushes, so that branch wins when it
+#   strictly contains origin's tip (bin/fm-pool-base-lib.sh owns that rule; a
+#   scout, which records no mode, falls back to the project's registered
+#   posture). When no origin is detected there is nothing else that could be
+#   authoritative, so spawn starts from refs/heads/<default> in every mode.
+#   Either way HEAD is detached onto that base, so a slot handed back on a
+#   branch never has that branch dragged along with it. Relaunch reuses the
+#   recorded worktree without fetching or resetting its base. An unreachable
+#   detected origin, a default branch that cannot be determined, or a non-clean
+#   worktree refuses a fresh spawn rather than risking a PR based on stale
+#   history or discarding local work.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -2524,7 +2532,7 @@ freshen_spawn_worktree_base() {  # <worktree> <project> <task-mode>
     return 1
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
-    default=$(default_branch "$worktree") || {
+    default=$(default_branch "$worktree") || default=$(spawn_repository_head_branch "$worktree") || {
       echo "error: could not determine the default branch for pooled worktree '$worktree', which has no origin; refusing to launch from an unverified base" >&2
       return 1
     }
@@ -2566,9 +2574,28 @@ freshen_spawn_worktree_base() {  # <worktree> <project> <task-mode>
   reset_spawn_worktree_base "$worktree" "$target" "$expected"
 }
 
+# An origin-less repository's own HEAD names the branch it treats as default, and
+# it is the only authority left once the conventional main/master names are
+# absent. Read it from the COMMON git dir, so a pooled worktree's own detached
+# HEAD never answers for the repository. Tried only after default_branch, which
+# prefers the conventional names and therefore cannot be misled by a primary
+# checkout stranded on a feature branch.
+spawn_repository_head_branch() {  # <worktree>
+  local worktree=$1 common
+  common=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  git -C "$worktree" --git-dir="$common" symbolic-ref --quiet --short HEAD 2>/dev/null
+}
+
+# HEAD is DETACHED onto the base rather than reset in place. treehouse is an
+# external pool and nothing here can prove a returned slot is not still sitting
+# on some previous task's branch; `reset --hard` would move that branch ref, and
+# in an origin-less repository those commits exist nowhere else. Detaching moves
+# only this worktree, so a branch this gate does not own is left exactly where it
+# was, and the crew branch is cut from the detached base as before.
 reset_spawn_worktree_base() {  # <worktree> <target> <expected-commit>
   local worktree=$1 target=$2 expected=$3 actual
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+  if ! git -C "$worktree" checkout --quiet --force --detach "$target" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi

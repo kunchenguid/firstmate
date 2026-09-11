@@ -277,12 +277,36 @@ test_originless_pool_refreshes_to_the_local_default_branch() {
   pass "an origin-less pooled worktree refreshes to the local default branch in every delivery mode"
 }
 
-test_originless_pool_with_no_default_branch_refuses() {
+# An origin-less repository whose default branch is named something other than
+# main or master is still perfectly knowable: its own HEAD says so.
+test_originless_pool_with_an_unconventional_default_branch_refreshes() {
+  local rec id out status landed
+  id='pool-originless-unconventional-r1'
+  rec=$(make_originless_case originless-unconventional "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" branch -m main trunk
+  DEFAULT_BRANCH=trunk
+  landed=$(land_locally landed-locally.txt 'approved work that was never pushed')
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch an origin-less pool whose default branch is named trunk"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$landed" ] \
+    || fail "spawn did not refresh onto an unconventionally named default branch"
+  assert_grep 'approved work that was never pushed' "$POOL_DIR/landed-locally.txt" \
+    "the pooled worktree does not carry work landed on the unconventionally named default branch"
+  pass "an origin-less pool resolves an unconventionally named default branch from the repository's HEAD"
+}
+
+test_originless_pool_with_no_determinable_default_branch_refuses() {
   local rec id out status before
   id='pool-originless-no-default-r1'
   rec=$(make_originless_case originless-no-default "$id")
   read_case_record "$rec"
+  # No conventional name AND no symbolic HEAD to fall back on: nothing names a
+  # default branch, so the base genuinely cannot be verified.
   git -C "$PROJECT_DIR" branch -m main not-a-default
+  git -C "$PROJECT_DIR" checkout --quiet --detach
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
@@ -293,8 +317,39 @@ test_originless_pool_with_no_default_branch_refuses() {
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD after failing to resolve the default branch"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
-  pass "an origin-less pool with no resolvable default branch refuses rather than launching"
+  pass "an origin-less pool with no determinable default branch refuses rather than launching"
 }
+
+# treehouse is an external pool, so a returned slot can be sitting on a branch.
+# Moving that branch would destroy commits that, in an origin-less repository,
+# exist nowhere else.
+test_pool_on_a_branch_is_refreshed_without_moving_that_branch() {
+  local rec id out status landed stranded
+  id='pool-on-a-branch-r1'
+  rec=$(make_originless_case pool-on-a-branch "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" checkout --quiet -b leftover-work
+  printf 'work from the previous task\n' > "$POOL_DIR/leftover.txt"
+  git -C "$POOL_DIR" add leftover.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm leftover-work
+  stranded=$(git -C "$POOL_DIR" rev-parse HEAD)
+  landed=$(land_locally landed-locally.txt 'approved work that was never pushed')
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh a pooled slot handed back on a branch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$landed" ] \
+    || fail "spawn did not refresh a pooled slot handed back on a branch"
+  [ "$(git -C "$POOL_DIR" rev-parse refs/heads/leftover-work)" = "$stranded" ] \
+    || fail "spawn moved a branch the pooled slot happened to sit on"
+  git -C "$POOL_DIR" cat-file -e "$stranded^{commit}" \
+    || fail "the commit the pooled slot was sitting on did not survive the refresh"
+  [ -z "$(git -C "$POOL_DIR" symbolic-ref --quiet HEAD || true)" ] \
+    || fail "spawn left the pooled worktree on a branch instead of detaching it onto the base"
+  pass "a pooled slot handed back on a branch is refreshed without moving that branch"
+}
+
 test_originless_dirty_pool_refuses_without_discarding_work() {
   local rec id out status before
   id='pool-originless-dirty-r1'
@@ -997,7 +1052,9 @@ test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_originless_pool_refreshes_to_the_local_default_branch
-test_originless_pool_with_no_default_branch_refuses
+test_originless_pool_with_an_unconventional_default_branch_refreshes
+test_originless_pool_with_no_determinable_default_branch_refuses
+test_pool_on_a_branch_is_refreshed_without_moving_that_branch
 test_originless_dirty_pool_refuses_without_discarding_work
 test_origin_config_without_url_refuses_pool
 test_empty_origin_config_section_refuses_pool

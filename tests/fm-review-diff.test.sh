@@ -104,14 +104,26 @@ commit_branch_work() {  # <case_dir>
   git -C "$case_dir/wt" commit -qm "branch work"
 }
 
+# The field shape: the worker's branch is cut from the pooled base, which for a
+# local-only task is the LOCAL default branch, so origin/main is an ancestor of
+# the branch and the landed commits are inside `origin/main...HEAD`. That is the
+# only topology in which the base choice changes the diff CONTENT rather than
+# just its label.
+branch_from_landed_default() {  # <case_dir>
+  git -C "$1/wt" reset --hard -q main
+}
+
 test_local_default_ahead_of_origin_is_the_review_base() {
   local case_dir out
   case_dir=$(make_case local-default-ahead)
   # Registered no-mistakes on purpose: the task's own mode decides the base.
   register_project_mode "$case_dir" no-mistakes
   land_on_local_default "$case_dir" landed-locally.txt 'approved work that was never pushed'
+  branch_from_landed_default "$case_dir"
   commit_branch_work "$case_dir"
   write_task_meta "$case_dir" "mode=local-only"
+  git -C "$case_dir/wt" diff --quiet "origin/main...HEAD" -- landed-locally.txt \
+    && fail "local-default-ahead: fixture does not reproduce the failure - origin/main as base omits the landed file"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
@@ -131,6 +143,7 @@ test_local_default_behind_origin_keeps_origin_review_base() {
   git -C "$case_dir/publisher" add pushed.txt
   git -C "$case_dir/publisher" -c user.email=t@t -c user.name=t commit -qm "advance origin"
   git -C "$case_dir/publisher" push -q origin main
+  branch_from_landed_default "$case_dir"
   commit_branch_work "$case_dir"
   write_task_meta "$case_dir" "mode=local-only"
 
@@ -152,6 +165,7 @@ test_pr_delivered_task_keeps_the_origin_review_base() {
     case_dir=$(make_case "local-default-ahead-$mode")
     register_project_mode "$case_dir" local-only
     land_on_local_default "$case_dir" landed-locally.txt 'a local commit that was never pushed'
+    branch_from_landed_default "$case_dir"
     commit_branch_work "$case_dir"
     write_task_meta "$case_dir" "mode=$mode"
 
@@ -160,6 +174,8 @@ test_pr_delivered_task_keeps_the_origin_review_base() {
     assert_contains "$out" 'diff base: origin/main' \
       "$mode: origin must stay the review base for a task that delivers through a PR"
     assert_contains "$out" '+branch work' "$mode: the branch's own change should still show"
+    assert_contains "$out" 'landed-locally.txt' \
+      "$mode: the review hid unpushed local commits the PR against origin would carry"
   done
   pass "fm-review-diff keeps the origin base for a PR-delivered task on a local-only project"
 }
@@ -172,6 +188,7 @@ test_task_without_a_recorded_mode_follows_the_registry() {
     case_dir=$(make_case "no-recorded-mode-$registered")
     register_project_mode "$case_dir" "$registered"
     land_on_local_default "$case_dir" landed-locally.txt 'approved work that was never pushed'
+    branch_from_landed_default "$case_dir"
     commit_branch_work "$case_dir"
     write_task_meta "$case_dir"
 
@@ -185,6 +202,8 @@ test_task_without_a_recorded_mode_follows_the_registry() {
     else
       assert_contains "$out" 'diff base: origin/main' \
         "no recorded mode: a $registered project's review base should stay origin"
+      assert_contains "$out" 'landed-locally.txt' \
+        "no recorded mode: a $registered project's review hid the unpushed local commits"
     fi
     assert_contains "$out" '+branch work' "no recorded mode: the branch's own change should still show"
   done
