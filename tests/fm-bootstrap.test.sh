@@ -45,7 +45,21 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
+  # A bare `lavish-axi` answers with its sessions listing, and a listing with no
+  # sessions still carries the header. A stub that answers only `--version` and
+  # then nothing is a tool whose listing cannot be parsed, which the
+  # running-session inventory correctly reports as a source it could not read -
+  # so the stub has to honour both halves of the contract, not just the version.
+  cat > "$fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_LAVISH_AXI_VERSION:-0.1.46}"
+  exit 0
+fi
+printf 'sessions[0]{file,status,url,pending_prompts}:\n'
+exit 0
+SH
+  chmod +x "$fakebin/lavish-axi"
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -873,6 +887,110 @@ test_routine_bootstrap_confirmations_are_silent() {
   pass "bootstrap keeps routine tasks-axi, harness, dispatch, and already-live liveness confirmations silent"
 }
 
+# Anything that has been running for days is surfaced unasked at session start,
+# and nothing else is. The inventory itself is owned by
+# tests/fm-session-inventory.test.sh; what this pins is the WIRING - that the
+# detect-only half of bootstrap reports it, and that it stays silent otherwise.
+test_stale_sessions_are_reported_unasked() {
+  local case_dir fixture root home fakebin out
+  case_dir="$TMP_ROOT/stale-sessions"
+  fixture=$(make_routine_bootstrap_fixture "$case_dir")
+  root=${fixture%%|*}
+  fixture=${fixture#*|}
+  home=${fixture%%|*}
+  fakebin=${fixture#*|}
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "SESSIONS_STALE:" \
+    "a home with nothing old must say nothing about running sessions"
+
+  # One worker in flight for a fortnight, through the ordinary backlog record.
+  mkdir -p "$home/data"
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+- [ ] ancient-task - Ancient Task (repo: alpha) (kind: ship) (since 2020-01-01)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/ancient-task.meta" \
+    "window=firstmate:fm-ancient-task" \
+    "worktree=$case_dir/wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=off"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "SESSIONS_STALE: worker ancient-task" \
+    "a worker running for years must be named at session start without being asked"
+  assert_contains "$out" "bin/fm-teardown.sh ancient-task" \
+    "the reported line must carry the guarded cleanup command"
+
+  # The detect-only half runs in a read-only session too, which is exactly when
+  # a second concurrent session exists to be noticed.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=0 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "SESSIONS_STALE: worker ancient-task" \
+    "a read-only session must still report what has been running for days"
+
+  # And it stays opt-outable for a home that does not want the notice.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_STALE_SESSIONS=0 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "SESSIONS_STALE:" \
+    "FM_BOOTSTRAP_STALE_SESSIONS=0 must opt a home out of the unasked notice"
+
+  # THE BUDGET HAS TO LEAVE ROOM FOR THE DISCLOSURE. bootstrap bounds the whole
+  # pass and the inventory bounds each source underneath; if a per-source bound
+  # is sized so a single wedged source outlasts the outer one, the captain is
+  # told only that the check did not finish and loses both the named source and
+  # every row that WAS readable. This drives bootstrap's own numbers - nothing
+  # here sets a bound - so the arithmetic cannot drift without failing.
+  # A live harness session recorded as this home's lock, so BOTH working-
+  # directory reads run: the machine-wide one that matches workers to their
+  # processes, and the one that scopes this home's sessions. One wedged mount
+  # wedges both, which is the case the budget has to survive.
+  local wedged sess
+  ln -sf /bin/bash "$fakebin/claude"
+  ( cd "$home" && exec "$fakebin/claude" -c 'sleep 120; :' sess-a ) &
+  sess=$!
+  sleep 0.5
+  printf '%s\n' "$sess" > "$home/state/.lock"
+  for wedged in lsof readlink; do
+    cat > "$fakebin/$wedged" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+    chmod +x "$fakebin/$wedged"
+  done
+  out=$(PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh")
+  # Both reads must actually have wedged, or this case is not exercising the
+  # additive pair the budget is sized for.
+  assert_contains "$out" "worker-processes, harness-sessions unreadable" \
+    "both working-directory reads must be the wedged sources here"
+  assert_contains "$out" "SESSIONS_STALE: could not check everything - " \
+    "a wedged source must be named, not swallowed by the outer bound"
+  assert_not_contains "$out" "the running-session check did not finish" \
+    "the per-source disclosure must be reachable under bootstrap's own budget"
+  assert_contains "$out" "SESSIONS_STALE: worker ancient-task" \
+    "and the rows that were readable must survive the source that was not"
+  rm -f "$fakebin/lsof" "$fakebin/readlink" "$fakebin/claude"
+  kill "$sess" 2>/dev/null || true
+  wait "$sess" 2>/dev/null || true
+
+  pass "bootstrap reports what has been running for days, unasked, and only that"
+}
+
 test_routine_bootstrap_contract_runs_under_system_bash() {
   local out
   [ -x /bin/bash ] || { pass "bootstrap routine contract skipped without /bin/bash"; return; }
@@ -1176,6 +1294,7 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
+test_stale_sessions_are_reported_unasked
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times

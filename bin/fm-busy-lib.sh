@@ -74,6 +74,16 @@
 # standalone Kimi is not: a seeded record with no writer could never be
 # cleared. See fm_busy_muse_run_state for the fold.
 #
+# FM_BUSY_READ_ONLY=1 makes classification touch no file at all. The muse pull
+# source is the one classifier path that writes anything: it memoises the log it
+# resolved in state/<id>.muse-session-current, and clears that memo when it no
+# longer matches. Both are pure caching - the classification is identical
+# without them - so a caller that must not write state (an overview on the
+# blocking session-start path, a display that redraws on a timer) sets this and
+# gets the same verdict, resolved from scratch, leaving nothing behind and
+# racing no writer that owns that file. Every state RECORD writer remains
+# bin/fm-busy-event.sh; this flag concerns only the classifier's own cache.
+#
 # The cursor pull source works the same way and for the same reason: it folds
 # cursor's own durable per-conversation transcript, which brackets each turn
 # with a role:user open and a typed turn_ended close that covers aborts. It has
@@ -486,6 +496,11 @@ fm_busy_muse_cache_session_log() {  # <state-dir> <id> <binding-id> <session-log
   [ -n "$3" ] || return 0
   current=$(fm_busy_muse_binding_field "$1" "$2" binding_id) || return 1
   [ "$current" = "$3" ] || return 1
+  # The binding re-check above is a race guard on the ANSWER and runs either
+  # way; only the write below is skipped under FM_BUSY_READ_ONLY, so a read-only
+  # caller gets the same verdict it would otherwise get, just without the cache
+  # it would have left behind.
+  [ "${FM_BUSY_READ_ONLY:-0}" != 1 ] || return 0
   cache=$(fm_busy_muse_cache_path "$1" "$2")
   tmp="$cache.tmp.$$"
   {
@@ -509,7 +524,7 @@ fm_busy_muse_session_log() {  # <state-dir> <id>
     printf '%s' "$cache"
     return 0
   fi
-  rm -f "$(fm_busy_muse_cache_path "$1" "$2")"
+  [ "${FM_BUSY_READ_ONLY:-0}" = 1 ] || rm -f "$(fm_busy_muse_cache_path "$1" "$2")"
   namespace_day=$(fm_busy_muse_namespace_day "$root") || return 1
   namespace_before=$(fm_busy_muse_namespace_signature "$namespace_day") || return 1
   while IFS= read -r candidate; do

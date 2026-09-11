@@ -15,6 +15,10 @@
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "TANGLE: <remediation>",
+#                 "SESSIONS_STALE: <what> - <n>d, <where> - close: <command>",
+#                 "SESSIONS_STALE: could not check everything - <source> unreadable
+#                 | the running-session check did not finish within <n>s
+#                 | the running-session check failed (exit <n>); run bin/fm-session-view.sh",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -51,6 +55,11 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          SESSIONS_STALE lines name every worker, review page, background
+#          harness session, or listener that has been running at or beyond the
+#          stale threshold and has a close command, oldest first and bounded;
+#          bin/fm-session-inventory.sh owns the inventory and the threshold, and
+#          silence means nothing is old. FM_BOOTSTRAP_STALE_SESSIONS=0 opts out.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -181,6 +190,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
 
 # Network-phase selection (see the header). An unrecognized value resolves to
 # `all` so a malformed override runs every step rather than silently dropping a
@@ -1468,6 +1479,78 @@ detect_local_config() {
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
   detect_home_summary_publication
+  detect_stale_sessions
+}
+
+# Anything that has been running for days - a worker, a review page, an idle
+# harness background session - is something a session start should say out loud
+# once, unasked, rather than leave for someone to go looking for. It runs here,
+# with the other local detect-only checks, so a read-only session that could not
+# take the fleet lock still reports it: a second concurrent session is exactly
+# when this matters most. bin/fm-session-inventory.sh owns the inventory and its
+# staleness rule; this only surfaces the lines it already prints, and prints
+# nothing at all when nothing is old.
+#
+# Bounded because it sits on the blocking session-start path: one pass is a
+# second or two of local reads, and a slow one degrades to a single line naming
+# what was not checked rather than delaying the digest.
+FM_STALE_SESSION_TIMEOUT=${FM_STALE_SESSION_TIMEOUT:-8}
+case "$FM_STALE_SESSION_TIMEOUT" in ''|*[!0-9]*|0) FM_STALE_SESSION_TIMEOUT=8 ;; esac
+detect_stale_sessions() {
+  local out rc=0 inner cwd_inner
+  [ "${FM_BOOTSTRAP_STALE_SESSIONS:-1}" = 1 ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  # THE BUDGET, WRITTEN OUT SO IT CANNOT DRIFT AGAIN. Every per-source bound has
+  # to sit below this outer one TOGETHER WITH THE REST OF THE PASS, or the outer
+  # bound kills everything first and the captain is told only that the check did
+  # not finish - losing both the source that was unreadable and every row that
+  # was perfectly readable.
+  #
+  #   slack      2s            what a pass costs outside its bounded sources:
+  #                            the ps table, the process walk, the jq assembly.
+  #                            Measured at about 2s against a real home.
+  #   inner      outer - slack one wedged fleet snapshot OR Lavish listing still
+  #                            leaves room to finish and disclose, because
+  #                            inner + slack = outer.
+  #   cwd_inner  (inner - slack) / 2
+  #                            the working directory is read TWICE in one pass -
+  #                            once machine-wide to match workers to their
+  #                            processes, once for the sessions under this
+  #                            home's harness - and one wedged mount wedges
+  #                            BOTH, so the pair must fit where one source fits:
+  #                            2 * cwd_inner + slack <= inner. At the default
+  #                            outer of 8s that is 2s per read, and a wedged
+  #                            reader then still leaves 2s of headroom.
+  #
+  # What deliberately does NOT fit is several DIFFERENT sources wedging in one
+  # pass: inner + inner already exceeds outer, and no per-source value can
+  # change that. That case belongs to the outer bound below, which still says
+  # the check did not finish rather than going quiet. The floors below can also
+  # exceed the budget for an unusually small outer bound; the same applies then.
+  inner=$((FM_STALE_SESSION_TIMEOUT - 2))
+  [ "$inner" -ge 2 ] || inner=2
+  cwd_inner=$(((inner - 2) / 2))
+  [ "$cwd_inner" -ge 2 ] || cwd_inner=2
+  out=$(FM_SESSION_INVENTORY_FLEET_TIMEOUT="${FM_SESSION_INVENTORY_FLEET_TIMEOUT:-$inner}" \
+    FM_SESSION_INVENTORY_LAVISH_TIMEOUT="${FM_SESSION_INVENTORY_LAVISH_TIMEOUT:-$inner}" \
+    FM_SESSION_INVENTORY_CWD_TIMEOUT="${FM_SESSION_INVENTORY_CWD_TIMEOUT:-$cwd_inner}" \
+    fm_run_timed "$FM_STALE_SESSION_TIMEOUT" \
+    "$SCRIPT_DIR/fm-session-inventory.sh" --stale-lines 2>/dev/null) || rc=$?
+  # The inventory discloses its OWN unreadable sources, in one line of exactly
+  # this shape. Only the two failures it cannot report on itself are left here -
+  # it never finished, or it never ran - and they take the same shape for the
+  # same reason: on this surface, silence means "nothing is old", so a check
+  # that did not happen may never look like one that found nothing.
+  if [ "$rc" = 124 ]; then
+    echo "SESSIONS_STALE: could not check everything - the running-session check did not finish within ${FM_STALE_SESSION_TIMEOUT}s; run bin/fm-session-view.sh"
+    return 0
+  fi
+  if [ "$rc" != 0 ]; then
+    echo "SESSIONS_STALE: could not check everything - the running-session check failed (exit $rc); run bin/fm-session-view.sh"
+    return 0
+  fi
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out"
 }
 
 # This home's ledger publication is deliberately best-effort: every lifecycle

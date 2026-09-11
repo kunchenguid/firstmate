@@ -255,6 +255,47 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Running-session overview (bin/fm-session-view.sh)
+
+`bin/fm-session-view.sh` shows everything running in a single list: one home's workers, its background services, the harness background sessions under a shared harness daemon, and every open Lavish review page.
+Workers, services, and sessions are scoped to the home; the review pages are not, because Lavish keeps one machine-wide list and seeing all of it in one place is the point.
+It renders `bin/fm-session-inventory.sh --json`, which is the structured owner of that inventory; both are read-only and neither ever closes, kills, or signals anything it reports.
+Close commands are printed for you to run - one for every row that has one, whatever its age - and a row that could lose work in progress says so on the line below its command.
+The stale threshold below governs the `!` marks and the unasked session-start lines, not what you are offered a way to close.
+The one row that never carries a close command is the captain's own background session: it is marked `(yours)` and is his to end, not something the overview offers to kill for him.
+It is recognised from the harness ancestry the overview runs in, which the session-start path always has.
+A pane has no harness ancestry to walk, and nothing else can stand in for it: the session lock names the outermost harness process, which under a shared harness daemon is the daemon rather than any one session.
+So in a pane every session row says `(owner unknown)` and none is offered for closing; the pids are still shown, so ending one deliberately stays possible.
+The close commands are withheld the same way whenever this home's workers could not be read, since a background session cannot then be told apart from a worker's own process - the view says which list was missing, and names the unreadable source. Ownership is unaffected there: the ancestry still answers it, so a session it recognises is still marked `(yours)`.
+
+Anything at or over the stale threshold is marked with a leading `!`.
+The age it is measured against is how long a worker has been RUNNING whenever a live process is working in its own local copy, and the age of the work itself when nothing is running, so abandoned work still holding a local copy is surfaced rather than hidden.
+A worker's task age is also shown in its own column when the pane is wide enough.
+`FM_SESSION_STALE_DAYS` sets that threshold and defaults to 3 days.
+The same threshold drives the unasked `SESSIONS_STALE:` lines a session start prints through [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh); set `FM_BOOTSTRAP_STALE_SESSIONS=0` to opt a home out of those lines.
+Those lines are capped, and the cap keeps one line for every kind that has an overdue row, then gives what is left to this home's own workers, background sessions, and services ahead of the machine-wide review pages, oldest first within each.
+Whatever does not fit is counted on a closing line pointing at the view, so nothing falls away silently.
+Because the review pages are machine-wide, only the main home names them on those unasked lines; a secondmate home leaves them to it rather than every home on the machine repeating the same lines at every session start.
+The pages themselves stay in the view and in `--json` for every home.
+
+For a pane you leave open, `--watch` redraws in place:
+
+```sh
+bin/fm-session-view.sh --watch
+```
+
+In WezTerm, one line opens that pane beside the current one and keeps it there:
+
+```sh
+wezterm cli split-pane --right --percent 35 --cwd /path/to/firstmate -- bash -lc 'exec bin/fm-session-view.sh --watch'
+```
+
+A background session is recognised as this home's by the directory it is working in, not by the arguments it was started with, because a harness keeps its pooled start-up arguments after being claimed for real work; [`docs/verification/running-session-overview.md`](verification/running-session-overview.md) records that measurement and the guard that refreshes it.
+
+`--interval` sets the redraw cadence; it defaults to 60 seconds and refuses anything under 15, because a faster redraw would poll harder than supervision itself for a display that changes on the scale of minutes.
+The view stays readable without colour and in a narrow pane: `--color never` disables colour (so does `NO_COLOR`), the "belongs to" column is dropped below 60 columns, and close commands are always printed unabridged so they stay pasteable.
+Each script's `--help` owns its exact flags and bounds.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
