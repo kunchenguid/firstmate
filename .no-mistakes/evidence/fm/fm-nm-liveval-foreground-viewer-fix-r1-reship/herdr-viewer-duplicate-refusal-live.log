@@ -1,0 +1,8 @@
+COMMAND: real Herdr duplicate viewer-start refusal probe
+SESSION: fm-lab-duplicate-live-97335-6091
+FIRST: viewer attached to fm-lab-duplicate-live-97335-6091 (pid 98038)
+SECOND_STATUS: 1
+SECOND: fm-herdr-lab: a lab viewer is already attached to 'fm-lab-duplicate-live-97335-6091'; stop it before starting another
+AFTER_REFUSAL: cleared
+AFTER_STOP: no_foreground_client
+RESULT: teardown=complete

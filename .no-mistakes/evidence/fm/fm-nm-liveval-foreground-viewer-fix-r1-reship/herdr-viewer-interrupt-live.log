@@ -1,0 +1,5 @@
+COMMAND: real Herdr interrupted viewer-start lifecycle probe
+SESSION: fm-lab-interrupt-live-76009-5965
+OBSERVED: command_pid=76799 launcher_pid=76873; sending TERM to viewer-start command
+RESULT: command_status=143 launcher=gone foreground_reason=no_foreground_client
+RESULT: teardown=complete

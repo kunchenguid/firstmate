@@ -1,0 +1,5 @@
+COMMAND: guarded viewer rejects default and unowned session names
+DEFAULT_STATUS: 1
+DEFAULT: fm-herdr-lab: refusing session name 'default'
+UNOWNED_STATUS: 1
+UNOWNED: fm-herdr-lab: missing fleet-state tripwire for 'fm-lab-unowned-81471-3974'; refusing to attach a viewer to a session this lab does not own
