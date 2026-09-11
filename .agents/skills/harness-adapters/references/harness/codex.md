@@ -13,6 +13,7 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
 | Model flag | `--model <model>`. |
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
+| Memory | Crewmate and scout launches pass `--disable memories`, while secondmate launches keep the harness default; verified on 2026-09-09 with codex-cli 0.153.4: `codex features list --disable memories` and `codex -c 'features.memories=false' features list` both report `memories stable false`. A raw launch command is passed verbatim by design, so an operator-typed raw Codex launch must carry `--disable memories` itself. |
 | Model discovery | Open the current interactive session's `/model` picker. |
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"

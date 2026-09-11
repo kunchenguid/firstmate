@@ -402,19 +402,27 @@ test_claude_threads_model_and_effort() {
 }
 
 test_codex_threads_model_and_effort() {
-  local rec id out status launch
-  id=profile-codex-z3
-  rec=$(make_spawn_case profile-codex codex "$id")
-  read_case_record "$rec"
+  local rec id out status launch kind
+  for kind in ship scout; do
+    id=profile-codex-$kind-z3
+    rec=$(make_spawn_case profile-codex-$kind codex "$id")
+    read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort high)
-  status=$?
-  expect_code 0 "$status" "codex spawn with profile flags should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread model and reasoning effort config"
-  pass "codex receives --model and model_reasoning_effort profile flags"
+    if [ "$kind" = ship ]; then
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort high)
+      status=$?
+    else
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --model gpt-5 --effort high)
+      status=$?
+    fi
+    expect_code 0 "$status" "codex spawn with profile flags should succeed"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+      "codex launch did not thread model and reasoning effort config"
+    assert_contains "$launch" "--disable memories" "codex $kind launch must disable memories"
+    pass "codex $kind receives model/effort flags and disables memories"
+  done
 }
 
 test_codex_omits_invalid_max_effort() {
