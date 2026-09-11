@@ -1385,8 +1385,7 @@ EOF
     if [ "$FM_COMPOSER_SCAN_UNSAFE" = 1 ]; then
       printf 'unknown'; return 0
     fi
-    if [ "$FM_COMPOSER_SCAN_BOX_TOP" -lt 0 ] \
-       && [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
+    if [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
        && [ "$cy" -ge "$FM_COMPOSER_SCAN_AGY_ROW" ] \
        && [ "$cy" -le "$FM_COMPOSER_SCAN_AGY_END" ]; then
       _fm_composer_classify_agy_rows "$screen" "$styled" \

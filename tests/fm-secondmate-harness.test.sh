@@ -127,6 +127,47 @@ SH
   pass "fm-harness detects only Cursor Agent CLI's exact invocation marker"
 }
 
+test_agy_marker_precedes_gemini_and_ancestry_fallback() {
+  local dir fakebin got
+  dir="$TMP_ROOT/agy-marker"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field" in
+  comm=)
+    if [ "$pid" = "$PPID" ]; then printf '%s\n' bash; else printf '%s\n' agy; fi
+    ;;
+  args=) printf '%s\n' bash ;;
+  ppid=)
+    if [ "$pid" = "$PPID" ]; then printf '%s\n' 4242; else printf '%s\n' 1; fi
+    ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT \
+    -u CURSOR_INVOKED_AS PATH="$fakebin:$BASE_PATH" \
+    GEMINI_CLI=1 ANTIGRAVITY_AGENT=1 "$ROOT/bin/fm-harness.sh")
+  [ "$got" = agy ] || fail "AGY marker lost to Gemini marker: '$got'"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT \
+    -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT PATH="$fakebin:$BASE_PATH" \
+    GEMINI_CLI=1 "$ROOT/bin/fm-harness.sh")
+  [ "$got" = gemini ] || fail "Gemini marker alone resolved '$got', expected gemini"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT \
+    -u CURSOR_INVOKED_AS -u GEMINI_CLI -u ANTIGRAVITY_AGENT \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = agy ] || fail "AGY ancestry resolved '$got', expected agy"
+  pass "fm-harness gives AGY marker precedence and retains ancestry detection"
+}
+
 # ===========================================================================
 # C) fm-harness.sh secondmate-model / secondmate-effort token resolution
 # ===========================================================================
@@ -2623,6 +2664,7 @@ SH
 
 test_harness_resolution
 test_cursor_marker_detection
+test_agy_marker_precedes_gemini_and_ancestry_fallback
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands

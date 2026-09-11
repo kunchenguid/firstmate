@@ -58,6 +58,11 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  # Antigravity CLI exports ANTIGRAVITY_AGENT=1 to child/tool processes, but
+  # the live agy launcher itself exports no ANTIGRAVITY_* identity marker.
+  # This marker was measured in agy 1.2.0 and must outrank an inherited
+  # foreign marker; the ancestry arm below identifies the launcher TUI itself.
+  [ "${ANTIGRAVITY_AGENT:-}" = "1" ] && { echo agy; return; }
   # Gemini is checked BEFORE claude for exactly cursor's reason above: the
   # Gemini CLI does NOT clear an inherited CLAUDECODE, so a gemini worker
   # launched from a claude primary carries BOTH markers and whichever is
@@ -71,12 +76,6 @@ detect_own() {
   # carrying the claude primary's value (claude-code_2-1-260_agent), so it is
   # an inherited launcher marker, not a Gemini identity.
   [ "${GEMINI_CLI:-}" = "1" ] && { echo gemini; return; }
-  # Antigravity CLI exports ANTIGRAVITY_AGENT=1 to child/tool processes, but
-  # the live agy launcher itself exports no ANTIGRAVITY_* identity marker.
-  # This marker was measured in agy 1.2.0 and must outrank an inherited
-  # CLAUDECODE from a Claude primary, while the ancestry arm below identifies
-  # the launcher TUI itself.
-  [ "${ANTIGRAVITY_AGENT:-}" = "1" ] && { echo agy; return; }
   # rovo (Atlassian Rovo CLI) sets ATLASSIAN_AGENT_TYPE=rovo, ROVODEV_CLI=1, and
   # AGENT=rovodev_cli on its tool subprocesses (verified, rovo 202609.1.2). It does
   # NOT scrub an inherited CLAUDECODE, so a rovo worker launched from a claude

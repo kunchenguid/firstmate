@@ -749,6 +749,17 @@ test_agy_prompt_preserves_structural_draft_rows() {
     extract=$(fm_composer_extract_selected_content "$caps" "$screen")
     [ "$extract" = 'first second line' ] \
       || fail "agy extraction must use the shared normalized row join, got '$extract'"
+    screen=$'────────────────\n> first\n╭────────────────────────╮\n│ x                      │\n╰────────────────────────╯\n────────────────'
+    if [ "$caps" = "$CAPS_TMUX" ]; then
+      out=$(fm_composer_classify_screen "$caps" "$screen" 3 probe-absent)
+    else
+      out=$(fm_composer_classify_screen "$caps" "$screen")
+    fi
+    [ "$out" = pending ] \
+      || fail "a boxed AGY draft must classify pending, got '$out'"
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+    [ "$extract" = 'first ╭────────────────────────╮ x ╰────────────────────────╯' ] \
+      || fail "a boxed AGY draft lost rows during extraction, got '$extract'"
   done
   pass "fm_composer: agy preserves prompt and shell-looking multiline rows"
 }
