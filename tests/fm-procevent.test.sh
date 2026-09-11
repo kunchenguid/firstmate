@@ -1506,8 +1506,12 @@ ep_reconcile "failed=1" 1 "a runner that died before claiming was not reported f
 [ "$(launch_failed_wake_count "$HEP" episode-src)" = 1 ] \
   || fail "a launch that could not confirm was not announced: $ep_out"
 ep_key=$(launch_failed_wake_keys "$HEP" episode-src)
-[[ "$ep_key" =~ ^procevent:episode-src:launch-failed:[0-9]+-[0-9]+$ ]] \
-  || fail "the launch-failed wake is not keyed by source and registration identity: $ep_key"
+# <registration identity>-<per-episode nonce>: the watcher remembers every key
+# it has surfaced for good, so the identity alone would announce only the first
+# episode of a registration (tests/fm-watch-triage.test.sh proves delivery).
+[[ "$ep_key" =~ ^(procevent:episode-src:launch-failed:[0-9]+-[0-9]+)-[0-9]+-[0-9]+$ ]] \
+  || fail "the launch-failed wake is not keyed by source, registration identity and episode: $ep_key"
+ep_episode_prefix=${BASH_REMATCH[1]}
 ep_wake=$(launch_failed_wake_payloads "$HEP" episode-src)
 assert_contains "$ep_wake" "episode-src" \
   "the launch-failed wake does not name the source it is about: $ep_wake"
@@ -1533,8 +1537,17 @@ ep_damage
 ep_reconcile "failed=1" 1 "a source that failed again after recovering was not reported failed"
 [ "$(launch_failed_wake_count "$HEP" episode-src)" = 2 ] \
   || fail "a new failure episode after a confirmed launch was not announced: $ep_out"
-[ "$(launch_failed_wake_keys "$HEP" episode-src | sort -u | wc -l | tr -d ' ')" = 1 ] \
-  || fail "the second episode ran under a different registration identity: $(launch_failed_wake_keys "$HEP" episode-src)"
+# The earlier version of this assertion locked in ONE key for both episodes,
+# which is exactly the collision that left every episode after the first
+# unsurfaced: both keys must carry the same registration identity and still
+# differ, or the watcher's seen marker for episode one suppresses episode two.
+ep_key_again=$(launch_failed_wake_keys "$HEP" episode-src | sed -n '2p')
+[ "$ep_key_again" != "$ep_key" ] \
+  || fail "a new failure episode reused the first episode's queue key: $ep_key_again"
+case "$ep_key_again" in
+  "$ep_episode_prefix"-*) ;;
+  *) fail "the second episode ran under a different registration identity: $ep_key_again (first: $ep_key)" ;;
+esac
 ep_repair
 pe "$HEP" retire episode-src >/dev/null 2>&1 || true
 pass "a launch that cannot confirm is announced once per failure episode"

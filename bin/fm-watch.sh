@@ -130,6 +130,10 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# Only for the arm-time check on FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS below;
+# the per-cycle reconcile itself runs as a separate process.
+# shellcheck source=bin/fm-procevent-lib.sh
+. "$SCRIPT_DIR/fm-procevent-lib.sh"
 # Single owner of durable merge-outcome publication, shared with
 # bin/fm-pr-merge.sh so self and poll origins use the same role-routed outcome.
 # The watcher still owns immediate delivery of its actionable poll result and
@@ -1720,6 +1724,24 @@ event_wait_or_sleep() {
 # before acquiring the singleton lock or entering the blocking loop.
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
+fi
+
+# FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS is validated here, at arm time, and an
+# unusable value refuses to arm. This is deliberately NOT symmetry with the
+# tunables above, which this watcher only defaults and never validates. The
+# reason is specific: every supervision cycle runs `fm-procevent.sh reconcile`
+# with its output and exit status discarded, and reconcile refuses an unusable
+# window by name before it launches anything. Under this watcher that refusal
+# is invisible - every cycle would exit early, no source would ever start, and
+# the whole home would sit disarmed while presenting as supervised. A watcher
+# that refuses to arm is loud through an existing, independent, proven path:
+# the liveness guard's WATCHER DOWN banner in firstmate's own session. The
+# message shape is reconcile's own, so the operator reads one refusal in both
+# places. The refusal goes to stdout because bin/fm-watch-arm.sh relays the
+# child's stdout and recognises `watcher: FAILED` as the typed failure line.
+if ! fm_procevent_launch_confirm_seconds >/dev/null; then
+  echo "watcher: FAILED - FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS"
+  exit 1
 fi
 
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then

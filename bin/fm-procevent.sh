@@ -1256,23 +1256,34 @@ report_stranded_source() {  # <source-id> <claim-token> <why-and-recovery>
 # announces nothing and a source that recovers and then fails again announces
 # a new one. Nothing here changes what reconcile does about the launch itself:
 # it keeps relaunching exactly as before, and this only says so once.
+#
+# The queue key carries a nonce beyond the episode: the watcher remembers every
+# key it has surfaced for good, so a key made of the registration identity alone
+# would be surfaced for the first episode only and every later episode of the
+# same registration would sit in the queue unannounced. The marker records the
+# episode and that nonce together, and the episode alone decides whether to
+# announce.
 report_launch_failure() {  # <source-id> <registration-identity>
-  local id=$1 identity=$2 episode
+  local id=$1 identity=$2 episode nonce
   case "$identity" in ''|*[!0-9:]*) episode=unreadable ;; *) episode=${identity//:/-} ;; esac
+  nonce="$(date +%s)-$RANDOM"
   announce_source_once "$(launch_failed_file "$id")" "$episode" \
-    "procevent:$id:launch-failed:$episode" \
-    "check: process-event source $id is registered but its runner could not start: reconcile launched it and the runner exited without taking the source's claim, so nothing is collecting from it, and reconcile will keep launching it every supervision cycle with the same result until the cause is fixed. The runner never claimed, so bin/fm-procevent.sh start $id is not what fixes this; it reproduces the failure with the runner's refusal on stderr, where a hand-run bin/fm-procevent.sh reconcile only counts it as failed=. Check the source command and the adapter binary the registration names."
+    "procevent:$id:launch-failed:$episode-$nonce" \
+    "check: process-event source $id is registered but its runner could not start: reconcile launched it and the runner exited without taking the source's claim, so nothing is collecting from it, and reconcile will keep launching it every supervision cycle with the same result until the cause is fixed. The runner never claimed, so bin/fm-procevent.sh start $id is not what fixes this; it reproduces the failure with the runner's refusal on stderr, where a hand-run bin/fm-procevent.sh reconcile only counts it as failed=. Check the source command and the adapter binary the registration names." \
+    "$episode $nonce"
 }
 
 # Shared marker discipline for the announcements above: <marker> holds the
-# generation last reported, written before the wake and removed again if the
-# wake does not land, so a failed announcement retries instead of being marked
-# delivered, and the same generation never announces twice.
-announce_source_once() {  # <marker> <generation> <key> <payload>
-  local marker=$1 generation=$2 key=$3 payload=$4 previous
+# generation last reported as its first field, written before the wake and
+# removed again if the wake does not land, so a failed announcement retries
+# instead of being marked delivered, and the same generation never announces
+# twice. A caller may store more after that field (the launch-failure nonce);
+# only the first field decides.
+announce_source_once() {  # <marker> <generation> <key> <payload> [marker-record]
+  local marker=$1 generation=$2 key=$3 payload=$4 record=${5:-$2} previous
   previous=$(cat -- "$marker" 2>/dev/null || true)
-  [ "$previous" != "$generation" ] || return 1
-  (umask 077; printf '%s\n' "$generation" > "$marker") || return 1
+  [ "${previous%%[[:space:]]*}" != "$generation" ] || return 1
+  (umask 077; printf '%s\n' "$record" > "$marker") || return 1
   if ! fm_wake_append check "$key" "$payload"; then
     rm -f -- "$marker"
     return 1
