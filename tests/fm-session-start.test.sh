@@ -19,6 +19,8 @@
 #     blocked row kept whole, the dispatchable queued listing bounded with an
 #     exact disclosed remainder
 #   - orphan status logs whose task meta has already disappeared
+#   - the config/plain-style presence flag: surfaced in the bootstrap section
+#     on the locked path and the read-only path alike, silent when absent
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -1362,6 +1364,69 @@ EOF
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }
 
+# --- plain style flag: surfaced when present, silent when absent -------------
+
+# bootstrap_section <digest>: the digest's BOOTSTRAP subsection body, up to the
+# WAKE QUEUE subsection that follows it, so a placement assertion cannot be
+# satisfied by the same text printed anywhere else in the digest.
+bootstrap_section() {
+  printf '%s\n' "$1" | awk '/^BOOTSTRAP$/{flag=1;next}/^WAKE QUEUE$/{flag=0}flag'
+}
+
+test_plain_style_flag_surfaced_in_digest() {
+  local rec root home fakebin out section holder_pid status
+  local line='BOOTSTRAP_INFO: plain style active (config/plain-style present)'
+
+  # Absent flag: the default, and the digest says nothing about plain style.
+  # (The section is not asserted fully silent: whatever else this machine's
+  # bootstrap detects is not this test's subject.)
+  rec=$(new_world plain-style-absent)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "plain style" "an absent config/plain-style still produced a plain-style digest line"
+
+  # Present flag on the ordinary locked path: exactly one line, inside the
+  # bootstrap section where the digest reports the other local config facts.
+  rec=$(new_world plain-style-present)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'any contents are ignored\n' > "$home/config/plain-style"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  section=$(bootstrap_section "$out")
+  assert_contains "$section" "$line" "a present config/plain-style was not surfaced in the bootstrap section"
+  [ "$(printf '%s\n' "$out" | grep -cF "$line")" -eq 1 ] \
+    || fail "the plain-style digest line must print exactly once: $out"
+
+  # Present flag on the lock-refused read-only path: the detect-only bootstrap
+  # still surfaces it, because a read-only session talks to the captain too.
+  rec=$(new_world plain-style-read-only)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  : > "$home/config/plain-style"
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  expect_code 0 "$status" "fm-session-start.sh must exit 0 on the read-only plain-style path"
+  assert_contains "$out" "READ-ONLY SESSION" "the read-only plain-style case did not actually take the lock-refused path"
+  assert_contains "$(bootstrap_section "$out")" "$line" "a read-only session did not surface the present config/plain-style flag"
+
+  pass "config/plain-style is surfaced in the bootstrap section when present and silent when absent"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -2645,6 +2710,7 @@ test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
+test_plain_style_flag_surfaced_in_digest
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts

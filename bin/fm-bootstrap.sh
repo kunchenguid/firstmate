@@ -4,7 +4,13 @@
 #          Detect: prints one line per actionable problem, or an explicit
 #          BOOTSTRAP_INFO no-action fact for completed benign bootstrap work, and
 #          exits 0.
-#          Silent = all good.
+#          Silent = all good, with one deliberate exception: a present
+#          config/plain-style presence flag always prints
+#          "BOOTSTRAP_INFO: plain style active (config/plain-style present)",
+#          on every path including detect-only and read-only sessions and
+#          regardless of FM_BOOTSTRAP_VERBOSE_FACTS, because the agent can
+#          honor the flag only if the digest shows it (schema:
+#          docs/configuration.md "Plain style").
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
@@ -1453,6 +1459,14 @@ detect_local_config() {
   [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then
     echo "BOOTSTRAP_INFO: crew harness override active: $crew"
+  fi
+  # Plain communication style (docs/configuration.md "Plain style"): the agent
+  # can honor the presence flag only if the digest shows it, so this fact is
+  # printed on every path, including detect-only and read-only sessions, and is
+  # deliberately not gated behind FM_BOOTSTRAP_VERBOSE_FACTS like the routine
+  # confirmations around it. Only presence is read; the contents are ignored.
+  if [ -f "$CONFIG/plain-style" ]; then
+    echo "BOOTSTRAP_INFO: plain style active (config/plain-style present)"
   fi
   # A configured cursor crew harness needs a cursor executable present, and
   # cursor ships under EITHER installed name. Resolution runs through the
