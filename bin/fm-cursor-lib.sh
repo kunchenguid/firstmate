@@ -12,7 +12,7 @@
 # directory component silently classifies as this harness. That widening would
 # let firstmate launch an unrelated executable with Cursor flags.
 #
-# Two independent kinds of Cursor evidence are accepted, and either alone
+# Three independent kinds of Cursor evidence are accepted; any one alone
 # carries a positive verdict, so no single vendor string is load-bearing:
 #
 #   Structural (no subprocess, safe during a process scan): the canonical path
@@ -21,6 +21,14 @@
 #   ~/.local/share/cursor-agent/versions/<version>/cursor-agent (verified
 #   2026-08-11, cursor-agent 2026.08.11-e8db854), so the alias resolves to
 #   Cursor's own name and install tree.
+#
+#   IDE extension-host (no subprocess, safe during a process scan): Cursor
+#   Desktop parents agent/tool shells under a workspace-scoped
+#   "Cursor Helper (Plugin): extension-host ..." process. Without this match a
+#   Firstmate primary running inside Cursor IDE chat can never locate harness
+#   ancestry for the fleet lock even when CURSOR_AGENT=1 makes detect_own print
+#   cursor. Never match the top-level Cursor.app binary - that pid is shared
+#   across every window in one install (verified macOS Cursor, 2026-09-11).
 #
 #   Probe (a bounded `--help` run, used only when resolving an executable to
 #   launch, never during a process scan): Cursor's own CLI banner and its
@@ -208,21 +216,46 @@ fm_cursor_argv0_is_cursor() {  # <argv0>
   fm_cursor_path_is_cursor "$argv0"
 }
 
+# True when <comm>/<args> describe Cursor IDE's workspace-scoped extension-host
+# plugin helper - the process that parents agent tool shells when Firstmate
+# runs as a Cursor IDE chat primary (not the cursor-agent CLI).
+#
+# Evidence (macOS Cursor IDE, 2026-09-11): tool shell ->
+#   "Cursor Helper (Plugin): extension-host <workspace> [n-m]" ->
+#   /Applications/Cursor.app/Contents/MacOS/Cursor
+# macOS often truncates `ps -o comm=` mid-label, so the full string is typically
+# only reliable in `ps -o args=`. Matching either field is intentional.
+# Rejected: the top-level Cursor.app binary; bare "extension-host" (VS Code and
+# other Electron IDEs use that role name without Cursor's Plugin helper label).
+fm_cursor_is_ide_extension_host() {  # <comm> <args>
+  local blob
+  blob=$(printf '%s\n%s' "${1:-}" "${2:-}")
+  printf '%s' "$blob" | grep -qF 'Cursor Helper (Plugin): extension-host' && return 0
+  case "$blob" in
+    *'Cursor Helper (Plugin).app'*extension-host*) return 0 ;;
+    *'/Cursor Helper (Plugin)'*extension-host*) return 0 ;;
+  esac
+  return 1
+}
+
 # True when the process described by command name $1 and structured argv0 $3 is
 # Cursor. The single owner of Cursor process identity for the ancestry walk
 # (bin/fm-session-lock-lib.sh), harness detection (bin/fm-harness.sh), pane
 # liveness (bin/backends/tmux.sh), and worker-server discovery (bin/fm-spawn.sh).
 #
-# Accepted: an exact cursor-agent command name; a MainThread or bare
-# interpreter whose structured argv[0] carries Cursor's install path; a legacy
-# `agent` whose argv[0] resolves into Cursor's install tree.
+# Accepted: Cursor IDE's extension-host Plugin helper; an exact cursor-agent
+# command name; a MainThread or bare interpreter whose structured argv[0]
+# carries Cursor's install path; a legacy `agent` whose argv[0] resolves into
+# Cursor's install tree.
 #
-# Rejected: a bare MainThread with no Cursor evidence; any executable whose
-# basename merely happens to be `agent`; any path with an `agent/` directory
-# component that is running something else.
+# Rejected: the top-level Cursor.app binary alone; a bare MainThread with no
+# Cursor evidence; any executable whose basename merely happens to be `agent`;
+# any path with an `agent/` directory component that is running something else;
+# a bare extension-host without Cursor's Plugin helper label.
 fm_cursor_process_matches() {  # <comm> <args> [argv0]
-  local comm=$1 argv0=${3:-} base
-  [ -n "$comm" ] || [ -n "$argv0" ] || return 1
+  local comm=$1 args=${2:-} argv0=${3:-} base
+  [ -n "$comm" ] || [ -n "$args" ] || [ -n "$argv0" ] || return 1
+  fm_cursor_is_ide_extension_host "$comm" "$args" && return 0
   argv0=${argv0:-$comm}
   base=$(basename -- "$comm")
   base=${base#-}

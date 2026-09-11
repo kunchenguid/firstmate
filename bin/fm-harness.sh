@@ -121,8 +121,11 @@ detect_own() {
   local pid=$$ comm args argv0
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
     argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
-    if fm_cursor_process_matches "$comm" '' "$argv0"; then
+    # Pass args so Cursor IDE's extension-host identity (often only complete in
+    # args= when macOS truncates comm=) can identify a chat-primary session.
+    if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
       echo cursor
       return
     fi

@@ -97,6 +97,25 @@ test_identity_accepts_cursor_shapes_rejects_lookalikes() {
     || fail "a bare MainThread with no cursor evidence must not identify"
   ! fm_cursor_process_matches node '' '' \
     || fail "a node with no argv[0] evidence must not identify"
+  # Cursor IDE chat primary: extension-host Plugin helper (macOS truncates
+  # comm=, so args= carries the full label). Never the top-level Cursor.app.
+  fm_cursor_process_matches 'Cursor Helper (P' \
+    'Cursor Helper (Plugin): extension-host firstmate [1-2]' '' \
+    || fail "truncated comm + full extension-host args must identify as cursor"
+  fm_cursor_process_matches \
+    'Cursor Helper (Plugin): extension-host firstmate [1-2]' \
+    'Cursor Helper (Plugin): extension-host firstmate [1-2]' '' \
+    || fail "full extension-host label in both fields must identify as cursor"
+  ! fm_cursor_process_matches \
+    '/Applications/Cursor.app/Contents/MacOS/Cursor' \
+    '/Applications/Cursor.app/Contents/MacOS/Cursor' '' \
+    || fail "the top-level Cursor.app binary must not identify as lock identity"
+  ! fm_cursor_process_matches 'extension-host' 'extension-host firstmate' '' \
+    || fail "a bare extension-host without Cursor's Plugin helper must not identify"
+  ! fm_cursor_process_matches \
+    'Code Helper (Plugin): extension-host' \
+    'Code Helper (Plugin): extension-host firstmate [1-2]' '' \
+    || fail "VS Code's Plugin helper must not identify as Cursor"
   pass "fm_cursor_process_matches: cursor's real shapes identify; real node/agent lookalikes do not"
 }
 
@@ -198,7 +217,21 @@ test_cursor_marker_outranks_inherited_claudecode() {
 
 test_harness_ancestry_rejects_cursor_named_node_script() {
   command -v node >/dev/null 2>&1 || return 0
-  local helper="$TMP_ROOT/cursor-agent-helper.js" out
+  local helper="$TMP_ROOT/cursor-agent-helper.js" out pid args
+  # Under Cursor IDE chat the real extension-host ancestor correctly identifies
+  # as cursor; that masks the filename-lookalike check this case exists for.
+  pid=$$
+  for _ in 1 2 3 4 5 6 7 8; do
+    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+    case "$args" in
+      *'Cursor Helper (Plugin): extension-host'*)
+        pass "fm-harness.sh: cursor-like node script names do not establish ancestry identity (skipped under Cursor IDE extension-host)"
+        return 0
+        ;;
+    esac
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+  done
   cat > "$helper" <<'JS'
 const { spawnSync } = require('child_process');
 const env = { ...process.env };

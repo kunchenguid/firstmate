@@ -220,6 +220,52 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_cursor_ide_extension_host_owns_the_lock() {
+  # Cursor IDE chat primary: tool shell -> extension-host Plugin helper ->
+  # Cursor.app. Lock identity is the extension-host pid, never Cursor.app.
+  local dir fakebin got
+  dir="$TMP_ROOT/cursor-ide"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  18041:comm=) printf '%s\n' 'Cursor Helper (P' ;;
+  18041:args=) printf '%s\n' 'Cursor Helper (Plugin): extension-host firstmate [1-2]' ;;
+  18041:ppid=) printf '%s\n' 16971 ;;
+  16971:comm=) printf '%s\n' '/Applications/Cursor.app/Contents/MacOS/Cursor' ;;
+  16971:args=) printf '%s\n' '/Applications/Cursor.app/Contents/MacOS/Cursor' ;;
+  16971:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' zsh ;;
+  *:args=) printf '%s\n' 'zsh -c tool-shell' ;;
+  *:ppid=) printf '%s\n' 18041 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "Cursor IDE extension-host was not found in the ancestry"
+  [ "$got" = 18041 ] \
+    || fail "lock identity was '$got' instead of the extension-host pid 18041"
+  printf '18041\n' > "$dir/state/.lock"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "extension-host lock owner was not recognized as this session"
+  printf '16971\n' > "$dir/state/.lock"
+  if lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "top-level Cursor.app was accepted as this session's lock owner"
+  fi
+  pass "session-lock: Cursor IDE extension-host owns the lock; Cursor.app does not"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -362,6 +408,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_cursor_ide_extension_host_owns_the_lock
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
