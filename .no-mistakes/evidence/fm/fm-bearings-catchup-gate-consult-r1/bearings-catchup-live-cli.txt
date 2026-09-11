@@ -1,0 +1,68 @@
+SCENARIO: returned captain requests Bearings with one catch-up blocker and 20 ordinary dated gates
+{
+  "schema": "fm-bearings.v1",
+  "in_flight": [
+    {
+      "id": "repair-task",
+      "kind": "ship",
+      "state": "unknown",
+      "repo": "",
+      "name": "repair-task",
+      "doing": "worktree gone (torn down?)"
+    }
+  ],
+  "catchup": [
+    {
+      "id": "(return-catchup)",
+      "title": "1 blocker(s) to clear before ordinary work",
+      "blocked_by": "-",
+      "reason": "away-return catch-up",
+      "owner": "(main)",
+      "filed": null
+    }
+  ],
+  "gate_count": 21,
+  "ordinary_gate_count": 20,
+  "first_gate": {
+    "id": "(return-catchup)",
+    "title": "1 blocker(s) to clear before ordinary work",
+    "blocked_by": "-",
+    "reason": "away-return catch-up",
+    "owner": "(main)",
+    "filed": null
+  },
+  "catchup_in_decisions": false
+}
+
+SCENARIO: default TOON preserves the filed column and durable dates
+gates[21]{id,title,blocked_by,reason,owner,filed}:
+  (return-catchup),1 blocker(s) to clear before ordinary work,"-",away-return catch-up,(main),null
+  queued-20,Queued gate 20,"-","-",(main),2026-06-20
+
+SCENARIO: an ACTIVE away window still refuses Bearings
+exit=3 stdout_bytes=0
+stderr: fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work
+
+SCENARIO: blockerless lifecycle retention is surfaced as content and names its reason
+guard_exit=4
+fm-afk-return: return catch-up is pending with no open blocker; clear the retention reason below, then run bin/fm-afk-return.sh check
+catch-up retained: held set unreadable: synthetic reader failure; catch-up stays gated
+{
+  "catchup": [
+    {
+      "id": "(return-catchup)",
+      "title": "catch-up retained: held set unreadable: synthetic reader fai…",
+      "blocked_by": "-",
+      "reason": "away-return catch-up",
+      "owner": "(main)",
+      "filed": null
+    }
+  ],
+  "catchup_in_decisions": false
+}
+
+SCENARIO: clearing the gate removes only the catch-up posture row
+{
+  "catchup_count": 0,
+  "ordinary_gate_count": 20
+}
