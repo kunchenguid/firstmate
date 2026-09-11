@@ -234,7 +234,7 @@ SH
     FM_FAKE_SSH_DIRTY_HOST=host-charlie \
     FM_FAKE_GIT_FETCH_SLEEP=0.4 \
     FM_INHERITABLE_CONFIG='' \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_TREEHOUSE_GET_FLAGS=lease,root \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1
   )
 

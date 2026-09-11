@@ -51,8 +51,10 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
-#          treehouse is also MISSING when its installed version lacks
-#          "treehouse get --lease" support.
+#          treehouse is also MISSING when its installed version lacks either flag
+#          firstmate calls it with - "treehouse get --lease" or the global
+#          "--root" the per-home worktree pool needs - and the line names the
+#          flag that was not found.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
@@ -907,8 +909,25 @@ NO_MISTAKES_MIN=1.46.0
 GH_AXI_MIN=0.1.29
 LAVISH_AXI_MIN=0.1.46
 
-treehouse_supports_lease() {
-  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
+# The Treehouse flags firstmate's own call sites depend on, probed as one set
+# because a build missing either is equally unusable: `--lease` for the durable
+# non-interactive acquire (bin/fm-home-seed.sh) and the global `--root` for the
+# per-home worktree pool every ship/scout spawn sends into its pane
+# (bin/fm-spawn.sh). Both are advertised by `treehouse get --help`, --root under
+# its Global Flags. Prints the first flag it did not find, so the operator is
+# told which one to upgrade for: without this, a --root-less build passes
+# bootstrap and the failure surfaces only as a task pane that sits in the
+# project until fm-spawn.sh's 60s worktree poll gives up, naming no flag.
+treehouse_missing_flag() {
+  local help flag
+  help=$(treehouse get --help 2>&1)
+  for flag in --lease --root; do
+    printf '%s\n' "$help" \
+      | grep -Eq "(^|[^[:alnum:]_-])$flag([^[:alnum:]_-]|\$)" && continue
+    printf '%s\n' "$flag"
+    return 0
+  done
+  return 1
 }
 
 # Shared semantic-version floor for the tool gates below. A version string that
@@ -1402,6 +1421,7 @@ fi
 # Local detection: presence, version floors, and configuration. Nothing here
 # leaves this machine, so it stays on the session-start critical path.
 detect_local_tools() {
+  local treehouse_flag
   if [ "$BACKEND_VALID" -eq 0 ]; then
     echo "BACKEND_INVALID: $BACKEND (known: $FM_BACKEND_KNOWN)"
   fi
@@ -1412,12 +1432,13 @@ detect_local_tools() {
   for t in $COMMON_TOOLS; do
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
-  # The treehouse lease-support upgrade check is only relevant when the resolved
+  # The treehouse flag-support upgrade check is only relevant when the resolved
   # backend actually requires treehouse (every backend except orca, which owns its
   # own worktrees); an orca home must not be told to upgrade a provider it never uses.
   if fm_backend_list_contains "$TOOLS" treehouse \
-    && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
-    echo "MISSING: treehouse (install: $(install_cmd treehouse))"
+    && command -v treehouse >/dev/null 2>&1 \
+    && treehouse_flag=$(treehouse_missing_flag); then
+    echo "MISSING: treehouse (installed build's 'treehouse get' lacks $treehouse_flag; install: $(install_cmd treehouse))"
   fi
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
     echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"

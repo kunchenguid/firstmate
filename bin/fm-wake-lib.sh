@@ -1180,6 +1180,23 @@ fm_firstmate_root_home() {
   printf '%s\n' "$home"
 }
 
+# The Treehouse pool root a home draws its task worktrees from: the home's own
+# physical path, so its pool is <home>/.treehouse/<pool>/<slot>/<repo> in
+# Treehouse's in-project pool shape. Treehouse keys a pool inside a root by the
+# clone's directory basename plus a hash of its origin URL, never by the clone
+# itself, so two homes holding same-named clones of one origin under a shared
+# root are handed each other's worktrees (bin/fm-spawn.sh header). Rooting the
+# pool at the home is what separates them, and bin/fm-spawn.sh sends this value
+# as literal `--root` text into the task pane because the pane's own environment
+# never sees the spawning process's exports. `treehouse return` locates a slot's
+# pool from the slot path itself, so teardown needs no root and a slot allocated
+# under the old shared root still returns.
+fm_treehouse_pool_root() {  # [<home>]
+  local home=${1:-$FM_HOME}
+  [ -n "$home" ] || return 1
+  CDPATH='' cd -- "$home" 2>/dev/null && pwd -P
+}
+
 # The one lock serializing Treehouse slot allocation and return for a project.
 #
 # It is anchored in the local root home's state directory so that every home on

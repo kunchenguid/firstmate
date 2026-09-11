@@ -278,8 +278,10 @@ test_spawn_tmux_window_construction() {
     "must disable allow-rename on the spawned window"
 
   # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
-    "treehouse get must be sent to the stable window id"
+  # The get carries this home's physical path as the pool root
+  # (tests/fm-spawn-pool-home.test.sh owns that contract).
+  assert_grep "send-keys -t @spawnwid treehouse get --root '$(cd -P -- "$home" && pwd -P)' Enter" "$rec" \
+    "treehouse get must be sent to the stable window id with this home as the pool root"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 

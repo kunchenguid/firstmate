@@ -1492,6 +1492,79 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+## Treehouse pool root
+
+Verified 2026-09-11 against treehouse v2.3.0 on Linux, from a scratch bare origin with two clones of it, both named `proj`, under different parents.
+Refresh with `bin/fm-test-run.sh tests/fm-treehouse-pool-root.test.sh`, which pins every fact below against the installed binary and skips only when treehouse is absent.
+
+The pool key inside a root is the clone's directory basename plus the first six hex digits of sha256 over the origin URL string exactly as `git remote get-url origin` prints it, under `<root>/.treehouse/`, and the root defaults to `$HOME`.
+
+```
+$ printf '%s' "$(git -C ~/Projects/firstmate remote get-url origin)" | sha256sum | cut -c1-6
+b8697d
+$ ls ~/.treehouse/
+firstmate-b8697d  saucier-6b967b  vramfit-383298  ...
+```
+
+Under one shared root the second clone is handed the first clone's worktree: the pool is keyed by name and origin, not by the clone it was created from.
+
+```
+$ (cd homeA/proj && treehouse get --lease --no-fetch --root "$S/R" --lease-holder A)
+$S/R/.treehouse/proj-83d8e9/1/proj
+$ (cd homeA/proj && treehouse return --force --root "$S/R" "$S/R/.treehouse/proj-83d8e9/1/proj")
+$ (cd homeB/proj && treehouse get --lease --no-fetch --root "$S/R" --lease-holder B)
+$S/R/.treehouse/proj-83d8e9/1/proj
+$ git -C "$S/R/.treehouse/proj-83d8e9/1/proj" rev-parse --path-format=absolute --git-common-dir
+$S/homeA/proj/.git
+```
+
+Under a root of its own the second clone is handed a worktree of itself, which is why `bin/fm-spawn.sh` sends `treehouse get --root '<home>'` into the pane.
+
+```
+$ (cd homeB/proj && treehouse get --lease --no-fetch --root "$S/RB" --lease-holder B)
+$S/RB/.treehouse/proj-83d8e9/1/proj
+$ git -C "$S/RB/.treehouse/proj-83d8e9/1/proj" rev-parse --path-format=absolute --git-common-dir
+$S/homeB/proj/.git
+```
+
+`treehouse return` resolves the pool from the slot path, so `bin/fm-teardown.sh` passes no root and a slot allocated under the old shared root still returns; a path in no pool is refused with exit 1.
+
+```
+$ (cd homeB/proj && treehouse return --force "$S/RB/.treehouse/proj-83d8e9/1/proj"; echo "exit=$?")
+🌳 Worktree returned to pool.
+exit=0
+$ (cd homeB/proj && treehouse status --root "$S/RB" --json)
+[{"name":"1","path":"$S/RB/.treehouse/proj-83d8e9/1/proj","status":"available",...}]
+$ (cd homeB/proj && treehouse return --force "$S/homeA/proj"; echo "exit=$?")
+worktree $S/homeA/proj is not managed by treehouse
+exit=1
+```
+
+An exported `TREEHOUSE_ROOT` never reaches the task pane because the spawn sends command text, not environment, and an empty pool under a fresh root is indistinguishable from a relocated one by listing alone; every check above therefore reads the common dir of the worktree actually handed out.
+
+### The `--root` floor, measured rather than inferred
+
+CI's pinned build must be a version that has the flag, so the pin was measured against the two versions in play instead of read off release notes. v2.0.1, the previous pin, has no `--root` at all: it is absent from `treehouse --help`, from `treehouse get --help`, and from `treehouse status --help`, and both subcommands reject it outright. v2.3.0 carries it as a global flag on `get`, `status`, and `return`. `bin/fm-install-treehouse.sh` is therefore pinned to v2.3.0 - the version every fact above was verified against and the one the operating machine runs - and `bin/fm-bootstrap.sh` probes `--root` beside `--lease`, naming the flag it did not find.
+
+```
+$ bin/fm-install-treehouse.sh "$T/bin"   # at the v2.0.1 pin
+$ "$T/bin/treehouse" --version
+v2.0.1
+$ (cd "$R" && "$T/bin/treehouse" get --root "$R/poolroot" --lease)
+unknown flag: --root
+$ (cd "$R" && "$T/bin/treehouse" status --root "$R/poolroot")
+unknown flag: --root
+$ "$T/bin/treehouse" get --help | grep -c root
+0
+$ treehouse --version   # the pin after the bump, and the installed build
+v2.3.0
+$ treehouse get --help | sed -n '/Global Flags:/,$p'
+Global Flags:
+      --root string   Worktree root directory, overriding TREEHOUSE_ROOT and config; relative paths (e.g. "." for an in-project pool) resolve from the repo root
+```
+
+v2.0.1 also predates `treehouse get --no-fetch` and `treehouse status --json`, both of which `tests/fm-treehouse-pool-root.test.sh` uses, so no pool-key comparison against it was possible - the flag gap, not a key-shape difference, is what forced the bump.
+
 ## Pi supervision branch
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.

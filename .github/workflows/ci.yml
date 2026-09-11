@@ -185,6 +185,17 @@ jobs:
           set -eu
           npm install -g @earendil-works/pi-coding-agent
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
+      - name: Install pinned Treehouse
+        run: |
+          set -eu
+          # tests/fm-treehouse-pool-root.test.sh pins the pool facts
+          # bin/fm-spawn.sh's per-home pool root relies on against the real
+          # binary; without it the suite could only skip.
+          # This install belongs to whichever lane holds that test - today both
+          # portable-serial shards. Move it with the test if lanes are rebalanced,
+          # or its lane's --fail-on-gate-skip 'treehouse not found' fails the job.
+          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix
@@ -199,6 +210,7 @@ jobs:
           # any missing typecheck prerequisite is a broken lane, not a valid skip.
           bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
+            --fail-on-gate-skip 'treehouse not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
       - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
         if: always()
