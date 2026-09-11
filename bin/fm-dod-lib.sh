@@ -246,6 +246,10 @@ Two firstmate-specific rules layer on top of that guidance:
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+
+\`done:\` on this task is reserved for exactly that line, with a real PR URL in it - nothing else earns it.
+Finishing your implementation, watching your own tests pass, and committing is \`working:\`, not \`done:\`; the pipeline is your finish line, not your own test run.
+A \`done:\` line that names a commit instead of a PR URL is a contract violation, and firstmate will send the task back.
 EOF
       ;;
     *)
