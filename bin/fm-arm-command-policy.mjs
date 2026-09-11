@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Semantic policy for watcher arm and checkpoint shell commands.
+// Semantic policy for watcher arm and checkpoint shell commands, and for the
+// general broad-process-kill rule (a kill that selects by command line or name
+// across the shared process table); docs/arm-pretool-check.md owns the contract.
 //
 // This parser is deliberately narrow.
 // It recognizes executed command positions without evaluating, expanding,
@@ -9,9 +11,10 @@
 // The tokenizer and command-position analysis (Lexer, splitProgram,
 // commandPosition) are exported so the sibling cd-guard policy
 // (bin/fm-cd-command-policy.mjs) reuses the same proven parser instead of
-// duplicating shell lexing; see docs/cd-guard.md. The watcher-arm decision
-// procedure below stays private to this file. The CLI entry point at the bottom
-// runs only when this module is invoked directly, never on import.
+// duplicating shell lexing; see docs/cd-guard.md. The watcher-arm and
+// broad-process-kill decision procedures below stay private to this file. The
+// CLI entry point at the bottom runs only when this module is invoked directly,
+// never on import.
 
 import path from "node:path";
 import { realpathSync } from "node:fs";

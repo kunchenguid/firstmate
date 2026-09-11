@@ -15,7 +15,7 @@ Update its executable or hook owner, concise tool fact, and `../../../docs/verif
 
 ## Pre-tool protection
 
-Supported primaries deny watcher-arm anti-patterns before execution, including shell `&`, truncating pipes, bundling, and broad `pkill -f fm-watch`.
+Supported primaries deny watcher-arm anti-patterns before execution, including shell `&`, truncating pipes, bundling, and broad `pkill -f fm-watch`, and deny any broad process kill that selects by command line or name rather than the caller's own ancestry, process group, or session.
 `../../../docs/arm-pretool-check.md` owns hook commands, output quirks, and evidence.
 The tool reference names the integration form.
 Validate changes against the real harness in a scratch project before trusting them.
