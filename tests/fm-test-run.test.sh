@@ -58,8 +58,9 @@ SH
 }
 
 test_list_all_exact_suite_coverage() {
-  local listed expected missing extra f
-  listed=$("$RUNNER" --list --all | LC_ALL=C sort)
+  local listed expected missing extra f tmp
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-unconfigured.XXXXXX")
+  listed=$(FM_CONFIG_OVERRIDE="$tmp/config" "$RUNNER" --list --all | LC_ALL=C sort)
   expected=$(
     for f in "$ROOT"/tests/*.test.sh; do
       [ -f "$f" ] || continue
@@ -75,7 +76,8 @@ test_list_all_exact_suite_coverage() {
   [ "$(printf '%s\n' "$listed" | uniq | wc -l | tr -d ' ')" = \
     "$(printf '%s\n' "$listed" | wc -l | tr -d ' ')" ] \
     || fail "--list --all must not duplicate scripts"
-  pass "exact suite coverage: --all lists every tests/*.test.sh once"
+  rm -rf "$tmp"
+  pass "exact suite coverage: --all lists every tests/*.test.sh once without a disabled policy"
 }
 
 test_family_selection() {
@@ -1199,7 +1201,7 @@ test_lane_selection_grammar_is_the_published_lane_label() {
   while IFS= read -r proven; do
     printf '#!/usr/bin/env bash\necho "ok - proven fixture"\n' >"$repo/$proven"
     chmod +x "$repo/$proven"
-  done < <("$RUNNER" --list --lane portable-parallel-1)
+  done < <(FM_CONFIG_OVERRIDE="$tmp/config" "$RUNNER" --list --lane portable-parallel-1)
 
   (cd "$repo" && bin/fm-test-run.sh --lane portable-serial --json "$tmp/lane.json") >/dev/null 2>&1 \
     || { rm -rf "$tmp"; fail "a lane-selected run over a green fixture must pass"; }

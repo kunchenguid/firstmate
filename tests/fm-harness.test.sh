@@ -51,6 +51,78 @@ EOF
   pass "fm-harness: secondmate configuration skips comments and exposes all tokens"
 }
 
+test_disabled_harness_refuses_detected_and_alias_values() {
+  local out status
+  printf 'grok\ncursor\n' > "$CONFIG/disabled-adapters"
+  set +e
+  out=$(GROK_AGENT=1 run_harness 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a disabled detected harness should refuse"
+  assert_contains "$out" "harness 'grok' is disabled by config/disabled-adapters" \
+    "disabled detected harness did not name the policy"
+  set +e
+  out=$(run_harness validate cursor-agent 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "the cursor-agent alias should refuse when cursor is disabled"
+  assert_contains "$out" "harness 'cursor-agent' is disabled by config/disabled-adapters" \
+    "disabled cursor alias did not name the policy"
+  rm -f "$CONFIG/disabled-adapters"
+  pass "fm-harness: disabled-adapters policy blocks detected and alias harnesses"
+}
+
+adapter_test_paths() {  # <adapter>
+  case "$1" in
+    opencode) printf '%s\n' tests/fm-opencode-primary-live-e2e.test.sh ;;
+    grok) printf '%s\n' tests/fm-grok-continuity-live-e2e.test.sh tests/fm-grok-harness.test.sh tests/fm-grok-stop-live-e2e.test.sh ;;
+    kimi) printf '%s\n' tests/fm-kimi-harness.test.sh tests/fm-kimi-trust-check.test.sh tests/fm-kimi-turnend-hook.test.sh ;;
+    gemini) printf '%s\n' tests/fm-gemini-harness.test.sh ;;
+    muse) printf '%s\n' tests/fm-muse-harness.test.sh tests/fm-muse-signals-live-e2e.test.sh ;;
+    rovo) printf '%s\n' tests/fm-rovo-harness.test.sh tests/fm-rovo-signals-live-e2e.test.sh ;;
+    omp) printf '%s\n' tests/fm-omp-harness.test.sh tests/fm-omp-primary-live-e2e.test.sh ;;
+    cursor) printf '%s\n' tests/fm-cursor-harness.test.sh tests/fm-cursor-primary.test.sh tests/fm-cursor-primary-live-e2e.test.sh tests/fm-wake-drain-open-decisions-cursor.test.sh ;;
+    *) return 1 ;;
+  esac
+}
+
+test_tracked_policy_blocks_every_listed_harness_and_test_lane() {
+  local fakebin adapter path paths out policy_out listed coverage
+  [ -f "$ROOT/config/disabled-adapters" ] || fail "tracked disabled-adapters policy is missing"
+  fakebin=$(fm_fakebin "$TMP_ROOT/disabled-adapters")
+  listed=$(FM_CONFIG_OVERRIDE="$ROOT/config" "$ROOT/bin/fm-test-run.sh" --list --all)
+
+  while IFS= read -r adapter; do
+    case "$adapter" in ''|\#*) continue ;; esac
+    if policy_out=$(FM_CONFIG_OVERRIDE="$ROOT/config" "$HARNESS" validate "$adapter" 2>&1); then
+      fail "disabled adapter '$adapter' passed the policy gate"
+    else
+      :
+    fi
+    assert_contains "$policy_out" "harness '$adapter' is disabled by config/disabled-adapters" \
+      "disabled adapter '$adapter' did not fail through the policy gate"
+    if out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+      FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE="$ROOT/config" FM_SPAWN_NO_GUARD=1 \
+      "$ROOT/bin/fm-spawn.sh" "disabled-$adapter" projects/none "$adapter" --mode no-mistakes --yolo off 2>&1); then
+      fail "disabled adapter '$adapter' was spawnable"
+    else
+      :
+    fi
+    paths=$(adapter_test_paths "$adapter") || fail "disabled adapter '$adapter' lacks a test-lane guard"
+    while IFS= read -r path; do
+      printf '%s\n' "$listed" | grep -Fqx "$path" \
+        && fail "disabled adapter '$adapter' still selects $path"
+    done <<<"$paths"
+  done < "$ROOT/config/disabled-adapters"
+
+  coverage=$(FM_CONFIG_OVERRIDE="$ROOT/config" "$ROOT/bin/fm-test-run.sh" --check-coverage)
+  assert_contains "$coverage" "FM_TEST_COVERAGE ok" \
+    "disabled adapter policy broke test coverage accounting"
+  pass "tracked disabled adapters cannot spawn or select their dedicated test lanes"
+}
+
 test_verified_marker_precedes_other_markers
 test_crew_config_overrides_detected_harness
 test_secondmate_fields_ignore_comments_and_resolve_tokens
+test_disabled_harness_refuses_detected_and_alias_values
+test_tracked_policy_blocks_every_listed_harness_and_test_lane

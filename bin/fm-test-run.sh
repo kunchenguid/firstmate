@@ -167,6 +167,7 @@ RUN_STARTED_MS=$(now_ms)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
+FM_DISABLED_ADAPTERS_CONFIG="${FM_CONFIG_OVERRIDE:-${FM_HOME:-$ROOT}/config}/disabled-adapters"
 
 MODE=
 LIST_ONLY=0
@@ -468,7 +469,7 @@ list_known_lanes() {
 # bin/fm-test-isolation-proof.sh --list). Do not expand without a new concurrent
 # isolation proof archive.
 list_proven_isolated() {
-  cat <<'EOF'
+  cat <<'EOF' | filter_enabled_tests
 tests/fm-arm-pretool-check.test.sh
 tests/fm-backend-herdr.test.sh
 tests/fm-brief.test.sh
@@ -502,7 +503,7 @@ EOF
 # order aligned with that archive because --jobs 2 assigns each next script to
 # the worker that becomes available first.
 list_portable_parallel_1() {
-  cat <<'EOF'
+  cat <<'EOF' | filter_enabled_tests
 tests/fm-x-mode.test.sh
 tests/fm-test-run.test.sh
 tests/fm-slack-captain-channel.test.sh
@@ -520,7 +521,7 @@ EOF
 
 # Portable parallel shard 2: the complementary half of that fixed partition.
 list_portable_parallel_2() {
-  cat <<'EOF'
+  cat <<'EOF' | filter_enabled_tests
 tests/fm-backend-herdr.test.sh
 tests/fm-arm-pretool-check.test.sh
 tests/fm-crew-state.test.sh
@@ -1147,7 +1148,7 @@ run_coverage_guard() {
   fi
 
   if [ -x "$ROOT/bin/fm-test-isolation-proof.sh" ]; then
-    "$ROOT/bin/fm-test-isolation-proof.sh" --list | LC_ALL=C sort -u >"$tmp/proof_list"
+    "$ROOT/bin/fm-test-isolation-proof.sh" --list | filter_enabled_tests | LC_ALL=C sort -u >"$tmp/proof_list"
     if ! cmp -s "$tmp/proven" "$tmp/proof_list"; then
       log "coverage guard: embedded proven-isolated set diverges from bin/fm-test-isolation-proof.sh --list"
       comm -3 "$tmp/proven" "$tmp/proof_list" >&2 || true
@@ -1232,6 +1233,43 @@ print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipp
 PY
 }
 
+disabled_adapter_for_test() {  # <test-path>
+  case "$(basename "$1")" in
+    fm-opencode-primary-live-e2e.test.sh) printf '%s\n' opencode ;;
+    fm-grok-continuity-live-e2e.test.sh|fm-grok-harness.test.sh|fm-grok-stop-live-e2e.test.sh) printf '%s\n' grok ;;
+    fm-kimi-harness.test.sh|fm-kimi-trust-check.test.sh|fm-kimi-turnend-hook.test.sh) printf '%s\n' kimi ;;
+    fm-gemini-harness.test.sh) printf '%s\n' gemini ;;
+    fm-muse-harness.test.sh|fm-muse-signals-live-e2e.test.sh) printf '%s\n' muse ;;
+    fm-rovo-harness.test.sh|fm-rovo-signals-live-e2e.test.sh) printf '%s\n' rovo ;;
+    fm-omp-harness.test.sh|fm-omp-primary-live-e2e.test.sh) printf '%s\n' omp ;;
+    fm-cursor-harness.test.sh|fm-cursor-primary.test.sh|fm-cursor-primary-live-e2e.test.sh|fm-wake-drain-open-decisions-cursor.test.sh) printf '%s\n' cursor ;;
+    *) return 1 ;;
+  esac
+}
+
+test_is_disabled() {  # <test-path>
+  local adapter
+  adapter=$(disabled_adapter_for_test "$1") || return 1
+  [ -e "$FM_DISABLED_ADAPTERS_CONFIG" ] || return 1
+  [ -f "$FM_DISABLED_ADAPTERS_CONFIG" ] && [ ! -L "$FM_DISABLED_ADAPTERS_CONFIG" ] \
+    || die "config/disabled-adapters must be a regular file"
+  grep -Fqx "$adapter" "$FM_DISABLED_ADAPTERS_CONFIG"
+}
+
+filter_enabled_tests() {
+  local test rc
+  while IFS= read -r test; do
+    [ -n "$test" ] || continue
+    if test_is_disabled "$test"; then
+      continue
+    else
+      rc=$?
+      [ "$rc" -eq 1 ] || die "cannot apply disabled-adapters policy"
+    fi
+    printf '%s\n' "$test"
+  done
+}
+
 all_repo_tests() {
   # Deterministic lexical order (same as bash glob expansion under LC_ALL=C).
   local f
@@ -1239,7 +1277,7 @@ all_repo_tests() {
   for f in tests/*.test.sh; do
     [ -f "$f" ] || continue
     printf '%s\n' "$f"
-  done | LC_ALL=C sort
+  done | filter_enabled_tests | LC_ALL=C sort
 }
 
 # Behavior-area fixture helpers (tests/*-helpers.sh). They are not suites, so
@@ -2320,6 +2358,10 @@ fi
 if [ "$LIST_LANES" -eq 1 ]; then
   list_known_lanes
   exit 0
+fi
+
+if [ -e "$FM_DISABLED_ADAPTERS_CONFIG" ] && { [ ! -f "$FM_DISABLED_ADAPTERS_CONFIG" ] || [ -L "$FM_DISABLED_ADAPTERS_CONFIG" ]; }; then
+  die "config/disabled-adapters must be a regular file"
 fi
 
 if [ "$CHECK_COVERAGE" -eq 1 ]; then

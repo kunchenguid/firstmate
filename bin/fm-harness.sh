@@ -13,6 +13,7 @@
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
+#        fm-harness.sh validate <harness> Refuse a harness disabled by the local policy.
 #        fm-harness.sh validate-native-effort <harness> <model> <effort>
 #                                        Refuse ultra unless the harness is pi or
 #                                        pi-signed and the model explicitly names
@@ -32,6 +33,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+FM_DISABLED_ADAPTERS_CONFIG="$CONFIG/disabled-adapters"
+# shellcheck source=bin/fm-disabled-adapters-lib.sh
+. "$SCRIPT_DIR/fm-disabled-adapters-lib.sh"
 
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
@@ -288,11 +292,30 @@ validate_native_effort() {
   return 1
 }
 
+validate_harness() {  # <harness>
+  local harness=$1 rc
+  if fm_disabled_adapter "$harness"; then
+    printf "error: harness '%s' is disabled by config/disabled-adapters\n" "$harness" >&2
+    return 1
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] || return "$rc"
+  fi
+}
+
+resolve_and_validate() {  # <resolver>
+  local harness
+  harness=$("$1") || return
+  validate_harness "$harness" || return
+  printf '%s\n' "$harness"
+}
+
 case "${1:-}" in
   validate-native-effort) shift; validate_native_effort "$@" ;;
-  crew) resolve_crew ;;
-  secondmate) resolve_secondmate ;;
+  validate) [ "$#" -eq 2 ] || { echo "usage: fm-harness.sh validate <harness>" >&2; exit 2; }; validate_harness "$2" ;;
+  crew) resolve_and_validate resolve_crew ;;
+  secondmate) resolve_and_validate resolve_secondmate ;;
   secondmate-model) resolve_secondmate_model ;;
   secondmate-effort) resolve_secondmate_effort ;;
-  *) detect_own ;;
+  *) resolve_and_validate detect_own ;;
 esac

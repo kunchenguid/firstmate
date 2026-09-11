@@ -1274,6 +1274,11 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
+  if ! "$FM_ROOT/bin/fm-harness.sh" validate "$harness"; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  fi
   model=${MODEL:--}
   effort=${EFFORT:--}
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
@@ -2363,6 +2368,10 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND" "$ACCESS") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+if [ -n "$HARNESS" ]; then
+  "$FM_ROOT/bin/fm-harness.sh" validate "$HARNESS" || exit 1
+fi
 
 # Dispatch attestation backstop (AGENTS.md section 4): when the dispatch profiles
 # are active and this is not a secondmate spawn, an explicit harness must carry a
