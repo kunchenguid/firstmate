@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false, "required": ["refreshSeconds", "pools"],
+  "properties": {
+    "refreshSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+    "pools": {"type": "array", "items": {
+      "type": "object", "additionalProperties": false, "required": ["id", "provider"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]+$"},
+        "provider": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "label": {"type": "string", "minLength": 1},
+        "expectedEmail": {"type": "string", "minLength": 1},
+        "credentialSource": {"type": "string", "minLength": 1},
+        "env": {"type": "object", "additionalProperties": false, "properties": {
+          "CODEX_HOME": {"type": "string", "minLength": 1},
+          "CLAUDE_CONFIG_DIR": {"type": "string", "minLength": 1}
+        }},
+        "windows": {"type": "object", "additionalProperties": {"type": "number", "exclusiveMinimum": 0}}
+      }
+    }}
+  }
+}
