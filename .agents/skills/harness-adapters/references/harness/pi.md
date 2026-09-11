@@ -12,6 +12,7 @@ Verified on 2026-09-10 with Pi 0.85.1 unless a fact gives another version; Pi-si
 | Interrupt | Single Escape. |
 | Skill invocation | No separate verified form beyond normal command behavior; use natural language when the exact command is uncertain. |
 | Model flag | `--model <model>`. |
+| Firstmate-repository worker context | `--no-context-files` with a role-line `--append-system-prompt <text>` prevents the repository's `AGENTS.md` from overriding the launch brief; a named `modules/<name>/` also appends that module's `AGENTS.md` by file path, while other projects and secondmate homes keep normal context discovery. |
 | Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; both identities expose the same levels and completed the same model-qualified max-thinking smoke. |
 | Model discovery | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 

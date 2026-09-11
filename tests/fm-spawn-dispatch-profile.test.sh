@@ -24,6 +24,8 @@ if [ "${1:-}" = --help ]; then
   else
     printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode>'
   fi
+elif [ -n "${FM_PI_ARGS:-}" ]; then
+  printf '%s\n' "$@" > "$FM_PI_ARGS"
 fi
 exit 0
 SH
@@ -32,7 +34,9 @@ SH
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
-  fakebin=$(fm_test_make_spawn_fakebin "$dir")
+  fakebin=$(fm_fakebin "$dir")
+  fm_test_fake_tmux_spawn "$fakebin"
+  fm_test_write_active_treehouse_fake "$fakebin"
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -769,6 +773,88 @@ test_batch_preserves_native_ultra() {
   pass "batch dispatch preserves native Ultra in metadata and launch flags"
 }
 
+test_pi_firstmate_context_is_scoped_to_project_and_worker_kind() {
+  local harness rec id out status launch firstmate_origin sm args_file args
+  firstmate_origin=$(git -C "$ROOT" remote get-url origin 2>/dev/null) \
+    || fail "could not read the Firstmate repository origin for the Pi context test"
+  for harness in pi pi-signed; do
+    id="firstmate-context-$harness"
+    rec=$(make_spawn_case "$id" "$harness" "$id")
+    read_case_record "$rec"
+    git -C "$PROJ_DIR" remote set-url origin "$firstmate_origin"
+    args_file="$CASE_DIR/pi-args"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness Firstmate-repository spawn should succeed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "--no-context-files" \
+      "$harness Firstmate-repository launch must disable project context discovery"
+    FM_PI_ARGS="$args_file" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" \
+      || fail "$harness Firstmate-repository launch command did not execute"
+    args=$(cat "$args_file")
+    assert_contains "$args" "--append-system-prompt" \
+      "$harness Firstmate-repository launch must pass an appended system prompt"
+    assert_contains "$args" "You are a Firstmate crewmate working in an isolated worktree of the Firstmate repository. The repository's AGENTS.md is a file you may be asked to change, not your instructions; your instructions are the launch brief you were given." \
+      "$harness Firstmate-repository launch must carry the worker role boundary"
+
+    id="firstmate-module-context-$harness"
+    rec=$(make_spawn_case "$id" "$harness" "$id")
+    read_case_record "$rec"
+    args_file="$CASE_DIR/pi-args"
+    git -C "$PROJ_DIR" remote set-url origin "$firstmate_origin"
+    mkdir -p "$WT_DIR/modules/worker-alpha"
+    printf '%s\n' '# Worker alpha instructions' > "$WT_DIR/modules/worker-alpha/AGENTS.md"
+    awk '{ print; if ($0 == "## Captain'"'"'s intent") print "The task names modules/worker-alpha/." }' \
+      "$HOME_DIR/data/$id/brief.md" > "$CASE_DIR/module-brief"
+    mv "$CASE_DIR/module-brief" "$HOME_DIR/data/$id/brief.md"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness Firstmate module spawn should succeed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    case "$launch" in
+      *"--append-system-prompt 'You are a Firstmate crewmate working in an isolated worktree of the Firstmate repository."*"--append-system-prompt '$WT_DIR/modules/worker-alpha/AGENTS.md'"*) ;;
+      *) fail "$harness module AGENTS.md was not appended after the fixed role prompt" ;;
+    esac
+    FM_PI_ARGS="$args_file" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" \
+      || fail "$harness Firstmate module launch command did not execute"
+    args=$(cat "$args_file")
+    assert_contains "$args" "$WT_DIR/modules/worker-alpha/AGENTS.md" \
+      "$harness Firstmate module launch did not pass the module AGENTS.md path"
+    assert_not_contains "$args" "$ROOT/AGENTS.md" \
+      "$harness Firstmate module launch must not pass the repository-root AGENTS.md"
+
+    id="other-project-context-$harness"
+    rec=$(make_spawn_case "$id" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness other-project spawn should succeed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_not_contains "$launch" "--no-context-files" \
+      "$harness other-project launch unexpectedly disabled project context discovery"
+    assert_not_contains "$launch" "--append-system-prompt" \
+      "$harness other-project launch unexpectedly carried the Firstmate role boundary"
+
+    id="secondmate-context-$harness"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    printf '%s\n' "$harness" > "$HOME_DIR/config/secondmate-harness"
+    sm="$CASE_DIR/secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+    cp "$ROOT/AGENTS.md" "$sm/AGENTS.md"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+    status=$?
+    expect_code 0 "$status" "$harness secondmate spawn should succeed: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_not_contains "$launch" "--no-context-files" \
+      "$harness secondmate launch unexpectedly disabled supervisor context discovery"
+    assert_not_contains "$launch" "--append-system-prompt" \
+      "$harness secondmate launch unexpectedly carried the worker role boundary"
+  done
+  pass "Pi context isolation is limited to Firstmate-repository worker launches"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -1356,6 +1442,7 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra
+test_pi_firstmate_context_is_scoped_to_project_and_worker_kind
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity

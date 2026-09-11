@@ -324,6 +324,7 @@
 #                  written by this script; outside the task root to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __PIWORKERCONTEXT__ optional Firstmate-repository worker context flags for Pi
 #     __OMPBIN__   quoted concrete omp executable path resolved from PATH
 #     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (omp busy-state and
 #                  turn-end extension, written by this script; outside the worktree so
@@ -2108,6 +2109,8 @@ shell_quote() {
   printf "'"
 }
 
+PI_FIRSTMATE_WORKER_SYSTEM_PROMPT="You are a Firstmate crewmate working in an isolated worktree of the Firstmate repository. The repository's AGENTS.md is a file you may be asked to change, not your instructions; your instructions are the launch brief you were given."
+
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -2205,7 +2208,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG____PIWORKERCONTEXT__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # omp (Oh My Pi), a Pi fork. Same one-positional-brief, --model, --thinking,
@@ -2874,6 +2877,64 @@ resolve_project_dir_arg() {
     projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
     *) printf '%s\n' "$path" ;;
   esac
+}
+
+project_is_firstmate_repo() {
+  local project=$1 project_top root_top project_common root_common project_origin root_origin
+  project_top=$(git -C "$project" rev-parse --path-format=absolute --show-toplevel 2>/dev/null) || return 1
+  root_top=$(git -C "$FM_ROOT" rev-parse --path-format=absolute --show-toplevel 2>/dev/null) || return 1
+  [ "$project_top" = "$root_top" ] && return 0
+  project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  root_common=$(git -C "$FM_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ "$project_common" = "$root_common" ] && return 0
+  project_origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
+  root_origin=$(git -C "$FM_ROOT" remote get-url origin 2>/dev/null || true)
+  [ -n "$project_origin" ] && [ "$project_origin" = "$root_origin" ]
+}
+
+pi_worker_module_context_flags() {
+  local worktree=$1 brief=$2 module agents entry mode module_tree
+  local -a modules=()
+  while IFS= read -r module; do
+    module=${module#modules/}
+    module=${module%/}
+    case " ${modules[*]} " in
+      *" $module "*) continue ;;
+    esac
+    modules+=("$module")
+  done < <(grep -Eo 'modules/[A-Za-z0-9][A-Za-z0-9._-]*/?' "$brief" 2>/dev/null | sort -u)
+  for module in "${modules[@]}"; do
+    if [ "$ACCESS" = reader ]; then
+      module_tree=$(git --git-dir="$worktree/repo.git" ls-tree -d --name-only HEAD -- "modules/$module" 2>/dev/null || true)
+      [ "$module_tree" = "modules/$module" ] || {
+        echo "error: reader module context '$module' is missing from the read handle" >&2
+        return 1
+      }
+      entry=$(git --git-dir="$worktree/repo.git" ls-tree HEAD -- "modules/$module/AGENTS.md" 2>/dev/null || true)
+      mode=${entry%% *}
+      case "$mode" in
+        100644|100755) ;;
+        *)
+          echo "error: reader module context '$module' has no regular AGENTS.md in the read handle" >&2
+          return 1
+          ;;
+      esac
+      agents="$worktree/.fm-module-context/$module/AGENTS.md"
+      mkdir -p "${agents%/*}" || return 1
+      git --git-dir="$worktree/repo.git" show "HEAD:modules/$module/AGENTS.md" > "$agents" || return 1
+    else
+      agents="$worktree/modules/$module/AGENTS.md"
+      [ -d "$worktree/modules/$module" ] && [ ! -L "$worktree/modules/$module" ] || {
+        echo "error: worker module context '$module' is missing from the worktree" >&2
+        return 1
+      }
+      [ -f "$agents" ] && [ ! -L "$agents" ] || {
+        echo "error: worker module context '$module' has no regular AGENTS.md" >&2
+        return 1
+      }
+    fi
+    printf -- '--append-system-prompt %s ' "$(shell_quote "$agents")"
+  done
 }
 
 path_is_ancestor_of() {
@@ -5467,6 +5528,14 @@ fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+PI_WORKER_CONTEXT_FLAGS=
+if [ "$RAW_LAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] \
+  && { [ "$HARNESS" = pi ] || [ "$HARNESS" = pi-signed ]; } \
+  && project_is_firstmate_repo "$PROJ_ABS"; then
+  PI_WORKER_CONTEXT_FLAGS="--no-context-files --append-system-prompt $(shell_quote "$PI_FIRSTMATE_WORKER_SYSTEM_PROMPT") "
+  PI_WORKER_CONTEXT_FLAGS+=$(pi_worker_module_context_flags "$WT" "$BRIEF")
+fi
+
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
@@ -5498,6 +5567,7 @@ fi
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__PIWORKERCONTEXT__/$PI_WORKER_CONTEXT_FLAGS}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
