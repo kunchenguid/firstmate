@@ -589,7 +589,7 @@ export function commandPosition(tokens) {
   let command = words[index];
   while (command) {
     const name = basename(command.value);
-    if (name === "builtin") {
+    if (command.value === "builtin") {
       wrappers.push(name);
       index += 1;
       command = words[index];
@@ -920,7 +920,7 @@ function analyzeProgram(command, context, depth = 0) {
   for (const tokens of program.nodes) {
     const position = commandPosition(tokens);
     const nodeContext = contextWithAssignments(activeContext, position.words);
-    const firstName = basename(position.words[0]?.value || "");
+    const firstName = basename(position.words.find((word) => word.value !== "!")?.value || "");
     if (["if", "then", "else", "elif", "fi", "for", "while", "until", "case", "esac", "do", "done", "function", "time", "coproc"].includes(firstName)) {
       unsupported = true;
     }

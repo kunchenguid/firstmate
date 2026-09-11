@@ -419,6 +419,8 @@ test_broad_process_kill_contract() {
   assert_policy bpk-negated-kill-all $'deny\tbroad-process-kill' '! kill -9 -1'
   assert_policy bpk-builtin-kill-all $'deny\tbroad-process-kill' 'builtin kill -- -1'
   assert_policy bpk-time-pkill $'deny\tbroad-process-kill' 'time pkill -f node'
+  assert_policy bpk-negated-time-pkill $'deny\tbroad-process-kill' '! time pkill -f node'
+  assert_policy bpk-negated-time-kill-all $'deny\tbroad-process-kill' '! time kill -9 -1'
   # A kill-all target on the xargs tail is broad whatever feeds the pipe.
   assert_policy bpk-xargs-kill-all-dashdash $'deny\tbroad-process-kill' 'echo x | xargs kill -- -1'
   assert_policy bpk-xargs-kill-all-signal $'deny\tbroad-process-kill' 'echo x | xargs kill -9 -1'
@@ -457,6 +459,8 @@ test_broad_process_kill_contract() {
   assert_policy bpk-allow-negated-kill-probe allow '! kill -0 "$pid"'
   assert_policy bpk-allow-negated-pgrep allow '! pgrep -f node'
   assert_policy bpk-allow-negated-test allow '! test -f x'
+  assert_policy bpk-allow-negated-time-sleep allow '! time sleep 1'
+  assert_policy bpk-allow-negated-time-scoped-pkill allow '! time pkill -P $$'
   # Query and help forms of the kill tools execute no kill.
   assert_policy bpk-allow-command-v-pkill allow 'command -v pkill'
   assert_policy bpk-allow-command-v-pkill-redirected allow 'command -v pkill >/dev/null 2>&1'
