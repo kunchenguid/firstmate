@@ -136,11 +136,13 @@ fm_cost_summary_write() {  # <data-dir> <task-id> <meta-file> <kind> <pr-url> <l
   else
     relaunched=false
   fi
-  since=${intake_at:-1970-01-01T00:00:00Z}
   claude_usd=null
   pi_usd=null
-  [ -z "$wt" ] || claude_usd=$(fm_cost_claude_usd_total "$wt" "$since")
-  [ -z "$wt" ] || pi_usd=$(fm_cost_pi_usd_total "$wt" "$since")
+  if [ -n "$intake_at" ]; then
+    since=$intake_at
+    [ -z "$wt" ] || claude_usd=$(fm_cost_claude_usd_total "$wt" "$since")
+    [ -z "$wt" ] || pi_usd=$(fm_cost_pi_usd_total "$wt" "$since")
+  fi
   if [ "$claude_usd" = null ] && [ "$pi_usd" = null ]; then
     list_usd_total=null
   else
