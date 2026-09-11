@@ -1135,6 +1135,26 @@ test_terminal_metrics_keep_observation_and_unknown_distinct() {
   pass "terminal metrics retain observed zero, unavailable null, and relaunch identity"
 }
 
+test_subscription_sheet_counts_unresolved_task_class() {
+  local home json csv row
+  home=$(make_home unresolved-class-count)
+  run_intake "$home" unresolved-a "$(intake_payload | jq -c '.taskClass="unresolved"')" >/dev/null \
+    || fail "unresolved-class intake failed"
+  run_intake "$home" classified-b "$(intake_payload | jq -c '.taskClass="rote-reversible-edit"')" >/dev/null \
+    || fail "classified intake failed"
+  json=$(FM_HOME="$home" "$TELEMETRY" subscription-sheet --format json) \
+    || fail "subscription-sheet json failed"
+  printf '%s' "$json" | jq -e 'length==1 and .[0].taskClassUnresolved==1' >/dev/null \
+    || fail "JSON sheet did not count one unresolved class on the two-intake tuple: $json"
+  csv=$(FM_HOME="$home" "$TELEMETRY" subscription-sheet --format csv) \
+    || fail "subscription-sheet csv failed"
+  printf '%s\n' "$csv" | awk -F, 'NR==1 { found=0; for (i=1;i<=NF;i++) if ($i=="taskClassUnresolved") found=1; exit !found }' \
+    || fail "CSV header lacks taskClassUnresolved: $csv"
+  row=$(printf '%s\n' "$csv" | python3 -c 'import csv,sys; rows=list(csv.DictReader(sys.stdin)); print(rows[0]["taskClassUnresolved"] if rows else "")')
+  [ "$row" = 1 ] || fail "CSV sheet did not count one unresolved class on the two-intake tuple: $csv"
+  pass "subscription-sheet counts unresolved taskClass intakes per row"
+}
+
 test_terminal_metrics_keep_observation_and_unknown_distinct
 test_terminals_and_retry_links
 test_crash_recovery_and_terminal_idempotency
@@ -1160,6 +1180,7 @@ test_terminal_accepts_lease_conflict_failure_class
 test_terminal_accepts_state_divergence_failure_class
 test_intake_records_task_id_on_event_and_sheet
 test_intake_refuses_unknown_quota_decision_and_sheet_surfaces_it
+test_subscription_sheet_counts_unresolved_task_class
 test_terminal_facts_round_trip_blocked_class_and_green_none
 test_usage_observation_whitelist_refuses_invalid_shapes
 printf 'All model telemetry tests passed.\n'

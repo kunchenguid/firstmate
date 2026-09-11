@@ -17,7 +17,8 @@
 #     Join intake+terminal over a bounded startedAt window and group by the
 #     subscription axes (harness, provider, accountProfile, dispatchModelFamily,
 #     model) to report attempts, acceptance, cost, tokens, task classes served,
-#     quota utilization, and the usageSource breakdown. Proof that the existing
+#     how many intakes recorded taskClass=unresolved, quota utilization, and the
+#     usageSource breakdown. Proof that the existing
 #     telemetry join answers a subscription-renewal question without a dashboard.
 #   fm-model-telemetry.sh spawn-failures [--from <bound>] [--to <bound>] [--format json|csv|md]
 #     Group recorded pre-launch spawn refusals over a bounded attemptedAt window
@@ -1190,13 +1191,13 @@ subscription_sheet_command() {
   case "$format" in
     json) printf '%s\n' "$json" ;;
     csv)
-      printf '%s\n' 'subscription,harness,provider,accountProfile,dispatchModelFamily,model,attempts,accepted,rejectedOrFailed,open,cost,currency,inputTokens,outputTokens,taskClasses,quotaSelected,quotaStopped,quotaUnknown,headroomSufficient,headroomTight,headroomExhausted,headroomUnmeasurable,headroomUnknown,usageRecorded,usageNoVerifiedSource,usageSessionNotFound,usageSessionMatchedNoTokens,usageUnreadable,usageWorktreeMissing,usageAbsent'
-      printf '%s' "$json" | jq -r '.[] | [.subscription,.harness,(.provider//""),(.accountProfile//""),(.dispatchModelFamily//""),(.model//""),.attempts,.accepted,.rejectedOrFailed,.open,(.cost//""),(.currency//""),(.inputTokens//""),(.outputTokens//""),(.taskClasses|join(";")),.quotaSelected,.quotaStopped,.quotaUnknown,.headroomSufficient,.headroomTight,.headroomExhausted,.headroomUnmeasurable,.headroomUnknown,.usageRecorded,.usageNoVerifiedSource,.usageSessionNotFound,.usageSessionMatchedNoTokens,.usageUnreadable,.usageWorktreeMissing,.usageAbsent] | @csv'
+      printf '%s\n' 'subscription,harness,provider,accountProfile,dispatchModelFamily,model,attempts,accepted,rejectedOrFailed,open,cost,currency,inputTokens,outputTokens,taskClasses,taskClassUnresolved,quotaSelected,quotaStopped,quotaUnknown,headroomSufficient,headroomTight,headroomExhausted,headroomUnmeasurable,headroomUnknown,usageRecorded,usageNoVerifiedSource,usageSessionNotFound,usageSessionMatchedNoTokens,usageUnreadable,usageWorktreeMissing,usageAbsent'
+      printf '%s' "$json" | jq -r '.[] | [.subscription,.harness,(.provider//""),(.accountProfile//""),(.dispatchModelFamily//""),(.model//""),.attempts,.accepted,.rejectedOrFailed,.open,(.cost//""),(.currency//""),(.inputTokens//""),(.outputTokens//""),(.taskClasses|join(";")),.taskClassUnresolved,.quotaSelected,.quotaStopped,.quotaUnknown,.headroomSufficient,.headroomTight,.headroomExhausted,.headroomUnmeasurable,.headroomUnknown,.usageRecorded,.usageNoVerifiedSource,.usageSessionNotFound,.usageSessionMatchedNoTokens,.usageUnreadable,.usageWorktreeMissing,.usageAbsent] | @csv'
       ;;
     md)
       printf '%s\n' '| subscription | attempts | accepted | rejected/failed | open | cost | tokens in/out | task classes | quota selected/stopped/unknown | headroom sufficient/tight/exhausted | usage recorded/unavailable/absent |'
       printf '%s\n' '|---|---|---|---|---|---|---|---|---|---|---|'
-      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.subscription|esc) | \(.attempts) | \(.accepted) | \(.rejectedOrFailed) | \(.open) | \((if .cost==null then "absent" else ((.currency // "")+" "+(.cost|tostring)) end)|esc) | \(([.inputTokens,.outputTokens]|map(select(.!=null))|join("/"))|esc) | \(.taskClasses|join(",")) | \(.quotaSelected)/\(.quotaStopped)/\(.quotaUnknown) | \(.headroomSufficient)/\(.headroomTight)/\(.headroomExhausted) | \(.usageRecorded)/\(.usageNoVerifiedSource + .usageSessionNotFound + .usageSessionMatchedNoTokens + .usageUnreadable + .usageWorktreeMissing)/\(.usageAbsent) |"'
+      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.subscription|esc) | \(.attempts) | \(.accepted) | \(.rejectedOrFailed) | \(.open) | \((if .cost==null then "absent" else ((.currency // "")+" "+(.cost|tostring)) end)|esc) | \(([.inputTokens,.outputTokens]|map(select(.!=null))|join("/"))|esc) | \(.taskClasses|join(",")) unresolved=\(.taskClassUnresolved) | \(.quotaSelected)/\(.quotaStopped)/\(.quotaUnknown) | \(.headroomSufficient)/\(.headroomTight)/\(.headroomExhausted) | \(.usageRecorded)/\(.usageNoVerifiedSource + .usageSessionNotFound + .usageSessionMatchedNoTokens + .usageUnreadable + .usageWorktreeMissing)/\(.usageAbsent) |"'
       ;;
     *) die "subscription-sheet format must be json, csv, or md" ;;
   esac
@@ -1339,6 +1340,7 @@ subscription_sheet_json() {
       inputTokens: ([.[] | .terminal.usage.inputTokens // empty] | add),
       outputTokens: ([.[] | .terminal.usage.outputTokens // empty] | add),
       taskClasses: ([.[] | .intake.taskClass] | unique),
+      taskClassUnresolved: (map(select(.intake.taskClass=="unresolved")) | length),
       quotaSelected: (map(select(.intake.selection.quota.decision=="selected")) | length),
       quotaStopped: (map(select(.intake.selection.quota.decision=="stopped")) | length),
       quotaUnknown: (map(select(.intake.selection.quota.decision=="unknown" or .intake.selection.quota.decision=="not-applicable")) | length),
