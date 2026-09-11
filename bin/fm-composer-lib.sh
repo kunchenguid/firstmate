@@ -1104,7 +1104,6 @@ _fm_composer_agy_busy_scope() {  # <plain-screen>
     fi
   done <<< "$screen"
   if [ "$prompt" -lt 0 ] || [ "$last_boundary" -lt 0 ]; then
-    printf '%s' "$screen"
     return 0
   fi
   if [ "$footer_after_boundary" -ne 1 ] && [ "$rule_count" -ne 1 ]; then

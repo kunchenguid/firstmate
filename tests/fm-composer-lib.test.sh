@@ -844,8 +844,10 @@ test_agy_boundary_is_locale_independent() {
 }
 
 test_generic_delivery_busy_union_includes_agy_cancel() {
-  local active='esc to cancel                                                Gemini 3.8 Flash · medium' draft_screen
+  local active draft_screen cropped_screen
+  active=$'────\n> \n────\nesc to cancel                                                Gemini 3.8 Flash · medium'
   draft_screen=$'────\n> first\nesc to cancel Gemini 3.8 Flash · medium\n────\n? for shortcuts'
+  cropped_screen=$'draft continuation 1\ndraft continuation 2\ndraft continuation 3\ndraft continuation 4\ndraft continuation 5\ndraft continuation 6\ndraft continuation 7\ndraft continuation 8\ndraft continuation 9\ndraft continuation 10\ndraft continuation 11\nesc to cancel Gemini 3.8 Flash · medium'
   if printf '%s\n' 'esc to cancel' | fm_busy_lines_match; then
     fail "generic delivery busy matcher must not classify draft text as busy"
   fi
@@ -857,6 +859,12 @@ test_generic_delivery_busy_union_includes_agy_cancel() {
   fi
   if printf '%s\n' "$draft_screen" | fm_busy_lines_match agy; then
     fail "AGY busy matcher must exclude the draft region"
+  fi
+  if printf '%s\n' "$cropped_screen" | fm_busy_lines_match; then
+    fail "generic AGY busy matcher must fail closed on cropped captures"
+  fi
+  if printf '%s\n' "$cropped_screen" | fm_busy_lines_match agy; then
+    fail "AGY busy matcher must fail closed on cropped captures"
   fi
   if ! printf '%s\n' "$active" | fm_busy_lines_match; then
     fail "generic delivery busy matcher must recognize AGY's native active row"
