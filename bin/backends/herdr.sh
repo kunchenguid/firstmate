@@ -3095,7 +3095,7 @@ fm_backend_herdr_composer_state() {  # <target> [harness] -> empty|pending|pendi
 fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unknown
   local target=$1 harness=${2:-} cap visible
   cap=$(fm_backend_herdr_capture "$target" 40) || { printf 'unknown'; return 0; }
-  [ -n "$(printf '%s' "$cap" | grep -v '^[[:space:]]*$')" ] || { printf 'unknown'; return 0; }
+  printf '%s' "$cap" | grep -q -v '^[[:space:]]*$' || { printf 'unknown'; return 0; }
   if printf '%s' "$cap" | fm_busy_lines_match "$harness"; then
     printf 'busy'
   else

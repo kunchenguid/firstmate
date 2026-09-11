@@ -201,7 +201,7 @@ fm_pane_busy_state() {  # <target> [harness] -> busy|idle|unknown
   local win=$1 harness=${2:-} tail40
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) \
     || { printf 'unknown'; return 0; }
-  [ -n "$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$')" ] || { printf 'unknown'; return 0; }
+  printf '%s' "$tail40" | grep -q -v '^[[:space:]]*$' || { printf 'unknown'; return 0; }
   if printf '%s' "$tail40" | fm_busy_lines_match "$harness"; then
     printf 'busy'
   else
