@@ -1448,8 +1448,8 @@ families_for_changed_path() {
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       # bin/fm-watch.sh sources bin/fm-pr-lib.sh and runs its PR-poll
-      # retirement recovery before it takes the watcher lock, so the watcher
-      # suites exercise this code too.
+      # retirement recovery as soon as it holds the watcher lock, so the
+      # watcher suites exercise this code too.
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-nm-run-lib.sh)
