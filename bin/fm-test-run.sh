@@ -141,6 +141,11 @@
 # that names it is selected as that SCRIPT, because the reference is per-script
 # evidence. Consumer bin/ scripts still resolve through the curated map, so
 # recorded family-level coupling still expands to the whole family.
+# A shared file directly under tests/ maps to the suites that name it, but only
+# at tests/lib.sh, tests/fixtures.sh, *-helpers.sh, or *-fixture.sh. Any other
+# non-.test.sh file directly under tests/ stays unmapped and refuses the run,
+# so a new shared helper or fixture has to carry one of those names; a fixture
+# under tests/fixtures/<dir>/ is mapped by that directory instead.
 set -eu
 
 now_ms() {
@@ -1560,6 +1565,11 @@ families_for_changed_path() {
       fi
       ;;
     tests/lib.sh|tests/*-helpers.sh|tests/fixtures.sh|tests/*-fixture.sh)
+      # Shared top-level test files, selected by the suites that name them.
+      # Must stay below the tests/fixtures/*/* arm: a case glob's * spans /, so
+      # tests/*-fixture.sh would otherwise swallow a nested
+      # tests/fixtures/<dir>/<name>-fixture.sh and scan for its basename
+      # instead of the fixture directory its readers actually name.
       families_for_test_reference "$(basename "$path")" \
         || printf '%s\n' "__unmapped__:$path"
       ;;
