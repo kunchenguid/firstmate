@@ -3,7 +3,9 @@
 #
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# the default branch, and compares against the local default branch when there is
+# no origin or when that local branch strictly contains origin's tip, which is how
+# a local-only project carries work landed by bin/fm-merge-local.sh.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -138,6 +140,18 @@ if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
   BASE="origin/$DEFAULT"
+  # A local-only project can have an origin and still land approved work with
+  # bin/fm-merge-local.sh, which merges into the LOCAL default branch and never
+  # pushes. Reviewing against origin there reports that landed work as part of
+  # the branch's own change. So the local default branch wins exactly when it
+  # strictly contains origin's, which is the same rule and the same reasoning
+  # freshen_spawn_worktree_base in bin/fm-spawn.sh states in full.
+  ORIGIN_TIP=$(git -C "$WT" rev-parse --verify --quiet "origin/$DEFAULT^{commit}" 2>/dev/null || true)
+  LOCAL_TIP=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" 2>/dev/null || true)
+  if [ -n "$ORIGIN_TIP" ] && [ -n "$LOCAL_TIP" ] && [ "$ORIGIN_TIP" != "$LOCAL_TIP" ] \
+    && git -C "$WT" merge-base --is-ancestor "$ORIGIN_TIP" "$LOCAL_TIP" 2>/dev/null; then
+    BASE="$DEFAULT"
+  fi
 else
   BASE="$DEFAULT"
 fi

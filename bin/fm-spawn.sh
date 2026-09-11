@@ -2497,8 +2497,25 @@ spawn_worktree_has_origin_config() {  # <worktree>
   return 1
 }
 
+# Refresh a pooled worktree onto the base the next task must start from.
+#
+# Which ref carries landed work depends on how the project lands it. A project
+# delivered through a PR lands on origin, so origin's default branch is
+# authoritative. A `local-only` project lands through bin/fm-merge-local.sh,
+# which merges into the LOCAL default branch and never pushes, so origin's tip is
+# missing work the captain has already approved. Resetting to origin there hands
+# the next task a base from before that merge, and its branch then reads as a
+# revert of the landed work: silent, because the worker's own change is correct
+# and the deletions hide inside its diff, and compounding, because every further
+# local landing widens the gap.
+#
+# So the local default branch wins exactly when it strictly contains origin's:
+# it then holds everything origin has plus the locally landed work, and nothing
+# can be lost by starting there. Equal means the same commit and origin stands.
+# Behind or diverged both keep origin authoritative, because a local branch that
+# does not contain origin's tip is not something to silently build on.
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default target expected actual status local_ref local_commit
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2535,6 +2552,13 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
+  local_ref="refs/heads/$default"
+  local_commit=$(git -C "$worktree" rev-parse --verify --quiet "$local_ref^{commit}" 2>/dev/null || true)
+  if [ -n "$local_commit" ] && [ "$local_commit" != "$expected" ] \
+    && git -C "$worktree" merge-base --is-ancestor "$expected" "$local_commit" 2>/dev/null; then
+    target=$local_ref
+    expected=$local_commit
+  fi
   if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1

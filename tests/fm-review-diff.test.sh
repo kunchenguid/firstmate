@@ -75,6 +75,60 @@ run_review_diff() {
     "$REVIEW_DIFF" "$@"
 }
 
+# A `local-only` project can have an origin and still land approved work with
+# bin/fm-merge-local.sh, which merges into the LOCAL default branch and never
+# pushes. The review base has to follow the landed work, or the review reports it
+# as part of the branch's own change.
+land_on_local_default() {  # <case_dir> <file> <content>
+  local case_dir=$1 file=$2 content=$3
+  printf '%s\n' "$content" > "$case_dir/project/$file"
+  git -C "$case_dir/project" add "$file"
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -qm "land $file on local main"
+}
+
+commit_branch_work() {  # <case_dir>
+  local case_dir=$1
+  printf 'branch work\n' > "$case_dir/wt/branch.txt"
+  git -C "$case_dir/wt" add branch.txt
+  git -C "$case_dir/wt" commit -qm "branch work"
+}
+
+test_local_default_ahead_of_origin_is_the_review_base() {
+  local case_dir out
+  case_dir=$(make_case local-default-ahead)
+  land_on_local_default "$case_dir" landed-locally.txt 'approved work that was never pushed'
+  commit_branch_work "$case_dir"
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: main' \
+    "local-default-ahead: the local default branch should be the review base"
+  assert_contains "$out" '+branch work' "local-default-ahead: the branch's own change should still show"
+  assert_not_contains "$out" 'landed-locally.txt' \
+    "local-default-ahead: locally landed work was reported as part of the branch"
+  pass "fm-review-diff reviews against a local default branch that strictly contains origin"
+}
+
+test_local_default_behind_origin_keeps_origin_review_base() {
+  local case_dir out
+  case_dir=$(make_case local-default-behind)
+  git clone -q "$case_dir/origin.git" "$case_dir/publisher"
+  printf 'pushed elsewhere\n' > "$case_dir/publisher/pushed.txt"
+  git -C "$case_dir/publisher" add pushed.txt
+  git -C "$case_dir/publisher" -c user.email=t@t -c user.name=t commit -qm "advance origin"
+  git -C "$case_dir/publisher" push -q origin main
+  commit_branch_work "$case_dir"
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/main' \
+    "local-default-behind: origin must stay the review base when local trails it"
+  assert_contains "$out" '+branch work' "local-default-behind: the branch's own change should still show"
+  pass "fm-review-diff keeps origin as the review base when the local default branch trails it"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local() {
   local case_dir out
   case_dir=$(make_case pr-head-sha)
@@ -174,3 +228,5 @@ test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_local_default_ahead_of_origin_is_the_review_base
+test_local_default_behind_origin_keeps_origin_review_base
