@@ -51,7 +51,7 @@ Keep runtime writes under `FM_HOME/state/<name>/`, including any database, plus 
 Only a thin `bin/fm-<name>.sh` wrapper lives outside the module; event adapters live in `src/adapters/procevent.sh` and use the existing process-event owner, never direct wake-queue append.
 The [shared reader](fm-state-reader/README.md) owns that executable delivery seam and its durability limits.
 Service requests and replies consume the shared [MessagePort](fm-state-reader/src/ports/messages.d.ts), [adapter](fm-state-reader/src/adapters/messages.mjs), and [fake](fm-state-reader/tests/fake-messages.mjs), never an application-private inbox wire format.
-The adapter delegates to existing guarded message owners; services without supported lifecycle admission remain on the fake rather than claiming a task identity.
+Standalone services use the shared reader's [service admission and shutdown contract](fm-state-reader/README.md#standalone-service-admission), never task metadata or the supervisor identity.
 A service appends daily JSONL under `state/<name>/telemetry/YYYY-MM-DD.jsonl` with this record shape: `{"ts":"UTC ISO-8601","module":"name","event":"port.exit","requestId":null,"threadId":null,"actor":"name","inputs":{"ids":[],"bytes":0},"decision":null,"reasons":[],"stepsMs":{},"model":null,"harness":null,"effort":null,"tokens":null,"cost":null,"outcome":"accepted","evidencePath":null,"counters":{}}`.
 Outcome is `accepted`, `rejected`, or `error` after a step and null at entry; unknown measurements remain null, never invented zeros.
 Log adapter entry/exit and errors with refusal reasons; pure core functions return decision evidence for the use case to log rather than doing I/O themselves.

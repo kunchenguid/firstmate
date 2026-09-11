@@ -13,14 +13,14 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 ## Shared messages and threads
 
-[`bin/fm-message.sh`](../bin/fm-message.sh) exposes `send`, `receive`, `ack`, `read`, `validate`, and `stats`, with side-effect-free `-h`/`--help` on every verb; sending delegates to the existing data-plane owner.
+[`bin/fm-message.sh`](../bin/fm-message.sh) exposes `send`, `receive`, `ack`, `read`, `validate`, `stats`, and `service`, with side-effect-free `-h`/`--help` on every verb; sending delegates to the existing data-plane owner.
 Applications import the shared [MessagePort and adapter](../modules/fm-state-reader/README.md) instead of defining their own wire format.
 The shared codec and inbox primitives in [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) own `fm-message.v1` for workers, the supervisor, and service adapters.
 No service-specific inbox format or conversation server is required.
 Existing unstructured inbox bodies remain byte-compatible; structured reads refuse legacy records without message metadata rather than guessing their sender.
 
 A launched worker's send is bound to its exact live task record and physical working directory, never a supplied sender label.
-It can address a comma-separated list of live same-home tasks or the reserved `supervisor` participant.
+It can address a comma-separated list of live same-home tasks, registered services, or the reserved `supervisor` participant.
 The latter receives the same inbox record plus a durable wake, not a user-facing chat or Slack message.
 Only the supervisor communicates with the repository owner.
 Lifecycle keys, explicit terminal targets, remote routes, and decision-resolution flags are unavailable to worker messages.
@@ -39,9 +39,9 @@ An interrupted fan-out retains the original message for id-preserving retry, inc
 Supervisor wake notifications are at-least-once notifications of that one inbox record, not independent copies to process twice.
 These are same-user operational safeguards, not a sandbox against a process that can rewrite metadata directly.
 
-Current endpoint admission uses the existing recovery-grade liveness proof, available on tmux and Herdr; ambiguous state and backends without that proof refuse rather than claiming a live participant.
+Task endpoint admission uses the existing recovery-grade liveness proof, available on tmux and Herdr; ambiguous state and backends without that proof refuse rather than claiming a live participant.
 The mechanism does not depend on a model or harness-specific rendered marker beyond the already-owned backend classifier.
-Services can consume the codec and idempotent inbox delivery primitive behind their own ports, but their lifecycle admission is not implemented by this task-record sender.
+Standalone processes use the shared reader's [service admission contract](../modules/fm-state-reader/README.md#standalone-service-admission), with no invented task metadata or supervisor fallback.
 
 ### Message telemetry
 

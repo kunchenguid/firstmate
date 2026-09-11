@@ -5,9 +5,9 @@
 #                     [--thread <name>] <single-line text>
 #        fm_peer_send --reply <request-id> <text>  (all thread members by default)
 #        fm_peer_send --retry <message-id> --thread <name>
-# Identity: FM_TASK_ID is a lookup hint, checked against exact live metadata and
-# the physical working directory. Without it, structured supervisory sends
-# require cwd=FM_HOME. This guards operator mistakes, not hostile same-UID code
+# Identity: FM_SERVICE_ID uses fm-service-message-lib.sh's process binding;
+# otherwise FM_TASK_ID is checked against exact live metadata and physical cwd.
+# Without either hint, structured supervisory sends require cwd=FM_HOME. This guards operator mistakes, not hostile same-UID code
 # able to edit metadata or write directly to another participant's files.
 # Existing thread members may add live recipients. Every copy shares one id,
 # thread and recipient list. data/threads/<thread>.md is append-only JSON lines
@@ -22,9 +22,13 @@
 # messages. The limiter follows the sender's existing inbox cleanup. Helpers
 # report only to their recorded parent; no key, decision-close or remote route.
 
+# shellcheck source=bin/fm-service-message-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-service-message-lib.sh"
+
 fm_peer_live_task() {  # <state> <id>
   local id=$2 meta="$1/$2.meta" kind
   case "$id" in ''|*[!A-Za-z0-9._-]*|.|..|supervisor) return 1 ;; esac
+  [ ! -L "$1/services" ] && [ ! -e "$1/services/$id.json" ] && [ ! -L "$1/services/$id.json" ] || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ -z "$(fm_meta_get "$meta" remote_host)" ] || return 1
   kind=$(fm_backend_meta_exact_value "$meta" kind) || return 1
@@ -36,6 +40,11 @@ fm_peer_live_task() {  # <state> <id>
 fm_peer_sender() {  # <state> <task-hint>
   local state=$1 id=$2 worktree cwd root
   cwd=$(pwd -P) || return 1
+  if [ -n "${FM_SERVICE_ID:-}" ]; then
+    [ -z "$id" ] || { echo 'error: service and task identity cannot be combined' >&2; return 1; }
+    fm_service_sender "$state" "$FM_SERVICE_ID"; return $?
+  fi
+  fm_service_unmarked_caller "$state" || return 1
   if [ -z "$id" ]; then
     [ "$cwd" = "$(cd "$FM_HOME" && pwd -P)" ] || {
       echo 'error: a structured supervisor send must run from its own home' >&2; return 1;
@@ -74,6 +83,7 @@ fm_peer_request() {  # <state> <sender> <ref>
 
 fm_peer_send() (
   set -eu
+  : "${STATE:?message state directory is required}"
   local targets=${1:-} sender kind=note ref='' thread='' retry='' text request='' message ledger
   local lock thread_lock held='' id recipients members record count since now dir rate parent meta
   local status_path failed=0 records='' first_args rows
@@ -116,10 +126,12 @@ fm_peer_send() (
   [ "$(cd "$STATE" && pwd -P)" = "$(cd "$FM_HOME/state" && pwd -P)" ] || {
     echo 'error: messages cannot override the home state directory' >&2; exit 1;
   }
+  # Structured replies must wake this home, not an inherited queue override.
+  export FM_WAKE_QUEUE="$STATE/.wake-queue" FM_WAKE_QUEUE_LOCK="$STATE/.wake-queue.lock"
   fm_message_log port.enter '' sender_identity
   sender=$(fm_peer_sender "$STATE" "${FM_TASK_ID:-}") || exit 1
   fm_message_log port.exit accepted sender_identity
-  if [ "$sender" != supervisor ]; then
+  if [ -f "$STATE/$sender.meta" ]; then
     sender_model=$(fm_meta_get "$STATE/$sender.meta" model)
     sender_harness=$(fm_meta_get "$STATE/$sender.meta" harness)
     sender_effort=$(fm_meta_get "$STATE/$sender.meta" effort)
@@ -208,18 +220,23 @@ EOF
     fm_task_inbox_lock_acquire "$lock" || { echo 'error: message metadata could not be locked' >&2; exit 1; }
     held="${held}${held:+ }$meta"
     if [ "$meta" = supervisor ]; then
+      [ ! -e "$STATE/services/supervisor.json" ] && [ ! -L "$STATE/services/supervisor.json" ] &&
       [ ! -e "$STATE/supervisor.meta" ] && [ ! -L "$STATE/supervisor.meta" ] || {
         echo 'error: reserved supervisor participant conflicts with a task record' >&2; exit 1;
       }
       continue
     fi
     fm_message_log port.enter '' live_endpoint
-    fm_peer_live_task "$STATE" "$meta" || { echo "error: $meta is not a live same-home task" >&2; exit 1; }
+    if [ -e "$STATE/services/$meta.json" ] || [ -L "$STATE/services/$meta.json" ]; then
+      fm_service_live "$STATE" "$meta" || { echo "error: $meta is not a live same-home service" >&2; exit 1; }
+    else
+      fm_peer_live_task "$STATE" "$meta" || { echo "error: $meta is not a live same-home task" >&2; exit 1; }
+    fi
     validated_count=$((validated_count+1))
     fm_message_log port.exit accepted live_endpoint
   done
   [ "$(fm_peer_sender "$STATE" "${FM_TASK_ID:-}")" = "$sender" ] || exit 1
-  if [ "$sender" != supervisor ]; then
+  if [ -f "$STATE/$sender.meta" ]; then
     parent=$(fm_meta_get "$STATE/$sender.meta" parent)
     if [ -n "$parent" ] && [ "$recipients" != "$parent" ]; then
       echo 'error: a helper reports only to its recorded parent' >&2; exit 1
@@ -268,6 +285,8 @@ EOF
       else
         failed=1; failed_count=$((failed_count+1)); fm_message_log port.exit error wake_write_failed
       fi
+    elif [ -f "$STATE/services/$meta.json" ]; then
+      fm_message_log decision accepted service_inbox_queued
     else
       # Reuse the existing runtime-independent doorbell; it carries no payload.
       fm_message_log port.enter '' doorbell
@@ -279,7 +298,7 @@ EOF
       fi
     fi
   done
-  if [ "$sender" != supervisor ]; then
+  if [ -f "$STATE/$sender.meta" ]; then
     status_path="$STATE/$sender.status"
     if [ -L "$status_path" ] || { [ -e "$status_path" ] && [ ! -f "$status_path" ]; } \
       || ! printf 'peer: %s -> %s: %.80s\n' "$sender" "$(printf '%s' "$message" | jq -r '.to|join(",")')" \

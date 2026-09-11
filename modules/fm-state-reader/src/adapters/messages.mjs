@@ -1,13 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 
-/** @returns {import('../ports/messages.d.ts').MessagePort} */
-export function messages({ home, root }) {
+function messageRunner({ home, root, service }) {
   home = fs.realpathSync(home);
   root = fs.realpathSync(root);
   const cwd = process.cwd();
   const env = { ...process.env, FM_HOME: home, FM_ROOT_OVERRIDE: root, FM_STATE_OVERRIDE: path.join(home, 'state') };
+  if (service !== undefined) {
+    if (typeof service !== 'string' || !/^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/.test(service) || service === 'supervisor') throw Error('Invalid service name');
+    env.FM_SERVICE_ID = service;
+    delete env.FM_TASK_ID;
+  }
   const run = args => new Promise((resolve, reject) => {
     const child = execFile(path.join(root, 'bin/fm-message.sh'), args, { cwd, env, timeout: 30000, maxBuffer: 1048576 }, (error, stdout) => {
       // Exit 3 is a retained partial fan-out, not permission to mint a new id.
@@ -17,6 +21,30 @@ export function messages({ home, root }) {
     });
     child.stdin?.end();
   });
+  return { run, sync: args => execFileSync(path.join(root, 'bin/fm-message.sh'), args, { cwd, env, timeout: 30000, maxBuffer: 1048576, stdio: 'pipe' }) };
+}
+
+/** @returns {import('../ports/messages.d.ts').MessagePort} */
+export function messages(options) { return messagePort(messageRunner(options).run); }
+
+/** @returns {Promise<import('../ports/messages.d.ts').ServiceMessagePort>} */
+export async function serviceMessages({ home, root, name }) {
+  if (name === undefined) throw Error('Service name required');
+  const { run, sync } = messageRunner({ home, root, service: name });
+  const closeArgs = ['service', 'deregister', name, String(process.pid)];
+  const cleanup = () => {
+    try { sync(closeArgs); } catch { process.stderr.write('warning: service deregistration failed; registration retained for inspection\n'); }
+  };
+  process.once('exit', cleanup);
+  try { await run(['service', 'register', name, String(process.pid)]); }
+  catch (error) { cleanup(); process.off('exit', cleanup); throw error; }
+  return {
+    ...messagePort(run),
+    async close() { await run(closeArgs); process.off('exit', cleanup); },
+  };
+}
+
+function messagePort(run) {
   const send = async args => {
     const { stdout, partial } = await run(['send', ...args]);
     const receipt = /^message=(msg-[a-f0-9]{32}) thread=([A-Za-z0-9._-]+) delivered=([A-Za-z0-9._ -]*)\n$/.exec(stdout);

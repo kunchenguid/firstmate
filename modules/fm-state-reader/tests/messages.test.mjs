@@ -20,6 +20,9 @@ test('application message use case uses one fake port and acknowledges only afte
   await port.acknowledge(entry.name);
   assert.deepEqual(await port.receive(), []);
   assert.deepEqual(port.calls, [{ method: 'reply', ref: request.id, text: 'checked' }, { method: 'acknowledge', name: '001.msg' }]);
+  await port.close();
+  await assert.rejects(port.receive(), /closed/);
+  assert.deepEqual(port.calls.at(-1), { method: 'close' });
 });
 
 test('real message adapter composes with send, receive, reply and guarded acknowledgement', async () => {
@@ -77,9 +80,9 @@ exit 0
 
 test('root and leaf command help works without a configured home and has no side effects', () => {
   const env = { ...process.env, FM_HOME: '', FM_TASK_ID: '' };
-  for (const verb of ['', 'send', 'receive', 'ack', 'read', 'validate', 'stats']) {
+  for (const verb of ['', 'send', 'receive', 'ack', 'read', 'validate', 'stats', 'service', 'service register', 'service deregister']) {
     for (const flag of ['-h', '--help']) {
-      const output = execFileSync(path.join(root, 'bin/fm-message.sh'), [...(verb ? [verb] : []), flag], { env, encoding: 'utf8' });
+      const output = execFileSync(path.join(root, 'bin/fm-message.sh'), [...(verb ? verb.split(' ') : []), flag], { env, encoding: 'utf8' });
       assert.match(output, /Usage: fm-message/);
       assert.match(output, /--thread/);
       assert.match(output, /Example:/);

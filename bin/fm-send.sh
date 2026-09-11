@@ -11,8 +11,8 @@
 # [--kind request|reply|note|needs-decision] [--ref <request-id>] <text>.
 # --reply <request-id> <text> replies to the thread's members by default;
 # --retry <message-id> --thread <name> resumes a recorded partial fan-out.
-# A launched worker always uses this guarded message path, never the typed
-# or decision-resolution paths below. fm-peer-message-lib.sh owns that route;
+# A launched worker or registered service uses this guarded message path, never
+# the typed or decision-resolution paths below. fm-peer-message-lib.sh owns that route;
 # fm-task-inbox-lib.sh owns the shared schema and read/send primitives.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
@@ -262,12 +262,15 @@ fi
 STRUCTURED_MESSAGE=0
 case "${1:-}" in --reply|--retry|*,*) STRUCTURED_MESSAGE=1 ;; esac
 case "${2:-}" in --thread|--kind|--ref) STRUCTURED_MESSAGE=1 ;; esac
-if [ -n "${FM_TASK_ID:-}" ] || [ "$STRUCTURED_MESSAGE" = 1 ]; then
-  # shellcheck source=bin/fm-peer-message-lib.sh
-  . "$SCRIPT_DIR/fm-peer-message-lib.sh"
+# shellcheck source=bin/fm-peer-message-lib.sh
+. "$SCRIPT_DIR/fm-peer-message-lib.sh"
+if [ -n "${FM_TASK_ID:-}${FM_SERVICE_ID:-}" ] || [ "$STRUCTURED_MESSAGE" = 1 ] \
+  || [ -e "$STATE/services/${1:-}.json" ] || [ -L "$STATE/services/${1:-}.json" ]; then
   fm_peer_send "$@"
   exit $?
 fi
+
+fm_service_unmarked_caller "$STATE" || exit 1
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 

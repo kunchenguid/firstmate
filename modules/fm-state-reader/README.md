@@ -18,11 +18,11 @@ bin/fm-message.sh send --help
 bin/fm-message.sh receive --help
 ```
 
-Import `files`, `snapshot`, `readLedger`, `publishEvent`, and `messages` from `src/index.mjs`.
+Import `files`, `snapshot`, `readLedger`, `publishEvent`, `messages`, and `serviceMessages` from `src/index.mjs`.
 For example, `snapshot(files(process.env.FM_HOME), Date.now() / 1000)` returns a plain snapshot.
 `messages({home, root})` returns the [MessagePort](src/ports/messages.d.ts); its adapter delegates to `bin/fm-message.sh` and never implements a second wire codec or writes task files directly.
 
-Messaging requires an existing operational home and live recorded tasks; these commands do not create them:
+Messaging requires an existing operational home and live participants; these commands do not launch them:
 
 ```sh
 FM_HOME=/path/to/home bin/fm-message.sh send peer-a,peer-b --thread review --kind request -- 'Check the API'
@@ -34,6 +34,38 @@ Run from the launched task's working directory with its inherited `FM_TASK_ID`, 
 No caller-supplied `from` label is supported.
 The [message owner](../../bin/fm-task-inbox-lib.sh) defines `fm-message.v1`; [current message behavior](../../docs/agent-control.md#shared-messages-and-threads) covers thread membership, authority, and retry guarantees.
 The library and one-shot commands have no idle scene or timer; animation belongs to applications following [the module template](../TEMPLATE.md).
+
+### Standalone service admission
+
+A foreground service uses `await serviceMessages({home, root, name})` at startup, rather than borrowing `FM_TASK_ID` or the supervisor identity.
+It returns the same MessagePort plus `close()`; no process, poller, timer, or alternate wire format is created.
+
+```js
+const port = await serviceMessages({ home, root, name: 'fm-moiras' });
+try {
+  const [entry] = await port.receive();
+  if (entry?.message.kind === 'request') {
+    const receipt = await port.send([entry.message.from], 'received', {
+      kind: 'reply', ref: entry.message.id,
+    });
+    if (!receipt.partial) await port.acknowledge(entry.name);
+  }
+} finally {
+  await port.close();
+}
+```
+
+The [service owner](../../bin/fm-service-message-lib.sh) defines the process-bound registration in `state/services/<name>.json`; `bin/fm-message.sh service --help` documents the equivalent shell lifecycle.
+Names share the participant namespace: `supervisor`, task collisions, duplicate live owners, malformed records, and symlinked registry paths refuse.
+A service hint is verified against its recorded live PID fingerprint and calling-process ancestry on every message operation; omitting the hint from a registered process cannot fall back to another identity.
+The factory replaces inherited task identity only in its captured CLI environment, leaving the application's environment unchanged.
+Service traffic uses `state/<name>.inbox/`, the same threads, request references, retries, rate limits, and telemetry as other messages, never the supervisor inbox unless explicitly addressed there.
+Structured sends also pin supervisor wakes to that home's state directory rather than inheriting an unrelated queue override.
+Applications own receive scheduling and graceful signal handling; call `close()` after in-flight operations and before shutdown.
+Normal Node process exit also attempts deregistration synchronously; failures warn, while abrupt termination can leave a stale registration.
+Dead processes refuse delivery; after the recorded PID is gone, restarting the same named service can replace its stale registration without deleting pending or handled messages.
+A still-live PID with a changed fingerprint remains a refusal, not permission to replace its owner.
+PID validation is a preflight, not an atomic guarantee against a process dying immediately afterwards; queued messages remain durable for the next instance.
 
 ## How to configure
 
@@ -48,7 +80,10 @@ All available options are function arguments or the existing operational environ
 | `snapshot(source, now)` | Both required | StateFiles port and observation time in epoch seconds. |
 | `readLedger(source, key)` | Both required | Read a permitted ledger with malformed/truncated evidence retained. |
 | `publishEvent({home, root, module, id})` | All required | Publish an already-written immutable event through the registered process-event owner. |
-| `messages({home, root})` | Both required | Physical home and checkout containing the installed message tools. |
+| `messages({home, root, service})` | `service` absent | Physical home and tool checkout; optional service name binds an already-registered calling process. |
+| `serviceMessages({home, root, name})` | All required | Register this process and return a ServiceMessagePort; does not start a server. |
+| `ServiceMessagePort.close()` | Explicit shutdown | Deregister this process without deleting its inbox or history. |
+| `FM_SERVICE_ID` | Absent outside services | Registered service lookup hint, checked against live native process ancestry. |
 | `FM_TASK_ID` | Absent for the supervisor | Inherited task identity; checked against live metadata and the working directory. |
 | `MessagePort.send(to, text, options)` | `options={}`, kind `note` | Recipient id array, text, and optional `kind`, `thread`, `ref`; unspecified thread is created by the transport. |
 | `MessagePort.reply(ref, text)` | Thread members | Reply using the received request's id. |
@@ -79,7 +114,7 @@ FM_HOME=/path/to/home bin/fm-message.sh stats
 jq . /path/to/home/state/fm-message/telemetry/2026-09-11.jsonl
 ```
 
-`stats` summarizes the rolling last 24 hours; delivery counters count accepted delivery calls, including idempotent retry confirmations, not unique new inbox files.
+`stats` summarizes the rolling last 24 hours, including service registration/deregistration outcomes; delivery counters count accepted delivery calls, including idempotent retry confirmations, not unique new inbox files.
 Thread ledgers contain private conversation text and must not be copied into telemetry.
 Consuming services own their own decision and model telemetry; this shared reader adds no autonomous logging process.
 For Tachikoma and Backpass integration, consume these JSONL files by `requestId` and `threadId`; this change provides the feed, not an automatic ingestion process.
@@ -93,8 +128,8 @@ npm --prefix modules/fm-state-reader test
 
 Follow the [module template](../TEMPLATE.md): pure record parsing in `src/core`, snapshot orchestration in `src/usecases`, TypeScript contracts in `src/ports`, and concrete edges in `src/adapters`.
 Tests distinguish plain core assertions, use cases using [fake files](tests/fake-files.mjs) and [fake messages](tests/fake-messages.mjs), and real filesystem/CLI/process-event composition.
-A service without supported lifecycle admission uses the message fake instead of pretending to be a tracked worker.
-The concrete message sender currently admits ordinary task records with verified tmux or Herdr liveness; service process admission remains with its own lifecycle adapter.
+The message fake includes `close()` for service use cases; real service acceptance tests exercise separate Node processes, registration, both reply directions, guarded refusal, normal shutdown and abrupt-death recovery.
+Ordinary task records retain verified tmux or Herdr liveness; standalone service admission uses native process identity independently of those backends.
 
 ### Supported limits
 

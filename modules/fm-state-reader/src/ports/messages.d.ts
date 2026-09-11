@@ -14,6 +14,7 @@ export interface Message {
 export interface MessageOptions { thread?: string; kind?: MessageKind; ref?: string }
 export interface MessageReceipt { id: string; thread: string; delivered: string[]; partial: boolean }
 export interface MessageEntry { name: string; message: Message }
+export interface ServiceMessagePort extends MessagePort { close(): Promise<void> }
 export interface MessagePort {
   send(to: string[], text: string, options?: MessageOptions): Promise<MessageReceipt>;
   reply(ref: string, text: string): Promise<MessageReceipt>;
