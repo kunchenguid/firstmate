@@ -90,7 +90,6 @@ run_with_fake() {
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
-    FM_HERDR_LAB_VIEWER_TIMEOUT="${FM_HERDR_LAB_VIEWER_TIMEOUT:-1}" \
     "$@"
 }
 
@@ -269,21 +268,6 @@ write_viewer_record() {
     "$pid" "$start" "$pid" "$start" > "$record"
 }
 
-test_viewer_start_validates_timeout_before_launch() {
-  local name="fm-lab-viewer-timeout-$$" log out status value
-  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-timeout fixture provision failed"
-  log=$(run_with_fake fm_herdr_lab_viewer_log_path "$name")
-  for value in 0 -1 0.5; do
-    status=0
-    out=$(FM_HERDR_LAB_VIEWER_TIMEOUT="$value" run_with_fake fm_herdr_lab_viewer_start "$name" 2>&1) || status=$?
-    expect_code 1 "$status" "invalid viewer timeout '$value' must be refused"
-    assert_contains "$out" "must be a positive integer" "invalid viewer timeout refusal was unclear"
-    assert_absent "$log" "invalid viewer timeout '$value' launched the viewer"
-  done
-  run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-timeout fixture teardown failed"
-  pass "fm-herdr-lab: viewer timeout is validated before launch"
-}
-
 test_viewer_start_requires_its_owned_process() {
   local name="fm-lab-viewer-ownership-$$" out status=0 marker="$TMP_ROOT/viewer-launched"
   run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-ownership fixture provision failed"
@@ -294,7 +278,8 @@ test_viewer_start_requires_its_owned_process() {
 exit 0
 SH
   chmod +x "$FAKEBIN/python3"
-  out=$(FM_FAKE_VIEWER_MARKER="$marker" run_with_fake fm_herdr_lab_viewer_start "$name" 2>&1) || status=$?
+  out=$(FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_VIEWER_MARKER="$marker" \
+    run_with_fake fm_herdr_lab_viewer_start "$name" 2>&1) || status=$?
   rm -f "$FAKEBIN/python3"
   expect_code 1 "$status" "a foreign foreground client must not satisfy viewer start"
   assert_present "$marker" "viewer ownership fixture did not launch"
@@ -323,7 +308,8 @@ test_viewer_stop_only_signals_owned_processes() {
   holder_pid=$!
   write_viewer_record "$record" "$holder_pid"
   status=0
-  run_with_fake fm_herdr_lab_viewer_stop "$name" >/dev/null 2>&1 || status=$?
+  FM_FAKE_HERDR_FAST_POLL=1 run_with_fake fm_herdr_lab_viewer_stop "$name" \
+    >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "stop must fail while the session still reports a foreground client"
   wait "$holder_pid" 2>/dev/null || true
   kill -0 "$holder_pid" 2>/dev/null && fail "stop left the recorded viewer process running"
@@ -354,7 +340,8 @@ test_teardown_refuses_while_viewer_attached() {
   holder_pid=$!
   write_viewer_record "$record" "$holder_pid"
   : > "$FAKE_LOG"
-  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  FM_FAKE_HERDR_FAST_POLL=1 run_with_fake fm_herdr_lab_teardown "$name" \
+    >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "teardown must refuse while an owned viewer is still attached"
   [ "$(cat "$FAKE_STATE/$name")" = running ] \
     || fail "the refused teardown stopped the lab session anyway"
@@ -371,7 +358,8 @@ test_viewer_stop_retains_record_when_detach_is_unreadable() {
   run_with_fake fm_herdr_lab_provision "$name" || fail "unreadable-detach fixture provision failed"
   record=$(run_with_fake fm_herdr_lab_viewer_record_path "$name")
   printf 'launcher_pid=99999999\nlauncher_start=stale\nviewer_pid=99999999\nviewer_start=stale\n' > "$record"
-  FM_FAKE_HERDR_TITLE_FAIL=1 run_with_fake fm_herdr_lab_viewer_stop "$name" >/dev/null 2>&1 || status=$?
+  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_TITLE_FAIL=1 \
+    run_with_fake fm_herdr_lab_viewer_stop "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "an unreadable detach result on a running session must fail closed"
   assert_present "$record" "an unreadable detach result discarded the ownership record"
   printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
@@ -408,7 +396,6 @@ test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch
 test_viewer_refuses_unowned_sessions
-test_viewer_start_validates_timeout_before_launch
 test_viewer_start_requires_its_owned_process
 test_viewer_stop_only_signals_owned_processes
 test_teardown_refuses_while_viewer_attached

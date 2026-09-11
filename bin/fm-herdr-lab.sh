@@ -33,8 +33,6 @@
 # Stop signals only identity-matched recorded processes and retains its
 # ownership record until detach is confirmed or the session is stopped or
 # absent; teardown refuses when that stop cannot be confirmed.
-# FM_HERDR_LAB_VIEWER_TIMEOUT sets the positive-integer wait in seconds for
-# viewer start and stop, and defaults to 30 when unset or empty.
 set -u
 
 fm_herdr_lab_error() {
@@ -174,6 +172,8 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
 # of only their detached halves. bin/fm-herdr-lab-viewer.py owns the pty and
 # environment mechanics; the guards below own who may be attached to.
 
+readonly fm_herdr_lab_viewer_timeout_seconds=2
+
 fm_herdr_lab_viewer_record_path() { # <session>
   printf '%s/%s.viewer' "$(fm_herdr_lab_state_dir)" "$1"
 }
@@ -243,24 +243,9 @@ fm_herdr_lab_viewer_session_stopped_or_absent() { # <session>
   [ "$running" = false ] || [ "$running" = absent ]
 }
 
-fm_herdr_lab_viewer_timeout() {
-  local raw=${FM_HERDR_LAB_VIEWER_TIMEOUT:-30}
-  if [[ ! "$raw" =~ ^[0-9]+$ ]] || [[ ! "$raw" =~ [1-9] ]]; then
-    fm_herdr_lab_error "FM_HERDR_LAB_VIEWER_TIMEOUT must be a positive integer"
-    return 1
-  fi
-  raw=${raw#"${raw%%[!0]*}"}
-  [ "${#raw}" -le 9 ] || {
-    fm_herdr_lab_error "FM_HERDR_LAB_VIEWER_TIMEOUT is too large"
-    return 1
-  }
-  printf '%s' "$raw"
-}
-
 fm_herdr_lab_viewer_start() { # <session>
-  local name=$1 record log launcher waited attempt reason pid timeout
+  local name=$1 record log launcher waited attempt reason pid timeout=$fm_herdr_lab_viewer_timeout_seconds
   fm_herdr_lab_validate_name "$name" || return 1
-  timeout=$(fm_herdr_lab_viewer_timeout) || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
   command -v python3 >/dev/null 2>&1 || { fm_herdr_lab_error "python3 is required for the lab viewer"; return 1; }
@@ -307,9 +292,8 @@ fm_herdr_lab_viewer_start() { # <session>
 }
 
 fm_herdr_lab_viewer_stop() { # <session>
-  local name=$1 record log role waited attempt reason timeout
+  local name=$1 record log role waited attempt reason timeout=$fm_herdr_lab_viewer_timeout_seconds
   fm_herdr_lab_validate_name "$name" || return 1
-  timeout=$(fm_herdr_lab_viewer_timeout) || return 1
   record=$(fm_herdr_lab_viewer_record_path "$name")
   log=$(fm_herdr_lab_viewer_log_path "$name")
   # An absent record means this lab owns no viewer. Any client attached in that
