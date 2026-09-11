@@ -827,18 +827,30 @@ test_agy_boundary_is_locale_independent() {
     utf8_locale=$(LC_ALL=C locale -a | LC_ALL=C awk '/[Uu][Tt][Ff].*8/ { print; exit }')
   fi
   [ -n "$utf8_locale" ] || fail "no UTF-8 locale is available for AGY boundary coverage"
-  for boundary in '────' '════' '━━━━' '----'; do
+  for boundary in '────' '━━━━' '═══' '╿' '----' '===='; do
     for locale in C "$utf8_locale"; do
       LC_ALL="$locale" _fm_composer_agy_boundary_row "$boundary" \
         || fail "AGY boundary '$boundary' was rejected under $locale"
     done
   done
   for locale in C "$utf8_locale"; do
-    if LC_ALL="$locale" _fm_composer_agy_boundary_row '── text ──'; then
-      fail "mixed AGY boundary text was accepted under $locale"
-    fi
+    for non_boundary in '│abc│' '- text -'; do
+      if LC_ALL="$locale" _fm_composer_agy_boundary_row "$non_boundary"; then
+        fail "mixed AGY boundary text was accepted under $locale: $non_boundary"
+      fi
+    done
   done
   pass "fm_composer: AGY boundaries are locale-independent"
+}
+
+test_generic_delivery_busy_union_includes_agy_cancel() {
+  if ! printf '%s\n' 'esc to cancel' | fm_busy_lines_match; then
+    fail "generic delivery busy matcher must recognize AGY's cancel marker"
+  fi
+  if printf '%s\n' 'esc to cancel' | fm_busy_lines_match unknown-harness; then
+    fail "unknown harness must not borrow the generic delivery busy matcher"
+  fi
+  pass "fm_composer: generic delivery busy union recognizes AGY cancel"
 }
 
 test_agy_prompt_preserves_furniture_looking_drafts() {
@@ -893,6 +905,7 @@ test_agy_prompt_preserves_structural_draft_rows
 test_agy_prompt_uses_complete_positional_boundaries
 test_agy_prompt_disambiguates_repeated_boundaries
 test_agy_boundary_is_locale_independent
+test_generic_delivery_busy_union_includes_agy_cancel
 test_agy_prompt_preserves_furniture_looking_drafts
 
 test_queued_enter_verdict_busy_pending_is_empty() {

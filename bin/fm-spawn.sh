@@ -920,6 +920,7 @@ SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
 SPAWN_FRESH_WIRING_PENDING=0
 AGY_HOOK_ROOT=
+AGY_HOOK_SETTINGS=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
@@ -2089,6 +2090,76 @@ esac
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+agy_hook_directory_secure() {
+  local path=$1 owner mode
+  [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  owner=$(stat -c %u "$path" 2>/dev/null || stat -f %u "$path" 2>/dev/null) || return 1
+  mode=$(stat -c %a "$path" 2>/dev/null || stat -f %Lp "$path" 2>/dev/null) || return 1
+  case "$mode" in
+    ''|*[!0-7]*) return 1 ;;
+  esac
+  [ "$owner" = "$(id -u)" ] || return 1
+  (( (8#$mode & 022) == 0 && (8#$mode & 200) != 0 ))
+}
+
+agy_prepare_hook_root() {
+  local root=$1 state_root=$2 root_real agents_real
+  if [ -L "$root" ]; then
+    echo "error: refusing symlinked agy hook root $root" >&2
+    return 1
+  fi
+  if [ -e "$root" ]; then
+    if ! agy_hook_directory_secure "$root"; then
+      echo "error: refusing unsafe agy hook root $root" >&2
+      return 1
+    fi
+  elif ! (umask 077 && mkdir "$root"); then
+    echo "error: could not create agy hook root $root" >&2
+    return 1
+  fi
+  if [ -L "$root" ]; then
+    echo "error: refusing symlinked agy hook root $root" >&2
+    return 1
+  fi
+  root_real=$(cd -P -- "$root" && pwd -P) || {
+    echo "error: could not resolve agy hook root $root" >&2
+    return 1
+  }
+  case "$root_real/" in
+    "$state_root/"*) ;;
+    *)
+      echo "error: agy hook root escaped firstmate state: $root" >&2
+      return 1
+      ;;
+  esac
+  if [ -L "$root_real/.agents" ]; then
+    echo "error: refusing symlinked agy hook settings directory $root_real/.agents" >&2
+    return 1
+  fi
+  if [ -e "$root_real/.agents" ]; then
+    if ! agy_hook_directory_secure "$root_real/.agents"; then
+      echo "error: refusing unsafe agy hook settings directory $root_real/.agents" >&2
+      return 1
+    fi
+  elif ! (umask 077 && mkdir "$root_real/.agents"); then
+    echo "error: could not create agy hook settings directory $root_real/.agents" >&2
+    return 1
+  fi
+  agents_real=$(cd -P -- "$root_real/.agents" && pwd -P) || {
+    echo "error: could not resolve agy hook settings directory $root_real/.agents" >&2
+    return 1
+  }
+  case "$agents_real/" in
+    "$state_root/"*) ;;
+    *)
+      echo "error: agy hook settings escaped firstmate state: $root_real/.agents" >&2
+      return 1
+      ;;
+  esac
+  AGY_HOOK_ROOT=$root_real
+  AGY_HOOK_SETTINGS=$agents_real/hooks.json
 }
 
 # rovo confines every file-tool operation (open_files, create_file, grep, ...)
@@ -3475,10 +3546,9 @@ EOF
         a_pre=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '{}'")
         a_progress=$(json_escape "$progress_cmd_prefix --gen $(shell_quote "$BUSY_GEN") >/dev/null 2>&1 || true; printf '{}'")
         a_stop=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 && touch $(shell_quote "$TURNEND") || true; printf '{}'")
-        AGY_HOOK_ROOT="$STATE_REAL/$ID.agy-hooks"
+        agy_prepare_hook_root "$STATE_REAL/$ID.agy-hooks" "$STATE_REAL" || exit 1
         [ "$RELAUNCH" -eq 1 ] || SPAWN_FRESH_WIRING_PENDING=1
-        mkdir -p "$AGY_HOOK_ROOT/.agents"
-        cat > "$AGY_HOOK_ROOT/.agents/hooks.json" <<EOF
+        cat > "$AGY_HOOK_SETTINGS" <<EOF
 {"firstmate":{"PreInvocation":[{"command":"$a_pre"}],"PostToolUse":[{"command":"$a_progress"}],"Stop":[{"command":"$a_stop"}]}}
 EOF
       fi
