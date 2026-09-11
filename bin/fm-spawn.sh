@@ -185,6 +185,23 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   The same test also requires the path to be a worktree OF THE SPAWNING
+#   PROJECT'S OWN CLONE (its git common dir is the project's), on every backend
+#   whose worktrees Treehouse provides; only Orca, which owns its own worktree
+#   shape, is exempt. That is the harness-independent guard against the pool
+#   collision below, and it runs before any harness is launched, so a spawn
+#   handed another home's worktree refuses instead of launching into it.
+#   Treehouse keys a pool by the clone's directory basename plus a hash of its
+#   origin URL, under <root>/.treehouse/ with the root defaulting to $HOME, so
+#   two homes holding same-named clones of one origin share one pool and each
+#   is handed worktrees of the other's clone (verified against treehouse
+#   v2.3.0; docs/verification/runtime-backends.md "Treehouse pool root"). Every
+#   ship/scout spawn therefore sends `treehouse get --root '<home>'` into the
+#   pane, with the home resolved by bin/fm-wake-lib.sh's fm_treehouse_pool_root
+#   from this process's FM_HOME, so each home draws worktrees only from its own
+#   clones. The root travels as literal command text because an exported
+#   TREEHOUSE_ROOT never reaches the pane's own shell. Teardown needs no root:
+#   `treehouse return` locates the pool from the slot path itself.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -2318,7 +2335,7 @@ real_path_or_raw() {  # <path>
 SPAWN_WT_TOP=
 SPAWN_WT_REASON=
 spawn_worktree_isolated() {  # <path>
-  local path=$1 wt_real wt_top_real wt_git_dir proj_common
+  local path=$1 wt_real wt_top_real wt_git_dir wt_common proj_common
   SPAWN_WT_TOP=
   SPAWN_WT_REASON=
   wt_real=
@@ -2365,13 +2382,34 @@ spawn_worktree_isolated() {  # <path>
     SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
     return 1
   fi
+  # A Treehouse-provided worktree must belong to the spawning project's own
+  # clone: its common git dir must be the project's. Treehouse keys its pool by
+  # the clone's name and origin rather than by the clone, so a home whose clone
+  # shares both with another home's clone is handed that other clone's worktree
+  # under a shared root (see the header). Without this comparison such a path
+  # passes every check above - it is a real, distinct, linked worktree - and
+  # the worker would commit into another home's clone. Orca owns its own
+  # worktree shape, which is not established to be a linked worktree of the
+  # project, so the comparison is skipped there rather than guessed at.
+  if [ "$BACKEND" != orca ]; then
+    wt_common=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+      && wt_common=$(cd "$wt_common" 2>/dev/null && pwd -P) || wt_common=
+    if [ -z "$wt_common" ]; then
+      SPAWN_WT_REASON="its git common directory could not be resolved"
+      return 1
+    fi
+    if [ "$wt_common" != "$proj_common" ]; then
+      SPAWN_WT_REASON="it is a worktree of another clone (common git dir '$wt_common'), not of the spawning project's clone (common git dir '$proj_common')"
+      return 1
+    fi
+  fi
   return 0
 }
 
 validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2
   if ! spawn_worktree_isolated "$WT"; then
-    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'; $SPAWN_WT_REASON); refusing to launch to avoid tangling the primary checkout or another clone. Inspect target $inspect_target" >&2
     exit 1
   fi
 }
@@ -3066,7 +3104,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # The pool root is this home, sent as literal text so it provably reaches
+  # the pane's shell (an exported TREEHOUSE_ROOT would not); the header owns why
+  # the home is the root. Single quotes survive because the path is quoted the
+  # same way the relaunch `cd` above quotes its target.
+  SPAWN_POOL_ROOT=$(fm_treehouse_pool_root "$FM_HOME") || {
+    echo "error: could not resolve this home's Treehouse pool root from FM_HOME '$FM_HOME'; refusing to acquire a worktree from an unknown pool" >&2
+    exit 1
+  }
+  spawn_pool_root_quoted=${SPAWN_POOL_ROOT//\'/\'\\\'\'}
+  spawn_send_text_line "$WT_TARGET" "treehouse get --root '$spawn_pool_root_quoted'"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
