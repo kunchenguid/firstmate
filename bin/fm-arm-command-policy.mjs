@@ -56,19 +56,23 @@ function rawMentionsBroadKill(command) {
 // Conservative raw check for the general (any-target) broad process kill, used
 // only on grammar the AST cannot model, mirroring rawMentionsBroadKill for the
 // watcher. `pkill`/`killall` are kills-by-match by definition; a `pgrep` feeding
-// a `kill` or `xargs` is the discover-then-kill form. An occurrence whose own
-// argument span carries a caller-scope flag is not broad, so the recommended
-// scoped cleanup idiom inside a loop stays allowed.
+// a `kill` or `xargs`, like any ps/pidof/fuser or pid-listing lsof alongside
+// one, is the discover-then-kill form, and `fuser -k` is a kill by itself. A
+// pkill/pgrep occurrence whose own argument span carries a caller-scope flag is
+// not broad, so the recommended scoped cleanup idiom inside a loop stays allowed.
 function rawMentionsGeneralBroadKill(command) {
   const normalized = normalizeLineContinuations(command);
   if (/\bkillall\b/.test(normalized)) return true;
+  if (/\bfuser\b[^;|&\n)`]*\s(?:-[A-Za-z]*k|--kill)/.test(normalized)) return true;
   const unscoped = (verbPattern) => [...normalized.matchAll(verbPattern)].some((match) => !rawArgsSelectByCallerScope(match[1]));
   if (unscoped(/\bpkill\b([^;|&\n)`]*)/g)) return true;
-  return unscoped(/\bpgrep\b([^;|&\n)`]*)/g) && /\b(?:kill|xargs)\b/.test(normalized);
+  if (!/\b(?:kill|xargs)\b/.test(normalized)) return false;
+  if (unscoped(/\bpgrep\b([^;|&\n)`]*)/g)) return true;
+  return /\b(?:ps|pidof|fuser)\b/.test(normalized) || /\blsof\b[^;|&\n)`]*\s-[A-Za-z]*t/.test(normalized);
 }
 
 function rawArgsSelectByCallerScope(args) {
-  return /(?:^|\s)(?:-[Pgs][0-9]*|--(?:parent|pgroup|session)(?:=\S*)?)(?=\s|$)/.test(args);
+  return /(?:^|\s)(?:-[Pgs](?:[0-9]+|\$\S*)?|--(?:parent|pgroup|session)(?:=\S*)?)(?=\s|$)/.test(args);
 }
 
 function normalizeLineContinuations(source) {
@@ -757,10 +761,11 @@ function selectsByCallerScope(args) {
   return args.some((word) => {
     const value = word.value;
     if (/^--(?:parent|pgroup|session)(?:=.*)?$/.test(value)) return true;
-    // Only a standalone scope option, optionally with an attached numeric value
-    // (-P123, -g0), scopes the kill; a signal name such as -HUP, -STOP, or
-    // -SIGPIPE is never a scope flag even though it contains one of the letters.
-    return /^-[Pgs][0-9]*$/.test(value);
+    // Only a standalone scope option, optionally with an attached numeric or
+    // expansion value (-P123, -g0, -P$$, -P$pid), scopes the kill; a signal name
+    // such as -HUP, -STOP, or -SIGPIPE is never a scope flag even though it
+    // contains one of the letters.
+    return /^-[Pgs](?:[0-9]+|\$\S*)?$/.test(value);
   });
 }
 
@@ -775,7 +780,8 @@ function isUnscopedPgrep(position) {
 // A process-selection-by-attribute discovery command whose output, fed to a
 // kill, reaches the shared process table: an unscoped pgrep, any ps, a pid-
 // listing lsof (-t or -Fp), pidof, or fuser. Caller-owned pid sources such as
-// `cat pidfile`, `jobs -p`, or a literal are not discovery.
+// `cat pidfile`, `jobs -p`, or a literal are not discovery. `fuser -k` kills
+// its matches itself and is handled as a kill in analyzeProgram.
 function isUnscopedDiscovery(position) {
   if (!position.command) return false;
   const name = basename(position.command.value);
@@ -941,6 +947,7 @@ function analyzeProgram(command, context, depth = 0) {
     // caller's own ancestry/group/session, or a kill fed by an unscoped
     // discovery match, reaches sibling lanes on the shared process table.
     if ((commandName === "pkill" && !selectsByCallerScope(args)) || commandName === "killall") broadProcessKill = true;
+    if (commandName === "fuser" && args.some((word) => /^-[A-Za-z]*k/.test(word.value) || word.value === "--kill")) broadProcessKill = true;
     if (commandName === "kill" && !isKillProbe(args) && (nodeUnscopedDiscovery || args.some((word) => wordReferencesAny(word, nodeContext.unscopedPids)))) broadProcessKill = true;
     if (isUnscopedDiscovery(position)) unscopedDiscovery = true;
     if (hasDynamicExecutionPayload(position, nodeContext) || wordReferencesAny(position.command, nodeContext.protectedVariables)) nodeNestedProtected = true;

@@ -173,6 +173,13 @@ matrix_case K20 allow 'kill $(jobs -p)'
 matrix_case K21 allow 'pgrep -P $$ | xargs -n 1 kill'
 matrix_case K22 allow 'for p in $(pgrep -P $$); do kill $p; done'
 matrix_case K23 allow 'kill -0 $(pgrep -f "lavish-axi poll")'
+# K24-K28: fuser -k is itself a kill; a complete discovery pipe or substitution
+# inside loop/if grammar fails closed; attached-value scope flags stay allowed.
+matrix_case K24 deny 'fuser -k 3000/tcp'
+matrix_case K25 deny 'while true; do ps aux | grep "lavish-axi poll" | awk '"'"'{print $2}'"'"' | xargs kill; sleep 1; done'
+matrix_case K26 deny 'if true; then lsof -ti :3000 | xargs kill -9; fi'
+matrix_case K27 allow 'fuser 3000/tcp'
+matrix_case K28 allow 'pkill -P$$'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -303,6 +310,7 @@ test_broad_process_kill_contract() {
   assert_policy bpk-signal-sighup $'deny\tbroad-process-kill' 'pkill -SIGHUP node'
   assert_policy bpk-signal-stop $'deny\tbroad-process-kill' 'pkill -STOP -f "lavish-axi poll"'
   assert_policy bpk-signal-pipe $'deny\tbroad-process-kill' 'pkill -PIPE node'
+  assert_policy bpk-signal-tstp $'deny\tbroad-process-kill' 'pkill -TSTP -f "lavish-axi poll"'
   assert_policy bpk-signal-numeric $'deny\tbroad-process-kill' 'pkill -9 -f node'
   # xargs options with a separated value must not hide the kill utility.
   assert_policy bpk-xargs-n-sep $'deny\tbroad-process-kill' 'pgrep -f node | xargs -n 1 kill'
@@ -317,6 +325,18 @@ test_broad_process_kill_contract() {
   assert_policy bpk-pidof-cmdsub $'deny\tbroad-process-kill' 'kill $(pidof node)'
   assert_policy bpk-fuser-xargs $'deny\tbroad-process-kill' 'fuser 3000/tcp 2>/dev/null | xargs kill'
   assert_policy bpk-ps-var $'deny\tbroad-process-kill' 'p=$(ps aux | grep node | awk '"'"'{print $2}'"'"'); kill $p'
+  # fuser -k kills every process on the port itself; it is a kill, not a feed.
+  assert_policy bpk-fuser-k $'deny\tbroad-process-kill' 'fuser -k 3000/tcp'
+  assert_policy bpk-fuser-k-namespace $'deny\tbroad-process-kill' 'fuser -k -n tcp 3000'
+  assert_policy bpk-fuser-k-signal $'deny\tbroad-process-kill' 'fuser -KILL -k 3000/tcp'
+  assert_policy bpk-fuser-kill-long $'deny\tbroad-process-kill' 'fuser --kill 3000/tcp'
+  assert_policy bpk-loop-fuser-k $'deny\tbroad-process-kill' 'for x in 1; do fuser -k 3000/tcp; done'
+  # A complete discovery pipe or substitution inside unsupported loop/if grammar
+  # fails closed for ps/lsof/pidof exactly as it does for pgrep.
+  assert_policy bpk-loop-ps-xargs $'deny\tbroad-process-kill' 'while true; do ps aux | grep "lavish-axi poll" | awk '"'"'{print $2}'"'"' | xargs kill; sleep 1; done'
+  assert_policy bpk-if-lsof-xargs $'deny\tbroad-process-kill' 'if true; then lsof -ti :3000 | xargs kill -9; fi'
+  assert_policy bpk-loop-pidof-cmdsub $'deny\tbroad-process-kill' 'for x in 1; do kill $(pidof node); done'
+  assert_policy bpk-loop-ps-cmdsub $'deny\tbroad-process-kill' 'until false; do kill $(ps aux | grep "lavish-axi poll" | awk '"'"'{print $2}'"'"'); done'
 
   # Caller-scoped kills - the safe forms the guard must NOT refuse - selecting by
   # parent, process group, or session, or by a specific pid the caller chose.
@@ -331,6 +351,11 @@ test_broad_process_kill_contract() {
   assert_policy bpk-allow-literal-pid allow 'kill 76803'
   assert_policy bpk-allow-literal-signal allow 'kill -9 "$pid"'
   assert_policy bpk-allow-parent-attached allow 'pkill -P12345'
+  assert_policy bpk-allow-parent-attached-self allow 'pkill -P$$'
+  assert_policy bpk-allow-parent-attached-var allow 'pkill -P$pid -f node'
+  assert_policy bpk-allow-pgrep-attached-xargs allow 'pgrep -P$$ | xargs kill'
+  assert_policy bpk-allow-kill-pgrep-attached allow 'kill $(pgrep -P$$)'
+  assert_policy bpk-allow-loop-scoped-attached allow 'for p in $(pgrep -P$$); do kill $p; done'
   assert_policy bpk-allow-session-signal allow 'pkill -HUP -s 4242'
   # The scoped cleanup idiom inside loop grammar the classifier cannot model is
   # still recognized as scoped by the raw fallback and allowed.
@@ -347,6 +372,8 @@ test_broad_process_kill_contract() {
   assert_policy bpk-allow-readonly-pgrep allow 'pgrep -f "lavish-axi poll" | head'
   assert_policy bpk-allow-ps-grep allow 'ps aux | grep node'
   assert_policy bpk-allow-lsof-readonly allow 'lsof -i :3000'
+  assert_policy bpk-allow-fuser-readonly allow 'fuser 3000/tcp'
+  assert_policy bpk-allow-loop-ps-readonly allow 'while true; do ps aux | grep node; sleep 1; done'
   assert_policy bpk-allow-data-mention allow "echo 'pkill -f node'"
 }
 

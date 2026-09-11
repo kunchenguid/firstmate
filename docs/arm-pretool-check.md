@@ -51,6 +51,7 @@ Normalizing first keeps this a strict superset: a protected watcher path obfusca
 The quoting-decoder marker closes the case the byte strip cannot: `bin/fm-$'\x77'atch-arm.sh` and `bin/fm-$"watch"-arm.sh` both resolve to `bin/fm-watch-arm.sh` only after the classifier decodes the encoded character, so a cheap byte strip would otherwise lose the `fm-watch` bytes and fast-allow them.
 This trigger set and marker set are coupled to the classifier in `bin/fm-arm-command-policy.mjs`: adding any new denied command family, or any new quote or expansion form the classifier decodes, requires extending these sets in the same change, or the prefilter stops being a strict superset.
 The prefilter owns no semantic exception: it can only ever fast-allow a command that is definitely not a watcher command, so it never flips a classification and the classifier remains the single owner of every decision.
+The bare `ps` trigger also matches ordinary commands that merely contain those two bytes (`https://`, `apps/`, `deps`), so more commands now pay the classifier's roughly 70 ms startup instead of fast-allowing; this is an accepted, correctness-neutral cost, because narrowing the trigger would risk fast-allowing a deniable command.
 
 The seatbelt's threat model is agent mistakes: no one accidentally writes an ANSI-C- or locale-obfuscated watcher path, and deliberate obfuscation is the post-arm liveness guard's territory.
 The marker guard closes the static gap anyway because it is cheap and provable per encoding class.
@@ -139,10 +140,11 @@ The watcher rule above is the highest-severity case of a wider one: any kill tha
 The classifier denies this class with `broad-process-kill`:
 
 - `pkill` or `killall` that does not select by the caller's own ancestry, process group, or session.
-  The caller-scope flag set is exactly `-P`/`--parent`, `-g`/`--pgroup`, and `-s`/`--session`, as a standalone short option with an optional attached numeric value (`-P`, `-P123`, `-g0`, `-s5`) or the long form (`--parent 123`, `--parent=123`).
+  The caller-scope flag set is exactly `-P`/`--parent`, `-g`/`--pgroup`, and `-s`/`--session`, as a standalone short option with an optional attached numeric or expansion value (`-P`, `-P123`, `-g0`, `-s5`, `-P$$`, `-P$pid`) or the long form (`--parent 123`, `--parent=123`).
   A signal name is never a scope flag: `pkill -HUP node`, `pkill -SIGHUP node`, `pkill -STOP -f X`, `pkill -PIPE node`, and `pkill -9 -f node` are all broad even though the signal name contains one of the letters.
   `killall` has no scope flag and is always broad, as is `-G` (a real unix group id, not a process group).
   Path-qualified, `command`, and `sudo` forms are recognized through the same wrapper unwrapping as the watcher rule.
+- `fuser -k` (or `--kill`, with any signal such as `-KILL -k`), which kills every process holding the named port or file host-wide; `fuser` without `-k` is read-only discovery.
 - An executed `kill` (or `xargs kill`/`xargs pkill`) fed by an unscoped discovery command - one that selects processes by attribute rather than by a caller-owned pid: an unscoped `pgrep`, any `ps`, a pid-listing `lsof` (`-t`, `-ti:PORT`, `-Fp`), `pidof`, or `fuser`.
   The recognized feeds are command substitution (`kill $(pgrep -f X)`, `kill $(ps aux | grep X | awk '{print $2}')`, `kill $(pidof X)`), a single variable hop (`p=$(pgrep -f X); kill $p`, `p=$(ps aux | grep X | awk '{print $2}'); kill $p`), and a pipe tail (`pgrep -f X | xargs kill`, `ps aux | grep X | awk '{print $2}' | xargs kill`, `lsof -ti :3000 | xargs kill -9`); any node between the discovery and the `xargs` in the same pipe run is fine, and `xargs` options with a separated value (`-n 1`, `-I {}`, `-L 1`) or `--` do not hide the utility.
   A `pgrep` that itself selects by ancestry, group, or session (for example `pgrep -P $$`) is caller-scoped, so the kill it feeds is allowed.
@@ -154,12 +156,14 @@ A specific `kill <pid>` is allowed, because a literal pid carries no evidence of
 Read-only discovery (`pgrep -f X`, `ps aux | grep X`, `lsof -i :3000`) and quoted data (`echo 'pkill -f X'`) are never kills and are allowed.
 
 Unsupported compound grammar (a loop, `case`, `if`, or other construct the classifier does not model) falls back to a raw byte check, the same way the watcher backstop does.
-The raw check fires on any `killall`, on a `pkill` whose own argument span (up to the next `;`, `|`, `&`, newline, or closing paren) carries no caller-scope flag, and on such an unscoped `pgrep` when the command also carries a `kill` or `xargs` verb.
-So `while true; do pkill -f node; done` is denied, while the recommended scoped cleanup idiom `for p in $(pgrep -P $$); do kill $p; done` is allowed.
+The raw check fires on any `killall`, on a `fuser` followed by `-k`/`--kill`, on a `pkill` whose own argument span (up to the next `;`, `|`, `&`, newline, or closing paren) carries no caller-scope flag, and - when the command also carries a `kill` or `xargs` verb - on such an unscoped `pgrep`, on any `ps`, `pidof`, or `fuser`, or on an `lsof` whose argument span carries a `-t` flag.
+So `while true; do pkill -f node; done`, `if true; then lsof -ti :3000 | xargs kill -9; fi`, and `for x in 1; do kill $(pidof node); done` are denied, while the recommended scoped cleanup idiom `for p in $(pgrep -P $$); do kill $p; done` is allowed.
 
 Residuals - what this rule does not catch, so a reader can tell without running it:
 
-1. Discovery routed through a loop or a multi-hop variable (`for p in $(ps aux | awk '{print $2}'); do kill $p; done`, `a=$(ps ...); b=$a; kill $b`) is not tracked; the classifier follows one substitution or one variable hop, not general shell dataflow.
+1. Discovery output routed through anything other than a command substitution or a plain `$var` reference is not tracked: a file (`ps aux | grep X > /tmp/pids; kill $(cat /tmp/pids)`), an array, a parameter transform, or an intermediate command that is not itself discovery.
+   The classifier follows direct variable references (`a=$(ps ...); b=$a; kill $b` is denied), not general shell dataflow.
+   In unsupported loop/`if`/`case` grammar the raw check is byte-level, so a discovery command and a `kill`/`xargs` anywhere in the same command are denied together even when the shell would not connect them.
 2. A bare `pkill`, `killall`, or `pgrep` token used as pure data inside unsupported loop/`if`/`case` grammar (`if grep -q pkill tests/x.sh; then echo y; fi`) is conservatively denied, because the raw fallback cannot tell data from command there; the supported-grammar equivalent `grep -q pkill tests/x.sh && echo y` is allowed.
 3. A discover-then-literal-kill across two commands (`pgrep -f X` now, `kill 76803` later) cannot be caught by any command-shape seatbelt, because the literal pid carries no evidence of foreign origin; the shared-process-table rule in `AGENTS.md` is the containment for it.
 4. The gate-agent surface under `disable_project_settings` (see "Purpose and boundary") does not load this seatbelt at all; the `AGENTS.md` rule and the crewmate brief's wait-discipline rule are the containment there.
