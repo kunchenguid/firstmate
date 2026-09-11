@@ -402,7 +402,7 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 FM_COMPOSER_AGY_FOOTER_RE_DEFAULT='^\?[[:space:]]+for shortcuts([[:space:]]|$)'
 # Antigravity hides the shortcuts footer while a draft is present, but keeps
 # the model-and-effort footer below the composer region.
-FM_COMPOSER_AGY_MODEL_RE_DEFAULT='^Gemini[[:space:]].*[[:space:]]·[[:space:]](low|medium|high)$'
+FM_COMPOSER_AGY_MODEL_RE_DEFAULT='^.+[[:space:]]·[[:space:]](low|medium|high)$'
 # omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
 # git, and context cells. Verified live through Herdr on omp 18.1.11:
@@ -713,7 +713,12 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       *) leftbar_start=-1 ;;
     esac
     case "$trimmed" in
-      '>'*) agy_prompt_row=$row ;;
+      '>'*)
+        if [ "$agy_prompt_row" -lt 0 ] \
+           && { [ -z "$cy" ] || [ "$row" -le "$cy" ]; }; then
+          agy_prompt_row=$row
+        fi
+        ;;
     esac
     if fm_composer_idle_matches "$trimmed" \
       "${FM_COMPOSER_AGY_FOOTER_RE:-$FM_COMPOSER_AGY_FOOTER_RE_DEFAULT}" sensitive; then
@@ -865,6 +870,14 @@ EOF
     agy_end_row=$((agy_signal_row - 1))
     FM_COMPOSER_SCAN_AGY_ROW=$agy_prompt_row
     FM_COMPOSER_SCAN_AGY_END=$agy_end_row
+    if [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$agy_prompt_row" ] \
+       && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$agy_end_row" ]; then
+      FM_COMPOSER_SCAN_BARE_ROW=-1
+    fi
+    if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$agy_prompt_row" ] \
+       && [ "$FM_COMPOSER_SCAN_SHELL_ROW" -le "$agy_end_row" ]; then
+      FM_COMPOSER_SCAN_SHELL_ROW=-1
+    fi
   fi
   if [ -n "$cy" ] && [ "$top" -ge 0 ] && [ "$top" -lt "$cy" ]; then
     FM_COMPOSER_SCAN_UNSAFE=1
@@ -1275,7 +1288,9 @@ EOF
         fi
         ;;
       agy)
-        case "$content" in '>'*) content=${content#>} ;; esac
+        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ]; then
+          case "$content" in '>'*) content=${content#>} ;; esac
+        fi
         fm_composer_normalize_trim_var content
         ;;
       box)

@@ -714,6 +714,51 @@ test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
   pass "fm_composer_classify_screen: agy uses cursor divergence and model-footer proof for multiline drafts"
 }
 
+test_agy_prompt_accepts_supported_model_footers() {
+  local caps=$'styled=1\ncursor=1' footer out extract
+  for footer in \
+    'Claude Sonnet 4.6 · low' \
+    'GPT-OSS 120B · medium' \
+    'Gemini 3.8 Flash · high'; do
+    out=$(fm_composer_classify_screen "$caps" $'> draft\n'"$footer" 0)
+    [ "$out" = pending ] \
+      || fail "agy footer '$footer' must classify an unsent draft pending, got '$out'"
+    extract=$(fm_composer_extract_selected_content "$caps" $'> draft\n'"$footer")
+    [ "$extract" = 'draft' ] \
+      || fail "agy footer '$footer' must preserve the draft, got '$extract'"
+  done
+  pass "fm_composer: agy recognizes supported model footers by structure"
+}
+
+test_agy_prompt_preserves_structural_draft_rows() {
+  local screen out extract caps
+  for caps in "$CAPS_TMUX" 'styled=0'; do
+    screen=$'> first\n> second\nClaude Sonnet 4.6 · low'
+    if [ "$caps" = "$CAPS_TMUX" ]; then
+      out=$(fm_composer_classify_screen "$caps" "$screen" 1)
+    else
+      out=$(fm_composer_classify_screen "$caps" "$screen")
+    fi
+    [ "$out" = pending ] \
+      || fail "agy draft rows beginning with > must classify pending, got '$out'"
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+    [ "$extract" = 'first > second' ] \
+      || fail "agy draft rows beginning with > were not preserved, got '$extract'"
+    screen=$'> run this:\n$ make test\nGPT-OSS 120B · medium'
+    if [ "$caps" = "$CAPS_TMUX" ]; then
+      out=$(fm_composer_classify_screen "$caps" "$screen" 1)
+    else
+      out=$(fm_composer_classify_screen "$caps" "$screen")
+    fi
+    [ "$out" = pending ] \
+      || fail "agy shell-looking draft rows must classify pending, got '$out'"
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen")
+    [ "$extract" = 'run this: $ make test' ] \
+      || fail "agy shell-looking draft rows were not preserved, got '$extract'"
+  done
+  pass "fm_composer: agy preserves prompt and shell-looking multiline rows"
+}
+
 test_agy_prompt_preserves_furniture_looking_drafts() {
   local caps=$'styled=0\ncursor=1' out extract screen
   for draft in '? for shortcuts' '────────'; do
@@ -762,6 +807,8 @@ test_selected_content_is_composer_scoped_and_wrap_normalized
 test_agy_prompt_requires_footer_proof
 test_agy_prompt_requires_footer_proof_without_cursor
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts
+test_agy_prompt_accepts_supported_model_footers
+test_agy_prompt_preserves_structural_draft_rows
 test_agy_prompt_preserves_furniture_looking_drafts
 
 test_queued_enter_verdict_busy_pending_is_empty() {

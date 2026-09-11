@@ -32,7 +32,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fm_live_gate default-on FM_COMPOSER_MATRIX_LIVE tmux
+fm_live_gate opt-in FM_COMPOSER_MATRIX_LIVE tmux
 
 SOCKET="fm-cmx-live-$$"
 SESSION="cmxlive"
