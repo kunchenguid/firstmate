@@ -152,10 +152,14 @@ while IFS='|' read -r id home _window meta; do
       if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi
       [ "$remote_pending" -eq 0 ] || remote_nudge=1
       if [ "$remote_nudge" -eq 1 ]; then
-        if FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-          "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" >/dev/null 2>&1; then
+        send_rc=0
+        FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+          "$SCRIPT_DIR/fm-send.sh" "fm-$id" --automatic "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" >/dev/null 2>&1 || send_rc=$?
+        if [ "$send_rc" -eq 0 ]; then
           rm -f -- "$remote_marker"
           echo "  config-reread: sent"
+        elif [ "$send_rc" -eq 4 ]; then
+          echo "  config-reread: deferred while the mate waits on its open decision; retry retained"
         else
           echo "  config-reread: send failed; retry retained"
           errors=1

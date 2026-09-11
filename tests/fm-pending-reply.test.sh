@@ -198,6 +198,42 @@ test_completed_turn_no_report_triggers_one_recovery() {
   pass "completed turn with no report triggers exactly one recovery"
 }
 
+# A mate waiting on its own open decision is never poked by the recovery; the
+# recovery stays unattempted and runs once the decision closes.
+test_recovery_waits_while_the_mate_has_an_open_decision() {
+  local home state corr hook_log
+  home=$(setup_parent decision-wait)
+  state="$home/state"
+  hook_log="$TMP_ROOT/decision-wait-hook.log"
+  : > "$hook_log"
+  export FM_PENDING_REPLY_NOW=2500
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  decision_wait_hook() {
+    printf '%s\n' "$1" >> "$hook_log"
+  }
+  export -f decision_wait_hook
+  export FM_PENDING_REPLY_SEND_HOOK=decision_wait_hook
+
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "status of phase 8")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  fm_pending_reply_observe_busy "$state" "$corr" idle
+  printf 'needs-decision [key=scope]: narrow or wide?\n' >> "$state/hibit.status"
+  if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
+    fail "recovery must wait while the mate waits on its own decision"
+  fi
+  [ ! -s "$hook_log" ] || fail "recovery poked a mate waiting on its decision"
+  [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+    || fail "a deferred recovery must stay unattempted, got $(phase_of "$state" "$corr")"
+
+  printf 'resolved [key=scope]: answered: narrow\n' >> "$state/hibit.status"
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery should send once the decision closes"
+  [ "$(wc -l < "$hook_log" | tr -d ' ')" = 1 ] || fail "expected exactly one recovery send"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  pass "recovery never pokes a mate waiting on its own decision, and runs once it closes"
+}
+
 test_recovery_attempt_is_never_reinjected() {
   local home state corr rec hook_log lines live_corr live_rec live_pid live_identity
   home=$(setup_parent recovery-at-most-once)
@@ -1574,6 +1610,7 @@ test_escalated_undelivered_correlation_stays_retryable() {
 
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
+test_recovery_waits_while_the_mate_has_an_open_decision
 test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable

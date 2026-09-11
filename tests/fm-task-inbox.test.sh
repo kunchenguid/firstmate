@@ -561,6 +561,24 @@ test_watcher_quiet_on_healthy_inbox() {
   pass "watcher: a healthy or empty inbox stays completely silent"
 }
 
+# Contract: the watcher never types into a worker idle on its own open decision
+# while nothing is waiting in its inbox.
+test_watcher_never_rings_a_worker_waiting_on_its_decision() {
+  local dir state out log pid
+  dir=$(setup_watch_case decisionwait)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  mkdir -p "$state/t1.inbox/handled"
+  printf 'needs-decision [key=pick]: alpha or beta?\n' > "$state/t1.status"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  sleep 4
+  fm_test_reap "$pid"
+  [ ! -s "$log" ] || fail "the watcher typed into a worker waiting on its decision:"$'\n'"$(cat "$log")"
+  pass "watcher: a worker idle on its open decision with an empty inbox is never rung"
+}
+
 test_watcher_ack_silences_unwritable_ladder() {
   local dir state out log pid rec rings i=0
   dir=$(setup_watch_case ack-unwritable-ladder)
@@ -707,6 +725,7 @@ test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
+test_watcher_never_rings_a_worker_waiting_on_its_decision
 test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
