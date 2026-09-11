@@ -2327,6 +2327,58 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
   done
 }
 
+configure_secondmate_with_agy_child() {  # <case-dir>
+  local case_dir=$1 home="$1/secondmate-home" child_wt="$1/child-agy-wt"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  git -C "$case_dir/project" worktree add -q -b fm/child-agy "$child_wt" main
+  fm_write_meta "$home/state/child-agy.meta" \
+    "window=firstmate:fm-child-agy" \
+    "endpoint_task_id=child-agy" \
+    "worktree=$child_wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only" \
+    "harness=agy"
+  : > "$home/state/child-agy.status"
+  mkdir -p "$home/state/child-agy.agy-hooks"
+  printf '%s\n' hook > "$home/state/child-agy.agy-hooks/stop"
+}
+
+test_forced_secondmate_agy_hook_cleanup_retains_record_on_failure() {
+  local case_dir home hook_root rc
+  case_dir=$(make_case agy-child-hook-cleanup)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_agy_child "$case_dir"
+  home="$case_dir/secondmate-home"
+  hook_root="$home/state/child-agy.agy-hooks"
+  cat > "$case_dir/fakebin/rm" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" $hook_root "*) exit 1 ;;
+esac
+exec /bin/rm "\$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "agy-child-hook-cleanup: teardown succeeded after hook-root removal failed"
+  [ -e "$home/state/child-agy.meta" ] || fail "agy-child-hook-cleanup: failed hook cleanup erased child metadata"
+  [ -d "$hook_root" ] || fail "agy-child-hook-cleanup: failed hook cleanup erased the hook root"
+  assert_grep "failed to remove agy hook root '$hook_root'" "$case_dir/stderr" \
+    "agy-child-hook-cleanup: failure did not report the retained hook root"
+
+  rm -f "$case_dir/fakebin/rm"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "agy-child-hook-cleanup: retry should complete after hook removal succeeds"
+  [ ! -e "$home/state/child-agy.meta" ] || fail "agy-child-hook-cleanup: successful retry retained child metadata"
+  [ ! -e "$hook_root" ] || fail "agy-child-hook-cleanup: successful retry retained the hook root"
+  pass "forced AGY child teardown retains metadata until hook cleanup succeeds"
+}
+
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
   local case_dir home lock ready release holder_pid rc waited=0 child
   case_dir=$(make_case descendant-locks)
@@ -3683,6 +3735,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
+test_forced_secondmate_agy_hook_cleanup_retains_record_on_failure
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close

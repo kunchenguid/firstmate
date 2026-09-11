@@ -3051,6 +3051,12 @@ cleanup_firstmate_home_children() {
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
+    if [ "$child_harness" = agy ]; then
+      if ! rm -rf "$sub_state/$child_id.agy-hooks"; then
+        echo "error: failed to remove agy hook root '$sub_state/$child_id.agy-hooks'; retaining child record" >&2
+        return 1
+      fi
+    fi
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
@@ -3058,8 +3064,6 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
       "$sub_state/.$child_id.branch-outcome-index"
-    [ "$child_harness" = agy ] || continue
-    rm -rf "$sub_state/$child_id.agy-hooks"
   done
 }
 
