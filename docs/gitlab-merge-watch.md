@@ -3,6 +3,7 @@
 Empirical record for the merge watch and the merge path on GitLab, alongside the existing GitHub ones.
 The arming, poll, and missing-`glab` evidence through the GitHub-unaffected case was collected on 2026-07-21; "Merging a merge request" was run on 2026-08-22.
 Every output is reproduced exactly.
+Handing GitLab issues to firstmate by label is a separate flow; [gitlab-issue-intake.md](gitlab-issue-intake.md) is its operating guide.
 
 ## Versions
 
