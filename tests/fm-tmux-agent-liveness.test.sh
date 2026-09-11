@@ -59,6 +59,12 @@ ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 ln -s "$SLEEP_BIN" "$LAB/bin/omp"
 ln -s "$SLEEP_BIN" "$LAB/bin/ompd"
 ln -s "$SLEEP_BIN" "$LAB/bin/comp"
+# agy (Antigravity) is a single binary whose live process name is the bare
+# word `agy`; the two decoys are the substrings an unanchored glob would
+# misread.
+ln -s "$SLEEP_BIN" "$LAB/bin/agy"
+ln -s "$SLEEP_BIN" "$LAB/bin/agyw"
+ln -s "$SLEEP_BIN" "$LAB/bin/magyar"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
@@ -193,6 +199,22 @@ for decoy in ompd comp; do
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
+
+# --- agy's bare binary name --------------------------------------------------
+# agy (Antigravity) runs as a single binary whose live process name is exactly
+# `agy`, with no path component to fall back on, so the anchored name is the
+# only signal and the two decoys prove it never widens into a substring match.
+new_window agy "$LAB/bin/agy" 900
+wait_for_state "$SESSION:agy" alive \
+  || fail "agy's bare binary name must classify alive"
+pass "tmux liveness: agy's bare binary name classifies alive"
+
+for decoy in agyw magyar; do
+  new_window "decoy-$decoy" "$LAB/bin/$decoy" 900
+  wait_for_state "$SESSION:decoy-$decoy" ambiguous \
+    || fail "'$decoy' merely contains 'agy' and must not classify as a live agent pane"
+done
+pass "tmux liveness: unrelated agy-containing command names stay ambiguous"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that
