@@ -318,7 +318,11 @@ run_gemini_hook() {  # <settings.json> <hook-event>
 
 run_agy_hook() {  # <hooks.json> <hook-event>
   local cmd
-  cmd=$(jq -r ".firstmate.$2[0].command" "$1")
+  if [ "$2" = PostToolUse ]; then
+    cmd=$(jq -r ".firstmate.$2[0].hooks[0].command" "$1")
+  else
+    cmd=$(jq -r ".firstmate.$2[0].command" "$1")
+  fi
   [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
   printf '{}' | sh -c "$cmd"
 }

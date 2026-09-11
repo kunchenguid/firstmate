@@ -3563,7 +3563,7 @@ EOF
         [ "$RELAUNCH" -eq 1 ] || SPAWN_FRESH_WIRING_PENDING=1
         agy_prepare_hook_root "$STATE_REAL/$ID.agy-hooks" "$STATE_REAL" || exit 1
         agy_write_hook_file "$AGY_HOOK_SETTINGS" "$STATE_REAL" <<EOF || exit 1
-{"firstmate":{"PreInvocation":[{"command":"$a_pre"}],"PostToolUse":[{"command":"$a_progress"}],"Stop":[{"command":"$a_stop"}]}}
+{"firstmate":{"PreInvocation":[{"command":"$a_pre"}],"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"$a_progress"}]}],"Stop":[{"command":"$a_stop"}]}}
 EOF
       fi
       ;;
