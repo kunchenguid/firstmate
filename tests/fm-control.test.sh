@@ -731,7 +731,7 @@ test_agy_interrupt_records_unconfirmed_state() {
   dir=$(new_case agy-unconfirmed)
   add_task "$dir" t1 agy
   alive_as "$dir" agy
-  gen=$($ROOT/bin/fm-busy-event.sh arm "$dir/home/state" t1)
+  gen=$("$ROOT"/bin/fm-busy-event.sh arm "$dir/home/state" t1)
   printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
   before=$(cat "$dir/home/state/t1.busy-state")
   out=$(run_control "$dir" t1 interrupt); rc=$?

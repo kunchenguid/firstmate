@@ -233,7 +233,7 @@ run_agy_canonical_lifecycle() (
   printf 'tmux\n' > "$home/config/backend"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-brief.sh" "$task" lifecycle --scout \
     >/dev/null || die "agy ($version): could not scaffold the lifecycle brief"
-  cat > "$home/data/$task/brief.md" <<EOF
+  cat > "$home/data/$task/brief.md" <<'EOF'
 # Task
 
 Run the exact shell command `sleep 60` and wait for it to finish.
@@ -280,9 +280,10 @@ EOF
     sleep 1
   done
   [ "$verdict" = empty ] || die "agy ($version): control interrupt did not return to a proven empty composer"
+  lifecycle_tool_brief="Run the exact shell command \`sleep 60\` and wait for it to finish. Do not run any other command."
   FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-send.sh" "$task" \
-    'Run the exact shell command `sleep 60` and wait for it to finish. Do not run any other command.' \
+    "$lifecycle_tool_brief" \
     >/dev/null 2>&1 || die "agy ($version): data-plane turn could not be submitted"
   for _ in $(seq 1 120); do
     capture=$(TMUX_TMPDIR="$lab/tmux" tmux capture-pane -p -t "$target" 2>/dev/null || true)
@@ -297,9 +298,10 @@ EOF
   grep -Fq 'unknown fm-interrupt' "$state/$task.busy-state" 2>/dev/null || \
     grep -Fq 'state=unknown' "$state/$task.busy-state" \
     || die "agy ($version): data-plane interrupt did not preserve unknown semantic state"
+  lifecycle_natural_brief="Run \`printf AGY_LIFECYCLE_DONE\` exactly once, then stop."
   FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-send.sh" "$task" \
-    'Run `printf AGY_LIFECYCLE_DONE` exactly once, then stop.' >/dev/null 2>&1 \
+    "$lifecycle_natural_brief" >/dev/null 2>&1 \
     || die "agy ($version): natural turn could not be submitted"
   for _ in $(seq 1 120); do
     if [ -f "$state/$task.turn-ended" ] && grep -Fq 'state=idle' "$state/$task.busy-state" 2>/dev/null; then
