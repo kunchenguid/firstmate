@@ -1574,9 +1574,10 @@ LK_ID=$(printf 'k%.0s' $(seq 1 64))
 [ "${#LK_ID}" -eq 64 ] || fail "fixture invalid: long source id is ${#LK_ID} chars"
 pe_register "$HLK" lavish "$LK_ID" -- "$EP_SOURCE_CMD" >/dev/null
 LK_SOURCE="$HLK/state/procevent/$LK_ID.source"
-awk '/^argv:$/ { print; exit } { print }' "$LK_SOURCE" > "$LK_SOURCE.tmp" \
-  && cat "$LK_SOURCE.tmp" > "$LK_SOURCE" && rm -f "$LK_SOURCE.tmp" \
-  || fail "could not damage the long-id registration"
+if ! { awk '/^argv:$/ { print; exit } { print }' "$LK_SOURCE" > "$LK_SOURCE.tmp" \
+  && cat "$LK_SOURCE.tmp" > "$LK_SOURCE" && rm -f -- "$LK_SOURCE.tmp"; }; then
+  fail "could not damage the long-id registration"
+fi
 lk_out=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=2 pe "$HLK" reconcile) || true
 assert_contains "$lk_out" "failed=1" "the long-id launch was not reported failed: $lk_out"
 lk_key=$(launch_failed_wake_keys "$HLK" "$LK_ID")
