@@ -443,6 +443,36 @@ test_agy_hooks_refuse_symlinked_root() {
   pass "agy spawn refuses symlinked hook roots without touching their targets"
 }
 
+test_agy_hooks_refuse_preexisting_root_types() {
+  local rec id=busy-agy-preexisting-file out status state root before
+  rec=$(make_spawn_case agy-preexisting-file agy "$id")
+  read_case_record "$rec"
+  state="$HOME_DIR/state"
+  root="$state/$id.agy-hooks"
+  printf 'user-owned\n' > "$root"
+  before="$CASE_DIR/preexisting-file.before"
+  cp "$root" "$before"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "agy spawn must refuse a pre-existing hook file: $out"
+  cmp -s "$root" "$before" || fail "agy spawn modified a pre-existing hook file"
+
+  rec=$(make_spawn_case agy-preexisting-dir agy busy-agy-preexisting-dir)
+  read_case_record "$rec"
+  state="$HOME_DIR/state"
+  root="$state/busy-agy-preexisting-dir.agy-hooks"
+  mkdir -p "$root/nested"
+  printf 'user-owned\n' > "$root/nested/sentinel"
+  before="$CASE_DIR/preexisting-dir.before"
+  cp "$root/nested/sentinel" "$before"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" busy-agy-preexisting-dir "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "agy spawn must refuse a pre-existing hook directory: $out"
+  cmp -s "$root/nested/sentinel" "$before" \
+    || fail "agy spawn modified a pre-existing hook directory"
+  pass "agy spawn preserves pre-existing hook files and directories during abort cleanup"
+}
+
 test_agy_hooks_refuse_symlinked_file() {
   local rec id=busy-agy-file-symlink out status state target settings
   rec=$(make_spawn_case agy-file-symlink agy "$id")
@@ -639,6 +669,7 @@ test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_agy_hooks_semantic_lifecycle
 test_agy_hooks_refuse_symlinked_root
+test_agy_hooks_refuse_preexisting_root_types
 test_agy_hooks_refuse_symlinked_file
 test_agy_prepare_failure_removes_hook_root
 test_agy_hooks_stale_incarnation_harmless

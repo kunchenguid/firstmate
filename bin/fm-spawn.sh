@@ -920,6 +920,8 @@ SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
 SPAWN_FRESH_WIRING_PENDING=0
 AGY_HOOK_ROOT=
+AGY_HOOK_ROOT_PATH=
+AGY_HOOK_ROOT_CREATED=0
 AGY_HOOK_SETTINGS=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
@@ -935,12 +937,20 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
 spawn_fresh_wiring_rollback() {
+  local status=0
   [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] || return 0
-  if [ -n "${AGY_HOOK_ROOT:-}" ] && ! rm -rf -- "$AGY_HOOK_ROOT"; then
-    echo "error: failed-dispatch cleanup did not remove agy hook state for $ID" >&2
-    return 1
+  if [ "${AGY_HOOK_ROOT_CREATED:-0}" = 1 ]; then
+    if [ -n "${AGY_HOOK_ROOT:-}" ] && ! rm -rf -- "$AGY_HOOK_ROOT"; then
+      echo "error: failed-dispatch cleanup did not remove agy hook state for $ID" >&2
+      status=1
+    fi
+  elif [ -n "${AGY_HOOK_ROOT_PATH:-}" ] \
+      && { [ -e "$AGY_HOOK_ROOT_PATH" ] || [ -L "$AGY_HOOK_ROOT_PATH" ]; }; then
+    echo "warning: failed-dispatch cleanup retained pre-existing agy hook path $AGY_HOOK_ROOT_PATH" >&2
+    status=1
   fi
   SPAWN_FRESH_WIRING_PENDING=0
+  return "$status"
 }
 
 spawn_fresh_commit_rollback() {
@@ -2094,6 +2104,7 @@ json_escape() {
 
 agy_prepare_hook_root() {
   local root=$1 state_root=$2 root_real agents_real
+  AGY_HOOK_ROOT_PATH=$root
   if [ -e "$root" ] || [ -L "$root" ]; then
     echo "error: refusing pre-existing agy hook root $root" >&2
     return 1
@@ -2102,6 +2113,7 @@ agy_prepare_hook_root() {
     echo "error: could not create agy hook root $root" >&2
     return 1
   fi
+  AGY_HOOK_ROOT_CREATED=1
   AGY_HOOK_ROOT=$root
   if [ -L "$root" ]; then
     echo "error: refusing symlinked agy hook root $root" >&2
