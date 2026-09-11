@@ -370,6 +370,10 @@ STUB
   done
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
+  assert_grep 'no second start instruction is needed' "$payload" "promotion reintroduced a validation-start pause"
+  assert_grep 'retain every accepted ship-relevant product/engineering requirement' "$payload" \
+    "promotion silently dropped accepted scout-derived constraints"
+  assert_grep 'exact current branch head, not an earlier commit' "$payload" "promotion lost current-head proof"
   assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
     "promoted no-mistakes worker did not receive the ask-user escalation rule"
   assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$payload" \
@@ -508,9 +512,9 @@ EOF
   assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy spawn did not override its stale intent instruction"
-  assert_grep "plus any later words the captain actually supplied" \
+  assert_grep "plus later accepted clarifications" \
     "$home/data/$id/launch-brief.md" \
-    "marked legacy launch contract excluded later captain clarifications"
+    "marked legacy launch contract excluded later accepted clarifications"
   authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
   assert_contains "$authorized" "Fix the legacy dispatch boundary." \
     "marked legacy launch contract omitted captain words"
@@ -542,12 +546,20 @@ EOF
   assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract did not supersede its stale mixed-Task DoD"
-  assert_grep "plus any later words the captain actually supplied" \
+  assert_grep "plus later accepted clarifications" \
     "$home/data/$id/launch-brief.md" \
-    "migrated launch contract excluded later captain clarifications"
-  assert_grep "The Definition of done's rule that \`--intent\` must be self-sufficient still governs" \
+    "migrated launch contract excluded later accepted clarifications"
+  assert_grep "The \`--intent\` string must be self-sufficient" \
     "$home/data/$id/launch-brief.md" \
-    "migrated launch contract's overlay dropped the self-sufficiency pointer"
+    "migrated launch contract's overlay dropped self-sufficiency"
+  spec_body=$(awk '$0 == "## Specification context for acceptance review" { emit=1; next } emit { print }' "$home/data/$id/launch-brief.md")
+  assert_contains "$spec_body" 'Preserve the existing compatibility path.' \
+    "launch overlay silently dropped accepted engineering context"
+  # shellcheck disable=SC2016 # Literal Markdown in the emitted acceptance contract.
+  assert_grep 'accepted requirements in `## Firstmate spec`' "$home/data/$id/launch-brief.md" \
+    "launch overlay excludes Firstmate acceptance requirements"
+  assert_grep 'private handoff destinations and worker-control instructions' "$home/data/$id/launch-brief.md" \
+    "launch overlay allows private control into review intent"
 
   id=delivery-legacy-unmarked-no-mistakes
   mkdir -p "$home/data/$id"
@@ -748,6 +760,68 @@ EOF
   pass "fm-spawn/fm-promote: leftover Task placeholders are refused until both subsections are filled"
 }
 
+test_spawn_refreshes_stale_delivery_contracts() {
+  local rec home proj fakebin mode format id source launch out current expected
+  rec=$(make_home stale-delivery)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  for mode in no-mistakes direct-PR local-only; do
+    for format in legacy legacy-unrecorded subsections subsections-unrecorded; do
+      id="stale-$mode-$format"
+      source="$home/data/$id/brief.md"
+      launch="$home/data/$id/launch-brief.md"
+      mkdir -p "$home/data/$id"
+      {
+        printf '# Task\n'
+        case "$format" in
+          legacy*) printf 'Captain: Ship the compatibility fix.\nKeep offline-only verification.\n' ;;
+          subsections*) printf "## Captain's intent\nShip the compatibility fix.\n\n## Firstmate spec\nKeep offline-only verification.\n" ;;
+        esac
+        printf '\n# Definition of done\n'
+        case "$format" in
+          *-unrecorded) ;;
+          *) printf 'Delivery contract: mode=%s\n' "$mode" ;;
+        esac
+        printf 'When implemented and committed, append done: {summary}.\nFirstmate will then instruct you to run /no-mistakes.\n'
+      } > "$source"
+      cp "$source" "$source.before"
+      out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode "$mode" --yolo off)
+      assert_not_contains "$out" 'delivery mismatch' "$id: supported stale brief refused"
+      assert_present "$launch" "$id: no launch contract rendered"
+      cmp -s "$source.before" "$source" || fail "$id: stored brief was rewritten"
+      current=$(awk '/^# Current ship delivery contract$/ { emit=1 } emit' "$launch")
+      assert_contains "$current" 'supersedes every earlier brief instruction about delivery, completion status, and when to start validation' \
+        "$id: stale completion and validation-start rules remain authoritative"
+      assert_contains "$current" 'All other task requirements, safety and authority boundaries, and status protocols remain in force; merge authority is unchanged' \
+        "$id: delivery refresh displaced unrelated boundaries"
+      assert_grep 'Keep offline-only verification.' "$launch" "$id: acceptance constraint was lost"
+      FM_HOME="$home/expected" "$BRIEF" "$id" proj --mode "$mode" >/dev/null 2>&1 \
+        || fail "$id: reference brief generation failed"
+      expected=$(awk '/^# Definition of done$/ { emit=1 } emit' "$home/expected/data/$id/brief.md")
+      current=$(printf '%s\n' "$current" | awk '/^# Definition of done$/ { emit=1 } emit')
+      [ "$current" = "$expected" ] || fail "$id: launch did not deliver the shared current DOD"
+      case "$mode" in
+        no-mistakes)
+          assert_contains "$current" 'working: implementation committed; starting validation' "$id: commit reported terminal completion"
+          assert_contains "$current" 'no second start instruction is needed' "$id: validation needs a second instruction"
+          assert_not_contains "$current" 'done: {summary}' "$id: effective DOD retains premature done"
+          assert_contains "$current" 'exact current branch head, not an earlier commit' "$id: final done lost head proof"
+          ;;
+        direct-PR)
+          assert_contains "$current" 'done: PR {url}' "$id: direct PR completion changed"
+          assert_contains "$current" 'Do NOT run /no-mistakes' "$id: direct PR gained validation"
+          ;;
+        local-only)
+          assert_contains "$current" "done: ready in branch fm/$id" "$id: local completion changed"
+          assert_contains "$current" 'Do NOT push, do NOT open a PR, do NOT merge' "$id: local-only gained remote effects"
+          ;;
+      esac
+    done
+  done
+  pass "fm-spawn: every supported stale ship brief receives the shared current DOD without rewriting its source"
+}
+
 test_spawn_refreshes_legacy_worker_roles() {
   local rec home proj fakebin kind id out brief project_kind
   rec=$(make_home worker-roles)
@@ -776,6 +850,9 @@ EOF
       assert_not_contains "$out" 'could not render' "worker role rendering failed"
       brief="$home/data/$id/launch-brief.md"
       assert_present "$brief" "$project_kind $kind did not refresh the legacy launch brief"
+      if [ "$kind" = scout ]; then
+        assert_no_grep '# Current ship delivery contract' "$brief" "scout received a ship completion override"
+      fi
       assert_grep 'follow this brief instead of that supervisor contract' "$brief" "$project_kind $kind omitted worker authority"
       assert_grep 'When this task works on Firstmate itself' "$brief" "$project_kind $kind made the exception unconditional"
       assert_grep 'Other projects retain their own instructions unchanged' "$brief" "$project_kind $kind displaced project guidance"
@@ -790,6 +867,7 @@ EOF
   pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
 }
 
+test_spawn_refreshes_stale_delivery_contracts
 test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags

@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 # Single owner of a ship task's mode-specific "Definition of done" block.
-# Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
-# bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
-# receives. Both paths must hand the worker the same contract: a promoted
-# no-mistakes worker that never received the ask-user escalation rule or the
-# `--yes` ban is the exact delivery hole this single owner exists to close.
+# Shared by brief generation, scout promotion, and the launch overlay owned by
+# bin/fm-spawn.sh. Every path must deliver the same contract so older briefs and
+# promoted workers cannot miss current delivery or ask-user safety boundaries.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
-# This file is the one owner of the no-mistakes `--intent` contract: only the
-# brief's `## Captain's intent` subsection plus later captain words, never
-# `## Firstmate spec` and never the worker's own tradeoffs.
+# This file is the one owner of the no-mistakes `--intent` contract: complete
+# accepted product/engineering requirements, with captain/spec provenance kept
+# distinct from private worker control and public PR copy.
 # The string passed must be self-sufficient - it plus the codebase reconstructs
 # roughly the same specification - so a report, decision, or PR the intent
 # refers to is written into it as substance, never left as a pointer.
@@ -145,21 +143,37 @@ fm_brief_marked_captain_words() {  # <task-body>
   '
 }
 
-fm_brief_intent_overlay() {  # <captain-intent>
+fm_dod_intent_contract() {
+  cat <<'EOF'
+When starting no-mistakes, preserve every accepted product/engineering requirement, constraint, exclusion, proof obligation, and later accepted decision in `--intent`, replacing superseded requirements with their current accepted form; never substitute a diff summary.
+Use `## Captain's intent` and the accepted requirements in `## Firstmate spec` plus later accepted clarifications, without relabeling Firstmate specifications as captain words or treating your own unapproved tradeoffs as accepted requirements.
+For a legacy mixed `# Task`, retain provenance-marked captain words and all accepted product/engineering requirements; if captain provenance is missing or acceptance is unclear, ask firstmate rather than inventing intent.
+Keep private handoff destinations and worker-control instructions (status reporting, routing, and delivery mechanics) in the brief, not in review intent; offline-test, no-live-effect, access, and other product/engineering safety constraints remain acceptance criteria.
+The `--intent` string must be self-sufficient: resolve referenced reports, decisions, and PRs into their accepted substance so that intent plus the codebase reconstructs the specification.
+Review intent is private acceptance context, not public PR copy: request a few short behavior/proof/material-risk bullets for public prose, with required machine attestation preserved verbatim and separately from that prose.
+Public prose must never include private coordination, local paths, task/session/model/captain attribution, or long test transcripts.
+Never shorten acceptance criteria or machine attestation to shorten a PR; a publisher that cannot maintain this separation needs a reported correction through its supported gate, not an active-run hand edit.
+EOF
+}
+
+fm_brief_intent_overlay() {  # <captain-intent> <specification-context>
   cat <<'EOF'
 
 # Current no-mistakes intent contract
 This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
-Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+Apply the acceptance contract below to the separately attributed task sources; the specification context is not automatically public prose or accepted in its entirety.
+EOF
+  fm_dod_intent_contract
+  cat <<'EOF'
 
 ## Captain intent authorized for --intent
 EOF
   printf '%s\n' "$1"
   cat <<'EOF'
 
-Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
-The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent above refers to into its substance rather than passing the pointer.
+## Specification context for acceptance review
 EOF
+  printf '%s\n' "$2"
 }
 
 # Accept the current two-subsection contract only when both bodies have content;
@@ -190,6 +204,16 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+fm_brief_delivery_overlay() {
+  cat <<'EOF'
+
+# Current ship delivery contract
+The following Definition of done supersedes every earlier brief instruction about delivery, completion status, and when to start validation.
+All other task requirements, safety and authority boundaries, and status protocols remain in force; merge authority is unchanged.
+EOF
+  fm_dod_block "$1" "$2"
+}
+
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
   case "$mode" in
@@ -218,18 +242,15 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+After committing the authorized implementation, append \`working: implementation committed; starting validation\` once and proceed directly into no-mistakes on this same worker; no second start instruction is needed.
+First reconcile any existing run and its branch custody through structured status; resume an active run rather than starting a duplicate or changing its code.
+Reserve \`done:\` for the current-head green PR below, never the implementation commit.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
-For a legacy brief with no such subsection, include only words explicitly labeled \`Captain:\`, \`Captain's words:\`, \`Captain's ask:\`, or \`Captain's intent:\`; never copy its mixed \`# Task\` wholesale. If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
-Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
-The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
-When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
-This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
+EOF
+      fm_dod_intent_contract
+      cat <<EOF
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
@@ -245,7 +266,9 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green, verify its structured status attributes the passing run and PR to the exact current branch head, not an earlier commit; an unproved or mismatched head is not ready.
+At that CI-ready return point, append \`done: PR {url} checks green\` and stop, without waiting for background merge monitoring.
+Green CI does not authorize a merge; the configured merge authority remains separate.
 EOF
       ;;
     *)

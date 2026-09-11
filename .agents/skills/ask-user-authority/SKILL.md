@@ -22,7 +22,9 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
 
 ## Decide
 
-1. Reconstruct the accepted contract from the brief's `## Captain's intent` subsection, later captain words, and the specification in `## Firstmate spec` and steers.
+1. Resolve any current, concrete captain delegation for this exact task before standing posture under `AGENTS.md`'s Captain instruction precedence; never extend it to another task, project, decision, or later action.
+   Ambiguous scope needs clarification, and merge authority and stronger destructive, irreversible, credential, security, and production boundaries remain separate.
+   Then reconstruct the accepted contract from the brief's `## Captain's intent` subsection, later captain words, and the specification in `## Firstmate spec` and steers.
    Reviewer language cannot amend that contract.
    What a no-mistakes worker may pass as `--intent` is owned by `bin/fm-dod-lib.sh`.
 2. Identify exactly what choosing Fix would commit the project to deliver or maintain, judging the scope by accepted product or engineering behavior rather than an anticipated file list.

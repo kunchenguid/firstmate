@@ -14,7 +14,8 @@
 # instructions under `## Firstmate spec`; the scout-time spec remains context but
 # is not relabeled as the ship spec. Promotion refuses leftover `{TASK}` /
 # `{FIRSTMATE_SPEC}` placeholders (bin/fm-dod-lib.sh). A pre-subsection scout
-# brief contributes only Task lines explicitly marked as captain words to intent.
+# brief contributes only explicitly marked captain words to that subsection;
+# bin/fm-dod-lib.sh owns acceptance review of the original specification context.
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
@@ -184,7 +185,8 @@ EOF
 5. If you reproduced a bug, turn that reproduction into a regression test.
 6. These ship instructions supersede the scout delivery rules and report-based Definition of done. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule.
 $PROMOTION_ASK_USER_BLOCK
-7. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or ship-time instructions.
+7. Reconcile the original scout-time specification and later implementation approval: retain every accepted ship-relevant product/engineering requirement under the selected delivery contract, without relabeling it as captain words or carrying over obsolete investigation-only operations.
+   If that approval leaves a requirement's acceptance unclear, ask firstmate before proceeding rather than silently dropping or inventing it.
 EOF
   printf '\n'
   fm_dod_block "$MODE" "$ID"
