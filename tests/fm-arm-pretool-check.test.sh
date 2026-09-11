@@ -180,6 +180,17 @@ matrix_case K25 deny 'while true; do ps aux | grep "lavish-axi poll" | awk '"'"'
 matrix_case K26 deny 'if true; then lsof -ti :3000 | xargs kill -9; fi'
 matrix_case K27 allow 'fuser 3000/tcp'
 matrix_case K28 allow 'pkill -P$$'
+# K29-K36: kill-all via pid -1, a discovery wrapped in the producer node, an
+# xargs pkill by name and a wrapped xargs kill utility; and the query/help
+# forms plus the negative process-group form that must stay allowed.
+matrix_case K29 deny 'kill -9 -1'
+matrix_case K30 deny '(pgrep -f node) | xargs kill'
+matrix_case K31 deny 'echo node | xargs pkill -f'
+matrix_case K32 deny 'pgrep -f node | xargs -n1 sudo kill'
+matrix_case K33 allow 'kill -- -$pgid'
+matrix_case K34 allow 'kill -1 1234'
+matrix_case K35 allow 'command -v pkill'
+matrix_case K36 allow 'pkill --help'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -261,6 +272,7 @@ test_direct_policy_contract() {
   assert_policy direct-loop-broad-pkill $'deny\tbroad-watcher-kill' 'while true; do pkill -f fm-watch; done'
   assert_policy direct-loop-broad-kill-pgrep $'deny\tbroad-watcher-kill' 'until false; do kill $(pgrep -f fm-watch); done'
   assert_policy direct-watcher-pgrep-xargs-kill $'deny\tbroad-watcher-kill' 'pgrep -f fm-watch | xargs kill'
+  assert_policy direct-watcher-subshell-pgrep-xargs-kill $'deny\tbroad-watcher-kill' '(pgrep -f fm-watch) | xargs kill'
   assert_policy direct-loop-no-kill-allowed allow 'for f in 1; do echo fm-watch; done'
   assert_policy direct-pipeline $'deny\twatcher-pipeline' 'bin/fm-watch-arm.sh | cat'
   assert_policy direct-leading-redirection $'deny\twatcher-redirection' '>/tmp/out bin/fm-watch-arm.sh'
@@ -337,6 +349,26 @@ test_broad_process_kill_contract() {
   assert_policy bpk-if-lsof-xargs $'deny\tbroad-process-kill' 'if true; then lsof -ti :3000 | xargs kill -9; fi'
   assert_policy bpk-loop-pidof-cmdsub $'deny\tbroad-process-kill' 'for x in 1; do kill $(pidof node); done'
   assert_policy bpk-loop-ps-cmdsub $'deny\tbroad-process-kill' 'until false; do kill $(ps aux | grep "lavish-axi poll" | awk '"'"'{print $2}'"'"'); done'
+  # kill targeting pid -1 signals every process the caller may reach.
+  assert_policy bpk-kill-all-signal $'deny\tbroad-process-kill' 'kill -9 -1'
+  assert_policy bpk-kill-all-dashdash $'deny\tbroad-process-kill' 'kill -- -1'
+  assert_policy bpk-kill-all-named-signal $'deny\tbroad-process-kill' 'kill -s TERM -1'
+  assert_policy bpk-kill-all-signal-dashdash $'deny\tbroad-process-kill' 'kill -TERM -- -1'
+  # A discovery wrapped in the producer node's subshell, group, or substitution
+  # still feeds the xargs kill.
+  assert_policy bpk-subshell-pgrep-xargs $'deny\tbroad-process-kill' '(pgrep -f node) | xargs kill'
+  assert_policy bpk-group-pgrep-xargs $'deny\tbroad-process-kill' '{ pgrep -f a; pgrep -f b; } | xargs kill'
+  assert_policy bpk-cmdsub-pgrep-echo-xargs $'deny\tbroad-process-kill' 'echo $(pgrep -f node) | xargs kill'
+  assert_policy bpk-subshell-ps-xargs $'deny\tbroad-process-kill' '(ps aux | grep node | awk '"'"'{print $2}'"'"') | xargs kill'
+  # xargs pkill/killall is broad by name whatever feeds it; a kill utility
+  # behind a known wrapper or a separated long xargs option is still found.
+  assert_policy bpk-xargs-pkill-by-name $'deny\tbroad-process-kill' 'echo node | xargs pkill -f'
+  assert_policy bpk-xargs-pkill-n1 $'deny\tbroad-process-kill' 'cat names | xargs -n1 pkill -f'
+  assert_policy bpk-xargs-killall $'deny\tbroad-process-kill' 'cat names | xargs killall'
+  assert_policy bpk-xargs-sudo-kill $'deny\tbroad-process-kill' 'pgrep -f node | xargs -n1 sudo kill'
+  assert_policy bpk-xargs-command-kill $'deny\tbroad-process-kill' 'pgrep -f node | xargs -n1 command kill'
+  assert_policy bpk-xargs-env-kill $'deny\tbroad-process-kill' 'pgrep -f node | xargs -n1 env kill'
+  assert_policy bpk-xargs-long-option-kill $'deny\tbroad-process-kill' 'pgrep -f node | xargs --max-args 1 kill'
 
   # Caller-scoped kills - the safe forms the guard must NOT refuse - selecting by
   # parent, process group, or session, or by a specific pid the caller chose.
@@ -349,6 +381,23 @@ test_broad_process_kill_contract() {
   assert_policy bpk-allow-pgrep-scoped-xargs allow 'pgrep -P $$ | xargs kill'
   assert_policy bpk-allow-pgrep-scoped-xargs-sep allow 'pgrep -P $$ | xargs -n 1 kill'
   assert_policy bpk-allow-literal-pid allow 'kill 76803'
+  # A negative process-group target, a variable group, or -1 as the SIGHUP
+  # signal spec are not the kill-all form.
+  assert_policy bpk-allow-kill-pgroup-var allow 'kill -- -$pgid'
+  assert_policy bpk-allow-kill-pgroup-literal allow 'kill -- -12345'
+  assert_policy bpk-allow-kill-pgroup-attached allow 'kill -12345'
+  assert_policy bpk-allow-kill-sighup-pid allow 'kill -1 1234'
+  assert_policy bpk-allow-kill-plain-pid allow 'kill 1234'
+  # Query and help forms of the kill tools execute no kill.
+  assert_policy bpk-allow-command-v-pkill allow 'command -v pkill'
+  assert_policy bpk-allow-command-v-pkill-redirected allow 'command -v pkill >/dev/null 2>&1'
+  assert_policy bpk-allow-command-v-killall allow 'command -v killall'
+  assert_policy bpk-allow-command-v-pgrep allow 'command -v pgrep'
+  assert_policy bpk-allow-command-v-lsof allow 'command -v lsof'
+  assert_policy bpk-allow-pkill-help allow 'pkill --help'
+  assert_policy bpk-allow-pkill-version allow 'pkill -V'
+  assert_policy bpk-allow-killall-list allow 'killall -l'
+  assert_policy bpk-allow-xargs-pkill-scoped allow 'echo node | xargs pkill -P $$'
   assert_policy bpk-allow-literal-signal allow 'kill -9 "$pid"'
   assert_policy bpk-allow-parent-attached allow 'pkill -P12345'
   assert_policy bpk-allow-parent-attached-self allow 'pkill -P$$'
@@ -512,6 +561,11 @@ test_prefilter_is_strict_superset() {
   "$CHECK" --command 'kill $(fuser 3000/tcp 2>/dev/null)' >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 2 ] || fail "prefilter must delegate a kill fed by fuser, not fast-allow it, got exit $rc"
+  # A kill of pid -1 carries only the bare "kill" bytes, so "kill" itself is a
+  # trigger substring rather than only pkill/killall.
+  "$CHECK" --command 'kill -9 -1' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a kill of pid -1, not fast-allow it, got exit $rc"
   # Obfuscation across a quote split loses the literal pkill bytes; the prefilter
   # normalizes quotes first, so it still delegates and the classifier still denies.
   "$CHECK" --command 'pk"ill" -f node' >/dev/null 2>&1

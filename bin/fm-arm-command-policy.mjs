@@ -24,7 +24,7 @@ const REASONS = {
   "watcher-bundled": "a protected watcher command must be the sole final command after approved setup nodes",
   "watcher-nested": "a protected watcher command must not run through a wrapper, substitution, or compound command",
   "broad-watcher-kill": "a broad process kill targeting the firstmate watcher is forbidden",
-  "broad-process-kill": "a process kill that matches by command line or name across the shared process table is forbidden; target your own process group, your own descendants, or a specific pid",
+  "broad-process-kill": "a process kill that matches by command line or name across the shared process table, or signals every process via pid -1, is forbidden; target your own process group, your own descendants, or a specific pid",
   "unclassifiable-protected-command": "unsupported or malformed shell syntax contains a protected watcher command",
   "watcher-direct": "bin/fm-watch.sh must not be run directly; arm the watcher with bin/fm-watch-arm.sh or run bin/fm-watch-checkpoint.sh instead",
 };
@@ -572,6 +572,7 @@ export function commandPosition(tokens) {
   const prefixAssignments = index;
   const wrappers = [];
   let unresolvedWrapperOption = false;
+  let query = false;
   const wrapperPayloads = [];
   let command = words[index];
   while (command) {
@@ -581,6 +582,7 @@ export function commandPosition(tokens) {
       const options = consumeWrapperOptions(name, words, index + 1);
       unresolvedWrapperOption ||= options.unresolved;
       wrapperPayloads.push(...options.embeddedPayloads);
+      if (name === "command" && words.slice(index + 1, options.index).some((word) => /^-[A-Za-z]*[vV]/.test(word.value))) query = true;
       index = options.index;
       command = words[index];
       continue;
@@ -615,7 +617,7 @@ export function commandPosition(tokens) {
     }
     break;
   }
-  return { words, index, command, wrappers, prefixAssignments, unresolvedWrapperOption, wrapperPayloads };
+  return { words, index, command, wrappers, prefixAssignments, unresolvedWrapperOption, wrapperPayloads, query };
 }
 
 const PROTECTED_SCRIPTS = [
@@ -791,16 +793,21 @@ function isUnscopedDiscovery(position) {
   return false;
 }
 
-// `xargs kill`/`xargs pkill` (the pipe form of discover-then-kill). The utility
-// is the first non-option argument after xargs. An option whose value is
-// attached (-n1, -P4, -I{}) is one word; an option whose letter ends the token
-// and takes a value (-n 1, -I {}, -L 1) consumes the next argument too. The
-// arguments are read from the node's tokens rather than its words because the
-// lexer reads a bare `{}` replstr as an empty brace group, not a word.
+// The kill utility an xargs node runs, if any: "fed" for a plain `kill` (broad
+// only when an unscoped discovery feeds the pipe) or "broad" for an unscoped
+// `pkill`/`killall` (broad by name whatever feeds it). The utility is the first
+// non-option argument after xargs, unwrapped through the same wrapper set as a
+// command position. An option whose value is attached (-n1, -P4, -I{}) is one
+// word; a short option whose letter ends the token and takes a value (-n 1,
+// -I {}, -L 1) or a value-taking long option without `=` (--max-args 1)
+// consumes the next argument too. The arguments are read from the node's
+// tokens rather than its words because the lexer reads a bare `{}` replstr as
+// an empty brace group, not a word.
 const XARGS_VALUE_OPTIONS = /[nILPsdEaJRS]$/;
-function nodeIsXargsKill(position, tokens) {
-  if (!position.command) return false;
-  if (!["xargs", "gxargs"].includes(basename(position.command.value))) return false;
+const XARGS_VALUE_LONG_OPTIONS = new Set(["arg-file", "delimiter", "eof", "max-args", "max-chars", "max-lines", "max-procs", "process-slot-var"]);
+function xargsKillKind(position, tokens) {
+  if (!position.command) return "";
+  if (!["xargs", "gxargs"].includes(basename(position.command.value))) return "";
   const args = [];
   let skipRedirectionTarget = false;
   for (const token of tokens.slice(tokens.indexOf(position.command) + 1)) {
@@ -812,23 +819,56 @@ function nodeIsXargsKill(position, tokens) {
       skipRedirectionTarget = false;
       continue;
     }
-    if (token.type === "word") args.push(token.value);
-    if (token.type === "group" && token.kind === "brace") args.push(`{${token.content}}`);
+    if (token.type === "word") args.push({ type: "word", value: token.value, subs: [], literal: true });
+    if (token.type === "group" && token.kind === "brace") args.push({ type: "word", value: `{${token.content}}`, subs: [], literal: true });
   }
+  let start = args.length;
   for (let i = 0; i < args.length; i += 1) {
-    const value = args[i];
-    if (value.startsWith("-")) {
-      if (value !== "--" && !value.startsWith("--") && XARGS_VALUE_OPTIONS.test(value)) i += 1;
-      continue;
+    const value = args[i].value;
+    if (value === "--") {
+      start = i + 1;
+      break;
     }
-    return /(?:^|\/)(?:kill|pkill)$/.test(value);
+    if (!value.startsWith("-")) {
+      start = i;
+      break;
+    }
+    if (value.startsWith("--")) {
+      if (!value.includes("=") && XARGS_VALUE_LONG_OPTIONS.has(value.slice(2))) i += 1;
+    } else if (XARGS_VALUE_OPTIONS.test(value)) {
+      i += 1;
+    }
   }
-  return false;
+  const utility = commandPosition(args.slice(start));
+  if (!utility.command) return "";
+  const name = basename(utility.command.value);
+  if (name === "kill") return "fed";
+  if (name === "killall") return "broad";
+  if (name === "pkill") return selectsByCallerScope(utility.words.slice(utility.index + 1)) ? "" : "broad";
+  return "";
 }
 
 // `kill -0` sends no signal; it is a liveness probe, not a kill.
 function isKillProbe(args) {
   return args[0]?.value === "-0";
+}
+
+// `kill ... -1` in target position signals every process the caller may reach.
+// A leading `-<signal>` or `-s <sig>` is the signal spec, so `kill -1 1234`
+// sends SIGHUP to one pid, while `kill -9 -1` and `kill -- -1` target all.
+function isKillAll(args) {
+  const values = args.map((word) => word.value);
+  let index = 0;
+  if (values[index] === "-s" || values[index] === "-n") index += 2;
+  else if (/^-[A-Za-z0-9]+$/.test(values[index] || "")) index += 1;
+  if (values[index] === "--") index += 1;
+  return values.slice(index).includes("-1");
+}
+
+// `pkill --help`, `pkill -V`, `killall -l`: an informational invocation that
+// names no target is not a kill.
+function isKillToolQuery(args) {
+  return args.length > 0 && args.every((word) => ["--help", "-h", "-V", "--version", "-l", "-L"].includes(word.value));
 }
 
 function analyzeProgram(command, context, depth = 0) {
@@ -946,9 +986,12 @@ function analyzeProgram(command, context, depth = 0) {
     // General broad process kill: pkill/killall that does not select by the
     // caller's own ancestry/group/session, or a kill fed by an unscoped
     // discovery match, reaches sibling lanes on the shared process table.
-    if ((commandName === "pkill" && !selectsByCallerScope(args)) || commandName === "killall") broadProcessKill = true;
-    if (commandName === "fuser" && args.some((word) => /^-[A-Za-z]*k/.test(word.value) || word.value === "--kill")) broadProcessKill = true;
-    if (commandName === "kill" && !isKillProbe(args) && (nodeUnscopedDiscovery || args.some((word) => wordReferencesAny(word, nodeContext.unscopedPids)))) broadProcessKill = true;
+    const executedKillTool = !position.query && !isKillToolQuery(args);
+    if (executedKillTool && ((commandName === "pkill" && !selectsByCallerScope(args)) || commandName === "killall")) broadProcessKill = true;
+    if (executedKillTool && commandName === "fuser" && args.some((word) => /^-[A-Za-z]*k/.test(word.value) || word.value === "--kill")) broadProcessKill = true;
+    if (executedKillTool && commandName === "kill" && !isKillProbe(args) && (isKillAll(args) || nodeUnscopedDiscovery || args.some((word) => wordReferencesAny(word, nodeContext.unscopedPids)))) broadProcessKill = true;
+    const xargsKill = xargsKillKind(position, tokens);
+    if (xargsKill === "broad") broadProcessKill = true;
     if (isUnscopedDiscovery(position)) unscopedDiscovery = true;
     if (hasDynamicExecutionPayload(position, nodeContext) || wordReferencesAny(position.command, nodeContext.protectedVariables)) nodeNestedProtected = true;
     for (const word of position.words) {
@@ -969,13 +1012,14 @@ function analyzeProgram(command, context, depth = 0) {
       nestedProtected: nodeNestedProtected,
       redirection: nodeHasRedirection(tokens),
       substitution: nodeHasUnsafeSubstitution(tokens),
-      unscopedDiscovery: isUnscopedDiscovery(position),
-      pgrepWatcher: isWatcherPgrep(position, nodeContext),
-      xargsKill: nodeIsXargsKill(position, tokens),
+      unscopedDiscovery: nodeUnscopedDiscovery || isUnscopedDiscovery(position),
+      pgrepWatcher: nodePgrepWatcher || isWatcherPgrep(position, nodeContext),
+      xargsKill,
     });
   }
 
-  // Pipe form of discover-then-kill: an unscoped discovery command whose output
+  // Pipe form of discover-then-kill: an unscoped discovery command - direct, or
+  // inside the producer node's subshell, group, or substitution - whose output
   // is piped into `xargs kill`/`xargs pkill`. Scan each maximal run of
   // pipe-joined nodes for a discovery (or watcher pgrep) node upstream of an
   // xargs-kill node.

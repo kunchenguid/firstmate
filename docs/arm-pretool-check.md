@@ -40,10 +40,10 @@ The active firstmate home is `${FM_HOME:-<code-root>}`.
 It passes both roots and the exact command string to the Node policy owner.
 
 The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain any trigger substring even after the classifier's decoders run.
-Every deniable command carries one of a small set of trigger substrings after normalization: a protected watcher execution or a broad watcher kill contains `fm-watch`, and a general broad process kill contains `pkill`, `killall`, a discovery command that feeds a kill (`pgrep`, `ps`, `lsof`, `pidof`, `fuser`), or the `xargs` pipe tail that consumes one.
+Every deniable command carries one of a small set of trigger substrings after normalization: a protected watcher execution or a broad watcher kill contains `fm-watch`, and a general broad process kill contains `kill` (`pkill`, `killall`, `fuser -k`, and a `kill` of pid `-1` all carry it), a discovery command that feeds a kill (`pgrep`, `ps`, `lsof`, `pidof`, `fuser`), or the `xargs` pipe tail that consumes one.
 The fast path may allow only when both of these hold:
 
-1. The stripped text lacks every trigger substring (`fm-watch`, `pkill`, `killall`, `pgrep`, `ps`, `lsof`, `pidof`, `fuser`, `xargs`), after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines.
+1. The stripped text lacks every trigger substring (`fm-watch`, `kill`, `pgrep`, `ps`, `lsof`, `pidof`, `fuser`, `xargs`), after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines.
 2. The raw command carries no quoting-decoder marker: a `$` immediately followed by a single quote (ANSI-C `$'...'`) or a double quote (bash locale `$"..."`).
 
 Any trigger substring or any quoting-decoder marker delegates to the classifier.
@@ -145,11 +145,16 @@ The classifier denies this class with `broad-process-kill`:
   `killall` has no scope flag and is always broad, as is `-G` (a real unix group id, not a process group).
   Path-qualified, `command`, and `sudo` forms are recognized through the same wrapper unwrapping as the watcher rule.
 - `fuser -k` (or `--kill`, with any signal such as `-KILL -k`), which kills every process holding the named port or file host-wide; `fuser` without `-k` is read-only discovery.
+- `kill` targeting pid `-1` (`kill -9 -1`, `kill -- -1`, `kill -s TERM -1`), which signals every process the caller may reach; a leading `-<signal>` or `-s <sig>` is read as the signal spec, so `kill -1 1234` (SIGHUP to one pid), `kill -- -12345` and `kill -12345` (a process group), and `kill -- -$pgid` are allowed.
+- `xargs pkill` or `xargs killall` whatever feeds the pipe (`echo node | xargs pkill -f`, `cat names | xargs killall`), because those select by name; an `xargs pkill` that carries a caller-scope flag is allowed.
 - An executed `kill` (or `xargs kill`/`xargs pkill`) fed by an unscoped discovery command - one that selects processes by attribute rather than by a caller-owned pid: an unscoped `pgrep`, any `ps`, a pid-listing `lsof` (`-t`, `-ti:PORT`, `-Fp`), `pidof`, or `fuser`.
-  The recognized feeds are command substitution (`kill $(pgrep -f X)`, `kill $(ps aux | grep X | awk '{print $2}')`, `kill $(pidof X)`), a single variable hop (`p=$(pgrep -f X); kill $p`, `p=$(ps aux | grep X | awk '{print $2}'); kill $p`), and a pipe tail (`pgrep -f X | xargs kill`, `ps aux | grep X | awk '{print $2}' | xargs kill`, `lsof -ti :3000 | xargs kill -9`); any node between the discovery and the `xargs` in the same pipe run is fine, and `xargs` options with a separated value (`-n 1`, `-I {}`, `-L 1`) or `--` do not hide the utility.
+  The recognized feeds are command substitution (`kill $(pgrep -f X)`, `kill $(ps aux | grep X | awk '{print $2}')`, `kill $(pidof X)`), a single variable hop (`p=$(pgrep -f X); kill $p`, `p=$(ps aux | grep X | awk '{print $2}'); kill $p`), and a pipe tail (`pgrep -f X | xargs kill`, `ps aux | grep X | awk '{print $2}' | xargs kill`, `lsof -ti :3000 | xargs kill -9`); any node between the discovery and the `xargs` in the same pipe run is fine.
+  A discovery wrapped in the producer node's subshell, brace group, or substitution still counts as the feed (`(pgrep -f X) | xargs kill`, `{ pgrep -f a; pgrep -f b; } | xargs kill`, `echo $(pgrep -f X) | xargs kill`).
+  The `xargs` utility is unwrapped through the same finite wrapper set as a command position (`sudo`, `env`, `command`, `nohup`, `exec`, `timeout`), so `xargs -n1 sudo kill` is still a kill, and `xargs` options with a separated value (`-n 1`, `-I {}`, `-L 1`, `--max-args 1`) or `--` do not hide the utility.
   A `pgrep` that itself selects by ancestry, group, or session (for example `pgrep -P $$`) is caller-scoped, so the kill it feeds is allowed.
   Caller-owned pid sources are not discovery: `kill $(cat pidfile)`, `kill $(jobs -p)`, `echo 123 | xargs kill`, and `cat pids | xargs kill` are allowed.
   `kill -0` sends no signal and is a liveness probe, so `kill -0 $(pgrep -f X)` is allowed.
+  Query and help forms execute no kill and are allowed: `command -v pkill`, `command -v killall`, `pkill --help`, `pkill -V`, `killall -l` (any invocation whose only arguments are `--help`, `-h`, `-V`, `--version`, `-l`, or `-L`).
 
 The classifier judges the shape, not runtime identity: it permits the caller-scopeable forms without proving the argument value is the caller's own, exactly as the watcher rule permits `pkill -P <pid>` regardless of the pid.
 A specific `kill <pid>` is allowed, because a literal pid carries no evidence of a foreign origin in the command text.
@@ -161,12 +166,13 @@ So `while true; do pkill -f node; done`, `if true; then lsof -ti :3000 | xargs k
 
 Residuals - what this rule does not catch, so a reader can tell without running it:
 
-1. Discovery output routed through anything other than a command substitution or a plain `$var` reference is not tracked: a file (`ps aux | grep X > /tmp/pids; kill $(cat /tmp/pids)`), an array, a parameter transform, or an intermediate command that is not itself discovery.
+1. A kill utility reached through a nested inner shell after `xargs` (`xargs sh -c "kill $0"`, `xargs -I{} sh -c "kill {}"`) or a consumer-side group (`pgrep -f X | (xargs kill)`) is not caught; catching these needs interpreting the inner shell or an arbitrary group, which is deliberately out of scope.
+2. Discovery output routed through anything other than a command substitution or a plain `$var` reference is not tracked: a file (`ps aux | grep X > /tmp/pids; kill $(cat /tmp/pids)`), an array, a parameter transform, or an intermediate command that is not itself discovery.
    The classifier follows direct variable references (`a=$(ps ...); b=$a; kill $b` is denied), not general shell dataflow.
    In unsupported loop/`if`/`case` grammar the raw check is byte-level, so a discovery command and a `kill`/`xargs` anywhere in the same command are denied together even when the shell would not connect them.
-2. A bare `pkill`, `killall`, or `pgrep` token used as pure data inside unsupported loop/`if`/`case` grammar (`if grep -q pkill tests/x.sh; then echo y; fi`) is conservatively denied, because the raw fallback cannot tell data from command there; the supported-grammar equivalent `grep -q pkill tests/x.sh && echo y` is allowed.
-3. A discover-then-literal-kill across two commands (`pgrep -f X` now, `kill 76803` later) cannot be caught by any command-shape seatbelt, because the literal pid carries no evidence of foreign origin; the shared-process-table rule in `AGENTS.md` is the containment for it.
-4. The gate-agent surface under `disable_project_settings` (see "Purpose and boundary") does not load this seatbelt at all; the `AGENTS.md` rule and the crewmate brief's wait-discipline rule are the containment there.
+3. A bare `pkill`, `killall`, or `pgrep` token used as pure data inside unsupported loop/`if`/`case` grammar (`if grep -q pkill tests/x.sh; then echo y; fi`) is conservatively denied, because the raw fallback cannot tell data from command there; the supported-grammar equivalent `grep -q pkill tests/x.sh && echo y` is allowed.
+4. A discover-then-literal-kill across two commands (`pgrep -f X` now, `kill 76803` later) cannot be caught by any command-shape seatbelt, because the literal pid carries no evidence of foreign origin; the shared-process-table rule in `AGENTS.md` is the containment for it.
+5. The gate-agent surface under `disable_project_settings` (see "Purpose and boundary") does not load this seatbelt at all; the `AGENTS.md` rule and the crewmate brief's wait-discipline rule are the containment there.
 
 ## Stable reason codes
 
@@ -180,7 +186,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `watcher-bundled` | The outer command list is not the blessed setup-plus-final tree. |
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
-| `broad-process-kill` | An actual `pkill`/`killall` selects by command line or name rather than by the caller's own ancestry, process group, or session, or a `kill`/`xargs kill` is fed by an unscoped discovery command (`pgrep`, `ps`, `lsof -t`, `pidof`, `fuser`) through a substitution, one variable hop, or a pipe tail, so it can reach a sibling lane on the shared process table. |
+| `broad-process-kill` | An actual `pkill`/`killall`/`fuser -k` selects by command line, name, or port rather than by the caller's own ancestry, process group, or session; a `kill` targets pid `-1`; or a `kill`/`xargs kill` is fed by an unscoped discovery command (`pgrep`, `ps`, `lsof -t`, `pidof`, `fuser`) through a substitution, one variable hop, or a pipe tail, so it can reach a sibling lane on the shared process table. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
 | `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
 
@@ -279,8 +285,8 @@ Every native-path automatic marker was present and every deny sentinel remained 
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
 Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms, so the harness adapter wiring - unchanged in mechanism since the 2026-07-09 live record above - carries the broad-process-kill deny exactly as it carries the watcher denies.
-The matrix `K` series and the `test_broad_process_kill_contract` direct assertions cover the general broad-process-kill class, including the exact 2026-09-10 cross-lane incident shape (a kill fed by an unscoped `pgrep -f <phrase>`), the `pkill`/`killall`/pipe variants, signal-name options, separated-value `xargs` options, `ps`/`lsof`/`pidof`/`fuser` discovery feeds, and the paired caller-scoped, caller-owned-pid, `kill -0`, and scoped-loop forms that must remain allowed.
-The suite also verifies the widened transport prefilter delegates the `pkill`/`killall`/`pgrep`/`ps`/`lsof`/`pidof`/`fuser`/`xargs` trigger substrings, real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
+The matrix `K` series and the `test_broad_process_kill_contract` direct assertions cover the general broad-process-kill class, including the exact 2026-09-10 cross-lane incident shape (a kill fed by an unscoped `pgrep -f <phrase>`), the `pkill`/`killall`/pipe variants, signal-name options, separated-value `xargs` options, wrapped `xargs` utilities, `xargs pkill` by name, `ps`/`lsof`/`pidof`/`fuser` discovery feeds (direct or wrapped in the producer node), `fuser -k`, `kill` of pid `-1`, and the paired caller-scoped, caller-owned-pid, negative-process-group, `kill -0`, query/help, and scoped-loop forms that must remain allowed.
+The suite also verifies the widened transport prefilter delegates the `kill`/`pgrep`/`ps`/`lsof`/`pidof`/`fuser`/`xargs` trigger substrings, real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:
 
