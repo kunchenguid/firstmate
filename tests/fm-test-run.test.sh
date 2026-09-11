@@ -139,6 +139,11 @@ init_changed_fixture_repo() {
   : >"$repo/tests/unread-thing.sh"
   printf '# shared-probe-fixture.sh\n' >>"$repo/tests/fm-pr-merge.test.sh"
   printf '# shared-probe-fixture.sh\n' >>"$repo/tests/fm-secondmate-safety.test.sh"
+  # A nested fixture whose consuming suite names only the fixture directory,
+  # the shape the tests/fixtures/<dir>/ arm is keyed for.
+  mkdir -p "$repo/tests/fixtures/demo"
+  : >"$repo/tests/fixtures/demo/demo-fixture.sh"
+  printf '# tests/fixtures/demo\n' >>"$repo/tests/fm-backend-orca.test.sh"
   # A shared helper with no curated family of its own, named by exactly ONE
   # script of the expensive real-Herdr family and consumed by one curated
   # watcher script. This is the shape that made a one-line helper change select
@@ -1318,6 +1323,14 @@ test_changed_shared_fixture_selects_its_readers() {
     *fm-pr-merge.test.sh*)
       fail "an unrelated changed path picked up the fixture readers: $listed" ;;
   esac
+  git -C "$repo" checkout -q -- bin/fm-quota-choose.sh
+
+  # A nested tests/fixtures/<dir>/<name>-fixture.sh still reaches the
+  # directory-scan arm rather than the top-level fixture arm's basename scan.
+  printf '\n' >>"$repo/tests/fixtures/demo/demo-fixture.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend-orca.test.sh" \
+    "a nested fixture selects the suite that reads its directory"
 
   rm -rf "$tmp"
   pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
