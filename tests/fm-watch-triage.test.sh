@@ -63,35 +63,18 @@ wait_live() {
 }
 
 # Wait until <pid>'s watcher has completed a whole poll cycle, or exited first.
-# A fixed wait_live budget only proves the process is still ALIVE: fm-watch.sh
-# does bounded startup work (the recovery-marker snapshot, lock acquisition)
-# before its first stale scan, so on a loaded
-# machine a short fixed budget can reap a round before the cycle it asserts on
-# ever ran - and then every "no wake, no marker" assertion passes vacuously
-# while every "marker written" assertion fails spuriously.
-# The liveness beacon is touched at the TOP of every poll, so this drops any
-# beacon left by an earlier round, waits for THIS watcher to write a fresh one
-# (some poll's top), then waits for that one to advance (the next poll's top) -
-# and the whole cycle in between is what the caller's assertions describe.
+# The beacon is deliberately refreshed before every blocking step, so it cannot
+# distinguish cycle completion once a slow check crosses a wall-clock second.
+# fm-watch.sh's cycle marker lands immediately before its terminal wait instead:
+# it proves all current-cycle checks, scans, and pane triage have run.
 # 0 if the watcher is still alive after a completed cycle, 1 if it exited.
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
-  local state=$1 pid=$2 limit=${3:-300} beat first now i=0
-  beat="$state/.last-watcher-beat"
-  rm -f "$beat"
-  first=""
+  local state=$1 pid=$2 limit=${3:-300} marker i=0
+  marker="$state/.last-watcher-cycle"
+  rm -f "$marker"
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    first=$(file_mtime "$beat")
-    [ -n "$first" ] && break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  while [ "$i" -lt "$limit" ]; do
-    kill -0 "$pid" 2>/dev/null || return 1
-    now=$(file_mtime "$beat")
-    if [ -n "$now" ] && [ "$now" != "$first" ]; then
-      return 0
-    fi
+    [ -e "$marker" ] && return 0
     sleep 0.1
     i=$((i + 1))
   done
@@ -116,12 +99,6 @@ wait_numeric_file() {
     i=$((i + 1))
   done
   return 1
-}
-
-# Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
-# fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
-file_mtime() {
-  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
 }
 
 # Set <file>'s mtime to exactly <epoch> seconds, for aging a busy-turn marker by
@@ -4347,6 +4324,101 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
 
 # --- beacon stays fresh while absorbing -------------------------------------
 
+slow_check_fixture() {  # <name>
+  local name=$1 dir state home fakebin
+  dir=$(make_case "$name"); state="$dir/state"; home="$dir/home"; fakebin="$dir/fakebin"
+  mkdir -p "$home"
+  cat > "$state/a-slow.check.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 400
+: > "${FM_TEST_SLOW_CHECK_LATE:?}"
+SH
+  cat > "$state/b-fast.check.sh" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_TEST_FAST_CHECK_RAN:?}"
+SH
+  chmod 0700 "$state/a-slow.check.sh" "$state/b-fast.check.sh"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" a-slow >/dev/null \
+    || fail "could not register the slow check fixture"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" b-fast >/dev/null \
+    || fail "could not register the follow-up check fixture"
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = 400 ]; then
+  : > "${FM_TEST_SLOW_CHECK_STARTED:?}"
+  exec /bin/sleep 4
+fi
+exec /bin/sleep "$@"
+SH
+  chmod +x "$fakebin/sleep"
+  printf '%s\n' "$dir"
+}
+
+wait_for_present() {  # <path> [ticks]
+  local path=$1 ticks=${2:-100} i=0
+  while [ "$i" -lt "$ticks" ]; do
+    [ -e "$path" ] && return 0
+    /bin/sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+beacon_age() {  # <state>
+  FM_STATE_OVERRIDE="$1" bash -c '. "$1"; fm_path_age "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$1/.last-watcher-beat"
+}
+
+test_registered_slow_check_keeps_beacon_fresh() {
+  local dir state home fakebin out pid i age
+  dir=$(slow_check_fixture slow-check-fresh); state="$dir/state"; home="$dir/home"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_CHECK_INTERVAL=999999 FM_CHECK_TIMEOUT=10 FM_WATCHER_STALE_GRACE=3 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=999999 \
+    FM_TEST_SLOW_CHECK_STARTED="$dir/slow.started" \
+    FM_TEST_SLOW_CHECK_LATE="$dir/slow.late" FM_TEST_FAST_CHECK_RAN="$dir/fast.ran" \
+    "$WATCH" > "$out" 2> "$dir/watch.err" &
+  pid=$!
+  wait_for_present "$dir/slow.started" \
+    || { reap "$pid"; fail "the registered slow check did not start"; }
+  i=0
+  while [ "$i" -lt 20 ]; do
+    kill -0 "$pid" 2>/dev/null \
+      || { reap "$pid"; fail "watcher exited while the slow check was in flight: $(cat "$out")"; }
+    age=$(beacon_age "$state")
+    [ "$age" -lt 3 ] \
+      || { reap "$pid"; fail "watcher beacon became stale (${age}s) during the bounded slow check"; }
+    /bin/sleep 0.1
+    i=$((i + 1))
+  done
+  reap "$pid"
+  pass "a registered sleep 400 check cannot age the live watcher beacon past its grace"
+}
+
+test_timed_out_check_is_logged_and_does_not_block_the_cycle() {
+  local dir state home fakebin out pid
+  dir=$(slow_check_fixture slow-check-timeout); state="$dir/state"; home="$dir/home"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_CHECK_INTERVAL=999999 FM_CHECK_TIMEOUT=10 FM_WATCHER_STALE_GRACE=3 \
+    FM_CHECK_FORCE_FALLBACK=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=999999 \
+    FM_TEST_SLOW_CHECK_STARTED="$dir/slow.started" \
+    FM_TEST_SLOW_CHECK_LATE="$dir/slow.late" FM_TEST_FAST_CHECK_RAN="$dir/fast.ran" \
+    "$WATCH" > "$out" 2> "$dir/watch.err" &
+  pid=$!
+  wait_for_present "$dir/fast.ran" 60 \
+    || { reap "$pid"; fail "the check after the timed-out check did not run"; }
+  grep -F "watcher step timed out: check:$state/a-slow.check.sh after 1s; skipped for this cycle" \
+    "$state/.watch-triage.log" >/dev/null \
+    || { reap "$pid"; fail "the timed-out check was not logged with its name: $(cat "$state/.watch-triage.log" 2>/dev/null)"; }
+  /bin/sleep 2
+  [ ! -e "$dir/slow.late" ] \
+    || { reap "$pid"; fail "the timed-out slow check was not terminated"; }
+  kill -0 "$pid" 2>/dev/null \
+    || { reap "$pid"; fail "watcher did not continue after skipping the timed-out check"; }
+  reap "$pid"
+  pass "a named timed-out check is skipped and the rest of its watcher cycle continues"
+}
+
 test_beacon_stays_fresh_while_absorbing() {
   local dir state fakebin out status_file pid m1 m2 now
   dir=$(make_case beacon-fresh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -4781,6 +4853,8 @@ test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
+test_registered_slow_check_keeps_beacon_fresh
+test_timed_out_check_is_logged_and_does_not_block_the_cycle
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot

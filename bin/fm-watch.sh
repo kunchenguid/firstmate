@@ -133,6 +133,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-slack-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
 # expectations created by fm-send on marked secondmate requests. The tick is
 # cheap when no records exist and never scrapes secondmate conversation.
@@ -186,6 +188,23 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derive
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+# A step cannot consume the entire liveness grace: the watcher must return to a
+# heartbeat well before a healthy-lock probe could call it stale.
+WATCH_STEP_TIMEOUT=${FM_WATCH_STEP_TIMEOUT:-$CHECK_TIMEOUT}
+case "$WATCH_STEP_TIMEOUT" in ''|*[!0-9]*|0) WATCH_STEP_TIMEOUT=30 ;; esac
+case "$WATCHER_STALE_GRACE" in
+  [2-9]|[1-9][0-9]*)
+    if [ "$WATCH_STEP_TIMEOUT" -ge "$WATCHER_STALE_GRACE" ]; then
+      WATCH_STEP_TIMEOUT=$((WATCHER_STALE_GRACE / 2))
+    fi
+    ;;
+esac
+watcher_heartbeat() {
+  touch "$STATE/.last-watcher-beat"
+}
+watcher_cycle_complete() {
+  touch "$STATE/.last-watcher-cycle"
+}
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
@@ -1749,15 +1768,10 @@ slack_socket_surface_queued() {
 }
 
 run_check_process() {
-  local c=$1
-  shift
-  if [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
-    exec timeout "$CHECK_TIMEOUT" bash "$c" "$@"
-  elif [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
+  if [ "${FM_CHECK_FORCE_FALLBACK:-0}" = 1 ]; then
+    FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed "$WATCH_STEP_TIMEOUT" bash "$@"
   else
-    # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
+    fm_run_timed "$WATCH_STEP_TIMEOUT" bash "$@"
   fi
 }
 
@@ -1802,7 +1816,8 @@ fm_active_check_stop() {
 }
 
 run_check_capture() {
-  local pgid
+  local pgid check_status=0
+  watcher_heartbeat
   fm_check_output_cleanup
   FM_CHECK_RESULT=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
@@ -1822,11 +1837,14 @@ run_check_capture() {
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || check_status=$?
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
   fm_check_output_cleanup
+  if [ "$check_status" -eq 124 ]; then
+    triage_log "watcher step timed out: ${FM_CHECK_STEP_NAME:-check} after ${WATCH_STEP_TIMEOUT}s; skipped for this cycle"
+  fi
 }
 
 # 0 when any signaled status file carries a captain-relevant event in the bytes
@@ -1962,6 +1980,7 @@ heartbeat_scan_finds_actionable() {
 # durable watcher queue and remain silent on healthy data.
 auto_quota_drain_surface() {
   local out reason
+  watcher_heartbeat
   if out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-auto-quota-drain.sh" 2>/dev/null); then
     :
   else
@@ -2008,6 +2027,7 @@ event_wait_or_sleep() {
   done < <(recorded_windows)
 
   if [ "${#windows[@]}" -eq 0 ]; then
+    watcher_heartbeat
     sleep "$POLL"
     return
   fi
@@ -2024,10 +2044,12 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
+    watcher_heartbeat
     sleep "$POLL"
     return
   fi
 
+  watcher_heartbeat
   rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
   rc=$?
   case "$rc" in
@@ -2041,6 +2063,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
+      watcher_heartbeat
       sleep "$POLL"
       ;;
     *)
@@ -2249,9 +2272,10 @@ while :; do
     exit 0
   fi
 
-  # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # Liveness beacon for fm-guard.sh: refresh before every cycle and before
+  # each potentially blocking step below, so an alive watcher never mimics a
+  # stalled one while a check, poll, drain, or wait is in flight.
+  watcher_heartbeat
 
   # A recovery wake already has durable work waiting for presentation. Keep
   # newly added side-band summary work off that prompt path; the handling
@@ -2272,6 +2296,7 @@ while :; do
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
+  watcher_heartbeat
   fm_pending_reply_tick "$STATE" || true
 
   # Evaluate automatic quota pressure from one snapshot before any later cycle
@@ -2281,6 +2306,7 @@ while :; do
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
   # the parent without consuming or rewriting the receiving home's record.
+  watcher_heartbeat
   secondmate_wake_stall_tick || {
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
@@ -2291,11 +2317,14 @@ while :; do
   # only republishes results already captured durably and restarts a source
   # whose owner is gone. It is a no-op with nothing registered.
   if [ -d "$STATE/procevent" ]; then
+    watcher_heartbeat
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
+  watcher_heartbeat
   procevent_surface_queued
+  watcher_heartbeat
   slack_socket_surface_queued
 
   # Optional Slack poll fast path. Other checks stay on CHECK_INTERVAL.
@@ -2304,7 +2333,8 @@ while :; do
     && [ "$(age_of "$STATE/.last-slack-check")" -ge "$SLACK_CHECK_INTERVAL" ]; then
     if fms_poll_shim_valid "$slack_shim" "$FM_HOME" "$FM_ROOT" \
       && [ -f "$FM_ROOT/bin/fm-slack-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-slack-poll.sh" ]; then
-      FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-slack-poll.sh" || exit 1
+      FM_HOME="$FM_HOME" FM_CHECK_STEP_NAME="check:$slack_shim" \
+        run_check_capture "$FM_ROOT/bin/fm-slack-poll.sh" || exit 1
       out=$FM_CHECK_RESULT
       touch "$STATE/.last-slack-check"
       if [ -n "$out" ]; then
@@ -2323,6 +2353,7 @@ while :; do
   # This is mechanical and silent unless a durable terminal-outcome obligation
   # was created, so quiet cycles never wake firstmate or consume model tokens.
   inactive_out=
+  watcher_heartbeat
   if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
     if [ -n "$inactive_out" ]; then
@@ -2347,7 +2378,8 @@ while :; do
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
-          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
+          FM_HOME="$FM_HOME" FM_CHECK_STEP_NAME="check:$c" \
+            run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
           out=$FM_CHECK_RESULT
         else
           rejected_checks="$rejected_checks $c"
@@ -2364,12 +2396,12 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+          FM_CHECK_STEP_NAME="check:$c" run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-          run_check_capture "$custom_snapshot" || exit 1
+          FM_CHECK_STEP_NAME="check:$c" run_check_capture "$custom_snapshot" || exit 1
           out=$FM_CHECK_RESULT
           fm_custom_check_snapshot_cleanup
         else
@@ -2415,8 +2447,10 @@ while :; do
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  watcher_heartbeat
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
+    watcher_heartbeat
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
@@ -2540,6 +2574,7 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    watcher_heartbeat
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
@@ -2782,6 +2817,7 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    watcher_heartbeat
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
@@ -2814,5 +2850,6 @@ EOF
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.
+  watcher_cycle_complete
   event_wait_or_sleep
 done
