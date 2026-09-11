@@ -272,6 +272,8 @@ test_agy_native_draft_race_defers_without_enter() {
   [ ! -e "$dir/send.log.entered" ] || fail "an AGY draft race pressed Enter"
   assert_contains "$(cat "$err")" "agy composer is agy-draft-conflict" \
     "the AGY draft race did not report the compare failure"
+  assert_contains "$(cat "$err")" "stray typed text may remain unsent in the pane" \
+    "the AGY draft race did not warn about unsent stray text"
   pass "fm-send: an AGY draft race records the steer without pressing Enter"
 }
 

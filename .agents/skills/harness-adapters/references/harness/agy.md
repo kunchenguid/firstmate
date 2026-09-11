@@ -14,7 +14,9 @@ Antigravity CLI `agy` is a verified worker adapter for CREWMATE and SCOUT tasks 
 - The shared composer classifier owns agy prompt recognition, draft preservation, multiline extraction, and cursor or cursorless capability handling.
 - Non-tmux composer reads use a bounded 200-row tail for agy so both measured boundaries survive long drafts; other harnesses retain the normal 20-row tail.
 - The inbox doorbell defers both pending and unknown agy composer verdicts and rings only after a proven empty result; the watcher records the deferral and retries.
-- Raw agy launches remain unwired and classify as unknown.
+- Typed AGY steering compares the extracted composer with the literal text before Enter; a mismatch withholds Enter, records the steer in the inbox, and reports that stray text may remain unsent in the pane.
+- The remaining sub-second race between preflight and literal typing is shared with every typed harness path; race text stays unsubmitted and the durable inbox record is the recovery copy.
+- Raw commands whose basename is `agy` are recorded as `raw-agy`, remain unwired, and classify as unknown.
 - The exact current measurements and refresh commands are maintained in [`docs/verification/agy.md`](../../../../../docs/verification/agy.md).
 
 ## Boundaries

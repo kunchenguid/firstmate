@@ -14,6 +14,8 @@ set -u
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$ROOT/bin/fm-control-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-busy-adapter-wiring)
 
@@ -602,7 +604,7 @@ SH
 }
 
 test_raw_agy_launch_has_no_semantic_wiring() {
-  local rec id=busy-agy-raw out state
+  local rec id=busy-agy-raw out state raw_harness
   rec=$(make_spawn_case agy-raw agy "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 'agy --debug')
@@ -610,6 +612,11 @@ test_raw_agy_launch_has_no_semantic_wiring() {
   state="$HOME_DIR/state"
   assert_absent "$state/$id.busy-gen" "raw agy launch must not arm a busy generation"
   assert_absent "$state/$id.agy-hooks" "raw agy launch must not write hooks"
+  raw_harness=$(awk -F= '$1 == "harness" { print substr($0, index($0, "=") + 1); exit }' "$state/$id.meta")
+  [ "$raw_harness" = raw-agy ] \
+    || fail "raw agy launch must record an unverified harness identity"
+  fm_control_harness_family raw-agy \
+    && fail "raw agy launch must not resolve to verified control mechanics"
   [ "$(classify agy "$id" "$state")" = "unknown missing" ] \
     || fail "raw agy launch must classify unknown, got '$(classify agy "$id" "$state")'"
   pass "raw agy launch remains unwired and classifies unknown"

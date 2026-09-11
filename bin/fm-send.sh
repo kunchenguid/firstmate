@@ -288,13 +288,13 @@ fm_send_normalize_key() {  # <key>
 fm_send_record_interrupt() {  # <key>
   local key=$1 id gen
   [ "$key" = Escape ] || return 0
-  case "$TARGET_HARNESS" in claude*|agy*) : ;; *) return 0 ;; esac
+  case "$TARGET_HARNESS" in claude*|agy) : ;; *) return 0 ;; esac
   [ -n "$TARGET_META" ] || return 0
   id=$(fm_send_id_from_meta "$TARGET_META")
   [ -f "$STATE/$id.busy-gen" ] || return 0
   gen=$(fm_meta_get "$TARGET_META" busy_gen)
   if [ -n "$gen" ]; then
-    if [[ "$TARGET_HARNESS" == agy* ]]; then
+    if [[ "$TARGET_HARNESS" == agy ]]; then
       "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" unknown \
         --gen "$gen" --source fm-interrupt --event interrupt-unconfirmed
     else
@@ -302,7 +302,7 @@ fm_send_record_interrupt() {  # <key>
         --gen "$gen" --source fm-interrupt --event interrupt
     fi
   else
-    if [[ "$TARGET_HARNESS" == agy* ]]; then
+    if [[ "$TARGET_HARNESS" == agy ]]; then
       "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" unknown \
         --current-gen --source fm-interrupt --event interrupt-unconfirmed
     else
@@ -1076,6 +1076,7 @@ else
       AGY_TYPED_VERDICT=${verdict#*:}
       [ -n "$AGY_TYPED_VERDICT" ] || AGY_TYPED_VERDICT=unknown
       fm_send_write_local_inbox || exit 1
+      echo "fm-send: AGY submit comparison failed for task $(fm_send_id_from_meta "$TARGET_META") at $T; stray typed text may remain unsent in the pane" >&2
       echo "fm-send: agy composer is $AGY_TYPED_VERDICT; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring without touching the pane" >&2
       exit 1
       ;;
