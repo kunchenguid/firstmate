@@ -12,9 +12,10 @@ A firstmate primary must arm `bin/fm-watch-arm.sh` or run `bin/fm-watch-checkpoi
 A shell background operator, pipeline, redirection, wrapper, or unrelated command list can hide failure or let the watcher child die with the tool call.
 The seatbelt rejects those command shapes before execution.
 
-The same classifier also refuses a broad process kill that selects processes by command line or name rather than by the caller's own ancestry, process group, or session.
+The same classifier also refuses the known forms of a broad process kill - one that selects processes by command line or name rather than by the caller's own ancestry, process group, or session.
 Worktrees are isolated but the process table is not: a match on what a process is running reaches every matching process on the host, including sibling lanes, parallel firstmate homes, and the captain's own sessions.
 The watcher prohibition is the highest-severity special case of this rule; see "General broad process kill" below.
+This is a denylist over shell command text, and a denylist over shell has no completeness floor: the residual list in that section names the known gaps and is not a proof that nothing else gets through.
 
 This policy is not a post-arm liveness guarantee.
 `bin/fm-guard.sh` and `bin/fm-turnend-guard.sh` apply their respective post-arm supervision predicates to the watcher lock and beacon after an allowed call.
@@ -118,7 +119,7 @@ The final protected node may have one immediate `exec` wrapper.
 Its arguments are ordinary shell words and may contain quoted semicolons or watcher names.
 No other wrapper is approved.
 
-Inline environment assignments, `env`, `sudo`, `nohup`, nested shells, `eval`, subshell groups, substitutions, redirections, pipelines, asynchronous lists, `disown`, unrelated list nodes, and unsupported compound syntax are not blessed.
+Inline environment assignments, `env`, `sudo`, `nohup`, `builtin`, a leading `!` negation, nested shells, `eval`, subshell groups, substitutions, redirections, pipelines, asynchronous lists, `disown`, unrelated list nodes, and unsupported compound syntax are not blessed.
 
 ## Broad watcher kills
 
@@ -137,15 +138,18 @@ It is gated on the grammar being unsupported: in grammar the classifier does mod
 ## General broad process kill
 
 The watcher rule above is the highest-severity case of a wider one: any kill that selects processes by command line or name reaches every match on the shared process table, not just the caller's own tree, so it can hit a sibling lane.
-The classifier denies this class with `broad-process-kill`:
+The classifier denies the known broad-kill forms enumerated here with `broad-process-kill`.
+It is a denylist over shell command text, and a denylist over shell has no completeness floor, so the residual list below names the known gaps and is not a proof that nothing else gets through.
+The shared-process-table rule in `AGENTS.md` is the containment for the no-mistakes gate-agent surface (`disable_project_settings`), which this seatbelt never reaches, and remains the containment for any bypass this list does not name.
+The enumerated forms are:
 
 - `pkill` or `killall` that does not select by the caller's own ancestry, process group, or session.
   The caller-scope flag set is exactly `-P`/`--parent`, `-g`/`--pgroup`, and `-s`/`--session`, as a standalone short option with an optional attached numeric or expansion value (`-P`, `-P123`, `-g0`, `-s5`, `-P$$`, `-P$pid`) or the long form (`--parent 123`, `--parent=123`).
   A signal name is never a scope flag: `pkill -HUP node`, `pkill -SIGHUP node`, `pkill -STOP -f X`, `pkill -PIPE node`, and `pkill -9 -f node` are all broad even though the signal name contains one of the letters.
   `killall` has no scope flag and is always broad, as is `-G` (a real unix group id, not a process group).
-  Path-qualified, `command`, and `sudo` forms are recognized through the same wrapper unwrapping as the watcher rule.
+  Path-qualified forms and the prefixes `!`, `builtin`, `command`, `exec`, `env`, `nohup`, `sudo`, and `timeout`/`gtimeout` are recognized through the same wrapper unwrapping as the watcher rule (`! pkill -f node`, `! ! pkill -f node`, `builtin kill -- -1`), and `time` is routed to the raw fallback.
 - `fuser -k` (or `--kill`, with any signal such as `-KILL -k`), which kills every process holding the named port or file host-wide; `fuser` without `-k` is read-only discovery.
-- `kill` targeting pid `-1` (`kill -9 -1`, `kill -- -1`, `kill -s TERM -1`), which signals every process the caller may reach; a leading `-<signal>` or `-s <sig>` is read as the signal spec, so `kill -1 1234` (SIGHUP to one pid), `kill -- -12345` and `kill -12345` (a process group), and `kill -- -$pgid` are allowed.
+- `kill` targeting pid `-1` (`kill -9 -1`, `kill -- -1`, `kill -s TERM -1`), directly or as the `xargs` utility (`echo x | xargs kill -- -1`), which signals every process the caller may reach; a leading `-<signal>` or `-s <sig>` is read as the signal spec, so `kill -1 1234` (SIGHUP to one pid), `kill -- -12345` and `kill -12345` (a process group), and `kill -- -$pgid` are allowed.
 - `xargs pkill` or `xargs killall` whatever feeds the pipe (`echo node | xargs pkill -f`, `cat names | xargs killall`), because those select by name; an `xargs pkill` that carries a caller-scope flag is allowed.
 - An executed `kill` (or `xargs kill`/`xargs pkill`) fed by an unscoped discovery command - one that selects processes by attribute rather than by a caller-owned pid: an unscoped `pgrep`, any `ps`, any `lsof`, `pidof`, or `fuser`.
   `lsof` is discovery on any invocation, like `ps`, so the table-plus-`awk` form (`lsof -i :3000 | awk 'NR>1{print $2}' | xargs kill -9`) is denied exactly as the `-t` form is.
@@ -163,7 +167,7 @@ A specific `kill <pid>` is allowed, because a literal pid carries no evidence of
 Read-only discovery (`pgrep -f X`, `ps aux | grep X`, `lsof -i :3000`) and quoted data (`echo 'pkill -f X'`) are never kills and are allowed.
 
 Unsupported compound grammar (a loop, `case`, `if`, or other construct the classifier does not model) falls back to a raw byte check, the same way the watcher backstop does.
-The raw check first blanks `command -v`/`type`/`which` lookup spans and help/version-only kill-tool invocations, then fires on any `killall`, on a `fuser` followed by `-k`/`--kill`, on a `kill` whose target after a signal spec or `--` is the literal `-1`, on a `pkill` whose own argument span (up to the next `;`, `|`, `&`, newline, or closing paren) carries no caller-scope flag outside quotes, and - when the command also carries a `kill` or `xargs` verb - on such an unscoped `pgrep`, or on any `ps`, `lsof`, `pidof`, or `fuser`.
+The raw check first blanks `command -v`/`type`/`which` lookup spans and help/version-only kill-tool invocations, then fires on any `killall`, on a `fuser` followed by `-k`/`--kill`, on a `kill` whose target after a signal spec or `--` is the literal `-1` within the same simple command (the span stops at `;`, `|`, `&`, parens, or a backtick, so `while kill -0 "$pid"; do tail -1 "$log"; done` is not a kill-all), on a `pkill` whose own argument span (up to the next `;`, `|`, `&`, newline, or closing paren) carries no caller-scope flag outside quotes, and - when the command also carries a `kill` or `xargs` verb - on such an unscoped `pgrep`, or on any `ps`, `lsof`, `pidof`, or `fuser`.
 Quoted spans are blanked before the scope-flag test, so a pattern that merely contains scope-looking text (`while true; do pkill -f "node server.js -P 3000"; done`) is still denied, while a quoted scope value (`pkill -P "$pid"`) is still scoped.
 So `while true; do pkill -f node; done`, `while true; do kill -9 -1; done`, `if true; then lsof -ti :3000 | xargs kill -9; fi`, and `for x in 1; do kill $(pidof node); done` are denied, while the recommended scoped cleanup idiom `for p in $(pgrep -P $$); do kill $p; done`, the SIGHUP form `for x in 1; do kill -1 1234; done`, and the portable probe `if command -v pkill >/dev/null 2>&1; then echo y; fi` are allowed.
 
@@ -173,10 +177,11 @@ Residuals - what this rule does not catch, so a reader can tell without running 
 2. Discovery output routed through anything other than a command substitution or a plain `$var` reference is not tracked: a file (`ps aux | grep X > /tmp/pids; kill $(cat /tmp/pids)`), an array, a parameter transform, or an intermediate command that is not itself discovery.
    The classifier follows direct variable references (`a=$(ps ...); b=$a; kill $b` is denied), not general shell dataflow.
    In unsupported loop/`if`/`case` grammar the raw check is byte-level, so a discovery command and a `kill`/`xargs` anywhere in the same command are denied together even when the shell would not connect them.
-3. A bare kill-tool token (`pkill` or `killall`, or a `pgrep`/`ps`/`lsof -t`/`pidof`/`fuser` alongside a `kill` or `xargs`) used as pure data inside unsupported loop/`if`/`case` grammar (`if grep -q pkill tests/x.sh; then echo y; fi`) is conservatively denied, because the raw fallback cannot tell data from command there, except for the recognized query and help forms above; the supported-grammar equivalent `grep -q pkill tests/x.sh && echo y` is allowed.
+3. A bare kill-tool token (`pkill` or `killall`, or a `pgrep`/`ps`/`lsof`/`pidof`/`fuser` alongside a `kill` or `xargs`) used as pure data inside unsupported loop/`if`/`case` grammar (`if grep -q pkill tests/x.sh; then echo y; fi`) is conservatively denied, because the raw fallback cannot tell data from command there, except for the recognized query and help forms above; the supported-grammar equivalent `grep -q pkill tests/x.sh && echo y` is allowed.
 4. A discover-then-literal-kill across two commands (`pgrep -f X` now, `kill 76803` later) cannot be caught by any command-shape seatbelt, because the literal pid carries no evidence of foreign origin; the shared-process-table rule in `AGENTS.md` is the containment for it.
 5. The gate-agent surface under `disable_project_settings` (see "Purpose and boundary") does not load this seatbelt at all; the `AGENTS.md` rule and the crewmate brief's wait-discipline rule are the containment there.
 6. The `ps`/`lsof` spelling of caller-scoped cleanup (`ps -o pid= --ppid $$ | xargs kill`, `kill $(ps -o pid= --ppid $$)`) is denied as unscoped discovery; use `pgrep -P`/`-g`/`-s` or a specific pid instead.
+7. An unrecognized exec-through utility placed in front of a kill utility (`nice`, `setsid`, `stdbuf`, `ionice`, `caffeinate`, `doas`, `chrt`, `taskset`, or any other command word the classifier does not unwrap) is not unwrapped, so `nice pkill -f node` is allowed; only `!`, `builtin`, `command`, `exec`, `env`, `nohup`, `sudo`, and `timeout`/`gtimeout` are unwrapped, and `time` is routed to the raw fallback.
 
 ## Stable reason codes
 
@@ -190,7 +195,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `watcher-bundled` | The outer command list is not the blessed setup-plus-final tree. |
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
-| `broad-process-kill` | An actual `pkill`/`killall`/`fuser -k` selects by command line, name, or port rather than by the caller's own ancestry, process group, or session; a `kill` targets pid `-1`; or a `kill`/`xargs kill` is fed by an unscoped discovery command (`pgrep`, `ps`, `lsof -t`, `pidof`, `fuser`) through a substitution, one variable hop, or a pipe tail, so it can reach a sibling lane on the shared process table. |
+| `broad-process-kill` | An actual `pkill`/`killall`/`fuser -k` selects by command line, name, or port rather than by the caller's own ancestry, process group, or session; a `kill` (direct or as the `xargs` utility) targets pid `-1`; or a `kill`/`xargs kill` is fed by an unscoped discovery command (`pgrep`, `ps`, `lsof`, `pidof`, `fuser`) through a substitution, one variable hop, or a pipe tail, so it can reach a sibling lane on the shared process table. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
 | `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
 

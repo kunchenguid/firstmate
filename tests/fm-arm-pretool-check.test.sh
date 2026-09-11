@@ -202,6 +202,14 @@ matrix_case K40 allow 'pgrep -f node | xargs kill -0'
 matrix_case K41 deny 'while true; do pkill -f "node server.js -P 3000"; done'
 matrix_case K42 deny 'lsof -i :3000 | awk '"'"'NR>1{print $2}'"'"' | xargs kill -9'
 matrix_case K43 allow 'for p in $(pgrep -P "$$"); do kill $p; done'
+# K44-K48: a negation or builtin prefix does not hide the kill, a kill-all on
+# the xargs tail is broad, and the kill -0 wait loop with a later -1 argument
+# to another command is allowed.
+matrix_case K44 deny '! pkill -f node'
+matrix_case K45 deny 'builtin kill -- -1'
+matrix_case K46 deny 'echo x | xargs kill -- -1'
+matrix_case K47 allow 'while kill -0 "$pid" 2>/dev/null; do tail -1 "$log"; sleep 1; done'
+matrix_case K48 allow '! pkill -P $$'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -284,6 +292,8 @@ test_direct_policy_contract() {
   assert_policy direct-loop-broad-kill-pgrep $'deny\tbroad-watcher-kill' 'until false; do kill $(pgrep -f fm-watch); done'
   assert_policy direct-watcher-pgrep-xargs-kill $'deny\tbroad-watcher-kill' 'pgrep -f fm-watch | xargs kill'
   assert_policy direct-watcher-subshell-pgrep-xargs-kill $'deny\tbroad-watcher-kill' '(pgrep -f fm-watch) | xargs kill'
+  assert_policy direct-watcher-negated-pkill $'deny\tbroad-watcher-kill' '! pkill -f fm-watch'
+  assert_policy direct-watcher-negated-arm $'deny\twatcher-nested' '! bin/fm-watch-arm.sh'
   assert_policy direct-loop-no-kill-allowed allow 'for f in 1; do echo fm-watch; done'
   assert_policy direct-pipeline $'deny\twatcher-pipeline' 'bin/fm-watch-arm.sh | cat'
   assert_policy direct-leading-redirection $'deny\twatcher-redirection' '>/tmp/out bin/fm-watch-arm.sh'
@@ -402,6 +412,20 @@ test_broad_process_kill_contract() {
   assert_policy bpk-lsof-table-awk-xargs $'deny\tbroad-process-kill' 'lsof -i :3000 | awk '"'"'NR>1{print $2}'"'"' | xargs kill -9'
   assert_policy bpk-lsof-table-awk-cmdsub $'deny\tbroad-process-kill' 'kill -9 $(lsof -i :3000 | awk '"'"'NR>1{print $2}'"'"')'
   assert_policy bpk-if-lsof-table-awk $'deny\tbroad-process-kill' 'if true; then lsof -i :3000 | awk '"'"'NR>1{print $2}'"'"' | xargs kill -9; fi'
+  # A leading negation or builtin prefix is unwrapped, so the real command is
+  # classified; time is routed to the raw fallback.
+  assert_policy bpk-negated-pkill $'deny\tbroad-process-kill' '! pkill -f node'
+  assert_policy bpk-double-negated-pkill $'deny\tbroad-process-kill' '! ! pkill -f node'
+  assert_policy bpk-negated-kill-all $'deny\tbroad-process-kill' '! kill -9 -1'
+  assert_policy bpk-builtin-kill-all $'deny\tbroad-process-kill' 'builtin kill -- -1'
+  assert_policy bpk-time-pkill $'deny\tbroad-process-kill' 'time pkill -f node'
+  # A kill-all target on the xargs tail is broad whatever feeds the pipe.
+  assert_policy bpk-xargs-kill-all-dashdash $'deny\tbroad-process-kill' 'echo x | xargs kill -- -1'
+  assert_policy bpk-xargs-kill-all-signal $'deny\tbroad-process-kill' 'echo x | xargs kill -9 -1'
+  # The kill-all raw check stays bound to one simple command.
+  assert_policy bpk-loop-kill-all-dashdash $'deny\tbroad-process-kill' 'while true; do kill -- -1; done'
+  assert_policy bpk-for-kill-all-signal $'deny\tbroad-process-kill' 'for x in 1; do kill -9 -1; done'
+  assert_policy bpk-if-kill-all-named $'deny\tbroad-process-kill' 'if true; then kill -s KILL -1; fi'
 
   # Caller-scoped kills - the safe forms the guard must NOT refuse - selecting by
   # parent, process group, or session, or by a specific pid the caller chose.
@@ -423,6 +447,16 @@ test_broad_process_kill_contract() {
   assert_policy bpk-allow-kill-plain-pid allow 'kill 1234'
   assert_policy bpk-allow-loop-kill-sighup-pid allow 'for x in 1; do kill -1 1234; done'
   assert_policy bpk-allow-loop-kill-pgroup allow 'for x in 1; do kill -- -$pgid; done'
+  # A -1 argument to a later command in the same loop is not a kill-all target.
+  assert_policy bpk-allow-wait-loop-tail allow 'while kill -0 "$pid" 2>/dev/null; do tail -1 "$log"; sleep 1; done'
+  assert_policy bpk-allow-wait-loop-head allow 'until ! kill -0 $pid; do sleep 1; done; head -1 out.log'
+  assert_policy bpk-allow-if-kill-git-log allow 'if kill -TERM $pid; then git log -1; fi'
+  assert_policy bpk-allow-loop-kill-sleep allow 'for x in 1; do kill -9 $pid; sleep -1; done'
+  # Negated safe forms stay allowed.
+  assert_policy bpk-allow-negated-scoped-pkill allow '! pkill -P $$'
+  assert_policy bpk-allow-negated-kill-probe allow '! kill -0 "$pid"'
+  assert_policy bpk-allow-negated-pgrep allow '! pgrep -f node'
+  assert_policy bpk-allow-negated-test allow '! test -f x'
   # Query and help forms of the kill tools execute no kill.
   assert_policy bpk-allow-command-v-pkill allow 'command -v pkill'
   assert_policy bpk-allow-command-v-pkill-redirected allow 'command -v pkill >/dev/null 2>&1'
@@ -439,6 +473,8 @@ test_broad_process_kill_contract() {
   assert_policy bpk-allow-xargs-kill-zero-probe allow 'pgrep -f node | xargs kill -0'
   assert_policy bpk-allow-xargs-n1-kill-zero-probe allow 'pgrep -f node | xargs -n1 kill -0'
   assert_policy bpk-allow-xargs-pkill-scoped allow 'echo node | xargs pkill -P $$'
+  assert_policy bpk-allow-xargs-kill-signal-only allow 'echo 123 | xargs kill -TERM'
+  assert_policy bpk-allow-xargs-kill-pgroup-var allow 'pgrep -P $$ | xargs kill -- -$pgid'
   assert_policy bpk-allow-literal-signal allow 'kill -9 "$pid"'
   assert_policy bpk-allow-parent-attached allow 'pkill -P12345'
   assert_policy bpk-allow-parent-attached-self allow 'pkill -P$$'

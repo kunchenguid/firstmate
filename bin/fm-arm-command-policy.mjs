@@ -69,7 +69,7 @@ function rawMentionsGeneralBroadKill(command) {
     .replace(/\b(?:pkill|killall)(?:\s+(?:--help|-h|-V|--version|-l|-L))+(?=\s*(?:[;|&)`\n]|$))/g, " ");
   if (/\bkillall\b/.test(normalized)) return true;
   if (/\bfuser\b[^;|&\n)`]*\s(?:-[A-Za-z]*k|--kill)/.test(normalized)) return true;
-  if (/\bkill\s+(?:-[A-Za-z0-9]+|-[sn]\s+\S+|--)\s+(?:\S+\s+)*-1(?=[\s;|&)`]|$)/.test(normalized)) return true;
+  if (/\bkill\s+(?:-[A-Za-z0-9]+|-[sn]\s+[^\s;|&()`]+|--)\s+(?:[^\s;|&()`]+\s+)*-1(?=[\s;|&)`]|$)/.test(normalized)) return true;
   const unscoped = (verbPattern) => [...normalized.matchAll(verbPattern)].some((match) => !rawArgsSelectByCallerScope(match[1]));
   if (unscoped(/\bpkill\b([^;|&\n)`]*)/g)) return true;
   if (!/\b(?:kill|xargs)\b/.test(normalized)) return false;
@@ -574,16 +574,27 @@ function consumeWrapperOptions(name, words, index) {
 
 export function commandPosition(tokens) {
   const words = wordsInNode(tokens);
-  let index = 0;
-  while (index < words.length && isAssignment(words[index].value)) index += 1;
-  const prefixAssignments = index;
   const wrappers = [];
+  let index = 0;
+  while (index < words.length && words[index].value === "!") {
+    wrappers.push("!");
+    index += 1;
+  }
+  const firstCommandWord = index;
+  while (index < words.length && isAssignment(words[index].value)) index += 1;
+  const prefixAssignments = index - firstCommandWord;
   let unresolvedWrapperOption = false;
   let query = false;
   const wrapperPayloads = [];
   let command = words[index];
   while (command) {
     const name = basename(command.value);
+    if (name === "builtin") {
+      wrappers.push(name);
+      index += 1;
+      command = words[index];
+      continue;
+    }
     if (name === "exec" || name === "command" || name === "sudo" || name === "nohup") {
       wrappers.push(name);
       const options = consumeWrapperOptions(name, words, index + 1);
@@ -800,7 +811,8 @@ function isUnscopedDiscovery(position) {
 
 // The kill utility an xargs node runs, if any: "fed" for a plain `kill` (broad
 // only when an unscoped discovery feeds the pipe) or "broad" for an unscoped
-// `pkill`/`killall` (broad by name whatever feeds it). The utility is the first
+// `pkill`/`killall` or a `kill` whose own target is pid -1 (broad whatever
+// feeds it). The utility is the first
 // non-option argument after xargs, unwrapped through the same wrapper set as a
 // command position. An option whose value is attached (-n1, -P4, -I{}) is one
 // word; a short option whose letter ends the token and takes a value (-n 1,
@@ -847,7 +859,11 @@ function xargsKillKind(position, tokens) {
   const utility = commandPosition(args.slice(start));
   if (!utility.command) return "";
   const name = basename(utility.command.value);
-  if (name === "kill") return isKillProbe(utility.words.slice(utility.index + 1)) ? "" : "fed";
+  if (name === "kill") {
+    const killArgs = utility.words.slice(utility.index + 1);
+    if (isKillProbe(killArgs)) return "";
+    return isKillAll(killArgs) ? "broad" : "fed";
+  }
   if (name === "killall") return "broad";
   if (name === "pkill") return selectsByCallerScope(utility.words.slice(utility.index + 1)) ? "" : "broad";
   return "";
