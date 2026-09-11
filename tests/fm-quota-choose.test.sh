@@ -249,6 +249,9 @@ ok "unknown harness fails closed"
 
 out=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate agy:default)
 [ "$out" = "claude default" ] || fail "trailing agy candidate changed the earlier selection: $out"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:unreadable-model)
+[ "$out" = "agy unreadable-model" ] || fail "agy candidate was not eligible without a provider row: $out"
+ok "agy remains eligible without synthetic quota mapping"
 
 if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate 'claude:' 2>&1); then
   fail "trailing empty model was hidden by an earlier selection"

@@ -333,7 +333,6 @@ provider_for_harness() {
     kimi)         printf 'kimi\n' ;;
     cursor)       printf 'cursor\n' ;;
     muse)         printf 'meta\n' ;;
-    agy)          printf 'agy\n' ;;
     *)            return 1 ;;
   esac
 }
@@ -373,6 +372,7 @@ for c in "${CANDIDATES[@]}"; do
   [ "$model" = "$c" ] && model="default"
   [ -n "$model" ] || die "invalid candidate: $c"
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
+  [ "$harness" = agy ] && continue
   provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
     omp) die "omp quota mapping covers only the openai-codex and claude-bridge prefixes: $model" ;;
     *) die "unknown harness: $harness" ;;
@@ -384,12 +384,12 @@ for c in "${CANDIDATES[@]}"; do
   harness=${c%%:*}
   model=${c#*:}
   [ "$model" = "$c" ] && model="default"
-  provider=$(provider_for_harness "$harness" "$model")
   if [ "$harness" = agy ]; then
     printf 'warning: agy %s remains eligible with unmeasurable quota headroom\n' "$model" >&2
     chosen="$harness $model"
     break
   fi
+  provider=$(provider_for_harness "$harness" "$model")
   scope_model=$model
   [ "$harness" != omp ] || scope_model=${model#*/}
   effective=$(effective_for_provider_model "$provider" "$scope_model")
