@@ -904,6 +904,50 @@ test_teardown_cost_summary_excludes_stale_session_files() {
   pass "teardown's cost.json sums only session files at/after intake_at, excluding a reused pool slot's stale ones"
 }
 
+# A task spawned before this change deploys has no intake_at recorded, so
+# there is no safe lower bound to exclude a stale session file left by a
+# prior occupant of a reused treehouse pool worktree slot: consumption must
+# be written null rather than computed with an unbounded (epoch-0) scan that
+# would fold every such stale file in.
+test_teardown_cost_summary_null_without_intake_at() {
+  local case_dir rc cost_json fake_home claude_dir
+  case_dir=$(make_case cost-no-intake)
+  write_meta "$case_dir" local-only ship
+  {
+    printf '%s\n' 'harness=claude'
+    printf '%s\n' 'model=claude-fable-5-1'
+    printf '%s\n' 'effort=high'
+  } >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "merged work"
+  git -C "$case_dir/project" update-ref refs/heads/main \
+    "$(git -C "$case_dir/wt" rev-parse HEAD)"
+
+  fake_home="$case_dir/fake-home"
+  claude_dir="$fake_home/.claude/projects/$(printf '%s' "$case_dir/wt" | tr '/.' '--')"
+  mkdir -p "$claude_dir"
+  printf '%s\n' '{"type":"cost-state","totalCostUSD":99.99}' > "$claude_dir/stale.jsonl"
+  fm_touch_epoch 0 "$claude_dir/stale.jsonl"
+
+  set +e
+  HOME="$fake_home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "cost-no-intake: teardown should succeed on merged local-only work"
+
+  cost_json="$case_dir/data/task-x1/cost.json"
+  [ -f "$cost_json" ] \
+    || fail "cost-no-intake: data/task-x1/cost.json must survive a completed teardown"
+  command -v jq >/dev/null 2>&1 && {
+    [ "$(jq -r '.consumption.claude_list_usd_total' "$cost_json")" = null ] \
+      || fail "cost-no-intake: claude_list_usd_total must stay null without a safe intake_at lower bound"
+    [ "$(jq -r '.consumption.pi_list_usd_total' "$cost_json")" = null ] \
+      || fail "cost-no-intake: pi_list_usd_total must stay null without a safe intake_at lower bound"
+    [ "$(jq -r '.consumption.list_usd_total' "$cost_json")" = null ] \
+      || fail "cost-no-intake: list_usd_total must stay null without a safe intake_at lower bound"
+  }
+  pass "teardown never computes consumption with an unbounded scan when intake_at is missing"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -3801,6 +3845,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_teardown_writes_a_surviving_cost_summary
 test_teardown_cost_summary_excludes_stale_session_files
+test_teardown_cost_summary_null_without_intake_at
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
