@@ -19,6 +19,9 @@ STATELESS_HOME="$TMP_ROOT/stateless-home"
 LARGE_CHILD_HOME="$TMP_ROOT/large-child-home"
 LARGE_PARENT_HOME="$TMP_ROOT/large-parent-home"
 DECISIONS_HOME="$TMP_ROOT/decisions-home"
+OVERSIZED_HOME="$TMP_ROOT/oversized-home"
+MIRROR_CHILD_HOME="$TMP_ROOT/mirror-child-home"
+MIRROR_PARENT_HOME="$TMP_ROOT/mirror-parent-home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 WATCH_PID=
 SLOW_WRITER_PID=
@@ -320,6 +323,175 @@ jq -e '.schema == "fm-secondmate-home-summary.v1" and .counts.decisions_open == 
   "$DECISIONS_HOME/state/home-summary.json" >/dev/null \
   || fail "large open-decisions home-summary was not published with its full decision count"
 pass "many long held decisions on one task publish without exec argument transport"
+
+# Nothing bounds a SINGLE status line: an agent appends notes directly and
+# fm-procevent-remote-reply.sh mirrors a remote payload line with no size cap.
+# One such line above Linux's 128 KiB MAX_ARG_STRLEN used to break every jq that
+# carried it on argv - the crew-state read, the status-event composition, and the
+# per-task row - and the row was dropped without any command reporting failure,
+# which is what made the published summary read as an orphaned, unreadable home.
+# Publish one, then require the full line back untruncated.
+mkdir -p "$OVERSIZED_HOME/state" "$OVERSIZED_HOME/data" "$OVERSIZED_HOME/config" \
+  "$OVERSIZED_HOME/projects/task"
+printf '# Seeded Firstmate home\n' > "$OVERSIZED_HOME/AGENTS.md"
+printf 'oversized\n' > "$OVERSIZED_HOME/.fm-secondmate-home"
+fm_git_init_commit "$OVERSIZED_HOME/projects/task"
+cat > "$OVERSIZED_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] big-line-task - Task holding one huge status line (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+fm_write_meta "$OVERSIZED_HOME/state/big-line-task.meta" \
+  "window=fmtest:fm-big-line-task" \
+  "worktree=$OVERSIZED_HOME/projects/task" \
+  "project=firstmate" \
+  "harness=claude" \
+  "kind=ship" \
+  "mode=no-mistakes" \
+  "spawn_gen=fm.bigline123456"
+oversized_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$OVERSIZED_HOME/state" big-line-task)
+"$ROOT/bin/fm-busy-event.sh" apply "$OVERSIZED_HOME/state" big-line-task idle \
+  --gen "$oversized_gen" --source claude-hook --event stop
+oversized_note=$(head -c 200000 /dev/zero | LC_ALL=C tr '\0' 'y')
+printf 'needs-decision [key=oversized]: %s\n' "$oversized_note" \
+  > "$OVERSIZED_HOME/state/big-line-task.status"
+[ "$(wc -c < "$OVERSIZED_HOME/state/big-line-task.status")" -gt 131072 ] \
+  || fail "oversized status-line fixture did not exceed the per-argument limit"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$OVERSIZED_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/oversized-summary.json" \
+  2> "$TMP_ROOT/oversized-summary.err" \
+  || fail "secondmate home-summary mode failed for one oversized status line: $(cat "$TMP_ROOT/oversized-summary.err")"
+[ ! -s "$TMP_ROOT/oversized-summary.err" ] \
+  || fail "secondmate home-summary mode reported an error for one oversized status line: $(cat "$TMP_ROOT/oversized-summary.err")"
+jq -e '.schema == "fm-secondmate-home-summary.v1"
+  and .valid == true
+  and .invalidity.kind == null
+  and .counts.decisions_open == 1
+  and .counts.endpoints == 1
+  and (.decisions_open[0] | .id == "big-line-task" and .key == "oversized")' \
+  "$TMP_ROOT/oversized-summary.json" >/dev/null \
+  || fail "an oversized status line dropped the task from the home summary: $(jq -c '{valid,invalidity,counts}' "$TMP_ROOT/oversized-summary.json")"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$OVERSIZED_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --json > "$TMP_ROOT/oversized-snapshot.json" \
+  || fail "fleet snapshot json mode failed for one oversized status line"
+jq -e --argjson bytes "${#oversized_note}" '(.tasks | length) == 1
+  and (.tasks[0].id == "big-line-task")
+  and (.tasks[0].current_state.state == "parked")
+  and (.tasks[0].current_state.source == "status-log")
+  and (.tasks[0].current_state.detail | length) == $bytes
+  and (.tasks[0].hints.open_decisions | length) == 1
+  and (.tasks[0].hints.open_decisions[0].summary | length) == $bytes
+  and (.tasks[0].hints.last_event_text | length) > $bytes' \
+  "$TMP_ROOT/oversized-snapshot.json" >/dev/null \
+  || fail "the oversized status line was dropped or truncated in the fleet snapshot"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$OVERSIZED_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "home-summary writer failed for one oversized status line"
+jq -e '.valid == true and .counts.decisions_open == 1' \
+  "$OVERSIZED_HOME/state/home-summary.json" >/dev/null \
+  || fail "the oversized-status-line home summary was not published as readable"
+pass "one oversized status line publishes a readable home summary untruncated"
+
+# The same bytes reach a PARENT through the secondmate aggregation, which
+# re-exports the mirrored line, its note, and the keyed decision fold. A local
+# registered home covers the structured-home record and a remote route covers the
+# mirrored parent-event fallback, while an ordinary task sorted AFTER the
+# oversized one proves a per-task payload can no longer omit unrelated tasks.
+mkdir -p "$MIRROR_CHILD_HOME/state" "$MIRROR_CHILD_HOME/data" \
+  "$MIRROR_CHILD_HOME/config" "$MIRROR_CHILD_HOME/projects" "$MIRROR_CHILD_HOME/bin"
+printf '# Seeded Firstmate home\n' > "$MIRROR_CHILD_HOME/AGENTS.md"
+printf 'ccc-mate\n' > "$MIRROR_CHILD_HOME/.fm-secondmate-home"
+printf '%s\n' '## In flight' '' '## Queued' '' '## Done' \
+  > "$MIRROR_CHILD_HOME/data/backlog.md"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$MIRROR_CHILD_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "mirror child home-summary publication failed"
+mkdir -p "$MIRROR_PARENT_HOME/state" "$MIRROR_PARENT_HOME/data" \
+  "$MIRROR_PARENT_HOME/config" "$MIRROR_PARENT_HOME/projects/task" "$TMP_ROOT/mirrorbin"
+printf '# Seeded Firstmate home\n' > "$MIRROR_PARENT_HOME/AGENTS.md"
+fm_git_init_commit "$MIRROR_PARENT_HOME/projects/task"
+cat > "$MIRROR_PARENT_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] aaa-big - Task holding one huge status line (repo: firstmate) (kind: ship) (since 2026-08-28)
+- [ ] bbb-plain - Ordinary task sorted after it (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+{
+  printf -- '- ccc-mate - local fixture domain (home: %s; scope: fixture work; projects: firstmate; added 2026-08-28)\n' \
+    "$MIRROR_CHILD_HOME"
+  printf -- '- ddd-remote - remote fixture domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: fixture work; projects: alpha; added 2026-08-28)\n'
+} > "$MIRROR_PARENT_HOME/data/secondmates.md"
+for mirror_id in aaa-big bbb-plain; do
+  fm_write_meta "$MIRROR_PARENT_HOME/state/$mirror_id.meta" \
+    "window=fmtest:fm-$mirror_id" \
+    "worktree=$MIRROR_PARENT_HOME/projects/task" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=fm.$mirror_id.123456"
+done
+fm_write_secondmate_meta "$MIRROR_PARENT_HOME/state/ccc-mate.meta" \
+  "$MIRROR_CHILD_HOME" "fmtest:fm-ccc-mate" firstmate claude
+fm_write_meta "$MIRROR_PARENT_HOME/state/ddd-remote.meta" \
+  "window=remote:ddd-remote" \
+  "endpoint_task_id=ddd-remote" \
+  "worktree=/remote/home/never-locally-present" \
+  "harness=claude" \
+  "kind=secondmate" \
+  "mode=secondmate" \
+  "home=/remote/home" \
+  "remote_host=remote-mac" \
+  "remote_root=/remote/root" \
+  "remote_backend=herdr" \
+  "remote_herdr_session=fm-remote" \
+  "remote_target=fm-remote:w1:p1"
+printf 'needs-decision [key=mirrored]: %s\n' "$oversized_note" \
+  > "$MIRROR_PARENT_HOME/state/aaa-big.status"
+printf 'working: ordinary short note\n' > "$MIRROR_PARENT_HOME/state/bbb-plain.status"
+printf 'needs-decision [key=child-gate]: %s\n' "$oversized_note" \
+  > "$MIRROR_PARENT_HOME/state/ccc-mate.status"
+printf 'needs-decision [key=mirrored-remote]: %s\n' "$oversized_note" \
+  > "$MIRROR_PARENT_HOME/state/ddd-remote.status"
+cat > "$TMP_ROOT/mirrorbin/refusing-ssh" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+exit 255
+SH
+chmod +x "$TMP_ROOT/mirrorbin/refusing-ssh"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$MIRROR_PARENT_HOME" \
+  FM_SSH_BIN="$TMP_ROOT/mirrorbin/refusing-ssh" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --json > "$TMP_ROOT/mirror-snapshot.json" \
+  2> "$TMP_ROOT/mirror-snapshot.err" \
+  || fail "parent fleet snapshot failed for mirrored oversized status lines: $(cat "$TMP_ROOT/mirror-snapshot.err")"
+jq -e '[.tasks[].id] == ["aaa-big","bbb-plain","ccc-mate","ddd-remote"]' \
+  "$TMP_ROOT/mirror-snapshot.json" >/dev/null \
+  || fail "an oversized per-task payload omitted tasks from the parent snapshot: $(jq -c '[.tasks[].id]' "$TMP_ROOT/mirror-snapshot.json")"
+jq -e --argjson bytes "${#oversized_note}" '.secondmate_current.records
+  | (length == 2)
+  and (.[0] | .id == "ccc-mate"
+       and .provenance.summary_source == "local-ledger"
+       and (.parent_event.raw | length) > $bytes
+       and (.parent_event.note | length) == $bytes
+       and (.parent_event.open_decisions | length) == 1
+       and (.parent_event.open_decisions[0].key == "child-gate")
+       and (.parent_event.reconciliation.decisions | length) == 1)
+  and (.[1] | .id == "ddd-remote"
+       and .provenance.selected == "parent-event-fallback"
+       and (.parent_event.raw | length) > $bytes
+       and (.parent_event.open_decisions | length) == 1)' \
+  "$TMP_ROOT/mirror-snapshot.json" >/dev/null \
+  || fail "the parent aggregation dropped a mirrored oversized status line: $(jq -c '[.secondmate_current.records[] | {id,sel:.provenance.selected,raw:(.parent_event.raw|length)}]' "$TMP_ROOT/mirror-snapshot.json")"
+pass "mirrored oversized status lines survive the parent secondmate aggregation"
 
 mkdir -p "$CADENCE_HOME/state" "$CADENCE_HOME/data" "$CADENCE_HOME/config" \
   "$CADENCE_HOME/projects"
