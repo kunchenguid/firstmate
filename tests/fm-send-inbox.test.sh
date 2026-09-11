@@ -277,6 +277,18 @@ test_agy_native_draft_race_defers_without_enter() {
   pass "fm-send: an AGY draft race records the steer without pressing Enter"
 }
 
+test_agy_native_deferral_closes_resolved_key() {
+  local dir err rc
+  dir=$(setup_case agy-resolve-deferred agy); err="$dir/send.err"
+  printf 'needs-decision [key=agy-choice]: choose the rollout\n' > "$dir/home/state/t1.status"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=agy-pending -- t1 --resolve-key agy-choice "/no-mistakes"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an AGY deferred answer must remain nonzero"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the deferred AGY answer was not durably recorded"
+  grep -F 'resolved [key=agy-choice]: answered: /no-mistakes' "$dir/home/state/t1.status" >/dev/null \
+    || fail "an AGY deferral left its resolved key open: $(cat "$dir/home/state/t1.status")"
+  pass "fm-send: AGY deferral closes its resolved decision key"
+}
+
 test_explicit_target_stays_typed() {
   local dir err
   dir=$(setup_case explicit); err="$dir/send.err"
@@ -414,6 +426,7 @@ test_harness_invocations_stay_typed
 test_agy_native_defers_pending_and_unknown
 test_agy_native_empty_remains_typed
 test_agy_native_draft_race_defers_without_enter
+test_agy_native_deferral_closes_resolved_key
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery

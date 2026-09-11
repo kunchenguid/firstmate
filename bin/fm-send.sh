@@ -871,7 +871,6 @@ else
       esac
     fi
   fi
-  AGY_TYPED_DEFERRED=0
   AGY_TYPED_VERDICT=
   if [ "$INBOX_PLANE" = 1 ] && [ "$TARGET_BACKEND" = remote ]; then
     # Remote inbox leg: the message becomes a durable record in the remote
@@ -991,10 +990,6 @@ else
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
     fm_send_write_local_inbox || exit 1
-    if [ "$AGY_TYPED_DEFERRED" = 1 ]; then
-      echo "fm-send: agy composer is $AGY_TYPED_VERDICT; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring without touching the pane" >&2
-      exit 1
-    fi
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.
@@ -1076,6 +1071,10 @@ else
       AGY_TYPED_VERDICT=${verdict#*:}
       [ -n "$AGY_TYPED_VERDICT" ] || AGY_TYPED_VERDICT=unknown
       fm_send_write_local_inbox || exit 1
+      if [ -n "$RESOLVE_KEYS" ]; then
+        fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+        fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+      fi
       echo "fm-send: AGY submit comparison failed for task $(fm_send_id_from_meta "$TARGET_META") at $T; stray typed text may remain unsent in the pane" >&2
       echo "fm-send: agy composer is $AGY_TYPED_VERDICT; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring without touching the pane" >&2
       exit 1

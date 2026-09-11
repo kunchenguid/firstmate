@@ -307,10 +307,11 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" "$harness" 2>/dev/null); then
     return 2
   fi
-  # The verdict is read only to report a failed keystroke; every other value
-  # (empty, pending, unknown, ...) is deliberately ignored, never proof.
-  [ "$verdict" != send-failed ] || return 2
-  return 0
+  case "$verdict" in
+    send-failed) return 2 ;;
+    agy-preflight:*|agy-draft-conflict) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 fm_task_inbox_is_fire_and_forget() {  # <record-path>

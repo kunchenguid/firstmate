@@ -309,6 +309,25 @@ test_agy_unknown_defers_but_codex_unknown_rings() {
   pass "inbox: AGY defers unknown composers while codex keeps the existing policy"
 }
 
+test_ring_propagates_agy_submit_deferral() {
+  local state rec rc
+  state="$TMP_ROOT/ring-submit-deferral/state"
+  mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "agy steer")
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_backend_agent_state() { printf "alive\n"; }
+    fm_task_inbox_doorbell_line() { printf "doorbell\n"; }
+    fm_backend_composer_state() { printf "empty\n"; }
+    fm_backend_send_text_submit() { printf "agy-draft-conflict\n"; }
+    fm_task_inbox_ring tmux sess:fm-t1 "$2" fm-t1
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec" || rc=$?
+  [ "$rc" = 1 ] || fail "an AGY submit deferral should return protected status 1, got $rc"
+  [ -f "$rec" ] || fail "an AGY submit deferral must retain its durable record"
+  pass "inbox: AGY submit deferrals preserve the re-ring status"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -727,6 +746,7 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_agy_unknown_defers_but_codex_unknown_rings
+test_ring_propagates_agy_submit_deferral
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
