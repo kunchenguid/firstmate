@@ -53,6 +53,16 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# Also covers the spelling treehouse matches a return path against. Treehouse
+# registers its pool under $HOME and never resolves symlinks when matching, so a
+# slot whose $HOME is reached through a symlink is registered under one spelling
+# while the task record holds the physical one.
+#   (z1) slot under a symlinked $HOME          -> ALLOW under the $HOME form
+#   (z2) slot under an unsymlinked $HOME       -> ALLOW unchanged
+#   (z3) slot outside the resolved $HOME       -> ALLOW, byte-identical passthrough
+#   (z4) $HOME cannot be resolved              -> ALLOW, recorded path untouched
+#   (z5) treehouse rejects the spelling given  -> REFUSE loudly (lease not dropped)
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -522,6 +532,85 @@ fi
 exit 0
 SH
   chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# Rebuild the case's task worktree as a real treehouse pool slot living inside a
+# home directory that is reached through a symlink, reproducing a bootc host
+# where /home is a symlink to /var/home and $HOME is the /home form. The slot is
+# created - and reported - under the physical spelling, which is what a pane cwd
+# read yields at spawn time and what the task record therefore holds, while real
+# treehouse registers the pool under its $HOME-rooted spelling.
+#
+# The pool's treehouse-state.json is written empty: only its presence matters,
+# because that is what marks the layout a treehouse pool slot for teardown.
+#
+# Echoes: <physical-slot-path> <symlinked-home> <physical-home>
+make_symlinked_home_pool_slot() {
+  local case_dir=$1 case_phys pool slot
+  case_phys=$(cd "$case_dir" && pwd -P)
+  mkdir -p "$case_phys/real-home"
+  ln -s real-home "$case_phys/link-home"
+  pool="$case_phys/real-home/.treehouse/proj-abc"
+  slot="$pool/1/repo"
+  mkdir -p "$pool"
+  printf '%s\n' '{}' > "$pool/treehouse-state.json"
+
+  # is_treehouse_pool_slot proves ownership from the pool layout plus a shared git
+  # common dir, so the slot has to be a genuine linked worktree of the project.
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  git -C "$case_dir/project" worktree add -q "$slot" fm/task-x1
+
+  printf '%s %s %s\n' "$slot" "$case_phys/link-home" "$case_phys/real-home"
+}
+
+# A `treehouse` that models the real tool's return matching rule, verified live
+# against treehouse v2.3.0: it makes its path argument absolute and cleans it
+# lexically but never resolves symlinks, then requires an exact match against the
+# one spelling its pool registered, rejecting anything else as "not managed by
+# treehouse". Teardown only ever passes an already-absolute, already-clean path,
+# so an exact string match models it faithfully at that boundary. Every
+# invocation is logged so a test can prove which spelling was handed over, and
+# whether a return was attempted at all.
+add_spelling_matching_treehouse() {
+  local case_dir=$1 registered=$2
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+[ "\${1:-}" = return ] || exit 0
+p=\${!#}
+if [ "\$p" = "$registered" ]; then
+  echo "Worktree returned to pool."
+  exit 0
+fi
+echo "worktree \$p is not managed by treehouse" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  : > "$case_dir/treehouse.log"
+}
+
+# Run teardown for a pool-slot case under <home> as the OS home directory. The
+# subshell keeps that HOME from leaking into any later case.
+run_teardown_with_home() {
+  local case_dir=$1 home=$2
+  ( export HOME="$home"; run_teardown "$case_dir" )
+}
+
+# Point the task record at <slot> and land its work, so teardown reaches the
+# treehouse-return step instead of refusing earlier on unlanded work.
+seed_landed_pool_slot_task() {
+  local case_dir=$1 slot=$2
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$slot" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=teardown-test-task-x1"
+  git -C "$slot" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "shippable work"
+  git -C "$slot" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
 }
 
 git_index_lock_path() {
@@ -1727,6 +1816,120 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   [ -f "$case_dir/state/task-x1.meta" ] \
     || fail "persistent-index-lock: teardown completed despite persistent lock"
   pass "persistent index.lock exhausts retries and refuses without force-removing the lock"
+}
+
+test_symlinked_home_pool_slot_is_returned_under_its_home_form_spelling() {
+  local case_dir rc slot link_home real_home
+  case_dir=$(make_case symlinked-home-pool-slot-return)
+  read -r slot link_home real_home < <(make_symlinked_home_pool_slot "$case_dir")
+  add_spelling_matching_treehouse "$case_dir" "$link_home/.treehouse/proj-abc/1/repo"
+  seed_landed_pool_slot_task "$case_dir" "$slot"
+
+  set +e
+  run_teardown_with_home "$case_dir" "$link_home" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "symlinked-home: teardown should complete when treehouse registered the slot under the \$HOME form"
+  assert_not_contains "$(cat "$case_dir/stderr")" "not managed by treehouse" \
+    "symlinked-home: teardown handed treehouse a spelling it does not accept"
+  assert_grep "return --force $link_home/.treehouse/proj-abc/1/repo" "$case_dir/treehouse.log" \
+    "symlinked-home: the return did not re-spell the slot through \$HOME"
+  assert_no_grep "return --force $real_home" "$case_dir/treehouse.log" \
+    "symlinked-home: the return still handed treehouse the physical spelling"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "symlinked-home: teardown aborted after killing the worker instead of returning the slot"
+  pass "a pool slot under a symlinked \$HOME is returned under the \$HOME-form spelling"
+}
+
+test_unsymlinked_home_pool_slot_still_returns_unchanged() {
+  local case_dir rc slot link_home real_home
+  case_dir=$(make_case physical-home-pool-slot-return)
+  read -r slot link_home real_home < <(make_symlinked_home_pool_slot "$case_dir")
+  add_spelling_matching_treehouse "$case_dir" "$slot"
+  seed_landed_pool_slot_task "$case_dir" "$slot"
+
+  set +e
+  run_teardown_with_home "$case_dir" "$real_home" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "physical-home: teardown should complete when \$HOME has no symlinked component"
+  assert_grep "return --force $slot" "$case_dir/treehouse.log" \
+    "physical-home: the return did not hand over the recorded path"
+  assert_no_grep "$link_home" "$case_dir/treehouse.log" \
+    "physical-home: the return rewrote a spelling that already matched \$HOME"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "physical-home: teardown did not complete"
+  pass "a pool slot under an unsymlinked \$HOME is returned unchanged"
+}
+
+test_pool_slot_outside_resolved_home_is_passed_through_byte_identical() {
+  local case_dir rc slot link_home real_home other_home
+  case_dir=$(make_case pool-slot-outside-home)
+  read -r slot link_home real_home < <(make_symlinked_home_pool_slot "$case_dir")
+  other_home="$(dirname "$real_home")/elsewhere"
+  mkdir -p "$other_home"
+  add_spelling_matching_treehouse "$case_dir" "$slot"
+  seed_landed_pool_slot_task "$case_dir" "$slot"
+
+  set +e
+  run_teardown_with_home "$case_dir" "$other_home" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "outside-home: a slot that does not live under \$HOME must be handed over untouched"
+  assert_grep "return --force $slot" "$case_dir/treehouse.log" \
+    "outside-home: the return did not pass the recorded path through"
+  assert_no_grep "$link_home" "$case_dir/treehouse.log" \
+    "outside-home: the return rewrote a path that does not live under \$HOME"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "outside-home: teardown did not complete"
+  pass "a pool slot outside the resolved \$HOME is handed to treehouse byte-identical"
+}
+
+test_unresolvable_home_passes_the_recorded_path_through() {
+  local case_dir rc slot link_home real_home
+  case_dir=$(make_case unresolvable-home-pool-slot)
+  read -r slot link_home real_home < <(make_symlinked_home_pool_slot "$case_dir")
+  add_spelling_matching_treehouse "$case_dir" "$slot"
+  seed_landed_pool_slot_task "$case_dir" "$slot"
+
+  set +e
+  run_teardown_with_home "$case_dir" "$real_home/no-such-home" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "unresolvable-home: a \$HOME that cannot be resolved must not break the return"
+  assert_grep "return --force $slot" "$case_dir/treehouse.log" \
+    "unresolvable-home: the return did not pass the recorded path through"
+  assert_no_grep "$link_home" "$case_dir/treehouse.log" \
+    "unresolvable-home: the return rewrote the path against an unresolvable \$HOME"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "unresolvable-home: teardown did not complete"
+  pass "an unresolvable \$HOME leaves the recorded path untouched"
+}
+
+test_rejected_slot_return_still_refuses_loudly() {
+  local case_dir rc slot link_home real_home
+  case_dir=$(make_case rejected-slot-return)
+  read -r slot link_home real_home < <(make_symlinked_home_pool_slot "$case_dir")
+  add_spelling_matching_treehouse "$case_dir" "$real_home/.treehouse/other-pool/9/repo"
+  seed_landed_pool_slot_task "$case_dir" "$slot"
+
+  set +e
+  run_teardown_with_home "$case_dir" "$link_home" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "rejected-return: a spelling treehouse refuses must not be swallowed as an already-reclaimed slot"
+  assert_grep "not managed by treehouse" "$case_dir/stderr" \
+    "rejected-return: teardown did not surface the return failure"
+  assert_grep "return" "$case_dir/treehouse.log" \
+    "rejected-return: teardown skipped the return"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "rejected-return: teardown discarded the task record despite a failed return"
+  pass "a return treehouse rejects keeps the loud failure instead of silently dropping the lease"
 }
 
 test_empty_retry_wait_uses_default_without_aborting() {
@@ -3719,6 +3922,11 @@ test_index_lock_mtime_read_failure_refuses
 test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
+test_symlinked_home_pool_slot_is_returned_under_its_home_form_spelling
+test_unsymlinked_home_pool_slot_still_returns_unchanged
+test_pool_slot_outside_resolved_home_is_passed_through_byte_identical
+test_unresolvable_home_passes_the_recorded_path_through
+test_rejected_slot_return_still_refuses_loudly
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
 test_parked_run_advanced_past_unfetched_head_is_still_aborted

@@ -1210,6 +1210,49 @@ fm_treehouse_project_lock_path() {  # <project-dir>
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
+# The path spelling `treehouse return` accepts for a pool slot.
+#
+# Treehouse matches a return path against the spellings its pool registered
+# after only lexical cleaning - it resolves "." and ".." segments, collapses
+# doubled and trailing slashes, and makes a relative path absolute, but it never
+# resolves symlinks. Its pool root is rooted at $HOME, so that is the spelling it
+# stores. Every worktree path Firstmate captures is physical instead: a pane's
+# OS-level cwd read at spawn, or `pwd -P`. Wherever $HOME reaches the home
+# directory through a symlinked component, the two disagree and `treehouse
+# return` rejects the physical form as "not managed by treehouse" - which on a
+# bootc host, where /home is a symlink to /var/home and $HOME is the /home form,
+# is every pooled slot.
+#
+# So a path under the resolved $HOME is re-spelled through the literal $HOME,
+# which is the same HOME/realpath resolution treehouse itself used to build the
+# pool root. Where $HOME has no symlinked component the resolved and literal
+# forms are equal and this is an identity mapping. A path outside the resolved
+# $HOME is passed through byte-identical rather than guessed at.
+#
+# Always prints a path and succeeds; the return itself stays responsible for
+# reporting failure, and nothing here treats a non-rewritten path as evidence
+# that the slot has already been reclaimed.
+fm_treehouse_return_path() {  # <slot-dir>
+  local dir=$1 home home_real
+  home=${HOME:-}
+  [ -n "$home" ] || { printf '%s\n' "$dir"; return 0; }
+  home_real=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || {
+    printf '%s\n' "$dir"
+    return 0
+  }
+  home=${home%/}
+  [ -n "$home" ] || home=/
+  case $dir in
+    "$home_real") printf '%s\n' "$home" ;;
+    "$home_real"/*)
+      dir=${dir#"$home_real"}
+      [ "$home" = / ] || dir="$home$dir"
+      printf '%s\n' "$dir"
+      ;;
+    *) printf '%s\n' "$dir" ;;
+  esac
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
