@@ -2376,6 +2376,57 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# True when some OTHER task's published record already names <worktree>: proof
+# that Treehouse handed this spawn a slot a live task already owns, regardless
+# of what Treehouse's own pool state believes. Treehouse's `get` is meant to
+# never repeat a leased slot, but its liveness tracking is keyed off whichever
+# process last touched the pane, which can be a short-lived intermediate shell
+# that has already exited by the time the long-lived agent is running - so a
+# later, fully sequential `get` can still be handed a path another task's
+# state/<id>.meta already recorded (AGENTS.md section 1's fm-spawn.sh scope).
+# This task's own $ID.meta is excluded by path, not by absence: a plain
+# re-spawn of an existing id (not --relaunch) reaches here with its own prior
+# meta still on disk, and that prior record naming this same worktree is
+# expected reuse, never a foreign collision.
+#
+# A worktree= match alone is not proof of a LIVE collision: fm-teardown.sh
+# returns a task's Treehouse slot to the pool well before it removes that
+# task's .meta record, and several of its steps in between deliberately retain
+# the record on failure so a rerun can retry delivery. A worktree can
+# therefore be legitimately back in the pool, freshly reused by this spawn,
+# while its former owner's meta still names it. Only a positive liveness
+# signal for the other task's recorded endpoint - the same
+# fm_backend_agent_alive classifier fm-crew-state.sh and this file's own
+# duplicate-launch guard already trust - proves it is still owned; a
+# confirmed-dead or missing endpoint is a stale record, not a collision. A
+# target that cannot be resolved at all is treated the same as unknown
+# (conservative), matching fm-spawn.sh's other endpoint-liveness guard above.
+SPAWN_WT_COLLISION_TASK=
+spawn_worktree_claimed_elsewhere() {  # <worktree>
+  local wt=$1 wt_real self_meta other_meta other_wt other_backend other_target other_state
+  SPAWN_WT_COLLISION_TASK=
+  wt_real=$(real_path_or_raw "$wt")
+  self_meta="$STATE/$ID.meta"
+  for other_meta in "$STATE"/*.meta; do
+    [ -e "$other_meta" ] || continue
+    [ "$other_meta" != "$self_meta" ] || continue
+    other_wt=$(fm_meta_get "$other_meta" worktree)
+    [ -n "$other_wt" ] || continue
+    [ "$(real_path_or_raw "$other_wt")" = "$wt_real" ] || continue
+    other_backend=$(fm_backend_of_meta "$other_meta")
+    other_target=$(fm_backend_target_of_meta "$other_meta")
+    if [ -n "$other_target" ]; then
+      other_state=$(fm_backend_agent_alive "$other_backend" "$other_target" 2>/dev/null || printf unknown)
+    else
+      other_state=unknown
+    fi
+    [ "$other_state" = dead ] && continue
+    SPAWN_WT_COLLISION_TASK=$(basename "$other_meta" .meta)
+    return 0
+  done
+  return 1
+}
+
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:
 # an earlier refresh moved the superproject and left the submodule checkout on
 # the pin the previous base recorded. The refusal still stands and this gate
@@ -3061,6 +3112,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # Bounded retry on a post-acquisition collision: Treehouse's own pool state
+  # is not trusted to keep one slot from being handed to two tasks (see
+  # spawn_worktree_claimed_elsewhere above). FM_TREEHOUSE_SLOT_COLLISION_RETRIES
+  # overrides the default for testing; an invalid value falls back to it.
+  SPAWN_WT_COLLISION_RETRIES=${FM_TREEHOUSE_SLOT_COLLISION_RETRIES:-3}
+  case "$SPAWN_WT_COLLISION_RETRIES" in
+    ''|*[!0-9]*)
+      echo "warning: invalid FM_TREEHOUSE_SLOT_COLLISION_RETRIES '$SPAWN_WT_COLLISION_RETRIES'; using 3" >&2
+      SPAWN_WT_COLLISION_RETRIES=3
+      ;;
+  esac
+  SPAWN_WT_ATTEMPT=0
+  while :; do
+  SPAWN_WT_ATTEMPT=$((SPAWN_WT_ATTEMPT + 1))
+  WT=""
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -3121,6 +3187,54 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+
+  if spawn_worktree_claimed_elsewhere "$WT"; then
+    echo "warning: treehouse handed spawn $ID the worktree '$WT', already recorded by task $SPAWN_WT_COLLISION_TASK; returning the colliding slot and retrying acquisition (attempt $SPAWN_WT_ATTEMPT/$SPAWN_WT_COLLISION_RETRIES)" >&2
+    if ! command -v treehouse >/dev/null 2>&1; then
+      echo "error: treehouse command not found; cannot return the colliding worktree slot $WT" >&2
+      exit 1
+    fi
+    # Treehouse's own return tracks the lease by its pool-state owner_pid, not
+    # by scanning the worktree for live processes, so this does not reach for
+    # task $SPAWN_WT_COLLISION_TASK's actual running agent - the stale
+    # owner_pid this clears is exactly the already-exited intermediate shell
+    # the bug report traced the collision to.
+    if ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
+      echo "error: could not return the colliding worktree slot $WT (already recorded by task $SPAWN_WT_COLLISION_TASK); refusing to launch onto a possibly double-owned worktree; inspect window $T and the pool state manually" >&2
+      exit 1
+    fi
+    if [ "$SPAWN_WT_ATTEMPT" -ge "$SPAWN_WT_COLLISION_RETRIES" ]; then
+      echo "error: treehouse repeatedly handed spawn $ID a worktree another live task already owns (last: $WT, held by $SPAWN_WT_COLLISION_TASK) after $SPAWN_WT_COLLISION_RETRIES attempts; refusing to launch onto a possibly double-owned worktree" >&2
+      exit 1
+    fi
+    # `treehouse get` opens a foreground subshell in whatever shell currently
+    # occupies the pane - every other call site invokes it exactly once, from
+    # the pane's original top-level shell at $PROJ_ABS. The pane is still
+    # sitting in that first subshell (the external `treehouse return --force`
+    # above ran in an unrelated subprocess and never touched it), so resending
+    # `treehouse get` without first leaving it would nest a second subshell
+    # inside the colliding one instead of issuing a clean acquisition from
+    # $PROJ_ABS. Exit that subshell and confirm the pane is back at the
+    # project directory before retrying.
+    spawn_send_text_line "$WT_TARGET" 'exit'
+    wt_exited=0
+    for _ in $(seq 1 20); do
+      p=$(spawn_current_path "$WT_TARGET" || true)
+      if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$PROJ_ABS_REAL" ]; then
+        wt_exited=1
+        break
+      fi
+      sleep 0.5
+    done
+    if [ "$wt_exited" -ne 1 ]; then
+      echo "error: window $T did not return to the project directory after returning the colliding worktree slot $WT; refusing to resend treehouse get into a possibly nested subshell; inspect window $T" >&2
+      exit 1
+    fi
+    sleep 1
+    continue
+  fi
+  break
+  done
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
