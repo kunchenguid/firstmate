@@ -117,54 +117,54 @@ drive() { # <function> <argument...>
   ' _ "$ROOT" "$@" 2>&1
 }
 
+# These run inside command substitutions, where `fail` would exit only the
+# subshell and let the script carry on with empty ids. They return non-zero
+# instead, and every call site carries its own `|| fail`.
 new_workspace() { # <label> -> "<workspace>\t<tab>\t<pane>"
   local out
-  out=$(lab workspace create --cwd "$ROOT" --label "$1" --no-focus) \
-    || fail "could not create the $1 workspace"
+  out=$(lab workspace create --cwd "$ROOT" --label "$1" --no-focus) || return 1
   printf '%s' "$out" | jq -er '
     [.result.workspace.workspace_id, .result.tab.tab_id, .result.root_pane.pane_id] | @tsv
-  ' || fail "could not read the $1 workspace ids"
+  '
 }
 
 new_tab() { # <workspace> <label> -> "<tab>\t<pane>"
   local out
-  out=$(lab tab create --workspace "$1" --label "$2" --cwd "$ROOT") \
-    || fail "could not create the $2 tab"
-  printf '%s' "$out" | jq -er '[.result.tab.tab_id, .result.root_pane.pane_id] | @tsv' \
-    || fail "could not read the $2 tab ids"
+  out=$(lab tab create --workspace "$1" --label "$2" --cwd "$ROOT") || return 1
+  printf '%s' "$out" | jq -er '[.result.tab.tab_id, .result.root_pane.pane_id] | @tsv'
 }
 
 focused_tab() {
   lab workspace list | jq -er '
     [.result.workspaces[] | select(.focused == true)] | select(length == 1) | .[0].active_tab_id
-  ' || fail "could not read the session's focused tab"
+  '
 }
 
 pane_exists() { lab pane get "$1" >/dev/null 2>&1; }
 
 foreground_reason() {
-  lab terminal title clear | jq -er '.result.reason' \
-    || fail "could not probe the session's foreground client"
+  lab terminal title clear | jq -er '.result.reason'
 }
 
 # --- the attachment itself, which is what #4131 could not do ----------------
 
-REASON=$(foreground_reason)
+REASON=$(foreground_reason) || fail "could not probe the session's foreground client"
 [ "$REASON" = no_foreground_client ] \
   || fail "the fresh lab already had a foreground client (reason=$REASON)"
 
 "$LAB_HELPER" viewer start "$LAB_SESSION" >/dev/null \
   || fail "could not attach a real foreground Herdr viewer over a sized pty"
-REASON=$(foreground_reason)
+REASON=$(foreground_reason) || fail "could not probe the session's foreground client"
 [ "$REASON" = cleared ] \
   || fail "the attached pty viewer did not register as a foreground client (reason=$REASON)"
 pass "attached viewer: a pty sized before the fork registers as a real Herdr foreground client"
 
 # --- scenario 3: a viewer on the target tab blocks the close ---------------
 
-IFS=$'\t' read -r WS_THREE TAB_THREE_A PANE_THREE_A <<<"$(new_workspace viewer-active)"
+FIXTURE=$(new_workspace viewer-active) || fail "could not create the scenario 3 workspace"
+IFS=$'\t' read -r WS_THREE TAB_THREE_A PANE_THREE_A <<<"$FIXTURE"
 # A second tab keeps the close a plain one rather than an emptying-workspace plan.
-IFS=$'\t' read -r _ _ <<<"$(new_tab "$WS_THREE" viewer-active-b)"
+new_tab "$WS_THREE" viewer-active-b >/dev/null || fail "could not create the scenario 3 companion tab"
 lab tab focus "$TAB_THREE_A" >/dev/null || fail "could not focus the scenario 3 target tab"
 [ "$(focused_tab)" = "$TAB_THREE_A" ] || fail "scenario 3 did not start focused on the target tab"
 
@@ -179,8 +179,10 @@ pass "attached viewer: a live client on the target tab refuses the close and kee
 
 # --- scenario 4: the viewer moves ONTO the target mid-close ----------------
 
-IFS=$'\t' read -r WS_FOUR TAB_FOUR_A PANE_FOUR_A <<<"$(new_workspace viewer-late-on)"
-IFS=$'\t' read -r TAB_FOUR_B _ <<<"$(new_tab "$WS_FOUR" viewer-late-on-b)"
+FIXTURE=$(new_workspace viewer-late-on) || fail "could not create the scenario 4 workspace"
+IFS=$'\t' read -r WS_FOUR TAB_FOUR_A PANE_FOUR_A <<<"$FIXTURE"
+FIXTURE=$(new_tab "$WS_FOUR" viewer-late-on-b) || fail "could not create the scenario 4 companion tab"
+IFS=$'\t' read -r TAB_FOUR_B _ <<<"$FIXTURE"
 lab tab focus "$TAB_FOUR_B" >/dev/null || fail "could not focus away from the scenario 4 target"
 [ "$(focused_tab)" = "$TAB_FOUR_B" ] || fail "scenario 4 did not start focused off the target tab"
 
@@ -198,8 +200,10 @@ pass "attached viewer: focus moving onto the target between planning and mutatio
 
 # --- scenario 5: the viewer moves OFF the target mid-close -----------------
 
-IFS=$'\t' read -r WS_FIVE TAB_FIVE_A PANE_FIVE_A <<<"$(new_workspace viewer-late-off)"
-IFS=$'\t' read -r TAB_FIVE_B _ <<<"$(new_tab "$WS_FIVE" viewer-late-off-b)"
+FIXTURE=$(new_workspace viewer-late-off) || fail "could not create the scenario 5 workspace"
+IFS=$'\t' read -r WS_FIVE TAB_FIVE_A PANE_FIVE_A <<<"$FIXTURE"
+FIXTURE=$(new_tab "$WS_FIVE" viewer-late-off-b) || fail "could not create the scenario 5 companion tab"
+IFS=$'\t' read -r TAB_FIVE_B _ <<<"$FIXTURE"
 lab tab focus "$TAB_FIVE_A" >/dev/null || fail "could not focus the scenario 5 target tab"
 [ "$(focused_tab)" = "$TAB_FIVE_A" ] || fail "scenario 5 did not start focused on the target tab"
 
@@ -218,8 +222,10 @@ pass "attached viewer: a close preserves the fresh non-target focus the viewer m
 
 # --- scenario 7: the projection's seeded-tab prune inherits the refusal ----
 
-IFS=$'\t' read -r WS_SEVEN TAB_SEVEN_SEEDED PANE_SEVEN_SEEDED <<<"$(new_workspace viewer-seeded)"
-IFS=$'\t' read -r _ PANE_SEVEN_TASK <<<"$(new_tab "$WS_SEVEN" fm-viewer-seeded-task)"
+FIXTURE=$(new_workspace viewer-seeded) || fail "could not create the scenario 7 workspace"
+IFS=$'\t' read -r WS_SEVEN TAB_SEVEN_SEEDED PANE_SEVEN_SEEDED <<<"$FIXTURE"
+FIXTURE=$(new_tab "$WS_SEVEN" fm-viewer-seeded-task) || fail "could not create the scenario 7 task tab"
+IFS=$'\t' read -r _ PANE_SEVEN_TASK <<<"$FIXTURE"
 lab tab list --workspace "$WS_SEVEN" \
   | jq -e --arg tab "$TAB_SEVEN_SEEDED" '.result.tabs[] | select(.tab_id == $tab) | .label == "1"' >/dev/null \
   || fail "the seeded tab is not the label-1 default tab the prune identifies"
@@ -241,7 +247,7 @@ pass "attached viewer: the projection seeded-tab prune refuses while a live clie
 
 "$LAB_HELPER" viewer stop "$LAB_SESSION" >/dev/null \
   || fail "could not detach the lab viewer"
-REASON=$(foreground_reason)
+REASON=$(foreground_reason) || fail "could not probe the session's foreground client"
 [ "$REASON" = no_foreground_client ] \
   || fail "the lab still reported a foreground client after the viewer stopped (reason=$REASON)"
 OUT=$(drive fm_backend_herdr_projection_close_pane_focus_preserving "$LAB_SESSION" "$PANE_THREE_A")

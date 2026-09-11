@@ -285,6 +285,9 @@ fm_herdr_lab_viewer_stop() { # <session>
     fm_herdr_lab_viewer_signal_pid "$pid" KILL
   done
 
+  # Both recorded processes are already gone by here, so an unreadable reason
+  # means the session itself is stopped or absent rather than a viewer this
+  # helper still has to detach.
   waited=0
   attempt=$((timeout * 5))
   while [ "$waited" -lt "$attempt" ]; do
