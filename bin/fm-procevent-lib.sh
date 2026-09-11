@@ -337,11 +337,12 @@ fm_procevent_claim_path() {
 # pid's start identity (fm_pid_start_identity). Written by the runner under the
 # source lock right after the spawn, read back only when its token matches the
 # loaded claim, and removed with the claim, so a record from a dead generation
-# can never speak for the one that replaced it. It keys the child on its start
-# time alone, exactly as fm_lock_holder_alive keys a lock holder, because the
-# question is "is the process we started still running" and a source command
-# that exec's into its long-lived poller keeps its pid and start time while its
-# command line changes.
+# can never speak for the one that replaced it. It keys the child on its pid
+# plus its start time, not its program image, because the question is "is the
+# process we started still running" and a source command that exec's into its
+# long-lived poller keeps its pid and start time while its command line
+# changes. Keying process liveness on start time rather than the program image
+# originates in commit 9141bafc.
 fm_procevent_claim_child_path() {
   printf '%s/%s.child\n' "$(fm_procevent_claim_root)" "$1"
 }

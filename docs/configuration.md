@@ -829,7 +829,7 @@ Ownership is machine-wide per canonical source, because separate homes can share
 Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `FM_PROCEVENT_CLAIM_ROOT`).
 Each claim binds its caller-reported home and runner PID to a process identity, unique claim generation, exact registration-file generation, and resolved state-root identity.
 Beside the claim, the runner records the poll child it spawned - that child's pid and start identity, bound to the claim generation by its token - as soon as the source command is running, and the record is removed with the claim.
-That record keys the child on its start time alone, exactly as a lock holder is keyed, so a source command that exec's into its long-lived poller keeps being recognized while a different process that later inherits the child's number does not.
+The record identifies the child by its pid plus its process start time, not its program image, so a source command that exec's into its long-lived poller keeps being recognized while a different process that later inherits the child's number does not.
 Registration, acquisition, replacement, retirement, and generation-bound release are serialized at one machine-wide boundary per source.
 A live identity-matched owner is never displaced, and release removes only the exact generation the caller acquired.
 Every stop proves ownership before its first signal: the live runner's recorded process identity must match and it must still lead its process group.

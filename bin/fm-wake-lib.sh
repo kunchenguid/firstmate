@@ -90,16 +90,17 @@ fm_pid_identity() {
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
 
-# The holder's process start time alone, with no program image folded in.
-# Generic lock liveness needs exactly this and nothing more: a pid whose start
-# time differs is a different process, which is the pid reuse this guards
-# against, while a live holder that exec'd into another program keeps both its
-# pid and its start time and is still the same holder. fm_pid_identity
-# deliberately folds the command in as well, so a ROLE predicate can retire a
-# process that exec'd away from the role it registered for; reusing that string
-# for holder liveness would read a live exec'd holder as dead and let its lock
-# be stolen out from under it. Mirrors fm_pid_identity's source selection so
-# both read the same process facts on every platform. The ps fallback's lstart
+# A process's start time alone, with no program image folded in. An "is the
+# process we started still running" check needs exactly this and nothing
+# more: a pid whose start time differs is a different process, which is the
+# pid reuse this guards against, while a live process that exec'd into another
+# program keeps both its pid and its start time and is still the one that was
+# started. fm_pid_identity deliberately folds the command in as well, so a ROLE
+# predicate can retire a process that exec'd away from the role it registered
+# for; reusing that string here would read a live exec'd process as dead.
+# Keying liveness on start time rather than the program image originates in
+# commit 9141bafc. Mirrors fm_pid_identity's source selection so both read the
+# same process facts on every platform. The ps fallback's lstart
 # rendering is pinned to one locale AND one time zone: the identity is written
 # under one environment and re-read under another, and a zone-shifted rendering
 # of the same start instant would read a live process as a stranger.
