@@ -1,56 +1,214 @@
-# Verification: the agy (Antigravity CLI) crewmate adapter
+# Verification: the agy worker adapter
 
-This record owns the dated empirical evidence for the worker-only `agy` adapter.
+This record owns dated empirical evidence for the worker-only Antigravity CLI adapter.
 The adapter reference at [`.agents/skills/harness-adapters/references/harness/agy.md`](../../.agents/skills/harness-adapters/references/harness/agy.md) owns the operating contract.
 
-## Subject
+## Current measurement
 
-| Field | Value |
-|---|---|
-| Version | `Antigravity CLI 1.2.0` from `~/.local/bin/agy`. |
-| Verified | 2026-09-10 on Linux. |
-| Scope | CREWMATE and SCOUT only. |
-| Primary and secondmate | Out of scope, with `--secondmate` refused. |
-| Provider | Authenticated real-model session on the local machine. |
+The current measurement was taken on 2026-09-11 UTC on Linux with Antigravity CLI 1.2.0 from `~/.local/bin/agy`.
+The verified scope is CREWMATE and SCOUT only.
 
-## Launch and interactive submission
+Command:
 
-`agy --help` reported `--prompt-interactive`, `--dangerously-skip-permissions`, `--model`, `--effort low|medium|high`, `--continue`, `--conversation`, `--add-dir`, and text, JSON, and stream formats.
-`agy models` listed `gemini-3.8-flash-high`, `gemini-3.8-flash-medium`, `gemini-3.8-flash-low`, `gemini-3.7`, `gemini-3.6`, `gemini-3.1-pro`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, and `gpt-oss-120b-medium` model entries.
-The real interactive launch was `agy --dangerously-skip-permissions --effort low --prompt-interactive "Reply with AGY_PROBE_READY, then wait for more input."`.
-The trust dialog was accepted with one Enter, the initial brief response began without another Enter, and the TUI remained at its live composer for steering.
-The idle capture was a bare `>` composer row followed by `? for shortcuts` and `Gemini 3.8 Flash · low`.
-The active-turn capture included `esc to cancel` and an animated `Working...` or `Generating...` row.
+```text
+~/.local/bin/agy --version
+```
 
-## Detection evidence
+Output:
 
-The live launcher process reported `ps comm=agy` and its tool child environment exported `ANTIGRAVITY_AGENT=1`.
-The same child environment also contained `ANTIGRAVITY_AGENTAPI_EXE`, `ANTIGRAVITY_CONVERSATION_ID`, `ANTIGRAVITY_LS_ADDRESS`, `ANTIGRAVITY_LS_VERSION`, `ANTIGRAVITY_PROJECT_ID`, `ANTIGRAVITY_SOURCE_METADATA`, and `ANTIGRAVITY_TRAJECTORY_ID`.
-The launcher itself did not export those `ANTIGRAVITY_*` identity values, so `ANTIGRAVITY_AGENT=1` is the verified child marker and exact `agy` ancestry is the launcher signal.
-The portable tests exercise marker precedence with inherited `CLAUDECODE`, exact ancestry, `agy-helper` and `agylib` decoys, and exact tmux process-name liveness.
+```text
+1.2.0
+```
 
-## Hook-backed busy state
+## CLI surface
 
-The installed hook documentation at `~/.gemini/antigravity-cli/builtin/skills/agy-customizations/docs/hooks.md` specifies JSON stdin and JSON stdout with camelCase keys.
-The live hook probe used an absolute `--add-dir` workspace containing `.agents/hooks.json` and observed `PreInvocation`, `PreToolUse`, `PostToolUse`, `PostInvocation`, and `Stop` events in the real process.
-The adapter writes only `state/<id>.agy-hooks/.agents/hooks.json` and never writes the task worktree's `.agents/hooks.json`.
-The portable wiring test drives the generated real hook commands and observes `busy agy-hook` after `PreInvocation` and `idle agy-hook` plus the turn-end marker after `Stop`.
-The live Escape probe canceled a real `sleep 60` tool call, returned the TUI to the `>` composer, and produced no delayed `Stop` event for that canceled invocation.
-The adapter therefore records `idle fm-interrupt` after its verified Escape delivery path instead of trusting a hook event that agy did not emit.
+Command:
 
-## Composer and control evidence
+```text
+~/.local/bin/agy --help 2>&1 | grep -E -- '--prompt-interactive|--dangerously-skip-permissions|--model|--effort|--continue|--conversation|--add-dir|--print-timeout|--output-format|--format'
+```
 
-The shared classifier accepts `>` as empty only when the independent `? for shortcuts` footer is present below it.
-The portable regression proves idle `>` plus footer is `empty`, `> draft` plus footer is `pending`, and bare `>` without the footer is `unknown` in both cursor and cursorless paths.
-The real Escape key canceled the active tool call once, required no composer clear, and left the worker alive.
-The real `/quit` command exited the TUI and printed the conversation id in its resume hint.
-Relaunching with `--conversation=<id>` restored the full prior screen and history.
-Relaunching with `--continue` also restored the latest conversation.
+Output:
 
-## Tests and refresh commands
+```text
+  --add-dir                       Add a directory to the workspace (repeatable) (default [])
+  -c                              Short alias for --continue
+  --continue                      Continue the most recent conversation
+  --conversation                  Resume a previous conversation by ID
+  --dangerously-skip-permissions  Auto-approve all tool permission requests without prompting
+  --effort                        Reasoning effort for the current CLI session (low|medium|high)
+  -i                              Short alias for --prompt-interactive
+  --input-format                  Input format for print mode (text, stream-json). stream-json reads one NDJSON message per line from stdin and runs a turn for each; it requires --output-format stream-json (default text)
+  --model                         Model for the current CLI session
+  --output-format                 Output format for print mode (text, json, stream-json) (default text)
+  --print-timeout                 Timeout for print mode wait (default 5m0s)
+  --prompt-interactive            Run an initial prompt interactively and continue the session
+```
 
-The portable regressions are `bash tests/fm-gemini-harness.test.sh`, `bash tests/fm-busy-adapter-wiring.test.sh`, `bash tests/fm-composer-lib.test.sh`, `bash tests/fm-control.test.sh`, and `bash tests/fm-tmux-agent-liveness.test.sh`.
-The live liveness guard is `FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh`.
-The live composer guard is `FM_COMPOSER_MATRIX_LIVE=1 bin/fm-test-run.sh tests/fm-composer-matrix-live-e2e.test.sh`.
-The live steering guard was run as `FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=agy FM_SEND_INBOX_LIVE_TIMEOUT=120 bash tests/fm-send-inbox-doorbell-live-e2e.test.sh` and the real worker acted on and acknowledged the inbox message.
-Both live guards use `fm_live_gate` from `tests/lib.sh` and fail loudly when an installed agy surface cannot be classified.
+Command:
+
+```text
+~/.local/bin/agy models
+```
+
+Output:
+
+```text
+Fetching available models...
+gemini-3.8-flash-high	Gemini 3.8 Flash (High)
+gemini-3.8-flash-medium	Gemini 3.8 Flash (Medium)
+gemini-3.8-flash-low	Gemini 3.8 Flash (Low)
+gemini-3.7-flash-high	Gemini 3.7 Flash (High)
+gemini-3.7-flash-medium	Gemini 3.7 Flash (Medium)
+gemini-3.7-flash-low	Gemini 3.7 Flash (Low)
+gemini-3.6-flash-high	Gemini 3.6 Flash (High)
+gemini-3.6-flash-medium	Gemini 3.6 Flash (Medium)
+gemini-3.6-flash-low	Gemini 3.6 Flash (Low)
+gemini-3.1-pro-high	Gemini 3.1 Pro (High)
+gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
+claude-sonnet-4-6	Claude Sonnet 4.6 (Thinking)
+claude-opus-4-6-thinking	Claude Opus 4.6 (Thinking)
+gpt-oss-120b-medium	GPT-OSS 120B (Medium)
+```
+
+## Portable regressions
+
+Command:
+
+```text
+bash tests/fm-composer-lib.test.sh | tail -1
+```
+
+Output:
+
+```text
+ok - fm_composer_queued_enter_verdict: only proven pending is converted
+```
+
+Command:
+
+```text
+bash tests/fm-busy-adapter-wiring.test.sh | tail -1
+```
+
+Output:
+
+```text
+all fm-busy-adapter-wiring tests passed
+```
+
+Command:
+
+```text
+bash tests/fm-control.test.sh | tail -1
+```
+
+Output:
+
+```text
+ok - fm-control's arrival leaves fm-send's from-firstmate marking untouched
+```
+
+Command:
+
+```text
+bash tests/fm-send-settle.test.sh | tail -1
+```
+
+Output:
+
+```text
+ok - fm-send: an agy Escape with no acknowledgement records unknown, not idle
+```
+
+Command:
+
+```text
+bash tests/fm-control-relaunch.test.sh | tail -1
+```
+
+Output:
+
+```text
+ok - relaunch heals an item that drifted out of In flight while the task stayed live
+```
+
+These suites cover the shared classifier, generated hook lifecycle, stale-generation wake rejection, teardown retirement, non-agy cleanup refusal, control interruption, and data-plane interruption.
+
+## Live guards
+
+Command:
+
+```text
+FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh | grep -E 'agy 1\.2\.0|harness liveness: agy|checked 3|FM_TEST_END'
+```
+
+Output:
+
+```text
+# agy 1.2.0: title='agy' foreground=[agy ]
+ok - harness liveness: agy 1.2.0 classifies alive
+# checked 3 installed harness(es)
+FM_TEST_END 2026-09-11T03:08:58Z tests/fm-harness-liveness-drift-live-e2e.test.sh exit=0 duration_ms=1084 gate_skip=false
+```
+
+Command:
+
+```text
+FM_COMPOSER_MATRIX_LIVE=1 bin/fm-test-run.sh tests/fm-composer-matrix-live-e2e.test.sh | grep -E 'ok - agy|ok - strict posture|ok - live composer-matrix'
+```
+
+Output:
+
+```text
+ok - agy (1.2.0): real idle > composer plus shortcuts footer classifies empty
+ok - agy (1.2.0): real unsent draft stays pending with styled and cursorless signals
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+ok - live composer-matrix guard verified 4 live surface(s)
+```
+
+Command:
+
+```text
+FM_AGY_LIFECYCLE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh | grep -E 'ok - agy|FM_TEST_END'
+```
+
+Output:
+
+```text
+ok - agy (1.2.0): canonical spawn, hooks, control/data interrupts, Stop, exit, and teardown passed
+FM_TEST_END 2026-09-11T03:12:12Z tests/fm-send-inbox-doorbell-live-e2e.test.sh exit=0 duration_ms=73455 gate_skip=false
+```
+
+The lifecycle guard proves canonical `fm-spawn` hook generation and brief submission, a real running tool, control-plane and data-plane Escape delivery, unconfirmed state handling, natural Stop idle and turn-end publication, exit, and teardown.
+
+## Repository gates
+
+Command:
+
+```text
+bin/fm-doc-audience-check.sh
+```
+
+Output:
+
+```text
+fm-doc-audience-check: ok surfaces=99 local_links=379
+```
+
+Command:
+
+```text
+bin/fm-lint.sh
+```
+
+Output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: local changed-file mode; ShellCheck source following disabled
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+```
+
+The repository lint and every touched suite are rerun before delivery, and this record is the single owner for current agy measurements.
