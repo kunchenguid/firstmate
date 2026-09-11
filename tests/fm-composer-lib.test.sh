@@ -716,22 +716,6 @@ test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
   pass "fm_composer_classify_screen: agy uses cursor divergence and model-footer proof for multiline drafts"
 }
 
-test_agy_prompt_accepts_supported_model_footers() {
-  local caps=$'styled=1\ncursor=1' footer out extract
-  for footer in \
-    'Claude Sonnet 4.6 · low' \
-    'GPT-OSS 120B · medium' \
-    'Gemini 3.8 Flash · high'; do
-    out=$(fm_composer_classify_screen "$caps" $'────────\n> draft\n────────\n'"$footer" 1)
-    [ "$out" = pending ] \
-      || fail "agy footer '$footer' must classify an unsent draft pending, got '$out'"
-    extract=$(fm_composer_extract_selected_content "$caps" $'────────\n> draft\n────────\n'"$footer")
-    [ "$extract" = 'draft' ] \
-      || fail "agy footer '$footer' must preserve the draft, got '$extract'"
-  done
-  pass "fm_composer: agy recognizes supported model footers by structure"
-}
-
 test_agy_prompt_preserves_structural_draft_rows() {
   local screen out extract caps
   for caps in "$CAPS_TMUX" 'styled=0'; do
@@ -796,6 +780,33 @@ test_agy_prompt_uses_complete_positional_boundaries() {
   pass "fm_composer: agy uses the complete positional boundary contract"
 }
 
+test_agy_boundary_is_locale_independent() {
+  local utf8_locale locale boundary
+  utf8_locale=
+  for candidate in C.UTF-8 en_US.UTF-8; do
+    if LC_ALL="$candidate" locale charmap >/dev/null 2>&1; then
+      utf8_locale=$candidate
+      break
+    fi
+  done
+  if [ -z "$utf8_locale" ]; then
+    utf8_locale=$(LC_ALL=C locale -a | LC_ALL=C awk '/[Uu][Tt][Ff].*8/ { print; exit }')
+  fi
+  [ -n "$utf8_locale" ] || fail "no UTF-8 locale is available for AGY boundary coverage"
+  for boundary in '────' '════' '━━━━' '----'; do
+    for locale in C "$utf8_locale"; do
+      LC_ALL="$locale" _fm_composer_agy_boundary_row "$boundary" \
+        || fail "AGY boundary '$boundary' was rejected under $locale"
+    done
+  done
+  for locale in C "$utf8_locale"; do
+    if LC_ALL="$locale" _fm_composer_agy_boundary_row '── text ──'; then
+      fail "mixed AGY boundary text was accepted under $locale"
+    fi
+  done
+  pass "fm_composer: AGY boundaries are locale-independent"
+}
+
 test_agy_prompt_preserves_furniture_looking_drafts() {
   local caps=$'styled=0\ncursor=1' out extract screen
   for draft in '? for shortcuts' '────────'; do
@@ -844,9 +855,9 @@ test_selected_content_is_composer_scoped_and_wrap_normalized
 test_agy_prompt_requires_footer_proof
 test_agy_prompt_requires_footer_proof_without_cursor
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts
-test_agy_prompt_accepts_supported_model_footers
 test_agy_prompt_preserves_structural_draft_rows
 test_agy_prompt_uses_complete_positional_boundaries
+test_agy_boundary_is_locale_independent
 test_agy_prompt_preserves_furniture_looking_drafts
 
 test_queued_enter_verdict_busy_pending_is_empty() {

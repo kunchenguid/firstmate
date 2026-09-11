@@ -396,13 +396,6 @@ FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.|^Plan, s
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
 # text, and only the run's LAST row is ever matched against it.
 FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
-# Antigravity CLI's ASCII `>` prompt is accepted only with a stable shortcuts
-# or model footer, or with the paired horizontal boundaries that remain visible
-# while a draft hides both footers.
-FM_COMPOSER_AGY_FOOTER_RE_DEFAULT='^\?[[:space:]]+for shortcuts([[:space:]]|$)'
-# Antigravity hides the shortcuts footer while a draft is present, but keeps
-# the model-and-effort footer below the composer region.
-FM_COMPOSER_AGY_MODEL_RE_DEFAULT='^.+[[:space:]]·[[:space:]](low|medium|high)$'
 # omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
 # git, and context cells. Verified live through Herdr on omp 18.1.11:
@@ -1041,15 +1034,19 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
 }
 
 _fm_composer_agy_boundary_row() {  # <trimmed-row>
-  local row=$1
-  case "$row" in
-    ''|*[!─-╿=_-]*) return 1 ;;
-  esac
+  local row=$1 hex
+  [ -n "$row" ] || return 1
+  hex=$(LC_ALL=C printf '%s' "$row" | LC_ALL=C od -An -tx1 -v | LC_ALL=C tr -d '[:space:]') || return 1
+  [ -n "$hex" ] || return 1
+  while [ -n "$hex" ]; do
+    case "$hex" in
+      2d*|3d*|5f*) hex=${hex#??} ;;
+      e294[89ab][0-9a-f]*) hex=${hex#??????} ;;
+      e295[89ab][0-9a-f]*) hex=${hex#??????} ;;
+      *) return 1 ;;
+    esac
+  done
   return 0
-}
-
-_fm_composer_agy_model_footer() {  # <trimmed-row>
-  fm_composer_idle_matches "$1" "${FM_COMPOSER_AGY_MODEL_RE:-$FM_COMPOSER_AGY_MODEL_RE_DEFAULT}" sensitive
 }
 
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
