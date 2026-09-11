@@ -1,0 +1,18 @@
+# Firstmate fleet liveness guardian - systemd USER timer template.
+#
+# Drives fm-liveness-guardian.service on a short cadence so a lapsed home is
+# repaired within roughly one interval and the re-arm gap after any wake stays
+# bounded. Install and enable per docs/liveness-guardian.md "Install".
+[Unit]
+Description=Run the Firstmate fleet liveness guardian periodically
+
+[Timer]
+# First pass shortly after boot/login, then every 2 minutes.
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+# Catch up one missed pass after the machine was asleep/off.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
