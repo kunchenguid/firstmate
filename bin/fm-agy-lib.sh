@@ -19,7 +19,7 @@ fm_agy_preflight() {
   [ -x "$bin" ] || { echo 'error: agy executable is absent' >&2; return 1; }
   help=$(AGY_CLI_DISABLE_AUTO_UPDATE=true "$bin" --help 2>&1) || return 1
   for flag in --new-project --add-dir --prompt-interactive --model --effort --dangerously-skip-permissions; do
-    printf '%s\n' "$help" | grep -Eq -- "^[[:space:]]*$flag[[:space:]]" || {
+    printf '%s\n' "$help" | grep -Eq -- "^[[:space:]]*${flag}[[:space:]]" || {
       echo "error: agy lacks required CLI capability $flag; adapter launch refused" >&2
       return 1
     }

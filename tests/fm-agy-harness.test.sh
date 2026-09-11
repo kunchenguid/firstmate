@@ -76,6 +76,7 @@ assert_contains "$launch" "--new-project --add-dir '$wt'" 'AGY tool workspace mu
 assert_contains "$launch" "--add-dir '$home/state/agy-test.agy-hook'" 'missing isolated hook workspace'
 assert_contains "$launch" "--model 'gemini-3.8-flash-low' --effort 'low'" 'model and effort flags'
 assert_contains "$launch" 'AGY_CLI_DISABLE_AUTO_UPDATE=true' 'AGY must not self-update workers'
+# shellcheck disable=SC2016 # Assert the literal command-substitution boundary.
 assert_contains "$launch" '--prompt-interactive "$(' 'prompt must be one quoted argument'
 assert_contains "$launch" 'encode launch-brief' 'typed envelope lost'
 FM_AGY_ARGV_LOG="$case_dir/argv" bash -c "$launch" || fail 'emitted launch command did not execute'
