@@ -659,7 +659,9 @@ if [ "$READ_ONLY" -eq 0 ]; then
   # Publication is side-band and best-effort, so it can never change the
   # session-start result. A context re-emit is not another session start.
   if [ "$REEMIT" -eq 0 ]; then
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+    # Summary publication is bounded but can still inspect every task; keep it
+    # out of the blocking digest while preserving the existing worker bound.
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 &
   fi
   # Every network call and the potentially slow inactive-outcome startup scan
   # are launched HERE, detached and bounded, so they run concurrently with the

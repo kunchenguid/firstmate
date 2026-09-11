@@ -32,6 +32,7 @@
 #     network result surfaces exactly once (inline or as a wake, never both), a
 #     read-only session declares the checks it skipped, and the tasks-axi
 #     compatibility verdict is paid for once per session start
+#   - a slow per-home summary publication does not delay a 60-task digest
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -834,6 +835,45 @@ EOF
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
+}
+
+test_session_start_does_not_wait_for_slow_home_summary() {
+  local rec root home fakebin out started elapsed i
+  rec=$(new_world slow-home-summary)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z'
+else
+  sleep "${FM_TEST_SNAPSHOT_TASK_SLEEP:-1}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 60 ]; do
+    fm_write_meta "$home/state/slow-task-$i.meta" "window=firstmate:fm-slow-task-$i" "worktree=$root" 'kind=ship' 'harness=claude' 'backend=tmux' 'mode=no-mistakes'
+    i=$((i + 1))
+  done
+
+  started=$(date +%s)
+  out=$(FM_HOME_SUMMARY_TIMEOUT=11 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 FM_TEST_SNAPSHOT_TASK_SLEEP=1 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 10 ] || fail "session start waited $elapsed seconds for a slow home summary"
+  i=0
+  while ! grep -Fq 'refresh exceeded its 11-second deadline' "$home/state/.home-summary-refresh.log" 2>/dev/null && [ "$i" -lt 200 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -Fq 'refresh exceeded its 11-second deadline' "$home/state/.home-summary-refresh.log" \
+    || fail "the deferred home summary did not retain its worker bound"
+  pass "session start does not wait for a slow 60-task home summary"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -3157,6 +3197,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_session_start_does_not_wait_for_slow_home_summary
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
