@@ -72,6 +72,31 @@ test_disabled_harness_refuses_detected_and_alias_values() {
   pass "fm-harness: disabled-adapters policy blocks detected and alias harnesses"
 }
 
+test_unlisted_adapter_is_enabled_after_nonmatching_entry() {
+  local out status
+  printf 'cursor\n# trailing comment\n' > "$CONFIG/disabled-adapters"
+  set +e
+  out=$(FM_DISABLED_ADAPTERS_CONFIG="$CONFIG/disabled-adapters" bash -c \
+    '. "$1/bin/fm-disabled-adapters-lib.sh"; fm_disabled_adapter pi' _ "$ROOT" 2>&1)
+  status=$?
+  set -e
+  [ "$status" -eq 1 ] || fail "an unlisted adapter returned status $status: $out"
+  [ -z "$out" ] || fail "an unlisted adapter wrote diagnostics: $out"
+
+  chmod 000 "$CONFIG/disabled-adapters"
+  set +e
+  out=$(FM_DISABLED_ADAPTERS_CONFIG="$CONFIG/disabled-adapters" bash -c \
+    '. "$1/bin/fm-disabled-adapters-lib.sh"; fm_disabled_adapter pi' _ "$ROOT" 2>&1)
+  status=$?
+  set -e
+  chmod 600 "$CONFIG/disabled-adapters"
+  [ "$status" -eq 2 ] || fail "an unreadable adapter config returned status $status: $out"
+  assert_contains "$out" "error: cannot read disabled adapters config:" \
+    "an unreadable adapter config did not report a read error"
+  rm -f "$CONFIG/disabled-adapters"
+  pass "disabled-adapters: nonmatching and trailing-comment configs return 1; unreadable returns 2"
+}
+
 adapter_test_paths() {  # <adapter>
   case "$1" in
     opencode) printf '%s\n' tests/fm-opencode-primary-live-e2e.test.sh ;;
@@ -125,4 +150,5 @@ test_verified_marker_precedes_other_markers
 test_crew_config_overrides_detected_harness
 test_secondmate_fields_ignore_comments_and_resolve_tokens
 test_disabled_harness_refuses_detected_and_alias_values
+test_unlisted_adapter_is_enabled_after_nonmatching_entry
 test_tracked_policy_blocks_every_listed_harness_and_test_lane

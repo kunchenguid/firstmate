@@ -13,13 +13,17 @@ fm_disabled_adapter_matches() {  # <requested-name> <configured-name>
 # fm_disabled_adapter: returns 0 when <name> is disabled, 1 when it is not, and
 # 2 when the policy file cannot be safely read.
 fm_disabled_adapter() {  # <name>
-  local name=$1 line config=${FM_DISABLED_ADAPTERS_CONFIG:-}
+  local name=$1 line config=${FM_DISABLED_ADAPTERS_CONFIG:-} matched=1
   [ -n "$config" ] || return 1
   [ -e "$config" ] || return 1
   if [ ! -f "$config" ] || [ -L "$config" ]; then
     printf 'error: disabled adapters config must be a regular file: %s\n' "$config" >&2
     return 2
   fi
+  [ -r "$config" ] || {
+    printf 'error: cannot read disabled adapters config: %s\n' "$config" >&2
+    return 2
+  }
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       ''|\#*) continue ;;
@@ -28,10 +32,10 @@ fm_disabled_adapter() {  # <name>
         return 2
         ;;
     esac
-    fm_disabled_adapter_matches "$name" "$line" && return 0
-  done < "$config" || {
-    printf 'error: cannot read disabled adapters config: %s\n' "$config" >&2
-    return 2
-  }
-  return 1
+    if fm_disabled_adapter_matches "$name" "$line"; then
+      matched=0
+      break
+    fi
+  done < "$config"
+  return "$matched"
 }
