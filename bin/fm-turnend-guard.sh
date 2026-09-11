@@ -80,7 +80,9 @@
 #      exit 2 never suppresses the sibling), so the guard restores the standing
 #      cycle itself: it spawns the watcher singleton detached and verifies it
 #      against the same strict predicate within FM_CLAUDE_GUARD_ARM_CONFIRM
-#      seconds (default 5). That arm runs UNCONDITIONALLY and is never
+#      seconds (default 10, 30 on Git Bash/MSYS - the same window
+#      bin/fm-watch-arm.sh confirms its own arms in). That arm runs
+#      UNCONDITIONALLY and is never
 #      budget-limited. Arming and blocking are different actions carrying
 #      different risks: restoring a watcher is recovery, and only blocking
 #      needs a ceiling, because blocking past Claude Code's hard
@@ -499,12 +501,24 @@ fi
 # makes a race with a late-claiming auto-arm harmless - one of the two attaches
 # or stands down. While away mode is active the daemon owns the watcher, so the
 # guard never spawns over it.
+# The confirm default is DERIVED from the same OSTYPE switch bin/fm-watch-arm.sh
+# uses for its own arm window rather than set to a separate number: the window
+# this guard confirms in must never be tighter than the arm layer it is
+# confirming, or the guard reports a failure the arm had not yet had time to
+# avoid, and that is a false-alarm generator. Git Bash/MSYS pays a much higher
+# fork cost while the watcher completes its pre-lock migration, so its default
+# is wider for the same reason fm-watch-arm's is.
+case "${OSTYPE:-}" in
+  msys*|mingw*|cygwin*) GUARD_ARM_CONFIRM_DEFAULT=30 ;;
+  *) GUARD_ARM_CONFIRM_DEFAULT=10 ;;
+esac
+
 guard_last_resort_arm() {
   local monitor_was_on=0 confirm deadline
   [ ! -e "$STATE/.afk" ] || return 1
   [ -x "$WATCH" ] || return 1
-  confirm=${FM_CLAUDE_GUARD_ARM_CONFIRM:-5}
-  case "$confirm" in ''|*[!0-9]*|0) confirm=5 ;; esac
+  confirm=${FM_CLAUDE_GUARD_ARM_CONFIRM:-$GUARD_ARM_CONFIRM_DEFAULT}
+  case "$confirm" in ''|*[!0-9]*|0) confirm=$GUARD_ARM_CONFIRM_DEFAULT ;; esac
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
   nohup "$WATCH" >/dev/null 2>&1 </dev/null &

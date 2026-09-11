@@ -85,12 +85,12 @@ printf '9999999\n' > "$HOME_DIR/state/.lock"
 # every later assertion below fails with a frozen ledger.
 sleep 600 &
 WEDGE_PID=$!
-WEDGE_IDENTITY=$(bash -c '. "$1"; fm_pid_identity "$$"' _ "$ROOT/bin/fm-wake-lib.sh") \
+WEDGE_IDENTITY=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$") \
   || fail "could not fabricate the dead holder's identity"
 WEDGE_LIVE_IDENTITY=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$WEDGE_PID") \
   || fail "could not identify the live reused pid"
 [ "$WEDGE_IDENTITY" != "$WEDGE_LIVE_IDENTITY" ] || fail "wedge fixture identities did not diverge"
-WEDGE_START=$(bash -c '. "$1"; fm_pid_start_identity "$$"' _ "$ROOT/bin/fm-wake-lib.sh") \
+WEDGE_START=$(bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$") \
   || fail "could not fabricate the dead holder's start time"
 WEDGE_LIVE_START=$(bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$WEDGE_PID") \
   || fail "could not read the live reused pid's start time"

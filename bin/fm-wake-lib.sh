@@ -120,8 +120,9 @@ fm_pid_start_identity() {  # <pid>
     return 0
   fi
   # Same LC_ALL=C pinning as fm_pid_identity: lstart is written under one locale
-  # and re-read under the machine's ambient one.
-  starttime=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  # and re-read under the machine's ambient one. TZ is pinned too: lstart renders
+  # in the caller's zone and holder liveness keys on string equality of this record.
+  starttime=$(TZ=UTC LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$starttime" ] || return 1
   printf 'lstart=%s\n' "$(printf '%s' "$starttime" | sed 's/^[[:space:]]*//')"
 }
