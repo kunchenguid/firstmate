@@ -130,6 +130,8 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-procevent-quota.sh"
   : >"$repo/bin/fm-quota-axi-lib.sh"
   : >"$repo/bin/fm-quota-choose.sh"
+  : >"$repo/bin/fm-ff-lib.sh"
+  : >"$repo/bin/fm-bootstrap.sh"
   : >"$repo/bin/unmapped-source.sh"
   # A shared helper with no curated family of its own, named by exactly ONE
   # script of the expensive real-Herdr family and consumed by one curated
@@ -270,6 +272,48 @@ test_changed_runner_surfaces_select_their_family() {
 
   rm -rf "$tmp"
   pass "runner and its documentation surfaces select their curated family, not just their contract owners"
+}
+
+# The fast-forward library owns the diagnostic line three operator-facing
+# reports print. Its curated arm must reach the families that actually pin those
+# reports, not just its contract owners, or an edit to it runs no coverage.
+test_shared_ff_library_selects_every_reporting_family() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-ff-lib.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/bin/fm-ff-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD | LC_ALL=C sort)
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" \
+    "the fast-forward library did not select the secondmate family that pins its reports"
+  assert_contains "$listed" "tests/fm-session-start.test.sh" \
+    "the fast-forward library did not select the session-bootstrap family that pins its reports"
+  assert_contains "$listed" "tests/fm-brief.test.sh" \
+    "the fast-forward library lost its pure-contract-unit coverage"
+
+  rm -rf "$tmp"
+  pass "the shared fast-forward library selects every family that pins its reports"
+}
+
+# bin/fm-bootstrap.sh alone owns the nudge and respawn reports pinned by the
+# secondmate suites, so it carries its own arm reaching that family as well as
+# session-bootstrap; the startup scripts beside it keep session-bootstrap only.
+test_bootstrap_selects_every_reporting_family() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-bootstrap.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/bin/fm-bootstrap.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD | LC_ALL=C sort)
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" \
+    "bin/fm-bootstrap.sh did not select the secondmate family that pins its nudge and respawn reports"
+  assert_contains "$listed" "tests/fm-session-start.test.sh" \
+    "bin/fm-bootstrap.sh lost its own session-bootstrap coverage"
+
+  rm -rf "$tmp"
+  pass "bin/fm-bootstrap.sh selects every family that pins its reports"
 }
 
 test_shell_line_ending_policy_selects_runner_contract() {
@@ -1668,6 +1712,8 @@ test_single_script_selection
 test_changed_file_selection_is_conservative
 test_task_marker_refuses_the_primary_checkout
 test_changed_runner_surfaces_select_their_family
+test_shared_ff_library_selects_every_reporting_family
+test_bootstrap_selects_every_reporting_family
 test_shell_line_ending_policy_selects_runner_contract
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family

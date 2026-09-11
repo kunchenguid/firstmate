@@ -87,6 +87,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-secondmate-restart-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-restart-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
@@ -132,11 +134,10 @@ restarted_count=0
 nudged_count=0
 unreached_count=0
 
-# The first line of a command's output that carries anything, flattened to one
-# readable line with its "error: " prefix dropped. A refusal's own words are the
-# most useful thing this report can carry, and its first line is often blank.
+# Select the command's own diagnostic through fm-ff-lib's shared SSH-banner
+# filter, then preserve this report's established omission of an error: prefix.
 first_reported_line() {  # <text>
-  printf '%s\n' "$1" | sed -n '/./{s/^error: //;s/[[:space:]]\{1,\}/ /g;p;q;}'
+  first_line "$1" | sed 's/^error: //'
 }
 
 # Send the ordinary re-read steer to a mate this pass will not restart, and say

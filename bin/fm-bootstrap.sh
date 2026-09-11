@@ -385,6 +385,13 @@ secondmate_sync() {
     fm_secondmate_nudge_write "$STATE" "$id" "$home" "$commit" "$instr" "$message" "$remote"
   }
 
+  report_nudge_send_failure() {  # <id> <send-output>
+    local reason
+    reason=$(first_line "$2")
+    [ -n "$reason" ] || reason="the send failed without a reported reason"
+    echo "NUDGE_SECONDMATES: secondmate $1: send failed: $reason"
+  }
+
   secondmate_send_nudge() {
     local id=$1 home=$2 commit=$3 instr=$4 selector marker out
     selector="fm-$id"
@@ -400,7 +407,7 @@ secondmate_sync() {
       rm -f "$marker"
       echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
-      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+      report_nudge_send_failure "$id" "$out"
     fi
   }
 
@@ -473,7 +480,7 @@ secondmate_sync() {
         rm -f "$marker"
         echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
       else
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+        report_nudge_send_failure "$id" "$out"
       fi
     done
   }
@@ -570,7 +577,7 @@ secondmate_sync() {
   # "move on to the next secondmate".
   secondmate_sync_remote_one() {  # <id> <home> <remote-host>
     local id=$1 _home=$2 remote_host=$3
-    local sync_out sync_rc inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+    local sync_out sync_rc inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation reason
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
@@ -598,7 +605,9 @@ secondmate_sync() {
     converged=1
     if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
       "$primary_head" < /dev/null 2>&1); then
-      case "$sync_out" in synced:*) nudge_needed=1 ;; esac
+      # The SSH transport may put its own warning lines before the command's
+      # success record, so recognize that record as a complete output line.
+      if printf '%s\n' "$sync_out" | grep -q '^synced:'; then nudge_needed=1; fi
     else
       sync_rc=$?
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(remote_sync_failure_reason "$sync_rc" "$sync_out")"
@@ -608,7 +617,9 @@ secondmate_sync() {
       "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
     else
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"
+      reason=$(first_line "$inherit_out")
+      [ -n "$reason" ] || reason="the inheritance push failed without a reported reason"
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $reason"
       converged=0
     fi
     [ "$remote_pending" -eq 0 ] || nudge_needed=1
@@ -618,7 +629,7 @@ secondmate_sync() {
         rm -f "$remote_marker"
         [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
       else
-        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+        report_nudge_send_failure "$id" "$out"
       fi
     elif [ "$converged" -eq 1 ]; then
       rm -f "$remote_marker"
@@ -716,6 +727,12 @@ secondmate_liveness_one_timed() {  # <meta> <id> <label>
 secondmate_liveness_one() {  # <meta> <id>
   local meta=$1 id=$2
   local window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
+  report_respawn_failure() {  # <id> <cause> <spawn-output>
+    local reason
+    reason=$(first_line "$3")
+    [ -n "$reason" ] || reason="the respawn failed without a reported reason"
+    echo "SECONDMATE_LIVENESS: secondmate $1: respawn failed after $2: $reason"
+  }
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || return 0
   harness=$(fm_meta_get "$meta" harness)
@@ -777,7 +794,7 @@ secondmate_liveness_one() {  # <meta> <id>
           secondmate_note_respawned "$id"
           report_relaunch "$id" "$cause" "host=$remote_host"
         else
-          echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+          report_respawn_failure "$id" "$cause" "$out"
         fi
         ;;
       ambiguous|unreadable|unverified)
@@ -814,7 +831,7 @@ secondmate_liveness_one() {  # <meta> <id>
         secondmate_note_respawned "$id"
         report_relaunch "$id" "$cause" "backend=$backend"
       else
-        echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+        report_respawn_failure "$id" "$cause" "$out"
       fi
       ;;
     ambiguous)

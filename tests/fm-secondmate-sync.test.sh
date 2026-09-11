@@ -732,6 +732,91 @@ SH
   pass "T8b a stale herdr endpoint cannot lose a durably enqueued nudge, and fm-<id> resolves through post-respawn metadata"
 }
 
+# silent_send_bin <w>: the real bin/ with one substitution - an fm-send.sh that
+# fails after writing nothing but OpenSSH's banner, the shape a send leg leaves
+# when it is killed before it can speak. Bootstrap runs its nudge sends through
+# its OWN directory, so the copy is what puts that leg under the real sweep.
+# Echoes the directory to run bin/fm-bootstrap.sh from.
+silent_send_bin() {
+  local w=$1 bindir
+  bindir="$w/silent-send-bin"
+  cp -R "$ROOT/bin" "$bindir"
+  cat > "$bindir/fm-send.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' \
+  '** WARNING: connection is not using a post-quantum key exchange algorithm.' \
+  '** This session may be vulnerable to store now, decrypt later attacks.' >&2
+exit 1
+SH
+  chmod +x "$bindir/fm-send.sh"
+  printf '%s\n' "$bindir"
+}
+
+# --- T8g: a silent send still names a cause on every nudge report -------------
+# The nudge reports quote the first line the send leg actually said. With only
+# OpenSSH's banner in the captured output there is no such line, so each report
+# must name the failure itself instead of trailing off after its colon.
+test_bootstrap_nudge_names_a_cause_when_send_says_nothing() {
+  local w c1 fakebin bindir out
+  w=$(new_world nudge-silent-send)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+  bindir=$(silent_send_bin "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$bindir/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" \
+    "NUDGE_SECONDMATES: secondmate sm-instr: send failed: the send failed without a reported reason" \
+    "a silent send left the nudge report trailing off after the colon"
+  assert_not_contains "$out" "send failed: ** WARNING" \
+    "OpenSSH's banner was reported as the send failure"
+  assert_present "$w/home/state/.secondmate-nudge-pending/sm-instr.pending" \
+    "a silent send failure should still leave its retry marker"
+  pass "T8g a silent nudge send still names a cause"
+}
+
+# The retry pass owns its own copy of that report, and reaches it for a home the
+# sweep itself would never nudge: already current, with a marker left by an
+# earlier failed send.
+test_bootstrap_nudge_retry_names_a_cause_when_send_says_nothing() {
+  local w base fakebin bindir out marker lines
+  w=$(new_world nudge-retry-silent-send)
+  bump_primary "$w" instr
+  base=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$base"
+  mkdir -p "$w/home/state/.secondmate-nudge-pending"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  {
+    printf 'id=sm-instr\n'
+    printf 'selector=fm-sm-instr\n'
+    printf 'home=%s\n' "$w/sm-instr"
+    printf 'commit=%s\n' "$base"
+    printf 'instructions=AGENTS.md\n'
+    printf 'message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.\n'
+    printf 'remote=0\n'
+  } > "$marker"
+  fakebin=$(make_fake_toolchain "$w")
+  bindir=$(silent_send_bin "$w")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 "$bindir/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" \
+    "NUDGE_SECONDMATES: secondmate sm-instr: send failed: the send failed without a reported reason" \
+    "a silent retry send left the nudge report trailing off after the colon"
+  assert_not_contains "$out" "send failed: ** WARNING" \
+    "OpenSSH's banner was reported as the retry send failure"
+  # An already-current home is never nudged by the sweep, so the single report
+  # can only have come from the retry pass.
+  lines=$(printf '%s\n' "$out" | grep -c '^NUDGE_SECONDMATES: ' || true)
+  [ "$lines" -eq 1 ] || fail "expected exactly one retry nudge report, got $lines"$'\n'"$out"
+  assert_present "$marker" "a silent retry failure should keep the marker for the next pass"
+  pass "T8h a silent retry send still names a cause"
+}
+
 # --- T9: bootstrap surfaces a skipped dirty live secondmate home --------------
 test_bootstrap_sweep_surfaces_skipped_home() {
   local w c1 base before fakebin out skip_line
@@ -906,6 +991,56 @@ test_seed_marker_does_not_mask_real_dirt() {
 # then runs the SAME ff_target guards above. These cases drive the real
 # host-local leg (bin/fm-remote-secondmate-control.sh) directly.
 
+test_failure_diagnostic_selection() {
+  local got
+
+  got=$(remote_sync_failure_reason 1 $'** WARNING: connection is not using a post-quantum key exchange algorithm.\nerror: remote home could not import abc123')
+  [ "$got" = 'error: remote home could not import abc123' ] \
+    || fail "an OpenSSH banner masked the remote-sync error: $got"
+
+  got=$(first_line $'** WARNING: connection is not using a post-quantum key exchange algorithm.\n** This session may be vulnerable to store now, decrypt later attacks.\nfatal: remote inheritance fixture failed')
+  [ "$got" = 'fatal: remote inheritance fixture failed' ] \
+    || fail "a multi-line OpenSSH banner masked the fatal diagnostic: $got"
+
+  # A wrapper that fails AFTER relaying the nested cause puts its own generic
+  # "error: " line last. The specific cause the operator can act on is the first
+  # line the command itself wrote, so that is what the report must carry.
+  got=$(first_line $'** WARNING: connection is not using a post-quantum key exchange algorithm.\nfirstmate: skipped: dirty working tree\nreread-firstmate: no\nerror: remote code root did not complete a safe origin update')
+  [ "$got" = 'firstmate: skipped: dirty working tree' ] \
+    || fail "a trailing generic wrapper displaced the specific cause: $got"
+
+  got=$(first_line $'** WARNING: connection is not using a post-quantum key exchange algorithm.\n** This session may be vulnerable to store now, decrypt later attacks.')
+  [ -z "$got" ] \
+    || fail "banner-only output invented a diagnostic the command never wrote: $got"
+
+  got=$(first_line $'ordinary failure\nadditional context')
+  [ "$got" = 'ordinary failure' ] \
+    || fail "ordinary output did not fall back to its first diagnostic: $got"
+
+  got=$(first_line $'** WARNING: connection is not using a post-quantum key exchange algorithm.\n\n** This session may be vulnerable to store now, decrypt later attacks.\nerror: remote home could not import abc123')
+  [ "$got" = 'error: remote home could not import abc123' ] \
+    || fail "a blank line inside the leading banner run ended banner skipping early: $got"
+
+  got=$(first_line $'** WARNING: connection is not using a post-quantum key exchange algorithm.\nremote home: skipped: dirty working tree\n** not a banner: this is output from the command itself')
+  [ "$got" = 'remote home: skipped: dirty working tree' ] \
+    || fail "a ** line after the command output began changed the selected diagnostic: $got"
+
+  got=$(first_line $'** WARNING: connection is not using a post-quantum key exchange algorithm.\n   \n** This session may be vulnerable to store now, decrypt later attacks.')
+  [ -z "$got" ] \
+    || fail "a whitespace-only line between banner lines was reported as the command failure: $got"
+
+  got=$(first_line '')
+  [ -z "$got" ] || fail "empty output invented a diagnostic: $got"
+
+  # first_line stays free to say nothing; the shared remote-sync boundary is
+  # what owes its two callers a cause when the remote leg never spoke.
+  got=$(remote_sync_failure_reason 255 $'** WARNING: connection is not using a post-quantum key exchange algorithm.\n** This session may be vulnerable to store now, decrypt later attacks.')
+  [ "$got" = 'the remote sync failed without a reported reason' ] \
+    || fail "a banner-only remote sync failure reported no cause at all: $got"
+
+  pass "failure reports ignore OpenSSH banners and select the real diagnostic"
+}
+
 # new_remote_world <name>: a PRIMARY firstmate repo with a bare forge origin, a
 # host "Firstmate copy" clone (the code root), and a persistent remote home clone
 # of that copy - the topology bin/fm-remote-home-provision.sh lays down. Echoes
@@ -963,6 +1098,30 @@ rargs=()
 while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
 cmd=${rargs[0]}
 [ "$cmd" != fm-remote-doctor.sh ] || exit 0
+if [ "${FM_TEST_REMOTE_LEG_SSH_BANNER:-0}" = 1 ]; then
+  case "$cmd ${rargs[1]:-}" in
+    'fm-remote-secondmate-control.sh sync'|'fm-remote-inherit.sh '*)
+      printf '%s\n' \
+        '** WARNING: connection is not using a post-quantum key exchange algorithm.' \
+        '** This session may be vulnerable to store now, decrypt later attacks.' >&2
+      ;;
+  esac
+fi
+# A remote leg killed before it could speak (a signalled or OOM-killed command)
+# leaves ssh reporting a bare 255 with nothing but OpenSSH's banner on stderr.
+if [ "${FM_TEST_REMOTE_LEG_SILENT:-0}" = 1 ]; then
+  printf '%s\n' \
+    '** WARNING: connection is not using a post-quantum key exchange algorithm.' \
+    '** This session may be vulnerable to store now, decrypt later attacks.' >&2
+  exit 255
+fi
+# A steer accepted at the boundary: the remote pane is out of scope here, so the
+# leg records the delivered payload instead of ringing a live agent.
+if [ -n "${FM_TEST_REMOTE_SEND_LOG:-}" ] \
+  && [ "$cmd" = fm-remote-secondmate-control.sh ] && [ "${rargs[1]:-}" = send ]; then
+  printf '%s\n' "${rargs[*]:2}" >> "$FM_TEST_REMOTE_SEND_LOG"
+  exit 0
+fi
 # An older remote Firstmate copy rejects a command shape it does not know with
 # the usage status, which is exactly what a parent-targeted sync meets there.
 if [ "${FM_TEST_REMOTE_LEG_REJECT_SYNC:-0}" = 1 ] \
@@ -1257,6 +1416,142 @@ test_bootstrap_syncs_remote_home_to_primary_commit() {
   pass "R8 session start converges a remote home on the primary's default-branch commit"
 }
 
+# --- R8b: a silent remote leg still names a cause on every report line ---------
+# A remote command killed before it could speak leaves ssh returning a bare 255
+# with nothing but OpenSSH's banner. Both remote convergence reports must still
+# carry a cause instead of trailing off after their colon.
+test_bootstrap_reports_a_cause_when_the_remote_leg_says_nothing() {
+  local w c1 home fakebin out
+  w=$(new_remote_world remote-silent-leg)
+  cp "$ROOT"/bin/fm-remote-*.sh "$w/main/bin/"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "primary tooling"
+  git -C "$w/main" push -q origin main
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/forge.git" "$c1"
+  bump_primary "$w" instr
+  git -C "$w/main" push -q origin main
+  home="$w/home"
+  mkdir -p "$home/config" "$home/projects"
+  printf -- '- sm - remote fixture (host: host-sm; root: %s; home: %s; scope: remote work; projects: alpha; added 2026-08-02)\n' \
+    "$w/coderoot" "$w/sm" > "$home/data/secondmates.md"
+  fm_write_secondmate_meta "$home/state/sm.meta" "$w/sm"
+  printf 'remote_host=host-sm\n' >> "$home/state/sm.meta"
+
+  fakebin=$(make_remote_leg_ssh_stub "$w")
+  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  out=$(PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_BOOTSTRAP_NETWORK=only \
+    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
+    FM_TEST_REPO_ROOT="$ROOT" FM_TEST_REMOTE_LEG_SILENT=1 \
+    FM_INHERITABLE_CONFIG=backend FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  assert_contains "$out" \
+    "SECONDMATE_SYNC: secondmate sm: skipped: remote tracked-file sync failed on host-sm: the remote sync failed without a reported reason" \
+    "a silent remote sync leg left its report trailing off after the colon"
+  assert_contains "$out" \
+    "SECONDMATE_SYNC: secondmate sm: skipped: remote inheritance failed on host-sm: the inheritance push failed without a reported reason" \
+    "a silent remote inheritance leg left its report trailing off after the colon"
+  assert_not_contains "$out" 'host-sm: ** WARNING' \
+    "OpenSSH's banner was reported as the remote failure"
+  pass "R8b a silent remote leg still names a cause on both convergence reports"
+}
+
+# The same captured banner must not swallow a successful sync: a home the sweep
+# just advanced still owes its running agent a re-read nudge, and the
+# banner-prefixed `synced:` line is the only signal that says so.
+test_bootstrap_nudges_after_banner_prefixed_sync() {
+  local w c1 c2 home fakebin out
+  w=$(new_remote_world remote-banner-nudge)
+  cp "$ROOT"/bin/fm-remote-*.sh "$w/main/bin/"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "primary tooling"
+  git -C "$w/main" push -q origin main
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/forge.git" "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  home="$w/home"
+  mkdir -p "$home/config" "$home/projects"
+  printf -- '- sm - remote fixture (host: host-sm; root: %s; home: %s; scope: remote work; projects: alpha; added 2026-08-02)\n' \
+    "$w/coderoot" "$w/sm" > "$home/data/secondmates.md"
+  fm_write_secondmate_meta "$home/state/sm.meta" "$w/sm"
+  printf 'remote_host=host-sm\n' >> "$home/state/sm.meta"
+  mkdir -p "$w/sm/state/parent-route"
+  fm_write_meta "$w/sm/state/parent-route/sm.meta" \
+    'window=fm-remote:p1' 'endpoint_task_id=sm' 'worktree=-' 'project=-' \
+    'backend=herdr' 'harness=codex' 'herdr_session=fm-remote' \
+    'herdr_workspace_id=w1' 'herdr_tab_id=t1' 'herdr_pane_id=p1'
+
+  fakebin=$(make_remote_leg_ssh_stub "$w")
+  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  out=$(PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_BOOTSTRAP_NETWORK=only \
+    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
+    FM_TEST_REPO_ROOT="$ROOT" FM_TEST_REMOTE_LEG_SSH_BANNER=1 \
+    FM_TEST_REMOTE_SEND_LOG="$w/steers.log" \
+    FM_INHERITABLE_CONFIG='' FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+
+  [ "$(head_of "$w/sm")" = "$c2" ] \
+    || fail "the banner-prefixed sweep left the remote home off the primary's commit (out: $out)"
+  assert_contains "$(cat "$w/steers.log" 2>/dev/null || true)" \
+    'Re-read AGENTS.md' \
+    "a banner-prefixed successful sync never steered the remote secondmate to re-read (out: $out)"
+  [ ! -f "$home/state/.secondmate-nudge-pending/sm.pending" ] \
+    || fail "the delivered remote re-read intent was left pending (out: $out)"
+  pass "a banner-prefixed successful sync still nudges the converged remote secondmate"
+}
+
+# The converged remote home's nudge is the third report built on that same
+# selector: when the send leg dies having written only the banner, this line
+# must name the failure rather than trail off after its colon.
+test_bootstrap_remote_nudge_names_a_cause_when_send_says_nothing() {
+  local w c1 c2 home fakebin bindir out
+  w=$(new_remote_world remote-silent-send)
+  cp "$ROOT"/bin/fm-remote-*.sh "$w/main/bin/"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "primary tooling"
+  git -C "$w/main" push -q origin main
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/forge.git" "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  git -C "$w/main" push -q origin main
+  home="$w/home"
+  mkdir -p "$home/config" "$home/projects"
+  printf -- '- sm - remote fixture (host: host-sm; root: %s; home: %s; scope: remote work; projects: alpha; added 2026-08-02)\n' \
+    "$w/coderoot" "$w/sm" > "$home/data/secondmates.md"
+  fm_write_secondmate_meta "$home/state/sm.meta" "$w/sm"
+  printf 'remote_host=host-sm\n' >> "$home/state/sm.meta"
+
+  fakebin=$(make_remote_leg_ssh_stub "$w")
+  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  bindir=$(silent_send_bin "$w")
+  out=$(PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_BOOTSTRAP_NETWORK=only \
+    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
+    FM_TEST_REPO_ROOT="$ROOT" \
+    FM_INHERITABLE_CONFIG='' FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
+    "$bindir/fm-bootstrap.sh" 2>&1)
+
+  [ "$(head_of "$w/sm")" = "$c2" ] \
+    || fail "the fixture never converged the remote home, so no nudge was owed (out: $out)"
+  assert_contains "$out" \
+    "NUDGE_SECONDMATES: secondmate sm: send failed: the send failed without a reported reason" \
+    "a silent send left the converged remote home's nudge report trailing off after the colon"
+  assert_not_contains "$out" "send failed: ** WARNING" \
+    "OpenSSH's banner was reported as the remote send failure"
+  assert_present "$home/state/.secondmate-nudge-pending/sm.pending" \
+    "an undelivered remote re-read intent should stay pending"
+  pass "a silent remote nudge send still names a cause"
+}
+
 # --- R10: an outdated host refuses, and the report says how to fix it ----------
 # A host still running an older Firstmate copy rejects a command shape it does
 # not know, which for this leg can only mean it predates the parent-targeted
@@ -1356,6 +1651,8 @@ test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_refuses_changed_home
+test_bootstrap_nudge_names_a_cause_when_send_says_nothing
+test_bootstrap_nudge_retry_names_a_cause_when_send_says_nothing
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch
@@ -1363,6 +1660,7 @@ test_spawn_warns_when_sync_skipped_before_launch
 test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
+test_failure_diagnostic_selection
 test_remote_sync_targets_primary_not_host_copy
 test_remote_sync_reports_the_changed_instruction_surface
 test_remote_sync_imports_from_host_copy
@@ -1372,6 +1670,9 @@ test_remote_sync_skips_unimportable_target
 test_remote_sync_skips_dirty_diverged_and_feature_branch
 test_remote_sync_without_target_follows_host_copy
 test_bootstrap_syncs_remote_home_to_primary_commit
+test_bootstrap_reports_a_cause_when_the_remote_leg_says_nothing
+test_bootstrap_nudges_after_banner_prefixed_sync
+test_bootstrap_remote_nudge_names_a_cause_when_send_says_nothing
 test_bootstrap_reports_outdated_host_actionably
 test_remote_launch_does_not_retarget_host_copy
 

@@ -460,6 +460,13 @@ printf '%s\n' "${rargs[*]}" >> "$FM_FAKE_SSH_LOG"
 case "${FM_FAKE_SSH_MODE:-ok}" in
   unreachable) exit 255 ;;
 esac
+case "${FM_FAKE_SSH_MODE:-ok}" in
+  banner-ok|banner-relaunch-fail)
+    printf '%s\n' \
+      '** WARNING: connection is not using a post-quantum key exchange algorithm.' \
+      '** This session may be vulnerable to store now, decrypt later attacks.' >&2
+    ;;
+esac
 case "${rargs[1]:-}" in
   send)
     # Model the live remote mate: act on the instruction and report back on the
@@ -471,6 +478,10 @@ case "${rargs[1]:-}" in
     fi
     ;;
   relaunch)
+    if [ "${FM_FAKE_SSH_MODE:-ok}" = banner-relaunch-fail ]; then
+      printf 'error: remote restart fixture failed after persistence\n' >&2
+      exit 41
+    fi
     case "${FM_FAKE_SSH_MODE:-ok}" in
       slow-relaunch)
         : > "$FM_FAKE_DIR/remote-relaunch-start"
@@ -478,7 +489,8 @@ case "${rargs[1]:-}" in
         : > "$FM_FAKE_DIR/remote-relaunch-end"
         ;;
     esac
-    printf 'relaunched %s\n' "${rargs[2]}"
+    printf 'relaunched %s harness=%s\n' \
+      "${rargs[2]}" "${FM_FAKE_RELAUNCH_HARNESS:-${rargs[3]}}"
     ;;
 esac
 exit 0
@@ -529,6 +541,44 @@ test_unreachable_host_is_reported_unknown() {
   assert_contains "$out" "sm3:" "the unreachable mate must still be named"
   assert_contains "$out" "could not be delivered" "an unreachable host must be reported as undelivered, not as reloaded"
   pass "T7 an unreachable host is reported honestly instead of claimed as reloaded"
+}
+
+# --- T7b: restart result lines ignore OpenSSH's leading PQ banner ------------
+# Both cases drive the real restart and fm-on scripts. The ssh stub prepends the
+# exact OpenSSH warning before the remote leg's own output, proving both that a
+# real failure reason survives and that a successful relaunch line is consumed.
+test_remote_restart_reports_through_ssh_banner() {
+  local dir out rc
+
+  dir=$(new_case remote-banner-failure)
+  setup_remote_case "$dir" sm3 banner-relaunch-fail
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm3.status"
+
+  out=$(run_restart "$dir" sm3); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 3 "$rc" "a reported remote relaunch failure must remain accounted"$'\n'"$out"
+  assert_contains "$out" \
+    "unreached: sm3: the restart outcome is unknown: remote restart fixture failed after persistence" \
+    "the restart result presented the OpenSSH banner instead of the remote leg's error"
+  assert_not_contains "$out" \
+    'restart outcome is unknown: ** WARNING:' \
+    "the restart result still attributes a remote failure to OpenSSH's banner"
+
+  dir=$(new_case remote-banner-success)
+  setup_remote_case "$dir" sm4 banner-ok
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm4.status"
+  export FM_FAKE_RELAUNCH_HARNESS=pi
+
+  out=$(run_restart "$dir" sm4); rc=$?
+  unset FM_FAKE_ANSWER_STATUS FM_FAKE_RELAUNCH_HARNESS
+
+  expect_code 0 "$rc" "a banner-prefixed successful remote relaunch must remain successful"$'\n'"$out"
+  assert_contains "$out" "restarted: sm4 on remote-mac (pi)" \
+    "the restart report did not consume the successful relaunch line under the banner"
+  assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" \
+    "the banner-prefixed successful restart was not counted"
+  pass "T7b remote restart reports ignore leading OpenSSH banners on failure and success"
 }
 
 # --- T8: a local restart lands on this home's durable pin, and says which -----
@@ -843,6 +893,7 @@ test_local_restart_uses_the_home_pin_and_reports_what_ran
 test_native_ultra_restart_keeps_local_and_remote_profiles
 test_remote_mate_restarts_over_the_transport_hop
 test_unreachable_host_is_reported_unknown
+test_remote_restart_reports_through_ssh_banner
 test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together
 test_post_stop_failure_is_reported_unreached

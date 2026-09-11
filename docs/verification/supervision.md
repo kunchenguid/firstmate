@@ -177,6 +177,8 @@ SECONDMATE_SYNC: secondmate ios: skipped: remote inheritance failed on remote-ma
 ```
 
 The unreachable route was preserved rather than relaunched in both runs, and the result surfaced durably as a queued `check: startup-network` wake once the worker finished.
+The two empty reason tails above are what that fixture's silent SSH stub produced on the day of this measurement.
+Those reports now select the remote command's own diagnostic through `bin/fm-ff-lib.sh` and fall back to a named reason when the remote wrote none - the sync line from that library's shared `remote_sync_failure_reason` boundary, the inheritance line from wording `bin/fm-bootstrap.sh` owns - so the same fixture ends both lines with a stated reason today; what this run proves is the byte-identity between the blocking and deferred paths, not the wording.
 
 Codex and Pi were not installed as run-tier labs in this measurement, so their evidence for this fact is NOT refreshed; `tests/fm-sessionstart-hook-live-e2e.test.sh` asserts it for each installed Claude, Codex exec, and Pi adapter and is the command that refreshes their record.
 Cursor's separate primary live guard covers its source-free session-open transport but does not claim this detached-worker measurement.

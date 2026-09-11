@@ -27,6 +27,10 @@
 # worktree dir as its cwd also blocks removal (the clone-dir liveness check); a
 # transient lock that self-clears is retried without a force-remove; and any
 # non-packed-refs.lock fetch failure keeps today's behavior with no retry.
+#
+# It also pins which line a failed fetch reports: git folds OpenSSH's two-line
+# post-quantum banner into the output of a fetch over SSH, and the skip line must
+# carry the remote's own error rather than that banner.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -622,6 +626,41 @@ test_transient_packed_refs_lock_self_clears() {
   pass "a transient packed-refs.lock that self-clears is retried without a force-remove"
 }
 
+# --- an SSH fetch failure reports the remote's error, not OpenSSH's banner ----
+# OpenSSH prints its two-line post-quantum warning on stderr, which git folds
+# into the fetch output this report reads. The stub below is a real
+# GIT_SSH_COMMAND, so the whole path - git fetch, its captured output, the skip
+# line - is the one a live SSH remote takes.
+test_ssh_fetch_failure_reports_the_remote_error_not_the_banner() {
+  local home clone ssh_stub out
+  home=$(new_home)
+  clone=$(build_pair "$home" bannerfetch)
+  advance_origin "$home" bannerfetch C1
+
+  ssh_stub="$home/fake-ssh"
+  cat > "$ssh_stub" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' \
+  '** WARNING: connection is not using a post-quantum key exchange algorithm.' \
+  '** This session may be vulnerable to store now, decrypt later attacks.' \
+  'fixture-host: Permission denied (publickey).' >&2
+exit 255
+SH
+  chmod +x "$ssh_stub"
+  git -C "$clone" remote set-url origin ssh://fixture-host/repo.git
+
+  export GIT_SSH_COMMAND="$ssh_stub"
+  out=$(run_sync "$home" bannerfetch)
+  unset GIT_SSH_COMMAND
+
+  assert_contains "$out" \
+    "bannerfetch: skipped: fetch failed: fixture-host: Permission denied (publickey)." \
+    "the fetch failure did not carry the remote's own error"
+  assert_not_contains "$out" '** WARNING' \
+    "OpenSSH's banner was reported as the fetch failure"
+  pass "an SSH fetch failure reports the remote's error, not OpenSSH's banner"
+}
+
 test_non_clone_dir_never_syncs_the_enclosing_repo() {
   local home before out after
   home=$(build_enclosing_home nonclone)
@@ -716,6 +755,7 @@ test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
 test_transient_packed_refs_lock_self_clears
 test_non_signature_fetch_failure_is_not_retried
+test_ssh_fetch_failure_reports_the_remote_error_not_the_banner
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_symlinked_clone_still_syncs

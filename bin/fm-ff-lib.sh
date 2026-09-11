@@ -31,6 +31,13 @@
 # fast-forward advances HEAD only and never moves the shared default branch or
 # any other worktree's checkout. A standalone remote home may instead advance
 # its checked-out default branch under the same guard.
+#
+# Beyond the fast-forward itself, this file owns first_line - the one selector
+# for a remote command's OWN diagnostic line under OpenSSH's banner - and the
+# remote_sync_failure_reason wording built over it. Reporting surfaces that
+# never fast-forward source this library for that selector (bin/fm-fleet-sync.sh
+# takes default_branch and first_line only), so an edit there changes their
+# operator reports too.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -39,7 +46,27 @@ SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # --- helpers ---------------------------------------------------------------
 
 first_line() {
-  printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
+  # OpenSSH may prepend its multi-line ** banner to a remote command's output,
+  # so a leading ** run is transport noise and never the command's diagnostic.
+  # Everything after it is the command's own output: report its first line that
+  # carries anything, flattened to one readable line.
+  # Banner-only or silent output therefore selects NOTHING, and this returns
+  # empty rather than inventing a reason. Do not add a placeholder here: each
+  # reporting surface owns the wording it appends after its own "...: ", and a
+  # sentinel returned from here would silently outrank every one of those
+  # per-surface fallbacks.
+  printf '%s\n' "$1" | awk '
+    /^\*\* / { next }
+    {
+      line = $0
+      gsub(/[[:space:]]+/, " ", line)
+      probe = line
+      sub(/^ /, "", probe)
+      if (probe == "") next
+      print line
+      exit
+    }
+  '
 }
 
 default_branch() {
@@ -235,15 +262,21 @@ changed_instr() {
 # Translate one remote home sync leg's failure into an operator-actionable
 # reason. The remote leg refuses a command shape it does not recognize with this
 # status, which on this leg can only mean that host's Firstmate copy predates the
-# parent-targeted sync it was just asked for; every other failure already carries
-# its own diagnostic.
+# parent-targeted sync it was just asked for; every other failure normally
+# carries its own diagnostic. When it carries none - a leg killed before it could
+# speak, leaving at most the SSH banner - this is the one boundary that names a
+# fallback for its callers, so bin/fm-spawn.sh and bin/fm-bootstrap.sh do not
+# each repeat one.
 REMOTE_SYNC_UNSUPPORTED_STATUS=2
 remote_sync_failure_reason() { # <exit-status> <output>
+  local reason
   if [ "$1" = "$REMOTE_SYNC_UNSUPPORTED_STATUS" ]; then
     printf '%s\n' "the Firstmate copy on that host is too old to sync to this primary's commit; run /updatefirstmate"
     return 0
   fi
-  first_line "$2"
+  reason=$(first_line "$2")
+  [ -n "$reason" ] || reason="the remote sync failed without a reported reason"
+  printf '%s\n' "$reason"
 }
 
 dirty_status() {
@@ -306,7 +339,7 @@ ff_target() {
     return 0
   fi
 
-  local default base cur instr local_rev base_rev before after out
+  local default base cur instr local_rev base_rev before after out ff_reason
   default=$(default_branch "$dir") || {
     echo "$label: skipped: cannot determine default branch"
     return 0
@@ -368,7 +401,14 @@ ff_target() {
   instr=$(changed_instr "$dir" "$base")
   before=$(git -C "$dir" rev-parse --short HEAD)
   if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
-    echo "$label: skipped: fast-forward failed: $(first_line "$out")"
+    # Deliberately untested: unlike the remote surfaces, this leg is local git,
+    # and every refusal it can reach here already prints its own diagnostic.
+    # Manufacturing a --ff-only failure that says nothing at all would be a
+    # fixture with no real counterpart, so the fallback stands unpinned while
+    # the reporting surfaces that CAN go silent are covered.
+    ff_reason=$(first_line "$out")
+    [ -n "$ff_reason" ] || ff_reason="the fast-forward failed without a reported reason"
+    echo "$label: skipped: fast-forward failed: $ff_reason"
     return 0
   fi
   after=$(git -C "$dir" rev-parse --short HEAD)

@@ -540,6 +540,88 @@ test_sweep_noop_with_no_secondmate_meta() {
   pass "sweep: a silent no-op with no kind=secondmate meta present (a secondmate home's own natural scoping)"
 }
 
+# silent_spawn_root <w>: an FM_ROOT whose bin/fm-spawn.sh fails after writing
+# nothing but OpenSSH's banner - the shape a launch leg leaves when it is killed
+# before it can speak (a signalled or OOM-killed remote command), and the only
+# input under which the sweep's respawn report has no diagnostic of its own to
+# quote. The remote route tooling is committed alongside it because fm-on.sh
+# only routes commands this FM_ROOT genuinely tracks.
+silent_spawn_root() {
+  local w=$1 root
+  root="$w/root"
+  mkdir -p "$root/bin"
+  cp "$ROOT"/bin/fm-remote-*.sh "$root/bin/"
+  cat > "$root/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' \
+  '** WARNING: connection is not using a post-quantum key exchange algorithm.' \
+  '** This session may be vulnerable to store now, decrypt later attacks.' >&2
+exit 1
+SH
+  chmod +x "$root/bin/fm-spawn.sh"
+  git init -q -b main "$root"
+  printf '# Firstmate\n' > "$root/AGENTS.md"
+  git -C "$root" add -A
+  git -C "$root" commit -qm 'fixture primary'
+  printf '%s\n' "$root"
+}
+
+# --- a failed respawn always names a cause -----------------------------------
+# The sweep quotes the first line the launch leg actually said. When OpenSSH's
+# banner is the only thing in the captured output there is no such line, so the
+# report must name why the endpoint is still down rather than trailing off after
+# its colon.
+test_sweep_names_a_cause_when_local_respawn_says_nothing() {
+  local w fb tmuxfb log out root
+  w=$(new_world sweep-silent-respawn)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  root=$(silent_spawn_root "$w")
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_ROOT_OVERRIDE="$root")
+
+  assert_contains "$out" \
+    "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after confirmed agent absence on existing endpoint: the respawn failed without a reported reason" \
+    "a silent local respawn left its report trailing off after the colon"
+  assert_not_contains "$out" "respawn failed after confirmed agent absence on existing endpoint: ** WARNING" \
+    "OpenSSH's banner was reported as the local respawn failure"
+  pass "sweep: a silent local respawn failure still names a cause"
+}
+
+test_sweep_names_a_cause_when_remote_respawn_says_nothing() {
+  local w fb tmuxfb log out root ssh_stub
+  w=$(new_world sweep-silent-remote-respawn)
+  add_sm_home "$w" rsm remote:rsm
+  printf 'remote_host=host-rsm\n' >> "$w/home/state/rsm.meta"
+  mkdir -p "$w/home/data"
+  printf -- '- rsm - remote fixture (host: host-rsm; root: /remote/root; home: /remote/home; scope: remote work; projects: alpha; added 2026-08-02)\n' \
+    > "$w/home/data/secondmates.md"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  root=$(silent_spawn_root "$w")
+  # A reachable host whose endpoint the remote leg itself reports dead: the
+  # readiness run succeeds and the state probe's last line is the verdict.
+  ssh_stub="$(fm_fakebin "$w/ssh")/fake-ssh"
+  cat > "$ssh_stub" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+printf 'dead\n'
+exit 0
+SH
+  chmod +x "$ssh_stub"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" \
+    FM_ROOT_OVERRIDE="$root" FM_SSH_BIN="$ssh_stub" FM_BOOTSTRAP_NETWORK=only)
+
+  assert_contains "$out" \
+    "SECONDMATE_LIVENESS: secondmate rsm: respawn failed after remote endpoint dead on its configured host: the respawn failed without a reported reason" \
+    "a silent remote respawn left its report trailing off after the colon"
+  assert_not_contains "$out" "respawn failed after remote endpoint dead on its configured host: ** WARNING" \
+    "OpenSSH's banner was reported as the remote respawn failure"
+  pass "sweep: a silent remote respawn failure still names a cause"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -551,6 +633,8 @@ test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure
+test_sweep_names_a_cause_when_local_respawn_says_nothing
+test_sweep_names_a_cause_when_remote_respawn_says_nothing
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only

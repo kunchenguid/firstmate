@@ -138,6 +138,50 @@ run_update() {
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
+run_update_report() {
+  local w=$1
+  PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" \
+    FM_SSH_BIN="$w/fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
+    FM_TEST_REPO_ROOT="$ROOT" FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    "$UPDATE" 2>&1
+}
+
+add_remote_update_mate() {  # <world> <id>
+  local w=$1 id=$2
+  git clone -q "$w/origin.git" "$w/coderoot"
+  git clone -q "$w/origin.git" "$w/$id"
+  mkdir -p "$w/$id/state" "$w/$id/data" "$w/$id/config" "$w/$id/projects"
+  printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
+  printf -- '- %s - remote domain (host: remote-mac; root: %s/coderoot; home: %s/%s; scope: things; projects: p; added 2026-09-10)\n' \
+    "$id" "$w" "$w" "$id" > "$w/home/data/secondmates.md"
+  cat > "$w/fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+shift 2  # host, fm-remote-entrypoint.sh
+home_b64=$3
+argv_b64=$4
+decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
+remote_home=$(decode "$home_b64")
+rargs=()
+while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
+printf '%s\n' \
+  '** WARNING: connection is not using a post-quantum key exchange algorithm.' \
+  '** This session may be vulnerable to store now, decrypt later attacks.' >&2
+# A transport that dies after the banner (a signalled remote leg) says nothing
+# of its own, which is exactly ssh's bare 255 with banner-only output.
+[ "${FM_FAKE_SSH_SILENT_FAIL:-}" = 1 ] && exit 255
+rc=0
+env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
+  "$FM_TEST_REPO_ROOT/bin/${rargs[0]}" "${rargs[@]:1}" || rc=$?
+exit "$rc"
+SH
+  chmod +x "$w/fakebin/fake-ssh"
+}
+
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
 # Combines the former T1 (fast-forward + reread + nudge signalling) and T2
 # (the advance is a single-parent fast-forward, never a merge commit) into one
@@ -292,6 +336,62 @@ EOF
   assert_contains "$out" "nudge-secondmates: none" \
     "a restarted remote mate must not also be steered"
   pass "T3e a legacy remote advance still restarts the live remote mate"
+}
+
+# --- T3f: OpenSSH's leading PQ banner never replaces update's own result ----
+# The ssh stub crosses the real fm-on -> host-local remote-control boundary and
+# prepends exactly what OpenSSH emits. A failed remote-home sync must surface its
+# error, while the same banner over a successful sync must not hide the synced:
+# line and downgrade the result to a malformed update. A leg that dies leaving
+# only the banner has no diagnostic at all, and must still report a cause.
+test_remote_update_reports_through_ssh_banner() {
+  local w out rc
+
+  w=$(new_world t3f-failure)
+  add_remote_update_mate "$w" sm1
+  bump_origin "$w" instr
+  printf 'uncommitted remote edit\n' >> "$w/sm1/README.md"
+
+  out=$(run_update_report "$w"); rc=$?
+
+  expect_code 0 "$rc" "a skipped remote home is an accounted update outcome"$'\n'"$out"
+  assert_contains "$out" \
+    "remote secondmate sm1: skipped on remote-mac: error: remote secondmate home sync skipped: dirty working tree" \
+    "the update report presented the OpenSSH banner instead of the remote leg's error"
+  assert_not_contains "$out" \
+    'skipped on remote-mac: ** WARNING:' \
+    "the update report still attributes a remote failure to OpenSSH's banner"
+
+  w=$(new_world t3f-success)
+  add_remote_update_mate "$w" sm1
+  bump_origin "$w" instr
+
+  out=$(run_update_report "$w"); rc=$?
+
+  expect_code 0 "$rc" "a banner-prefixed successful remote update must remain successful"$'\n'"$out"
+  assert_contains "$out" "remote secondmate sm1: updated on remote-mac" \
+    "the leading OpenSSH banner hid the successful remote update result"
+  assert_not_contains "$out" "malformed update result" \
+    "the successful line under the banner was classified as malformed"
+
+  # Banner-only output: the remote leg was killed before it could say anything,
+  # so there is no diagnostic to report and the line must still name a cause
+  # rather than trail off after the colon.
+  w=$(new_world t3f-silent)
+  add_remote_update_mate "$w" sm1
+  bump_origin "$w" instr
+
+  export FM_FAKE_SSH_SILENT_FAIL=1
+  out=$(run_update_report "$w"); rc=$?
+  unset FM_FAKE_SSH_SILENT_FAIL
+
+  expect_code 0 "$rc" "an unreachable remote leg is an accounted update outcome"$'\n'"$out"
+  assert_contains "$out" \
+    "remote secondmate sm1: skipped on remote-mac: the remote update failed without a reported reason" \
+    "a banner-only remote failure reported an empty reason"
+  assert_not_contains "$out" 'skipped on remote-mac: ** WARNING:' \
+    "a banner-only remote failure was attributed to OpenSSH's banner"
+  pass "T3f remote update reports ignore leading OpenSSH banners on failure and success"
 }
 
 # --- T4: dirty secondmate is skipped, its edit preserved -------------------
@@ -477,6 +577,7 @@ test_bin_only_advance_restarts
 test_unprovable_runtime_gets_fallback_nudge
 test_dead_secondmate_gets_no_action
 test_legacy_remote_advance_restarts
+test_remote_update_reports_through_ssh_banner
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_already_current_secondmate_still_restarts
