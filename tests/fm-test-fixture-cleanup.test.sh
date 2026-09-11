@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for tests/lib.sh's shared fixture-tempdir helper
-# (fm_test_tmproot / fm_test_cleanup / fm_test_reap_orphans).
+# (fm_test_tmproot / fm_test_cleanup / fm_test_reap_orphans) and its
+# background-process stopper (fm_test_reap).
 #
 # The near-universal call pattern across this suite is
 # `TMP_ROOT=$(fm_test_tmproot prefix)`, which forks a subshell to capture the
@@ -164,8 +165,44 @@ test_orphan_sweep_reaps_read_only_package_tree() {
   pass "the orphan sweep reaps read-only package fixtures"
 }
 
+wait_ready() {  # <file>
+  local tries=0
+  while [ ! -e "$1" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+  [ -e "$1" ]
+}
+
+# A child that ignores TERM stands in for a bash 5.2 process whose TERM trap was
+# dropped. fm_test_reap must still collect it after the grace period instead of
+# blocking forever, and must stop a cooperative child without that escalation.
+test_reap_collects_a_child_that_ignores_term() {
+  local pid started dir err ready
+  dir=$(fm_test_tmproot fm-test-reap)
+  err="$dir/reap.err"
+  ready="$dir/ready"
+  bash -c 'trap "" TERM; : > "$1"; while :; do sleep 0.1; done' _ "$ready" &
+  pid=$!
+  wait_ready "$ready" || fail "the TERM-ignoring child never armed its trap"
+  started=$SECONDS
+  FM_TEST_REAP_GRACE_SECONDS=1 fm_test_reap "$pid" 2> "$err"
+  ! kill -0 "$pid" 2>/dev/null || fail "fm_test_reap left a TERM-ignoring child running"
+  [ $((SECONDS - started)) -le 5 ] || fail "fm_test_reap took $((SECONDS - started))s to stop a TERM-ignoring child"
+  assert_grep "ignored TERM for 1s; sent KILL" "$err" "fm_test_reap did not report the KILL escalation"
+
+  # A TERM sent between fork and exec is caught by this shell's inherited trap
+  # and lost at exec, so the cooperative child also reports once it is running.
+  rm -f "$ready"
+  bash -c ': > "$1"; while :; do sleep 0.1; done' _ "$ready" &
+  pid=$!
+  wait_ready "$ready" || fail "the cooperative child never started"
+  FM_TEST_REAP_GRACE_SECONDS=1 fm_test_reap "$pid" 2> "$err"
+  ! kill -0 "$pid" 2>/dev/null || fail "fm_test_reap left a cooperative child running"
+  [ ! -s "$err" ] || fail "fm_test_reap escalated a child that honored TERM: $(cat "$err")"
+  pass "fm_test_reap collects a child that ignores TERM and stops a cooperative one without escalating"
+}
+
 test_fixture_root_gone_after_normal_exit
 test_fixture_root_gone_after_sigterm
+test_reap_collects_a_child_that_ignores_term
 test_cleanup_registry_resists_precreation
 test_fixture_registration_failure_rolls_back_root
 test_orphan_sweep_respects_fixture_ownership

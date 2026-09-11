@@ -340,8 +340,7 @@ test_meta_lock_contention_fails_bounded() {
   }
   run_send "$dir" "$err" FM_TASK_INBOX_LOCK_WAIT_SECS=0 -- t1 "must not hang"
   rc=$?
-  kill "$holder" 2>/dev/null
-  wait "$holder" 2>/dev/null
+  fm_test_reap "$holder"
   [ "$rc" -ne 0 ] || fail "metadata lock contention should fail after the bounded wait"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "a lock refusal must not enqueue a record"
   assert_contains "$(cat "$err")" "metadata could not be locked" \
