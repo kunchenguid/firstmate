@@ -907,10 +907,9 @@ ok - attached viewer: detaching releases the refusal, so the guard tracks the cl
 ```
 
 Both halves of the recipe are load-bearing, and each was measured by removing it from the helper and re-running the guard on the same host and release.
-Dropping the `TIOCSWINSZ` call and dropping the environment scrub each produced the same failure the untested scenarios reported:
+Dropping the `TIOCSWINSZ` call and dropping the environment scrub each left startup reporting `no_foreground_client`, followed by the guard failure:
 
 ```text
-fm-herdr-lab: lab viewer did not become the foreground client of 'fm-lab-fm-herdr-attache-71064-7965' within 8 seconds (last reason: no_foreground_client)
 not ok - could not attach a real foreground Herdr viewer over a sized pty
 ```
 
