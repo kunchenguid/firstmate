@@ -30,7 +30,10 @@
 # message means the captain is back (exit afk, flush catch-up, resume per-wake
 # responsiveness). The prefix and busy-guard solve the same problem - the
 # daemon and the human share one input channel - so they live together under
-# /afk.
+# /afk. The digest body itself never travels through the composer: inject_msg
+# writes it to a state/.subsuper-digest-* file and types only a short marked
+# line naming that file, because a long typed line loses its head (and with it
+# the prefix) on the way into the harness.
 #
 # Reliability model (see the /afk skill):
 #   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
@@ -135,8 +138,8 @@
 #                                   next channel (default 10; invalid/zero uses the
 #                                   default).
 #          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
-#                                   (default 3); the digest is typed once, only
-#                                   Enter is retried. Composer-empty detection is
+#                                   (default 3); the pointer line is typed once,
+#                                   only Enter is retried. Composer-empty detection is
 #                                   structural and style-aware (bin/fm-tmux-lib.sh):
 #                                   it drops dim/faint ghost text and strips the
 #                                   harness's box borders before deciding, so a
@@ -227,6 +230,14 @@ WEDGE_ALARM_NOTIFIER_PID=
 # supervisor-pane busy guard live in bin/fm-tmux-lib.sh.
 # FM_BUSY_REGEX also overrides Grok's isolated task-state fallback.
 INJECT_FAIL_SLEEP_DEFAULT=30
+# Ceiling for the one line inject_msg types, prefix included. It keeps every
+# injection inside a single terminal read and under Claude Code's 800-character
+# paste threshold with margin; inject_msg explains why a longer line loses its
+# head. The pointer line it types is about 200 bytes plus the state path.
+INJECT_LINE_MAX_BYTES=512
+# Digest files kept for audit. Firstmate reads each one in the turn its pointer
+# starts, so older files are history, not a queue.
+INJECT_DIGEST_KEEP=20
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
 CRASH_THRESHOLD_DEFAULT=10
@@ -708,26 +719,29 @@ stale_window_is_busy() {  # <window> <state>
   [ "${verdict%% *}" = busy ]
 }
 
-escalate_add() {  # <state> <distilled-item>
-  local state=$1 item=$2 buf
+# Every queued escalation logs one line naming its source (the wake reason, or
+# the housekeeping pass that raised it), so each digest item is traceable.
+escalate_add() {  # <state> <distilled-item> [source]
+  local state=$1 item=$2 source=${3:-unlabeled} buf
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || _now > "${buf}.since"
-  printf '%s\n' "$item" >> "$buf"
+  if printf '%s\n' "$item" >> "$buf"; then
+    log "escalate: $source -> $item"
+    return 0
+  fi
+  log "escalate buffer write failed: $source -> $item"
+  return 1
 }
 
-# Flush the escalation buffer as ONE batched, single-line digest to the
+# Flush the escalation buffer as ONE batched digest, one event per line, to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf n msg
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
-  n=$(wc -l < "$buf" 2>/dev/null || echo 0)
-  # Join buffered items with the literal " | " separator into one digest line.
-  msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
-  # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
-  # safety net, but keeping the source single-line makes the intent explicit).
-  msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
+  n=$(awk 'END { print NR }' "$buf" 2>/dev/null)
+  msg=$(printf 'Supervisor escalate (%s event(s)):\n' "${n:-0}"; cat "$buf")
   if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
   return 1
 }
@@ -1093,7 +1107,7 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
+      *) if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win" "stale recheck"; then
            stale_marker_remove "$win" "$state"
          fi ;;
     esac
@@ -1162,7 +1176,7 @@ housekeeping() {  # <state>
       *)
         standing=$(status_standing_wait_line "$state/$task.status")
         if [ -n "$standing" ] && status_is_captain_held "$standing"; then
-          if escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"; then
+          if escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win" "pause recheck"; then
             _now > "$marker"
           fi
         elif [ -n "$standing" ] && status_is_paused "$standing"; then
@@ -1179,7 +1193,7 @@ housekeeping() {  # <state>
           fi
           if fm_pr_poll_covers_wait "$state" "$task" "$FM_DAEMON_DIR/fm-pr-poll.sh" "$pause_secs"; then
             _now > "$marker"
-          elif escalate_add "$state" "$pause_reason"; then
+          elif escalate_add "$state" "$pause_reason" "pause recheck"; then
             _now > "$marker"
             if [ -n "$until" ] && [ "$now" -ge "$until" ]; then
               printf '%s\n' "$until" > "$due"
@@ -1211,7 +1225,7 @@ housekeeping() {  # <state>
         ident=$(status_observed_signature "$f")
         status_presentation_marker_reported_matches "$(_seen_status_path "$state" "$task")" "$ident" \
           && continue
-        if escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"; then
+        if escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)" "catch-all scan"; then
           status_presentation_marker_report "$(_seen_status_path "$state" "$task")" "$ident" || true
         fi
         continue
@@ -1221,11 +1235,11 @@ housekeeping() {  # <state>
       rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
       if [ "$rc" -eq 0 ]; then
         event=${rest#*$'\t'}
-        if escalate_add "$state" "$(basename "$f"): $event (catch-all scan)"; then
+        if escalate_add "$state" "$(basename "$f"): $event (catch-all scan)" "catch-all scan"; then
           mark_status_seen "$state" "$task" "$endpoint" "$ident" || true
         fi
       elif ! mark_status_seen "$state" "$task" "$endpoint" "$ident"; then
-        escalate_add "$state" "$(basename "$f"): status position commit failed (catch-all scan)"
+        escalate_add "$state" "$(basename "$f"): status position commit failed (catch-all scan)" "catch-all scan"
       fi
     done
   fi
@@ -1249,16 +1263,30 @@ window_for_task() {  # <task-key> [state]
 }
 
 # --- injection --------------------------------------------------------------
-# inject_msg: send one escalation digest to the supervisor pane.
-# Returns 0 on successful inject (or empty buffer), non-zero if the pane is
-# gone, the supervisor is busy, afk is inactive, or the verified submit cannot
-# be confirmed after bounded retries. On non-zero the caller preserves
-# the buffer so the escalation survives for the next cycle or the catch-up flush.
+# inject_msg: deliver one escalation digest to the supervisor pane.
+# Returns 0 once the backend confirms the submit, non-zero if afk is inactive,
+# the pane is gone or busy, the composer is not proven empty, the digest cannot
+# be written, or the verified submit cannot be confirmed after bounded retries.
+# On non-zero the caller preserves the buffer so the escalation survives for
+# the next cycle or the catch-up flush. Every call logs exactly one line with
+# the digest size and the outcome, so each attempt is auditable.
+#
+# Delivery shape: the digest goes into its own state/.subsuper-digest-* file
+# and the only thing typed is a short marked line naming that file.
+# Typing the digest itself loses its head once it is long. The macOS terminal
+# driver hands the reading program at most 1022 bytes of pending input per
+# read, so a longer send reaches the harness in several reads, and Claude Code
+# (2.1.268) takes a single read over 800 characters as a paste and discards it
+# when another read follows, keeping only the last one. The operational prefix
+# sits at the head, so the surviving tail reads as an unmarked captain message.
+# The same loss happens under tmux and Herdr, which both deliver every byte in
+# order; see docs/verification/runtime-backends.md "Away-mode transport".
+# INJECT_LINE_MAX_BYTES bounds the typed line well inside both limits.
 #
 # Submit model:
-#   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
+#   - TYPE ONCE, then submit with Enter. Never retype the line: a swallowed
 #     Enter leaves our text in the composer, and retyping would concatenate two
-#     sentinel-prefixed digests into one corrupted turn.
+#     sentinel-prefixed lines into one corrupted turn.
 #   - SUBMIT ACK = the backend submit primitive reports `empty` after Enter.
 #     For tmux that means a cleared composer; for herdr's normal idle-baseline
 #     path it means native agent-state observed a real turn start.
@@ -1268,20 +1296,14 @@ window_for_task() {  # <task-key> [state]
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
-inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+inject_msg() {  # <digest> [state]
+  local digest=$1 state target backend retries sleep_s verdict composer line file size line_size
   state="${2:-$(_state_root)}"
+  size="$(_byte_len "$digest")-byte digest"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
-  # (2) Single-line digest: collapse any embedded newlines so submission via
-  # send-keys + Enter is unambiguous regardless of how the TUI composer treats
-  # them. Then use the canonical typed envelope so downstream consumers retain
-  # the exact away-supervisor kind without interpreting this payload's prose.
-  msg=$(_collapse_newlines "$msg")
-  fm_operational_input_encode away-supervisor "$msg" encoded || return 1
-  msg=$encoded
+  afk_active "$state" || { log "inject deferred: afk inactive ($size)"; return 1; }
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   # BACKEND-AWARE (previously a raw `tmux display-message` pane-exists probe):
   # dispatches through bin/fm-backend.sh so a herdr supervisor pane is checked
@@ -1289,10 +1311,13 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  fm_backend_target_exists "$backend" "$target" || return 1
-  # (3) Busy-guard: never inject into an in-use supervisor pane.
+  if ! fm_backend_target_exists "$backend" "$target"; then
+    log "inject deferred: supervisor target $target not found ($size)"
+    return 1
+  fi
+  # (2) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
-    log "inject deferred: supervisor pane busy (agent mid-turn)"
+    log "inject deferred: supervisor pane busy (agent mid-turn; $size)"
     return 1
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
@@ -1306,10 +1331,27 @@ inject_msg() {  # <message> [state]
   #      stays buffered for the next cycle or the catch-up flush.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
-    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane; $size)"
     return 1
   fi
-  # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
+  # (3) Write the digest file and build the one short line that points at it,
+  # in the canonical typed envelope so downstream consumers retain the exact
+  # away-supervisor kind. Newlines are collapsed so Enter is unambiguous.
+  if ! file=$(_write_digest_file "$state" "$digest"); then
+    log "inject failed: digest file could not be written under $state ($size)"
+    return 1
+  fi
+  line=$(_collapse_newlines "Supervisor escalate: read the digest at $file (pre-read; re-arm not needed - watcher daemon-managed)")
+  if ! fm_operational_input_encode away-supervisor "$line" line; then
+    log "inject failed: pointer line could not be encoded ($size at $file)"
+    return 1
+  fi
+  line_size=$(_byte_len "$line")
+  if [ "$line_size" -gt "$INJECT_LINE_MAX_BYTES" ]; then
+    log "inject refused: ${line_size}-byte pointer line exceeds ${INJECT_LINE_MAX_BYTES} bytes ($size at $file)"
+    return 1
+  fi
+  # (4) Type the line ONCE, then submit with Enter (retry Enter only, never
   # retype) via the shared submit primitive. Success = the backend confirms
   # submit. An unconfirmed/unknown pane does NOT count as delivered, so the
   # buffer is preserved (strict) rather than cleared.
@@ -1318,12 +1360,36 @@ inject_msg() {  # <message> [state]
   # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
+  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" "$retries" "$sleep_s" "$sleep_s")
   if [ "$verdict" = empty ]; then
-    return 0  # Backend confirmed the submit.
+    log "inject delivered: ${line_size}-byte pointer line typed ($size at $file)"
+    return 0
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, ${line_size}-byte pointer line may be in composer; $size at $file)"
   return 1
+}
+
+_byte_len() {  # <text>
+  printf '%s' "$1" | wc -c | tr -d ' '
+}
+
+# One digest file per typed attempt. The UTC timestamp in the name sorts oldest
+# first in a glob, so pruning to INJECT_DIGEST_KEEP files needs no stat; the
+# file just written is never pruned, whatever its random suffix sorts as.
+_write_digest_file() {  # <state> <digest> -> path
+  local state=$1 digest=$2 file old excess
+  local -a files
+  file=$(mktemp "$state/.subsuper-digest-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX") || return 1
+  printf '%s\n' "$digest" > "$file" || { rm -f "$file"; return 1; }
+  files=("$state"/.subsuper-digest-*)
+  excess=$(( ${#files[@]} - INJECT_DIGEST_KEEP ))
+  for old in "${files[@]}"; do
+    [ "$excess" -gt 0 ] || break
+    [ "$old" != "$file" ] || continue
+    rm -f "$old"
+    excess=$((excess - 1))
+  done
+  printf '%s' "$file"
 }
 
 # --- INJECT_SKIP prefix match (literal prefixes, no regex) ------------------
@@ -1442,8 +1508,7 @@ handle_wake() {  # <reason> <state>
   fi
   case "$action" in
     escalate)
-      log "escalate: $reason -> $distilled"
-      if escalate_add "$state" "$distilled"; then
+      if escalate_add "$state" "$distilled" "$reason"; then
         # A terminal-stale escalate must not leave a persistence marker behind, or
         # housekeeping re-escalates the same pane as a false wedge later.
         [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"

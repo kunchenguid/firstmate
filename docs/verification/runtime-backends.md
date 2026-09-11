@@ -1520,6 +1520,37 @@ The current catch-up reporting boundary is pinned by `tests/fm-afk-return.test.s
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+The daemon's typed line must stay short, because a long typed line loses its head before the harness reads it.
+Measured 2026-09-11 on macOS 26.6.2 with Herdr 0.9.0 and Claude Code 2.1.268 in an isolated `fm-lab-` session:
+
+- A raw reader in a Herdr pane received every byte of a `pane send-text` in order, but never more than 1022 bytes per read: sends of 1022, 1023, 1100, 2000, and 4000 bytes arrived as reads of `1022`, `1022,1`, `1022,78`, `1022,978`, and `1022,1022,1022,934`.
+- Claude Code types a single read of up to 800 characters verbatim and turns a single read of 801 to 1022 characters into a `[Pasted text #N]` placeholder that expands intact on submit.
+- When a read over 800 characters is followed by another read, Claude Code keeps only the last one.
+  An 1100-byte unbracketed send reached the transcript as its last 78 bytes, and a digest the daemon typed directly at that size reached it as its last 85 bytes with no operational prefix, while the daemon's submit confirmation reported it delivered.
+- The same 1100 and 3000 bytes reached Claude Code intact when wrapped in bracketed paste or sent as 700-byte pieces, and `send-keys -l` on a private tmux server lost the head exactly as Herdr's `pane send-text` did.
+
+The daemon therefore writes each digest to a `state/.subsuper-digest-*` file and types only a prefixed pointer line of at most `INJECT_LINE_MAX_BYTES` (512) bytes, which keeps the whole line under the 800-character paste threshold however the terminal splits it.
+Linux was not measured.
+`fm-send.sh`'s typed plane (harness-native invocations and explicit endpoint targets) still types its text directly, so a typed-plane message longer than one 1022-byte read can lose its head the same way.
+`tests/fm-daemon.test.sh` and Scenario D of `tests/fm-afk-inject-e2e.test.sh` pin the pointer shape portably, and this opt-in guard proves it against real Claude Code in an isolated Herdr lab:
+
+```sh
+FM_AFK_INJECT_PREFIX_LIVE=1 tests/fm-afk-inject-prefix-live-e2e.test.sh
+```
+
+Observed 2026-09-11, first with Claude Code's transcript available and then launched from inside another Claude Code session, which does not save one:
+
+```text
+ok - live away-mode inject: Claude Code (2.1.268 (Claude Code)) on herdr 0.9.0 received a 3535-byte digest as a prefixed pointer line (proven by the transcript and rendered pane) in isolated session fm-lab-firstmate-afk-in-15661-27101
+ok - live away-mode inject: Claude Code (2.1.268 (Claude Code)) on herdr 0.9.0 received a 3538-byte digest as a prefixed pointer line (proven by the rendered pane) in isolated session fm-lab-firstmate-afk-in-33727-24948
+```
+
+Against a daemon copy patched to type the whole digest after the pointer, with the line bound lifted, the same guard failed:
+
+```text
+not ok - Claude Code (2.1.268 (Claude Code)) on herdr 0.9.0: neither the transcript nor the rendered pane shows the submitted message opening with the operational prefix
+```
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

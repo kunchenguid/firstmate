@@ -421,8 +421,57 @@ test_scenario_c() {
   pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
 }
 
+# --- Scenario D: long digest, head intact -----------------------------------
+# Regression: a digest longer than one terminal read (1022 bytes on macOS)
+# reached a real Claude composer with its head, operational prefix included,
+# cut off, so it read as the captain's return. Through the real watcher,
+# daemon, and tmux transport, a long captain-relevant status must still submit
+# exactly one short line that starts with the marker and names a digest file
+# holding the whole status line, and the delivery must be logged.
+
+test_scenario_d() {
+  reset_state
+  afk_enter "$STATE_DIR"
+  start_daemon
+
+  local long status_line digest_line digest_hex typed typed_bytes digest_file
+  long=$(printf 'lost-head-%04d ' $(seq 1 150))
+  status_line="done: PR https://example.test/pr/400 $long"
+  echo "$status_line" > "$STATE_DIR/fake-c1.status"
+  sleep 6
+
+  local marker_count
+  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  [ "$marker_count" -eq 1 ] \
+    || fail "Scenario D: expected exactly 1 U+2063 marker, got $marker_count"
+  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
+  case "$digest_line" in
+    *injection) ;;
+    *) fail "Scenario D: long digest misclassified (expected injection): $digest_line" ;;
+  esac
+  digest_hex=$(printf '%s' "$digest_line" | cut -f1)
+  case "$digest_hex" in
+    e281a3*) ;;
+    *) fail "Scenario D: submitted line lost its leading marker (hex: ${digest_hex:0:40}...)" ;;
+  esac
+  typed=$(printf '%s' "$digest_line" | cut -f2)
+  typed_bytes=$(printf '%s' "$typed" | wc -c | tr -d ' ')
+  [ "$typed_bytes" -le "$INJECT_LINE_MAX_BYTES" ] \
+    || fail "Scenario D: submitted line is $typed_bytes bytes; a long line loses its head in a real composer"
+  digest_file=$(printf '%s' "$typed" | sed -n 's/.*read the digest at \(.*\) (pre-read; .*/\1/p')
+  [ -f "$digest_file" ] || fail "Scenario D: submitted line names no digest file: $typed"
+  grep -F "fake-c1.status: $status_line" "$digest_file" >/dev/null \
+    || fail "Scenario D: digest file does not hold the whole status line: $(cat "$digest_file")"
+  grep -F "inject delivered: ${typed_bytes}-byte pointer line typed" "$STATE_DIR/.supervise-daemon.log" >/dev/null \
+    || fail "Scenario D: delivery left no sized log line"
+
+  stop_daemon
+  pass "Scenario D: a long digest submits one short marker-first line naming its full digest file"
+}
+
 test_scenario_a
 test_scenario_b
 test_scenario_c
+test_scenario_d
 
 echo "all e2e injection tests passed"

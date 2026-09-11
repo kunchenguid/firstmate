@@ -1443,8 +1443,14 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
   pass "persistent Orca stale resolves the terminal from metadata"
 }
 
+# typed_digest_file <sent-log>: the digest file named by the one pointer line
+# the daemon typed, or nothing when no pointer line was typed.
+typed_digest_file() {
+  sed -n 's/.*Supervisor escalate: read the digest at \(.*\) (pre-read; .*/\1/p' "$1" | head -1
+}
+
 test_escalate_batches_into_one_digest() {
-  local dir state fakebin sent capture n
+  local dir state fakebin sent capture n digest
   dir=$(make_supercase batch)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1458,10 +1464,10 @@ test_escalate_batches_into_one_digest() {
     || fail "escalate_flush failed"
   grep -F 'FIRSTMATE_OP: v1 away-supervisor: ' "$sent" >/dev/null \
     || fail "batch digest lacks the exact current away-supervisor kind"
-  grep -F "event A" "$sent" >/dev/null || fail "batch digest missing event A"
-  grep -F "event B" "$sent" >/dev/null || fail "batch digest missing event B"
-  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
-    || fail "batch digest did not join events with literal ' | '"
+  digest=$(typed_digest_file "$sent")
+  [ -f "$digest" ] || fail "typed line does not name a digest file: $(head -1 "$sent")"
+  [ "$(cat "$digest")" = "$(printf 'Supervisor escalate (2 event(s)):\nevent A: done: PR 1\nevent B: done: PR 2')" ] \
+    || fail "digest file does not list both events one per line: $(cat "$digest")"
   [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after flush"
   [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
   n=$(grep -c '\[ENTER\]' "$sent")
@@ -1470,7 +1476,7 @@ test_escalate_batches_into_one_digest() {
 }
 
 test_escalate_batch_age_uses_first_append() {
-  local dir state fakebin sent capture
+  local dir state fakebin sent capture digest
   dir=$(make_supercase batch-age)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1483,11 +1489,133 @@ test_escalate_batch_age_uses_first_append() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=90 FM_HOUSEKEEPING_TICK=0 \
     housekeeping "$state"
-  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
-    || fail "backdated batch did not flush as a joined digest (max-delay measured from last append)"
+  digest=$(typed_digest_file "$sent")
+  grep -Fx 'event B: done: PR 2' "$digest" >/dev/null 2>&1 \
+    || fail "backdated batch did not flush as one digest (max-delay measured from last append)"
   [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after backdated flush"
   [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
   pass "batch flush measures max-delay from the first append, not the last"
+}
+
+# Regression: a long digest typed into a real Claude composer arrived with its
+# head, operational prefix included, cut off, so it read as the captain's
+# return. The typed line must stay short and prefix-first however long the
+# digest grows, and the digest itself must survive whole in the named file.
+test_long_digest_types_short_prefixed_pointer() {
+  local dir state fakebin sent capture log typed digest i long
+  dir=$(make_supercase long-digest)
+  state="$dir/state"; fakebin="$dir/fakebin"; log="$dir/daemon.log"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty bare claude composer
+  long=$(printf 'lost-head-%04d ' $(seq 1 120))
+  for i in 1 2 3; do escalate_add "$state" "t$i.status: done: $long"; done
+  afk_enter "$state"
+  LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" escalate_flush "$state" || fail "long digest flush failed"
+  [ "$(grep -cv '^\[ENTER\]$' "$sent")" -eq 1 ] || fail "expected exactly one typed line"
+  typed=$(grep -v '^\[ENTER\]$' "$sent")
+  case "$typed" in
+    "${FM_OPERATIONAL_PREFIX}v1 away-supervisor: Supervisor escalate: read the digest at "*) ;;
+    *) fail "typed line does not start with the operational prefix: $typed" ;;
+  esac
+  [ "$(printf '%s' "$typed" | wc -c)" -le "$INJECT_LINE_MAX_BYTES" ] \
+    || fail "typed line is $(printf '%s' "$typed" | wc -c) bytes, over the $INJECT_LINE_MAX_BYTES-byte ceiling"
+  digest=$(typed_digest_file "$sent")
+  [ "$(wc -c < "$digest")" -gt 5000 ] || fail "digest file does not hold the long digest"
+  for i in 1 2 3; do
+    grep -Fx "t$i.status: done: $long" "$digest" >/dev/null || fail "digest file lost event $i"
+  done
+  grep -E "^\[[^]]*\] inject delivered: [0-9]+-byte pointer line typed \([0-9]+-byte digest at $digest\)$" "$log" >/dev/null \
+    || fail "delivered inject did not log its sizes and digest path: $(cat "$log")"
+  pass "a long digest types one short prefix-first pointer line and keeps every event in its file"
+}
+
+# Audit contract: every inject attempt leaves exactly one log line with the
+# digest size and the outcome, whichever guard stops it.
+test_inject_logs_every_attempt_with_size() {
+  local dir state log n
+  dir=$(make_supercase inject-audit)
+  state="$dir/state"; log="$dir/daemon.log"
+  (
+    LOG=$log
+    FM_SUPERVISOR_BACKEND=herdr
+    fm_backend_target_exists() { [ "$2" != "default:w1:gone" ]; }
+    pane_is_busy() { [ "$1" = "default:w1:busy" ]; }
+    fm_backend_composer_state() { if [ "$2" = "default:w1:draft" ]; then printf 'pending'; else printf 'empty'; fi; }
+    fm_backend_send_text_submit() { if [ "$2" = "default:w1:swallow" ]; then printf 'pending'; else printf 'empty'; fi; }
+    FM_SUPERVISOR_TARGET="default:w1:p1" inject_msg "hello" "$state" && fail "inject ran while afk was inactive"
+    afk_enter "$state"
+    for target in gone busy draft swallow; do
+      FM_SUPERVISOR_TARGET="default:w1:$target" inject_msg "hello" "$state" && fail "inject to $target should not succeed"
+    done
+    FM_SUPERVISOR_TARGET="default:w1:p1" inject_msg "hello" "$state" || fail "inject to an idle empty pane failed"
+  ) || fail "inject audit subshell failed"
+  n=$(grep -c '\] inject ' "$log")
+  [ "$n" -eq 6 ] || fail "expected one log line per attempt (6), got $n: $(cat "$log")"
+  [ "$(grep -c '\] inject .*5-byte digest' "$log")" -eq 6 ] || fail "an attempt logged no digest size: $(cat "$log")"
+  for outcome in 'deferred: afk inactive' 'deferred: supervisor target default:w1:gone not found' \
+    'deferred: supervisor pane busy' 'deferred: supervisor composer not confirmed-empty (state=pending' \
+    'failed: submit unconfirmed' 'delivered: '; do
+    grep -F "] inject $outcome" "$log" >/dev/null || fail "no log line for outcome '$outcome': $(cat "$log")"
+  done
+  pass "every inject attempt logs one line with the digest size and its outcome"
+}
+
+test_catchall_scan_escalation_is_logged() {
+  local dir state log
+  dir=$(make_supercase scan-audit)
+  state="$dir/state"; log="$dir/daemon.log"
+  printf 'done: ready\n' > "$state/scan-t1.status"
+  rm -f "$state/.subsuper-last-scan"
+  LOG="$log" FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  grep -F '] escalate: catch-all scan -> scan-t1.status: done: ready (catch-all scan)' "$log" >/dev/null \
+    || fail "catch-all scan escalation left no log line: $(cat "$log" 2>/dev/null)"
+  pass "a catch-all scan escalation is logged with its source"
+}
+
+# The typed line has a hard ceiling: an injection whose pointer would outgrow
+# it (only a pathologically long state path can) is refused, never typed.
+test_inject_refuses_pointer_over_ceiling() {
+  local dir state log
+  dir=$(make_supercase inject-ceiling)
+  state="$dir/$(printf 'd%.0s' $(seq 1 200))/$(printf 'e%.0s' $(seq 1 200))/state"
+  mkdir -p "$state"; log="$dir/daemon.log"
+  afk_enter "$state"
+  (
+    LOG=$log
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { fail "a pointer line over the ceiling must not be typed"; }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p1" inject_msg "hello" "$state" \
+      && fail "inject should refuse a pointer line over the ceiling"
+    true
+  ) || fail "ceiling subshell failed"
+  grep -F "] inject refused: " "$log" >/dev/null || fail "refused inject was not logged: $(cat "$log")"
+  pass "a pointer line over the ceiling is refused and logged, never typed"
+}
+
+test_digest_files_are_pruned_to_the_newest() {
+  local dir state i typed kept
+  dir=$(make_supercase digest-prune)
+  state="$dir/state"
+  afk_enter "$state"
+  for i in $(seq 1 $((INJECT_DIGEST_KEEP + 5))); do
+    typed=$(
+      fm_backend_target_exists() { return 0; }
+      pane_is_busy() { return 1; }
+      fm_backend_composer_state() { printf 'empty'; }
+      fm_backend_send_text_submit() { printf '%s' "$3" > "$dir/typed"; printf 'empty'; }
+      FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p1" inject_msg "digest $i" "$state" >/dev/null
+      cat "$dir/typed"
+    )
+  done
+  kept=$(find "$state" -name '.subsuper-digest-*' | wc -l | tr -d ' ')
+  [ "$kept" -eq "$INJECT_DIGEST_KEEP" ] || fail "expected $INJECT_DIGEST_KEEP digest files kept, found $kept"
+  printf '%s\n' "$typed" > "$dir/last"
+  [ "$(cat "$(typed_digest_file "$dir/last")")" = "digest $((INJECT_DIGEST_KEEP + 5))" ] \
+    || fail "the newest digest file was pruned or overwritten"
+  pass "digest files are pruned to the newest $INJECT_DIGEST_KEEP and never the one just typed"
 }
 
 test_heartbeat_scan_dedup() {
@@ -2770,12 +2898,14 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
-      case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
+      printf '%s\n' "$3" > "$dir/typed"
       printf 'empty'
     }
     FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
       || fail "inject_msg should succeed when send_text_submit confirms empty"
   ) || fail "herdr successful-submit inject_msg subshell failed"
+  [ "$(cat "$(typed_digest_file "$dir/typed")")" = hello ] \
+    || fail "the typed line does not point at a digest file holding the digest: $(cat "$dir/typed")"
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
@@ -2856,6 +2986,11 @@ test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
+test_long_digest_types_short_prefixed_pointer
+test_inject_logs_every_attempt_with_size
+test_catchall_scan_escalation_is_logged
+test_inject_refuses_pointer_over_ceiling
+test_digest_files_are_pruned_to_the_newest
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_needs_decision_queued_row_escalates_once_as_the_decision

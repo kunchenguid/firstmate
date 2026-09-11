@@ -319,6 +319,7 @@ There is still one watcher process; the event reader is a bounded child of that 
 The away daemon supports tmux and Herdr supervisor panes only.
 It refuses Zellij, Orca, and cmux as supervisor backends rather than applying the wrong transport.
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
+`pane send-text` types raw bytes without bracketed paste, so the daemon types only a short pointer line to its digest file rather than the digest itself ([evidence](verification/runtime-backends.md#away-mode-transport)).
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
 Harnesses with native tracked background execution can run the daemon in their terminal.
@@ -372,6 +373,7 @@ tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
+tests/fm-afk-inject-prefix-live-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 
