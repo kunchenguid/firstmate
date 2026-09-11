@@ -130,8 +130,9 @@ fm_cost_summary_write() {  # <data-dir> <task-id> <meta-file> <kind> <pr-url> <l
   model=$(fm_meta_get "$meta" model)
   effort=$(fm_meta_get "$meta" effort)
   spawn_gen=$(fm_meta_get "$meta" spawn_gen)
-  if [ -n "$intake_harness" ] \
-     && { [ "$intake_harness" != "$harness" ] || [ "$intake_model" != "$model" ] || [ "$intake_effort" != "$effort" ]; }; then
+  if [ -z "$intake_harness" ]; then
+    relaunched=null
+  elif [ "$intake_harness" != "$harness" ] || [ "$intake_model" != "$model" ] || [ "$intake_effort" != "$effort" ]; then
     relaunched=true
   else
     relaunched=false
