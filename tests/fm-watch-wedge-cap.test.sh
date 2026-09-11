@@ -425,7 +425,7 @@ test_wedge_cap_rollback_resets_state_v14() {
   if [ -e "$state/.wedge-escalations-$key" ]; then
     ewf_after=$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo "")
     case "$ewf_after" in
-      ''|0|0\n) ;;
+      ''|0|"0") ;;
       *) fail "wedge-escalation counter was NOT reset by v14 rollback (still holds '$ewf_after' = saturation value) - the next poll will re-fire PERMANENTLY-WEDGED immediately (this is the P1 Greptile flagged on v13)"
          ;;
     esac
@@ -1188,7 +1188,7 @@ test_wedge_cap_escalation_counter_resets_on_cap_fire() {
   if [ -e "$state/.wedge-escalations-$key" ]; then
     ewf_after_cap=$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)
     case "$ewf_after_cap" in
-      ''|0|0\n) ;;
+      ''|0|"0") ;;
       *) fail "wedge-escalation counter was not reset when the cap fired (still holds '$ewf_after_cap' = saturation value) - a fresh hash will re-fire the cap immediately"
          ;;
     esac
