@@ -25,7 +25,10 @@
 # decisions from report or visual-review prose or reimplements snapshot semantics.
 # Underway (in_flight) projects every main live worker plus every active child
 # from every readable secondmate ledger, independently of that home's
-# bearings_state. A home classified captain_decision because it has an open
+# bearings_state. Each row's name is the durable task title when nonblank and
+# its durable task id otherwise, so renderers always receive a task-identifying
+# label instead of having to substitute run status. A home classified
+# captain_decision because it has an open
 # captain hold still contributes each working child as its own Underway row;
 # the home row on secondmates[] keeps the decision and gate classification.
 # Captain-hold placement follows the canonical snapshot's hold_bucket and
@@ -40,6 +43,10 @@
 # and drops its gate, so a hold is never in both Captain's Call and Charted Next.
 # Aging is a projection safety net only; the durable
 # deferral remains re-holding with --until.
+#
+# Charted Next gates are ordered by durable filed date, newest first, before the
+# FM_BEARINGS_GATES bound is applied. Gates without a comparable filed date keep
+# their input order after dated gates.
 #
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
@@ -135,6 +142,8 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+Default gates are selected newest filed first before their bound; undated gates
+  retain input order after dated gates.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
