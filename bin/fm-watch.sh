@@ -63,6 +63,22 @@
 #                          for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
+#   stale: <window> (agent gone: <dead|missing> ...)
+#                          the backend's recovery-grade classifier positively
+#                          proved no live agent remains at this endpoint (an
+#                          empty shell husk or stale registration, or the pane
+#                          itself authoritatively absent). Surfaces ONCE, after
+#                          the same verdict reads on two polls; while the
+#                          established verdict holds, stale tracking for the
+#                          identity is suspended before the capture, so churn on
+#                          the dead pane cannot re-arm classification and no
+#                          wedge escalation or deep-inspection demand repeats
+#                          the established evidence. An alive read lifts the
+#                          suspension; a task record retired mid-poll or an
+#                          unrecorded window ends classification and sweeps the
+#                          identity's markers instead of alarming. Recovery and
+#                          teardown stay with firstmate: this path never closes,
+#                          kills, or cleans up the endpoint.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -384,11 +400,14 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*), and live homes hold those markers on
-# disk under the current format, so the format lives here alone: a second copy is
-# how a future change to it silently orphans a window's markers instead of clearing
-# them. The helpers below take the derived key rather than re-deriving it, so one
-# poll of one window derives it once.
+# .wedge-escalations-, .paused-*, .writing-*, .churn-since-, .agentgone-), and live
+# homes hold those markers on disk under the current format, so the format lives
+# here alone: a second copy is how a future change to it silently orphans a
+# window's markers instead of clearing them. The helpers below take the derived key
+# rather than re-deriving it, so one poll of one window derives it once.
+# sweep_unrecorded_window_markers retires the whole family for a window whose task
+# record is gone, so a recycled pane identity never inherits a dead task's
+# classification, escalation count, or suspension.
 window_key() {  # <window>
   local key=${1//:/_}
   key=${key//\//_}
@@ -702,6 +721,41 @@ recorded_windows() {
   done
 }
 
+# Retire every per-window stale-tracking marker whose window no longer has a
+# recorded task. Teardown removes the task record but not these markers, so
+# without this sweep a recycled pane identity would inherit a dead task's
+# stale classification, wedge-escalation count, or agent-gone suspension. The
+# recorded set is re-read here (not inherited from the poll loop) so a spawn
+# that lands mid-poll still counts as recorded. The marker family is exactly
+# the one the window_key comment enumerates plus .agentgone-; task-keyed
+# markers (.seen-*, .hb-surfaced-*) are not touched. Runs once per poll after
+# the stale loop; pure marker maintenance, never a wake.
+sweep_unrecorded_window_markers() {
+  local live=" " w f name key prefix
+  while IFS= read -r w; do
+    live="$live$(window_key "$w") "
+  done < <(recorded_windows)
+  for f in "$STATE"/.[a-z]*-*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    name=${f##*/}
+    key=
+    # Longest prefixes first: .stale-since- must win over .stale-, and
+    # .paused-rechecked-/.paused-resurfaced- over .paused-.
+    for prefix in stale-since wedge-escalations paused-rechecked paused-resurfaced \
+      writing-since writing-resurfaced churn-since agentgone hash count stale paused; do
+      case "$name" in
+        ".$prefix-"*) key=${name#".$prefix-"}; break ;;
+      esac
+    done
+    [ -n "$key" ] || continue
+    case "$live" in
+      *" $key "*) ;;
+      *) rm -f -- "$f" || return 1 ;;
+    esac
+  done
+  return 0
+}
+
 # Print the oldest structurally valid ACTIONABLE row in a local secondmate's
 # foreign queue. A stale recheck that explicitly identifies itself as a declared
 # external-wait pause is not evidence that the mate's wake loop is stuck: the
@@ -921,7 +975,7 @@ clear_write_tracking() {  # <window-key>
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason gv
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -934,6 +988,18 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        # Positive agent-death evidence outranks the recorded working verdict
+        # the timer was armed on: an escalation against a pane no agent inhabits
+        # can only repeat itself. One bounded probe at the threshold moment -
+        # the same point that already pays the worktree walk, never per poll -
+        # replaces the escalation with the single agent-gone surface.
+        gv=$(agent_state_probe "$win")
+        case "$gv" in
+          dead|missing)
+            note_agent_gone_pending "$win" "$gv"
+            return 0
+            ;;
+        esac
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
@@ -1109,6 +1175,82 @@ clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
   clear_stale_hash_tracking "$key"
+}
+
+# --- agent-gone termination -------------------------------------------------
+#
+# A pane whose agent is provably gone is a terminal fact about that identity,
+# not a stale classification: the backend's recovery-grade verdict
+# (fm_backend_agent_state, which licenses dead|missing only on positive
+# evidence) says the endpoint holds no live agent, so no future pane hash,
+# status-log leftover, or run-step record observed at that pane is evidence of
+# a live worker either. Without this gate the same fact kept re-alarming: an
+# exited agent left a bare shell whose hash kept churning under recovery
+# steers typed into it (each change reset the one-shot .stale- suppression),
+# and a stale hash classified working drove a wedge escalation every
+# STALE_ESCALATE_SECS with its demand-deep-inspection marker (60+ identical
+# deep inspections for one established fact on 2026-08-27).
+#
+# The contract: dead/missing evidence is recorded on first sight as
+# `.agentgone-<key>` = pending:<verdict> and the poll absorbs it silently; a
+# later poll that reads the SAME class of evidence promotes the marker to
+# gone:<verdict> and surfaces ONE stale wake naming the verdict. The two-poll
+# shape keeps a mid-teardown transient (the pane closes moments before its
+# task record lands) from ever alarming. While the established marker holds
+# and the verdict still reads dead or missing, the loop skips the identity
+# before even capturing it, so bytes typed into the dead shell cannot re-arm
+# anything; only an `alive` read clears the marker (an unknown/unreadable read
+# merely keeps a pending marker from ever establishing), so a relaunched agent
+# returns to ordinary supervision within a poll. The watcher never closes,
+# kills, or cleans up the endpoint itself - recovery and teardown stay with
+# firstmate; this only stops the repeated noise.
+
+# The raw recovery-grade probe, exactly as fm_backend_agent_state owns it.
+agent_state_probe() {  # <window>
+  fm_backend_agent_state "$(window_backend "$1")" "$1" 2>/dev/null || true
+}
+
+# Record first agent-gone evidence and absorb this poll's classification: the
+# early poll check below owns the confirming second read and the one surface.
+# A hash argument marks that hash classified, so a verdict that never confirms
+# (a transient misread) leaves the pane on the ordinary wedge-timer path
+# instead of re-surfacing the same sighting.
+note_agent_gone_pending() {  # <window> <verdict> [hash]
+  local win=$1 verdict=$2 h=${3:-} key
+  key=$(window_key "$win")
+  printf 'pending:%s' "$verdict" > "$STATE/.agentgone-$key"
+  [ -n "$h" ] && printf '%s' "$h" > "$STATE/.stale-$key"
+  triage_log "agent-gone evidence ($verdict) pending confirmation: $win"
+}
+
+# The ONE agent-gone surface for an identity: the confirmed second read. An
+# identity retired mid-poll (its task record already removed by a teardown
+# racing this poll) belongs to teardown, not to supervision, and never
+# surfaces. Durable-first: the wake is appended before any marker is written.
+# Clears the wedge/escalation timers and the pause flag so no timer outlives the
+# verdict (the declaration-scoped re-surface throttle deliberately survives for
+# the wait's owner), then suspends tracking through the established marker. The
+# hash markers are left untouched: the established marker already suppresses
+# every later read, and an `alive` read that lifts it compares the pane fresh.
+surface_agent_gone() {  # <window> <verdict>
+  local win=$1 verdict=$2 key reason detail
+  if [ -z "$(fm_backend_meta_for_window "$win" "$STATE" 2>/dev/null || true)" ]; then
+    triage_log "agent-gone surface skipped (identity retired mid-poll): $win"
+    return 0
+  fi
+  key=$(window_key "$win")
+  case "$verdict" in
+    missing) detail="the endpoint itself is authoritatively absent" ;;
+    *)       detail="the endpoint answers but holds no live agent (an empty shell or a stale registration)" ;;
+  esac
+  reason="stale: $win (agent gone: $verdict - $detail; stale tracking for this identity is suspended until the agent reads alive again; recover or tear down the worker)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf 'gone:%s' "$verdict" > "$STATE/.agentgone-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
+  clear_write_tracking "$key"
+  triage_log "agent gone ($verdict); surfaced once and suspended stale tracking: $win"
+  wake "$reason"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -1657,6 +1799,7 @@ heartbeat_scan_finds_actionable() {
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc
+  local transition_window transition_key transition_marker transition_absorb
   local windows=()
   while IFS= read -r w; do
     b=$(window_backend "$w")
@@ -1703,7 +1846,32 @@ event_wait_or_sleep() {
   case "$rc" in
     0)
       _event_cap_fails=0
-      handle_push_transition "$first_backend" "$first_session" "$rec"
+      # A blocked edge must not bypass a suspension the stale loop already
+      # established, and an edge for an identity retired mid-wait belongs to
+      # teardown. Both absorb the edge but still commit it, so it cannot refire;
+      # the suspension itself is re-probed first, so an agent that reads alive
+      # again gets its blocked edge delivered normally.
+      transition_window="$first_session:$(fm_transition_pane_id "$rec")"
+      transition_key=$(window_key "$transition_window")
+      transition_marker="$STATE/.agentgone-$transition_key"
+      transition_absorb=
+      if [ -z "$(fm_backend_meta_for_window "$transition_window" "$STATE" 2>/dev/null || true)" ]; then
+        transition_absorb="identity retired"
+      elif [ -e "$transition_marker" ]; then
+        case "$(cat "$transition_marker" 2>/dev/null || true)" in
+          gone:*)
+            case "$(agent_state_probe "$transition_window")" in
+              dead|missing) transition_absorb="agent gone, tracking suspended" ;;
+            esac
+            ;;
+        esac
+      fi
+      if [ -n "$transition_absorb" ]; then
+        fm_backend_commit_transition "$first_backend" "$STATE" "$first_session" "$rec" || exit 1
+        triage_log "absorbed push transition ($transition_absorb): $transition_window"
+      else
+        handle_push_transition "$first_backend" "$first_session" "$rec"
+      fi
       ;;
     2)
       # Event path unusable this cycle (connect/subscribe failure). Sleep the
@@ -2189,6 +2357,16 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    # A task record removed between enumeration and this window's turn means a
+    # teardown racing this poll already owns the identity: no classification may
+    # fire for a worker this home already retired, and the sweep after the loop
+    # retires its leftover markers. window_to_task's tmux-shaped fallback would
+    # otherwise invent a task id from the pane name and surface a stale wake for
+    # a task that no longer exists.
+    if [ -z "$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)" ]; then
+      triage_log "identity retired mid-poll; skipping stale classification: $w"
+      continue
+    fi
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
@@ -2209,7 +2387,45 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    # An established agent-gone suspension short-circuits here, before the
+    # capture: while the verdict still reads dead/missing there is nothing a
+    # pane read could teach, so bytes typed into the dead shell cannot re-arm
+    # the classification, and only an `alive` read lifts the suspension. A
+    # pending record whose verdict confirms on this later poll becomes the one
+    # agent-gone surface (surface_agent_gone owns the contract).
+    gmf="$STATE/.agentgone-$key"
+    if [ -e "$gmf" ]; then
+      gstate=$(agent_state_probe "$w")
+      case "$gstate" in
+        dead|missing)
+          case "$(cat "$gmf" 2>/dev/null || true)" in
+            gone:*) continue ;;
+            *)      surface_agent_gone "$w" "$gstate" ;;
+          esac
+          ;;
+        alive)
+          rm -f "$gmf"
+          triage_log "agent reads alive again; resumed stale tracking: $w"
+          ;;
+        *)
+          # An inconclusive read collapses unconfirmed evidence but never lifts
+          # an established suspension: only positive life does.
+          case "$(cat "$gmf" 2>/dev/null || true)" in
+            pending:*) rm -f "$gmf"; triage_log "agent-gone evidence did not confirm; back to ordinary tracking: $w" ;;
+            *)         continue ;;
+          esac
+          ;;
+      esac
+    fi
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      # A failed capture is ordinarily transient - but when the recovery-grade
+      # classifier proves the endpoint itself is absent, that is terminal
+      # evidence for this identity, not another poll's retry: record it pending
+      # and let the confirming read above own the one surface.
+      gstate=$(agent_state_probe "$w")
+      [ "$gstate" = "missing" ] && note_agent_gone_pending "$w" "$gstate"
+      continue
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -2263,7 +2479,14 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            # Positive agent-death evidence outranks every other read of this
+            # pane: no live agent remains to validate, answer, or resume, so the
+            # run-step/log verdicts below are leftovers. Record it pending and
+            # absorb this sighting; the confirming poll owns the one surface.
+            gv=$(agent_state_probe "$w")
+            if [ "$gv" = dead ] || [ "$gv" = missing ]; then
+              note_agent_gone_pending "$w" "$gv" "$h"
+            elif crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               clear_write_tracking "$key"
@@ -2322,18 +2545,31 @@ EOF
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
-            case "$(pause_state_class "$w" "$task")" in
-              working)
-                clear_pause_tracking "$key"
-                printf '%s' "$h" > "$sf"
-                date +%s > "$ssf"
-                triage_log "absorbed non-terminal stale (provably working): $w"
-                ;;
-              paused)
-                handle_paused_stale "$w" "$task" "$h"
+            # Positive agent-death evidence outranks the absorb classes below -
+            # except a declared wait, whose bounded cadence pause_state_class
+            # already owns its own liveness gating for (and whose human wait
+            # outlives any one agent incarnation).
+            gv=
+            status_is_paused_or_captain_held "$last" || gv=$(agent_state_probe "$w")
+            case "$gv" in
+              dead|missing)
+                note_agent_gone_pending "$w" "$gv" "$h"
                 ;;
               *)
-                surface_nonterminal_stale "$w" "$h"
+                case "$(pause_state_class "$w" "$task")" in
+                  working)
+                    clear_pause_tracking "$key"
+                    printf '%s' "$h" > "$sf"
+                    date +%s > "$ssf"
+                    triage_log "absorbed non-terminal stale (provably working): $w"
+                    ;;
+                  paused)
+                    handle_paused_stale "$w" "$task" "$h"
+                    ;;
+                  *)
+                    surface_nonterminal_stale "$w" "$h"
+                    ;;
+                esac
                 ;;
             esac
           else
@@ -2404,6 +2640,10 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+
+  # Retire the stale-tracking markers of any window that lost its task record
+  # since the previous poll (teardown removes the record, never these markers).
+  sweep_unrecorded_window_markers || true
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

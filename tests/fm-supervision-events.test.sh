@@ -34,7 +34,7 @@ sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
-    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
+    "$STATE_DIR"/.herdr-escalated-* "$STATE_DIR"/.agentgone-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
   _event_cap_key=""
@@ -152,5 +152,39 @@ event_wait_or_sleep   # disabled: sleeps without calling wait_transition
 WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
+
+# --- event_wait_or_sleep: agent-gone suppression and resurrection ------------
+# A blocked edge for an identity whose agent is already provably gone must not
+# bypass the suspension the stale loop established: it is absorbed but still
+# committed, so the same edge cannot refire. An edge whose agent reads alive
+# again is delivered normally even while its marker lingers for the poll loop.
+
+reset_state
+fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pD" "backend=herdr" "kind=ship"
+printf 'gone:dead\n' > "$STATE_DIR/.agentgone-default_wG_pD"
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_events_capable() { return 0; }
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_wait_transition() { printf '%s' "$(mkrec wG:pD blocked)"; return 0; }
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_agent_state() { printf 'dead'; return 0; }
+# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
+fm_backend_commit_transition() { printf 'commit\n' >> "$TMP/wtcalled"; return 0; }
+event_wait_or_sleep
+[ ! -s "$WAKE_LOG" ] || fail "an established agent-gone identity woke the supervisor from the event fast-path: $(cat "$WAKE_LOG")"
+[ ! -e "$STATE_DIR/.wake-queue" ] || fail "an established agent-gone identity queued a stale wake from the event fast-path"
+grep -q 'commit' "$TMP/wtcalled" 2>/dev/null || fail "the absorbed transition was not committed and would refire on the next edge"
+grep -q 'agent gone' "$STATE_DIR/.watch-triage.log" 2>/dev/null || fail "the agent-gone absorb was not logged"
+pass "event_wait_or_sleep: an established agent-gone identity absorbs the push edge but still commits it"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk7.meta" "window=default:wG:pD" "backend=herdr" "kind=ship"
+printf 'gone:dead\n' > "$STATE_DIR/.agentgone-default_wG_pD"
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
+fm_backend_agent_state() { printf 'alive'; return 0; }
+event_wait_or_sleep
+[ -s "$WAKE_LOG" ] || fail "a blocked edge for an agent reading alive again was swallowed by its stale suspension"
+grep -q 'default:wG:pD' "$STATE_DIR/.wake-queue" || fail "a resurrected agent's blocked edge did not reach the queue"
+pass "event_wait_or_sleep: a blocked edge for an agent reading alive again is delivered normally"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"

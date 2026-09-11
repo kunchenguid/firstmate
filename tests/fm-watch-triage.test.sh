@@ -2454,15 +2454,20 @@ make_hold_home() {  # <name> <status-line> <hold|nohold>
 
 # Launch one watcher against a hold fixture, armed the way parked_watch_round
 # arms one, plus the home the backlog read resolves against. The crew reads
-# stopped: a delivered worker's agent has exited, and that is the population
-# whose alarm the call must bound. The pid lands in HOLD_WATCH_PID rather than on
+# stopped-but-alive: a delivered worker whose agent still sits at its live idle
+# prompt is the population whose alarm the call must bound. A delivered worker
+# whose agent has EXITED is a different population with its own owner now: the
+# watcher terminates its stale tracking through the agent-gone contract (one
+# surface, then silence while the verdict holds), pinned by the
+# test_agent_gone_* family below.
+# The pid lands in HOLD_WATCH_PID rather than on
 # stdout: a command substitution would background the watcher inside a subshell,
 # leaving the caller unable to wait on or reap its own watcher.
 HOLD_WATCH_PID=
 hold_watch_launch() {  # <dir> <out> <capture>
   local dir=$1 out=$2 capture=$3
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=grok \
     FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
@@ -4788,6 +4793,342 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+# --- agent-gone termination: positive death evidence ends stale tracking -----
+#
+# The 2026-08-27 pa-strict-v1-producer-replan incident: a Pi agent exited leaving
+# an empty Bash prompt behind, yet stale classification kept reading the husk as
+# working/agent-alive, so the wedge timer re-escalated the same stale hash every
+# STALE_ESCALATE_SECS, and every recovery steer typed into the shell changed the
+# pane hash and reset the one-shot suppression - 60+ identical deep-inspection
+# alarms for one established fact. The 2026-09-12 pa-kline-deep-history-analysis
+# evidence added the torn-down sibling: a pane already gone (herdr
+# pane_not_found) kept drawing bare stale wakes while its task was being
+# retired. The contract pinned here: a backend recovery-grade dead/missing
+# verdict (fm_backend_agent_state) is confirmed across two polls, surfaced ONCE
+# as an agent-gone stale wake, and then suspends stale tracking for that
+# identity until the agent reads alive again - no repeated deep-inspection
+# demands, no per-hash re-alarm, and never a force or cleanup action (recovery
+# and teardown stay with firstmate).
+
+test_agent_gone_shell_husk_surfaces_once_then_silent() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case agent-gone-husk); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-husk"
+  printf 'idle bare shell after agent exit\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/husk.meta"
+  printf 'working: implementing the fix\n' > "$state/husk.status"
+  sig=$(seen_sig "$state/husk.status"); printf '%s' "$sig" > "$state/.seen-husk_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle bare shell after agent exit")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Worst case from the incident: the authoritative current-state read still
+  # says working (a live run-step record) while the pane is provably shell-only.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # Poll one records the pending evidence without alarming; poll two confirms
+  # the same verdict and surfaces the single agent-gone wake.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; fail "first agent-gone evidence surfaced on its first sight instead of awaiting confirmation: $(cat "$out")"; }
+  [ "$(cat "$state/.agentgone-$key" 2>/dev/null || true)" = "pending:dead" ] \
+    || { reap "$pid"; fail "first sight did not record pending agent-gone evidence: $(cat "$state/.agentgone-$key" 2>/dev/null)"; }
+  [ ! -s "$state/.wake-queue" ] \
+    || { reap "$pid"; fail "first sight queued a wake before the confirming read: $(cat "$state/.wake-queue")"; }
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a provably dead pane did not surface its one agent-gone wake after confirmation: $(cat "$out")"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "the agent-gone wake did not name the window: $(cat "$out")"
+  grep -F "agent gone" "$out" >/dev/null || fail "the one-shot wake did not carry the agent-gone reason: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a dead pane was wedge-escalated instead of agent-gone surfaced"
+  [ "$(cat "$state/.agentgone-$key" 2>/dev/null || true)" = "gone:dead" ] \
+    || fail "the agent-gone marker was not established at the surface: $(cat "$state/.agentgone-$key" 2>/dev/null)"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the agent-gone surface retained the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "the agent-gone surface retained the escalation count"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the agent-gone wake"
+
+  # While the same verdict holds, re-armed watchers stay silent, and bytes typed
+  # into the dead shell (recovery doorbells, /quit attempts) cannot re-arm the
+  # classification: the marker short-circuits before the capture, so the churn
+  # is never even seen.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "an established agent-gone identity re-surfaced on an unchanged verdict: $(cat "$out")"
+  fi
+  printf '/quit\nbash: /quit: No such file or directory\n' > "$capture_file"
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "pane churn on a dead shell re-armed the stale classification: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] \
+    || { reap "$pid"; fail "an established agent-gone identity queued another wake: $(cat "$state/.wake-queue")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the silent watcher stop"
+
+  # Resurrection: the agent reads alive again (a relaunch into the same pane),
+  # so the marker clears and ordinary stale supervision resumes - here the
+  # provably-working absorb with its wedge timer.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a resurrected agent did not return to ordinary stale supervision: $(cat "$out")"
+  fi
+  [ ! -e "$state/.agentgone-$key" ] \
+    || { reap "$pid"; fail "a live agent kept its agent-gone suspension"; }
+  [ -s "$state/.stale-since-$key" ] \
+    || { reap "$pid"; fail "a resurrected provably-working agent did not restart ordinary wedge tracking"; }
+  [ ! -s "$state/.wake-queue" ] \
+    || { reap "$pid"; fail "resurrection queued an unexpected wake: $(cat "$state/.wake-queue")"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a shell-only husk is confirmed, surfaced once as agent-gone, silenced while dead, and supervised again once alive"
+}
+
+test_agent_gone_missing_pane_surfaces_once() {
+  local dir state fakebin out window key sig pid
+  dir=$(make_case agent-gone-missing); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-gonepane"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gonepane.meta"
+  printf 'working: investigating\n' > "$state/gonepane.status"
+  sig=$(seen_sig "$state/gonepane.status"); printf '%s' "$sig" > "$state/.seen-gonepane_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The pane itself is authoritatively absent: every capture fails and the
+  # inventory omits the window (herdr pane_not_found's tmux analogue).
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS='fm-someone-else' \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; fail "a missing pane surfaced on the first failed capture instead of awaiting confirmation: $(cat "$out")"; }
+  [ "$(cat "$state/.agentgone-$key" 2>/dev/null || true)" = "pending:missing" ] \
+    || { reap "$pid"; fail "the first missing verdict did not record pending evidence: $(cat "$state/.agentgone-$key" 2>/dev/null)"; }
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a confirmed missing pane did not surface its one agent-gone wake: $(cat "$out")"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "the missing-pane wake did not name the window: $(cat "$out")"
+  grep -F "agent gone" "$out" >/dev/null || fail "the missing-pane wake did not carry the agent-gone reason: $(cat "$out")"
+  [ "$(cat "$state/.agentgone-$key" 2>/dev/null || true)" = "gone:missing" ] \
+    || fail "the missing verdict was not established at the surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the missing-pane wake"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS='fm-someone-else' \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "an established missing identity re-surfaced: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] \
+    || { reap "$pid"; fail "an established missing identity queued another wake: $(cat "$state/.wake-queue")"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "an authoritatively absent pane surfaces once as agent-gone, then stays silent"
+}
+
+test_agent_gone_replaces_wedge_escalation() {
+  local dir state fakebin out capture_file window key pane_hash sig back pid
+  dir=$(make_case agent-gone-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-wedgedead"
+  printf 'idle bare shell after agent exit\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/wedgedead.meta"
+  printf 'working: validating\n' > "$state/wedgedead.status"
+  sig=$(seen_sig "$state/wedgedead.status"); printf '%s' "$sig" > "$state/.seen-wedgedead_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle bare shell after agent exit")
+  # The incident state: a hash already classified working with the wedge timer
+  # armed and past its escalation threshold, while the agent is provably gone.
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '2\n' > "$state/.count-$key"
+  back=$(( $(date +%s) - 30 ))
+  printf '%s\n' "$back" > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; fail "positive death evidence at the escalation threshold still fired a wedge wake: $(cat "$out")"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || { reap "$pid"; fail "the escalation counter advanced on a dead pane"; }
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "the confirmed dead pane did not surface its one agent-gone wake: $(cat "$out")"; }
+  grep -F "agent gone" "$out" >/dev/null || fail "the threshold surface did not carry the agent-gone reason: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a dead pane was wedge-escalated instead of agent-gone surfaced"
+  grep -F "demand-deep-inspection" "$out" >/dev/null && fail "a dead pane demanded a deep inspection"
+  reap "$pid" 2>/dev/null
+  unset FM_FAKE_CREW_STATE
+  pass "positive agent-death evidence at the wedge threshold replaces the escalation with one agent-gone surface"
+}
+
+test_retired_identity_mid_poll_never_classified() {
+  local dir state fakebin out pid aaa_key zzz_key
+  dir=$(make_case retired-mid-poll); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  # Two recorded windows; capturing the FIRST alphabetically deletes the
+  # SECOND's task record, simulating a teardown racing the same poll cycle.
+  # The pane still answers and its agent still reads alive: only the metadata
+  # is gone, which must alone end classification for that identity.
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  list-windows) printf 'fm-aaa\nfm-zzz\n'; exit 0 ;;
+  capture-pane)
+    case "\$*" in
+      *fm-aaa*) rm -f "$state/zzz.meta"; printf 'aaa idle\n' ;;
+      *fm-zzz*) printf 'zzz idle\n' ;;
+    esac
+    exit 0 ;;
+  display-message)
+    case "\$*" in *pane_current_command*) printf 'grok\n'; exit 0 ;; esac ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  printf 'window=test:fm-aaa\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/aaa.meta"
+  printf 'window=test:fm-zzz\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/zzz.meta"
+  printf 'working: a\n' > "$state/aaa.status"
+  printf '%s' "$(seen_sig "$state/aaa.status")" > "$state/.seen-aaa_status"
+  printf 'working: z\n' > "$state/zzz.status"
+  printf '%s' "$(seen_sig "$state/zzz.status")" > "$state/.seen-zzz_status"
+  aaa_key=$(printf '%s' test:fm-aaa | tr ':/.' '___')
+  zzz_key=$(printf '%s' test:fm-zzz | tr ':/.' '___')
+  printf '%s' "$(hash_text 'aaa idle')" > "$state/.hash-$aaa_key"; printf '1\n' > "$state/.count-$aaa_key"
+  printf '%s' "$(hash_text 'zzz idle')" > "$state/.hash-$zzz_key"; printf '1\n' > "$state/.count-$zzz_key"
+  # aaa reads as genuinely working (absorbed); zzz, if classified at all, reads
+  # inconclusive and would surface a bare stale wake under the old contract.
+  export FM_FAKE_CREW_STATE_aaa='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE_zzz='state: unknown · source: none · fake default'
+  PATH="$fakebin:$PATH" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "an identity retired mid-poll was still classified: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] \
+    || { reap "$pid"; fail "an identity retired mid-poll queued a wake: $(cat "$state/.wake-queue")"; }
+  grep -F "test:fm-zzz" "$out" >/dev/null \
+    && { reap "$pid"; fail "a stale wake fired for an identity retired mid-poll: $(cat "$out")"; }
+  [ ! -e "$state/.hash-$zzz_key" ] \
+    || { reap "$pid"; fail "the retired identity kept its stale-tracking markers"; }
+  [ -e "$state/.hash-$aaa_key" ] \
+    || { reap "$pid"; fail "the still-recorded window lost its markers to the sweep"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE_aaa FM_FAKE_CREW_STATE_zzz
+  pass "a task record removed mid-poll ends that identity's classification and markers without a wake"
+}
+
+test_unrecorded_window_markers_swept() {
+  local dir state fakebin out capture_file window key okey prefix pid
+  dir=$(make_case marker-sweep); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-live"
+  printf 'live agent idle\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/live.meta"
+  printf 'working: on it\n' > "$state/live.status"
+  printf '%s' "$(seen_sig "$state/live.status")" > "$state/.seen-live_status"
+  # A full orphaned marker family left behind by a torn-down task's window.
+  okey=$(printf '%s' test:fm-ghost | tr ':/.' '___')
+  for prefix in hash count stale stale-since wedge-escalations paused \
+    paused-rechecked paused-resurfaced writing-since writing-resurfaced \
+    churn-since agentgone; do
+    printf 'x\n' > "$state/.$prefix-$okey"
+  done
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'live agent idle')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "the sweep fixture's live window was not absorbed as working: $(cat "$out")"
+  fi
+  reap "$pid"
+  for prefix in hash count stale stale-since wedge-escalations paused \
+    paused-rechecked paused-resurfaced writing-since writing-resurfaced \
+    churn-since agentgone; do
+    [ ! -e "$state/.$prefix-$okey" ] || fail "orphaned .$prefix- marker survived the sweep"
+  done
+  [ -e "$state/.hash-$key" ] || fail "the sweep removed a recorded window's hash marker"
+  [ -e "$state/.stale-$key" ] || fail "the sweep removed a recorded window's stale classification"
+  [ -e "$state/.stale-since-$key" ] || fail "the sweep removed a recorded window's wedge timer"
+  [ -e "$state/.seen-live_status" ] || fail "the sweep touched task-keyed seen markers"
+  [ ! -s "$state/.wake-queue" ] || fail "the sweep fixture queued an unexpected wake"
+  unset FM_FAKE_CREW_STATE
+  pass "unrecorded windows lose their whole stale-tracking marker family while recorded windows keep theirs"
+}
+
+# The flip side of the hold fixtures' live-agent population: a held delivery
+# whose agent has EXITED is owned by the agent-gone path - one surface naming
+# the dead endpoint, then silence while the verdict holds, even while the pane
+# churns under the SAME open captain call. The call's own durable visibility
+# (the drain's open-decisions fold) outlives the pane, so nothing rots.
+test_agent_gone_surfaces_once_when_held() {
+  local dir state out capture pid
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (held agent-gone surface)"; return 0; }
+  dir=$(make_hold_home held-dead-agent 'done: PR https://example.invalid/pull/1 checks green' hold) \
+    || fail "could not build a captain-held backlog fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf 'idle, elapsed 1s\n' > "$capture"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "a held dead pane did not surface its one agent-gone wake: $(cat "$out")"; }
+  grep -F "agent gone" "$out" >/dev/null \
+    || fail "the held dead pane's wake did not carry the agent-gone reason: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the agent-gone wake"
+
+  : > "$out"
+  printf 'idle, ticked again\n' > "$capture"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" 2>&1 &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a held dead pane re-alarmed after its agent-gone surface: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] \
+    || { reap "$pid"; fail "a held dead pane queued another wake: $(cat "$state/.wake-queue")"; }
+  reap "$pid"
+  pass "a held delivery with a dead agent surfaces once as agent-gone, then stays silent"
+}
+
 
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
@@ -4902,3 +5243,9 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_agent_gone_shell_husk_surfaces_once_then_silent
+test_agent_gone_missing_pane_surfaces_once
+test_agent_gone_replaces_wedge_escalation
+test_retired_identity_mid_poll_never_classified
+test_unrecorded_window_markers_swept
+test_agent_gone_surfaces_once_when_held
