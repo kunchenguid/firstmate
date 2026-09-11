@@ -56,7 +56,7 @@ Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.s
 
 A spawn discovers the task worktree by polling `pane get`'s `foreground_cwd`, the one cwd field that follows the subshell `treehouse get` opens.
 That field alone cannot tell a slow `git fetch origin`, which treehouse runs before it enters the worktree, from a refusal, because both leave the cwd in the project.
-The wait therefore also reads `pane process-info`'s foreground processes through `fm_backend_herdr_foreground_processes` in `bin/backends/herdr.sh`, whose comment owns the measured process shape.
+The wait therefore also reads `pane process-info`'s foreground processes through `fm_backend_herdr_foreground_processes` in `bin/backends/herdr.sh` (measured on Herdr 0.8.2 - [verification](verification/runtime-backends.md) "Worktree acquisition foreground").
 While treehouse or a child of it holds the foreground, the spawn keeps waiting under `FM_SPAWN_ACQUIRE_TIMEOUT`, and every other poll counts against the 60-second path-settle bound.
 When that read fails, the pane's own text stands in, as on zellij and cmux.
 The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns both bounds, what the pane text means, and the refusal wording.
