@@ -246,6 +246,32 @@ EOF
   pass "relaunch recovers a real interrupted owner without consuming its temp"
 }
 
+test_spawn_publishes_phase_timings() {
+  local case_dir="$TMP_ROOT/spawn-timing" home project worktree fakebin id out rc=0 timing
+  id=spawn-timing-s2c
+  home="$case_dir/home"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  timing="$case_dir/timings.tsv"
+  fm_test_spawn_home "$home" codex
+  fm_test_spawn_brief "$home" "$id"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  fm_test_write_active_treehouse_fake "$fakebin" "$worktree"
+  fm_git_worktree "$project" "$worktree" "pool-s2c"
+
+  out=$(FM_SPAWN_TIMING_LOG="$timing" fm_test_run_spawn "$home" "$worktree" "$fakebin" \
+    "$id" "$project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 0 "$rc" "timed spawn should complete"
+  assert_contains "$out" "spawn timing: total=" "spawn did not print its timing summary"
+  for phase in dispatch brief lease launch busy; do
+    grep -F $'v1\tphase\t'"$phase" "$timing" >/dev/null \
+      || fail "timing sink missed phase $phase"
+  done
+  grep -F $'v1\tspawn\tsummary\t' "$timing" >/dev/null \
+    || fail "timing sink missed the spawn summary"
+  pass "spawn publishes phase timings and a stderr summary"
+}
+
 test_spawn_refuses_corrupt_pipeline_record_without_changing_bytes() {
   local case_dir="$TMP_ROOT/spawn-corrupt-pipeline" home project worktree fakebin id out rc=0 pipeline expected
   id=spawn-corrupt-s2c
@@ -294,4 +320,5 @@ test_spawn_warns_and_preserves_unsafe_pipeline_record
 test_spawn_relaunch_warns_and_preserves_foreign_pipeline_record
 test_spawn_reclaims_stale_owner_lock_and_preserves_temp
 test_spawn_recovers_an_interrupted_owner_on_relaunch
+test_spawn_publishes_phase_timings
 test_spawn_refuses_corrupt_pipeline_record_without_changing_bytes

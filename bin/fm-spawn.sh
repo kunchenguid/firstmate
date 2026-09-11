@@ -528,6 +528,82 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-claude-account-profile-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-timing-lib.sh
+. "$SCRIPT_DIR/fm-timing-lib.sh"
+
+SPAWN_TIMING_STARTED=$(fm_timing_now_ms)
+SPAWN_TIMING_READY=0
+SPAWN_TIMING_EMITTED=0
+SPAWN_TIMING_DISPATCH_START=$SPAWN_TIMING_STARTED
+SPAWN_TIMING_DISPATCH_MS=0
+SPAWN_TIMING_BRIEF_MS=0
+SPAWN_TIMING_LEASE_MS=0
+SPAWN_TIMING_HERDR_MS=0
+SPAWN_TIMING_LAUNCH_MS=0
+SPAWN_TIMING_TRUST_MS=0
+SPAWN_TIMING_BUSY_MS=0
+SPAWN_TIMING_LEASE_START=
+SPAWN_TIMING_LEASE_ACTIVE=0
+SPAWN_TIMING_BRIEF_START=
+SPAWN_TIMING_HERDR_START=
+SPAWN_TIMING_LAUNCH_START=
+SPAWN_TIMING_TRUST_START=
+SPAWN_TIMING_BUSY_START=
+
+spawn_timing_enable() {
+  local log
+  [ "$SPAWN_TIMING_READY" = 0 ] || return 0
+  log=${FM_SPAWN_TIMING_LOG:-${FM_TIMING_LOG:-$STATE/.spawn.timings}}
+  [ -n "$log" ] || return 0
+  : >> "$log" 2>/dev/null || return 0
+  FM_TIMING_LOG=$log
+  FM_TIMING_EPOCH_MS=$SPAWN_TIMING_STARTED
+  export FM_TIMING_LOG FM_TIMING_EPOCH_MS
+  SPAWN_TIMING_READY=1
+}
+
+spawn_timing_finish() {
+  local phase=$1 start=${2:-} now elapsed
+  case "$start" in ''|*[!0-9]*) return 0 ;; esac
+  now=$(fm_timing_now_ms)
+  elapsed=$((now - start))
+  [ "$elapsed" -ge 0 ] || elapsed=0
+  fm_timing_record phase "$phase" "$start" "${ID:-unknown}"
+  case "$phase" in
+    dispatch) SPAWN_TIMING_DISPATCH_MS=$elapsed ;;
+    brief) SPAWN_TIMING_BRIEF_MS=$elapsed ;;
+    lease) SPAWN_TIMING_LEASE_MS=$elapsed ;;
+    herdr) SPAWN_TIMING_HERDR_MS=$elapsed ;;
+    launch) SPAWN_TIMING_LAUNCH_MS=$elapsed ;;
+    trust) SPAWN_TIMING_TRUST_MS=$elapsed ;;
+    busy) SPAWN_TIMING_BUSY_MS=$elapsed ;;
+  esac
+}
+
+spawn_timing_seconds() {
+  local milliseconds=$1
+  printf '%d.%03d' "$((milliseconds / 1000))" "$((milliseconds % 1000))"
+}
+
+spawn_timing_emit() {
+  local status=${1:-0} total
+  [ "$SPAWN_TIMING_READY" = 1 ] || return 0
+  [ "$SPAWN_TIMING_EMITTED" = 0 ] || return 0
+  SPAWN_TIMING_EMITTED=1
+  total=$(( $(fm_timing_now_ms) - SPAWN_TIMING_STARTED ))
+  [ "$total" -ge 0 ] || total=0
+  fm_timing_record spawn summary "$SPAWN_TIMING_STARTED" "${ID:-unknown}"
+  printf 'spawn timing: total=%ss dispatch=%ss brief=%ss lease=%ss herdr=%ss launch=%ss trust=%ss busy=%ss status=%s\n' \
+    "$(spawn_timing_seconds "$total")" \
+    "$(spawn_timing_seconds "$SPAWN_TIMING_DISPATCH_MS")" \
+    "$(spawn_timing_seconds "$SPAWN_TIMING_BRIEF_MS")" \
+    "$(spawn_timing_seconds "$SPAWN_TIMING_LEASE_MS")" \
+    "$(spawn_timing_seconds "$SPAWN_TIMING_HERDR_MS")" \
+    "$(spawn_timing_seconds "$SPAWN_TIMING_LAUNCH_MS")" \
+    "$(spawn_timing_seconds "$SPAWN_TIMING_TRUST_MS")" \
+    "$(spawn_timing_seconds "$SPAWN_TIMING_BUSY_MS")" "$status" >&2
+}
+
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1594,6 +1670,7 @@ spawn_abort_cleanup() {
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
   fi
+  spawn_timing_emit "$status"
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -1735,6 +1812,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   echo "error: spawn refused: state directory does not exist at $STATE" >&2
   exit 1
 fi
+spawn_timing_enable
 # Role partition: spawning NEW work is MAIN-owned. A relaunch of an existing
 # task is legitimate branch recovery (fm-control drives it through this same
 # entrypoint), so only a fresh spawn refuses the branch actor (contract:
@@ -2388,6 +2466,7 @@ if [ "$ACCOUNT_PROFILE_SET" -eq 1 ]; then
     exit 1
   fi
 fi
+spawn_timing_finish dispatch "$SPAWN_TIMING_DISPATCH_START"
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
@@ -2943,6 +3022,9 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
 fi
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  SPAWN_TIMING_BRIEF_START=$(fm_timing_now_ms)
+fi
 [ -f "$BRIEF" ] || { echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2; exit 1; }
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   if fm_brief_task_placeholders_present "$BRIEF"; then
@@ -2991,6 +3073,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
     exit 1
   fi
+  spawn_timing_finish brief "$SPAWN_TIMING_BRIEF_START"
 fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
@@ -3723,6 +3806,7 @@ case "$BACKEND" in
     WT_TARGET="$WID"
     ;;
   herdr)
+    SPAWN_TIMING_HERDR_START=$(fm_timing_now_ms)
     # fm_backend_herdr_workspace_label resolves the target workspace from
     # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
     # already the right home (the primary spawning its own crewmate/scout, or
@@ -3893,6 +3977,7 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    spawn_timing_finish herdr "$SPAWN_TIMING_HERDR_START"
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -4180,6 +4265,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     validate_spawn_worktree "relaunch" "$T"
   fi
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reader ]; then
+  SPAWN_TIMING_LEASE_START=$(fm_timing_now_ms)
+  SPAWN_TIMING_LEASE_ACTIVE=1
   fm_lock_acquire_wait "$TREEHOUSE_ACQUISITION_LOCK" || {
     echo "error: treehouse acquisition exclusion could not be acquired" >&2
     exit 1
@@ -4331,6 +4418,10 @@ fi
 if [ "$TREEHOUSE_NEW_ALLOCATION" -eq 1 ] || { [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; }; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
+if [ "$SPAWN_TIMING_LEASE_ACTIVE" = 1 ]; then
+  spawn_timing_finish lease "$SPAWN_TIMING_LEASE_START"
+  SPAWN_TIMING_LEASE_ACTIVE=0
+fi
 
 PI_TRUST_AGENT_DIR=
 if [ "$KIND" != secondmate ] && [ "$ACCESS" != reader ]; then
@@ -4351,6 +4442,7 @@ if [ "$KIND" != secondmate ] && [ "$ACCESS" != reader ]; then
 fi
 
 if [ "$HARNESS" = kimi ]; then
+  SPAWN_TIMING_TRUST_START=$(fm_timing_now_ms)
   KIMI_TRUST_STATUS=0
   kimi_prest_trust_workspace "$WT" || KIMI_TRUST_STATUS=$?
   if [ "$KIMI_TRUST_STATUS" = 2 ]; then
@@ -4360,6 +4452,7 @@ if [ "$HARNESS" = kimi ]; then
     echo "error: refusing Kimi spawn because workspace trust could not be established for $WT" >&2
     exit 1
   fi
+  spawn_timing_finish trust "$SPAWN_TIMING_TRUST_START"
 fi
 
 TASK_BASE_COMMIT=
@@ -5457,16 +5550,25 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
+SPAWN_TIMING_LAUNCH_START=$(fm_timing_now_ms)
+# Herdr's pane run types and submits atomically; avoid the two round-trips and
+# fixed settle sleeps required by literal-text delivery on other backends.
+if [ "$BACKEND" = herdr ]; then
+  spawn_send_text_line "$T" "$LAUNCH"
+else
+  sleep 0.3
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
 # The single Enter here submits the literal launch command to the pane shell.
-# Pi trust was registered above, so this is not a trust-dialog fallback.
-spawn_send_key "$T" Enter
+# Herdr's pane run already submits atomically, so only other backends need it.
+if [ "$BACKEND" != herdr ]; then
+  spawn_send_key "$T" Enter
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
@@ -5514,6 +5616,11 @@ if [ "$HARNESS" = cursor-agent ] && [ "$ACCESS" != reader ]; then
     cursor_spawn_fail "cursor-agent launch brief could not be submitted"
     exit 1
   fi
+fi
+spawn_timing_finish launch "$SPAWN_TIMING_LAUNCH_START"
+SPAWN_TIMING_BUSY_START=$(fm_timing_now_ms)
+if [ "$KIND" != secondmate ] && [ -n "${BUSY_GEN:-}" ]; then
+  fm_busy_record_read "$STATE_REAL" "$ID" >/dev/null 2>&1 || true
 fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
@@ -5596,9 +5703,11 @@ SPAWN_META_LOCK_HELD=0
 # delay delivery and could leave a stale summary behind when a later step
 # rolled that record back.
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+spawn_timing_finish busy "$SPAWN_TIMING_BUSY_START"
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 SPAWN_ACCESS=
 [ "$ACCESS" != reader ] || SPAWN_ACCESS=" access=reader"
+spawn_timing_emit 0
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_ACCESS$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
