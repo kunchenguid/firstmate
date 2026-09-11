@@ -1,0 +1,31 @@
+$ fm-pr-merge.sh task-x1 https://github.com/kunchenguid/firstmate/pull/4195
+(real authenticated read of a GitHub PR with multiple non-green checks)
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.pi/extensions/fm-primary-turnend-guard.ts -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+armed: state/task-x1.check.sh
+error: refusing to merge https://github.com/kunchenguid/firstmate/pull/4195
+  - check 'Lint' is not green
+  - check 'Behavior portable parallel 1' is not green
+  - check 'Behavior portable serial 1' is not green
+error: these checks are not green: Lint, Behavior portable parallel 1, Behavior portable serial 1
+exit=1
+$ fm-pr-merge.sh task-x1 https://github.com/kunchenguid/firstmate/pull/4195 --allow-red Lint
+(waives only Lint; other non-green checks must still refuse)
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.pi/extensions/fm-primary-turnend-guard.ts -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+armed: state/task-x1.check.sh
+error: refusing to merge https://github.com/kunchenguid/firstmate/pull/4195
+  - check 'Behavior portable parallel 1' is not green
+  - check 'Behavior portable serial 1' is not green
+error: these checks are not green: Behavior portable parallel 1, Behavior portable serial 1
+exit=1

@@ -1,0 +1,24 @@
+ok - structural refusals name their missing part
+ok - an omitted stop uses the no-stop marker and confirms
+ok - the never-set flags listed concepts and their inflections without refusing, and never fires on unrelated names
+ok - clause fields are recorded verbatim, and no static parser judges the wording
+ok - clause fields preserve repeated spaces, tabs, newlines, and backslashes
+ok - clause ids are input ordinals across accepted and refused clauses
+ok - the read-back renders the words verbatim beside the accepted and refused lists
+ok - words preserve their final newline shape in storage and read-back
+ok - propose then confirm writes the record, announces hold-for-return only, and every read subcommand reflects it
+ok - confirmation requires a read-back, and refresh leaves the standing record untouched
+ok - a replacement archives the old mandate and keeps the session start
+ok - a failed replacement keeps the standing posture live
+ok - a failed final replacement publication rolls back its superseded archive
+ok - validation and archive refuse incomplete clause rows by name
+ok - validation and archive refuse blank decoded clause fields
+ok - validation and archive refuse blank stop and refused text
+ok - validation and archive refuse damaged words blocks
+ok - archive keys the record by its entry time, empties the posture, and is idempotent
+ok - malformed inputs and foreign record versions are refused rather than guessed
+ok - merge grants round-trip through propose, confirm, read-back, and grants
+ok - empty grants write the scalar form, and invalid or duplicate ids are usage errors
+ok - a pre-field v1 record reads as empty grants rather than skipping the field
+ok - malformed and duplicate merge-grant fields fail record validation
+ok - archive removes live grants so archived copies are not consulted

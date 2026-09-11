@@ -1,0 +1,41 @@
+$ fm-afk-contract.sh propose --grant task-x1 --grant task-y2 --words "merge only when green"
+Away posture read-back (proposed, not yet confirmed):
+  entered: 2026-09-11T08:25:19Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  merge when green (task ids): task-x1, task-y2
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    merge only when green
+  accepted clauses:
+    (none)
+  refused clauses:
+    (none)
+  everything else waits for your return: no red merge without its named check, no discard without a named object and condition, never credentials, legal, financial, or attended prompts, nothing by analogy, and every clause expires at return.
+  hard rule: forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text; no recorded clause is authority by itself.
+  recorded clauses are held for the return brief and are not executed by this release.
+Say go to confirm; restate any refused clause first if you want it recorded.
+$ fm-afk-contract.sh confirm
+Away posture confirmed at 2026-09-11T08:25:19Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. No mandate clauses recorded. Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself. Expected return: not given. Spend cap: 4 concurrent workers.
+$ fm-afk-contract.sh grants
+task-x1
+task-y2
+$ fm-afk-contract.sh archive; fm-afk-contract.sh grants
+/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-product-test/home/state/afk-contracts/1789115119.afk-contract
+fm-afk-contract: no record at /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-product-test/home/state/.afk-contract
+exit=1 (no live away record after archive)
+$ fm-afk-contract.sh propose --grant task-x1 --grant task-x1
+fm-afk-contract: --grant lists 'task-x1' more than once
+exit=2
+$ fm-pr-merge.sh ... --allow-red=lint
+error: --allow-red requires a separate check name argument
+exit=2
+$ fm-pr-merge.sh ... --allow-red lint --allow-red unit
+error: --allow-red may be specified only once
+exit=2
+$ fm-pr-merge.sh ... -- --auto (without attended override)
+error: extra merge arguments must not request auto-merge, a protection bypass, or branch deletion; pass --attended-override only for an explicit captain instruction
+exit=1
+$ fm-pr-merge.sh task-x1 ... (real CLI, live away record, no grant)
+error: task task-x1 is held for the captain return
+exit=1

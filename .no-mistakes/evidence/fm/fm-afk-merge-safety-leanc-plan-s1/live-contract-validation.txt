@@ -1,0 +1,10 @@
+$ remove merge_grants from generated v1 record; validate; grants
+grants=[] (legacy missing field is an empty list)
+$ attach list content to scalar merge_grants; validate
+fm-afk-contract: record /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-contract-validation/state/.afk-contract has an invalid merge_grants field: a stored grant line is malformed
+fm-afk-contract: record /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-contract-validation/state/.afk-contract has no valid merge_grants field
+exit=1
+$ append duplicate top-level merge_grants; validate
+fm-afk-contract: record /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-contract-validation/state/.afk-contract has an invalid merge_grants field: the field is defined more than once
+fm-afk-contract: record /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-contract-validation/state/.afk-contract has no valid merge_grants field
+exit=1

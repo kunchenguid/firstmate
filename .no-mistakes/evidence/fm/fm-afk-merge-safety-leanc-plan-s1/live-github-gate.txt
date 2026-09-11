@@ -1,0 +1,23 @@
+$ fm-pr-merge.sh task-x1 https://github.com/kunchenguid/firstmate/pull/4198
+(real authenticated GitHub read; selected closed/conflicting PR so no merge mutation is authorized)
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.pi/extensions/fm-primary-turnend-guard.ts -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+armed: state/task-x1.check.sh
+error: refusing to merge https://github.com/kunchenguid/firstmate/pull/4198
+  - state is "CLOSED", not open
+  - mergeable is "CONFLICTING", not MERGEABLE
+  - mergeStateStatus is DIRTY (conflicts)
+exit=1
+$ recorded local task metadata after refusal
+window=fm-task-x1
+worktree=/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501
+project=/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501
+kind=ship
+mode=no-mistakes
+pr=https://github.com/kunchenguid/firstmate/pull/4198
+pr_head=60814fabb735a449acc4af670faf53f87aec98bb
