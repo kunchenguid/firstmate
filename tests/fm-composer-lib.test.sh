@@ -807,27 +807,32 @@ test_agy_prompt_uses_complete_positional_boundaries() {
   pass "fm_composer: agy uses the complete positional boundary contract"
 }
 
-test_agy_prompt_disambiguates_repeated_boundaries() {
-  local screen out extract boundary
+test_agy_bottommost_boundary_pair_anchors_current_composer() {
+  local boundary screen out extract
   boundary=$(printf '─%.0s' {1..16})
-  screen="$boundary"$'\n> first\n'"$boundary"$'\nsecond\n'"$boundary"
-  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3)
+  screen="$boundary"$'\n> old\n'"$boundary"$'\n'"$boundary"$'\n> \n'"$boundary"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 4 probe-absent)
+  [ "$out" = empty ] \
+    || fail "the current empty AGY pair must not merge prior turns, got '$out'"
+  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 4)
+  [ -z "$extract" ] \
+    || fail "empty current AGY extraction must exclude prior turns, got '$extract'"
+  screen="$boundary"$'\n> old\n'"$boundary"$'\n'"$boundary"$'\n> x\n'"$boundary"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 4 probe-absent)
   [ "$out" = pending ] \
-    || fail "styled cursor should use the first boundary below the cursor, got '$out'"
-  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 3)
-  [ "$extract" = "first $boundary second" ] \
-    || fail "styled cursor extraction dropped a rule-separated draft row: '$extract'"
-  screen="$boundary"$'\n> first\n'"$boundary"$'\nsecond\n'"$boundary"$'\n? for shortcuts'
+    || fail "the current AGY draft must stay pending, got '$out'"
+  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 4)
+  [ "$extract" = x ] \
+    || fail "current AGY extraction must exclude prior turns, got '$extract'"
   out=$(fm_composer_classify_screen 'styled=0' "$screen")
   [ "$out" = pending ] \
-    || fail "cursorless AGY with a footer should use the last boundary, got '$out'"
+    || fail "cursorless current AGY draft must stay pending, got '$out'"
   extract=$(fm_composer_extract_selected_content 'styled=0' "$screen")
-  [ "$extract" = "first $boundary second" ] \
-    || fail "cursorless AGY extraction dropped a rule-separated draft row: '$extract'"
-  screen="$boundary"$'\n> first\n'"$boundary"$'\nsecond\n'"$boundary"
-  out=$(fm_composer_classify_screen 'styled=0' "$screen")
+  [ "$extract" = x ] \
+    || fail "cursorless AGY extraction must exclude prior turns, got '$extract'"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 1 probe-absent)
   [ "$out" = unknown ] \
-    || fail "cursorless AGY with repeated boundaries and no footer must defer, got '$out'"
+    || fail "a cursor outside the current AGY pair must defer, got '$out'"
   screen=$'> quoted\n────────────────\n╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
   out=$(fm_composer_classify_screen 'styled=1' "$screen")
   [ "$out" = empty ] \
@@ -835,7 +840,7 @@ test_agy_prompt_disambiguates_repeated_boundaries() {
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3)
   [ "$out" = empty ] \
     || fail "cursor selection must keep the lower bordered composer, got '$out'"
-  pass "fm_composer: AGY repeated boundaries defer safely and respect lower composers"
+  pass "fm_composer: AGY uses the bottom-most boundary pair and respects lower composers"
 }
 
 test_agy_boundary_is_locale_independent() {
@@ -892,6 +897,9 @@ test_generic_delivery_busy_union_includes_agy_cancel() {
   fi
   if printf '%s\n' "$cropped_screen" | fm_busy_lines_match agy; then
     fail "AGY busy matcher must fail closed on cropped captures"
+  fi
+  if ! FM_BUSY_REGEX=BUSYTOKEN fm_busy_lines_match agy <<< 'BUSYTOKEN'; then
+    fail "an explicit busy-regex override must scan the full capture"
   fi
   if ! printf '%s\n' "$active" | fm_busy_lines_match; then
     fail "generic delivery busy matcher must recognize AGY's native active row"
@@ -955,7 +963,7 @@ test_agy_prompt_requires_footer_proof_without_cursor
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts
 test_agy_prompt_preserves_structural_draft_rows
 test_agy_prompt_uses_complete_positional_boundaries
-test_agy_prompt_disambiguates_repeated_boundaries
+test_agy_bottommost_boundary_pair_anchors_current_composer
 test_agy_boundary_is_locale_independent
 test_generic_delivery_busy_union_includes_agy_cancel
 test_agy_prompt_preserves_furniture_looking_drafts
