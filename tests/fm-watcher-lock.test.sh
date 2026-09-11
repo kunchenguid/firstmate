@@ -462,6 +462,58 @@ test_lock_keeps_live_holder_that_exec_changed_its_command() {
   pass "a live holder that exec'd into another program keeps its lock"
 }
 
+# Holder liveness keys on string equality of the recorded start time, and the
+# `ps -o lstart` fallback renders that time in the caller's zone. A contender
+# under a different TZ than the holder must still read a live holder as the
+# same process: without the TZ pin the same instant renders as two strings and
+# the live holder is stolen from mid-hold. The zones are chosen 16 hours apart
+# and the raw unpinned rendering is asserted to differ between them, so the case
+# cannot pass on a host where both zones happen to agree.
+test_lock_keeps_live_holder_across_caller_timezones() {
+  local dir state lockdir ready holder raw_tokyo raw_la out lockpid i
+  dir=$(make_case lock-tz-holder)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  ready="$dir/held"
+  TZ=Asia/Tokyo FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    exec sleep 300
+  ' _ "$LIB" "$lockdir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$ready" ] || { kill "$holder" 2>/dev/null || true; fail "Tokyo holder never took the lock"; }
+  raw_tokyo=$(TZ=Asia/Tokyo LC_ALL=C ps -p "$holder" -o lstart= 2>/dev/null || true)
+  raw_la=$(TZ=America/Los_Angeles LC_ALL=C ps -p "$holder" -o lstart= 2>/dev/null || true)
+  out=$(TZ=America/Los_Angeles FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ -n "$raw_tokyo" ] && [ -n "$raw_la" ] \
+    || fail "could not render the holder's start time in both zones"
+  [ "$raw_tokyo" != "$raw_la" ] \
+    || fail "fixture did not diverge: unpinned lstart rendered identically in both zones, so this case proves nothing"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "a live holder was stolen by a contender running under a different TZ: $out" ;;
+  esac
+  case "$out" in
+    *"held=$holder"*) ;;
+    *) fail "cross-zone holder not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  [ "$lockpid" = "$holder" ] || fail "cross-zone holder's lock pid was clobbered (got '$lockpid')"
+  pass "a live holder keeps its lock against a contender running under a different TZ"
+}
+
 test_lock_does_not_steal_live_lock() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-noop)
@@ -1271,6 +1323,7 @@ test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_steals_live_reused_pid_with_mismatched_identity
 test_lock_keeps_live_holder_with_matching_identity
 test_lock_keeps_live_holder_that_exec_changed_its_command
+test_lock_keeps_live_holder_across_caller_timezones
 test_lock_claim_records_holder_identity
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace

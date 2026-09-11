@@ -2268,6 +2268,96 @@ test_hook_claude_mode_spent_budget_restores_the_cycle_before_alarming() {
   pass "fm-turnend-guard --claude: a restorable cycle is restored rather than alarmed over"
 }
 
+# The same watcher stand-in, but it idles for <delay> seconds before taking the
+# singleton lock, standing in for a watcher that is slow to establish (the
+# pre-lock migration bin/fm-watch-arm.sh widens its own confirm window for).
+# It records its pid first so a case whose guard gave up on it can retire it.
+write_slow_watcher_fixture() {
+  local dir=$1 delay=$2
+  cat > "$dir/bin/fm-watch.sh" <<SH
+#!/usr/bin/env bash
+set -u
+SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+STATE="\${FM_STATE_OVERRIDE:-\$FM_HOME/state}"
+. "\$SCRIPT_DIR/fm-wake-lib.sh"
+printf '%s\\n' "\${BASHPID:-\$\$}" > "\$STATE/fixture-watcher.pid"
+sleep $delay
+LOCK="\$STATE/.watch.lock"
+fm_lock_try_acquire "\$LOCK" || exit 0
+printf '%s\\n' "\$FM_HOME" > "\$LOCK/fm-home"
+printf '%s\\n' "\$SCRIPT_DIR/fm-watch.sh" > "\$LOCK/watcher-path"
+fm_pid_identity "\${BASHPID:-\$\$}" > "\$LOCK/pid-identity" 2>/dev/null
+while :; do
+  touch "\$STATE/.last-watcher-beat"
+  sleep 0.2
+done
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+}
+
+retire_slow_watcher_fixture() {
+  local dir=$1 pid waited=0
+  pid=$(cat "$dir/state/fixture-watcher.pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  kill "$pid" 2>/dev/null || true
+  while [ "$waited" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  rm -f "$dir/state/.watch.lock" "$dir/state/fixture-watcher.pid"
+}
+
+# The guard's confirm window is derived from the same OSTYPE switch
+# bin/fm-watch-arm.sh uses for its own arm window (10 s, 30 s on Git Bash/MSYS)
+# instead of the hand-set 5 s it used to carry. A confirm window tighter than
+# the arm layer it confirms makes the guard report a failure the arm had not
+# yet had time to avoid. This case drives a watcher that establishes after 7 s:
+# slower than the old 5 s default, inside the derived 10 s one. The old
+# default is re-applied explicitly as the control, so the case cannot pass on
+# a fixture that was simply fast enough for any window.
+test_hook_claude_mode_last_resort_arm_default_confirm_matches_arm_window() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-last-resort-confirm-default")
+  : > "$dir/state/task1.meta"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  write_slow_watcher_fixture "$dir" 7
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  retire_slow_watcher_fixture "$dir"
+  expect_code 2 "$status" "a watcher slower than the old 5 s default must still be confirmed inside the derived window"
+  assert_contains "$out" "SUPERVISION RESTORED BY THE TURN-END GUARD" \
+    "the derived default confirm window gave up on a watcher fm-watch-arm's own window would have confirmed"
+  assert_not_contains "$out" "TURN WOULD END BLIND" \
+    "the guard reported a blind turn over a watcher that was still establishing"
+  # Control: the hand-set 5 s the default replaced does give up on this watcher.
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 FM_CLAUDE_GUARD_ARM_CONFIRM=5 run_hook_claude "$dir" false); status=$?
+  retire_slow_watcher_fixture "$dir"
+  expect_code 2 "$status" "the 5 s control must still block"
+  assert_contains "$out" "TURN WOULD END BLIND" \
+    "the 7 s fixture was confirmed inside 5 s, so the case proves nothing about the default"
+  pass "fm-turnend-guard --claude: the last-resort arm's default confirm window is the arm layer's 10 s, not a tighter hand-set 5 s"
+}
+
+# Git Bash/MSYS gets the same 30 s fm-watch-arm gives its own arms there. A
+# watcher establishing after 12 s is past the 10 s default on every other
+# platform and inside the MSYS one.
+test_hook_claude_mode_last_resort_arm_default_confirm_widens_on_msys() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-last-resort-confirm-msys")
+  : > "$dir/state/task1.meta"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  write_slow_watcher_fixture "$dir" 12
+  out=$(OSTYPE=msys FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  retire_slow_watcher_fixture "$dir"
+  expect_code 2 "$status" "the MSYS-derived window must still yield one handling turn"
+  assert_contains "$out" "SUPERVISION RESTORED BY THE TURN-END GUARD" \
+    "under OSTYPE=msys the guard did not widen its confirm window with fm-watch-arm's"
+  assert_not_contains "$out" "TURN WOULD END BLIND" \
+    "under OSTYPE=msys the guard reported a blind turn inside fm-watch-arm's own 30 s window"
+  pass "fm-turnend-guard --claude: the last-resort arm's default confirm window widens to 30 s on Git Bash/MSYS with fm-watch-arm's"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -2357,6 +2447,8 @@ test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace
 test_hook_no_afk_ignores_poll_derived_grace
 test_hook_claude_mode_last_resort_arm_restores_cycle
 test_hook_claude_mode_last_resort_arm_failure_still_blocks
+test_hook_claude_mode_last_resort_arm_default_confirm_matches_arm_window
+test_hook_claude_mode_last_resort_arm_default_confirm_widens_on_msys
 test_hook_claude_mode_last_resort_arm_stands_down_for_afk
 test_hook_claude_mode_spent_budget_stops_blocking_but_never_stops_arming
 test_hook_claude_mode_spent_budget_restores_the_cycle_before_alarming
