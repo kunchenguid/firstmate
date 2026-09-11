@@ -851,6 +851,45 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
   pass "fm-teardown.sh backend=orca: scout report gate then helper-backed worktree removal"
 }
 
+test_scout_teardown_orca_worktree_not_in_treehouse_pool_still_succeeds() {
+  local proj wt data state config id out rc neutral
+  id="orcateardownnotpoolz4"
+  proj="$TMP_ROOT/teardown-notpool-project"
+  wt="$TMP_ROOT/teardown-notpool-wt"
+  data="$TMP_ROOT/teardown-notpool-data"
+  state="$TMP_ROOT/teardown-notpool-state"
+  config="$TMP_ROOT/teardown-notpool-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-teardown-notpool" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-teardown-notpool" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case teardown-notpool
+  # The worktree sits outside any Treehouse pool: Orca creates and owns its own
+  # worktrees (docs/architecture.md), so they are never pool slots. The
+  # pool-slot guard must not refuse an Orca teardown for that; Orca's own
+  # worktree registry (the orca CLI response below) is the proof that applies.
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-teardown-notpool","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "Orca scout teardown must not be refused for being outside a Treehouse pool"$'\n'"$out"
+  assert_not_contains "$out" "is not a Treehouse pool slot" \
+    "Orca teardown was wrongly refused by the pool-slot guard"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-teardown-notpool'$'\x1f''--force'$'\x1f''--json' \
+    "teardown did not remove the Orca worktree through orca worktree rm"
+  assert_absent "$state/$id.meta" "teardown should remove task metadata"
+  pass "fm-teardown.sh backend=orca: teardown succeeds even when the worktree is outside a Treehouse pool"
+}
+
 test_scout_teardown_refuses_orca_id_path_mismatch() {
   local proj wt other_wt data state config id out rc neutral
   id="orcascoutmismatchz5"
@@ -1361,6 +1400,7 @@ test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
 test_scout_teardown_removes_orca_worktree_via_helper
+test_scout_teardown_orca_worktree_not_in_treehouse_pool_still_succeeds
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
 test_teardown_preserves_metadata_when_orca_remove_error_json

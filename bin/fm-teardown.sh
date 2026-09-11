@@ -170,6 +170,21 @@
 # refusal above has already passed, and BEFORE any worktree return, branch
 # delete, or backend kill below - a still-active run or a leaked process may
 # own live work in that worktree):
+#   Fix 0 - prove the recorded worktree= is a Treehouse pool slot of the
+#     recorded project before Fix 1/Fix 2 are allowed to run at all, because
+#     Fix 2 reaps by that recorded path (observed 2026-08-26: a scout's
+#     worktree= pointed at the PRIMARY firstmate checkout, and Fix 2 killed
+#     live processes rooted there, including the primary's own session, before
+#     the later `treehouse return` ever found the path unmanaged).
+#     is_treehouse_pool_slot proves membership offline from the pool's own
+#     treehouse-state.json and a shared Git common directory, so a missing or
+#     failing treehouse binary cannot block it; a non-pool path refuses loudly
+#     (REFUSED) with no process touched. Skipped for backend=orca, whose
+#     worktrees are never pool slots by design:
+#     require_orca_worktree_path_match_if_present proves them over Orca's own
+#     registry instead, also BEFORE Fix 2 runs. Both proofs run before the
+#     backlog-close marker is written, so a refusal leaves nothing for a later
+#     session start to replay.
 #   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
 #     be torn down while its no-mistakes pipeline run is still PARKED at a gate
 #     (awaiting_approval/fix_review/any awaiting_agent field), with no worker
@@ -207,9 +222,11 @@
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
 #     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     roots are unique per task and never shared BY DESIGN, so this can never
+#     reach another task's or the primary's processes as long as the recorded
+#     worktree= is honest - which is exactly what Fix 0 above now proves
+#     before this ever runs, rather than assuming.
+#     Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -1181,6 +1198,40 @@ remove_kimi_turnend_auth() {
   rm -f -- "$path"
 }
 
+# remove_claude_hook_file <hook_path> <expected_state_dir> <task_id> <worktree> <project_dir>
+# Safely remove a per-task Claude hook file written by fm-spawn.sh into a
+# worktree's .claude/settings.local.json. Uses jq to extract the hook's command
+# strings and requires the exact Stop touch fm-spawn.sh writes for this task,
+# `touch <shell_quote "$STATE_REAL/$ID.turn-ended">`, resolved against this
+# home's canonical state directory (proving the hook belongs to this task in
+# this home), checks treehouse status for in-use worktrees, and only removes
+# when all checks pass. Does NOT remove the file if any check fails or is
+# inconclusive. A --secondmate spawn writes NO per-task hooks; any hook file in
+# a secondmate home's worktree is leftover garbage from an earlier crewmate
+# task and is only removed under the same safety checks.
+remove_claude_hook_file() {  # <hook_path> <expected_state_dir> <id> <wt> <proj>
+  local hook_file=$1 expected_state_dir=$2 id=$3 wt=$4 proj=$5
+  [ -f "$hook_file" ] || return 0
+  # Extract command strings via jq (fleet-wide dependency; fm-spawn.sh's
+  # json_escape() only escapes backslash and double-quote).
+  local commands real_state turnend_touch
+  commands=$(jq -r '.. | .command? // empty' "$hook_file" 2>/dev/null) || return 0
+  [ -n "$commands" ] || return 0
+  real_state=$(cd "$expected_state_dir" 2>/dev/null && pwd -P) || return 0
+  turnend_touch="touch '$(printf '%s' "$real_state/$id.turn-ended" | sed "s/'/'\\\\''/g")'"
+  printf '%s\n' "$commands" | grep -Fq -- "$turnend_touch" || return 0
+  # Check treehouse status: refuse if worktree is in-use. A missing
+  # treehouse binary must not skip this check - worktree_is_in_use itself
+  # fails closed toward "in use" when `treehouse status` cannot run at all.
+  if [ -n "$wt" ] && [ -n "$proj" ]; then
+    if worktree_is_in_use "$wt" "$proj"; then
+      return 1  # Worktree is in-use, or its state is unknown; leave the hook alone.
+    fi
+  fi
+  # All safety checks passed.
+  rm -f -- "$hook_file"
+}
+
 retire_busy_state() {
   local state_dir=$1 id=$2 gen=${3:-}
   if [ -n "$gen" ]; then
@@ -1945,6 +1996,30 @@ reap_task_backend_process_group() {  # <label>
     echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
     kill -KILL -- "-$pgid" 2>/dev/null || true
   fi
+}
+
+# worktree_is_in_use <dir> <cd_dir>: true when the worktree is listed as
+# in-use in `treehouse status` output, meaning a live agent still owns it.
+# Used to guard Claude hook file removal so an active worktree's hook is never
+# touched by mistake. The caller treats a "true" result as "leave the hook
+# alone", so this must fail closed toward that same outcome: an unresolvable
+# real path or a `treehouse status` error makes the in-use state unknown, not
+# false, and unknown must not be treated as license to remove a hook that
+# might still belong to a live agent.
+worktree_is_in_use() {  # <dir> <cd_dir>
+  local dir=$1 cd_dir=$2 real_dir status_out
+  real_dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 0
+  status_out=$( (cd "$cd_dir" && treehouse status) 2>/dev/null) || return 0
+  local candidate expanded
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    case "$candidate" in
+      "~"/*) expanded="$HOME/${candidate#"~/"}" ;;
+      *) expanded=$candidate ;;
+    esac
+    [ "$expanded" = "$real_dir" ] && return 0
+  done < <(printf '%s\n' "$status_out" | awk '$1 ~ /^[0-9]+$/ && $2 == "in-use" {print $3}')
+  return 1
 }
 
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
@@ -2904,13 +2979,15 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
+        remove_claude_hook_file "$child_wt/.claude/settings.local.json" "$sub_state" "$child_id" "$child_wt" "$child_proj" || true
+        rm -f "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
+      remove_claude_hook_file "$child_wt/.claude/settings.local.json" "$sub_state" "$child_id" "$child_wt" "$child_proj" || true
+      rm -f "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
@@ -3099,6 +3176,28 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
+# Fix 0 (see script header): prove the recorded worktree= after every read-only
+# refusal above but BEFORE the durable backlog-close marker below, so a refusal
+# leaves nothing for a later session start to replay, and BEFORE Fix 1/Fix 2
+# touch a single process. Not for kind=secondmate, for the same reason as Fix 1
+# and Fix 2 below. Orca creates and owns its own worktrees outside the treehouse
+# pool (docs/architecture.md), so they are never pool slots and would always be
+# wrongly refused; Orca's own equivalent proof,
+# require_orca_worktree_path_match_if_present over its own worktree registry,
+# runs instead (kind=scout is not exempt from it).
+if [ "$KIND" != secondmate ]; then
+  if [ "$BACKEND" = orca ]; then
+    if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
+      require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
+      ORCA_PATH_MATCH_VERIFIED=1
+    fi
+  elif [ -d "$WT" ] && ! is_treehouse_pool_slot "$PROJ" "$WT"; then
+    echo "REFUSED: worktree $WT recorded for task $ID is not a Treehouse pool slot of project ${PROJ:-<missing>}; nothing was changed." >&2
+    echo "Refusing before touching a single process: state/$ID.meta's worktree= or project= is likely stale or wrong. Verify it against \`treehouse status\` before retrying." >&2
+    exit 1
+  fi
+fi
+
 BACKLOG_CLOSED=0
 BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
 BACKLOG_TRANSITION_FLAGS=()
@@ -3183,7 +3282,8 @@ fi
 # leaked process can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
+# not by task-worktree cleanup. Fix 0 already proved the recorded worktree=
+# before the backlog-close marker above.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
@@ -3194,11 +3294,9 @@ fi
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+# ORCA_PATH_MATCH_VERIFIED is already 1 here for every reachable KIND != secondmate
+# case: the Fix 0 block above proves it before the close marker and the reap.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
-    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
-    ORCA_PATH_MATCH_VERIFIED=1
-  fi
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
@@ -3206,7 +3304,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+    remove_claude_hook_file "$WT/.claude/settings.local.json" "$STATE" "$ID" "$WT" "$PROJ" || true
+    rm -f "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
@@ -3220,7 +3319,8 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+  remove_claude_hook_file "$WT/.claude/settings.local.json" "$STATE" "$ID" "$WT" "$PROJ" || true
+  rm -f "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from

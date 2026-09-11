@@ -30,6 +30,10 @@ make_home() {  # <name>
 
 ## Done
 EOF
+  # Task worktrees live at $home/projects/<repo>, so the home is their
+  # <pool>/<slot>/<repo> Treehouse pool: the only kind of recorded worktree
+  # bin/fm-teardown.sh reaps under.
+  fm_treehouse_pool_slot "$home/projects/pool-slot"
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
   printf '%s\n' "$home"
@@ -2848,8 +2852,8 @@ test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
   home=$(make_home teardown-held-interrupted)
   id=sample-held-cleanup-failure
   wt="$home/projects/$id"
-  mkdir -p "$home/data/$id" "$wt" "$home/projects/sample"
-  git -C "$home/projects/sample" init -q || fail "could not initialize cleanup-failure project fixture"
+  mkdir -p "$home/data/$id"
+  fm_git_worktree "$home/projects/sample" "$wt" "fm/$id"
   tasks_in "$home" add "$id" "Investigate failed sample cleanup" --kind scout \
     --repo sample --start >/dev/null || fail "could not create the cleanup-failure fixture"
   fm_write_meta "$home/state/$id.meta" \
@@ -2908,7 +2912,8 @@ test_answer_before_cleanup_replay_preserves_the_retained_report() {
   home=$(make_home answer-before-cleanup-replay)
   id=sample-answer-before-cleanup-replay
   wt="$home/projects/$id"
-  mkdir -p "$home/data/$id" "$wt" "$home/projects/sample"
+  mkdir -p "$home/data/$id"
+  fm_git_worktree "$home/projects/sample" "$wt" "fm/$id"
   tasks_in "$home" add "$id" "Investigate answer before cleanup replay" --kind scout \
     --repo sample --start >/dev/null || fail "could not create the answer-before-replay fixture"
   fm_write_meta "$home/state/$id.meta" \
@@ -2962,7 +2967,8 @@ test_unusable_pending_close_record_names_its_reason() {
   id=sample-unusable-pending-close
   wt="$home/projects/$id"
   marker="$home/state/$id.backlog-close"
-  mkdir -p "$home/data/$id" "$wt" "$home/projects/sample" "$home/elsewhere"
+  mkdir -p "$home/data/$id" "$home/elsewhere"
+  fm_git_worktree "$home/projects/sample" "$wt" "fm/$id"
   tasks_in "$home" add "$id" "Investigate the unusable pending close" --kind scout \
     --repo sample --start >/dev/null || fail "could not create the unusable pending-close fixture"
   fm_write_meta "$home/state/$id.meta" \
@@ -3013,7 +3019,8 @@ test_relocated_report_does_not_wedge_an_answer_before_replay() {
   mv "$home/data" "$data"
   id=sample-relocated-answer-before-replay
   wt="$home/projects/$id"
-  mkdir -p "$home/data" "$data/$id" "$wt" "$home/projects/sample"
+  mkdir -p "$home/data" "$data/$id"
+  fm_git_worktree "$home/projects/sample" "$wt" "fm/$id"
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 

@@ -975,9 +975,10 @@ test_teardown_conformance_old_vs_new() {
   git -C "$ROOT" show "$old_tmux_ref:bin/backends/tmux.sh" > "$old_bin/bin/backends/tmux.sh" \
     || { BASE_REF=$saved_base_ref; fail "could not materialize historical tmux adapter from $old_tmux_ref"; }
   BASE_REF=$saved_base_ref
-  proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
+  proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-pool/1/teardown-wt"
   id="teardownconform1"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  fm_treehouse_pool_slot "$wt"
   fb=$(make_teardown_fakebin "$TMP_ROOT/teardown-fake")
 
   data="$TMP_ROOT/teardown-data"
@@ -986,7 +987,7 @@ test_teardown_conformance_old_vs_new() {
 
   state_old="$TMP_ROOT/teardown-state-old"; state_new="$TMP_ROOT/teardown-state-new"
   config_old="$TMP_ROOT/teardown-config-old"; config_new="$TMP_ROOT/teardown-config-new"
-  mkdir -p "$state_old" "$state_new" "$config_old" "$config_new"
+  mkdir -p "$state_old" "$state_new" "$config_old" "$config_new" "$old_bin/state"
 
   fm_write_meta "$state_old/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \

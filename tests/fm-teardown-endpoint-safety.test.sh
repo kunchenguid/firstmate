@@ -190,6 +190,7 @@ test_non_pool_teardown_ignores_task_set_lock() {
 test_metadata_lock_serializes_destructive_cleanup() {
   local dir id=metadata-locked-task lock ready release holder teardown_pid i=0 rc
   dir=$(make_case metadata-lock)
+  mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=isolated:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"

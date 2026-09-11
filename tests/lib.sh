@@ -322,10 +322,11 @@ fm_live_gate() {
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to
 # shadow real tools with stubs. fm_fake_exit0 drops trivial exit-0 stubs for the
 # named tools into a fakebin dir. fm_fake_crash_injector drops the shim a fake
-# uses to crash the process under test deterministically. fm_fake_version_tool
-# drops a stub for a tool whose installed version bootstrap gates, so a fixture
-# cannot be reported as an unparseable build simply for answering `--version`
-# with nothing.
+# uses to crash the process under test deterministically. fm_treehouse_pool_slot
+# gives a fixture worktree the managed pool layout teardown proves before reaping.
+# fm_fake_version_tool drops a stub for a tool whose installed version bootstrap
+# gates, so a fixture cannot be reported as an unparseable build simply for
+# answering `--version` with nothing.
 
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
@@ -379,6 +380,19 @@ echo "fm-crash-inject: pid $target still running 30s after SIGKILL" >&2
 exit 1
 SH
   chmod +x "$fakebin/fm-crash-inject"
+}
+
+# fm_treehouse_pool_slot <slot>...
+# Writes the pool state file a Treehouse pool keeps at <pool>/treehouse-state.json
+# for each <pool>/<slot>/<repo> path, so a linked worktree of the recorded project
+# at that path is a pool slot to bin/fm-teardown.sh.
+fm_treehouse_pool_slot() {
+  local slot pool
+  for slot in "$@"; do
+    pool=$(dirname "$(dirname "$slot")")
+    mkdir -p "$pool"
+    printf '{"worktrees":[]}\n' > "$pool/treehouse-state.json"
+  done
 }
 
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
