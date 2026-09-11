@@ -275,7 +275,7 @@ test_ship_mode_is_explicit_not_registry() {
 # or charter carries no delivery contract. Each must refuse rather than accept and
 # discard the flag, which would look recorded but change nothing.
 test_delivery_flags_are_refused_where_they_do_not_apply() {
-  local home out status label args expect
+  local home out status label args expect long_base
   home="$TMP_ROOT/refused-flags-home"
   mkdir -p "$home/data"
   while IFS='|' read -r label args expect; do
@@ -294,6 +294,7 @@ base on a scout brief|brief-refused-b5 some-proj --scout --base feat/x|--base ap
 base on a secondmate charter|brief-refused-b6 --secondmate --no-projects --base feat/x|--base applies only to ship briefs
 empty base on a ship brief|brief-refused-b7 some-proj --mode direct-PR --base=|--base requires a non-empty branch name
 base that git rejects as a ref|brief-refused-b8 some-proj --mode direct-PR --base=feat/..x|is not a valid git branch name
+base starting with a dash|brief-refused-b10 some-proj --mode direct-PR --base=-force|--base branch name must not start with a dash
 ROWS
   # A base carrying a space cannot ride the whitespace-delimited contract line, so
   # it is refused rather than silently truncated. It needs a quoted argument, which
@@ -304,6 +305,19 @@ ROWS
   assert_contains "$out" "--base branch name must not contain whitespace" \
     "a base carrying a space was not refused for its whitespace"
   assert_absent "$home/data/brief-refused-b9/brief.md" "a refused base still wrote a brief"
+  assert_absent "$home/data/brief-refused-b10/brief.md" "a dash-leading base still wrote a brief"
+  # git itself accepts both `-force` and an unbounded name, but the durable close
+  # marker bin/fm-teardown.sh writes at completion refuses them: a leading dash a
+  # replayed argument list could read as a flag, and anything past its 256-character
+  # cap. Accepting them here would surface that refusal only after the task ran to
+  # completion, so intake carries the same two rules.
+  long_base=$(printf 'a%.0s' $(seq 1 257))
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-refused-b11 some-proj --mode direct-PR --base "$long_base" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a base branch name past the close-marker length cap should exit non-zero"
+  assert_contains "$out" "--base branch name must be 256 characters or fewer" \
+    "an over-long base was not refused at intake"
+  assert_absent "$home/data/brief-refused-b11/brief.md" "an over-long base still wrote a brief"
   pass "fm-brief.sh: --yolo and scout/secondmate --mode/--base are refused, never silently dropped"
 }
 

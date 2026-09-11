@@ -1439,14 +1439,39 @@ pr_is_merged() {
 # changes, so unrelated commits the target gained past the merge-base do not count
 # as "added". Returns non-zero when inconclusive (no target ref, or a merge
 # conflict), so the caller refuses rather than guesses.
+#
+# Having an origin does not mean origin carries the target: a recorded base can
+# name a branch that only ever existed locally, or one origin deleted once it
+# merged up. `git fetch` exits non-zero for that case and for an unreachable
+# remote alike, and those demand opposite answers, so ls-remote separates them
+# exactly as bin/fm-review-diff.sh does - 0 the branch is present, 2 the remote
+# is reachable and has no such branch, anything else unreachable. Its stderr is
+# left intact so the unreachable case reports git's own reason. A reachable
+# remote without the branch measures refs/heads/<base>, the same local ref
+# bin/fm-merge-local.sh lands onto; an unreachable remote stays inconclusive and
+# never falls back, because a local base that may lag origin cannot clear work
+# for deletion. The pattern is the FULL ref: ls-remote matches a pattern against
+# the tail of each ref on a path-component boundary, so a bare <base> would also
+# match a remote `mirror/<base>` and call an unpushed base present.
 content_in_target_branch() {
-  local name ref default_tree merged_tree
+  local name ref default_tree merged_tree ls_status
   name=$(delivery_target_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-    ref="refs/heads/$name"
+    ls_status=0
+    git -C "$WT" ls-remote --exit-code --heads origin "refs/heads/$name" >/dev/null || ls_status=$?
+    case "$ls_status" in
+      0)
+        git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+        ref="refs/remotes/origin/$name"
+        ;;
+      2)
+        ref=$(delivery_target_ref "$name" local) || return 1
+        ;;
+      *)
+        return 1 ;;
+    esac
+  elif ref=$(delivery_target_ref "$name" local); then
+    :
   else
     return 1
   fi
@@ -1803,10 +1828,11 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       if TARGET=$(delivery_target_branch); then
         target_desc=$(delivery_target_source)
-        # work_is_landed has already fetched the target's remote copy, so a
-        # branch that resolves nowhere by now resolves nowhere at all, and
-        # reporting that as unlanded work would be the same false positive on
-        # the ship path that this refusal exists to stop on the local-only one.
+        # work_is_landed has already asked origin for the target and fetched its
+        # remote copy when origin had it, so a branch that resolves nowhere by
+        # now resolves nowhere at all, and reporting that as unlanded work would
+        # be the same false positive on the ship path that this refusal exists
+        # to stop on the local-only one.
         if ! delivery_target_ref "$TARGET" >/dev/null; then
           delivery_target_unresolvable_refusal "$TARGET" "$target_desc"
           return 1

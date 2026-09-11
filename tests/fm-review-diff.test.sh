@@ -19,6 +19,7 @@
 #   (h) origin carries mirror/<base> but not <base> -> still absent, not present
 #   (i) origin unreachable -> refuse; a base that cannot be confirmed is never guessed
 #   (j) base= recorded and resolving nowhere -> refuse, naming the branch and its source
+#   (k) a tag shares the base branch name -> measure the branch, never the tag
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -81,6 +82,44 @@ run_review_diff() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
     "$REVIEW_DIFF" "$@"
+}
+
+# Git resolves a bare `<name>` through refs/tags/<name> BEFORE refs/heads/<name>,
+# so a repo that also carries a tag named like the delivery target branch would
+# have the review silently taken against the tag - an arbitrary old point in
+# history presented as the branch the task lands on. Naming the full ref is what
+# makes the measured base the one the comment claims.
+test_tag_named_like_the_base_does_not_shadow_the_branch() {
+  local case_dir out err
+  case_dir=$(make_case tag-shadow)
+
+  git -C "$case_dir/wt" checkout -q -b feat/local-stack
+  printf 'local-stack-only\n' > "$case_dir/wt/stack.txt"
+  git -C "$case_dir/wt" add stack.txt
+  git -C "$case_dir/wt" commit -qm "commit only the unpushed local stack carries"
+  # A tag pinned to the older origin baseline, named exactly like the branch. A
+  # bare-name base resolves to THIS, dragging the branch's own commit into the
+  # diff as the task's work.
+  git -C "$case_dir/wt" tag feat/local-stack main
+  git -C "$case_dir/wt" checkout -q -B fm/task-x1 refs/heads/feat/local-stack
+  printf 'task-change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "the task's own change"
+
+  write_task_meta "$case_dir" "mode=local-only" "base=feat/local-stack"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  err=$(cat "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: refs/heads/feat/local-stack' \
+    "tag-shadow: the base must name the branch ref, not a bare name a tag can win"
+  assert_contains "$out" '+task-change' \
+    "tag-shadow: the task's own change must be in the diff"
+  assert_not_contains "$out" 'local-stack-only' \
+    "tag-shadow: a same-named tag must not drag the branch's own commits into the diff"
+  assert_contains "$err" 'origin has no feat/local-stack' \
+    "tag-shadow: the classifier must still report the branch as absent from origin"
+  pass "fm-review-diff measures the branch ref when a tag shares the base branch name"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local() {
@@ -230,7 +269,7 @@ test_unpushed_recorded_base_uses_the_local_ref() {
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
   err=$(cat "$case_dir/stderr")
 
-  assert_contains "$out" 'diff base: feat/local-stack' \
+  assert_contains "$out" 'diff base: refs/heads/feat/local-stack' \
     "local-base: an unpushed delivery target branch must review against its local ref"
   assert_contains "$out" '+task-change' \
     "local-base: the task's own change must be in the diff"
@@ -266,7 +305,7 @@ test_suffix_colliding_remote_branch_is_not_the_target() {
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
   err=$(cat "$case_dir/stderr")
 
-  assert_contains "$out" 'diff base: feat/local-stack' \
+  assert_contains "$out" 'diff base: refs/heads/feat/local-stack' \
     "suffix-collision: a remote mirror/<base> must not read as origin carrying <base>"
   assert_contains "$out" '+task-change' \
     "suffix-collision: the task's own change must be in the diff"
@@ -317,7 +356,7 @@ test_unresolvable_recorded_base_is_refused() {
   err=$(cat "$case_dir/stderr")
 
   expect_code 1 "$status" "missing-base: an unresolvable delivery target branch must refuse"
-  assert_contains "$err" 'base feat/never-existed does not exist' \
+  assert_contains "$err" 'base refs/heads/feat/never-existed does not exist' \
     "missing-base: the refusal must name the branch it could not resolve"
   assert_contains "$err" "this task's recorded delivery target branch" \
     "missing-base: the refusal must say where the measured branch came from"
@@ -334,3 +373,4 @@ test_unpushed_recorded_base_uses_the_local_ref
 test_suffix_colliding_remote_branch_is_not_the_target
 test_unreachable_remote_refuses_rather_than_guessing
 test_unresolvable_recorded_base_is_refused
+test_tag_named_like_the_base_does_not_shadow_the_branch

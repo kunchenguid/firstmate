@@ -159,7 +159,12 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
-BASE="$TARGET"
+# The FULL ref, never the bare name: git resolves a bare `<target>` through
+# refs/tags/<target> before refs/heads/<target>, so a repo holding a tag named
+# like the base branch would silently be diffed against the tag. This is the
+# base for a repo with no origin at all and for the reachable-but-absent case
+# below, and bin/fm-merge-local.sh and bin/fm-teardown.sh name the same ref.
+BASE="refs/heads/$TARGET"
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # `git fetch` exits non-zero both for "the remote does not carry this branch"
   # and for "the remote could not be reached", and those two demand opposite

@@ -52,6 +52,8 @@
 #   (z3) no base= + unlanded work                              -> REFUSE against the default branch
 #   (z4) base= + content squash-landed on that branch          -> ALLOW  (content fallback)
 #   (z5) base= + content landed only on the default branch     -> REFUSE, naming the base
+#   (z7) base= + origin reachable without it + content on the local base -> ALLOW
+#   (z8) base= + origin unreachable, content on the local base  -> REFUSE (never falls back)
 #   (z6) base= naming a branch that does not resolve here       -> REFUSE, naming the branch
 #        as the cause instead of blaming the git index; the local-only and the
 #        ship path answer it identically, so neither reads as unlanded work
@@ -240,6 +242,22 @@ land_on_origin_branch() {
   git -C "$tmp" push -q origin "HEAD:$branch"
   rm -rf "$tmp"
   git -C "$case_dir/project" fetch -q origin "$branch"
+}
+
+# Land <file>=<content> as a single commit on a branch that exists ONLY in the
+# project's own refs/heads, never on origin. This is the shape a task stacked on
+# an unpushed base has once its work merges up, and the one origin cannot answer
+# for. Args: case_dir branch file content
+land_on_local_branch() {
+  local case_dir=$1 branch=$2 file=$3 content=$4 tmp
+  tmp="$case_dir/_land_local"
+  rm -rf "$tmp"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash onto local $branch"
+  git -C "$case_dir/project" fetch -q "$tmp" "HEAD:refs/heads/$branch"
+  rm -rf "$tmp"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -1000,6 +1018,57 @@ test_local_only_does_not_measure_the_remote_copy_of_the_landing_branch() {
     "base-remote-only: refusal pointed at a landing that would refuse for another reason"
   assert_present "$case_dir/wt" "base-remote-only: a refusal removed the worktree"
   pass "a local-only task never measures the remote copy of its landing branch"
+}
+
+# Having an origin never meant origin carries the target. A recorded base can
+# name a branch origin never had, or one origin deleted once it merged up, and
+# `git fetch` reports that with the same failure an unreachable remote gives. The
+# content fallback used to stop there, so a task whose work IS merged into its
+# local base was refused as unlanded and pointed at --force - the exact false
+# refusal the recorded base exists to remove.
+test_content_fallback_measures_the_local_base_origin_does_not_carry() {
+  local case_dir rc
+  case_dir=$(make_case base-local-only-branch)
+  write_meta "$case_dir" no-mistakes ship feat/stack
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  # feat/stack exists locally and carries the content; origin has only main.
+  land_on_local_branch "$case_dir" feat/stack feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "base-local-only-branch: teardown should succeed when the content is on the local base origin lacks"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "base-local-only-branch: teardown refused work already merged into its local base"
+  pass "the content fallback measures a delivery target branch origin does not carry"
+}
+
+# An unreachable remote is NOT a reachable remote missing the branch, and the two
+# demand opposite answers. Falling back to the local base there would clear work
+# for deletion against a ref that may lag origin, so this stays inconclusive - a
+# refusal, never an auto-force - even though the local base does carry the
+# content and would have allowed teardown had origin merely lacked the branch.
+test_unreachable_origin_never_falls_back_to_the_local_base() {
+  local case_dir rc
+  case_dir=$(make_case base-unreachable-origin)
+  write_meta "$case_dir" no-mistakes ship feat/stack
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_local_branch "$case_dir" feat/stack feature.txt hello
+  git -C "$case_dir/project" remote set-url origin "$case_dir/does-not-exist.git"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-unreachable-origin: an unreachable origin must refuse, not fall back to the local base"
+  assert_grep "not landed on feat/stack" "$case_dir/stderr" \
+    "base-unreachable-origin: refusal did not name the delivery target branch it could not measure"
+  assert_grep "does-not-exist.git" "$case_dir/stderr" \
+    "base-unreachable-origin: git's own reason for the unreachable remote was discarded"
+  assert_present "$case_dir/wt" "base-unreachable-origin: a refusal removed the worktree"
+  pass "an unreachable origin refuses rather than measuring a local base that may lag it"
 }
 
 test_unresolvable_recorded_base_refuses_on_the_ship_path_too() {
@@ -3920,6 +3989,8 @@ test_absent_base_still_measures_the_default_branch
 test_recorded_base_content_fallback_allows
 test_content_on_the_default_branch_is_not_landed_for_a_base_task
 test_unresolvable_recorded_base_refuses_and_names_the_branch
+test_content_fallback_measures_the_local_base_origin_does_not_carry
+test_unreachable_origin_never_falls_back_to_the_local_base
 test_local_only_does_not_measure_the_remote_copy_of_the_landing_branch
 test_unresolvable_recorded_base_refuses_on_the_ship_path_too
 test_local_only_force_overrides_unpushed

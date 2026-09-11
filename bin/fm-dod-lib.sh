@@ -208,6 +208,14 @@ EOF
 # empty value, any name carrying whitespace (the contract line is
 # whitespace-delimited, so a space would silently truncate the recorded base),
 # and any name git itself rejects as a ref.
+#
+# It also refuses a leading dash and anything past 256 characters, because the
+# durable close marker bin/fm-teardown.sh writes at completion carries the base
+# inside its "local <branch>" note and refuses both
+# (fm_backlog_close_marker_write: a leading dash a replayed argument list could
+# read as a flag, and the marker's own length cap). Accepting here what that
+# marker rejects would surface the refusal at the end of a finished task instead
+# of at intake, so the two rules are kept identical on purpose.
 fm_delivery_base_validate() {  # <branch>
   local base=$1
   if [ -z "$base" ]; then
@@ -218,7 +226,14 @@ fm_delivery_base_validate() {  # <branch>
     *[[:space:]]*)
       echo "error: --base branch name must not contain whitespace (got '$base')" >&2
       return 1 ;;
+    -*)
+      echo "error: --base branch name must not start with a dash (got '$base')" >&2
+      return 1 ;;
   esac
+  if [ "${#base}" -gt 256 ]; then
+    echo "error: --base branch name must be 256 characters or fewer (got ${#base})" >&2
+    return 1
+  fi
   if ! command -v git >/dev/null 2>&1; then
     echo "error: --base '$base' cannot be validated because git is not on PATH" >&2
     return 1

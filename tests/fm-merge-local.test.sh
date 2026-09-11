@@ -33,7 +33,7 @@ make_case() {
   local name=$1 parent=$2 checkout=$3 base=${4:-} case_dir proj
   case_dir="$TMP_ROOT/$name"
   proj="$case_dir/project"
-  mkdir -p "$case_dir/state"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$case_dir/config"
   git init -q -b main "$proj"
   git -C "$proj" commit -q --allow-empty -m "main baseline"
   git -C "$proj" branch feat/stack
@@ -55,10 +55,17 @@ make_case() {
   printf '%s\n' "$case_dir"
 }
 
+# FM_DATA_OVERRIDE and FM_CONFIG_OVERRIDE are pinned to the case dir because the
+# landing reads this home's captain-hold state before it moves any branch.
+# Without them both resolve to the real repo's own home - a gitignored `data/`
+# that is absent in a fresh checkout, so the guard cannot answer and every case
+# refuses, and present on a working machine, where a test would read live records.
 run_merge_local() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_SPAWN_NO_GUARD=1 \
     "$MERGE_LOCAL" task-m1 "$@"
 }
