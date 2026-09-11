@@ -170,6 +170,13 @@ fm_composer_normalize_trim_var() {  # <varname>
   printf -v "$__fmnt_name" '%s' "$__fmnt_text"
 }
 
+fm_composer_normalize_compare_text() {
+  local text=$1
+  fm_composer_normalize_trim_var text
+  text=${text//[$' \t\r\n\v\f']/}
+  printf '%s' "$text"
+}
+
 # fm_composer_strip_ghost: the ONE fleet-wide ANSI-aware extractor of "real typed
 # content" from a captured, styled composer row. Reads the styled line on stdin
 # (from `tmux capture-pane -e`, `herdr pane read --format ansi`, or

@@ -60,13 +60,28 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s\n' "${1:-}" >> "$FM_SEND_LOG"
+    elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = agy-empty ]; then
+      : > "$FM_SEND_LOG.entered"
     fi
     exit 0 ;;
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
+    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = agy-empty ] && [ -s "$FM_SEND_LOG" ] && [ ! -e "$FM_SEND_LOG.entered" ]; then
+      printf '────────────────\n> %s\n────────────────\n' "$(cat "$FM_SEND_LOG")"
+    elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = agy-race ]; then
+      calls_file="$FM_SEND_LOG.calls"
+      calls=0
+      [ -f "$calls_file" ] && calls=$(cat "$calls_file")
+      calls=$((calls + 1))
+      printf '%s\n' "$calls" > "$calls_file"
+      if [ "$calls" -eq 1 ]; then
+        printf '────────────────\n> \n────────────────\n'
+      else
+        printf '────────────────\n> existing draft\n────────────────\n'
+      fi
+    elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
     elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = agy-pending ]; then
       printf '────────────────\n> leftover txt\n────────────────\n'
@@ -247,6 +262,19 @@ test_agy_native_empty_remains_typed() {
   pass "fm-send: AGY native empty composers remain on the typed plane"
 }
 
+test_agy_native_draft_race_defers_without_enter() {
+  local dir err rc rec
+  dir=$(setup_case agy-race agy); err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=agy-race -- t1 "/no-mistakes"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an AGY draft appearing during submit must defer nonzero"
+  rec="$dir/home/state/t1.inbox/001.msg"
+  [ -f "$rec" ] || fail "the AGY draft race was not durably recorded"
+  [ ! -e "$dir/send.log.entered" ] || fail "an AGY draft race pressed Enter"
+  assert_contains "$(cat "$err")" "agy composer is agy-draft-conflict" \
+    "the AGY draft race did not report the compare failure"
+  pass "fm-send: an AGY draft race records the steer without pressing Enter"
+}
+
 test_explicit_target_stays_typed() {
   local dir err
   dir=$(setup_case explicit); err="$dir/send.err"
@@ -383,6 +411,7 @@ test_failed_ring_is_still_sent
 test_harness_invocations_stay_typed
 test_agy_native_defers_pending_and_unknown
 test_agy_native_empty_remains_typed
+test_agy_native_draft_race_defers_without_enter
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
 test_secondmate_marker_and_enqueue_delivery

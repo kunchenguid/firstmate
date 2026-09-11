@@ -416,6 +416,22 @@ SH
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+test_raw_launch_rejects_agy_marker_assignment() {
+  local rec id out status
+  id=profile-raw-agy-marker-z15a
+  rec=$(make_spawn_case profile-raw-agy-marker claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "ANTIGRAVITY_AGENT=1 custom-agent --flag")
+  status=$?
+  expect_code 1 "$status" "raw AGY marker assignment should be refused"
+  assert_contains "$out" "ANTIGRAVITY_AGENT" "raw AGY marker refusal was not explicit"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused raw AGY marker launch published metadata"
+  pass "raw launches reject inline AGY identity assignments"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -1382,6 +1398,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_launch_rejects_agy_marker_assignment
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

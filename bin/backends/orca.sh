@@ -280,6 +280,10 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
   fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
+  if [ "$harness" = agy ] && ! fm_backend_agy_composer_matches orca "$terminal" "$text"; then
+    printf 'agy-draft-conflict'
+    return 0
+  fi
   fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
     "$terminal" "$retries" "$sleep_s" '' "$harness"
 }

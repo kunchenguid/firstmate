@@ -689,6 +689,55 @@ fm_send_feed_resolved_holds() {  # <answer-text>
   fi
 }
 
+fm_send_write_local_inbox() {
+  INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || return 1
+  if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
+    if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+      fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+    fi
+    echo "error: steer not sent to $INBOX_TASK_ID: its task metadata could not be locked for final delivery validation" >&2
+    return 1
+  fi
+  CURRENT_INBOX_TARGET=
+  CURRENT_INBOX_BACKEND=
+  CURRENT_INBOX_SPAWN_GEN=
+  if [ -f "$TARGET_META" ]; then
+    CURRENT_INBOX_TARGET=$(fm_backend_target_of_meta "$TARGET_META")
+    CURRENT_INBOX_BACKEND=$(fm_backend_of_meta "$TARGET_META")
+    CURRENT_INBOX_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
+  fi
+  if [ "$CURRENT_INBOX_TARGET" != "$T" ] \
+    || [ "$CURRENT_INBOX_BACKEND" != "$TARGET_BACKEND" ] \
+    || { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] \
+      && [ "$CURRENT_INBOX_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } \
+    || [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
+    fm_lock_release "$INBOX_META_LOCK"
+    if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+      fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+    fi
+    echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
+    return 1
+  fi
+  inbox_write_rc=0
+  if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
+    INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
+      "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
+  else
+    INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
+      "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
+  fi
+  if [ "$inbox_write_rc" -ne 0 ]; then
+    fm_lock_release "$INBOX_META_LOCK"
+    if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+      fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+    fi
+    echo "error: steer not sent to $INBOX_TASK_ID: its inbox record could not be written under $STATE/$INBOX_TASK_ID.inbox" >&2
+    return 1
+  fi
+  fm_lock_release "$INBOX_META_LOCK"
+}
+
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
 # scope the codex `$<skill>` popup-settle below. A task selector carries
 # meta; an explicit backend-target escape hatch has none, so its harness is
@@ -824,19 +873,6 @@ else
   fi
   AGY_TYPED_DEFERRED=0
   AGY_TYPED_VERDICT=
-  if [ "$INBOX_PLANE" = 0 ] && [ "$TARGET_BACKEND" != remote ] \
-    && [ -n "$TARGET_SELECTOR" ] && [ "$TARGET_HARNESS" = agy ]; then
-    AGY_TYPED_VERDICT=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" \
-      "$EXPECTED_LABEL" "$TARGET_HARNESS" 2>/dev/null) || AGY_TYPED_VERDICT=unknown
-    case "$AGY_TYPED_VERDICT" in
-      empty) ;;
-      *)
-        AGY_TYPED_DEFERRED=1
-        [ -n "$AGY_TYPED_VERDICT" ] || AGY_TYPED_VERDICT=unknown
-        INBOX_PLANE=1
-        ;;
-    esac
-  fi
   if [ "$INBOX_PLANE" = 1 ] && [ "$TARGET_BACKEND" = remote ]; then
     # Remote inbox leg: the message becomes a durable record in the remote
     # home's steering inbox, written idempotently by the host-local leg, then
@@ -954,51 +990,7 @@ else
     exit 0
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
-    INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
-    INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
-    if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
-      echo "error: steer not sent to $INBOX_TASK_ID: its task metadata could not be locked for final delivery validation" >&2
-      exit 1
-    fi
-    CURRENT_INBOX_TARGET=
-    CURRENT_INBOX_BACKEND=
-    CURRENT_INBOX_SPAWN_GEN=
-    if [ -f "$TARGET_META" ]; then
-      CURRENT_INBOX_TARGET=$(fm_backend_target_of_meta "$TARGET_META")
-      CURRENT_INBOX_BACKEND=$(fm_backend_of_meta "$TARGET_META")
-      CURRENT_INBOX_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
-    fi
-    if [ "$CURRENT_INBOX_TARGET" != "$T" ] \
-      || [ "$CURRENT_INBOX_BACKEND" != "$TARGET_BACKEND" ] \
-      || { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] \
-        && [ "$CURRENT_INBOX_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } \
-      || [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
-      fm_lock_release "$INBOX_META_LOCK"
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
-      echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
-      exit 1
-    fi
-    if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
-      INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
-        "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
-    else
-      INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
-        "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
-    fi
-    if [ "${inbox_write_rc:-0}" -ne 0 ]; then
-      fm_lock_release "$INBOX_META_LOCK"
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
-      echo "error: steer not sent to $INBOX_TASK_ID: its inbox record could not be written under $STATE/$INBOX_TASK_ID.inbox" >&2
-      exit 1
-    fi
-    fm_lock_release "$INBOX_META_LOCK"
+    fm_send_write_local_inbox || exit 1
     if [ "$AGY_TYPED_DEFERRED" = 1 ]; then
       echo "fm-send: agy composer is $AGY_TYPED_VERDICT; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring without touching the pane" >&2
       exit 1
@@ -1079,6 +1071,13 @@ else
   fi
   case "$verdict" in
     empty)
+      ;;
+    agy-preflight:*|agy-draft-conflict)
+      AGY_TYPED_VERDICT=${verdict#*:}
+      [ -n "$AGY_TYPED_VERDICT" ] || AGY_TYPED_VERDICT=unknown
+      fm_send_write_local_inbox || exit 1
+      echo "fm-send: agy composer is $AGY_TYPED_VERDICT; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring without touching the pane" >&2
+      exit 1
       ;;
     send-failed)
       fm_send_known_undelivered_cleanup || \

@@ -286,5 +286,9 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [har
   [ "$baseline_state" = idle ] && baseline_idle=1
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
+  if [ "$harness" = agy ] && ! fm_backend_agy_composer_matches tmux "$target" "$text"; then
+    printf 'agy-draft-conflict'
+    return 0
+  fi
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle" "$harness"
 }

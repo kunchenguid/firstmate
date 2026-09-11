@@ -557,14 +557,16 @@ fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expe
   cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label" "$harness") || return 1
   caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$capture_lines")
   after=$(fm_composer_extract_selected_content "$caps" "$cap" '' "$harness") || return 1
-  fm_composer_normalize_spaces_var before
-  fm_composer_normalize_spaces_var text
-  fm_composer_normalize_spaces_var after
-  before=${before//[$' \t\r\n\v\f']/}
-  text=${text//[$' \t\r\n\v\f']/}
-  after=${after//[$' \t\r\n\v\f']/}
+  before=$(fm_composer_normalize_compare_text "$before")
+  text=$(fm_composer_normalize_compare_text "$text")
+  after=$(fm_composer_normalize_compare_text "$after")
   [ -n "$text" ] || return 1
-  expected=$before$text
+  if [ "$harness" = agy ]; then
+    [ -z "$before" ] || return 1
+    expected=$text
+  else
+    expected=$before$text
+  fi
   [ "$after" = "$expected" ]
 }
 
@@ -579,10 +581,14 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} before
   before=$(fm_backend_zellij_composer_content "$target" "$expected_label" "$harness") \
     || { printf 'send-failed'; return 0; }
+  if [ "$harness" = agy ]; then
+    before=$(fm_composer_normalize_compare_text "$before")
+    [ -z "$before" ] || { printf 'agy-preflight:pending'; return 0; }
+  fi
   fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_backend_zellij_composer_observed_append "$target" "$before" "$text" "$expected_label" "$harness" \
-    || { printf 'send-failed'; return 0; }
+    || { [ "$harness" = agy ] && printf 'agy-draft-conflict' || printf 'send-failed'; return 0; }
   fm_composer_submit_retry_core fm_backend_zellij_send_key fm_backend_zellij_composer_state \
     "$target" "$retries" "$sleep_s" "$expected_label" "$harness"
 }
