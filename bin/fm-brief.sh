@@ -438,14 +438,12 @@ case "$MODE" in
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-# Captured via `read -d ''` rather than `DOD=$(...)`: command substitution
-# silently strips trailing newlines, which would lose trailing blank lines
-# the rendered Definition of done should keep. MODE is validated above to
-# one of fm_dod_block's three known modes, so its unknown-mode error path
-# is unreachable here.
-IFS= read -r -d '' DOD < <(fm_dod_block "$MODE" "$ID") || true
-
-cat > "$BRIEF" <<EOF
+# fm_dod_block's stdout is streamed straight into the brief below rather than
+# captured with `DOD=$(...)`: command substitution silently strips trailing
+# newlines, which would lose trailing blank lines the rendered Definition of
+# done should keep. bin/fm-promote.sh streams it the same way.
+{
+cat <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
@@ -509,6 +507,7 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
-$DOD
 EOF
+fm_dod_block "$MODE" "$ID"
+} > "$BRIEF" || exit 1
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
