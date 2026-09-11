@@ -409,7 +409,13 @@ jobs:
           # source: a suite that stops early or runs nothing therefore still
           # fails. A derivation that finds no tests fails too, rather than
           # comparing zero against zero and passing forever.
-          expected_tests() { grep -c '^test_[a-z_]*$' "$1" || true; }
+          # The character class must cover every name the suites actually use,
+          # digits included: an earlier [a-z_] form could not see
+          # test_landed_preserves_kindless_v1_summary_reports and so counted one
+          # test fewer than ran, failing a correct tree. A derivation that
+          # undercounts is the same defect as a literal that goes stale, so the
+          # pattern is kept as wide as the shell function names it matches.
+          expected_tests() { grep -c '^test_[A-Za-z0-9_]*$' "$1" || true; }
           observed_ok() { printf '%s\n' "$1" | grep -c '^ok - ' || true; }
 
           snapshot_expected=$(expected_tests tests/fm-fleet-snapshot-view.test.sh)
