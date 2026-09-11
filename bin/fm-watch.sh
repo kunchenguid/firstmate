@@ -1068,7 +1068,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   # with an empty value via bash dynamic scoping. Previously the
   # sentinel name was built from $key which was empty on the busy-pane
   # route, so the v15/v16 sentinel guarantee did not hold there.
-  local key="$(window_key "$win")"
+  local key; key="$(window_key "$win")"
   # v15 (2026-09-08, Greptile review of v14): if a previous poll encountered
   # a cap-marker write failure AND the rollback itself failed (same fs
   # condition that broke the marker write), .wedge-rollback-failed-<key>
