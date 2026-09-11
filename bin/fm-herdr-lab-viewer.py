@@ -177,6 +177,7 @@ def main(argv):
 
     def _terminate(_signum, _frame):
         _signal_viewer(signal.SIGTERM)
+        signal.setitimer(signal.ITIMER_REAL, TERMINATE_GRACE_SECONDS)
 
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGINT, _terminate)

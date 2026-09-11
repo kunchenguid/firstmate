@@ -173,6 +173,7 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
 # environment mechanics; the guards below own who may be attached to.
 
 readonly fm_herdr_lab_viewer_timeout_seconds=5
+readonly fm_herdr_lab_viewer_launcher_grace_seconds=6
 
 fm_herdr_lab_viewer_record_path() { # <session>
   printf '%s/%s.viewer' "$(fm_herdr_lab_state_dir)" "$1"
@@ -305,7 +306,7 @@ fm_herdr_lab_viewer_start_locked() { # <session>
     sleep 0.2
     waited=$((waited + 1))
   done
-  fm_herdr_lab_cancel_provision "$launcher_pid"
+  fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"
   fm_herdr_lab_error "lab viewer did not become the foreground client of '$name' within $timeout seconds (last reason: ${reason:-<unreadable>})"
   [ ! -s "$log" ] || fm_herdr_lab_error "viewer log: $(tail -n 5 "$log" | tr '\n' ' ')"
   fm_herdr_lab_viewer_stop_locked "$name" >/dev/null 2>&1 || true
@@ -366,30 +367,53 @@ fm_herdr_lab_viewer_unlock() { # <session>
   }
 }
 
-fm_herdr_lab_viewer_start() { # <session>
-  local name=$1 status
-  fm_herdr_lab_validate_name "$name" || return 1
+fm_herdr_lab_viewer_restore_traps() {
+  trap - EXIT INT TERM
+  if [ "$restore_saved_traps" = 1 ]; then
+    [ -z "$saved_exit" ] || eval "$saved_exit"
+    [ -z "$saved_int" ] || eval "$saved_int"
+    [ -z "$saved_term" ] || eval "$saved_term"
+  fi
+}
+
+fm_herdr_lab_viewer_lock_abort() { # <signal> <status>
+  local signal=$1 status=$2
+  fm_herdr_lab_viewer_unlock "$name" >/dev/null 2>&1 || true
+  fm_herdr_lab_viewer_restore_traps
+  if [ "$signal" != EXIT ]; then
+    kill -s "$signal" "$$"
+  fi
+  exit "$status"
+}
+
+fm_herdr_lab_viewer_locked_call() { # <start_locked|stop_locked> <session>
+  local operation=$1 name=$2 status saved_exit saved_int saved_term restore_saved_traps=1
+  [ "$BASH_SUBSHELL" -eq 0 ] || restore_saved_traps=0
+  saved_exit=$(trap -p EXIT)
+  saved_int=$(trap -p INT)
+  saved_term=$(trap -p TERM)
   fm_herdr_lab_viewer_lock "$name" || return 1
-  if fm_herdr_lab_viewer_start_locked "$name"; then
+  trap 'fm_herdr_lab_viewer_lock_abort EXIT $?' EXIT
+  trap 'fm_herdr_lab_viewer_lock_abort INT 130' INT
+  trap 'fm_herdr_lab_viewer_lock_abort TERM 143' TERM
+  if "$operation" "$name"; then
     status=0
   else
     status=$?
   fi
-  fm_herdr_lab_viewer_unlock "$name" || return 1
+  fm_herdr_lab_viewer_unlock "$name" || status=1
+  fm_herdr_lab_viewer_restore_traps
   return "$status"
 }
 
+fm_herdr_lab_viewer_start() { # <session>
+  fm_herdr_lab_validate_name "$1" || return 1
+  fm_herdr_lab_viewer_locked_call fm_herdr_lab_viewer_start_locked "$1"
+}
+
 fm_herdr_lab_viewer_stop() { # <session>
-  local name=$1 status
-  fm_herdr_lab_validate_name "$name" || return 1
-  fm_herdr_lab_viewer_lock "$name" || return 1
-  if fm_herdr_lab_viewer_stop_locked "$name"; then
-    status=0
-  else
-    status=$?
-  fi
-  fm_herdr_lab_viewer_unlock "$name" || return 1
-  return "$status"
+  fm_herdr_lab_validate_name "$1" || return 1
+  fm_herdr_lab_viewer_locked_call fm_herdr_lab_viewer_stop_locked "$1"
 }
 
 fm_herdr_lab_viewer() { # <start|stop> <session>
@@ -401,6 +425,21 @@ fm_herdr_lab_viewer() { # <start|stop> <session>
       return 2
       ;;
   esac
+}
+
+fm_herdr_lab_cancel_viewer_launcher() { # <pid>
+  local pid=$1 attempt=0 max_attempts=$((fm_herdr_lab_viewer_launcher_grace_seconds * 10))
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt "$max_attempts" ]; do
+      sleep 0.1
+      attempt=$((attempt + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+  wait "$pid" 2>/dev/null || true
 }
 
 fm_herdr_lab_cancel_provision() { # <pid>
