@@ -719,7 +719,7 @@ task_json_lines() {
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json open_decisions_file
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -800,6 +800,16 @@ task_json_lines() {
         | select(. != null) ]')
     pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
     blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
+    # A long-lived task's whole-status-log decision fold has no size bound (it
+    # keeps every still-open needs-decision/blocked note, however long, until
+    # resolved), so this must never ride --argjson: Linux rejects a single exec
+    # argument over 128 KiB (MAX_ARG_STRLEN) even when total ARG_MAX is larger.
+    # File-back it like the other potentially large snapshot payloads below.
+    open_decisions_file="$SNAPSHOT_TASK_DIR/$id.open-decisions.json"
+    printf '%s\n' "$open_decisions_json" > "$open_decisions_file" || {
+      snapshot_task_cleanup
+      return 1
+    }
 
     endpoint_exists=null
     agent_alive=not_checked
@@ -853,11 +863,12 @@ task_json_lines() {
       --argjson worktree_path "$worktree_json" \
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
-      --argjson open_decisions "$open_decisions_json" \
+      --slurpfile open_decisions_file "$open_decisions_file" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
-      '{
+      '($open_decisions_file[0]) as $open_decisions
+      | {
         id:$id,
         kind:$kind,
         harness:($harness // ""),
