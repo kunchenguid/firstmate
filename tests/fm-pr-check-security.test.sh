@@ -513,6 +513,20 @@ test_rerecording_the_same_pr_preserves_the_delivery_clock() {
   fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
     || fail "carrying the delivery clock broke the poll provenance binding"
 
+  for old in 1761438600 1761442200; do
+    TZ=UTC0 set_mtime_epoch "$reg" "$old"
+    [ "$(file_mtime_epoch "$reg")" = "$old" ] \
+      || fail "the repeated daylight-saving hour fixture could not be set to $old"
+    TZ=Europe/Paris run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/7 \
+      >/dev/null 2>"$dir/stderr" \
+      || fail "re-recording during the repeated daylight-saving hour failed for $old: $(cat "$dir/stderr")"
+    second=$(file_mtime_epoch "$reg")
+    [ "$second" = "$old" ] \
+      || fail "re-recording during the repeated daylight-saving hour changed $old to $second"
+    fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+      || fail "preserving the repeated daylight-saving hour broke the poll provenance binding"
+  done
+
   run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/8 \
     >/dev/null 2>/dev/null || fail "recording a different PR failed"
   third=$(file_mtime_epoch "$reg")

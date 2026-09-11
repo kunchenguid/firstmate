@@ -110,8 +110,8 @@ if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
   pr_check_mtime() { /usr/bin/stat -f '%m' "$1" 2>/dev/null || true; }
   pr_check_set_mtime() {
     local stamp
-    stamp=$(date -r "$2" +%Y%m%d%H%M.%S) || return 1
-    touch -t "$stamp" "$1"
+    stamp=$(TZ=UTC0 date -r "$2" +%Y%m%d%H%M.%S) || return 1
+    TZ=UTC0 touch -t "$stamp" "$1"
   }
 else
   pr_check_mtime() { stat -c '%Y' "$1" 2>/dev/null || true; }
