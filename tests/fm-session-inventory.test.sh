@@ -294,6 +294,57 @@ run_detached() {  # <label> <cmd...>
   return 1
 }
 
+# Run the view on a REAL terminal of a given width. That is the only way to
+# observe the layout the captain gets: the frame is assembled inside a capture,
+# so a pipe can answer neither how wide his pane is nor whether it is one at
+# all. The driver sizes the terminal before the view starts, reads the first
+# frame, and then ends the process, because a watched pane never ends by itself.
+PTY_BODY="$TMP_ROOT/fm-pty-run.py"
+cat > "$PTY_BODY" <<'PY'
+import fcntl, os, pty, select, signal, struct, sys, termios, time
+
+cols = int(sys.argv[1])
+deadline = float(sys.argv[2])
+argv = sys.argv[3:]
+
+pid, fd = pty.fork()
+if pid == 0:
+    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 24, cols, 0, 0))
+    try:
+        os.execvp(argv[0], argv)
+    finally:
+        os._exit(127)
+
+out = b""
+end = time.time() + deadline
+while time.time() < end:
+    ready = select.select([fd], [], [], 0.2)[0]
+    if not ready:
+        if b"KIND" in out:
+            break
+        continue
+    try:
+        chunk = os.read(fd, 65536)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+try:
+    os.killpg(os.getpgid(pid), signal.SIGKILL)
+except OSError:
+    pass
+os.waitpid(pid, 0)
+sys.stdout.buffer.write(out)
+PY
+
+run_view_on_pty() {  # <columns> <home> <args...>
+  local cols=$1 home=$2
+  shift 2
+  FM_HOME="$home" FM_SESSION_INVENTORY_NOW_EPOCH="$NOW_EPOCH" \
+    PATH="$FAKEBIN:$PATH" python3 "$PTY_BODY" "$cols" 30 "$VIEW" "$@"
+}
+
 # The same two commands the captain runs, but from that pane-shaped process.
 run_inventory_detached() {  # <label> <home> <mode...>
   local label=$1 home=$2
@@ -1163,6 +1214,48 @@ test_view_is_readable_narrow_and_without_colour() {
   pass "view: readable without colour and in a narrow pane, with close commands intact"
 }
 
+# THE PANE DECIDES THE WIDTH, AND NOTHING ELSE MAY. The captain keeps this open
+# as a WezTerm side pane, roughly a third of his window, so a frame laid out for
+# a wider terminal wraps every row and loses the narrow-pane rendering entirely.
+# The frame is assembled inside a capture, which is a pipe rather than his pane,
+# so the width has to be read from the terminal itself; COLUMNS is set to the
+# wrong number in both directions here, because an inherited environment
+# variable is not a measurement of the pane in front of him.
+test_the_pane_lays_out_for_the_terminal_it_is_in() {
+  local home out longest
+  command -v python3 >/dev/null 2>&1 \
+    || { pass "view: terminal-width case skipped without python3"; return; }
+  home=$(make_home pane-width)
+  write_worker "$home" pane-task 9
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+
+  out=$(COLUMNS=100 run_view_on_pty 46 "$home" --watch --interval 15 --color never) \
+    || fail "the watched pane must render on a real terminal"
+  assert_contains "$out" "KIND" "the watched pane must draw its table"
+  assert_not_contains "$out" "BELONGS TO" \
+    "a 46-column pane must drop the belongs-to column, not lay out at the default width"
+  longest=$(printf '%s\n' "$out" | tr -d '\r' | LC_ALL=C awk '
+      /^ *KIND +WHAT/ { intable = 1 }
+      /^To close/ { intable = 0 }
+      intable { print length }' | sort -n | tail -1)
+  [ -n "$longest" ] && [ "$longest" -le 46 ] \
+    || fail "the watched table must fit the 46-column pane, longest table line was ${longest:-unknown}"
+
+  out=$(COLUMNS=100 run_view_on_pty 46 "$home" --color never) \
+    || fail "a single pass must render on a real terminal"
+  assert_contains "$out" "KIND" "a single pass must draw its table"
+  assert_not_contains "$out" "BELONGS TO" \
+    "a single pass in a 46-column terminal must follow that terminal too"
+
+  out=$(COLUMNS=46 run_view_on_pty 120 "$home" --watch --interval 15 --color never) \
+    || fail "the watched pane must render on a wide terminal"
+  assert_contains "$out" "BELONGS TO" \
+    "a 120-column pane must use the width it has, whatever COLUMNS was set to"
+
+  pass "view: the pane lays out for the terminal it is in, watched or not"
+}
+
 test_view_refuses_a_cadence_below_the_floor() {
   local home status=0
   home=$(make_home cadence)
@@ -1876,6 +1969,7 @@ test_review_page_with_queued_notes_needs_confirmation
 test_a_review_path_with_a_comma_reaches_lavish_whole
 test_unreadable_source_is_disclosed_not_counted_as_zero
 test_view_is_readable_narrow_and_without_colour
+test_the_pane_lays_out_for_the_terminal_it_is_in
 test_view_refuses_a_cadence_below_the_floor
 test_inventory_makes_no_cross_home_network_read
 test_a_home_reached_through_a_symlink_still_finds_what_runs_in_it

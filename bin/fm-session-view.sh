@@ -95,12 +95,25 @@ esac
 
 command -v jq >/dev/null 2>&1 || { echo "fm-session-view: jq not found" >&2; exit 1; }
 
-# Whether the REAL stdout is a terminal, decided once, before anything captures
-# it. --watch renders a frame into a variable first, and inside that capture
-# stdout is a pipe, so asking at that point would answer for the pipe and quietly
-# strip the colour from a pane that has it.
+# THE PANE IS MEASURED THROUGH THE TERMINAL, NEVER THROUGH WHEREVER OUTPUT IS
+# GOING. A frame is assembled inside a command substitution, and the layout is
+# decided there, so at that moment stdout is a pipe: `[ -t 1 ]` answers for the
+# pipe, and `tput cols` loses the window size with it. Both would then quietly
+# report a colourless 100-column terminal for a colour pane 46 columns wide,
+# which is the narrow-pane promise this file opens with failing silently.
+#
+# So the real stdout is duplicated once here, before anything can capture it,
+# and the two questions are answered from that descriptor instead: whether it is
+# a terminal, decided now, and how wide it is, read with `stty` - which takes
+# its terminal from a descriptor rather than from where its own output goes, and
+# so keeps answering for the pane from inside any capture. The size is read
+# again every pass, so a pane the captain resizes mid-watch is followed.
 STDOUT_IS_TTY=0
-[ -t 1 ] && STDOUT_IS_TTY=1
+TTY_FD_SAVED=0
+if [ -t 1 ]; then
+  STDOUT_IS_TTY=1
+  if { exec 3<&1; } 2>/dev/null; then TTY_FD_SAVED=1; fi
+fi
 
 use_color() {
   case "$COLOR" in
@@ -111,20 +124,22 @@ use_color() {
 }
 
 term_width() {
-  local cols=''
-  if [ -t 1 ]; then
-    cols=$(tput cols 2>/dev/null || true)
+  local cols='' size=''
+  if [ "$TTY_FD_SAVED" = 1 ]; then
+    size=$(stty size <&3 2>/dev/null || true)
+  elif [ "$STDOUT_IS_TTY" = 1 ]; then
+    size=$(stty size </dev/tty 2>/dev/null || true)
   fi
+  case "$size" in *' '*) cols=${size##* } ;; esac
   [ -n "$cols" ] || cols=${COLUMNS:-}
   case "$cols" in ''|*[!0-9]*|0) cols=100 ;; esac
   [ "$cols" -ge 40 ] || cols=40
   printf '%s\n' "$cols"
 }
 
-render_once() {
-  local json width colored
+render_once() {  # <width>
+  local json colored width=$1
   json=$("$SCRIPT_DIR/fm-session-inventory.sh" --json) || return $?
-  width=$(term_width)
   if use_color; then colored=1; else colored=0; fi
   printf '%s\n' "$json" | jq -r \
     --argjson width "$width" \
@@ -247,7 +262,7 @@ render_once() {
 }
 
 if [ "$WATCH" = 0 ]; then
-  render_once
+  render_once "$(term_width)"
   exit $?
 fi
 
@@ -264,7 +279,8 @@ fi
 # for an error.
 trap 'exit 0' INT TERM
 while :; do
-  if frame=$(render_once); then
+  pane_width=$(term_width)
+  if frame=$(render_once "$pane_width"); then
     if [ "$STDOUT_IS_TTY" = 1 ]; then
       printf '\033[H\033[2J'
     fi
