@@ -447,7 +447,12 @@ test_agy_hooks_are_removed_by_teardown() {
   state="$HOME_DIR/state"
   settings="$state/$id.agy-hooks"
   assert_present "$settings/.agents/hooks.json" "agy teardown fixture did not write hooks"
-  teardown_out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/treehouse"
+  teardown_out=$(PATH="$FAKEBIN_DIR:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1) || teardown_rc=$?
   expect_code 0 "$teardown_rc" "agy teardown should succeed: $teardown_out"
   assert_absent "$settings" "normal teardown must remove agy's private hook directory"
