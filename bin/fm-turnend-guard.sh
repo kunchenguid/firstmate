@@ -79,7 +79,12 @@
 #      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
-#      fail-open only for an already verified failure episode.
+#      fail-open only for an already verified failure episode. The budget
+#      charges each event epoch once, and it also charges every re-block
+#      against an epoch the auto-arm never advanced past the previous
+#      re-block (budget_account_current_epoch owns that rule), so an inert
+#      hook that leaves the ledger frozen cannot hold the guard in an
+#      unbounded re-block loop below that override.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -249,12 +254,31 @@ fi
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
-budget_account_current_epoch() {
-  local current_epoch outcome old_session old_count old_epoch tmp initialized
+#
+# Budget accounting, under the budget lock. Sets COUNT (the session's
+# consumed continuations, including this one) and BUDGET_INITIALIZED_FAILURE.
+# The ledger's epoch identity is what is charged: a new epoch charges once,
+# and an epoch this same invocation already charged is never charged again,
+# because the wait loop above can observe one fresh terminal epoch many times
+# before the block decision. Across Stops the two callers differ:
+#   - observe (the allow paths in autoarm_owns_recovery): seeing an
+#     already-charged epoch again is free - it is the same claim, seen again.
+#   - block (the re-block path): a re-block against the epoch the previous
+#     re-block already charged is a new consumed continuation, because the
+#     auto-arm advanced nothing between the two Stops - it did not participate
+#     at all, which is exactly the absence this budget bounds. Charging only
+#     epoch changes let an inert hook (identity-gated, never fired, or failing
+#     before its generation claim) freeze the ledger and the count together,
+#     so the guard re-blocked without limit and the attended fail-open below
+#     never became reachable.
+BUDGET_CHARGED_EPOCH=
+budget_account_current_epoch() {  # [observe|block]
+  local mode=${1:-observe} current_epoch outcome old_session old_count old_epoch tmp initialized charged
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
   current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   initialized=0
+  charged=0
   COUNT=0
   if [ -f "$BUDGET_FILE" ]; then
     old_session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
@@ -266,13 +290,18 @@ budget_account_current_epoch() {
     if [ "$old_session" = "$SESSION_ID" ]; then
       COUNT=$old_count
       if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ]; then
-        :
+        if [ "$mode" = block ] && [ "$BUDGET_CHARGED_EPOCH" != "$current_epoch" ]; then
+          COUNT=$((COUNT + 1))
+          charged=1
+        fi
       else
         COUNT=$((COUNT + 1))
+        charged=1
       fi
     fi
   fi
   if [ ! -f "$BUDGET_FILE" ] || [ "${old_session:-}" != "$SESSION_ID" ]; then
+    charged=1
     case "$outcome" in
       failed|failed-suppressed)
         if [ -e "$FAILURE_NOTICE" ]; then
@@ -293,6 +322,7 @@ budget_account_current_epoch() {
     return 1
   fi
   rm -f "$tmp" 2>/dev/null || true
+  [ "$charged" -eq 0 ] || BUDGET_CHARGED_EPOCH=$current_epoch
   BUDGET_INITIALIZED_FAILURE=$initialized
   fm_lock_release "$BUDGET_LOCK"
   return 0
@@ -456,7 +486,7 @@ fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.
-budget_account_current_epoch || block_stop
+budget_account_current_epoch block || block_stop
 terminal_fail_open
 terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then
