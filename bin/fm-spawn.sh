@@ -1520,6 +1520,9 @@ launch_template() {
     # same way. Its settings.local.json also never receives the mirrored
     # user-scope hooks below, because it keeps the full `user` settings scope
     # natively (docs/configuration.md documents this exemption).
+    # __CLAUDEPERMFLAG__ is the permission flag config/claude-permission-mode
+    # selects (header above): --dangerously-skip-permissions by default, or
+    # --permission-mode auto for a captain who refuses bypass mode.
     claude)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
