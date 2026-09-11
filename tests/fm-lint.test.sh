@@ -4,6 +4,8 @@
 # bin/fm-lint.sh must be the single owner that BOTH CI
 # (.github/workflows/ci.yml) and the pre-push gate (.no-mistakes.yaml
 # commands.lint) invoke, so the local lint can never diverge from CI again.
+# Focused hosted CI may use the explicit --ci-fast mode; the full default stays
+# the parity path for the no-mistakes gate and broad CI.
 # Regression origin: with no commands.lint configured, the local no-mistakes
 # lint step never ran the deterministic
 # `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh`, so PRs passed local
@@ -159,6 +161,7 @@ test_help_reports_the_complete_interface() {
   assert_contains "$help" "--list-files" "fm-lint.sh --help omitted --list-files"
   assert_contains "$help" "--help" "fm-lint.sh --help omitted --help"
   assert_contains "$help" "--fast" "fm-lint.sh --help omitted --fast"
+  assert_contains "$help" "--ci-fast" "fm-lint.sh --help omitted --ci-fast"
   assert_contains "$help" "SC1091" "fm-lint.sh --help omitted the local SC1091 exclusion"
   assert_contains "$help" "SC2034" "fm-lint.sh --help omitted the local SC2034 exclusion"
   assert_contains "$help" "SC2153" "fm-lint.sh --help omitted the local SC2153 exclusion"
@@ -307,6 +310,60 @@ SH
     || fail "fast lint mode did not lint the requested root"
   assert_grep $'analysis_mode\tfast' "$telemetry" "telemetry did not record fast analysis mode"
   pass "fm-lint.sh --fast disables ShellCheck extended analysis"
+}
+
+test_ci_fast_mode_disables_extended_analysis_in_one_process() {
+  local tmp fakebin log mode_log flag_log fixture_one fixture_two out
+  tmp=$(fm_test_tmproot fm-lint-ci-fast)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  mode_log="$tmp/mode.log"
+  flag_log="$tmp/flag.log"
+  fixture_one="$tmp/one.sh"
+  fixture_two="$tmp/two.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" one\n' > "$fixture_one"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" two\n' > "$fixture_two"
+  chmod +x "$fixture_one" "$fixture_two"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true \
+    FM_TEST_MODE_LOG="$mode_log" FM_TEST_FLAG_LOG="$flag_log" \
+    "$LINT" --ci-fast "$fixture_one" "$fixture_two" 2>&1) \
+    || fail "CI fast lint mode failed"$'\\n'"$out"
+  [ "$(wc -l < "$mode_log" | tr -d ' ')" -eq 1 ] \
+    || fail "CI fast lint mode started more than one ShellCheck process"
+  [ "$(cat "$mode_log")" = off ] \
+    || fail "CI fast lint mode did not disable extended analysis"
+  assert_grep $'external-sources=yes' "$flag_log" \
+    "CI fast lint mode did not preserve source following"
+  [ "$(wc -l < "$log" | tr -d ' ')" -eq 2 ] \
+    || fail "CI fast lint mode did not lint exactly two requested roots"
+  grep -Fqx "$fixture_one" "$log" \
+    || fail "CI fast lint mode skipped the first requested root"
+  grep -Fqx "$fixture_two" "$log" \
+    || fail "CI fast lint mode skipped the second requested root"
+  pass "fm-lint.sh --ci-fast uses one low-memory ShellCheck process for explicit roots"
+}
+
+test_ci_fast_full_inventory_uses_bounded_logical_shards() {
+  local tmp fakebin log mode_log out count
+  tmp=$(fm_test_tmproot fm-lint-ci-fast-shards)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  mode_log="$tmp/mode.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true \
+    FM_TEST_MODE_LOG="$mode_log" "$LINT" --ci-fast 2>&1) \
+    || fail "CI fast full inventory failed"$'\n'"$out"
+  count=$(wc -l < "$mode_log" | tr -d ' ')
+  [ "$count" -eq 32 ] \
+    || fail "CI fast full inventory started $count ShellCheck processes, expected 32 logical shards"
+  [ "$(grep -c '^off$' "$mode_log")" -eq 32 ] \
+    || fail "CI fast full inventory did not disable extended analysis in every shard"
+  [ "$(wc -l < "$log" | tr -d ' ')" -gt 500 ] \
+    || fail "CI fast full inventory did not forward the complete canonical root set"
+  pass "fm-lint.sh --ci-fast bounds the complete inventory into 32 deterministic one-worker shards"
 }
 
 test_ci_defaults_to_full_analysis() {
@@ -1366,6 +1423,8 @@ test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_fast_mode_disables_extended_analysis
 test_ci_defaults_to_full_analysis
+test_ci_fast_mode_disables_extended_analysis_in_one_process
+test_ci_fast_full_inventory_uses_bounded_logical_shards
 test_ci_rejects_explicit_fast_mode
 test_fast_mode_catches_a_real_lint_defect
 test_pins_an_explicit_version

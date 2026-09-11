@@ -160,7 +160,8 @@ run_inactive_reconcile() { # <home>
 }
 
 enable_real_crew_state() { # <home>
-  local home=$1 fb="$home/fakebin"
+  local home=$1
+  local fb="$home/fakebin"
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u

@@ -963,6 +963,7 @@ test_concurrent_rebind_waits_for_mutation_lock() {
     : > "$case_dir/rebound-complete"
     fm_lock_release "$case_dir/home/state/.treehouse-acquisition.lock"
   ) &
+  # shellcheck disable=SC2031 # The background PID is captured immediately.
   contender=$!
   rc=0
   run_teardown "$case_dir" task-x1 --force \

@@ -9,6 +9,7 @@ export LC_ALL=C
 
 SKILL="$ROOT/.agents/skills/bugfix-pair-room/SKILL.md"
 CHARTER_TEMPLATE="$ROOT/.agents/skills/secondmate-provisioning/templates/shipwright-charter.md"
+# shellcheck disable=SC2016 # Backticks are literal trigger markup.
 TRIGGER='`bugfix-pair-room` before dispatching a bug the captain found in the flow or any bug brief without a proven root cause.'
 
 test_skill_contract() {

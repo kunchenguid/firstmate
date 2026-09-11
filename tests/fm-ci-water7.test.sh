@@ -102,7 +102,8 @@ assert "needs" not in lint
 assert "if" not in lint
 assert lint.get("env") == {"FM_LINT_JOBS": "1"}
 assert lint["steps"][-1]["run"] == "bin/fm-lint.sh --ci-fast"
-assert "actionlint" not in str(lint)
+assert any(step.get("run") == "bin/fm-lint-workflows.sh" for step in lint["steps"])
+assert "actionlint" in str(lint)
 
 critical_commands = {
     "critical-teardown": [
@@ -161,7 +162,7 @@ portable_commands = {
     for job_id in ("tests-portable-parallel-1", "tests-portable-parallel-2")
 }
 
-def execute_portable_command(job_id, expected_lane, expected_index, expected_jobs):
+def execute_portable_command(job_id, expected_lane, expected_index, expected_jobs, fail_on_pi=False):
     with tempfile.TemporaryDirectory(prefix="fm-water7-command-") as directory:
         root = pathlib.Path(directory)
         runner = root / "bin/fm-test-run.sh"
@@ -190,6 +191,11 @@ def execute_portable_command(job_id, expected_lane, expected_index, expected_job
         args = [arg.decode() for arg in args]
         expected_json = runner_temp / "fm-test" / f"fm-test-timing-{expected_lane}.json"
         expected_args = ["--lane", expected_lane, "--json", str(expected_json)]
+        if fail_on_pi:
+            expected_args[2:2] = [
+                "--fail-on-gate-skip",
+                "Pi extension typecheck prerequisite not found",
+            ]
         if expected_jobs != 1:
             expected_args[0:0] = ["--jobs", str(expected_jobs)]
         assert args == expected_args, (job_id, args)
@@ -200,7 +206,7 @@ def execute_portable_command(job_id, expected_lane, expected_index, expected_job
 
 
 executed_lanes = [
-    execute_portable_command("tests-portable-parallel-1", "portable-parallel-1", 1, 2),
+    execute_portable_command("tests-portable-parallel-1", "portable-parallel-1", 1, 2, True),
     execute_portable_command("tests-portable-parallel-2", "portable-parallel-2", 2, 1),
 ]
 assert sorted(executed_lanes) == ["portable-parallel-1", "portable-parallel-2"]

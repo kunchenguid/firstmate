@@ -9,10 +9,22 @@ on:
 permissions:
   contents: read
 
+env:
+  TASKS_AXI_VERSION: 0.2.5
+  GIT_AUTHOR_NAME: Repository CI
+  GIT_AUTHOR_EMAIL: repository-ci@users.noreply.github.com
+  GIT_COMMITTER_NAME: Repository CI
+  GIT_COMMITTER_EMAIL: repository-ci@users.noreply.github.com
+
 jobs:
+  # Pull requests need one bounded lint process instead of the broad behavior
+  # suite. The lint owner keeps the exact ShellCheck and actionlint definitions.
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FM_LINT_JOBS: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned ShellCheck
@@ -25,11 +37,95 @@ jobs:
           set -eu
           bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      # Single owner of the lint definition (shell file set, config, version,
-      # and GitHub workflow lint). Do not re-spell the checks here; keep CI
-      # and the pre-push gate on this script so a self-broken ci.yml still
-      # fails locally before merge.
-      - run: bin/fm-lint.sh
+      - name: Run pinned workflow lint
+        run: bin/fm-lint-workflows.sh
+      - name: Run one low-memory ShellCheck pass
+        run: bin/fm-lint.sh --ci-fast
+
+  critical-teardown:
+    name: Critical teardown safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install required test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - name: Install tasks-axi
+        run: npm install -g "tasks-axi@$TASKS_AXI_VERSION"
+      - name: Run teardown safety owners
+        run: |
+          bin/fm-test-run.sh \
+            tests/fm-teardown.test.sh \
+            tests/fm-teardown-endpoint-safety.test.sh
+
+  critical-spawn:
+    name: Critical spawn safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install required test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - name: Install tasks-axi
+        run: npm install -g "tasks-axi@$TASKS_AXI_VERSION"
+      - name: Run spawn safety owners
+        run: |
+          bin/fm-test-run.sh \
+            tests/fm-spawn-dispatch-profile.test.sh \
+            tests/fm-spawn-pool-base-freshen.test.sh \
+            tests/fm-spawn-worktree-settle.test.sh
+
+  critical-delivery:
+    name: Critical delivery and wake safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install required test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      - name: Install tasks-axi
+        run: npm install -g "tasks-axi@$TASKS_AXI_VERSION"
+      - name: Run delivery and wake safety owners
+        run: |
+          bin/fm-test-run.sh \
+            tests/fm-pr-merge.test.sh \
+            tests/fm-branch-supervision.test.sh \
+            tests/fm-wake-queue.test.sh \
+            tests/fm-wake-drain.test.sh \
+            tests/fm-wake-drain-open-decisions.test.sh \
+            tests/fm-wake-drain-open-decisions-cursor.test.sh \
+            tests/fm-wake-drain-unread-status.test.sh
+
+  critical-smokes:
+    name: Critical end-to-end smokes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install required test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep tmux
+      - name: Run critical end-to-end smokes
+        run: |
+          bin/fm-test-run.sh \
+            tests/fm-backend-autodetect-smoke.test.sh \
+            tests/fm-backend-tmux-smoke.test.sh \
+            tests/fm-afk-inject-e2e.test.sh
 
   # Deterministic proof that portable parallel shards + portable serial + Herdr
   # equal the complete tests/*.test.sh inventory with no missing or duplicates,
@@ -37,6 +133,7 @@ jobs:
   test-coverage:
     name: Test coverage guard
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     steps:
       - uses: actions/checkout@v6
       - name: Prove complete regression partition
@@ -47,13 +144,18 @@ jobs:
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
-    # Measured shard wall is ~1 min of serial sum on proven scripts; this cap is
-    # a hang tripwire with margin, not the expected healthy end of the lane.
-    timeout-minutes: 10
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    # Measured two-worker wall is ~9 min on the current proven scripts; this cap
+    # is a hang tripwire with margin, not the expected healthy end of the lane.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Install required test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -67,8 +169,9 @@ jobs:
       - name: Install tasks-axi
         run: |
           set -eu
-          npm install -g tasks-axi
+          npm install -g "tasks-axi@$TASKS_AXI_VERSION"
           tasks-axi --version
+      # Token-free Pi extension checks use the installed package's own types.
       - name: Install the Pi package for the Pi extension tests
         run: |
           set -eu
@@ -78,7 +181,7 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-parallel-1 \
+          bin/fm-test-run.sh --jobs 2 --lane portable-parallel-1 \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
@@ -92,11 +195,16 @@ jobs:
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Install required test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -110,7 +218,7 @@ jobs:
       - name: Install tasks-axi
         run: |
           set -eu
-          npm install -g tasks-axi
+          npm install -g "tasks-axi@$TASKS_AXI_VERSION"
           tasks-axi --version
       - name: Run portable parallel shard 2
         run: |
@@ -135,10 +243,11 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Current runners can take ~20 min for a balanced shard. This 30-minute cap
-    # preserves the timeout as a hang tripwire while allowing runner-speed and
-    # job-setup margin; it is not the expected healthy end of the lane.
-    timeout-minutes: 30
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    # Measured whole remainder is ~63 min of serial work; the balanced shards
+    # are ~12.7 min each. Cap leaves recovery margin for slower hosted runners;
+    # it remains a hang tripwire, not the expected healthy end of the lane.
+    timeout-minutes: 35
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
@@ -148,6 +257,15 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Install required test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep
+          # Ubuntu 24.04's AppArmor default blocks bubblewrap's uid namespace
+          # even after the package is installed. This ephemeral runner needs a
+          # usable sandbox, not merely a binary on PATH, for the runtime-closure
+          # acceptance test below.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -169,11 +287,9 @@ jobs:
       - name: Install tasks-axi for backlog-handoff delegation
         run: |
           set -eu
-          npm install -g tasks-axi
+          npm install -g "tasks-axi@$TASKS_AXI_VERSION"
           tasks-axi --version
-      # The Pi extension tests read the installed Pi package's own types and
-      # runtime, so without it they gate-skip and pass silently. It is a public
-      # npm package and needs no credential, so CI can hold the real thing.
+      # Token-free Pi extension checks use the installed package's own types.
       - name: Install the Pi package for the Pi extension tests
         run: |
           set -eu
@@ -189,8 +305,6 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          # The Pi package is installed above and CI provides npm and tsc, so
-          # any missing typecheck prerequisite is a broken lane, not a valid skip.
           bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
@@ -209,6 +323,7 @@ jobs:
   tests-herdr:
     name: Behavior tests (Herdr)
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     # Healthy runs finish around 7 minutes. This job cap is a last-resort hang
     # tripwire, not the expected end of the lane. The family-run step owns the
     # tighter bound so a wedged suite fails fast with always() cleanup and
@@ -218,6 +333,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Install required test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
       - name: Require tools for real Herdr
         run: |
           set -eu
@@ -250,15 +369,15 @@ jobs:
           printf '%s\n' "$status"
           version=$(printf '%s' "$status" | jq -r '.client.version // empty')
           protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty')
-          [ "$version" = "0.7.4" ] || {
-            echo "::error::expected exact Herdr pin 0.7.4, got ${version:-<empty>}"
+          [ "$version" = "0.8.0" ] || {
+            echo "::error::expected exact Herdr pin 0.8.0, got ${version:-<empty>}"
             exit 1
           }
           case "$protocol" in
             ''|*[!0-9]*) echo "::error::could not read client protocol"; exit 1 ;;
           esac
-          [ "$protocol" -ge 16 ] || {
-            echo "::error::herdr protocol $protocol is below the required floor 16"
+          [ "$protocol" -ge 19 ] || {
+            echo "::error::herdr protocol $protocol is below the required floor 19"
             exit 1
           }
       - name: Start default Herdr session for fleet-state tripwire
@@ -334,7 +453,7 @@ jobs:
       - tests-portable-parallel-2
       - tests-portable-serial
       - tests-herdr
-    if: always()
+    if: always() && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci'))
     steps:
       - uses: actions/checkout@v6
       - name: Download lane timing artifacts
@@ -367,6 +486,7 @@ jobs:
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
     runs-on: macos-latest
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -427,18 +547,17 @@ jobs:
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     steps:
       - uses: actions/checkout@v6
       - name: Compatibility pointers must stay intact
         run: |
           set -eu
-          [ ! -L CLAUDE.md ] || { echo "::error::CLAUDE.md must be a real @AGENTS.md pointer file, not a symlink"; exit 1; }
-          tmp=$(mktemp)
-          trap 'rm -f "$tmp"' EXIT
-          printf '%s\n' \
-            '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
-            '@AGENTS.md' >"$tmp"
-          cmp -s CLAUDE.md "$tmp" || { echo "::error::CLAUDE.md must be the canonical @AGENTS.md pointer"; exit 1; }
+          [ -f CLAUDE.md ] && [ ! -L CLAUDE.md ] || { echo "::error::CLAUDE.md must be a regular @AGENTS.md pointer"; exit 1; }
+          cmp -s CLAUDE.md - <<'EOF' || { echo "::error::CLAUDE.md must contain the canonical @AGENTS.md pointer"; exit 1; }
+          <!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
+          @AGENTS.md
+          EOF
           [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
       - name: Personal fleet paths must not be tracked
         run: |

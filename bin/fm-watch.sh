@@ -181,6 +181,7 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 eval "$(fm_watch_intervals)"
+POLL=${POLL:-15}
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh

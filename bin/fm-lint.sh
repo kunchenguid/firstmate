@@ -3,11 +3,15 @@
 #
 # Runs its file set with ShellCheck's default severity, extended analysis,
 # ambient configuration disabled, and one exact ShellCheck version. CI and
-# no-mistakes both invoke this script with no arguments, so this owner selects
-# the context-appropriate rule set without duplicating lint configuration.
+# no-mistakes invoke this script with the full default, while hosted focused CI
+# may use --ci-fast for one low-memory ordinary-check pass.
+# The default path selects the context-appropriate rule set without duplicating
+# lint configuration.
 # The explicit --fast mode is local-only and disables ShellCheck's extended
 # dataflow analysis while preserving ordinary shell lint checks and source
-# following. CI, main, and merge-base-less runs keep --norc --external-sources
+# following. The explicit --ci-fast mode is the hosted low-memory contract and
+# disables extended analysis without changing source following. Normal CI, main,
+# and merge-base-less runs keep --norc --external-sources
 # with full dataflow over the whole canonical set. An ordinary local branch
 # (changed-file mode, including the no-mistakes lint step) drops
 # --external-sources, keeps dataflow, and excludes SC1091, SC2034, SC2153,
@@ -42,9 +46,11 @@
 # backlog backend follows the same tasks-axi lifecycle path.
 #
 # Canonical lint defaults to two bounded workers over two stable logical shards.
-# Each shard writes separate diagnostics, and the parent replays those outputs in
-# deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
-# runs the same shards serially with byte-identical diagnostics and exit selection.
+# The hosted --ci-fast full inventory uses 32 logical shards with one worker so
+# each ShellCheck process gets a bounded source graph. The parent replays
+# diagnostics in deterministic shard and root order after every worker finishes.
+# FM_LINT_JOBS=1 runs the same shards serially with byte-identical diagnostics
+# and exit selection.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
@@ -52,6 +58,8 @@
 # Usage:
 #   fm-lint.sh                         lint the context-selected file set (see above)
 #   fm-lint.sh --fast [path]...       local lint with extended analysis disabled
+#   fm-lint.sh --ci-fast [path]...    hosted lint with extended analysis disabled
+#                                      (full inventory uses 32 serial shards)
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
@@ -61,6 +69,8 @@
 set -u
 
 REQUIRED_SHELLCHECK=0.11.0
+SHARD_COUNT=2
+CI_FAST_SHARD_COUNT=32
 # Cross-file codes that need --external-sources. Local changed-file mode
 # cannot judge them, so they stay CI-only.
 LOCAL_NOX_EXCLUDE=SC1091,SC2034,SC2153,SC2329
@@ -155,6 +165,7 @@ fm_lint_usage() {
 # Default no-args lint also validates GitHub workflows. Explicit paths stay a
 # ShellCheck-only override so callers can target one shell root.
 fm_lint_run_workflows() {
+  [ "$CI_FAST" -eq 0 ] || return 0
   [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
   "$SELF_DIR/fm-lint-workflows.sh"
 }
@@ -395,6 +406,7 @@ fm_lint_run_backend_purity() {
 JOBS=${FM_LINT_JOBS:-2}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
 FAST=0
+CI_FAST=0
 ANALYSIS_MODE=full
 LIST_FILES=0
 while [ "$#" -gt 0 ]; do
@@ -422,6 +434,12 @@ while [ "$#" -gt 0 ]; do
       ANALYSIS_MODE=fast
       shift
       ;;
+    --ci-fast)
+      FAST=1
+      CI_FAST=1
+      ANALYSIS_MODE=fast
+      shift
+      ;;
     --list-files)
       LIST_FILES=1
       shift
@@ -443,9 +461,12 @@ case "$JOBS" in
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
 esac
 
-if [ "$FAST" -eq 1 ] && { [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; }; then
+if [ "$FAST" -eq 1 ] && { [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; } && [ "$CI_FAST" -eq 0 ]; then
   printf 'fm-lint.sh: --fast is local-only; CI uses full ShellCheck analysis.\n' >&2
   exit 2
+fi
+if [ "$CI_FAST" -eq 1 ]; then
+  JOBS=1
 fi
 
 # fm_lint_changed_base_ref prints the ref to diff the working branch against:
@@ -520,6 +541,14 @@ if [ "$CHANGED_MODE" -eq 1 ] && [ "$FAST" -eq 0 ]; then
   ANALYSIS_MODE=local
 fi
 ROOT_COUNT=${#ROOTS[@]}
+ACTIVE_SHARD_COUNT=$SHARD_COUNT
+if [ "$CI_FAST" -eq 1 ]; then
+  if [ "$EXPLICIT_PATHS" -eq 0 ]; then
+    ACTIVE_SHARD_COUNT=$CI_FAST_SHARD_COUNT
+  else
+    ACTIVE_SHARD_COUNT=1
+  fi
+fi
 
 if [ "$LIST_FILES" -eq 1 ]; then
   [ "$#" -eq 0 ] || {
@@ -548,7 +577,9 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
     "$REQUIRED_SHELLCHECK" "$resolved" "$REQUIRED_SHELLCHECK" >&2
   exit 1
 fi
-if [ "$FAST" -eq 1 ]; then
+if [ "$CI_FAST" -eq 1 ]; then
+  printf 'fm-lint.sh: hosted low-memory mode; ShellCheck extended analysis disabled\n' >&2
+elif [ "$FAST" -eq 1 ]; then
   printf 'fm-lint.sh: fast local mode; ShellCheck extended analysis disabled\n' >&2
 elif [ "$FOLLOW_SOURCES" -eq 0 ]; then
   printf 'fm-lint.sh: local changed-file mode; ShellCheck source following disabled\n' >&2
@@ -601,9 +632,8 @@ TAB=$(printf '\t')
 WEIGHTS="$TMP_ROOT/weights"
 OUTPUT_DIR="$TMP_ROOT/output"
 mkdir -p "$OUTPUT_DIR"
-SHARD_COUNT=2
 worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
+while [ "$worker" -lt "$ACTIVE_SHARD_COUNT" ]; do
   : > "$TMP_ROOT/manifest.$worker"
   worker=$((worker + 1))
 done
@@ -627,21 +657,30 @@ for path in "${ROOTS[@]}"; do
   index=$((index + 1))
 done
 
-# Largest-first deterministic greedy assignment keeps the two bounded workers
+# Largest-first deterministic greedy assignment keeps the bounded workers
 # balanced without affecting replay order. Direct bytes are a stable portable
 # proxy after the expensive dynamic adapter source fan-out is cut.
-WORKER_LOADS=(0 0)
+WORKER_LOADS=()
+worker=0
+while [ "$worker" -lt "$ACTIVE_SHARD_COUNT" ]; do
+  WORKER_LOADS[worker]=0
+  worker=$((worker + 1))
+done
 LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n "$WEIGHTS" > "$WEIGHTS.sorted"
 while IFS="$TAB" read -r weight index path; do
   worker=0
-  if [ "${WORKER_LOADS[1]}" -lt "${WORKER_LOADS[0]}" ]; then
-    worker=1
-  fi
+  candidate=1
+  while [ "$candidate" -lt "$ACTIVE_SHARD_COUNT" ]; do
+    if [ "${WORKER_LOADS[candidate]}" -lt "${WORKER_LOADS[worker]}" ]; then
+      worker=$candidate
+    fi
+    candidate=$((candidate + 1))
+  done
   printf '%s\t%s\n' "$index" "$path" >> "$TMP_ROOT/manifest.$worker"
   WORKER_LOADS[worker]=$((WORKER_LOADS[worker] + weight))
 done < "$WEIGHTS.sorted"
 worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
+while [ "$worker" -lt "$ACTIVE_SHARD_COUNT" ]; do
   LC_ALL=C sort -t "$TAB" -k1,1n "$TMP_ROOT/manifest.$worker" > "$TMP_ROOT/manifest.$worker.sorted"
   mv "$TMP_ROOT/manifest.$worker.sorted" "$TMP_ROOT/manifest.$worker"
   worker=$((worker + 1))
@@ -726,25 +765,25 @@ fm_lint_wait_workers() {
 
 if [ "$JOBS" -eq 1 ]; then
   worker=0
-  while [ "$worker" -lt "$SHARD_COUNT" ]; do
+  while [ "$worker" -lt "$ACTIVE_SHARD_COUNT" ]; do
     fm_lint_start_worker "$worker"
     fm_lint_wait_workers
     worker=$((worker + 1))
   done
 else
   worker=0
-  while [ "$worker" -lt "$SHARD_COUNT" ]; do
+  while [ "$worker" -lt "$ACTIVE_SHARD_COUNT" ]; do
     fm_lint_start_worker "$worker"
     worker=$((worker + 1))
   done
   fm_lint_wait_workers
 fi
 
-# Replay both stable shards in deterministic order and select the first nonzero
+# Replay stable shards in deterministic order and select the first nonzero
 # shard status. ShellCheck processes every root in a shard after earlier findings.
 overall_rc=0
 worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
+while [ "$worker" -lt "$ACTIVE_SHARD_COUNT" ]; do
   output="$OUTPUT_DIR/shard.$worker"
   [ ! -f "$output.out" ] || cat "$output.out"
   if [ -f "$output.rc" ]; then
@@ -849,8 +888,11 @@ EOF
     printf 'source_boundary_directives\t%s\n' "$source_boundaries"
     printf 'source_followed_directives\t%s\n' "$source_followed"
     printf 'source_target_count\t%s\n' "$source_targets"
-    printf 'shard_1_weight_bytes\t%s\n' "${WORKER_LOADS[0]}"
-    printf 'shard_2_weight_bytes\t%s\n' "${WORKER_LOADS[1]:-0}"
+    worker=0
+    while [ "$worker" -lt "$ACTIVE_SHARD_COUNT" ]; do
+      printf 'shard_%s_weight_bytes\t%s\n' "$((worker + 1))" "${WORKER_LOADS[worker]}"
+      worker=$((worker + 1))
+    done
     printf 'wall_seconds\t%s\n' "$((TELEMETRY_END_EPOCH - TELEMETRY_START_EPOCH))"
     printf 'worker_wall_sum_seconds\t%s\n' "$timing_worker_wall"
     printf 'max_worker_wall_seconds\t%s\n' "$max_worker_wall"
