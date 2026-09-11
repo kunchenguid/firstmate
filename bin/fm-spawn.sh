@@ -1491,6 +1491,7 @@ omp_model_validate() {  # <omp-bin> <model>
 # model-and-effort.md) and launches unvalidated with a notice.
 agy_model_validate() {  # <agy-bin> <model>
   local bin=$1 model=$2 listing rc=0 bound=${FM_AGY_MODELS_TIMEOUT:-15}
+  case "$bound" in ''|*[!0-9]*|0*) bound=15 ;; esac
   [ -n "$model" ] && [ "$model" != default ] || return 0
   listing=$(fm_run_timed "$bound" "$bin" models 2>/dev/null < /dev/null) || rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$listing" ]; then

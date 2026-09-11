@@ -535,7 +535,7 @@ run_agy_spawn() {
     FM_FAKE_AGY_ASSUME_TRUSTED="${FM_FAKE_AGY_ASSUME_TRUSTED:-0}" \
     FM_FAKE_AGY_RACE="${FM_FAKE_AGY_RACE:-0}" \
     FM_FAKE_AGY_ANSWER="${FM_FAKE_AGY_ANSWER:-works}" \
-    FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=1 \
+    FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=${FM_AGY_MODELS_TIMEOUT:-1} \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -627,6 +627,25 @@ test_agy_hung_listing_is_cut_off_and_launches() {
   assert_contains "$(cat "$CASE_DIR/launch.log")" "--model 'gemini-3.8-flash-low'" \
     "a hung listing dropped the requested model instead of launching it unvalidated"
   pass "fm-spawn: a hung agy listing is cut off by the shared bound and launches unvalidated"
+}
+
+test_agy_zero_model_timeout_is_clamped_to_the_default_bound() {
+  local id rec out rc started elapsed
+  id="agy-zerobound-z14-$$"
+  rec=$(make_agy_spawn_case zerobound "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  started=$(date +%s)
+  out=$(FM_FAKE_AGY_MODELS_HANG=1 FM_AGY_MODELS_TIMEOUT=0 \
+    run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 0 "$rc" "a hung listing with a zero bound must not block the spawn"
+  [ "$elapsed" -lt 25 ] || fail "a zero model bound disabled the deadline (took ${elapsed}s)"
+  assert_contains "$out" "did not answer within 15s" \
+    "a zero model bound was not clamped to the documented default"
+  [ -s "$CASE_DIR/launch.log" ] || fail "a zero model bound produced no launch command"
+  pass "fm-spawn: a zero FM_AGY_MODELS_TIMEOUT is clamped to the default bound"
 }
 
 # Bare Enter key presses only: shell setup rides its Enter on the typed text
@@ -810,6 +829,7 @@ test_agy_effort_xhigh_is_recorded_but_omitted
 test_agy_unlisted_model_refuses_before_pane_creation
 test_agy_unreachable_listing_launches_unvalidated
 test_agy_hung_listing_is_cut_off_and_launches
+test_agy_zero_model_timeout_is_clamped_to_the_default_bound
 test_agy_trust_registers_the_logical_and_resolved_worktree_paths
 test_agy_trust_creates_a_missing_store
 test_agy_trust_refuses_out_of_scope_paths
