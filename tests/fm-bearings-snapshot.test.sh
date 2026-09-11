@@ -2402,6 +2402,63 @@ EOF
   pass "active children reach Underway independently of a home captain hold"
 }
 
+# A captain scanning Underway must be able to tell WHICH task a row is, and the
+# board orders Charted Next by the durable filed date, so both facts have to come
+# out of fleet state rather than being invented at render time.
+test_underway_and_gate_rows_carry_the_durable_name_and_filed_date() {
+  local home mate fakebin json
+  home=$(make_home durable-name-filed)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/durable-name-home"
+  make_valid_secondmate_home named-mate "$mate"
+  append_secondmate_registry "$home" named-mate "$mate"
+  mkdir -p "$home/projects/main-wt"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] main-ship - Rename the fleet board rows (repo: firstmate) (kind: ship) (since 2026-07-09)
+
+## Queued
+- [ ] newer-gate - Filed later (repo: firstmate) (kind: ship) (since 2026-07-10)
+- [ ] older-gate - Filed earlier (repo: firstmate) (kind: ship) (since 2026-07-01)
+- [ ] undated-gate - Filed before dates were recorded (repo: firstmate) (kind: ship)
+
+## Done
+EOF
+  fm_write_meta "$home/state/main-ship.meta" \
+    "window=firstmate:fm-main-ship" "worktree=$home/projects/main-wt" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$home/state" main-ship busy
+  printf 'working: no-mistakes review round 2\n' > "$home/state/main-ship.status"
+
+  printf '## In flight\n' > "$mate/data/backlog.md"
+  printf -- '- [ ] mate-child - Tighten the ledger contract (repo: sample) (kind: ship) (since 2026-07-08)\n' \
+    >> "$mate/data/backlog.md"
+  printf '\n## Queued\n\n## Done\n' >> "$mate/data/backlog.md"
+  mkdir -p "$mate/projects/mate-child"
+  fm_write_meta "$mate/state/mate-child.meta" \
+    "window=firstmate:fm-mate-child" "worktree=$mate/projects/mate-child" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" mate-child busy
+  printf 'working: waiting on the pipeline\n' > "$mate/state/mate-child.status"
+
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | any(.id == "main-ship"
+      and .name == "Rename the fleet board rows"
+      and (.doing | type == "string") and (.doing | length) > 0
+      and .doing != .name))
+      and (.in_flight | any(.id == "named-mate/mate-child"
+        and .name == "Tighten the ledger contract"
+        and (.doing | type == "string") and (.doing | length) > 0
+        and .doing != .name))
+      and (.gates | any(.id == "newer-gate" and .filed == "2026-07-10"))
+      and (.gates | any(.id == "older-gate" and .filed == "2026-07-01"))
+      and (.gates | any(.id == "undated-gate" and .filed == null))
+  ' >/dev/null || fail "durable Underway names or gate filed dates are missing: $json"
+  pass "Underway rows carry the durable task name and gates carry their filed date"
+}
+
 test_mixed_secondmate_roles_partial_state_and_captain_readiness() {
   local home fakebin hibit wheel sshhip ha canonical json
   home=$(make_home mixed-domain-regressions)
@@ -3214,6 +3271,7 @@ test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_working_captain_holds_keep_their_bucket_surfaces
 test_active_children_project_independent_of_home_captain_hold
+test_underway_and_gate_rows_carry_the_durable_name_and_filed_date
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending

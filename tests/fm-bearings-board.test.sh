@@ -261,6 +261,17 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   [ "$rc" -ne 0 ] || fail "a fleet row without an explicit repo marker was accepted"
 
   write_valid_payload "$data"
+  jq '.underway = [{"id":"sample-task","repo":"sample","state":"working",
+    "kind":"ship","doing":"implementing"}]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an underway row without an explicit name marker was accepted"
+
+  write_valid_payload "$data"
+  jq '.charted[0].filed = "last Tuesday"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a charted row with an uncomparable filed date was accepted"
+
+  write_valid_payload "$data"
   jq '.captains_call[0].allow_freeform = "yes"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a non-boolean renderer field was accepted"
