@@ -1212,14 +1212,14 @@ agent_state_probe() {  # <window>
 
 # Record first agent-gone evidence and absorb this poll's classification: the
 # early poll check below owns the confirming second read and the one surface.
-# A hash argument marks that hash classified, so a verdict that never confirms
-# (a transient misread) leaves the pane on the ordinary wedge-timer path
-# instead of re-surfacing the same sighting.
-note_agent_gone_pending() {  # <window> <verdict> [hash]
-  local win=$1 verdict=$2 h=${3:-} key
+# While the pending marker exists the early check intercepts every later poll
+# before classification, so a verdict that never confirms (a transient misread)
+# drops the marker and the same pane state re-classifies as a fresh first
+# sight on the next poll - nothing is swallowed.
+note_agent_gone_pending() {  # <window> <verdict>
+  local win=$1 verdict=$2 key
   key=$(window_key "$win")
   printf 'pending:%s' "$verdict" > "$STATE/.agentgone-$key"
-  [ -n "$h" ] && printf '%s' "$h" > "$STATE/.stale-$key"
   triage_log "agent-gone evidence ($verdict) pending confirmation: $win"
 }
 
@@ -2400,7 +2400,7 @@ EOF
         dead|missing)
           case "$(cat "$gmf" 2>/dev/null || true)" in
             gone:*) continue ;;
-            *)      surface_agent_gone "$w" "$gstate" ;;
+            *)      surface_agent_gone "$w" "$gstate" ; continue ;;
           esac
           ;;
         alive)
@@ -2485,7 +2485,7 @@ EOF
             # absorb this sighting; the confirming poll owns the one surface.
             gv=$(agent_state_probe "$w")
             if [ "$gv" = dead ] || [ "$gv" = missing ]; then
-              note_agent_gone_pending "$w" "$gv" "$h"
+              note_agent_gone_pending "$w" "$gv"
             elif crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
@@ -2553,7 +2553,7 @@ EOF
             status_is_paused_or_captain_held "$last" || gv=$(agent_state_probe "$w")
             case "$gv" in
               dead|missing)
-                note_agent_gone_pending "$w" "$gv" "$h"
+                note_agent_gone_pending "$w" "$gv"
                 ;;
               *)
                 case "$(pause_state_class "$w" "$task")" in
