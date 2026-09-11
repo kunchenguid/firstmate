@@ -204,8 +204,9 @@
 #   fm_backend_<backend>_foreground_processes). zellij and cmux have no such
 #   reader, and a read can fail on any backend; those polls read the pane's
 #   own text instead: treehouse's "Entered worktree" line starts the settle
-#   phase, and an `error:` line or the max_trees pool-cap line after the
-#   echoed command fails the spawn at once with the pane's last lines. A shell
+#   phase, and an `error:` line or the max_trees pool-cap line seen after the
+#   echoed command and before any entry fails the spawn at once with the
+#   pane's last lines. A shell
 #   that is back in the project directory after treehouse was seen running
 #   means treehouse exited without entering (the pool at its cap, say), and the
 #   spawn fails at once. Every refusal from this wait prints what the evidence
@@ -3388,8 +3389,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   #              settle bound, with the pane's own text standing in for the
   #              foreground (spawn_pane_signal). Treehouse's "Entered
   #              worktree" line starts the settle phase afresh; an error or
-  #              pool-cap line fails the spawn at once with the pane's last
-  #              lines. A slow fetch on these backends is therefore given up
+  #              pool-cap line seen before any entry fails the spawn at once
+  #              with the pane's last lines. Once entry is seen the pane text
+  #              is not read again: the nested shell owns the pane from then
+  #              on, and its own startup errors are not treehouse's verdict.
+  #              A slow fetch on these backends is therefore given up
   #              on at the settle bound, with a refusal that says so: the
   #              per-project Treehouse lock is held across this wait (see the
   #              header), so nothing waits longer without positive evidence.
@@ -3424,14 +3428,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     fg_report=$(spawn_foreground_processes "$WT_TARGET" 2>/dev/null || true)
     phase=$(spawn_worktree_phase "$fg_report")
-    if [ "$phase" = unknown ]; then
+    if [ "$phase" = unknown ] && [ "$treehouse_entered" = 0 ]; then
       case "$(spawn_pane_signal "$WT_TARGET")" in
         entered)
           treehouse_seen=1
-          if [ "$treehouse_entered" = 0 ]; then
-            treehouse_entered=1
-            settle_secs=0
-          fi
+          treehouse_entered=1
+          settle_secs=0
           ;;
         refused)
           treehouse_seen=1

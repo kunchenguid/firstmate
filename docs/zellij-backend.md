@@ -70,7 +70,8 @@ Every pane operation passes an explicit `--pane-id` because a new session can fo
 Worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
 This active probe is scoped to spawn-time worktree discovery and is not advertised as a general live-cwd API.
 Zellij exposes no per-pane foreground process either, so that discovery cannot tell a slow `git fetch origin` inside `treehouse get` from a refusal.
-The pane text stands in for the foreground: treehouse's own `Entered worktree` line starts the 60-second path-settle bound, and an `error:` line or the `max_trees` pool-cap line after the echoed command fails the spawn at once with the pane's last lines.
+The pane text stands in for the foreground: treehouse's own `Entered worktree` line starts the 60-second path-settle bound, and an `error:` line or the `max_trees` pool-cap line seen after the echoed command and before any entry fails the spawn at once with the pane's last lines.
+Once the entry line has been seen, the pane text is not read again, so the nested shell's own startup errors are never taken for a refusal.
 A pane that shows neither gives up at that same bound, and the refusal names the foreground as unreadable.
 The larger `FM_SPAWN_ACQUIRE_TIMEOUT` bound needs a foreground reader that shows treehouse running, because the spawn holds the per-project Treehouse lock across the wait; the [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns both bounds.
 

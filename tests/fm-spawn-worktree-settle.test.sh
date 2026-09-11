@@ -33,8 +33,8 @@
 # reported as still running, that a refusal fails fast with the pane's own
 # reason, and that an unreadable foreground (an empty FM_FAKE_PANE_SHELL)
 # stays on the settle bound with the pane text standing in: it gives up at
-# 60s, an "Entered worktree" line starts the settle phase, and an error line
-# fails fast.
+# 60s, an "Entered worktree" line starts the settle phase, an error line
+# before any entry fails fast, and an error line after the entry does not.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -494,6 +494,45 @@ test_unreadable_foreground_refusal_line_fails_fast() {
   pass "a refusal line in the pane text fails fast on a backend without a foreground reader"
 }
 
+# Once treehouse's entry line has been seen, the pane text is treehouse's
+# verdict no longer: the nested shell owns the pane from then on, and on
+# zellij and cmux the path probes scroll the entry line out of the capture
+# window while the shell's own startup noise stays inside it. The incident
+# shape: entry seen, then a capture holding only an error line, and a path
+# that never settles. The spawn must give up at the settle bound naming the
+# entry it saw and the last path seen, never claim treehouse reported an
+# error.
+test_error_line_after_entry_is_not_read_as_a_refusal() {
+  local rec id out status reads
+  id=settle-blind-entry-noise-z11
+  rec=$(make_primary_case settle-blind-entry-noise "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  PANE_SHELL=
+  ACQUIRE_TIMEOUT=100
+  PANE_TAIL="\$ treehouse get\n🌳 Entered worktree at $WT_DIR. Type 'exit' to return.\n"
+  PANE_TAIL_LATE_READS=5
+  PANE_TAIL_LATE='error: prompt plugin failed to load\n$ \n'
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane whose path never settled"$'\n'"$out"
+  assert_contains "$out" "printed its 'Entered worktree' line, but no isolated worktree appeared within 60s after it" \
+    "spawn did not name the entry it saw and the settle bound it reached"
+  assert_contains "$out" "$STALE_DIR" \
+    "the refusal did not name the path the pane kept reporting"
+  assert_not_contains "$out" "reported an error in the pane" \
+    "spawn read the nested shell's startup noise as a treehouse refusal after entry"
+  assert_not_contains "$out" "did not enter" \
+    "spawn claimed treehouse did not enter after seeing its entry line"
+  reads=$(cat "$COUNTFILE")
+  { [ "$reads" -ge 61 ] && [ "$reads" -le 62 ]; } \
+    || fail "after entry only the settle bound applies, but the spawn polled $reads times"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an error line after treehouse's entry is not read as a refusal"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
@@ -504,5 +543,6 @@ test_pool_cap_refusal_fails_fast_with_the_pane_reason
 test_unreadable_foreground_gives_up_at_the_settle_bound
 test_unreadable_foreground_entered_line_starts_the_settle_phase
 test_unreadable_foreground_refusal_line_fails_fast
+test_error_line_after_entry_is_not_read_as_a_refusal
 
 echo "# all fm-spawn-worktree-settle tests passed"
