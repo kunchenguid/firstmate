@@ -8,12 +8,15 @@
 # property, not the fold's own source text. tests/fm-wake-drain-open-decisions.test.sh
 # already covers the fold's single-drain correctness; this file covers the
 # cursor's cross-drain persistence and cost bound.
+#   - a cold-fold timing bound over 60 status logs with 200 lines each
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-open-decisions-cursor-tests)
 
@@ -37,6 +40,52 @@ append_filler() {  # <file> <count>
 # incremental fold call (last matching line in the probe log).
 last_probe_bytes() {  # <probe-file> <status-file>
   grep -F "$(printf '%s\t' "$2")" "$1" 2>/dev/null | tail -1 | cut -f2
+}
+
+test_cold_fold_of_60_status_logs_stays_bounded() {
+  local dir state out started elapsed load i j status ident size
+  dir=$(make_case cold-60-status-logs)
+  state="$dir/state"
+  out="$dir/drain.out"
+  i=1
+  while [ "$i" -le 60 ]; do
+    status="$state/task-$i.status"
+    if [ "$i" -eq 1 ]; then
+      printf 'needs-decision [key=shape]: keep the current shape\n' > "$status"
+    else
+      printf 'working: routine filler line 001\n' > "$status"
+    fi
+    j=2
+    while [ "$j" -le 200 ]; do
+      printf 'working: routine filler line %03d\n' "$j" >> "$status"
+      j=$((j + 1))
+    done
+    i=$((i + 1))
+  done
+
+  # The presentation manifest represents a prior clean presentation, leaving
+  # the cold open-decision fold as the measured path without replaying 12,000
+  # routine status lines through the unrelated unread-status surfaces.
+  : > "$state/.status-presentation-cursor"
+  for status in "$state"/*.status; do
+    i=${status##*/}
+    i=${i%.status}
+    ident=$(bash -c '. "$1"; _fm_open_decisions_file_ident "$2"' _ \
+      "$ROOT/bin/fm-classify-lib.sh" "$status") \
+      || fail "could not fingerprint $status for the cold-fold fixture"
+    size=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+    printf '%s\t%s\t%s\t0\n' "$i" "$ident" "$size" >> "$state/.status-presentation-cursor"
+  done
+
+  started=$(date +%s)
+  fm_run_timed 60 env FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 \
+    "$DRAIN" > "$out" 2> "$dir/drain.err" \
+    || fail "cold 60-log drain exceeded its 60-second bound"
+  elapsed=$(( $(date +%s) - started ))
+  grep -F 'task-1 [key=shape] needs-decision: keep the current shape' "$out" >/dev/null \
+    || fail "the cold-fold fixture lost its open decision"
+  load=$(uptime 2>/dev/null | tr '\\n' ' ' || printf 'unknown')
+  pass "cold 60-log fold stayed under 60s (elapsed=${elapsed}s load=${load})"
 }
 
 test_buried_decision_survives_many_growing_drains_and_resolution_clears_it() {
@@ -347,6 +396,7 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   pass "an old fold cache is rebuilt once before same-version incremental reads resume"
 }
 
+test_cold_fold_of_60_status_logs_stays_bounded
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
 test_read_failure_preserves_state_for_retry

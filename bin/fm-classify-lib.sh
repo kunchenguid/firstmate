@@ -762,9 +762,9 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   ' "$f" "$start" "$length"
 }
 
-status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
-  local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
-  local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
+status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [<captured-identity>]
+  local f=$1 captured_end=${2:-} captured_ident=${3:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
+  local version='' size actual_size cur_ident resolve held chunk_file raw_file chunk_size line cursor_dirty=0 snapshot_trusted=0
   local target_cursor
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
@@ -811,23 +811,44 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
       esac
   fi
 
-  # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
-  # report the already-trusted persisted set unchanged rather than risking a
-  # silent invalidation that would wipe it.
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
-  [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
-  actual_size=$(_fm_status_file_size "$f") \
-    || { printf '%s' "$trusted_open"; return 0; }
-  actual_size=${actual_size//[[:space:]]/}
-  case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
-  if [ -n "$captured_end" ]; then
-    case "$captured_end" in
-      ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
-    esac
-    [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
-    size=$captured_end
+  # A presentation snapshot already captured this file's identity and size.
+  # Reuse that pair when the persisted fold cursor agrees, avoiding four
+  # subprocess-backed metadata reads for every unchanged status log.
+  case "$captured_end" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ -n "$captured_ident" ] \
+        && [ "$version" = "$FM_OPEN_DECISIONS_FOLD_VERSION" ] \
+        && [ "$ident" = "$captured_ident" ] \
+        && [ "$offset" -le "$captured_end" ]; then
+        cur_ident=$captured_ident
+        actual_size=$captured_end
+        size=$captured_end
+        snapshot_trusted=1
+      fi
+      ;;
+  esac
+  if [ "$snapshot_trusted" -eq 1 ]; then
+    :
   else
-    size=$actual_size
+    # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
+    # report the already-trusted persisted set unchanged rather than risking a
+    # silent invalidation that would wipe it.
+    cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
+    [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
+    actual_size=$(_fm_status_file_size "$f") \
+      || { printf '%s' "$trusted_open"; return 0; }
+    actual_size=${actual_size//[[:space:]]/}
+    case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+    if [ -n "$captured_end" ]; then
+      case "$captured_end" in
+        ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
+      esac
+      [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
+      size=$captured_end
+    else
+      size=$actual_size
+    fi
   fi
 
   if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
@@ -839,20 +860,45 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
 
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
-    _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
-    chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
-      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
-    chunk_size=${chunk_size//[[:space:]]/}
-    case "$chunk_size" in
-      ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
-    esac
-    # Test-only observability seam (off by default, no production behavior
-    # change): when set, records exactly how many bytes THIS call folded, so a
-    # test can assert the incremental path stays bounded by new appends rather
-    # than re-reading the whole file, without relying on timing or source text.
-    [ -n "${FM_OPEN_DECISIONS_READ_PROBE:-}" ] \
-      && printf '%s\t%s\n' "$f" "$chunk_size" >> "$FM_OPEN_DECISIONS_READ_PROBE"
+    if [ "$offset" -eq 0 ] && [ -z "$trusted_open" ]; then
+      # A cold fold only needs transition lines: routine status cannot change
+      # the open-decision set, but still costs one shell process per line.
+      raw_file="$cf.raw.$$"
+      _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$raw_file" 2>/dev/null \
+        || { rm -f "$raw_file" "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+      held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+      awk -v resolve="$resolve" -v held="$held" '
+        {
+          verb = $0
+          sub(/:.*/, "", verb)
+          sub(/\[.*/, "", verb)
+          sub(/^[[:space:]]*/, "", verb)
+          split(verb, words, /[[:space:]]+/)
+          if (words[1] == "needs-decision" || words[1] == "blocked" ||
+              words[1] == resolve || words[1] == held) print
+        }
+      ' "$raw_file" > "$chunk_file" 2>/dev/null \
+        || { rm -f "$raw_file" "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      rm -f "$raw_file"
+      [ -n "${FM_OPEN_DECISIONS_READ_PROBE:-}" ] \
+        && printf '%s\t%s\n' "$f" "$((size - offset))" >> "$FM_OPEN_DECISIONS_READ_PROBE"
+    else
+      _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
+        || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
+        || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      chunk_size=${chunk_size//[[:space:]]/}
+      case "$chunk_size" in
+        ''|*[!0-9]*) rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0 ;;
+      esac
+      # Test-only observability seam (off by default, no production behavior
+      # change): when set, records exactly how many bytes THIS call folded, so a
+      # test can assert the incremental path stays bounded by new appends rather
+      # than re-reading the whole file, without relying on timing or source text.
+      [ -n "${FM_OPEN_DECISIONS_READ_PROBE:-}" ] \
+        && printf '%s\t%s\n' "$f" "$chunk_size" >> "$FM_OPEN_DECISIONS_READ_PROBE"
+    fi
     resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
     held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
@@ -1338,7 +1384,7 @@ scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
-    open=$(status_open_decisions_incremental "$f" "$endpoint") || return 1
+    open=$(status_open_decisions_incremental "$f" "$endpoint" "$ident") || return 1
     [ -n "$open" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
