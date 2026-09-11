@@ -516,7 +516,13 @@ $1
 EOF
 }
 
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+# The spawn drives the real bin/fm-agy-trust.sh and the fake tmux's trust
+# lookup under this base PATH, and both read agy's settings store with node,
+# which runners do not keep in the system bin dirs. Carry the directory the
+# invoking environment resolves node from, the fm-kimi-harness shape.
+NODE_BIN=$(command -v node) || fail "test needs node"
+NODE_BIN_DIR=$(dirname "$NODE_BIN")
+BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 run_agy_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
