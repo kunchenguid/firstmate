@@ -3,8 +3,10 @@ name: process-event-sources
 description: >-
   Agent-only procedure for registered process-to-event sources and their wakes.
   Use before arming a long-polling source firstmate owns, before registering a
-  deterministic condition->action watch, and on any
-  `procevent <adapter> <source-id> <sequence>` check wake.
+  deterministic condition->action watch, on any
+  `procevent <adapter> <source-id> <sequence>` check wake, and on any
+  `process-event source stranded` or `process-event source failed to start`
+  check wake.
   Owns the arming commands, the condition->action eligibility boundary, the
   durable result read, which wakes must be routed to their adapter instead of
   acknowledged generically, the handled acknowledgement contract, the one-owner
@@ -17,7 +19,7 @@ metadata:
 
 # process-event-sources
 
-Load this before arming a long-polling source, before registering a deterministic condition->action watch, and whenever a `check:` wake carries `procevent <adapter> <source-id> <sequence>`.
+Load this before arming a long-polling source, before registering a deterministic condition->action watch, whenever a `check:` wake carries `procevent <adapter> <source-id> <sequence>`, and whenever the watcher headlines a `process-event source stranded` or `process-event source failed to start` wake.
 
 The runner exists so a blocking external process never holds firstmate's conversational turn.
 Firstmate registers a source, keeps working, and is woken when that process completes.
@@ -36,7 +38,8 @@ After arming by hand, confirm `bin/fm-procevent.sh list` reports that source as 
 Reconcile reports every launch that did not prove it took its claim within the confirm window as `failed=` and exits non-zero, so a source that cannot be started says so instead of looking armed, and it wakes you once per failure episode about it because the watcher discards that count; `start` does not fix that - if the source stays unowned, run `start` attached to read the runner's refusal, then check the source command and adapter binary the registration names, and if a later reconcile finds the source owned the episode closes on its own.
 A source `list` reports as `orphaned` is one reconcile will not relaunch, because something may still be polling it; reconcile wakes you once about it, and that wake's payload says which of two recoveries applies.
 If the claim's recorded pid is alive under a different identity, `bin/fm-procevent.sh start <source-id>` takes the source back once you have checked nothing is still polling it - provided the dead generation's reservation records can still be tidied; otherwise it refuses with `cannot claim source`.
-If the runner itself died and its process group survives, `start` reports `already owned` and takes nothing back: verify whether the dead runner's polling child is still attached to the source, and once that group is empty the next reconcile reclaims the source on its own. Nothing signals that group automatically.
+If the runner itself died and its process group survives, `start` reports `already owned` and takes nothing back: verify whether the dead runner's polling child is still attached to the source, and once that group is empty the next reconcile reclaims the source on its own.
+Nothing signals that group automatically.
 
 When a source carries captain answers to captain-held tasks, bind it BEFORE arming it, so it can never produce an answer that has nowhere to go:
 
