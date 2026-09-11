@@ -39,6 +39,12 @@ printf 'state: working · source: run-step · fixture task %s\n' "${1:-}"
 SH
 chmod +x "$FAKE_ROOT/bin/fm-crew-state.sh"
 
+# The real fm-status-pr-url.sh (and the fm-pr-lib.sh it sources) run for
+# real here, against fixture .meta files, rather than being stubbed: the
+# pr= parse itself is what this test needs to prove.
+ln -s "$ROOT/bin/fm-status-pr-url.sh" "$FAKE_ROOT/bin/fm-status-pr-url.sh"
+ln -s "$ROOT/bin/fm-pr-lib.sh" "$FAKE_ROOT/bin/fm-pr-lib.sh"
+
 # Stub quota-axi on PATH: the server invokes it by bare name.
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
@@ -57,16 +63,23 @@ cat > "$STATE_DIR/home-summary.json" <<'JSON'
   "reason": null,
   "invalidity": {"kind": null, "ids": []},
   "state": "active_child_work",
-  "active_children": [{"id": "task1", "kind": "ship", "state": "working"}],
+  "active_children": [
+    {"id": "task1", "kind": "ship", "state": "working"},
+    {"id": "task2", "kind": "ship", "state": "working"}
+  ],
   "decisions_open": [],
   "holds": [],
   "queued": [],
   "landed": [],
   "endpoints": [],
-  "counts": {"active_children": 1, "decisions_open": 0, "holds": 0, "queued": 0, "landed": 0, "endpoints": 0},
+  "counts": {"active_children": 2, "decisions_open": 0, "holds": 0, "queued": 0, "landed": 0, "endpoints": 0},
   "omitted": []
 }
 JSON
+
+# task1 has a recorded PR; task2 has no meta file at all (no PR yet).
+printf 'window=default\npr=https://github.com/kunchenguid/firstmate/pull/9999\n' \
+  > "$STATE_DIR/task1.meta"
 
 # A decoy secret file placed next to the ledger: the endpoint must never read
 # or echo arbitrary state-dir contents, only the specific sources it names.
@@ -103,10 +116,13 @@ printf '%s' "$BODY" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 assert d["home_summary"]["active_children"][0]["id"] == "task1", d
-assert d["live_crew_state"]["task1"].startswith("state: working"), d
+rows = {row["id"]: row for row in d["tasks"]}
+assert rows["task1"]["state"].startswith("state: working"), d
+assert rows["task1"]["pr_url"] == "https://github.com/kunchenguid/firstmate/pull/9999", d
+assert rows["task2"]["pr_url"] is None, d
 assert d["quota"]["providers"][0]["provider"] == "fixture", d
-' || fail "/status did not combine crew-state, home-summary, and quota as expected"
-pass "/status combines fm-crew-state.sh, home-summary.json, and quota-axi output"
+' || fail "/status did not combine crew-state, PR URLs, home-summary, and quota as expected"
+pass "/status combines fm-crew-state.sh, recorded PR URLs, home-summary.json, and quota-axi output"
 
 case "$BODY" in
   *do-not-leak*) fail "/status leaked the decoy .env secret" ;;

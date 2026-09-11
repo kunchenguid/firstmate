@@ -13,8 +13,10 @@
 # else (404 on any other path, 405 on any non-GET method: no writes, no
 # commands):
 #   GET /status   one JSON document combining bin/fm-crew-state.sh's live
-#                 per-task verdicts, the published state/home-summary.json
-#                 fleet ledger, and quota-axi's read-only capacity report.
+#                 per-task verdicts (each with a pr_url from
+#                 bin/fm-status-pr-url.sh, null when no PR is recorded), the
+#                 published state/home-summary.json fleet ledger, and
+#                 quota-axi's read-only capacity report.
 #   GET /events   the same document as an SSE stream, re-sent every
 #                 --interval seconds (default 5) until the client disconnects.
 # Every field comes straight from those existing sources, so the endpoint

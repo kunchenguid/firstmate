@@ -7,8 +7,10 @@
 #     ledger) is read verbatim as the fleet snapshot.
 #   - Each active child's live one-line state comes from bin/fm-crew-state.sh
 #     <id>, called fresh per request so it never goes stale between ledger
-#     refreshes.
-#   - quota-axi --json --once --no-credential-refresh supplies capacity data,
+#     refreshes, alongside its recorded PR URL (null when absent) from
+#     bin/fm-status-pr-url.sh <id>, which defers to fm-pr-lib.sh's own pr=
+#     parser rather than re-reading state/<id>.meta by hand.
+#   - quota-axi --json --no-credential-refresh supplies capacity data,
 #     strictly read-only (no credential renewal, no keychain prompt).
 # None of those sources embed tokens, credentials, .env values, brief text,
 # or raw pane/scrollback content, and this server adds none of its own: it
@@ -27,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def _run(argv, timeout):
+def _run(argv, timeout, env=None):
     """Run argv, returning (ok, stdout_text). Never raises."""
     try:
         proc = subprocess.run(
@@ -36,6 +38,7 @@ def _run(argv, timeout):
             text=True,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
@@ -56,16 +59,22 @@ def read_home_summary(state_dir):
         return None, f"home-summary.json unreadable: {exc}"
 
 
-def read_crew_state(fm_root, fm_home, task_ids, timeout):
+def build_task_rows(fm_root, fm_home, state_dir, task_ids, timeout):
     crew_state_bin = os.path.join(fm_root, "bin", "fm-crew-state.sh")
-    live = {}
+    pr_url_bin = os.path.join(fm_root, "bin", "fm-status-pr-url.sh")
     env = dict(os.environ)
     env["FM_HOME"] = fm_home
+    env["FM_STATE_OVERRIDE"] = state_dir
+    rows = []
     for task_id in task_ids:
-        ok, out = _run([crew_state_bin, task_id], timeout)
-        line = out.strip() if ok else f"state: unknown · source: none · {out.strip()}"
-        live[task_id] = line
-    return live
+        ok, out = _run([crew_state_bin, task_id], timeout, env=env)
+        state_line = (
+            out.strip() if ok else f"state: unknown · source: none · {out.strip()}"
+        )
+        pr_ok, pr_out = _run([pr_url_bin, task_id], timeout, env=env)
+        pr_url = pr_out.strip() if pr_ok and pr_out.strip() else None
+        rows.append({"id": task_id, "state": state_line, "pr_url": pr_url})
+    return rows
 
 
 def read_quota(timeout):
@@ -89,14 +98,14 @@ def build_payload(fm_root, fm_home, state_dir, timeout):
             for child in summary.get("active_children", [])
             if isinstance(child, dict) and child.get("id")
         ]
-    crew_state = read_crew_state(fm_root, fm_home, task_ids, timeout)
+    tasks = build_task_rows(fm_root, fm_home, state_dir, task_ids, timeout)
     quota, quota_error = read_quota(timeout)
     return {
         "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "home": fm_home,
         "home_summary": summary,
         "home_summary_error": summary_error,
-        "live_crew_state": crew_state,
+        "tasks": tasks,
         "quota": quota,
         "quota_error": quota_error,
     }
