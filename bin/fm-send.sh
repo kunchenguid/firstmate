@@ -294,11 +294,21 @@ fm_send_record_interrupt() {  # <key>
   [ -f "$STATE/$id.busy-gen" ] || return 0
   gen=$(fm_meta_get "$TARGET_META" busy_gen)
   if [ -n "$gen" ]; then
-    "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
-      --gen "$gen" --source fm-interrupt --event interrupt
+    if [[ "$TARGET_HARNESS" == agy* ]]; then
+      "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" unknown \
+        --gen "$gen" --source fm-interrupt --event interrupt-unconfirmed
+    else
+      "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
+        --gen "$gen" --source fm-interrupt --event interrupt
+    fi
   else
-    "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
-      --current-gen --source fm-interrupt --event interrupt
+    if [[ "$TARGET_HARNESS" == agy* ]]; then
+      "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" unknown \
+        --current-gen --source fm-interrupt --event interrupt-unconfirmed
+    else
+      "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
+        --current-gen --source fm-interrupt --event interrupt
+    fi
   fi || {
     echo "error: key '$key' reached $T, but the interrupt state could not be recorded for $id" >&2
     return 1

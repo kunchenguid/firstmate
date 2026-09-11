@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SEND="$ROOT/bin/fm-send.sh"
@@ -724,6 +726,25 @@ test_interrupt_without_acknowledgement_preserves_busy_state() {
   pass "fm-control interrupt: unconfirmed delivery preserves observed busy state"
 }
 
+test_agy_interrupt_records_unconfirmed_state() {
+  local dir gen before after out rc
+  dir=$(new_case agy-unconfirmed)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  gen=$($ROOT/bin/fm-busy-event.sh arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  before=$(cat "$dir/home/state/t1.busy-state")
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "an agy interrupt without acknowledgement should still deliver"$'\n'"$out"
+  after=$(cat "$dir/home/state/t1.busy-state")
+  [ "$after" != "$before" ] || fail "agy unconfirmed interrupt must publish an explicit unknown state"
+  [ "$(fm_busy_classify tmux fmses:fm-t1 agy t1 "$dir/home/state")" = "unknown fm-interrupt" ] \
+    || fail "agy unconfirmed interrupt must classify unknown/fm-interrupt, got '$(fm_busy_classify tmux fmses:fm-t1 agy t1 "$dir/home/state")'"
+  assert_contains "$out" "verified=agent-alive cancel=unconfirmed" \
+    "agy control must distinguish delivery proof from cancellation proof"
+  pass "fm-control: agy unconfirmed Escape records unknown instead of semantic idle"
+}
+
 test_muse_interrupt_confirms_adapter_acknowledgement() {
   local dir root log out rc
   dir=$(new_case confirmed)
@@ -910,6 +931,7 @@ test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
 test_interrupt_without_acknowledgement_preserves_busy_state
+test_agy_interrupt_records_unconfirmed_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt

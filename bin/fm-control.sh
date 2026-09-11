@@ -373,15 +373,16 @@ send_interrupt_keys() {
     || die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
 }
 
-# agy 1.2.0 cancels a tool invocation with Escape without emitting its Stop
-# hook, so the control plane closes the firstmate-owned semantic busy record
-# after the key is delivered instead of leaving the worker falsely busy.
-record_agy_interrupt_idle() {
+# Antigravity does not expose a cancellation acknowledgement in its verified
+# hook path, so an Escape delivery must not be promoted to semantic idle.
+record_agy_interrupt_result() {
+  local cancel=$1
   [ "$HARNESS" = agy ] || return 0
+  [ "$cancel" = confirmed ] && return 0
   [ -f "$STATE/$ID.busy-gen" ] || return 0
-  "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" idle \
-    --current-gen --source fm-interrupt --event interrupt \
-    || die "agy interrupt reached task $ID, but its semantic idle state could not be recorded"
+  "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" unknown \
+    --current-gen --source fm-interrupt --event interrupt-unconfirmed \
+    || die "agy interrupt reached task $ID, but its unconfirmed state could not be recorded"
 }
 
 prepare_interrupt_ack() {
@@ -422,8 +423,8 @@ deliver_interrupt() {
   local cancel
   prepare_interrupt_ack
   send_interrupt_keys
-  record_agy_interrupt_idle
   cancel=$(interrupt_cancel_claim)
+  record_agy_interrupt_result "$cancel"
   printf '%s' "$cancel"
 }
 

@@ -140,8 +140,29 @@ test_claude_escape_records_interrupt_idle() {
   pass "fm-send: a successful Claude Escape records the interrupt lifecycle edge"
 }
 
+test_agy_escape_records_interrupt_unknown() {
+  local dir fb log rc home gen out
+  dir="$TMP_ROOT/agy-interrupt"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/sleep.log"
+  home="$dir/home"; mkdir -p "$home/state"
+  fm_write_meta "$home/state/task.meta" \
+    "window=sess:win" "worktree=$home/wt" "project=$home/project" \
+    "harness=agy" "kind=ship" "mode=no-mistakes" "yolo=off"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" task)
+  printf 'busy_gen=%s\n' "$gen" >> "$home/state/task.meta"
+
+  env PATH="$fb:$PATH" FM_HOME="$home" FM_SLEEP_LOG="$log" \
+    "$SEND" task --key Escape 2>/dev/null; rc=$?
+  expect_code 0 "$rc" "agy Escape send should succeed"
+  out=$(fm_busy_classify tmux sess:win agy task "$home/state")
+  [ "$out" = "unknown fm-interrupt" ] \
+    || fail "agy Escape must classify unknown/fm-interrupt, got '$out'"
+  pass "fm-send: an agy Escape with no acknowledgement records unknown, not idle"
+}
+
 test_default_send_pauses_one_second
 test_zero_disables_pause
 test_pause_is_tunable
 test_key_path_never_pauses
 test_claude_escape_records_interrupt_idle
+test_agy_escape_records_interrupt_unknown
