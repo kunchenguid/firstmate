@@ -5,7 +5,7 @@ Load this with the selected tool reference for dispatch, start, or adapter verif
 ## Resolution
 
 Use the router's detection and safety sections for static crew and secondmate harness resolution and all explicit overrides.
-`config/crew-dispatch.json` can override that static default for one crewmate or scout with concrete harness, model, and effort axes.
+`config/crew-dispatch.json` can override that static default for one crewmate or scout with concrete harness, model, effort, and (for codex) Codex account home axes.
 For a profile array, load `quota-array-dispatch` after establishing harness and provider facts here.
 
 `../secondmate-provisioning/SKILL.md` owns inherited local material.

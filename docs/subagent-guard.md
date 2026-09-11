@@ -366,8 +366,9 @@ tests/fm-subagent-pretool-check.test.sh
 
 ## Known residual gap
 
-The other tracked Claude hook entries in `.claude/settings.json` refuse to run under Grok's Claude-compatible settings loading (docs/turnend-guard.md "Harness integrations"), because Grok already covers each of those events through its own `.grok/hooks/` registration and running both creates a duplicate path.
-This entry is the deliberate exception and stays unguarded: Grok is "inspected but not wired" above, so no `.grok/hooks/` registration covers the subagent-spawn event at all, and guarding it would remove the guard from Grok entirely rather than deduplicate it.
+Every tracked Claude hook entry in `.claude/settings.json` whose event Grok already covers through its own `.grok/hooks/` registration carries the Grok marker guard whose inventory and rationale docs/turnend-guard.md "Harness integrations" owns, so Grok's Claude-compatible settings loading cannot run a second copy of such an event.
+Two entries are the deliberate exceptions and stay unguarded: this one, and the `UserPromptSubmit` voice presenter `bin/fm-voice-pending.sh`, whose reasoning docs/turnend-guard.md records beside the guarded set.
+This entry stays unguarded because Grok is "inspected but not wired" above, so no `.grok/hooks/` registration covers the subagent-spawn event at all, and guarding it would remove the guard from Grok entirely rather than deduplicate it.
 The coverage it leaves is partial rather than correct - the tracked entry passes `--claude`, which suppresses exactly the stdout decision object Grok consumes - so treat this as incidental reach, not as Grok being wired.
 Wiring Grok properly still requires the matcher-token verification described above, and that is what closes this exception.
 The same exception now also covers Cursor, which loads the tracked Claude settings as well: `.cursor/hooks.json` registers no subagent-spawn matcher, so this entry stays unguarded there for the same reason, and its `--claude` rendering leaves Cursor the exit-2 and stderr path rather than Cursor's own decision object.

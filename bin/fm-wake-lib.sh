@@ -1846,6 +1846,47 @@ fm_wake_print_deduped() {
   ' "$file"
 }
 
+# --- captain voice notes -----------------------------------------------------
+#
+# A spoken turn the voice conversation transport hands to firstmate arrives as
+# a `check` row keyed `inbox:vc-<sha256>` beside its durable record
+# state/inbox/vc-<sha256>.note. The producer is the fm_inbox_conversation.py
+# capture command, currently on the voice branch fm/firstmate-voice-implement,
+# not on main. bin/fm-inbox.sh note is the typed-note path: it mints
+# <epoch>-<suffix> ids with no voice marker, and no reply can be published
+# against such a note. Only the transport capture writes vc-<sha256> ids, and a
+# spoken reply can be published only against such a capture.
+# These helpers are the one owner of that key and of the VOICE heading, shared
+# by bin/fm-wake-drain.sh (voice rows first inside its locked, actor-filtered
+# view) and bin/fm-voice-pending.sh (the same rows, read-only, at the start of
+# a Claude captain-message turn); docs/watcher-continuity.md owns the contract.
+FM_WAKE_VOICE_KEY_PATTERN='^inbox:vc-'
+
+# Print the check rows of <queue-file> whose key matches
+# FM_WAKE_VOICE_KEY_PATTERN, same-key deduplicated keeping the latest row, in
+# queue order; print nothing when there are none.
+fm_wake_voice_rows() {  # <queue-file>
+  awk -F '\t' -v voice="$FM_WAKE_VOICE_KEY_PATTERN" '
+    NF >= 5 && $3 == "check" && $4 ~ voice {
+      if (!($4 in seen)) {
+        order[++count] = $4
+        seen[$4] = 1
+      }
+      line[$4] = $0
+    }
+    END {
+      for (i = 1; i <= count; i++) {
+        print line[order[i]]
+      }
+    }
+  ' "$1"
+}
+
+# Print the heading placed above <count> presented voice rows.
+fm_wake_voice_heading() {  # <count>
+  printf 'VOICE: the captain spoke - %s voice note(s) below; answer every one before any other wake (the note is state/inbox/<id>.note; bin/fm-inbox.sh drain --ack <id> retires it once answered):\n' "$1"
+}
+
 # --- branch grant evidence and per-actor pending rows ------------------------
 #
 # docs/watcher-continuity.md "Per-actor acknowledgement" owns the contract these

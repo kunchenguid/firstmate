@@ -6,6 +6,15 @@
 # newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
 # then assert liveness.
 #
+# Captain voice notes come first. A spoken turn arrives as a `check` row keyed
+# by fm-wake-lib.sh's FM_WAKE_VOICE_KEY_PATTERN (that library's "captain voice
+# notes" section owns the key, the producer, and the VOICE heading); this
+# script presents every such row ahead of every other row, under that heading,
+# so it cannot be read past. Presentation order only: sequence numbers, claims,
+# deduplication, and the acknowledgement cutoff are exactly what they would be
+# without it. bin/fm-voice-pending.sh presents the same rows read-only at the
+# start of a Claude captain-message turn, which never runs this drain.
+#
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
@@ -40,6 +49,9 @@ ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
+VOICE_VIEW=
+VOICE_ROWS=0
+OTHER_ROWS=
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
 # main (FM_SUPERVISION_ACTOR unset or "main", via fm-lease-lib.sh's fm_lease_actor
@@ -838,15 +850,37 @@ awk -F '\t' -v seqs="$ACTOR_ROWS_FILE" '
   NF >= 5 && ($2 in keep)
 ' "$FM_WAKE_QUEUE" > "$DRAIN_VIEW_TMP" || exit 1
 RAW_ROWS=$(fm_wake_print_deduped "$DRAIN_VIEW_TMP") || exit "$?"
+VOICE_VIEW=$(fm_wake_voice_rows "$DRAIN_VIEW_TMP") || exit 1
 rm -f -- "$DRAIN_VIEW_TMP" || exit 1
 DRAIN_VIEW_TMP=
+# Voice first (header). The 2026-09-10 incident: eleven spoken turns were
+# queued behind a text message that pulled firstmate onto other work, and none
+# were answered. Reordering the presented view is the whole mechanism: the
+# voice rows move to the top in their own queue order, every other row keeps
+# its order behind them, and nothing about the rows themselves changes.
+if [ -n "$VOICE_VIEW" ]; then
+  VOICE_ROWS=$(printf '%s\n' "$VOICE_VIEW" | awk 'END { print NR }') || exit 1
+  OTHER_ROWS=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' -v voice="$FM_WAKE_VOICE_KEY_PATTERN" \
+    '!($3 == "check" && $4 ~ voice)') || exit 1
+  RAW_ROWS=$(
+    printf '%s\n' "$VOICE_VIEW"
+    [ -z "$OTHER_ROWS" ] || printf '%s\n' "$OTHER_ROWS"
+  ) || exit 1
+fi
 ACK_THROUGH=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }') || exit 1
 case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   0) ;;
   ''|*[!0-9]*) ;;
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
-if [ -n "$RAW_ROWS" ]; then
+if [ "$VOICE_ROWS" -gt 0 ]; then
+  fm_wake_voice_heading "$VOICE_ROWS" || exit "$?"
+  printf '%s\n' "$VOICE_VIEW" || exit "$?"
+  if [ -n "$OTHER_ROWS" ]; then
+    printf 'OTHER WAKES (handle only after every voice note above):\n' || exit "$?"
+    printf '%s\n' "$OTHER_ROWS" || exit "$?"
+  fi
+elif [ -n "$RAW_ROWS" ]; then
   printf '%s\n' "$RAW_ROWS" || exit "$?"
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1

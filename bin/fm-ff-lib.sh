@@ -39,7 +39,36 @@ SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # --- helpers ---------------------------------------------------------------
 
 first_line() {
-  printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
+  # OpenSSH may prepend a multi-line ** banner to the command's own output.
+  # Skip only that leading run: once the command's own output begins, later
+  # ** lines are ordinary output. Prefer a real diagnostic anywhere in the
+  # remaining text, then its first meaningful line, so transport warnings are
+  # never presented as the cause.
+  printf '%s\n' "$1" | awk '
+    !started && /^\*\* / { next }
+    {
+      candidate = $0
+      gsub(/[[:space:]]+/, " ", candidate)
+      probe = candidate
+      sub(/^[[:space:]]+/, "", probe)
+      if (probe != "") started = 1
+      if (probe ~ /^(error|fatal):/) {
+        print candidate
+        found = 1
+        exit
+      }
+      if (!have_fallback && probe != "") {
+        fallback = candidate
+        have_fallback = 1
+      }
+    }
+    END {
+      if (!found) {
+        if (have_fallback) print fallback
+        else print "command failed with no diagnostic"
+      }
+    }
+  '
 }
 
 default_branch() {

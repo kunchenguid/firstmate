@@ -19,6 +19,25 @@ if [ "${1:-}" = "--version" ]; then
   printf 'quota-axi 0.1.29\n'
   exit 0
 fi
+if [ -n "${QUOTA_AXI_ARGV_LOG:-}" ]; then
+  printf 'CODEX_HOME=%s\n' "${CODEX_HOME-<unset>}" >> "$QUOTA_AXI_ARGV_LOG"
+  printf 'argv=%s\n' "$*" >> "$QUOTA_AXI_ARGV_LOG"
+fi
+if [ "${QUOTA_AXI_PER_HOME:-0}" = 1 ]; then
+  # The ambient account (no CODEX_HOME) is exhausted; the selected account
+  # starts healthy and drops below 10% on its second read.
+  if [ -z "${CODEX_HOME:-}" ]; then
+    printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}}]}\n'
+    exit 0
+  fi
+  count=0
+  [ ! -f "$QUOTA_AXI_COUNT" ] || read -r count < "$QUOTA_AXI_COUNT"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$QUOTA_AXI_COUNT"
+  if [ "$count" -eq 1 ]; then remaining=90; else remaining=5; fi
+  printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":%s,"runway":{"status":"through_reset"}}]}}]}\n' "$remaining"
+  exit 0
+fi
 case "${QUOTA_AXI_MALFORMED:-}" in
   schema)
     printf '{"schemaVersion":4,"providers":[]}\n'
@@ -168,7 +187,10 @@ for provider in -- codex-; do
 done
 ok "arm rejects noncanonical provider identities"
 
-out=$(FM_HOME="$LAB/retire-home" FM_STATE_OVERRIDE="$LAB/retire-state" \
+RETIRE_HOME="$LAB/retire-home"
+RETIRE_STATE="$LAB/retire-state"
+(umask 077; mkdir -p "$RETIRE_HOME" "$RETIRE_STATE")
+out=$(FM_HOME="$RETIRE_HOME" FM_STATE_OVERRIDE="$RETIRE_STATE" \
   "$BIN/fm-procevent-quota.sh" retire --provider codex)
 [ "$out" = "retired: quota-codex" ] || fail "provider retire targeted the wrong source: $out"
 ok "provider retire resolves the armed source id"
@@ -221,5 +243,151 @@ out=$(QUOTA_AXI_KNOWN_UNKNOWN_FIRST=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$P
 printf '%s\n' "$out" | grep -qx 'status: exhausted' || fail "known semantics with unknown headroom did not continue polling"
 printf '%s\n' "$out" | grep -qx 'condition_polls: 2' || fail "known semantics with unknown headroom stopped early"
 ok "poll preserves unknown headroom under known semantics"
+
+# --- Codex account axis (--codex-home) ---------------------------------------
+# A Codex account is a directory holding that account's auth.json. Fixtures use
+# placeholder files only; no real credential is ever read or copied.
+make_codex_account() {  # <dir>
+  mkdir -p "$1"
+  printf '%s\n' '{"placeholder":"fixture"}' > "$1/auth.json"
+}
+ARGV_LOG="$LAB/quota-axi.argv"
+ACCT="$LAB/accounts/.codex-1"
+make_codex_account "$ACCT"
+
+rm -f "$COUNT" "$ARGV_LOG"
+out=$(QUOTA_AXI_PER_HOME=1 QUOTA_AXI_ARGV_LOG="$ARGV_LOG" QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --codex-home "$ACCT" --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: low' || fail "codex-home watch did not report the selected account as low: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 2' || fail "codex-home watch fired on the exhausted ambient account instead of its own: $out"
+printf '%s\n' "$out" | grep -qx "codex_home: $ACCT" || fail "codex-home watch did not record the account it tracked: $out"
+grep -qx "CODEX_HOME=$ACCT" "$ARGV_LOG" || fail "quota-axi was not read under the selected account's CODEX_HOME: $(cat "$ARGV_LOG")"
+if grep -qx 'CODEX_HOME=<unset>' "$ARGV_LOG"; then
+  fail "codex-home watch read the ambient account: $(cat "$ARGV_LOG")"
+fi
+grep -qx 'argv=--provider codex --json' "$ARGV_LOG" || fail "codex-home read did not name the codex provider: $(cat "$ARGV_LOG")"
+source_id=$(printf '%s\n' "$out" | sed -n 's/^quota: //p')
+case "$source_id" in
+  quota-codex-codex-1-????????) ;;
+  *) fail "codex-home watch did not derive a per-account source id: $source_id" ;;
+esac
+[ "$("$BIN/fm-procevent-quota.sh" source-id --provider codex --codex-home "$ACCT")" = "$source_id" ] \
+  || fail "source-id did not resolve the same per-account id the poll reported"
+ok "codex-home watch polls the selected account under its own CODEX_HOME and source id"
+
+acct_alias="$LAB/accounts/codex-account-alias"
+ln -s "$ACCT" "$acct_alias"
+alias_source_id=$("$BIN/fm-procevent-quota.sh" source-id --provider codex --codex-home "$acct_alias")
+[ "$alias_source_id" = "$source_id" ] \
+  || fail "a symlink alias for one account produced a duplicate source id: $alias_source_id"
+ok "codex-home watch canonicalizes aliases to one account identity"
+
+ALIAS_ARM_HOME="$LAB/alias-arm-home"
+mkdir -p "$ALIAS_ARM_HOME" && mkdir -m 700 "$ALIAS_ARM_HOME/state"
+out=$(FM_HOME="$ALIAS_ARM_HOME" FM_PROCEVENT_CLAIM_ROOT="$LAB/alias-claims" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" arm --interval 30 --threshold 15 --provider codex --codex-home "$acct_alias") \
+  || fail "arm through a valid account alias refused: $out"
+printf '%s\n' "$out" | grep -qx "armed: $source_id" \
+  || fail "alias arm did not register the physical source identity: $out"
+alias_reg="$ALIAS_ARM_HOME/state/procevent/$source_id.source"
+[ -f "$alias_reg" ] || fail "alias arm did not publish the canonical registration"
+alias_binding=$(find "$ALIAS_ARM_HOME/state/procevent" -maxdepth 1 -type f \
+  -name '.quota-codex-home-*.binding' -print)
+[ -n "$alias_binding" ] && [ "$(printf '%s\n' "$alias_binding" | wc -l | tr -d ' ')" = 1 ] \
+  || fail "alias arm did not publish exactly one private spelling binding: $alias_binding"
+rm -f -- "$acct_alias"
+[ "$(FM_HOME="$ALIAS_ARM_HOME" "$BIN/fm-procevent-quota.sh" source-id --provider codex --codex-home "$acct_alias")" = "$source_id" ] \
+  || fail "the durable alias binding did not preserve source identity after alias removal"
+out=$(FM_HOME="$ALIAS_ARM_HOME" FM_PROCEVENT_CLAIM_ROOT="$LAB/alias-claims" \
+  "$BIN/fm-procevent-quota.sh" retire --provider codex --codex-home "$acct_alias")
+[ "$out" = "retired: $source_id" ] || fail "retire through a removed alias targeted the wrong source: $out"
+[ ! -e "$alias_reg" ] || fail "retire through a removed alias left the canonical registration behind"
+[ ! -e "$alias_binding" ] && [ ! -L "$alias_binding" ] \
+  || fail "retire through a removed alias left its durable binding behind"
+ok "codex-home retire uses and cleans the durable alias binding after alias removal"
+
+rm -f "$COUNT" "$ARGV_LOG"
+out=$(QUOTA_AXI_PER_HOME=1 QUOTA_AXI_ARGV_LOG="$ARGV_LOG" QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: exhausted' || fail "provider watch without --codex-home did not track the ambient account: $out"
+printf '%s\n' "$out" | grep -qx 'quota: quota-codex' || fail "provider watch without --codex-home changed its source id: $out"
+if printf '%s\n' "$out" | grep -q '^codex_home: '; then
+  fail "provider watch without --codex-home reported an account: $out"
+fi
+grep -qx 'CODEX_HOME=<unset>' "$ARGV_LOG" || fail "provider watch without --codex-home exported a CODEX_HOME: $(cat "$ARGV_LOG")"
+grep -qx 'argv=--json' "$ARGV_LOG" || fail "provider watch without --codex-home changed its quota-axi argv: $(cat "$ARGV_LOG")"
+ok "provider watch without --codex-home still reads the ambient account exactly as before"
+
+rm -f "$COUNT" "$ARGV_LOG"
+user_home="$LAB/user-home"
+make_codex_account "$user_home/.codex-2"
+# shellcheck disable=SC2088  # the literal ~/ spelling is the input under test
+out=$(HOME="$user_home" QUOTA_AXI_PER_HOME=1 QUOTA_AXI_ARGV_LOG="$ARGV_LOG" QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --codex-home '~/.codex-2' --timeout 1)
+printf '%s\n' "$out" | grep -qx "codex_home: $user_home/.codex-2" || fail "a ~/ codex home was not expanded against HOME: $out"
+grep -qx "CODEX_HOME=$user_home/.codex-2" "$ARGV_LOG" || fail "quota-axi did not receive the expanded ~/ home: $(cat "$ARGV_LOG")"
+ok "codex-home watch expands ~/ against the polling user's HOME"
+
+ARM_HOME="$LAB/arm-home"
+mkdir -p "$ARM_HOME" && mkdir -m 700 "$ARM_HOME/state"
+out=$(FM_HOME="$ARM_HOME" FM_PROCEVENT_CLAIM_ROOT="$LAB/claims" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" arm --interval 30 --threshold 15 --provider codex --codex-home "$ACCT") \
+  || fail "arm with a valid --codex-home refused: $out"
+printf '%s\n' "$out" | grep -qx "armed: $source_id" || fail "arm did not register the per-account source id: $out"
+printf '%s\n' "$out" | grep -qx "codex_home: $ACCT" || fail "arm did not report the tracked account: $out"
+reg="$ARM_HOME/state/procevent/$source_id.source"
+[ -f "$reg" ] || fail "arm did not publish the per-account registration at $reg"
+grep -qx -- '--codex-home' "$reg" || fail "registered poll argv carries no --codex-home: $(cat "$reg")"
+grep -qx -- "$ACCT" "$reg" || fail "registered poll argv does not name the expanded account: $(cat "$reg")"
+out=$(FM_HOME="$ARM_HOME" FM_PROCEVENT_CLAIM_ROOT="$LAB/claims" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" arm --interval 30 --threshold 15 --provider codex) \
+  || fail "arm without --codex-home refused: $out"
+reg="$ARM_HOME/state/procevent/quota-codex.source"
+[ -f "$reg" ] || fail "arm without --codex-home did not publish the provider registration"
+if grep -q -- 'codex-home' "$reg"; then
+  fail "arm without --codex-home registered an account axis: $(cat "$reg")"
+fi
+ok "arm registers the account axis only when --codex-home is given"
+
+out=$(FM_HOME="$ARM_HOME" FM_PROCEVENT_CLAIM_ROOT="$LAB/claims" FM_STATE_OVERRIDE="$ARM_HOME/state" \
+  "$BIN/fm-procevent-quota.sh" retire --provider codex --codex-home "$ACCT")
+[ "$out" = "retired: $source_id" ] || fail "per-account retire targeted the wrong source: $out"
+ok "per-account retire resolves the armed source id"
+
+noauth="$LAB/accounts/.codex-3"
+mkdir -p "$noauth"
+if err=$(FM_HOME="$ARM_HOME" FM_PROCEVENT_CLAIM_ROOT="$LAB/claims" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" arm --provider codex --codex-home "$noauth" 2>&1); then
+  fail "arm unexpectedly armed a watch on an account with no auth.json"
+fi
+printf '%s\n' "$err" | grep -q "codex home '$noauth' has no non-empty auth.json" \
+  || fail "signed-out account refusal did not name the missing sign-in: $err"
+[ -z "$(find "$ARM_HOME/state/procevent" -name 'quota-codex-codex-3-*' 2>/dev/null)" ] \
+  || fail "a refused arm published a registration"
+ok "arm refuses an account with no auth.json before registering anything"
+
+if err=$(PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" arm --provider claude --codex-home "$ACCT" 2>&1); then
+  fail "arm unexpectedly accepted --codex-home for provider claude"
+fi
+printf '%s\n' "$err" | grep -q -- '--codex-home applies only to --provider codex' \
+  || fail "non-codex --codex-home refusal returned: $err"
+if err=$(PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" arm --codex-home "$ACCT" 2>&1); then
+  fail "arm unexpectedly accepted --codex-home for the aggregate watch"
+fi
+printf '%s\n' "$err" | grep -q -- '--codex-home applies only to --provider codex' \
+  || fail "aggregate --codex-home refusal returned: $err"
+ok "arm refuses --codex-home on a non-codex or aggregate watch"
+
+rm -f "$COUNT" "$ARGV_LOG"
+signed_out="$LAB/accounts/.codex-4"
+make_codex_account "$signed_out"
+: > "$signed_out/auth.json"
+out=$(QUOTA_AXI_PER_HOME=1 QUOTA_AXI_ARGV_LOG="$ARGV_LOG" QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --codex-home "$signed_out" --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: error' || fail "a signed-out account did not end the watch with an error: $out"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 1' || fail "a signed-out account kept polling: $out"
+printf '%s\n' "$out" | grep -q 'has no non-empty auth.json' || fail "signed-out error did not name the missing sign-in: $out"
+[ ! -e "$ARGV_LOG" ] || fail "a signed-out account still reached quota-axi (would have reported the ambient account): $(cat "$ARGV_LOG")"
+ok "poll on a signed-out account wakes with an error instead of reading the ambient account"
 
 printf '# all fm-procevent-quota tests passed\n'

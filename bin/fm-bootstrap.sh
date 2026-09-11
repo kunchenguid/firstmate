@@ -596,9 +596,14 @@ secondmate_sync() {
     fi
     nudge_needed=0
     converged=1
+    # Both remote legs below are captured with 2>&1, so OpenSSH may prepend its
+    # multi-line ** banner to the leg's own output. Every parse of these captures
+    # must stay line-anchored: a whole-string match would miss the banner-prefixed
+    # success token and silently drop the re-read nudge a converged home still owes
+    # its running agent. `first_line` applies the same rule to the failure reasons.
     if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
       "$primary_head" < /dev/null 2>&1); then
-      case "$sync_out" in synced:*) nudge_needed=1 ;; esac
+      if printf '%s\n' "$sync_out" | grep -q '^synced:'; then nudge_needed=1; fi
     else
       sync_rc=$?
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(remote_sync_failure_reason "$sync_rc" "$sync_out")"
@@ -1129,6 +1134,10 @@ crew_dispatch_validate() {
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
+    def malformed_codex_home($items):
+      ($items | any(has("codexHome") and (((.codexHome | type) != "string") or (.codexHome | length) == 0)));
+    def foreign_codex_home($items):
+      ($items | any(has("codexHome") and .harness != "codex"));
     def bad_efforts:
       configured_profiles
       | map({h: .harness, m: .model, e: .effort})
@@ -1146,6 +1155,8 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
     elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile model and effort must be non-empty strings when present"
+    elif malformed_codex_home([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile codexHome must be a non-empty string when present"
+    elif foreign_codex_home([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile codexHome applies only to harness codex"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
@@ -1154,6 +1165,8 @@ crew_dispatch_validate() {
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
     elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then "default profile model and effort must be non-empty strings when present"
+    elif has("default") and malformed_codex_home([profiles(.default)[]?]) then "default profile codexHome must be a non-empty string when present"
+    elif has("default") and foreign_codex_home([profiles(.default)[]?]) then "default profile codexHome applies only to harness codex"
     else
       (configured_profiles
         | map(.harness)
@@ -1177,7 +1190,8 @@ crew_dispatch_validate() {
       + (if ($p.model? != null) then "/" + ($p.model | tostring)
          elif ($p.effort? != null) then "/default"
          else "" end)
-      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
+      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end)
+      + (if ($p.codexHome? != null) then "@" + ($p.codexHome | tostring) else "" end);
     def profile_set($value; $selector):
       if ($value | type) == "array" then
         (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")
