@@ -51,6 +51,15 @@
 #     generation changes while observations run, its selected metadata remains
 #     but mutable current-state, status, report, and endpoint evidence is discarded
 #     rather than attributed to the replacement generation.
+#     A per-task observation this command cannot read back, or a per-task payload
+#     it cannot hand to the composing step, degrades only that one task's derived
+#     surface and reports the degradation on stderr: current_state folds to state
+#     unknown with a detail naming the unreadable observation,
+#     paths.status_log.last_event is emptied while paths.status_log.present still
+#     reports the contract file, and hints.open_decisions can be empty while
+#     hints.pending_decision and hints.blocked_event still report the fold that
+#     could not be carried. The row itself is never dropped: omitting a live task
+#     would publish it as vanished rather than as unobserved.
 #     Local current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately. Remote secondmate rows use
 #     an explicit unknown value because their endpoint liveness belongs to
