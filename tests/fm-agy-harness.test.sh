@@ -25,9 +25,12 @@
 #      and nothing is armed as busy wiring because no writer could clear it.
 #   6. The busy signature is the pinned `esc to cancel` status row alone; the
 #      free-floating `Generating...` word must never read busy on its own.
-#   7. Herdr's registry already tracks agy, so exit detection stays
-#      registry-driven: a registered status (even done) is live, and no
-#      process-name shortcut may flip it to agent-free.
+#   7. Herdr's registry already tracks agy, and exit detection proves the
+#      agent at process level before trusting any registration (the shared
+#      post-#4115 contract in bin/backends/herdr.sh): a registered status plus
+#      a process view naming agy is live and refuses replacement, a registered
+#      status over a proven shell-only pane is the explicit stale-agent state,
+#      and nothing short of that shared proof flips an agy pane to agent-free.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -202,15 +205,32 @@ test_agy_tmux_names_the_native_binary_an_agent() {
   pass "bin/fm-agent-process-lib.sh: agy is an agent, fragments are not"
 }
 
+# Canned `pane process-info` bodies for the herdr fixtures. The shared
+# exit-detection contract proves a registered agent at process level before
+# trusting it (bin/backends/herdr.sh fm_backend_herdr_pane_process_state), so
+# every registered-status fixture pairs its `agent get` body with a process
+# view. The agy-shaped body names the foreground process exactly `agy`, which
+# is the same identity surface the tmux liveness probe and the ancestry
+# detector use - no real agy process is needed because the foreground branch
+# answers before the descendant walk touches the process table.
+agy_herdr_process_info_body() {  # <shell-pid> <foreground-name> -> JSON
+  printf '%s\n' "{\"result\":{\"type\":\"pane_process_info\",\"process_info\":{\"pane_id\":\"w9:p1\",\"shell_pid\":$1,\"foreground_processes\":[{\"pid\":$(( $1 + 1 )),\"name\":\"$2\",\"argv\":[\"$2\",\"--prompt-interactive\"],\"argv0\":\"$2\",\"cmdline\":\"$2 --prompt-interactive\"}]}}}"
+}
+
 agy_herdr_agent_state() {  # <fixture-dir> -> verdict; logs every CLI call
   local dir=$1
   : > "$dir/calls.log"
-  AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
+  AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_PROC="$dir/process-info.json" \
+    AGY_FIX_LOG="$dir/calls.log" bash -c '
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_pane_presence_state() { printf "present"; }
     fm_backend_herdr_cli() {
       printf "%s\n" "$*" >> "$AGY_FIX_LOG"
-      case "$*" in *"agent get"*) cat "$AGY_FIX_RESP" ;; *) exit 0 ;; esac
+      case "$*" in
+        *"agent get"*) cat "$AGY_FIX_RESP" ;;
+        *"pane process-info"*) cat "$AGY_FIX_PROC" ;;
+        *) exit 0 ;;
+      esac
     }
     fm_backend_herdr_pane_agent_state testsession w9:p1' "$ROOT" 2>&1
 }
@@ -219,30 +239,65 @@ test_herdr_done_with_live_registry_stays_live() {
   local dir out
   dir="$TMP_ROOT/herdr-done"; mkdir -p "$dir"
   printf '%s\n' '{"result":{"agent":{"agent":"agy","agent_status":"done","pane_id":"w9:p1"}}}' > "$dir/agent-get.json"
+  agy_herdr_process_info_body 424242 agy > "$dir/process-info.json"
   out=$(agy_herdr_agent_state "$dir")
-  [ "$out" = live ] || fail "a registered done status must stay live, got '$out'"
+  [ "$out" = live ] || fail "a registered done status with an agy process view must stay live, got '$out'"
   grep -q "process-info" "$dir/calls.log" \
-    && fail "the registry verdict consulted process state" || true
-  out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
+    || fail "the shared contract proves a registered agent at process level; the verdict trusted the registration alone"
+  out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_PROC="$dir/process-info.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
     . "$0/bin/backends/herdr.sh"
     fm_backend_herdr_pane_presence_state() { printf "present"; }
     fm_backend_herdr_cli() {
-      case "$*" in *"agent get"*) cat "$AGY_FIX_RESP" ;; *) exit 0 ;; esac
+      case "$*" in
+        *"agent get"*) cat "$AGY_FIX_RESP" ;;
+        *"pane process-info"*) cat "$AGY_FIX_PROC" ;;
+        *) exit 0 ;;
+      esac
     }
     fm_backend_herdr_tab_is_husk testsession w9:p1 && printf husk || printf refused' "$ROOT" 2>&1)
   [ "$out" = refused ] || fail "a live pane must refuse husk replacement, got '$out'"
-  pass "herdr exit detection: done with a live registry stays live and refuses replacement"
+  pass "herdr exit detection: done with a live registry and an agy process view stays live and refuses replacement"
+}
+
+test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live() {
+  local dir out shell_pid
+  dir="$TMP_ROOT/herdr-stale"; mkdir -p "$dir"
+  # The descendant walk reads the REAL process table, so the canned pane shell
+  # must be a process this test owns and can prove alive: a short-lived sleep.
+  sleep 30 & shell_pid=$!
+  printf '%s\n' '{"result":{"agent":{"agent":"agy","agent_status":"done","pane_id":"w9:p1"}}}' > "$dir/agent-get.json"
+  agy_herdr_process_info_body "$shell_pid" bash > "$dir/process-info.json"
+  out=$(agy_herdr_agent_state "$dir")
+  kill "$shell_pid" 2>/dev/null || true
+  [ "$out" = stale-agent ] || fail "a registered status over a proven shell-only pane must read stale-agent, got '$out'"
+  out=$(AGY_FIX_RESP="$dir/agent-get.json" AGY_FIX_PROC="$dir/process-info.json" AGY_FIX_LOG="$dir/calls.log" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_presence_state() { printf "present"; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"agent get"*) cat "$AGY_FIX_RESP" ;;
+        *"pane process-info"*) cat "$AGY_FIX_PROC" ;;
+        *) exit 0 ;;
+      esac
+    }
+    fm_backend_herdr_tab_is_husk testsession w9:p1 && printf husk || printf refused' "$ROOT" 2>&1)
+  [ "$out" = refused ] || fail "a stale registration must still refuse husk replacement, got '$out'"
+  pass "herdr exit detection: a registered status over a shell-only pane is stale-agent and still refuses closing"
 }
 
 test_herdr_shell_first_with_live_registry_stays_live() {
   local dir out
   dir="$TMP_ROOT/herdr-idle"; mkdir -p "$dir"
   printf '%s\n' '{"result":{"agent":{"agent":"agy","agent_status":"idle","pane_id":"w9:p1"}}}' > "$dir/agent-get.json"
+  # The pane shell is present in the process view too (shell_pid), but the
+  # foreground names agy: the verified harness identity outranks shell-first
+  # ranking, and the shared contract's process proof is satisfied.
+  agy_herdr_process_info_body 424242 agy > "$dir/process-info.json"
   out=$(agy_herdr_agent_state "$dir")
-  [ "$out" = live ] || fail "a registered idle status must stay live, got '$out'"
+  [ "$out" = live ] || fail "a registered idle status with an agy foreground must stay live, got '$out'"
   grep -q "process-info" "$dir/calls.log" \
-    && fail "the registry verdict consulted process state" || true
-  pass "herdr exit detection: a registered pane stays live however its shell ranks"
+    || fail "the shared contract proves a registered agent at process level; the verdict trusted the registration alone"
+  pass "herdr exit detection: a registered pane with an agy foreground stays live however its shell ranks"
 }
 
 test_herdr_lone_unregistered_pane_is_agent_free() {
@@ -827,6 +882,7 @@ test_agy_busy_signatures_are_harness_scoped
 test_agy_classify_reports_unknown_when_the_marker_scrolls_out
 test_agy_tmux_names_the_native_binary_an_agent
 test_herdr_done_with_live_registry_stays_live
+test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live
 test_herdr_shell_first_with_live_registry_stays_live
 test_herdr_lone_unregistered_pane_is_agent_free
 test_herdr_malformed_and_failed_reads_stay_unknown

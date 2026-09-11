@@ -118,10 +118,14 @@ case "$reply" in
 esac
 # The reply can render while the turn is still finishing: the busy footer stays
 # pinned until the idle composer replaces it, so wait for the settled idle row
-# before asserting what the settled pane must not match.
+# before asserting what the settled pane must not match. The wait itself
+# refreshes $screen: the reply-wait loop above can legitimately break on a
+# frame that still carries the pinned busy footer, and asserting on that stale
+# frame would fail every run whose reply lands mid-turn.
 idle_settled=
 for _ in $(seq 1 120); do
-  case "$(capture)" in *"? for shortcuts"*) idle_settled=1; break ;; esac
+  screen=$(capture)
+  case "$screen" in *"? for shortcuts"*) idle_settled=1; break ;; esac
   sleep 0.5
 done
 [ -n "$idle_settled" ] || fail "the agy composer never settled to its idle footer after the reply"

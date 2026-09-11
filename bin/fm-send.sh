@@ -1030,7 +1030,21 @@ else
       ;;
     *) settle=0.3 ;;
   esac
-  retries=${FM_SEND_RETRIES:-3}
+  # Per-harness submit-confirm budget. agy's bare `>` composer verdict is
+  # `unknown`, so a landed submit is acknowledged only by the idle-to-busy
+  # transition poll, and agy renders its verified busy footer well after the
+  # shared budget expires: ~1.5s after Enter for a short steer, ~4-5s for a
+  # realistic longer brief (live-measured, agy 1.2.1), against the shared
+  # default's 3 x 0.4s. With the shared default a typed steer to an agy
+  # endpoint was reported exit-1 non-delivery for a message that landed and
+  # ran, inviting a duplicate resend. agy typed targets get a longer default
+  # budget (~8s at the default cadence, twice the worst measured render); an
+  # explicit FM_SEND_RETRIES still wins, and every other harness keeps the
+  # shared 3-retry default untouched.
+  case "$TARGET_HARNESS" in
+    agy) retries=${FM_SEND_RETRIES:-20} ;;
+    *) retries=${FM_SEND_RETRIES:-3} ;;
+  esac
   sleep_s=${FM_SEND_SLEEP:-0.4}
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary. Only LOCAL targets reach this
