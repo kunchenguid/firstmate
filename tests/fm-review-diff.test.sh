@@ -44,9 +44,9 @@ make_case() {
   printf '%s\n' "$case_dir"
 }
 
-# The review base follows where a project lands approved work, and the captain
-# records that in the home's project registry, so these cases register it the
-# same way rather than asserting on how it is resolved.
+# A task carries its own delivery mode in state/<id>.meta. The registered posture
+# below only answers for a scout, which records no mode, and these cases register
+# it the same way the captain does rather than asserting on how it is resolved.
 register_project_mode() {  # <case_dir> <mode>
   printf -- '- project [%s] - review base fixture (added 2026-09-11)\n' "$2" \
     > "$1/data/projects.md"
@@ -107,10 +107,11 @@ commit_branch_work() {  # <case_dir>
 test_local_default_ahead_of_origin_is_the_review_base() {
   local case_dir out
   case_dir=$(make_case local-default-ahead)
-  register_project_mode "$case_dir" local-only
+  # Registered no-mistakes on purpose: the task's own mode decides the base.
+  register_project_mode "$case_dir" no-mistakes
   land_on_local_default "$case_dir" landed-locally.txt 'approved work that was never pushed'
   commit_branch_work "$case_dir"
-  write_task_meta "$case_dir"
+  write_task_meta "$case_dir" "mode=local-only"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
@@ -119,20 +120,19 @@ test_local_default_ahead_of_origin_is_the_review_base() {
   assert_contains "$out" '+branch work' "local-default-ahead: the branch's own change should still show"
   assert_not_contains "$out" 'landed-locally.txt' \
     "local-default-ahead: locally landed work was reported as part of the branch"
-  pass "fm-review-diff reviews against a local default branch that strictly contains origin"
+  pass "fm-review-diff reviews a local-only task against a local default branch that contains origin"
 }
 
 test_local_default_behind_origin_keeps_origin_review_base() {
   local case_dir out
   case_dir=$(make_case local-default-behind)
-  register_project_mode "$case_dir" local-only
   git clone -q "$case_dir/origin.git" "$case_dir/publisher"
   printf 'pushed elsewhere\n' > "$case_dir/publisher/pushed.txt"
   git -C "$case_dir/publisher" add pushed.txt
   git -C "$case_dir/publisher" -c user.email=t@t -c user.name=t commit -qm "advance origin"
   git -C "$case_dir/publisher" push -q origin main
   commit_branch_work "$case_dir"
-  write_task_meta "$case_dir"
+  write_task_meta "$case_dir" "mode=local-only"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
@@ -142,25 +142,53 @@ test_local_default_behind_origin_keeps_origin_review_base() {
   pass "fm-review-diff keeps origin as the review base when the local default branch trails it"
 }
 
-# A project delivered through a PR lands on origin, so an unpushed local default
-# branch is not landed work. Reviewing against it would hide commits the PR
-# against origin will carry.
-test_local_default_ahead_keeps_origin_unless_the_project_lands_locally() {
+# A task delivered through a PR lands on origin, so an unpushed local default
+# branch is not landed work for it. Reviewing against it would hide commits the
+# PR against origin will carry. The project is registered local-only in both
+# cases here, so only the task's own mode can produce the right answer.
+test_pr_delivered_task_keeps_the_origin_review_base() {
   local case_dir out mode
-  for mode in no-mistakes direct-PR unregistered; do
+  for mode in no-mistakes direct-PR; do
     case_dir=$(make_case "local-default-ahead-$mode")
-    [ "$mode" = unregistered ] || register_project_mode "$case_dir" "$mode"
+    register_project_mode "$case_dir" local-only
     land_on_local_default "$case_dir" landed-locally.txt 'a local commit that was never pushed'
+    commit_branch_work "$case_dir"
+    write_task_meta "$case_dir" "mode=$mode"
+
+    out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+    assert_contains "$out" 'diff base: origin/main' \
+      "$mode: origin must stay the review base for a task that delivers through a PR"
+    assert_contains "$out" '+branch work' "$mode: the branch's own change should still show"
+  done
+  pass "fm-review-diff keeps the origin base for a PR-delivered task on a local-only project"
+}
+
+# A scout records no delivery mode, so the registered posture is the only answer
+# available and the review base follows it.
+test_task_without_a_recorded_mode_follows_the_registry() {
+  local case_dir out registered
+  for registered in local-only no-mistakes; do
+    case_dir=$(make_case "no-recorded-mode-$registered")
+    register_project_mode "$case_dir" "$registered"
+    land_on_local_default "$case_dir" landed-locally.txt 'approved work that was never pushed'
     commit_branch_work "$case_dir"
     write_task_meta "$case_dir"
 
     out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
-    assert_contains "$out" 'diff base: origin/main' \
-      "$mode: origin must stay the review base when the project does not land work locally"
-    assert_contains "$out" '+branch work' "$mode: the branch's own change should still show"
+    if [ "$registered" = local-only ]; then
+      assert_contains "$out" 'diff base: main' \
+        "no recorded mode: a local-only project's review base should follow the landed work"
+      assert_not_contains "$out" 'landed-locally.txt' \
+        "no recorded mode: locally landed work was reported as part of the branch"
+    else
+      assert_contains "$out" 'diff base: origin/main' \
+        "no recorded mode: a $registered project's review base should stay origin"
+    fi
+    assert_contains "$out" '+branch work' "no recorded mode: the branch's own change should still show"
   done
-  pass "fm-review-diff only prefers the local default branch for a project registered local-only"
+  pass "fm-review-diff falls back to the registered posture when a task records no delivery mode"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local() {
@@ -264,4 +292,5 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_local_default_ahead_of_origin_is_the_review_base
 test_local_default_behind_origin_keeps_origin_review_base
-test_local_default_ahead_keeps_origin_unless_the_project_lands_locally
+test_pr_delivered_task_keeps_the_origin_review_base
+test_task_without_a_recorded_mode_follows_the_registry

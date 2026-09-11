@@ -2508,9 +2508,9 @@ spawn_worktree_has_origin_config() {  # <worktree>
 #
 # A worktree with no origin configured is the one shape that rule does not
 # decide: there is no origin to be authoritative, so refs/heads/<default> is the
-# only base there, whatever the project's delivery mode.
-freshen_spawn_worktree_base() {  # <worktree> <project>
-  local worktree=$1 project=$2 default target expected status local_ref local_commit
+# only base there, whatever this task's delivery mode.
+freshen_spawn_worktree_base() {  # <worktree> <project> <task-mode>
+  local worktree=$1 project=$2 mode=$3 default target expected status local_ref local_commit
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2559,7 +2559,7 @@ freshen_spawn_worktree_base() {  # <worktree> <project>
   }
   local_ref="refs/heads/$default"
   local_commit=$(git -C "$worktree" rev-parse --verify --quiet "$local_ref^{commit}" 2>/dev/null || true)
-  if fm_pool_base_prefers_local_default "$worktree" "$project" "$expected" "$local_commit"; then
+  if fm_pool_base_prefers_local_default "$worktree" "$project" "$mode" "$expected" "$local_commit"; then
     target=$local_ref
     expected=$local_commit
   fi
@@ -3247,7 +3247,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" "$PROJ_ABS" || exit 1
+  freshen_spawn_worktree_base "$WT" "$PROJ_ABS" "${MODE:-}" || exit 1
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,

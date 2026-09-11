@@ -243,25 +243,29 @@ make_originless_case() {  # <name> <id>
 # local default branch is the only base - in every delivery mode. A pooled slot
 # allocated before the captain landed work on it must still be moved onto it.
 test_originless_pool_refreshes_to_the_local_default_branch() {
-  local rec id out status landed mode
-  for mode in local-only no-mistakes unregistered; do
+  local rec id out status landed mode git_dir
+  for mode in local-only no-mistakes direct-PR scout; do
     id="pool-originless-$mode-r6"
     rec=$(make_originless_case "originless-$mode" "$id")
     read_case_record "$rec"
-    [ "$mode" = unregistered ] || register_project_mode "$mode"
     ! git -C "$POOL_DIR" remote get-url origin >/dev/null 2>&1 \
       || fail "fixture unexpectedly configured an origin remote"
     landed=$(land_locally landed-locally.txt 'approved work that was never pushed')
     [ "$landed" != "$(git -C "$POOL_DIR" rev-parse HEAD)" ] \
       || fail "fixture did not leave the pool short of the locally landed commit"
 
-    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    if [ "$mode" = scout ]; then
+      out=$(run_spawn "$id" --scout)
+    else
+      out=$(run_spawn "$id" --mode "$mode" --yolo off)
+    fi
     status=$?
     expect_code 0 "$status" "spawn should launch an origin-less pooled worktree ($mode)"$'\n'"$out"
     assert_contains "$out" "spawned $id" "spawn did not report success for the origin-less pool"
     assert_not_contains "$out" "could not fetch origin" \
       "spawn attempted a freshness fetch against a nonexistent origin"
-    [ ! -e "$POOL_DIR/.git/FETCH_HEAD" ] || fail "spawn fetched against a pooled worktree with no origin"
+    git_dir=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-dir)
+    [ ! -e "$git_dir/FETCH_HEAD" ] || fail "spawn fetched against a pooled worktree with no origin"
     [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$landed" ] \
       || fail "spawn left an origin-less pool on a base missing locally landed work ($mode)"
     assert_grep 'approved work that was never pushed' "$POOL_DIR/landed-locally.txt" \
@@ -777,10 +781,10 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
 # that shape - origin's tip is real, the local branch carries it plus landed work -
 # and prove the next pooled spawn starts from the landed work rather than from a
 # base that would read as a revert of it.
-# The delivery mode the captain registered for a project is what decides whether
-# its approved work lands locally, so these fixtures register it the same way the
-# captain does - a line in the home's own data/projects.md - rather than asserting
-# on the resolution itself.
+# A ship task carries its own delivery mode on the spawn command line. The
+# registered posture below only answers for a scout, which records no mode, and
+# these fixtures register it the same way the captain does - a line in the home's
+# own data/projects.md - rather than asserting on the resolution itself.
 register_project_mode() {  # <mode>
   local mode=$1
   printf -- '- %s [%s] - pooled base fixture (added 2026-09-11)\n' \
@@ -806,13 +810,16 @@ test_local_default_ahead_of_origin_wins() {
   id='pool-local-ahead-r1'
   rec=$(make_case local-ahead "$id")
   read_case_record "$rec"
-  register_project_mode local-only
+  # Registered no-mistakes on purpose: the captain can instruct a single task to
+  # ship local-only, and it is that task's mode, not the standing posture, that
+  # decides where its work lands.
+  register_project_mode no-mistakes
   sync_local_default_to_origin
   origin_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
   landed=$(land_locally landed-locally.txt 'approved work that was never pushed')
   [ "$landed" != "$origin_tip" ] || fail "fixture did not advance the local default branch past origin"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should launch from a local default branch that contains origin"$'\n'"$out"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$landed" ] \
@@ -828,34 +835,66 @@ test_local_default_ahead_of_origin_wins() {
     printf '# local-only base: HEAD=%s local %s=%s origin/%s=%s\n' \
       "$(git -C "$POOL_DIR" rev-parse HEAD)" "$DEFAULT_BRANCH" "$landed" "$DEFAULT_BRANCH" "$origin_tip"
   fi
-  pass "a local default branch strictly ahead of origin becomes the pooled base"
+  pass "a local-only task starts from a local default branch strictly ahead of origin"
 }
 
-# The preference exists because a `local-only` project lands approved work on its
-# local default branch. On a project delivered through a PR, an unpushed local
-# default is not landed work, and starting a branch there would sweep those
-# commits into it and narrow the review diff that follows.
-test_local_ahead_keeps_origin_unless_the_project_lands_locally() {
+# The preference exists because a `local-only` task lands approved work on the
+# local default branch. A task delivered through a PR lands on origin, so an
+# unpushed local default is not landed work for it, and starting a branch there
+# would sweep those commits into the PR and narrow the review diff that follows.
+# The project is registered local-only in every case here, so only the task's own
+# mode can produce the right answer.
+test_pr_delivered_task_keeps_origin_on_a_local_only_project() {
   local rec id out status landed origin_tip mode
-  for mode in no-mistakes direct-PR no-mistakes-prod-only unregistered; do
+  for mode in no-mistakes direct-PR; do
     id="pool-local-ahead-$mode-r1"
     rec=$(make_case "local-ahead-$mode" "$id")
     read_case_record "$rec"
-    [ "$mode" = unregistered ] || register_project_mode "$mode"
+    register_project_mode local-only
     sync_local_default_to_origin
     origin_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
     landed=$(land_locally landed-locally.txt 'a local commit that was never pushed')
     [ "$landed" != "$origin_tip" ] || fail "fixture did not advance the local default branch past origin"
 
-    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    out=$(run_spawn "$id" --mode "$mode" --yolo off)
     status=$?
-    expect_code 0 "$status" "spawn should launch from origin for a $mode project"$'\n'"$out"
+    expect_code 0 "$status" "spawn should launch from origin for a $mode task"$'\n'"$out"
     [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$origin_tip" ] \
-      || fail "spawn adopted an unpushed local default branch on a $mode project"
+      || fail "a $mode task adopted an unpushed local default branch"
     [ ! -e "$POOL_DIR/landed-locally.txt" ] \
-      || fail "spawn swept unpushed local commits into a $mode project's base"
+      || fail "a $mode task swept unpushed local commits into its base"
   done
-  pass "an unpushed local default branch is only preferred for a project registered local-only"
+  pass "a PR-delivered task keeps origin even on a project registered local-only"
+}
+
+# A scout records no delivery mode, so there is no task fact to read and the
+# registered posture is the only answer available.
+test_scout_without_a_recorded_mode_follows_the_registry() {
+  local rec id out status landed origin_tip registered
+  for registered in local-only no-mistakes; do
+    id="pool-scout-$registered-r1"
+    rec=$(make_case "scout-$registered" "$id")
+    read_case_record "$rec"
+    register_project_mode "$registered"
+    sync_local_default_to_origin
+    origin_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+    landed=$(land_locally landed-locally.txt 'approved work that was never pushed')
+    [ "$landed" != "$origin_tip" ] || fail "fixture did not advance the local default branch past origin"
+
+    out=$(run_spawn "$id" --scout)
+    status=$?
+    expect_code 0 "$status" "a scout should launch on a $registered project"$'\n'"$out"
+    [ -z "$(grep '^mode=' "$HOME_DIR/state/$id.meta" || true)" ] \
+      || fail "fixture assumed a scout records no delivery mode, but it recorded one"
+    if [ "$registered" = local-only ]; then
+      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$landed" ] \
+        || fail "a scout on a local-only project did not start from the locally landed work"
+    else
+      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$origin_tip" ] \
+        || fail "a scout on a $registered project adopted an unpushed local default branch"
+    fi
+  done
+  pass "a scout with no recorded delivery mode follows the project's registered posture"
 }
 
 test_local_default_equal_to_origin_keeps_origin() {
@@ -863,13 +902,12 @@ test_local_default_equal_to_origin_keeps_origin() {
   id='pool-local-equal-r1'
   rec=$(make_case local-equal "$id")
   read_case_record "$rec"
-  register_project_mode local-only
   sync_local_default_to_origin
   origin_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
   [ "$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")" = "$origin_tip" ] \
     || fail "fixture did not leave the local default branch equal to origin"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should launch when local and origin name the same commit"$'\n'"$out"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$origin_tip" ] \
@@ -882,14 +920,13 @@ test_local_default_behind_origin_keeps_origin() {
   id='pool-local-behind-r1'
   rec=$(make_case local-behind "$id")
   read_case_record "$rec"
-  register_project_mode local-only
   git -C "$PROJECT_DIR" fetch --quiet origin
   origin_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
   local_tip=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
   [ "$local_tip" = "$INITIAL_SHA" ] && [ "$local_tip" != "$origin_tip" ] \
     || fail "fixture did not leave the local default branch behind origin"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should launch from origin when the local default branch is behind"$'\n'"$out"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$origin_tip" ] \
@@ -904,14 +941,13 @@ test_local_default_diverged_from_origin_keeps_origin() {
   id='pool-local-diverged-r1'
   rec=$(make_case local-diverged "$id")
   read_case_record "$rec"
-  register_project_mode local-only
   git -C "$PROJECT_DIR" fetch --quiet origin
   origin_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
   diverged=$(land_locally diverged.txt 'a local commit that never saw origin tip')
   git -C "$PROJECT_DIR" merge-base --is-ancestor "$origin_tip" "$diverged" \
     && fail "fixture did not leave the local default branch diverged from origin"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should launch from origin when the local default branch diverged"$'\n'"$out"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$origin_tip" ] \
@@ -927,13 +963,12 @@ test_local_ahead_dirty_pool_refuses_without_discarding_work() {
   id='pool-local-ahead-dirty-r1'
   rec=$(make_case local-ahead-dirty "$id")
   read_case_record "$rec"
-  register_project_mode local-only
   sync_local_default_to_origin
   landed=$(land_locally landed-locally.txt 'approved work that was never pushed')
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded on a dirty pool even with locally landed work available"
   assert_contains "$out" "is not clean" "spawn did not clearly refuse the dirty pooled worktree"
@@ -951,7 +986,8 @@ test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_local_default_ahead_of_origin_wins
-test_local_ahead_keeps_origin_unless_the_project_lands_locally
+test_pr_delivered_task_keeps_origin_on_a_local_only_project
+test_scout_without_a_recorded_mode_follows_the_registry
 test_local_default_equal_to_origin_keeps_origin
 test_local_default_behind_origin_keeps_origin
 test_local_default_diverged_from_origin_keeps_origin
