@@ -644,6 +644,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_SHELL_ROW=-1
   FM_COMPOSER_SCAN_AGY_ROW=-1
   FM_COMPOSER_SCAN_AGY_END=-1
+  FM_COMPOSER_SCAN_AGY_BOUNDARY=-1
   FM_COMPOSER_SCAN_LEFTBAR_START=-1
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
   FM_COMPOSER_SCAN_PI_PAIR_FOUND=0
@@ -653,6 +654,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
   local agy_prompt_row=-1 agy_boundary_row=-1
+  local agy_last_boundary_row=-1 agy_rule_count=0 agy_footer_after_boundary=0
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
   while IFS= read -r line; do
@@ -714,9 +716,17 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     esac
     if [ "$agy_prompt_row" -ge 0 ] && [ "$row" -ge "$agy_prompt_row" ]; then
       if [ "$row" -gt "$agy_prompt_row" ] \
-         && [ "$agy_boundary_row" -lt 0 ] \
          && _fm_composer_agy_boundary_row "$trimmed"; then
-        agy_boundary_row=$row
+        agy_rule_count=$((agy_rule_count + 1))
+        agy_last_boundary_row=$row
+        agy_footer_after_boundary=0
+        if [ -n "$cy" ] && [ "$row" -gt "$cy" ] \
+           && [ "$agy_boundary_row" -lt 0 ]; then
+          agy_boundary_row=$row
+        fi
+      elif [ "$agy_last_boundary_row" -ge 0 ] \
+           && _fm_composer_agy_footer_row "$trimmed"; then
+        agy_footer_after_boundary=1
       fi
     fi
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
@@ -841,6 +851,13 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   done <<EOF
 $pane
 EOF
+  if [ -z "$cy" ]; then
+    if [ "$agy_footer_after_boundary" = 1 ] || [ "$agy_rule_count" -eq 1 ]; then
+      agy_boundary_row=$agy_last_boundary_row
+    else
+      agy_boundary_row=-1
+    fi
+  fi
   local agy_end_row=-1
   if [ "$agy_prompt_row" -ge 0 ] && [ "$agy_boundary_row" -ge 0 ]; then
     agy_end_row=$((agy_boundary_row - 1))
@@ -848,6 +865,7 @@ EOF
   if [ "$agy_prompt_row" -ge 0 ] && [ "$agy_end_row" -ge "$agy_prompt_row" ]; then
     FM_COMPOSER_SCAN_AGY_ROW=$agy_prompt_row
     FM_COMPOSER_SCAN_AGY_END=$agy_end_row
+    FM_COMPOSER_SCAN_AGY_BOUNDARY=$agy_boundary_row
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$agy_prompt_row" ] \
        && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$agy_end_row" ]; then
       FM_COMPOSER_SCAN_BARE_ROW=-1
@@ -1044,6 +1062,13 @@ _fm_composer_agy_boundary_row() {  # <trimmed-row>
   return 0
 }
 
+_fm_composer_agy_footer_row() {  # <trimmed-row>
+  case "$1" in
+    *'? for shortcuts'*|*' · low'|*' · medium'|*' · high') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
 # through <cursor-row> is non-blank and carries no structural edge - the
 # contiguity proof that those rows are the bare composer's wrapped input
@@ -1165,8 +1190,8 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_LEFTBAR_START
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_LEFTBAR_END
   fi
-  if [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ]; then
-    generic=$FM_COMPOSER_SCAN_AGY_ROW
+  if [ "$FM_COMPOSER_SCAN_AGY_BOUNDARY" -gt "$generic" ]; then
+    generic=$FM_COMPOSER_SCAN_AGY_BOUNDARY
     FM_COMPOSER_SELECTED_KIND=agy
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_AGY_ROW
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_AGY_END
@@ -1233,8 +1258,8 @@ _fm_composer_select_cursorless() {
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
 }
 
-fm_composer_extract_selected_content() {  # <caps> <screen>
-  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
+fm_composer_extract_selected_content() {  # <caps> <screen> [cursor_row]
+  local caps=$1 screen=$2 cursor=${3:-} styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
@@ -1243,8 +1268,16 @@ fm_composer_extract_selected_content() {  # <caps> <screen>
 $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
-  _fm_composer_scan_screen "$plain" '' 1
-  _fm_composer_select_cursorless "$plain" || return 1
+  _fm_composer_scan_screen "$plain" "$cursor" 1
+  if [ -n "$cursor" ] \
+     && [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
+     && [ "$cursor" -le "$FM_COMPOSER_SCAN_AGY_END" ]; then
+    FM_COMPOSER_SELECTED_KIND=agy
+    FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_AGY_ROW
+    FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_AGY_END
+  else
+    _fm_composer_select_cursorless "$plain" || return 1
+  fi
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
@@ -1338,7 +1371,8 @@ EOF
     if [ "$FM_COMPOSER_SCAN_UNSAFE" = 1 ]; then
       printf 'unknown'; return 0
     fi
-    if [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
+    if [ "$FM_COMPOSER_SCAN_BOX_TOP" -lt 0 ] \
+       && [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
        && [ "$cy" -ge "$FM_COMPOSER_SCAN_AGY_ROW" ] \
        && { [ "$cy" -le "$FM_COMPOSER_SCAN_AGY_END" ] || \
             { [ "$cy" -eq $((FM_COMPOSER_SCAN_AGY_END + 1)) ] \

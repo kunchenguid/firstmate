@@ -706,7 +706,7 @@ test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
   [ "$extract" = 'first line second line' ] \
     || fail "cursorless agy extraction lost multiline draft content: '$extract'"
   screen=$'────────\n> first line\n? for shortcuts\n────────\nGemini 3.8 Flash · low'
-  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 3)
+  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 2)
   [ "$out" = pending ] \
     || fail "a multiline agy draft containing furniture-looking rows must read pending, got '$out'"
   extract=$(fm_composer_extract_selected_content "$cursor_caps" "$screen")
@@ -782,6 +782,36 @@ test_agy_prompt_uses_complete_positional_boundaries() {
       || fail "a model-looking draft continuation was dropped, got '$extract'"
   done
   pass "fm_composer: agy uses the complete positional boundary contract"
+}
+
+test_agy_prompt_disambiguates_repeated_boundaries() {
+  local screen out extract
+  screen=$'────\n> first\n────\nsecond\n────'
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3)
+  [ "$out" = pending ] \
+    || fail "styled cursor should use the first boundary below the cursor, got '$out'"
+  extract=$(fm_composer_extract_selected_content "$CAPS_TMUX" "$screen" 3)
+  [ "$extract" = 'first ──── second' ] \
+    || fail "styled cursor extraction dropped a rule-separated draft row: '$extract'"
+  screen=$'────\n> first\n────\nsecond\n────\n? for shortcuts'
+  out=$(fm_composer_classify_screen 'styled=0' "$screen")
+  [ "$out" = pending ] \
+    || fail "cursorless AGY with a footer should use the last boundary, got '$out'"
+  extract=$(fm_composer_extract_selected_content 'styled=0' "$screen")
+  [ "$extract" = 'first ──── second' ] \
+    || fail "cursorless AGY extraction dropped a rule-separated draft row: '$extract'"
+  screen=$'────\n> first\n────\nsecond\n────'
+  out=$(fm_composer_classify_screen 'styled=0' "$screen")
+  [ "$out" = unknown ] \
+    || fail "cursorless AGY with repeated boundaries and no footer must defer, got '$out'"
+  screen=$'> quoted\n────\n╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
+  out=$(fm_composer_classify_screen 'styled=1' "$screen")
+  [ "$out" = empty ] \
+    || fail "cursorless selection must keep the lower bordered composer, got '$out'"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3)
+  [ "$out" = empty ] \
+    || fail "cursor selection must keep the lower bordered composer, got '$out'"
+  pass "fm_composer: AGY repeated boundaries defer safely and respect lower composers"
 }
 
 test_agy_boundary_is_locale_independent() {
@@ -861,6 +891,7 @@ test_agy_prompt_requires_footer_proof_without_cursor
 test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts
 test_agy_prompt_preserves_structural_draft_rows
 test_agy_prompt_uses_complete_positional_boundaries
+test_agy_prompt_disambiguates_repeated_boundaries
 test_agy_boundary_is_locale_independent
 test_agy_prompt_preserves_furniture_looking_drafts
 
