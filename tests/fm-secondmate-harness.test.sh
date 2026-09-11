@@ -3,7 +3,7 @@
 # tokens config/secondmate-harness carries alongside the harness, and the
 # primary->secondmate inherited local-material propagation.
 #
-# Three capabilities are under test:
+# Four capabilities are under test:
 #   A) Harness split. config/secondmate-harness sets the harness the PRIMARY uses
 #      to launch SECONDMATE agents, independent of config/crew-harness (the
 #      crewmate harness). fm-harness.sh secondmate resolves the fallback chain
@@ -41,6 +41,16 @@
 #      spawn only when the harness also resolves from that file, so the pin is
 #      durable across every respawn while explicit per-spawn harness/model/effort
 #      flags still win.
+#   D) Realignment safety. config/crew-harness answers two questions with one
+#      value - the crewmate fallback and the second link of the secondmate chain -
+#      so correcting it for one of them can silently re-answer the other. An
+#      explicitly pinned config/secondmate-harness insulates secondmate launches
+#      from that edit, and an unpinned one does not, which is why the pin must be
+#      set FIRST. An active config/crew-dispatch.json keeps the same edit away
+#      from crewmate launches entirely: a resolved profile ignores
+#      config/crew-harness and an unresolved spawn refuses instead of reading it.
+#      Each case carries its negative control, because every assertion here would
+#      also hold if config/crew-harness had simply stopped working everywhere.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2560,6 +2570,209 @@ SH
   pass "B25 spawn quarantines stale rereads without blocking relaunch"
 }
 
+# ===========================================================================
+# D) Realignment safety: correcting config/crew-harness must not move an
+#    explicitly pinned secondmate launch, and must not move crewmate dispatch
+#    at all while config/crew-dispatch.json is active.
+# ===========================================================================
+# config/crew-harness answers two questions with one value: it is the crewmate
+# fallback AND the second link of the secondmate chain. So an edit made to
+# correct the crewmate answer silently re-answers the secondmate one - unless
+# config/secondmate-harness is pinned first. That ordering is the safety
+# property, and both cases below assert it in BOTH directions. Without the
+# negative control half, each would also pass if config/crew-harness had no
+# effect anywhere, which is exactly the vacuous result that would hide a
+# regression in the fallback chain.
+
+# A crew-harness edit must not move a PINNED secondmate harness; with no pin,
+# the same edit MUST move it.
+test_pinned_secondmate_survives_a_crew_harness_realignment() {
+  local cfg before after crew
+  cfg="$TMP_ROOT/realign-pinned/config"
+  mkdir -p "$cfg"
+  printf 'claude\n' > "$cfg/crew-harness"
+  printf 'pi\n' > "$cfg/secondmate-harness"
+
+  before=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
+  [ "$before" = pi ] || fail "pinned: secondmate resolved '$before' before the edit, expected the pinned pi"
+  printf 'codex\n' > "$cfg/crew-harness"
+  after=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
+  [ "$after" = pi ] \
+    || fail "pinned: a config/crew-harness edit moved the secondmate harness to '$after'; an explicit pin must insulate it"
+  crew=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" crew)
+  [ "$crew" = codex ] \
+    || fail "pinned: crew resolution did not take the edit (got '$crew'), so the insulation assertion above is vacuous"
+
+  # Negative control: the same edit with NO pin must move the secondmate value.
+  cfg="$TMP_ROOT/realign-unpinned/config"
+  mkdir -p "$cfg"
+  printf 'claude\n' > "$cfg/crew-harness"
+  before=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
+  [ "$before" = claude ] || fail "unpinned: secondmate resolved '$before', expected the crew-harness value claude"
+  printf 'codex\n' > "$cfg/crew-harness"
+  after=$(CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" secondmate)
+  [ "$after" = codex ] || fail "unpinned: secondmate resolved '$after' after the crew edit, expected codex"
+  [ "$before" != "$after" ] \
+    || fail "negative control did not diverge: config/crew-harness moved an unpinned secondmate nowhere, so the pinned case proves nothing"
+
+  pass "D1 a config/crew-harness realignment leaves a PINNED secondmate harness alone; an unpinned one moves with it (the pin-first ordering is load-bearing)"
+}
+
+# The same property at the spawn chokepoint, which is what actually launches an
+# agent: every spawn re-resolves, so the pin must still hold after the edit.
+test_pinned_secondmate_spawn_survives_a_crew_harness_realignment() {
+  local w meta
+  w="$TMP_ROOT/realign-spawn"
+  mkdir -p "$w/home/config"
+  printf 'claude\n' > "$w/home/config/crew-harness"
+  printf 'pi\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$w/sm-before" sm-before
+  make_seeded_home "$w/sm-after" sm-after
+
+  spawn_secondmate "$w" sm-before "$w/sm-before"
+  meta="$w/home/state/sm-before.meta"
+  [ "$(meta_harness "$meta")" = pi ] \
+    || fail "pinned spawn: pre-edit secondmate launched on '$(meta_harness "$meta")', expected the pinned pi"
+
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  spawn_secondmate "$w" sm-after "$w/sm-after"
+  meta="$w/home/state/sm-after.meta"
+  [ "$(meta_harness "$meta")" = pi ] \
+    || fail "pinned spawn: after a crew-harness edit the secondmate launched on '$(meta_harness "$meta")', expected the pinned pi"
+  [ "$(cat "$w/sm-after/config/crew-harness")" = codex ] \
+    || fail "pinned spawn: the edited crew-harness did not reach the secondmate home, so this case did not exercise the edit"
+
+  # Negative control: an unpinned home takes the edit at spawn time.
+  w="$TMP_ROOT/realign-spawn-unpinned"
+  mkdir -p "$w/home/config"
+  printf 'claude\n' > "$w/home/config/crew-harness"
+  make_seeded_home "$w/sm-before" sm-before
+  make_seeded_home "$w/sm-after" sm-after
+  spawn_secondmate "$w" sm-before "$w/sm-before"
+  [ "$(meta_harness "$w/home/state/sm-before.meta")" = claude ] \
+    || fail "unpinned spawn: expected the crew-harness value claude"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  spawn_secondmate "$w" sm-after "$w/sm-after"
+  [ "$(meta_harness "$w/home/state/sm-after.meta")" = codex ] \
+    || fail "unpinned spawn: a crew-harness edit did not reach an unpinned secondmate launch, so the pinned spawn case proves nothing"
+
+  pass "D2 spawn: a pinned config/secondmate-harness keeps launching its own harness across a crew-harness realignment; an unpinned home takes the edit"
+}
+
+# Spawn one ordinary ship task and echo fm-spawn's combined output.
+# <crew> is written to config/crew-harness; the literal '-' leaves it absent.
+# Remaining args are passed through to fm-spawn (an explicit --harness, or none).
+crew_ship_spawn() {
+  local w=$1 id=$2 crew=$3 home fakebin
+  shift 3
+  home="$w/home"
+  fakebin=$(make_launch_capturing_tmux "$w/tmux-$id")
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  if [ "$crew" = "-" ]; then
+    rm -f "$home/config/crew-harness"
+  else
+    printf '%s\n' "$crew" > "$home/config/crew-harness"
+  fi
+  : > "$w/$id.launch.log"
+  PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$w/wt" FM_FAKE_LAUNCH_LOG="$w/$id.launch.log" \
+    GROK_HOME="$home/grok-home" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$w/project" --mode no-mistakes --yolo off "$@" 2>&1
+}
+
+# While config/crew-dispatch.json is active, config/crew-harness cannot reach a
+# crewmate launch by ANY path: an explicitly resolved profile ignores its value,
+# and a spawn with no explicit harness refuses instead of falling back to it.
+# That is what makes realigning the file safe for crew work; the negative
+# control removes the dispatch file and shows the same knob is genuinely live
+# there, so the inertness above is caused by the dispatch file and not by
+# config/crew-harness having no effect anywhere.
+test_crew_harness_is_inert_for_dispatch_resolved_crewmates() {
+  local w crew profile id n out status launch meta first_launch first_meta
+  w="$TMP_ROOT/crew-inert"
+  mkdir -p "$w/home/config" "$w/home/state"
+  # Two rules plus the default, so "every matching rule" is more than one row.
+  printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}},{"when":"utility","use":{"harness":"pi","model":"openai-codex/gpt-5.6-terra","effort":"low"}}],"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' \
+    > "$w/home/config/crew-dispatch.json"
+  fm_git_worktree "$w/project" "$w/wt" wt-crew-inert
+  n=0
+  # <resolved-profile-flags> rows: one per matching dispatch rule, plus default.
+  while IFS='^' read -r profile; do
+    [ -n "$profile" ] || continue
+    first_launch=
+    first_meta=
+    # claude is the pre-realignment value, pi the post-realignment one, and '-'
+    # the absent case; a dispatch-resolved launch must not vary across them.
+    for crew in claude pi -; do
+      n=$((n + 1))
+      id="crew-inert-z$n"
+      # shellcheck disable=SC2086  # deliberate word-splitting: the row holds flags
+      out=$(crew_ship_spawn "$w" "$id" "$crew" $profile); status=$?
+      expect_code 0 "$status" \
+        "dispatch-resolved crew spawn failed with crew-harness='$crew'"$'\n'"$out"
+      meta=$(grep -E '^(harness|model|effort)=' "$w/home/state/$id.meta" | sort)
+      # The launch embeds this task's own brief path, so normalize the id out:
+      # what must be identical across crew-harness values is everything else.
+      launch=$(cat "$w/$id.launch.log")
+      launch=${launch//"$id"/TASKID}
+      if [ -z "$first_launch" ]; then
+        first_launch=$launch
+        first_meta=$meta
+      else
+        [ "$launch" = "$first_launch" ] \
+          || fail "crew-harness='$crew' changed the launch command of a dispatch-resolved crewmate ($profile)"$'\n'"--- expected ---"$'\n'"$first_launch"$'\n'"--- got ---"$'\n'"$launch"
+        [ "$meta" = "$first_meta" ] \
+          || fail "crew-harness='$crew' changed the recorded profile of a dispatch-resolved crewmate ($profile)"$'\n'"--- expected ---"$'\n'"$first_meta"$'\n'"--- got ---"$'\n'"$meta"
+      fi
+    done
+  done <<'ROWS'
+--harness grok --model grok-4 --effort high
+--harness pi --model openai-codex/gpt-5.6-terra --effort low
+--harness codex --model gpt-5 --effort medium
+ROWS
+
+  # With the dispatch file active and NO explicit harness, the spawn refuses
+  # rather than reading config/crew-harness - the consultation backstop.
+  for crew in claude pi -; do
+    n=$((n + 1))
+    id="crew-inert-z$n"
+    out=$(crew_ship_spawn "$w" "$id" "$crew"); status=$?
+    expect_code 1 "$status" "an unresolved crew spawn should refuse while dispatch profiles are active (crew-harness='$crew')"
+    assert_contains "$out" "config/crew-dispatch.json is active" \
+      "the refusal did not name the dispatch backstop (crew-harness='$crew')"
+    assert_absent "$w/home/state/$id.meta" "the refusal wrote a meta (crew-harness='$crew')"
+  done
+
+  # Negative control: with no dispatch file, that same unresolved spawn DOES
+  # resolve from config/crew-harness and its value changes the launch.
+  # Both launches are normalized the same way the inertness comparison above is,
+  # so the divergence this asserts comes from the harness and not from the task
+  # id embedded in each brief path - which would make the control vacuous.
+  rm -f "$w/home/config/crew-dispatch.json"
+  n=$((n + 1))
+  id="crew-live-z$n"
+  out=$(crew_ship_spawn "$w" "$id" claude); status=$?
+  expect_code 0 "$status" "with no dispatch file an unresolved crew spawn should fall back to crew-harness"$'\n'"$out"
+  first_launch=$(cat "$w/$id.launch.log")
+  first_launch=${first_launch//"$id"/TASKID}
+  assert_contains "$first_launch" "claude " "crew-harness=claude did not produce a claude launch"
+  n=$((n + 1))
+  id="crew-live-z$n"
+  out=$(crew_ship_spawn "$w" "$id" codex); status=$?
+  expect_code 0 "$status" "with no dispatch file an unresolved crew spawn should fall back to crew-harness"$'\n'"$out"
+  launch=$(cat "$w/$id.launch.log")
+  launch=${launch//"$id"/TASKID}
+  assert_contains "$launch" "codex " "crew-harness=codex did not produce a codex launch"
+  [ "$launch" != "$first_launch" ] \
+    || fail "negative control did not diverge: config/crew-harness changed nothing even with no dispatch file, so the inertness assertions prove nothing"
+
+  pass "D3 spawn: config/crew-harness cannot reach a crewmate launch while dispatch profiles are active, for every matching rule and the default; with no dispatch file it is live again"
+}
+
 test_harness_resolution
 test_cursor_marker_detection
 test_secondmate_model_effort_tokens
@@ -2609,5 +2822,8 @@ test_config_reread_bootstrap_path_and_spawn_flexibility
 test_bootstrap_respawns_before_config_reread
 test_spawn_quarantines_pending_rereads_on_cleanup_failure
 test_bootstrap_detect_only_does_not_create_state
+test_pinned_secondmate_survives_a_crew_harness_realignment
+test_pinned_secondmate_spawn_survives_a_crew_harness_realignment
+test_crew_harness_is_inert_for_dispatch_resolved_crewmates
 
 echo "# all fm-secondmate-harness tests passed"
