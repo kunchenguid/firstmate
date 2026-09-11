@@ -1,0 +1,51 @@
+=== Scenario 1: default /bearings-style TOON while catch-up has one blocker ===
+in_flight[1]{id,kind,state,repo,doing}:
+  repair-task,ship,unknown,firstmate,worktree gone (torn down?)
+decisions_open: []
+gates[1]{id,title,blocked_by,reason,owner}:
+  (return-catchup),1 blocker(s) to clear before ordinary work,"-",away-return catch-up,(main)
+  repair-task,tmux,"synthetic:fm-repair-task",false,not_checked
+
+=== Scenario 1 JSON contract: fleet row + posture gate, absent from Captain call ===
+{
+  "in_flight": [
+    {
+      "id": "repair-task",
+      "kind": "ship",
+      "state": "unknown",
+      "repo": "firstmate",
+      "doing": "worktree gone (torn down?)"
+    }
+  ],
+  "return_gate": [
+    {
+      "id": "(return-catchup)",
+      "title": "1 blocker(s) to clear before ordinary work",
+      "blocked_by": "-",
+      "reason": "away-return catch-up",
+      "owner": "(main)"
+    }
+  ],
+  "catchup_in_decisions": false
+}
+
+=== Scenario 2: ACTIVE away window still refuses Bearings ===
+exit=3
+fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work
+
+=== Scenario 3: blockerless lifecycle retention is named ===
+guard_exit=4
+fm-afk-return: return catch-up is pending with no open blocker; clear the retention reason below, then run bin/fm-afk-return.sh check
+catch-up retained: held set unreadable: synthetic backlog; catch-up stays gated
+{
+  "return_gate": [
+    {
+      "id": "(return-catchup)",
+      "title": "catch-up retained: held set unreadable: synthetic backlog",
+      "blocked_by": "-",
+      "reason": "away-return catch-up",
+      "owner": "(main)"
+    }
+  ],
+  "catchup_in_decisions": false
+}
