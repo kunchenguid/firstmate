@@ -75,11 +75,22 @@
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
+#      if that wait does not prove recovery, this guard primes
+#      bin/fm-claude-stop-autoarm.sh --ensure-watcher as a handling successor
+#      immediately before refusing, so a refusal cannot abort the only process
+#      that could restore a watcher (Claude Code
+#      starts the registered asyncRewake hook in parallel, then cancels sibling
+#      hooks when a Stop is blocked). Priming is refusal-path only: doing it
+#      before the wait turned every ordinary Claude Stop into a handling
+#      successor and suppressed once-per-generation downtime re-presentation;
 #   3. only when neither materializes is the auto-arm genuinely absent: re-block
 #      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
-#      fail-open only for an already verified failure episode.
+#      fail-open only for an already verified failure episode. The primed
+#      watcher, if it is still coming up, survives that refusal and can satisfy
+#      the next Stop, so two consecutive refusals cannot be guaranteed by the
+#      first.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -233,7 +244,7 @@ block_stop() {
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
-      printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
+      printf '●  The Stop-owned auto-arm did not claim this home, so no generation claim owns recovery for this Stop.\n'
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
@@ -249,8 +260,15 @@ fi
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
-budget_account_current_epoch() {
-  local current_epoch outcome old_session old_count old_epoch tmp initialized
+# The epoch identity deduplicates the several observations one Stop makes of the
+# same auto-arm generation. It must not also pin the bound: a Stop that reaches
+# the refusal with no epoch progress is still a consecutive block, and accounting
+# it as a no-op is what froze state/.turnend-claude-blocks at count=1 while the
+# auto-arm was unable to publish a new epoch at all.
+BUDGET_ACCOUNTED=0
+budget_account_current_epoch() {  # [blocked-stop]
+  local current_epoch outcome old_session old_count old_epoch tmp initialized blocked=0
+  [ "${1:-}" = blocked-stop ] && blocked=1
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
   current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
@@ -265,7 +283,8 @@ budget_account_current_epoch() {
     esac
     if [ "$old_session" = "$SESSION_ID" ]; then
       COUNT=$old_count
-      if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ]; then
+      if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ] \
+        && { [ "$blocked" -eq 0 ] || [ "$BUDGET_ACCOUNTED" -eq 1 ]; }; then
         :
       else
         COUNT=$((COUNT + 1))
@@ -294,6 +313,7 @@ budget_account_current_epoch() {
   fi
   rm -f "$tmp" 2>/dev/null || true
   BUDGET_INITIALIZED_FAILURE=$initialized
+  BUDGET_ACCOUNTED=1
   fm_lock_release "$BUDGET_LOCK"
   return 0
 }
@@ -456,7 +476,7 @@ fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.
-budget_account_current_epoch || block_stop
+budget_account_current_epoch blocked-stop || block_stop
 terminal_fail_open
 terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then
@@ -473,4 +493,31 @@ if [ "$terminal_status" -eq 0 ]; then
   exit 0
 fi
 [ "$terminal_status" -eq 2 ] && exit 0
+
+# Prime recovery only on the refusal path. A blocked Stop aborts Claude's
+# in-flight asyncRewake hook, which is what turned one missed claim into a
+# deadlock: the arm never ran, the epoch could freeze or advance, and every
+# later Stop refused. --ensure-watcher uses this hook's harness ancestry,
+# detaches the bin/fm-watch-arm.sh owner as a handling successor so a primed
+# cycle is confirmed, ledgered, and not re-announced into a one-poll
+# resurface, and takes no generation claim, so the registered asyncRewake hook
+# still owns rewake once a later Stop is allowed. The primed process is already
+# setsid-detached and survives this refusal. Nothing here reads its result: the
+# refusal banner stops at the missing generation claim, which is true whether or
+# not a cycle was detached, so it never denies a recovery this Stop just
+# started. Do not prime before the wait: that made every ordinary Claude Stop
+# start a handling successor and suppressed once-per-generation downtime
+# re-presentation. Do not prime before terminal_fail_open either: that let a
+# cycle this Stop forked answer the health check the fail-open decides on, so
+# the mechanism for restoring supervision could silence the alarm that says
+# supervision is broken. Do not call autoarm_owns_recovery here: that accounts
+# the failed-epoch budget.
+if ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" \
+  && ! fm_autoarm_claim_open "$STATE" "$GRACE" \
+  && [ -x "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" ]; then
+  printf '%s' "$PAYLOAD" \
+    | "$SCRIPT_DIR/fm-claude-stop-autoarm.sh" --ensure-watcher \
+    || true
+fi
+
 block_stop

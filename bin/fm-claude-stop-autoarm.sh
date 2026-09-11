@@ -67,6 +67,15 @@
 # On any uncertainty such as unresolvable ancestry, malformed lock state, or
 # lock contention, it exits 0 and leaves continuity to the synchronous guard and
 # the model.
+#
+# --ensure-watcher is the Stop-guard priming path: the same identity, AFK, and
+# need gates, then a session-detached bin/fm-watch-arm.sh cycle. It does not
+# take a generation claim and does not exit 2, so the registered asyncRewake
+# firing remains the rewake owner once a later Stop is allowed. The detached arm
+# starts the watcher as a handling successor (FM_WATCH_PREDECESSOR_ARM_PID) so a
+# post-downtime start does not re-announce and immediately resurface. The guard
+# invokes this before a refusal so a blocked Stop cannot abort the only process
+# that could restore a watcher (docs/turnend-guard.md).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,10 +87,17 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
+ENSURE_WATCHER=0
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
+for arg in "$@"; do
+  case "$arg" in
+    --ensure-watcher) ENSURE_WATCHER=1 ;;
+    *) echo "usage: $(basename "$0") [--ensure-watcher]" >&2; exit 2 ;;
+  esac
+done
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -149,6 +165,59 @@ need_supervision || exit 0
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
+fi
+
+# --- guard priming: restore a watcher without taking the rewake claim ----------
+# Double-fork through python3 so the primed cycle is a session leader. A refused
+# Stop hook is a session leader on Darwin (Claude spawns command hooks
+# detached); SIGHUP from that session must not tear the primed cycle down. The
+# detached process is bin/fm-watch-arm.sh, the single owner of watcher start,
+# bounded confirmation, and the state/.watch-cycle-exits.log lifecycle ledger,
+# so a primed cycle that cannot start still records why and which lock holder
+# blocked it there. Start that arm as a handling successor so a leftover
+# downtime marker is not re-announced into a one-poll resurface. Hand it the
+# same derived $GRACE the retry loop below passes: the arm's own default is a
+# flat 300s, so a primed cycle on a long-poll home would otherwise reject the
+# healthy watcher it just found as stale. Nothing reads the detached cycle's
+# stdout after this hook exits, so it goes to /dev/null and the ledger stays the
+# single record of the cycle. This path never holds a generation claim: the
+# registered asyncRewake hook attaches.
+if [ "$ENSURE_WATCHER" -eq 1 ]; then
+  WATCH="$SCRIPT_DIR/fm-watch.sh"
+  ARM="$SCRIPT_DIR/fm-watch-arm.sh"
+  predecessor=
+  if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+    exit 0
+  fi
+  [ -x "$ARM" ] || exit 0
+  if [ -f "$STATE/.watch-cycle-exits.log" ]; then
+    predecessor=$(awk -F '\t' '
+      /^arm_pid=/ { sub(/^arm_pid=/, "", $1); pid = $1 }
+      END { print pid }
+    ' "$STATE/.watch-cycle-exits.log")
+  fi
+  case "$predecessor" in
+    ''|*[!0-9]*) predecessor=primed ;;
+  esac
+  if command -v python3 >/dev/null 2>&1; then
+    FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" FM_GUARD_GRACE="$GRACE" python3 -c '
+import os, sys
+if len(sys.argv) < 2:
+    os._exit(1)
+pid = os.fork()
+if pid > 0:
+    os._exit(0)
+os.setsid()
+devnull = os.open(os.devnull, os.O_RDWR)
+os.dup2(devnull, 0)
+os.dup2(devnull, 1)
+os.dup2(devnull, 2)
+if devnull > 2:
+    os.close(devnull)
+os.execvp(sys.argv[1], sys.argv[1:])
+' "$ARM" || true
+  fi
+  exit 0
 fi
 
 # --- single-flight generation claim --------------------------------------------

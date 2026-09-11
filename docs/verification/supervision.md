@@ -385,6 +385,167 @@ fm-doc-audience-check: ok surfaces=64 local_links=188
 FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=80078
 ```
 
+The Claude Stop guard/auto-arm deadlock correction (a refused Stop primes a detached watcher start that survives the refusal, so the first refusal cannot guarantee the next) was verified on 2026-09-08 with the installed ShellCheck 0.11.0, actionlint 1.7.12, and the same isolated behavior suites.
+This run was captured at commit `073a41f088a539e43cc3fa9deb60b4351a886242`, the branch head that carries the derived guard grace into the priming fork, so the record covers that source and its `test_ensure_watcher_primes_arm_with_derived_grace` case rather than an earlier tree.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-turnend-guard.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: local changed-file mode; ShellCheck source following disabled
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+fm-doc-audience-check: ok surfaces=97 local_links=357
+touch: out of range or illegal time specification: YYYY-MM-DDThh:mm:SS[.frac][tz]
+not ok - a beacon older than the poll-derived grace must still block: expected exit 2, got 0
+FM_TEST_END 2026-09-08T21:02:35Z tests/fm-turnend-guard.test.sh exit=1 duration_ms=100845 gate_skip=false
+FM_TEST_SUMMARY total=4 failed=1 skipped_gate=0 duration_ms=149279
+```
+
+`bin/fm-lint.sh` exited 0.
+`bin/fm-doc-audience-check.sh` exited 0.
+`bin/fm-test-run.sh` over the four suites exited 1 - `tests/fm-turnend-guard.test.sh` failed and the other three passed.
+The failing case is `test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace`, which arrived from main in `891dc51` (#3946) and was byte-identical at `073a41f` to its state at this branch's base commit `b84e0e3`, so the deadlock correction neither introduced it nor touched it.
+It is a host portability failure rather than a supervision defect: the case ages the beacon with `touch -d "@<epoch>"`, BSD touch on this Darwin host rejects that GNU-only form with the `out of range or illegal time specification` line above, the beacon therefore stays fresh, and the guard correctly allows the stop the case expected it to block.
+It reproduced with the same single failure on two consecutive runs, so it was deterministic on this host rather than flaky.
+`tests/lib.sh` defines `fail()` as a `printf` plus `exit 1`, so that failure aborted the whole script, and `test_hook_no_afk_ignores_poll_derived_grace` - the only case invoked after it - therefore never ran at all in the run above.
+It is closed on this branch rather than left open: `9fa7179` replaces that `touch -d` form with a portable helper, and the full-script run recorded at the end of this entry executes and passes both cases.
+
+That abort left this correction's own guard-side cases with no stated result, because they are invoked earlier in the same script, so they were re-run on their own.
+`bin/fm-test-run.sh` selects whole scripts and has no per-case filter, so the isolated run used a copy of `tests/fm-turnend-guard.test.sh` truncated above its runner list - every function definition and helper intact, only the list of cases to invoke replaced.
+It was captured at commit `1474acb792630ece320089f14bf714a599705b02`, which is the tree that removed the banner's second primed-recovery line and re-pointed the three assertions naming it in the same change; reconstructing that whole commit is what reproduces the output below, because on `073a41f` with only the banner line deleted those assertions would still look for a string the banner no longer prints.
+
+Observed output of that isolated run:
+
+```text
+ok - fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)
+ok - fm-turnend-guard --claude: an ordinary stop does not prime and leaves downtime a primed cycle would consume
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (frozen-epoch variant)
+ok - fm-turnend-guard --claude: a refusal that detached nothing does not claim a primed start
+ok - fm-turnend-guard --claude: a refused stop still recovers when the epoch does not advance
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (advancing-epoch variant)
+ok - fm-turnend-guard --claude: a frozen auto-arm epoch still reaches the bounded attended fail-open
+```
+
+That copy exited 0.
+It covers the six guard-side cases this correction adds - `test_hook_claude_mode_ordinary_stop_does_not_prime`, `test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal`, `test_hook_claude_mode_away_refusal_claims_no_primed_start`, `test_hook_claude_mode_refused_stop_recovers_without_epoch_progress`, `test_hook_claude_mode_advancing_epoch_refusal_cannot_guarantee_a_second_refusal`, and `test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open` - plus `test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy` for the unprimed banner wording.
+It says nothing about any other case in that script; the full-script result above remains the only record for those.
+
+Two commits land after the trees named above, and neither has a fresh full-script run of its own.
+`1474acb` follows the `073a41f` full-script run: it removed the banner's second primed-recovery line and re-pointed the three assertions that named it in the same change, which is why the guard-side cases were re-run in isolation on that newer tree rather than left on the older one.
+It leaves `test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace` byte-identical to its state at `073a41f`, and no run at `1474acb` invoked that case, so at that point the full-script failure above was still the only observation of it.
+The review commit that follows `1474acb` changes documentation only - the tree named for the isolated run just above, and one removed sentence in `docs/turnend-guard.md` - so it touches no code or test path any command in this entry exercises, and no re-run was taken for it.
+
+`d8e407d` does change code, and it invalidates part of the isolated block above.
+It collapses the refusal banner to one unconditional sentence, removes the `--ensure-watcher` exit-status contract that existed only to choose between two wordings, and deletes `test_hook_claude_mode_away_refusal_claims_no_primed_start` - the fourth `ok` line above.
+That block therefore remains a record of `1474acb` and is not reproducible from `d8e407d` onward, so the six surviving cases were re-run on that tree by the same truncated-copy method.
+
+Observed output of that re-run:
+
+```text
+ok - fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)
+ok - fm-turnend-guard --claude: an ordinary stop does not prime and leaves downtime a primed cycle would consume
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (frozen-epoch variant)
+ok - fm-turnend-guard --claude: a refused stop still recovers when the epoch does not advance
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (advancing-epoch variant)
+ok - fm-turnend-guard --claude: a frozen auto-arm epoch still reaches the bounded attended fail-open
+```
+
+That copy exited 0, and the whole of `tests/fm-claude-stop-autoarm.test.sh` was run unmodified on the same tree: 46 cases, exit 0, including the two inert `--ensure-watcher` cases whose expected status returned to 0 with the contract gone.
+No full-script run of `tests/fm-turnend-guard.test.sh` was taken on that tree; the `touch -d` failure above stayed the only observation of that case until the run recorded at the end of this entry.
+
+The review commit carrying this paragraph changes code once more, and it does not invalidate the six-case block above.
+It moves the priming call below `terminal_fail_open` so it sits immediately before the final `block_stop`, because above that point the attended fail-open could allow the same Stop that had just forked a handling successor - and that successor could both consume the unacknowledged downtime episode and win the home lock in time to answer the health check the fail-open decides on.
+It adds `test_hook_claude_mode_fail_open_allows_without_priming_a_cycle` for exactly that sequence, which was observed failing against the pre-move placement with the forked arm and watcher pids named in its message, and passing after the move.
+All six cases in the block above were re-run on this tree by the same truncated-copy method and still print those same `ok` lines, alongside the new case, so that record holds here as written.
+No full-script run of `tests/fm-turnend-guard.test.sh` was taken on this tree either.
+
+`9fa7179` is the commit that closes the `touch -d` failure.
+It replaces that GNU-only form in the three away-mode poll-derived-grace cases with a portable `set_mtime` helper - the same shape `tests/fm-inactive-reconcile.test.sh` and `tests/fm-watch-triage.test.sh` already use - and otherwise changes documentation only.
+The four suites were re-run in full on that tree, so `tests/fm-turnend-guard.test.sh` reached the end of the script for the first time on this branch.
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-turnend-guard.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+Observed output, tail of the run - the `...` stands for the 46 `ok` lines of `tests/fm-claude-stop-autoarm.test.sh`, which ran in full between the two `FM_TEST_END` lines:
+
+```text
+ok - fm-turnend-guard: a dead away-mode daemon still blocks under the poll-derived grace
+ok - fm-turnend-guard: the poll-derived grace is bounded, not unlimited
+ok - fm-turnend-guard: with away mode off, the poll-derived grace never applies
+FM_TEST_END 2026-09-08T23:07:30Z tests/fm-turnend-guard.test.sh exit=0 duration_ms=103893 gate_skip=false
+...
+FM_TEST_END 2026-09-08T23:08:22Z tests/fm-claude-stop-autoarm.test.sh exit=0 duration_ms=51099 gate_skip=false
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=156304
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=612 failed=0
+FM_TEST_SUMMARY_FAMILY family=standalone count=1 duration_ms=51099 failed=0
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=2 duration_ms=121733 failed=0
+```
+
+`bin/fm-test-run.sh` over the four suites exited 0.
+`test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace` is the `the poll-derived grace is bounded, not unlimited` line, and `test_hook_no_afk_ignores_poll_derived_grace` - the case the earlier abort skipped, so no run on this host had ever executed it - is the line after it, so both are proven rather than merely unblocked.
+That also gives every other case in `tests/fm-turnend-guard.test.sh`, not only this correction's, a stated result on this host.
+The review commit carrying this paragraph changes documentation only - this entry and two added lines in `docs/turnend-guard.md` naming the block-budget-lock refusal that returns before priming - so it touches no code or test path the run above exercises, and no re-run was taken for it.
+
+The last review commit on this branch, the one carrying this paragraph, changes the refusal banner once more.
+It does not invalidate the isolated blocks above - every case named there keeps its name and still passes, as the full run at the end of this paragraph shows - but it does replace the banner wording those runs were taken against.
+The banner's Claude sentence had ended `so nothing owns recovery and restoring supervision is on you`, which is false on the refusal that just detached a primed cycle - the only refusal that reaches the banner after priming - and which tells the reader to arm a watcher over a recovery already under way.
+It now stops at what the guard actually knows and can state on every refusal: `The Stop-owned auto-arm did not claim this home, so no generation claim owns recovery for this Stop.`
+That is true whether or not this Stop detached anything, because `--ensure-watcher` deliberately takes no generation claim, and it leaves the banner's only instruction to the repair line below it, which tells a Claude session to inspect the Stop-owned recovery path rather than replace it.
+`test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal` gains one assertion on the first refusal's banner - the refusal in that case is the one that detaches the cycle the rest of the case then proves claims the home lock - and it fails against the old wording and passes against the new.
+
+That reproduction used the same truncated-copy method as the blocks above - the seven guard-side `--claude` cases, banner case first - run once with the guard's sentence reverted to its pre-correction wording and nothing else changed.
+`fail()` exits the script, so the run stops at the `not ok` line and the four cases after it did not run.
+
+```text
+ok - fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)
+ok - fm-turnend-guard --claude: an ordinary stop does not prime and leaves downtime a primed cycle would consume
+not ok - a refusal that detaches a recovery cycle must report the missing claim, not deny that anything is recovering (missing: 'no generation claim owns recovery for this Stop')
+FM_TEST_END 2026-09-08T23:40:06Z tests/zz-isolated-banner.test.sh exit=1 duration_ms=8826 gate_skip=false
+```
+
+The same copy on the corrected tree runs all seven to the end:
+
+```text
+ok - fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)
+ok - fm-turnend-guard --claude: an ordinary stop does not prime and leaves downtime a primed cycle would consume
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (frozen-epoch variant)
+ok - fm-turnend-guard --claude: a refused stop still recovers when the epoch does not advance
+ok - fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (advancing-epoch variant)
+ok - fm-turnend-guard --claude: the attended fail-open allows without priming a handling successor
+ok - fm-turnend-guard --claude: a frozen auto-arm epoch still reaches the bounded attended fail-open
+FM_TEST_END 2026-09-08T23:40:32Z tests/zz-isolated-banner.test.sh exit=0 duration_ms=21046 gate_skip=false
+```
+
+The four suites were then re-run in full on the corrected tree.
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-guard-stale-banner.test.sh tests/fm-turnend-guard.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+Observed output, tail of the run:
+
+```text
+ok - fm-turnend-guard: a dead away-mode daemon still blocks under the poll-derived grace
+ok - fm-turnend-guard: the poll-derived grace is bounded, not unlimited
+ok - fm-turnend-guard: with away mode off, the poll-derived grace never applies
+FM_TEST_END 2026-09-08T23:42:47Z tests/fm-turnend-guard.test.sh exit=0 duration_ms=128629 gate_skip=false
+FM_TEST_END 2026-09-08T23:43:51Z tests/fm-claude-stop-autoarm.test.sh exit=0 duration_ms=64323 gate_skip=false
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=195027
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=1134 failed=0
+FM_TEST_SUMMARY_FAMILY family=standalone count=1 duration_ms=64323 failed=0
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=2 duration_ms=154139 failed=0
+```
+
+`bin/fm-test-run.sh` over the four suites exited 0, `bin/fm-lint.sh` exited 0, and `bin/fm-doc-audience-check.sh` exited 0 on that tree.
+
 The Pi extension-model pull-guard correction (`bin/fm-guard.sh` no longer reports a false watcher-down on a Pi primary during the extension's own watcher hand-off) was verified on 2026-08-13 with the installed ShellCheck 0.11.0 and isolated behavior suites.
 The guard verdict itself reads only state files and process liveness, so the portable suites are the enforcing evidence; `bin/fm-harness.sh`'s Pi marker detection, which selects the model, is exercised in the same suite through `PI_CODING_AGENT`.
 

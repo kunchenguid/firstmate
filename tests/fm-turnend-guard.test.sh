@@ -19,6 +19,19 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
+# One case lets the guard prime a REAL detached watcher and arm (see
+# install_real_watch_stack). A failing assertion exits this file at once, so the
+# home carrying that cycle is recorded here and torn down before fm_test_cleanup
+# removes the directory the cycle is still writing into.
+PRIMED_CYCLE_HOME=
+turnend_guard_cleanup() {
+  [ -n "$PRIMED_CYCLE_HOME" ] && stop_real_primed_cycle "$PRIMED_CYCLE_HOME"
+  fm_test_cleanup || true
+}
+trap turnend_guard_cleanup EXIT
+trap 'turnend_guard_cleanup; exit 130' INT
+trap 'turnend_guard_cleanup; exit 143' TERM
+
 REQUIRED_REASON='watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn'
 AWAY_REQUIRED_REASON='Away mode owns watcher supervision'
 
@@ -1813,6 +1826,356 @@ test_hook_claude_mode_waits_for_late_claim() {
   pass "fm-turnend-guard --claude: bounded claim wait avoids a token-consuming forced continuation"
 }
 
+# The pending:downtime -> announced:downtime transition lives in
+# fm_recovery_marker_arm_check, which bin/fm-watch.sh calls the instant it takes
+# the singleton lock. A stub watcher cannot perform it, so "the downtime episode
+# is still unconsumed" is only a real assertion over the real watcher. Copy the
+# whole real bin/ so the detached arm forks it with its source graph intact and
+# with the lock path the guard's own health check expects.
+install_real_watch_stack() {
+  local dir=$1
+  cp -R "$ROOT/bin/." "$dir/bin/"
+}
+
+# A real primed cycle is up once its watcher holds the lock and has beaten.
+# fm-watch.sh consumes the downtime marker before it enters the poll loop that
+# touches the beacon, so a fresh beacon proves the transition already happened.
+await_real_primed_watcher() {
+  local dir=$1 i=0 pid
+  while [ "$i" -lt 200 ]; do
+    pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+      && [ -e "$dir/state/.last-watcher-beat" ]; then
+      return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# The detached arm and the watcher it forks are the primed cycle's own
+# processes, and both are matched by THIS fixture home's bin/ path - a fresh
+# mktemp directory no other home can name - so the match is exact to one case
+# and can never reach another home's watcher. The arm is exec'd with the fork,
+# which makes this the earliest observable trace a primed cycle leaves.
+primed_cycle_pids() {  # <dir>
+  local dir=$1
+  pgrep -f "$dir/bin/fm-watch" 2>/dev/null || true
+}
+
+# Stop a real primed cycle. The wait keeps the arm's teardown - its lifecycle
+# row in state/.watch-cycle-exits.log - inside the fixture's lifetime, so
+# nothing is still writing when the temp root is removed.
+stop_real_primed_cycle() {  # <dir>
+  local dir=$1 pid pids i=0
+  pids=$(primed_cycle_pids "$dir")
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+  done
+  while [ "$i" -lt 100 ]; do
+    pids=$(primed_cycle_pids "$dir")
+    [ -n "$pids" ] || return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+}
+
+# Priming on every ordinary Claude Stop made the normal cycle a handling
+# successor, which consumed pending:downtime and skipped rearm-resurface.
+# An allowed Stop after a late auto-arm claim must not leave a primed cycle
+# and must leave an unacknowledged downtime episode unconsumed so the
+# ordinary asyncRewake cycle can still re-present it once.
+# The refused Stop that follows is the positive control over the same home and
+# the same real stack: it primes, its watcher does announce that very episode,
+# and so the allowed Stop's assertion above is one a primed cycle would break.
+test_hook_claude_mode_ordinary_stop_does_not_prime() {
+  local dir helper out status holder i marker
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach a primed watcher"
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-ordinary-does-not-prime")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  install_real_watch_stack "$dir"
+  # From here on any assertion can exit this file with a real cycle running,
+  # including the regression this case exists to catch, where the ALLOWED stop
+  # is the one that primes.
+  PRIMED_CYCLE_HOME=$dir
+  printf 'pending:downtime:prime.1.aaa\n' > "$dir/state/.watcher-down"
+  chmod 600 "$dir/state/.watcher-down"
+  (
+    sleep 0.4
+    sleep 60 &
+    record_autoarm_owner "$dir" $!
+    printf '%s\n' $! > "$dir/holder.pid"
+    wait
+  ) &
+  helper=$!
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=3000 run_hook_claude_owned "$dir" true); status=$?
+  holder=$(cat "$dir/holder.pid" 2>/dev/null || true)
+  kill "$holder" 2>/dev/null || true
+  kill "$helper" 2>/dev/null || true
+  wait "$helper" 2>/dev/null || true
+  expect_code 0 "$status" "an ordinary stop that the auto-arm claims must still allow"
+  [ -z "$out" ] || fail "ordinary claimed stop produced output: $out"
+  # A primed cycle detaches, so its traces land after the hook has returned: the
+  # arm process itself is exec'd with the fork, and the control phase below takes
+  # the lock and announces the episode about a second after its own refusal.
+  # Watch all three over that long and fail on the first one that shows up.
+  i=0
+  while [ "$i" -lt 10 ]; do
+    [ -z "$(primed_cycle_pids "$dir")" ] \
+      || fail "an ordinary stop left a primed cycle behind: $(primed_cycle_pids "$dir")"
+    [ ! -e "$dir/state/.watch.lock/pid" ] \
+      || fail "an ordinary stop started a primed watcher"
+    marker=
+    [ -e "$dir/state/.watcher-down" ] && read -r marker < "$dir/state/.watcher-down"
+    [ "$marker" = 'pending:downtime:prime.1.aaa' ] \
+      || fail "an ordinary stop consumed the unacknowledged downtime episode: $marker"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  # Positive control: the claim holder is dead, so this stop refuses and primes.
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  expect_code 2 "$status" "the control stop must refuse once no auto-arm claims the home"
+  assert_contains "$out" "TURN WOULD END BLIND" "the control refusal lost the blind-turn banner"
+  await_real_primed_watcher "$dir" \
+    || fail "the watcher primed by the refused control stop never beat: $(cat "$dir/state/.watch-cycle-exits.log" 2>/dev/null || true)"
+  marker=$(cat "$dir/state/.watcher-down" 2>/dev/null || true)
+  stop_real_primed_cycle "$dir"
+  PRIMED_CYCLE_HOME=
+  [ "$marker" = 'announced:downtime:prime.1.aaa' ] \
+    || fail "the primed cycle did not announce the episode the allowed stop had to leave alone: $marker"
+  pass "fm-turnend-guard --claude: an ordinary stop does not prime and leaves downtime a primed cycle would consume"
+}
+
+# The 2026-09-06 deadlock: a refused Stop aborted Claude's in-flight asyncRewake
+# arm, so the next Stop was guaranteed to refuse as well. Priming
+# --ensure-watcher before the refusal must leave a path for a watcher to come
+# up, even when the current epoch is frozen (variant 1) or free to advance
+# (variant 2).
+# The primed watcher stays gated on state/release-watch rather than a wall-clock
+# delay, so "the watcher is not healthy yet" and "the watcher is healthy now" are
+# both states the test establishes rather than races it has to win under load.
+write_gated_watch_fixture() {
+  local dir=$1
+  cp "$ROOT/bin/fm-watch-arm.sh" "$dir/bin/fm-watch-arm.sh"
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  cat > "$dir/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+WATCH_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-watch.sh"
+while [ ! -e "$STATE/release-watch" ]; do
+  sleep 0.05
+done
+# shellcheck source=/dev/null
+. "$FM_HOME/bin/fm-wake-lib.sh"
+pid=${BASHPID:-$$}
+identity=$(fm_pid_identity "$pid") || identity="gated-watch-$pid"
+mkdir -p "$STATE/.watch.lock"
+printf '%s\n' "$pid" > "$STATE/.watch.lock/pid"
+printf '%s\n' "$FM_HOME" > "$STATE/.watch.lock/fm-home"
+printf '%s\n' "$WATCH_PATH" > "$STATE/.watch.lock/watcher-path"
+printf '%s\n' "$identity" > "$STATE/.watch.lock/pid-identity"
+touch "$STATE/.last-watcher-beat"
+sleep 60
+SH
+  chmod +x "$dir/bin/fm-watch.sh"
+}
+
+release_and_await_primed_watcher() {
+  local dir=$1 i=0 pid
+  : > "$dir/state/release-watch"
+  while [ "$i" -lt 200 ]; do
+    pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+      && [ -e "$dir/state/.last-watcher-beat" ]; then
+      return 0
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+run_hook_claude_owned() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # fake harness expands FM_HOME inside its child shell.
+  printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" \
+    | CLAUDECODE=1 FM_ARM_CONFIRM_TIMEOUT=30 FM_HOME="$home" "$dir/fake-claude" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        bash "$FM_HOME/bin/fm-turnend-guard.sh" --claude
+      ' 2>&1
+}
+
+kill_fixture_watcher() {
+  local dir=$1 pid
+  pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+}
+
+test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal() {
+  local dir out status
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach the primed watcher"
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-refused-still-primes")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_gated_watch_fixture "$dir"
+  # Variant 1: frozen rewake epoch that cannot advance on its own.
+  printf 'epoch=165 owner_pid=41746 outcome=rewake updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  expect_code 2 "$status" "first unprimed-window stop must still refuse while the watcher is not yet healthy"
+  assert_contains "$out" "TURN WOULD END BLIND" "first refused stop lost the blind-turn banner"
+  assert_contains "$out" "no generation claim owns recovery for this Stop" \
+    "a refusal that detaches a recovery cycle must report the missing claim, not deny that anything is recovering"
+  release_and_await_primed_watcher "$dir" \
+    || fail "the watcher primed by the refused stop never claimed the home lock"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  kill_fixture_watcher "$dir"
+  expect_code 0 "$status" "a stop refused by the guard must still leave a path for the primed watcher to claim the home"
+  [ -z "$out" ] || fail "recovery allow after a refused stop produced output: $out"
+  grep -F 'epoch=165 owner_pid=41746 outcome=rewake updated_at=1' \
+    "$dir/state/.claude-autoarm-epoch" >/dev/null \
+    || fail "frozen-epoch recovery mutated the auto-arm epoch instead of priming a watcher"
+  pass "fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (frozen-epoch variant)"
+}
+
+test_hook_claude_mode_refused_stop_recovers_without_epoch_progress() {
+  local dir out status epoch
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach the primed watcher"
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-refused-primes-no-epoch")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_gated_watch_fixture "$dir"
+  # Variant 2: no live claim, epoch free to advance, but the first Stop still
+  # refuses before the watcher is healthy.
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  expect_code 2 "$status" "first stop with no claim must still refuse while the primed watcher is starting"
+  epoch=$(sed -n '1p' "$dir/state/.claude-autoarm-epoch" 2>/dev/null || true)
+  [ -z "$epoch" ] || fail "--ensure-watcher took a generation claim: $epoch"
+  release_and_await_primed_watcher "$dir" \
+    || fail "the watcher primed by the refused stop never claimed the home lock"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  epoch=$(sed -n '1p' "$dir/state/.claude-autoarm-epoch" 2>/dev/null || true)
+  kill_fixture_watcher "$dir"
+  expect_code 0 "$status" "the primed watcher must make a later Stop allow even when the epoch never advanced"
+  [ -z "$out" ] || fail "recovery allow without epoch progress produced output: $out"
+  [ -z "$epoch" ] || fail "recovery wrote an auto-arm epoch instead of leaving rewake to the registered hook: $epoch"
+  pass "fm-turnend-guard --claude: a refused stop still recovers when the epoch does not advance"
+}
+
+# The second authorized deadlock variant: intermittent recovery with an epoch
+# that keeps advancing (166 failed -> 167 rewake). The advancing sequence
+# interleaves Stops the guard ALLOWS - a fresh failed epoch spending its one
+# handoff - with the Stops it refuses once that epoch ages out, and only a
+# refusing Stop primes. A refusal that follows an epoch transition must still
+# leave a path for the watcher, exactly as a frozen epoch does.
+test_hook_claude_mode_advancing_epoch_refusal_cannot_guarantee_a_second_refusal() {
+  local dir out status count
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach the primed watcher"
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-advancing-epoch-primes")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_gated_watch_fixture "$dir"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=166 owner_pid=999 outcome=failed updated_at=%s\n' "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  expect_code 0 "$status" "the fresh failed epoch 166 must spend its one automatic handoff"
+  [ -z "$out" ] || fail "the epoch-166 handoff stop produced output: $out"
+  [ -z "$(primed_cycle_pids "$dir")" ] \
+    || fail "an allowed handoff stop primed a watcher: $(primed_cycle_pids "$dir")"
+
+  printf 'epoch=167 owner_pid=41746 outcome=rewake updated_at=2\n' \
+    > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  expect_code 2 "$status" "the aged rewake epoch 167 must refuse while the watcher is not yet healthy"
+  assert_contains "$out" "TURN WOULD END BLIND" "the advancing-epoch refusal lost the blind-turn banner"
+  count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+  [ "$count" = 1 ] || fail "the refusal after an epoch transition did not advance the bounded count, got $count"
+  release_and_await_primed_watcher "$dir" \
+    || fail "the watcher primed by the refused stop never claimed the home lock"
+
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  kill_fixture_watcher "$dir"
+  expect_code 0 "$status" "a refusal that follows an epoch transition must still leave a path for the primed watcher"
+  [ -z "$out" ] || fail "recovery allow after an advancing-epoch refusal produced output: $out"
+  grep -F 'epoch=167 owner_pid=41746 outcome=rewake updated_at=2' \
+    "$dir/state/.claude-autoarm-epoch" >/dev/null \
+    || fail "advancing-epoch recovery mutated the auto-arm epoch instead of priming a watcher"
+  pass "fm-turnend-guard --claude: a refused stop cannot guarantee the next refusal (advancing-epoch variant)"
+}
+
+# The 2026-09-06 budget half of the same deadlock: state/.turnend-claude-blocks
+# stayed count=1 epoch=165 for forty minutes because the epoch identity that
+# deduplicates one Stop's several observations also suppressed the count across
+# Stops. A frozen auto-arm epoch must not pin the bound.
+# The bounded attended fail-open ALLOWS the stop, and priming used to run above
+# it, so the Stop that declares supervision genuinely down also forked a handling
+# successor. Two ways that hurt: the successor consumes the pending downtime
+# episode nobody has acknowledged, and its watcher can win the home lock in time
+# to answer the health check the fail-open decides on - letting the mechanism for
+# restoring supervision silence the alarm that says supervision is broken.
+test_hook_claude_mode_fail_open_allows_without_priming_a_cycle() {
+  local dir out status i marker
+  command -v python3 >/dev/null 2>&1 || fail "test host must provide python3 to detach a primed watcher"
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-fail-open-no-prime")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_gated_watch_fixture "$dir"
+  seed_claude_failure "$dir"
+  seed_claude_budget "$dir" 3
+  printf 'pending:downtime:failopen.1.aaa\n' > "$dir/state/.watcher-down"
+  chmod 600 "$dir/state/.watcher-down"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude_owned "$dir" true); status=$?
+  expect_code 0 "$status" "an exhausted budget with a verified failure episode must still reach the attended fail-open"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the fail-open lost its attended alarm"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the fail-open did not consume its episode alarm"
+  i=0
+  while [ "$i" -lt 10 ]; do
+    [ -z "$(primed_cycle_pids "$dir")" ] \
+      || fail "the allowed fail-open stop primed a cycle: $(primed_cycle_pids "$dir")"
+    [ ! -e "$dir/state/.watch.lock/pid" ] || fail "the allowed fail-open stop started a watcher"
+    marker=
+    [ -e "$dir/state/.watcher-down" ] && read -r marker < "$dir/state/.watcher-down"
+    [ "$marker" = 'pending:downtime:failopen.1.aaa' ] \
+      || fail "the allowed fail-open stop consumed the unacknowledged downtime episode: $marker"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  pass "fm-turnend-guard --claude: the attended fail-open allows without priming a handling successor"
+}
+
+test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open() {
+  local dir out status i count
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-frozen-epoch-budget")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=165 owner_pid=41746 outcome=failed updated_at=1788664081\n' > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  for i in 0 1 2 3; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+    expect_code 2 "$status" "a frozen-epoch stop must still refuse while the block budget is unspent"
+    assert_not_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the frozen-epoch fail-open fired before the bounded progression ended"
+    count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+    [ "$count" = "$i" ] || fail "a frozen-epoch block did not advance the bounded count to $i, got $count"
+  done
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "a frozen auto-arm epoch must not pin the bounded fail-open forever"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the frozen-epoch progression never reached its attended fail-open"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the frozen-epoch fail-open did not consume its episode alarm"
+  pass "fm-turnend-guard --claude: a frozen auto-arm epoch still reaches the bounded attended fail-open"
+}
+
 test_hook_claude_mode_secondmate_reblocks_like_primary() {
   local dir pid out status
   dir=$(make_secondmate_dir "$TMP_ROOT/hook-claude-sm-reblock")
@@ -2144,6 +2507,12 @@ test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
+test_hook_claude_mode_ordinary_stop_does_not_prime
+test_hook_claude_mode_refused_stop_cannot_guarantee_a_second_refusal
+test_hook_claude_mode_refused_stop_recovers_without_epoch_progress
+test_hook_claude_mode_advancing_epoch_refusal_cannot_guarantee_a_second_refusal
+test_hook_claude_mode_fail_open_allows_without_priming_a_cycle
+test_hook_claude_mode_frozen_epoch_still_reaches_the_bounded_fail_open
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_away_daemon_allows_between_watcher_cycles
 test_hook_away_daemon_allows_over_dead_watcher_lock
