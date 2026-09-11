@@ -96,6 +96,46 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   return 1
 }
 
+# --- process liveness -------------------------------------------------------
+#
+# is_live_non_zombie <pid> - THREE states, because two cannot express what a
+# reader actually needs to know:
+#
+#   0  the pid names a live, non-zombie process
+#   1  the pid is gone, or is a zombie waiting to be reaped
+#   2  ps could not answer for a pid that is still present
+#
+# The three-state contract exists because the two-state version got the empty
+# case backwards. `ps` returning nothing was read as "still running", so a
+# process reaped between the `kill -0` below and the `ps` read - the likeliest
+# moment for a parent shell to reap it - was reported LIVE, and an assertion
+# built on that could not tell a genuinely stuck process from a `ps` that simply
+# did not answer. Both produced the same verdict and therefore the same message.
+#
+# So an empty answer is never LIVE here. It is re-read: a pid that has since
+# vanished is gone (1), and only a pid still present after a retry is UNKNOWN
+# (2), which is announced on stderr so a caller that folds it into a boolean
+# still leaves a reader the reason.
+is_live_non_zombie() {  # <pid>
+  local pid=$1 stat
+  kill -0 "$pid" 2>/dev/null || return 1
+  stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+  if [ -z "$stat" ]; then
+    kill -0 "$pid" 2>/dev/null || return 1
+    stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+    if [ -z "$stat" ]; then
+      kill -0 "$pid" 2>/dev/null || return 1
+      printf '# is_live_non_zombie: ps reported no state for present pid %s; UNKNOWN, not live\n' \
+        "$pid" >&2
+      return 2
+    fi
+  fi
+  case "$stat" in
+    Z*) return 1 ;;
+  esac
+  return 0
+}
+
 # --- process-event runner reaping -------------------------------------------
 #
 # A process-event runner is detached into its own process group and reparents to

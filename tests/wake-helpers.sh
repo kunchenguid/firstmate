@@ -297,9 +297,17 @@ SH
 }
 
 wait_for_exit() {
-  local pid=$1 limit=${2:-50} i=0
+  local pid=$1 limit=${2:-50} i=0 state
   while [ "$i" -lt "$limit" ]; do
-    if ! is_live_non_zombie "$pid"; then
+    # Only a definite "gone" reaps. tests/lib.sh's is_live_non_zombie also
+    # reports UNKNOWN (2) for a present pid ps could not describe, and waiting
+    # on one of those would block here until it really exited - unbounded, which
+    # is the opposite of what this helper is for. Keep polling instead.
+    # `|| state=$?` rather than a bare call, so this stays safe in a suite
+    # running under errexit.
+    state=0
+    is_live_non_zombie "$pid" || state=$?
+    if [ "$state" -eq 1 ]; then
       wait "$pid"
       return "$?"
     fi
@@ -309,16 +317,6 @@ wait_for_exit() {
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   return 124
-}
-
-is_live_non_zombie() {
-  local pid=$1 stat
-  kill -0 "$pid" 2>/dev/null || return 1
-  stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
-  case "$stat" in
-    Z*) return 1 ;;
-  esac
-  return 0
 }
 
 hash_text() {

@@ -511,17 +511,18 @@ fm_lock_claim() {
   return 0
 }
 
+# Return 2 for owner creation/preparation failures; 1 permits contention recovery.
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 2
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   if ! fm_lock_prepare_owner "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
-    return 1
+    return 2
   fi
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
@@ -622,6 +623,30 @@ _fm_recovery_marker_write_locked() {
   fi
 }
 
+# Internal timeout in seconds for the shutdown-reachable transitions below.
+# Empty keeps ordinary recovery-marker operations on their blocking path;
+# watcher_cleanup in bin/fm-watch.sh supplies its deadline and clears it after use.
+# On timeout, return 124 with FM_LOCK_HELD_PID identifying a holder when known.
+FM_RECOVERY_MARKER_LOCK_TIMEOUT=
+
+# Both cleanup transitions must use this acquisition path to share the deadline.
+# Keep acquisition in the exiting process: fm_lock_acquire_wait_bounded delegates
+# to a child, which cannot reclaim a hold abandoned by the caller's interrupted
+# critical section. fm_lock_try_acquire preserves that self-held reclaim and
+# stale-owner recovery while returning to the deadline check after failures.
+_fm_recovery_marker_lock_acquire() {  # <lockdir>
+  local started
+  if [ -z "$FM_RECOVERY_MARKER_LOCK_TIMEOUT" ]; then
+    fm_lock_acquire_wait "$1"
+    return
+  fi
+  started=$SECONDS
+  while ! fm_lock_try_acquire "$1"; do
+    [ "$(( SECONDS - started ))" -lt "$FM_RECOVERY_MARKER_LOCK_TIMEOUT" ] || return 124
+    sleep 0.1
+  done
+}
+
 # Preserve a pending or announced episode's generation across downtime
 # republication so its outstanding acknowledgement remains usable, and keep an
 # already-announced generation announced so it cannot be re-presented until a
@@ -631,7 +656,7 @@ _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} lock saved_token generation='' status=pending
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$lock" || return 1
+  _fm_recovery_marker_lock_acquire "$lock" || return $?
   if [ -d "$marker" ] && [ ! -L "$marker" ]; then
     fm_lock_release "$lock"
     return 1
@@ -847,13 +872,13 @@ fm_recovery_transition() {
       ;;
     release-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return $?
       fm_lock_release "$target"
       ;;
     release-lock-existing)
       [ -n "$target" ] || return 1
       local lock="${marker}.lock"
-      fm_lock_acquire_wait "$lock" || return 1
+      _fm_recovery_marker_lock_acquire "$lock" || return $?
       if ! fm_recovery_marker_read "$marker"; then
         fm_lock_release "$lock"
         return 1
@@ -898,7 +923,13 @@ fm_lock_try_acquire() {
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  else
+    rc=$?
   fi
+  # Resource failures must return without recursive stealing. Contention can
+  # leave lockdir absent after a .steal-blocked claim; keep that path eligible
+  # to recover an abandoned stealer.
+  [ "$rc" -eq 1 ] || return 1
 
   fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)

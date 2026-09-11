@@ -219,6 +219,8 @@ esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+# Internal cleanup deadline; docs/watcher-continuity.md owns recovery behavior.
+WATCHER_SHUTDOWN_LOCK_SECS=5
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
@@ -1525,6 +1527,11 @@ run_check_capture() {
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+  # This restores the file-level disposition, and it runs on EVERY check, so it
+  # is the site that outlives the other one. BOTH must change together: a change
+  # - or a mutation meant to prove the handler is load-bearing - applied only to
+  # the file-level `trap 'exit 1' HUP INT TERM` is silently undone here, and
+  # proves nothing about a watcher that has run at least one check.
   trap 'exit 1' HUP INT TERM
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
@@ -1842,7 +1849,7 @@ reconcile_requests_detached() {
 }
 
 watcher_cleanup() {
-  local cleanup_status=0 owns_lock=0 transition=release-lock
+  local cleanup_status=0 owns_lock=0 transition=release-lock transition_status=0
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
@@ -1853,14 +1860,25 @@ watcher_cleanup() {
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
-  if [ "$owns_lock" -eq 1 ] \
-    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
-    echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
-    cleanup_status=1
+  if [ "$owns_lock" -eq 1 ]; then
+    # _fm_recovery_marker_lock_acquire owns the in-process deadline semantics.
+    FM_RECOVERY_MARKER_LOCK_TIMEOUT=$WATCHER_SHUTDOWN_LOCK_SECS
+    transition_status=0
+    fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime \
+      || transition_status=$?
+    FM_RECOVERY_MARKER_LOCK_TIMEOUT=
+    if [ "$transition_status" -eq 124 ]; then
+      echo "watcher: recovery state could not be persisted within ${WATCHER_SHUTDOWN_LOCK_SECS}s (marker lock held by pid ${FM_LOCK_HELD_PID:-unknown}); stopping and retaining stale lock evidence" >&2
+      cleanup_status=1
+    elif [ "$transition_status" -ne 0 ]; then
+      echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
+      cleanup_status=1
+    fi
   fi
   return "$cleanup_status"
 }
 trap watcher_cleanup EXIT
+# See run_check_capture's trap-restoration comment before changing this handler.
 trap 'exit 1' HUP INT TERM
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command

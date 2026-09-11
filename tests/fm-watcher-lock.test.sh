@@ -35,7 +35,7 @@ drain_and_ack() {  # <state>
 }
 
 test_singleton_start() {
-  local dir state fakebin out1 out2 pid1 pid2 live i
+  local dir state fakebin out1 out2 pid1 pid2 live i pid1_state pid2_state
   dir=$(make_case singleton)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -47,13 +47,17 @@ test_singleton_start() {
   pid2=$!
   i=0
   while [ "$i" -lt 50 ]; do
-    live=0
-    is_live_non_zombie "$pid1" && live=$((live + 1))
-    is_live_non_zombie "$pid2" && live=$((live + 1))
-    [ "$live" -eq 1 ] && break
+    pid1_state=0
+    pid2_state=0
+    is_live_non_zombie "$pid1" || pid1_state=$?
+    is_live_non_zombie "$pid2" || pid2_state=$?
+    live=$(( (pid1_state == 0) + (pid2_state == 0) ))
+    [ "$pid1_state" -ne 2 ] && [ "$pid2_state" -ne 2 ] && [ "$live" -eq 1 ] && break
     sleep 0.1
     i=$((i + 1))
   done
+  [ "$pid1_state" -ne 2 ] && [ "$pid2_state" -ne 2 ] \
+    || fail "singleton watcher liveness was unreadable"
   [ "$live" -eq 1 ] || fail "expected exactly one live watcher, got $live"
   i=0
   while [ "$i" -lt 50 ] && ! grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null 2>&1; do
@@ -419,7 +423,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
 }
 
 test_watch_restart_rejects_reused_pid() {
-  local dir state fakebin out live pid i
+  local dir state fakebin out live pid i process_state
   dir=$(make_case restart-reused-pid)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -434,12 +438,18 @@ test_watch_restart_rejects_reused_pid() {
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
   pid=$!
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$pid"; do
+  while [ "$i" -lt 80 ]; do
+    process_state=0
+    is_live_non_zombie "$pid" || process_state=$?
+    [ "$process_state" -eq 1 ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  is_live_non_zombie "$pid" \
-    && fail "restart did not surface recovery after replacing a reused-pid lock"
+  process_state=0
+  is_live_non_zombie "$pid" || process_state=$?
+  [ "$process_state" -ne 2 ] || fail "restart arm liveness was unreadable after replacing a reused-pid lock"
+  [ "$process_state" -eq 1 ] \
+    || fail "restart did not surface recovery after replacing a reused-pid lock"
   wait "$pid" 2>/dev/null || true
   grep -F 'check: rearm-resurface' "$out" >/dev/null \
     || fail "restart replaced reused-pid lock without surfacing recovery: $(cat "$out")"
@@ -524,6 +534,203 @@ test_watcher_self_evicts_on_lock_takeover() {
   [ "$lock_pid" = "$$" ] || fail "self-evicting watcher clobbered the new holder's lock (got '$lock_pid')"
   pass "watcher self-evicts when the lock pid no longer names it"
 }
+
+# Shutdown must be bounded. Every recovery-marker transition takes the marker
+# lock, and the one the EXIT trap runs used to wait for it forever: with a live
+# holder, SIGTERM became a no-op and the only way to stop the watcher was
+# SIGKILL. A supervisor that cannot stop its watcher by signalling it has no
+# supervision, so this pins that the signalled watcher exits anyway and says
+# what it could not persist.
+test_shutdown_is_bounded_when_marker_lock_is_held() {
+  local dir state fakebin out err pid holder holder_pid holder_survived i rc seeded lock_kept
+  dir=$(make_case bounded-shutdown)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    && [ -e "$state/.last-watcher-beat" ] \
+    || fail "watcher did not publish its singleton lock and beacon"
+
+  # Seed a LIVE holder on the recovery marker lock. It has to be seeded after
+  # the watcher is up: the watcher takes this same lock at startup, and seeding
+  # first would wedge it there instead of at the shutdown path under test. Its
+  # stdio goes to /dev/null so a holder outliving a failed assertion can never
+  # hold a caller's output pipe open.
+  sleep 300 >/dev/null 2>&1 &
+  holder=$!
+  seeded=0
+  i=0
+  while [ "$i" -lt 200 ]; do
+    if mkdir "$state/.watcher-down.lock" 2>/dev/null; then
+      printf '%s\n' "$holder" > "$state/.watcher-down.lock/pid"
+      seeded=1
+      break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if [ "$seeded" -ne 1 ]; then
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not seed a live holder on the recovery marker lock"
+  fi
+
+  kill -TERM "$pid" 2>/dev/null || fail "could not signal the watcher"
+  # 20s ceiling against a 5s shutdown bound. Without the bound the watcher never
+  # exits at all, so this is a wide margin on a bounded path, not a tight race.
+  rc=0
+  wait_for_exit "$pid" 200 || rc=$?
+  # Read everything the holder is needed for, then retire it, so no assertion
+  # below can leave a 300s sleeper behind.
+  holder_pid=$(cat "$state/.watcher-down.lock/pid" 2>/dev/null || true)
+  holder_survived=0
+  is_live_non_zombie "$holder" && holder_survived=1
+  lock_kept=0
+  [ -e "$state/.watch.lock" ] && lock_kept=1
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  [ "$rc" -ne 124 ] \
+    || fail "signaled watcher did not stop while the recovery marker lock was held"
+  [ "$rc" -ne 0 ] || fail "signaled watcher exited successfully"
+  assert_grep 'recovery state could not be persisted within' "$err" \
+    "bounded shutdown did not report what it could not persist"
+  assert_grep "marker lock held by pid $holder" "$err" \
+    "bounded shutdown did not name the live holder it gave up on"
+  # It gave up on the lock rather than stealing it, and left the stale singleton
+  # evidence the next arm reclaims - the same outcome an unwritable marker has.
+  [ "$holder_pid" = "$holder" ] \
+    || fail "bounded shutdown clobbered the live marker-lock holder (got '$holder_pid')"
+  [ "$holder_survived" -eq 1 ] || fail "bounded shutdown killed the marker-lock holder"
+  [ "$lock_kept" -eq 1 ] \
+    || fail "bounded shutdown released the stale lock evidence it reported retaining"
+  pass "signaled watcher stops on a held recovery marker lock and reports what it could not persist"
+}
+
+test_lock_resource_failure_returns() (
+  local dir state pid='' i process_state rc result
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "lock owner-directory failure returns # SKIP root bypasses directory permissions"
+    return
+  fi
+  dir=$(make_case lock-resource-failure)
+  state="$dir/state"
+  result="$dir/acquire.rc"
+  trap 'if [ -n "$pid" ]; then kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; chmod u+w "$state"' EXIT
+  chmod a-w "$state" || fail "could not make lock fixture state unwritable"
+
+  FM_STATE_OVERRIDE="$state" bash -eu -c '
+    . "$1"
+    if fm_lock_owner_dir "$2"; then
+      exit 10
+    fi
+    printf "ready\n" > "$3"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=$?; fi
+    printf "%s\n" "$rc" > "$4"
+    exit "$rc"
+  ' _ "$LIB" "$state/.resource.lock" "$dir/fault.ready" "$result" \
+    > "$dir/acquire.out" 2> "$dir/acquire.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    process_state=0
+    is_live_non_zombie "$pid" || process_state=$?
+    [ "$process_state" -eq 1 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  process_state=0
+  is_live_non_zombie "$pid" || process_state=$?
+  [ -s "$dir/fault.ready" ] || fail "fixture could not induce owner-directory creation failure"
+  [ "$process_state" -ne 2 ] || fail "resource-fault acquirer liveness was unreadable"
+  [ "$process_state" -eq 1 ] && [ -s "$result" ] \
+    || fail "lock acquisition did not return on owner-directory creation failure"
+  rc=0
+  wait "$pid" || rc=$?
+  pid=
+  [ "$rc" -ne 0 ] && [ "$rc" = "$(cat "$result")" ] \
+    || fail "lock acquisition did not return nonzero on owner-directory creation failure"
+  [ ! -e "$state/.resource.lock" ] && [ ! -L "$state/.resource.lock" ] \
+    || fail "failed acquisition published a lock"
+  pass "lock acquisition returns nonzero when owner-directory creation fails"
+)
+
+test_shutdown_is_bounded_when_state_is_unwritable() (
+  local dir state fakebin err pid='' i process_state rc started elapsed
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "watcher shutdown on unwritable state # SKIP root bypasses directory permissions"
+    return
+  fi
+  dir=$(make_case unwritable-state-shutdown)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  err="$dir/watch.err"
+  trap 'if [ -n "$pid" ]; then kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; chmod u+w "$state"' EXIT
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2> "$err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+      && [ -e "$state/.last-watcher-beat" ] \
+      && [ ! -e "$state/.watcher-down.lock" ] && [ ! -L "$state/.watcher-down.lock" ] \
+      && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    && [ -e "$state/.last-watcher-beat" ] \
+    || fail "watcher did not publish its singleton lock and beacon before the resource fault"
+  chmod a-w "$state" || fail "could not make watcher state unwritable"
+  [ ! -e "$state/.watcher-down.lock" ] && [ ! -L "$state/.watcher-down.lock" ] \
+    || fail "resource-fault fixture encountered marker-lock contention"
+  if FM_STATE_OVERRIDE="$state" bash -eu -c '. "$1"; fm_lock_owner_dir "$2"' \
+    _ "$LIB" "$state/.watcher-down.lock" >/dev/null 2>&1; then
+    fail "fixture could not induce watcher owner-directory creation failure"
+  fi
+  is_live_non_zombie "$pid" || fail "watcher exited before the resource-fault shutdown signal"
+  started=$SECONDS
+  kill -TERM "$pid" || fail "could not signal the watcher with unwritable state"
+  i=0
+  while [ "$i" -lt 200 ]; do
+    process_state=0
+    is_live_non_zombie "$pid" || process_state=$?
+    [ "$process_state" -eq 1 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  process_state=0
+  is_live_non_zombie "$pid" || process_state=$?
+  elapsed=$((SECONDS - started))
+  [ "$process_state" -ne 2 ] || fail "resource-fault watcher liveness was unreadable"
+  [ "$process_state" -eq 1 ] \
+    || fail "signaled watcher did not stop after owner-directory creation failed"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "signaled watcher exited successfully with unwritable state"
+  assert_grep 'recovery state could not be persisted within 5s' "$err" \
+    "resource-fault shutdown did not reach its deadline reporting branch"
+  assert_grep 'stopping and retaining stale lock evidence' "$err" \
+    "resource-fault shutdown did not report retained lock evidence"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid" ] \
+    || fail "resource-fault shutdown removed the singleton lock evidence"
+  pid=
+  pass "signaled watcher reaches its deadline on owner-directory creation failure (${elapsed}s)"
+)
 
 test_arm_self_eviction_is_loud_without_successor() {
   local dir state fakebin armout armpid watcher_pid status i
@@ -645,7 +852,7 @@ test_arm_starts_and_self_heals() {
   # before reporting 'started' - whether the lock is empty (clean start) or held
   # by a dead pid with a fresh-looking leftover beacon (self-heal). It must never
   # report 'healthy' off a dead pid. One row per pre-state, one assertion block.
-  local row dir state fakebin armout armpid i lock_pid dead_pid
+  local row dir state fakebin armout armpid i lock_pid dead_pid process_state
   for row in clean dead-pid; do
     dir=$(make_case "arm-$row")
     state="$dir/state"
@@ -667,15 +874,20 @@ test_arm_starts_and_self_heals() {
     i=0
     while [ "$i" -lt 80 ]; do
       if [ "$row" = dead-pid ]; then
-        is_live_non_zombie "$armpid" || break
+        process_state=0
+        is_live_non_zombie "$armpid" || process_state=$?
+        [ "$process_state" -eq 1 ] && break
       else
         grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
       fi
       sleep 0.1; i=$((i + 1))
     done
     if [ "$row" = dead-pid ]; then
-      is_live_non_zombie "$armpid" \
-        && fail "arm did not surface recovery after reclaiming a dead-pid lock"
+      process_state=0
+      is_live_non_zombie "$armpid" || process_state=$?
+      [ "$process_state" -ne 2 ] || fail "arm liveness was unreadable after reclaiming a dead-pid lock"
+      [ "$process_state" -eq 1 ] \
+        || fail "arm did not surface recovery after reclaiming a dead-pid lock"
       wait "$armpid" 2>/dev/null || true
       grep -F 'check: rearm-resurface' "$armout" >/dev/null \
         || fail "arm reclaimed dead-pid lock without surfacing recovery: $(cat "$armout")"
@@ -696,7 +908,7 @@ test_arm_starts_and_self_heals() {
 }
 
 test_arm_hup_cleans_child_and_temp_output() {
-  local dir state fakebin armout i armpid lock_pid status
+  local dir state fakebin armout i armpid lock_pid status process_state
   dir=$(make_case arm-hup-cleanup)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -716,11 +928,17 @@ test_arm_hup_cleans_child_and_temp_output() {
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
+  while [ "$i" -lt 80 ]; do
+    process_state=0
+    is_live_non_zombie "$lock_pid" || process_state=$?
+    [ "$process_state" -eq 1 ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  ! is_live_non_zombie "$lock_pid" || fail "HUP cleanup left watcher child running"
+  process_state=0
+  is_live_non_zombie "$lock_pid" || process_state=$?
+  [ "$process_state" -ne 2 ] || fail "HUP cleanup watcher child liveness was unreadable"
+  [ "$process_state" -eq 1 ] || fail "HUP cleanup left watcher child running"
   ! ls "$state"/.watch-arm-output.* >/dev/null 2>&1 || fail "HUP cleanup left temp output behind"
   pass "arm cleans child watcher and temp output on HUP"
 }
@@ -1121,6 +1339,9 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
+test_shutdown_is_bounded_when_marker_lock_is_held
+test_lock_resource_failure_returns || exit $?
+test_shutdown_is_bounded_when_state_is_unwritable || exit $?
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger

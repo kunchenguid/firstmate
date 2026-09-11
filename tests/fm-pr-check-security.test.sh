@@ -47,15 +47,10 @@ file_mode() {
   fi
 }
 
-process_is_live_non_zombie() {
-  local pid=$1 stat
-  kill -0 "$pid" 2>/dev/null || return 1
-  stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
-  case "$stat" in
-    Z*) return 1 ;;
-  esac
-  return 0
-}
+# Process liveness comes from tests/lib.sh's is_live_non_zombie (0 live, 1 gone,
+# 2 ps could not answer). This file used to carry its own copy that read an
+# empty ps answer as LIVE, which is what let a ps hiccup and a genuinely stuck
+# watcher reach the same assertion with the same message.
 
 LINK_KIND=
 LINK_TARGET=
@@ -1096,7 +1091,8 @@ SH
 }
 
 test_returned_custom_check_descendants_are_drained() {
-  local backend dir state fakebin ready direct_done child_pid_file sentinel watcher_pid child_pid i rc alive force_fallback
+  local backend dir state fakebin ready direct_done child_pid_file sentinel watcher_pid child_pid i rc child_state force_fallback
+  local watcher_state signaled_at
   for backend in installed-timeout fallback-timeout; do
     dir=$(make_case "returned-custom-descendant-$backend")
     state="$dir/home/state"
@@ -1147,26 +1143,68 @@ SH
       && [ -e "$state/.last-check" ] \
       || fail "$backend watcher did not complete the direct custom check"
     child_pid=$(cat "$child_pid_file")
+    signaled_at=$(date +%s)
     kill -TERM "$watcher_pid" 2>/dev/null || fail "could not stop $backend watcher"
+    # The budget is 150 POLLS, not 3 seconds: each iteration is a 0.02s sleep
+    # plus a ps, so its wall cost grows with machine load and the watcher gets
+    # proportionally MORE time exactly when it needs it. Do not raise it to make
+    # a red go away - the measured margin over a healthy shutdown is 15-20x, so
+    # a failure here is a real one and raising the budget only hides it.
+    # `|| watcher_state=$?` rather than a bare call: cases above leave errexit
+    # ON, and a bare command returning non-zero would end this script silently
+    # with no assertion and no message.
     i=0
-    while process_is_live_non_zombie "$watcher_pid" && [ "$i" -lt 150 ]; do
+    watcher_state=0
+    while [ "$i" -lt 150 ]; do
+      watcher_state=0
+      is_live_non_zombie "$watcher_pid" || watcher_state=$?
+      [ "$watcher_state" -eq 1 ] && break
       sleep 0.02
       i=$((i + 1))
     done
-    if process_is_live_non_zombie "$watcher_pid"; then
+    watcher_state=0
+    is_live_non_zombie "$watcher_pid" || watcher_state=$?
+    if [ "$watcher_state" -ne 1 ]; then
+      # Say what was seen. This costs nothing on the green path - it runs only
+      # when the case is already failing - and without it a failure here reports
+      # a verdict with no evidence, which is exactly what left one CI sighting
+      # unexplainable after the fact.
+      printf '# %s watcher still %s %ss after TERM (%s polls); state below\n' \
+        "$backend" \
+        "$([ "$watcher_state" -eq 2 ] && printf 'unreadable' || printf 'live')" \
+        "$(( $(date +%s) - signaled_at ))" "$i" >&2
+      printf '# descendant tree (watcher pid %s; recorded child pid %s): pid ppid pgid stat wchan args\n' \
+        "$watcher_pid" "$child_pid" >&2
+      ps -eo pid=,ppid=,pgid=,stat=,wchan=,args= 2>/dev/null | awk -v w="$watcher_pid" -v c="$child_pid" '
+        function tree(pid, indent, child) {
+          if (seen[pid]++) return
+          if (pid in rows) print indent rows[pid]
+          for (child in parents)
+            if (parents[child] == pid) tree(child, indent "  ")
+        }
+        { rows[$1] = $0; parents[$1] = $2 }
+        END { tree(w, ""); tree(c, "") }
+      ' >&2 || true
+      printf '# %s watcher stderr tail:\n' "$backend" >&2
+      tail -20 "$dir/watch.err" >&2 2>/dev/null || true
       kill -KILL "$watcher_pid" 2>/dev/null || true
       wait "$watcher_pid" 2>/dev/null || true
       kill -KILL "$child_pid" 2>/dev/null || true
+      # A ps that cannot answer and a watcher that will not stop are different
+      # failures and must not share a message.
+      [ "$watcher_state" -ne 2 ] \
+        || fail "$backend watcher liveness was unreadable after the direct check returned"
       fail "$backend watcher did not stop after the direct check returned"
     fi
     rc=0
     wait "$watcher_pid" || rc=$?
     [ "$rc" -ne 0 ] || fail "$backend signaled watcher exited successfully"
-    alive=0
-    process_is_live_non_zombie "$child_pid" && alive=1
-    [ "$alive" -eq 0 ] || kill -KILL "$child_pid" 2>/dev/null || true
+    child_state=0
+    is_live_non_zombie "$child_pid" || child_state=$?
+    [ "$child_state" -eq 1 ] || kill -KILL "$child_pid" 2>/dev/null || true
     wait "$child_pid" 2>/dev/null || true
-    [ "$alive" -eq 0 ] || fail "$backend watcher left a returned check descendant alive"
+    [ "$child_state" -ne 2 ] || fail "$backend returned check descendant liveness was unreadable"
+    [ "$child_state" -eq 1 ] || fail "$backend watcher left a returned check descendant alive"
     [ ! -e "$sentinel" ] || fail "$backend returned check descendant reached its sentinel"
     ! find "$state" -maxdepth 1 -name '.fm-custom-check.*' -print | grep . >/dev/null \
       || fail "$backend watcher left a private custom check snapshot"
