@@ -57,6 +57,16 @@
 #     supervision rather than this snapshot path.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
+#     runtime is present only in a home that opts in with the local, gitignored
+#     config/worker-running-time presence flag; without it this snapshot carries
+#     no runtime fields at all (bin/fm-running-time-lib.sh).
+#     runtime.running_seconds is how long that row's own worker has been
+#     running, derived from the spawn_gen incarnation token bin/fm-spawn.sh
+#     writes and always read as base 10. It is null when no start is recorded,
+#     when the token carries no readable epoch, or when the recorded start is
+#     later than the observation time, so a consumer never renders a fabricated
+#     elapsed time. On a kind=secondmate row this is that second mate's own
+#     uptime, never the age of the child work it supervises.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -78,7 +88,10 @@
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
 #     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. provenance.summary_source
+#     queued, landed, endpoints, counts, and omitted. In an opted-in home an
+#     active child also carries the running_seconds its own home measured for it,
+#     or null when that home records no start.
+#     provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
@@ -213,6 +226,12 @@ esac
 # shellcheck source=bin/fm-landed-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
+# shellcheck source=bin/fm-running-time-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-running-time-lib.sh"  # fm_running_time_enabled: the opt-in owner
+
+RUNNING_TIME=0
+fm_running_time_enabled && RUNNING_TIME=1
 
 usage() {
   cat <<'EOF'
@@ -290,6 +309,21 @@ path_present_json() {  # <contract-path> [<observed-path>]
 
 meta_value() {  # <meta-file> <key>
   fm_meta_get "$1" "$2"
+}
+
+# bin/fm-spawn.sh writes spawn_gen=s<epoch>.<pid>.<n> on every fresh spawn and
+# relaunch. A token from an older or hand-written record may carry no readable
+# start, so anything unparsable yields nothing rather than a guessed epoch.
+spawn_started_epoch() {  # <spawn-gen>
+  local token
+  case "$1" in s*) token=${1#s} ;; *) return 1 ;; esac
+  token=${token%%.*}
+  case "$token" in ''|*[!0-9]*) return 1 ;; esac
+  # Keep the value inside signed 64-bit range so the elapsed subtraction cannot
+  # overflow on a corrupt token, and read the digits as base 10 so a zero-padded
+  # token is never taken for an octal literal.
+  [ "${#token}" -le 18 ] || return 1
+  printf '%s\n' "$((10#$token))"
 }
 
 last_nonempty_line() {  # <file>
@@ -719,7 +753,7 @@ task_json_lines() {
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json started_epoch running_seconds runtime_json
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -736,6 +770,15 @@ task_json_lines() {
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)
     spawn_gen=$(meta_value "$meta" spawn_gen)
+    runtime_json=null
+    if [ "$RUNNING_TIME" = 1 ]; then
+      started_epoch=$(spawn_started_epoch "$spawn_gen" || true)
+      running_seconds=""
+      if [ -n "$started_epoch" ] && [ "$started_epoch" -le "$SNAPSHOT_EPOCH" ]; then
+        running_seconds=$((SNAPSHOT_EPOCH - started_epoch))
+      fi
+      runtime_json="{\"running_seconds\":${running_seconds:-null}}"
+    fi
     remote_host=$(meta_value "$meta" remote_host)
     remote_root=$(meta_value "$meta" remote_root)
     if [ -n "$remote_host" ]; then
@@ -837,6 +880,7 @@ task_json_lines() {
       --arg home "$home" \
       --arg projects "$projects" \
       --arg spawn_gen "$spawn_gen" \
+      --argjson runtime "$runtime_json" \
       --arg backend "$backend" \
       --arg target "$target" \
       --arg remote_host "$remote_host" \
@@ -865,6 +909,7 @@ task_json_lines() {
         yolo:($yolo // ""),
         project:($project // ""),
         spawn_gen:($spawn_gen | if . == "" then null else . end),
+        runtime:$runtime,
         backend:$backend,
         remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
         paths:{
@@ -899,7 +944,8 @@ task_json_lines() {
              steer:"bin/fm-send.sh fm-\($id) \u0027<instruction>\u0027",
              return_channel_note:null}
           end)
-      }'
+      }
+      | if $runtime == null then del(.runtime) else . end'
   done | jq -s 'sort_by(.id)'
 }
 
@@ -1016,8 +1062,9 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
-            source:.current_state.source,
-            doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
+            source:.current_state.source}
+           + (if has("runtime") then {running_seconds:.runtime.running_seconds} else {} end)
+           + {doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all

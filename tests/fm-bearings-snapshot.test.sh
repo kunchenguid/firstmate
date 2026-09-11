@@ -1041,6 +1041,123 @@ EOF
   pass "repeated snapshots keep the same current landed baseline and ignore prior reports"
 }
 
+# The instant every fixture run observes: run() pins it as a timestamp and the
+# secondmate ledger refresh pins the same instant as epoch seconds, so elapsed
+# expectations below are deterministic.
+FIXTURE_NOW_EPOCH=1783792800
+
+# One in-flight ship task started exactly <spawn-gen> ago; an empty token writes a
+# record with no recorded start at all.
+write_running_task() {  # <home> <id> <spawn-gen-or-empty>
+  local home=$1 id=$2 gen=$3
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$home/projects/ship-wt" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  if [ -n "$gen" ]; then
+    printf 'spawn_gen=%s\n' "$gen" >> "$home/state/$id.meta"
+  fi
+  printf 'working: building the thing\n' > "$home/state/$id.status"
+  printf -- '- [ ] %s - Ship %s (repo: firstmate) (kind: ship) (since 2026-07-11)\n' "$id" "$id" \
+    >> "$home/data/backlog.md"
+}
+
+test_running_elapsed_is_opt_in_and_then_rendered_or_unknown() {
+  local home fakebin toon json
+  home=$(make_home running-elapsed)
+  mkdir -p "$home/projects/ship-wt"
+  printf '## In flight\n' > "$home/data/backlog.md"
+  write_running_task "$home" recent "s$((FIXTURE_NOW_EPOCH - 45)).111.1"
+  write_running_task "$home" within-hour "s$((FIXTURE_NOW_EPOCH - 840)).111.2"
+  write_running_task "$home" long-run "s$((FIXTURE_NOW_EPOCH - 4440)).111.3"
+  write_running_task "$home" multi-day "s$((FIXTURE_NOW_EPOCH - 183600)).111.4"
+  write_running_task "$home" zero-padded "s0$((FIXTURE_NOW_EPOCH - 45)).111.5"
+  write_running_task "$home" no-start ""
+  write_running_task "$home" legacy-token "legacy-9f3c"
+  write_running_task "$home" future-start "s$((FIXTURE_NOW_EPOCH + 600)).111.6"
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+
+  # Unconfigured: the same fixture, with recorded starts to render, carries no
+  # running surface at all rather than a default projection.
+  json=$(run "$home" "$fakebin" --json)
+  toon=$(run "$home" "$fakebin")
+  printf '%s' "$json" | jq -e '
+    [.in_flight[] | select(has("running"))] | length == 0
+  ' >/dev/null || fail "an unconfigured home must render no running column: $json"
+  assert_contains "$toon" 'in_flight[8]{id,kind,state,repo,doing}' \
+    "an unconfigured home's TOON Underway rows must keep their original columns"
+
+  : > "$home/config/worker-running-time"
+  json=$(run "$home" "$fakebin" --json)
+  toon=$(run "$home" "$fakebin")
+  printf '%s' "$json" | jq -e '
+    (.in_flight | map({key:.id, value:.running}) | from_entries) as $r
+    | $r["recent"] == "45s"
+      and $r["within-hour"] == "14m"
+      and $r["long-run"] == "1h 14m"
+      and $r["multi-day"] == "2d 3h"
+  ' >/dev/null || fail "a recorded start must render as elapsed running time: $json"
+  # A zero-padded token is base 10, never an octal literal, and never an error
+  # that costs the whole snapshot.
+  printf '%s' "$json" | jq -e '
+    (.in_flight | map({key:.id, value:.running}) | from_entries)["zero-padded"] == "45s"
+  ' >/dev/null || fail "a zero-padded start was not read as base 10: $json"
+  printf '%s' "$json" | jq -e '
+    (.in_flight | map({key:.id, value:.running}) | from_entries) as $r
+    | $r["no-start"] == "unknown"
+      and $r["legacy-token"] == "unknown"
+      and $r["future-start"] == "unknown"
+  ' >/dev/null || fail "an unreadable start must say unknown, never a number or a blank: $json"
+  assert_contains "$toon" 'in_flight[8]{id,kind,state,repo,running,doing}' \
+    "TOON Underway rows must carry the running column"
+  assert_contains "$toon" ',1h 14m,' "the rendered elapsed time must reach the TOON rows"
+  pass "Underway reports elapsed running time only once the home opts in"
+}
+
+test_active_child_running_time_comes_from_its_own_home() {
+  local home mate fakebin json
+  home=$(make_home child-running)
+  mate="$TMP_ROOT/child-running-home"
+  write_domain_alpha_fixture "$home" "$mate"
+  mkdir -p "$mate/projects/phase8" "$mate/projects/phase9"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
+- [ ] phase9 - Sample rollout Phase 9 (repo: sample) (kind: ship) (since 2026-07-13)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/phase8.meta" \
+    "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" \
+    "spawn_gen=s$((FIXTURE_NOW_EPOCH - 4440)).222.1"
+  record_claude_state "$mate/state" phase8 busy
+  printf 'working [key=phase8]: implementing Phase 8 parity\n' > "$mate/state/phase8.status"
+  fm_write_meta "$mate/state/phase9.meta" \
+    "window=firstmate:fm-phase9" "worktree=$mate/projects/phase9" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" phase9 busy
+  printf 'working [key=phase9]: implementing Phase 9 parity\n' > "$mate/state/phase9.status"
+  # The primary pushes this flag into every secondmate home, so the fixture opts
+  # in on both sides exactly as a converged fleet does.
+  : > "$home/config/worker-running-time"
+  : > "$mate/config/worker-running-time"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | map({key:.id, value:.running}) | from_entries) as $r
+    | $r["domain-alpha/phase8"] == "1h 14m"
+      and $r["domain-alpha/phase9"] == "unknown"
+  ' >/dev/null || fail "an active child must report the start its own home recorded: $json"
+  pass "an active child reports its own home's running time, or unknown without one"
+}
+
 test_default_is_bounded_and_local_only() {
   local home fakebin toon json backlog
   home=$(make_home bounded); write_fixture "$home"
@@ -3195,6 +3312,8 @@ test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
+test_running_elapsed_is_opt_in_and_then_rendered_or_unknown
+test_active_child_running_time_comes_from_its_own_home
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_accepts_only_kind_owned_delivery_artifacts

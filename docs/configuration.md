@@ -208,6 +208,17 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Worker running time (config/worker-running-time)
+
+The optional local, gitignored `config/worker-running-time` presence flag opts this home into reporting how long each worker has been running.
+Only the file's presence is read, so its contents are ignored; remove it to return to the default.
+With the flag absent, `bin/fm-fleet-snapshot.sh` emits no runtime fields and `bin/fm-bearings-snapshot.sh` renders no running column, so an unconfigured home reads exactly as it did before the surface existed.
+With it present, every task row carries `runtime.running_seconds`, an active child in a home summary carries the `running_seconds` its own home measured, and the bearings Underway rows gain a rendered `running` column before `doing`.
+The value comes from the `spawn_gen` incarnation token the spawn already records, and it is null when no start is recorded, so a reader never renders a fabricated elapsed time.
+A relaunch records a fresh token, so the figure measures the worker's current incarnation rather than the whole life of the task it is working on.
+The flag is inherited by secondmate homes, because the running time of a child row is measured by the home that owns that child rather than by the home rendering the report.
+`bin/fm-running-time-lib.sh` owns the whole opt-in rule that both producers consult, resolving the home config directory from the standard overrides as well as testing for the flag, and each producer's header owns its exact fields.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
