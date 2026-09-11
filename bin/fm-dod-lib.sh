@@ -9,7 +9,16 @@
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
-# line that bin/fm-spawn.sh checks a ship brief against.
+# line that bin/fm-spawn.sh checks a ship brief against, then one "Terminal
+# condition:" line naming the single legal `done:` form for that mode.
+# Keep the terminal condition before the implementation handoff so a local
+# commit cannot be mistaken for delivery (tests/fm-brief.test.sh).
+# `done:` is terminal to status consumers -
+# bin/fm-inactive-reconcile.sh republishes it to a secondmate's parent channel as
+# a delivered outcome - so a no-mistakes implementation commit hands off with
+# nonterminal `working:` instead. That handoff still reaches firstmate:
+# bin/fm-watch.sh surfaces any crew that stopped its turn without positive
+# evidence it is still executing.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -197,20 +206,20 @@ fm_dod_block() {  # <mode> <task-id>
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+Terminal condition: \`done: PR {url}\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
+This task ships **direct-PR**: you raise the PR yourself. Do NOT run /no-mistakes.
+When the implementation is committed, push your branch and open a PR with \`gh-axi\`, then append that terminal line to the status file and stop.
+The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
     local-only)
       cat <<EOF
 # Definition of done
 Delivery contract: mode=local-only
-This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
+Terminal condition: \`done: ready in branch fm/$id\`. That is this task's ONLY legal \`done:\` line.
+This task ships **local-only**: no remote, no PR, no pipeline. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
+When the work is implemented and committed on \`fm/$id\`, append that terminal line to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
@@ -218,9 +227,8 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Terminal condition: \`done: PR {url} checks green\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
+Report the finished implementation with \`working: implemented, ready for the pipeline\` and stop the turn; firstmate then sends the pipeline invocation for your runtime.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -245,7 +253,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+Only now is the terminal condition reachable: after /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
       ;;
     *)

@@ -260,7 +260,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "Terminal condition: \`done: PR {url} checks green\`" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -370,6 +370,106 @@ test_no_mistakes_dod_wording() {
   assert_no_grep "no-mistakes refuses" "$brief" \
     "no-mistakes DOD must not claim the tool itself refuses --yes"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
+}
+
+# Print a generated brief's "# Definition of done" body, heading excluded.
+dod_body() {  # <brief>
+  awk '/^# Definition of done$/ { emit = 1; next } emit' "$1"
+}
+
+# Print the <n>th line of that body.
+dod_body_line() {  # <brief> <n>
+  dod_body "$1" | sed -n "$2p"
+}
+
+# On 2026-09-05 three of three no-mistakes ship workers reported `done:` on a
+# local commit with nothing pushed: the block opened with "complete only when
+# committed on your branch" and "append `done: {summary}`", while the real
+# terminal line sat far below the setup, --intent, and gate prose. Position is
+# the fix, so pin position rather than mere presence: every scaffold's
+# Definition of done leads with one "Terminal condition:" line naming that
+# mode's single legal `done:` form, immediately after the machine-readable
+# Delivery contract line a ship brief opens with.
+test_definition_of_done_leads_with_its_terminal_condition() {
+  local home id kind flag expect first second
+  home="$TMP_ROOT/terminal-condition-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r kind flag expect; do
+    [ -n "$kind" ] || continue
+    id="brief-terminal-$kind"
+    # shellcheck disable=SC2086  # flag is an intentional word-split arg list
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj $flag >/dev/null 2>&1 \
+      || fail "$kind: scaffold should exit 0"
+    brief="$home/data/$id/brief.md"
+    first=$(dod_body_line "$brief" 1)
+    second=$(dod_body_line "$brief" 2)
+    if [ "$kind" = scout ]; then
+      [ "$first" = "$expect" ] \
+        || fail "$kind: Definition of done must open with its terminal condition, got: $first"
+    else
+      [ "$first" = "Delivery contract: mode=$kind" ] \
+        || fail "$kind: Definition of done must open with its delivery contract line, got: $first"
+      [ "$second" = "$expect" ] \
+        || fail "$kind: terminal condition must be the line after the delivery contract, got: $second"
+    fi
+  done <<ROWS
+no-mistakes|--mode no-mistakes|Terminal condition: \`done: PR {url} checks green\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
+direct-PR|--mode direct-PR|Terminal condition: \`done: PR {url}\`. That is this task's ONLY legal \`done:\` line: a commit with no PR is not done.
+local-only|--mode local-only|Terminal condition: \`done: ready in branch fm/brief-terminal-local-only\`. That is this task's ONLY legal \`done:\` line.
+scout|--scout|Terminal condition: \`done: {one-line conclusion}\`. That is this task's ONLY legal \`done:\` line, and it is legal only once the report below exists and the completion gate passes; then stop.
+ROWS
+  pass "fm-brief.sh: every scaffold's Definition of done leads with its mode-specific terminal condition"
+}
+
+# `done:` is a terminal verb every consumer treats as delivered, so a
+# no-mistakes worker must not spend it on an implementation commit. Its
+# implementation stop gate is the nonterminal `working:` handoff instead, and
+# none of the wording that licensed the premature report may return.
+test_no_mistakes_hands_off_the_implementation_commit_without_done() {
+  local home id brief mode
+  home="$TMP_ROOT/premature-done-home"
+  mkdir -p "$home/data"
+  id="brief-premature-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "no-mistakes brief was not scaffolded"
+  assert_grep "Report the finished implementation with \`working: implemented, ready for the pipeline\`" "$brief" \
+    "no-mistakes DOD must hand off the implementation commit with the nonterminal working verb"
+  assert_no_grep "done: {summary}" "$brief" \
+    "no-mistakes DOD still licenses a done: line for a bare implementation commit"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "no-mistakes DOD still stops the worker at the commit before naming its terminal condition"
+
+  # A PR-delivering mode is never complete at a commit. local-only is excluded
+  # deliberately: its terminal condition really is the committed branch.
+  for mode in no-mistakes direct-PR; do
+    id="brief-premature-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    assert_no_grep "The task is complete only when committed on your branch" "$home/data/$id/brief.md" \
+      "$mode: brief still calls a commit with no PR complete"
+  done
+
+  # The handoff belongs to the pipeline mode alone; the faster paths deliver in
+  # one stage and must not learn to stop halfway.
+  for mode in direct-PR local-only; do
+    id="brief-nohandoff-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    assert_no_grep "ready for the pipeline" "$home/data/$id/brief.md" \
+      "$mode: brief must not carry the no-mistakes implementation handoff"
+  done
+
+  # Rule 4 forbids ending a turn on a mid-task working: line, and the Definition
+  # of done owns the exceptions. It must name them as stop gates, not as `done:`
+  # gates, or it contradicts the no-mistakes handoff above.
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-stopgate-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    assert_grep "continue the same stage until a stop gate the Definition of done names" "$home/data/$id/brief.md" \
+      "$mode: rule 4 must defer its stop gates to the Definition of done"
+    assert_no_grep "until a defined \`done:\` gate" "$home/data/$id/brief.md" \
+      "$mode: rule 4 still requires every stop gate to be a done: line"
+  done
+  pass "fm-brief.sh: no-mistakes reserves done: for the delivered PR and hands off with working:"
 }
 
 test_ask_user_escalation_format() {
@@ -878,6 +978,8 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_definition_of_done_leads_with_its_terminal_condition
+test_no_mistakes_hands_off_the_implementation_commit_without_done
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
