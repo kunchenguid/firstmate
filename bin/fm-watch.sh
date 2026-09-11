@@ -1784,6 +1784,25 @@ FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
 FM_CHECK_RESULT=
 FM_CHECK_SIGNAL_PENDING=
+FM_CUSTOM_CHECKS_DUE=0
+FM_CUSTOM_CHECKS_RUN=
+
+# Early priority wakes and failed cycles must not silently skip due checks.
+custom_checks_audit() {
+  local trust id
+  [ "$FM_CUSTOM_CHECKS_DUE" -eq 1 ] || return 0
+  for trust in "$STATE"/*.check-trust; do
+    [ -f "$trust" ] || continue
+    id=${trust##*/}
+    id=${id%.check-trust}
+    case " $FM_CUSTOM_CHECKS_RUN " in *" $id "*) continue ;; esac
+    # Audit the registration even if its script vanished; this never runs it.
+    if fm_custom_check_trust_read "$STATE" "$id"; then
+      triage_log "registered custom check did not run this cycle: $STATE/$id.check.sh"
+    fi
+  done
+  FM_CUSTOM_CHECKS_DUE=0
+}
 
 fm_check_output_cleanup() {
   [ -z "$FM_CHECK_OUTPUT" ] || rm -f -- "$FM_CHECK_OUTPUT"
@@ -1828,6 +1847,7 @@ run_check_capture() {
   ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
+  FM_CUSTOM_CHECKS_RUN="$FM_CUSTOM_CHECKS_RUN ${FM_CUSTOM_CHECK_ID:-}"
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
   trap 'exit 1' HUP INT TERM
@@ -2093,6 +2113,7 @@ watcher_cleanup() {
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
+  custom_checks_audit
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
@@ -2276,6 +2297,11 @@ while :; do
   # each potentially blocking step below, so an alive watcher never mimics a
   # stalled one while a check, poll, drain, or wait is in flight.
   watcher_heartbeat
+  FM_CUSTOM_CHECKS_RUN=
+  FM_CUSTOM_CHECKS_DUE=0
+  if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    FM_CUSTOM_CHECKS_DUE=1
+  fi
 
   # A recovery wake already has durable work waiting for presentation. Keep
   # newly added side-band summary work off that prompt path; the handling
@@ -2370,8 +2396,9 @@ while :; do
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
-  if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+  if [ "$FM_CUSTOM_CHECKS_DUE" -eq 1 ]; then
     rejected_checks=
+    check_wake_reason=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
@@ -2401,7 +2428,8 @@ while :; do
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-          FM_CHECK_STEP_NAME="check:$c" run_check_capture "$custom_snapshot" || exit 1
+          FM_CUSTOM_CHECK_ID="$id" FM_CHECK_STEP_NAME="check:$c" \
+            run_check_capture "$custom_snapshot" || exit 1
           out=$FM_CHECK_RESULT
           fm_custom_check_snapshot_cleanup
         else
@@ -2421,25 +2449,26 @@ while :; do
             exit 1
           fi
           retire_merged_pr_poll "$id"
-          touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
-          wake "$reason"
+        else
+          fm_wake_append check "$c" "$reason" || exit 1
         fi
-        fm_wake_append check "$c" "$reason" || exit 1
-        touch "$STATE/.last-check"
-        wake "$reason"
+        # Queue each result immediately, but finish the due batch before waking:
+        # an always-actionable early check must not starve later snapshots.
+        [ -n "$check_wake_reason" ] || check_wake_reason=$reason
       fi
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-      touch "$STATE/.last-check"
-      wake "$reason"
+      [ -n "$check_wake_reason" ] || check_wake_reason=$reason
     fi
+    custom_checks_audit
     touch "$STATE/.last-check"
+    [ -z "$check_wake_reason" ] || wake "$check_wake_reason"
   fi
 
   # On the first changed signal, linger one grace period and re-scan before

@@ -4419,6 +4419,91 @@ test_timed_out_check_is_logged_and_does_not_block_the_cycle() {
   pass "a named timed-out check is skipped and the rest of its watcher cycle continues"
 }
 
+test_actionable_check_does_not_starve_later_checks() {
+  local dir state home fakebin out pid mode cycle id snapshot f
+  for mode in 0 1; do
+    dir=$(make_case "check-fairness-$mode"); state="$dir/state"; home="$dir/home"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+    mkdir -p "$home"
+    printf '#!/usr/bin/env bash\necho repeat-reminder\n' > "$state/a-reminder.check.sh"
+    printf '#!/usr/bin/env bash\nsleep 30\n' > "$state/b-timeout.check.sh"
+    printf '#!/usr/bin/env bash\necho untrusted-executed\n' > "$state/c-untrusted.check.sh"
+    cat > "$state/z-review.check.sh" <<'SH'
+#!/usr/bin/env bash
+[ ! -e "$FM_STATE_OVERRIDE/.last-check" ] || exit 1
+rg -qF repeat-reminder "$FM_STATE_OVERRIDE/.wake-queue" || exit 1
+echo "$FM_TEST_CHECK_CYCLE" > "$FM_STATE_OVERRIDE/review.snapshot"
+echo review-request
+SH
+    for id in a-reminder b-timeout z-review; do
+      chmod 0700 "$state/$id.check.sh"
+      FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+        || fail "could not register $id"
+    done
+    for cycle in 1 2; do
+      rm -f "$state/.last-check"
+      PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+        FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
+        FM_WATCH_STEP_TIMEOUT=2 FM_CHECK_FORCE_FALLBACK="$mode" FM_TEST_CHECK_CYCLE="$cycle" \
+        "$WATCH" > "$out" 2> "$dir/watch.err" &
+      pid=$!
+      wait_for_exit "$pid" 200 || { reap "$pid"; fail "check batch did not deliver a wake"; }
+      snapshot=
+      IFS= read -r snapshot 2>/dev/null < "$state/review.snapshot" || true
+      [ "$snapshot" = "$cycle" ] || fail "later registered check did not update its snapshot in cycle $cycle (fallback=$mode)"
+      [ -e "$state/.last-check" ] || fail "completed check batch did not advance its cadence"
+      rg -Fx "check: $state/a-reminder.check.sh: repeat-reminder" "$out" >/dev/null \
+        || fail "batch did not retain its first wake reason"
+      rg -F "watcher step timed out: check:$state/b-timeout.check.sh after 2s; skipped for this cycle" \
+        "$state/.watch-triage.log" >/dev/null || fail "timeout was not logged"
+      ! rg -qF 'registered custom check did not run' "$state/.watch-triage.log" \
+        || fail "completed or timed-out checks were reported as unrun"
+      for f in "$state"/.fm-check-output.* "$state"/.fm-custom-check.*; do
+        [ ! -e "$f" ] || fail "check cycle leaked $f"
+      done
+      FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+        || fail "batch drain failed"
+      rg -F "check: $state/z-review.check.sh: review-request" "$dir/drain.out" >/dev/null \
+        || fail "later check's wake was not delivered through the durable queue"
+      rg -F "rejected unauthenticated state checks: $state/c-untrusted.check.sh" "$dir/drain.out" >/dev/null \
+        || fail "earlier output hid the untrusted-check rejection"
+      ! rg -qF untrusted-executed "$dir/drain.out" || fail "untrusted check executed"
+      ack_drain_err "$state" "$dir/drain.err" || fail "could not acknowledge the check batch"
+    done
+  done
+  pass "repeated actionable checks cannot starve later snapshots or wakes; timeouts log and cycle files are cleaned"
+}
+
+test_preempted_registered_checks_are_logged_only_when_due() {
+  local dir state out pid due
+  for due in yes no missing; do
+    dir=$(make_case "check-preempted-$due"); state="$dir/state"; out="$dir/watch.out"
+    cat > "$state/review.check.sh" <<'SH'
+#!/usr/bin/env bash
+echo ran > "$FM_STATE_OVERRIDE/review.snapshot"
+SH
+    chmod 0700 "$state/review.check.sh"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" review >/dev/null \
+      || fail "could not register preempted check"
+    [ "$due" != no ] || touch "$state/.last-check"
+    [ "$due" != missing ] || rm "$state/review.check.sh"
+    append_wake "$state" check procevent:priority:1 'check: procevent fixture priority 1' \
+      || fail "could not queue priority wake"
+    watch_bg "$state" "$dir/fakebin" "$out" env FM_HOME="$dir"
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "priority event did not wake"; }
+    [ ! -e "$state/review.snapshot" ] || fail "priority event unexpectedly ran the check"
+    if [ "$due" != no ]; then
+      rg -F "registered custom check did not run this cycle: $state/review.check.sh" \
+        "$state/.watch-triage.log" >/dev/null || fail "preempted due check was silent"
+      [ ! -e "$state/.last-check" ] || fail "preempted batch advanced the cadence"
+    else
+      ! rg -qF 'registered custom check did not run' "$state/.watch-triage.log" 2>/dev/null \
+        || fail "not-yet-due check was reported as skipped"
+    fi
+  done
+  pass "preempted due checks are named in triage without treating cadence skips as failures"
+}
+
 test_beacon_stays_fresh_while_absorbing() {
   local dir state fakebin out status_file pid m1 m2 now
   dir=$(make_case beacon-fresh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -4753,6 +4838,12 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
 }
 
 
+# Same focused-entry convention as fm-public-followup.test.sh; default runs all.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit "$?"
+fi
+
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
@@ -4855,6 +4946,8 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_registered_slow_check_keeps_beacon_fresh
 test_timed_out_check_is_logged_and_does_not_block_the_cycle
+test_actionable_check_does_not_starve_later_checks
+test_preempted_registered_checks_are_logged_only_when_due
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
