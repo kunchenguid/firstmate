@@ -3974,6 +3974,81 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_opencode_actionable_wake_follows_most_recent_idle_session() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-active-session-root"
+  home="$TMP_ROOT/opencode-active-session-home"
+  log="$TMP_ROOT/opencode-active-session.log"
+  stop="$TMP_ROOT/opencode-active-session.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  sleep 0.5
+  printf 'signal: multi-session wake\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const deliveries = [];
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      deliveries.push({ sessionID: request.path?.id, text: request.body.parts[0].text });
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-first" } } });
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("first session did not arm the watcher");
+  process.exit(1);
+}
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-second" } } });
+for (let i = 0; i < 500; i += 1) {
+  if (deliveries.some((delivery) => delivery.text.includes("multi-session wake"))) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const wake = deliveries.find((delivery) => delivery.text.includes("multi-session wake"));
+if (!wake) {
+  console.error(`actionable wake was never delivered: ${JSON.stringify(deliveries)}`);
+  process.exit(1);
+}
+if (wake.sessionID !== "session-second") {
+  console.error(`actionable wake went to the arming session, not the active one: ${wake.sessionID}`);
+  process.exit(1);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode must deliver an actionable wake to the most recently idle session"
+  [ -z "$out" ] || fail "OpenCode active-session test printed output: $out"
+  pass "OpenCode actionable wake follows the most recently idle session"
+}
+
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
@@ -4022,3 +4097,4 @@ test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
+test_opencode_actionable_wake_follows_most_recent_idle_session
