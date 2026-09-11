@@ -1081,6 +1081,110 @@ test_stale_watch_reclaim_publishes_before_clear() {
   pass "stale watcher reclaim publishes durable recovery evidence before clear"
 }
 
+# Live incident 2026-08-15/16: every one-shot watcher child the away-daemon
+# started recovered its predecessor's stale lock and then delivered
+# "check: rearm-resurface" even though the durable queue was empty and the
+# recovery episode was already acknowledged - one wasted handling turn per
+# cycle. A recovered lock alone must not resurface; only the durable record
+# (a pending episode or a queued row) may.
+test_recovered_lock_retired_episode_settles() {
+  local dir state out dead_pid pid i lock_pid token
+  dir=$(make_case recovered-retired-settles)
+  state="$dir/state"
+  out="$dir/watch.out"
+  dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
+  printf 'acked:downtime:genretired\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ -n "$lock_pid" ] && [ "$lock_pid" != "$dead_pid" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$lock_pid" != "$dead_pid" ] || { kill "$pid" 2>/dev/null; fail "watcher did not recover the stale lock"; }
+  # Hold through several poll cycles: a settled recovery must never resurface.
+  i=0
+  while [ "$i" -lt 25 ]; do
+    [ -s "$out" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$out" ] && { kill "$pid" 2>/dev/null; fail "retired episode resurfaced after lock recovery: $(cat "$out")"; }
+  is_live_non_zombie "$pid" || fail "watcher exited instead of settling into its live wait"
+  token=$(cat "$state/.watcher-down" 2>/dev/null || true)
+  [ "$token" = "acked:downtime:genretired" ] \
+    || { kill "$pid" 2>/dev/null; fail "lock recovery reopened an acknowledged episode: $token"; }
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "recovered lock with an acknowledged episode and empty queue settles without resurfacing"
+}
+
+test_recovered_lock_pending_episode_still_resurfaces() {
+  local dir state out pid dead_pid i token
+  dir=$(make_case recovered-pending-resurfaces)
+  state="$dir/state"
+  out="$dir/watch.out"
+  dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
+  printf 'pending:downtime:genpending\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ] && is_live_non_zombie "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$pid" && { kill "$pid" 2>/dev/null; fail "watcher did not resurface a pending episode"; }
+  wait "$pid" 2>/dev/null || true
+  grep -F 'check: rearm-resurface' "$out" >/dev/null \
+    || fail "pending episode after lock recovery did not resurface: $(cat "$out")"
+  token=$(cat "$state/.watcher-down" 2>/dev/null || true)
+  [ "$token" = "announced:downtime:genpending" ] \
+    || fail "recovery resurface did not preserve the pending episode's generation: $token"
+  pass "recovered lock with a pending episode still resurfaces and keeps its generation"
+}
+
+test_recovered_lock_queued_row_still_resurfaces() {
+  local dir state out pid dead_pid i
+  dir=$(make_case recovered-queued-resurfaces)
+  state="$dir/state"
+  out="$dir/watch.out"
+  append_wake "$state" check test-key "check: queued during downtime" \
+    || fail "could not append a durable wake"
+  # Force the acked shape AFTER the append, so only the recovery's own
+  # queue check can reopen the episode.
+  printf 'acked:downtime:genqueued\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ] && is_live_non_zombie "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$pid" && { kill "$pid" 2>/dev/null; fail "watcher did not resurface a queued row"; }
+  wait "$pid" 2>/dev/null || true
+  grep -F 'check: rearm-resurface' "$out" >/dev/null \
+    || fail "queued row after lock recovery did not resurface: $(cat "$out")"
+  pass "recovered lock with a queued row still resurfaces despite the acknowledged episode"
+}
+
 test_msys_pid_identity_uses_proc() {
   local live identity
   case "$(uname)" in
@@ -1108,6 +1212,9 @@ test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
+test_recovered_lock_retired_episode_settles
+test_recovered_lock_pending_episode_still_resurfaces
+test_recovered_lock_queued_row_still_resurfaces
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency

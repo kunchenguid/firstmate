@@ -242,6 +242,8 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
+    "$STATE/.subsuper-escalations.flushing" \
+    "$STATE/.subsuper-escalations.flushing.since" \
     "$STATE/.subsuper-inject-wedged"
 }
 
@@ -589,8 +591,10 @@ EOF
     wedge=$(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)
     append_evidence wedge "$wedge" "$evidence"
   fi
-  if [ -s "$STATE/.subsuper-escalations" ]; then
-    escalations=$(cat "$STATE/.subsuper-escalations" 2>/dev/null || true)
+  # A .flushing snapshot holds items whose delivery was never confirmed (the
+  # daemon died mid-flush), so the catch-up reads it ahead of the live buffer.
+  if [ -s "$STATE/.subsuper-escalations.flushing" ] || [ -s "$STATE/.subsuper-escalations" ]; then
+    escalations=$(cat "$STATE/.subsuper-escalations.flushing" "$STATE/.subsuper-escalations" 2>/dev/null || true)
     append_evidence escalation "$escalations" "$evidence"
   fi
 
