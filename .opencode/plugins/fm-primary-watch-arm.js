@@ -15,6 +15,7 @@ const REARM_RETRY_MAX_MS = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const REARM_RETRY_LIMIT = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
 
 let child = null;
+let activeSessionID = "";
 let armStatus = "idle";
 let retryTimer = null;
 let retryFailures = 0;
@@ -396,12 +397,16 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       if (restorationInFlight) return;
       retryFailures = 0;
       setArmStatus("wake");
-      const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      // Deliver to the session that most recently went idle, not the one that
+      // first armed this watcher: a home can host more than one OpenCode
+      // session, and the captain watches whichever is active.
+      const deliverTo = activeSessionID || sessionID;
+      const restoration = restoreAfterActionableClose(paths, deliverTo, client, predecessor);
       restorationInFlight = restoration;
       void restoration.then(async (result) => {
         try {
           const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
-          await deliverActionableWake(paths, client, sessionID, message, result.recovery);
+          await deliverActionableWake(paths, client, deliverTo, message, result.recovery);
         } finally {
           if (restorationInFlight === restoration) restorationInFlight = null;
         }
@@ -410,7 +415,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
         surfaceFailure(
           paths,
           client,
-          sessionID,
+          deliverTo,
           `watcher: FAILED - OpenCode could not deliver an actionable wake\n${String(error?.message ?? error)}`,
         );
       });
@@ -420,7 +425,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       setArmStatus("failed");
       return;
     }
-    void scheduleRetry(paths, sessionID, client, classification.message, predecessor);
+    void scheduleRetry(paths, activeSessionID || sessionID, client, classification.message, predecessor);
   });
   armChild.on("error", (error) => {
     if (settled) return;
@@ -434,7 +439,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     }
     void scheduleRetry(
       paths,
-      sessionID,
+      activeSessionID || sessionID,
       client,
       `watcher: FAILED - OpenCode arm child failed: ${error.message}`,
       String(armChild.pid ?? ""),
@@ -489,6 +494,10 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
       if (event.type !== "session.idle") return;
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
+      // Remember the most recently idle session so an actionable wake is
+      // delivered to the captain's active session even when another session
+      // in this home armed the watcher first.
+      activeSessionID = sessionID;
       void ensureArm(paths, sessionID, client);
     },
   };
