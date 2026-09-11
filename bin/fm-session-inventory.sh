@@ -337,6 +337,9 @@ bounded_cwd_read() {  # [<pid>...]
     else
       LC_ALL=C awk -F'\t' '{ print $1 }' "$PSTABLE" > "$pidlist"
     fi
+    # The quoted body is the child shell's program: "$1" and "$pid" must
+    # expand there, not here.
+    # shellcheck disable=SC2016
     fm_run_timed "$CWD_TIMEOUT" bash -c '
       while IFS= read -r pid; do
         [ -n "$pid" ] || continue
