@@ -1011,9 +1011,13 @@ _wedge_cap_rollback() {
     # like) and the next poll re-escalates with no suppression - the
     # queue-flood v15 closed is re-introduced under persistent fs
     # failure. v16 captures the redirect's exit status explicitly so
-    # the rollback can return a distinct code (1 = rollback reset
-    # failed AND sentinel write failed; 2 would be ambiguous here) so
-    # the cap path can distinguish the failure modes.
+    # the rollback can return a distinct code for the cap path's exit
+    # semantics:
+    #   - return 0: rollback reset succeeded (sentinel not written)
+    #   - return 1: rollback reset failed AND sentinel written
+    #   - return 2: rollback reset failed AND sentinel write ALSO failed
+    # The cap path maps these to exit 1, 2, and 3 respectively so the
+    # operator-facing triage_log lines can distinguish them.
     local _sentinel="$STATE/.wedge-rollback-failed-$_key"
     _sentinel_rc=0
     { printf '%s %s\n' "$(date +%s 2>/dev/null || echo 0)" "$_first_fail" > "$_sentinel"; } 2>/dev/null || _sentinel_rc=$?
@@ -1058,6 +1062,13 @@ esac
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <hash>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason permanent_marker marker_ts
+  # v17 (2026-09-11, no-mistakes review of v16): assign key locally so
+  # busy_turn_bound_check's empty `local key` in its fall-through path
+  # (non-afk-paused branch that calls us) cannot shadow this function
+  # with an empty value via bash dynamic scoping. Previously the
+  # sentinel name was built from $key which was empty on the busy-pane
+  # route, so the v15/v16 sentinel guarantee did not hold there.
+  local key="$(window_key "$win")"
   # v15 (2026-09-08, Greptile review of v14): if a previous poll encountered
   # a cap-marker write failure AND the rollback itself failed (same fs
   # condition that broke the marker write), .wedge-rollback-failed-<key>
@@ -1121,22 +1132,14 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   # hasn't been observed at cap-level yet can still escalate. The window-
   # scoped marker above is the primary gate; this is the secondary gate.
   if [ -z "$hash" ]; then
-    # Defensive fallback: without a hash, fall back to the v1 window-scoped
-    # marker name so the cap still suppresses retries for this window even if
-    # a future caller forgets to thread the hash. Trade-off: a fresh stale hash
-    # in the same window will also be suppressed (the v1 behavior). Logged so
-    # the missing-hash regression is visible.
+    # Defensive fallback: without a hash, the cap-marker write below uses
+    # the window-scoped marker name (same file the gate above just
+    # checked) so suppression still holds even if a future caller forgets
+    # to thread the hash. The TTL check above already covered the case;
+    # we just need to log the missing-hash regression and assign the
+    # marker path the cap-fire block writes to.
     triage_log "wedge_timer_check: missing hash parameter, falling back to window-scoped marker for $win"
     permanent_marker="$STATE/.wedge-permanent-$(window_key "$win")"
-    if [ -e "$permanent_marker" ]; then
-      marker_ts=$(cat "$permanent_marker" 2>/dev/null || true)
-      case "$marker_ts" in
-        ''|*[!0-9]*) marker_ts=0 ;;
-      esac
-      if [ $(( $(date +%s) - marker_ts )) -lt "$FM_CAP_HORIZON_SECS" ]; then
-        return 0
-      fi
-    fi
   else
     permanent_marker="$STATE/.wedge-permanent-$(window_key "$win")-${hash:0:12}"
     if [ -e "$permanent_marker" ]; then
@@ -1191,7 +1194,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # not silently suppressed. Success path leaves both marker and queue
         # entry durable before `wake` runs.
         if [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this (window, hash) until FM_CAP_HORIZON_SECS (default 86400s) elapses, the pane hash changes, or operator manually removes STATE/.wedge-permanent-<key>-<hash12>; local patch 2026-08-19)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this WINDOW until FM_CAP_HORIZON_SECS (default 86400s) elapses or operator manually removes BOTH STATE/.wedge-permanent-<key> AND STATE/.wedge-permanent-<key>-<hash12>; local patch 2026-08-19)"
           # v15 (2026-09-08, Greptile review of v14): the v14 rollback helper
           # used `|| true` on every line, so a rollback that itself failed
           # (the SAME fs condition that broke the marker write) would

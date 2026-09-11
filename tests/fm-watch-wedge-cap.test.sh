@@ -127,14 +127,22 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "busy wedged pane initial content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
+  # v17 (2026-09-11): churn test now exercises busy_turn_bound_check →
+  # wedge_timer_check instead of the idle hash-change branch, so the
+  # window-scoped marker is actually checked against a fresh hash per
+  # poll. Crew state is busy, FM_BUSY_TURN_MAX_SECS=1, .meta aged past 1s.
+  printf 'busy: harness busy\n' > "$state/wedge-cap-churning.status"
+  sig=$(seen_sig "$state/wedge-cap-churning.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-churning_status"
+  touch -d '2 seconds ago' "$state/wedge-cap-churning.meta" 2>/dev/null || \
+    perl -e 'utime(time()-2, time()-2, $ARGV[0])' "$state/wedge-cap-churning.meta"
   printf '1\n' > "$state/.count-$key"
   max=3
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   marker_window="$state/.wedge-permanent-$key"
   marker_hash="$state/.wedge-permanent-$key-${pane_hash:0:12}"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_BUSY_TURN_MAX_SECS=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
@@ -145,9 +153,11 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
   n=1
   while [ "$n" -le "$max" ]; do
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    touch -d '2 seconds ago' "$state/wedge-cap-churning.meta" 2>/dev/null || \
+      perl -e 'utime(time()-2, time()-2, $ARGV[0])' "$state/wedge-cap-churning.meta"
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_BUSY_TURN_MAX_SECS=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
     pid=$!
     if ! wait_for_exit "$pid" 100; then
@@ -165,9 +175,11 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
     i=$((i + 1))
     printf 'busy wedged pane iteration %d with brand new content\n' "$i" > "$capture_file"
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    touch -d '2 seconds ago' "$state/wedge-cap-churning.meta" 2>/dev/null || \
+      perl -e 'utime(time()-2, time()-2, $ARGV[0])' "$state/wedge-cap-churning.meta"
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_BUSY_TURN_MAX_SECS=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max FM_CAP_HORIZON_SECS=86400 "$WATCH" > "$out" &
     pid=$!
     if wait_poll_cycle "$state" "$pid" 2>/dev/null; then
