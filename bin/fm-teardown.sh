@@ -166,9 +166,10 @@
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
 #
-# Slot path spelling: every return hands treehouse the path re-spelled through
-# $HOME by bin/fm-wake-lib.sh's fm_treehouse_return_path. A path outside the
-# resolved $HOME is passed through unchanged, and failures stay loud either way.
+# Slot path spelling: every return hands treehouse the spelling the pool's own
+# treehouse-state.json registered for that slot, resolved by bin/fm-wake-lib.sh's
+# fm_treehouse_return_path. A path no pool registers is passed through unchanged,
+# and failures stay loud either way.
 #
 # Pre-teardown cleanup sequence (runs once every landed/discard-work safety
 # refusal above has already passed, and BEFORE any worktree return, branch
@@ -305,12 +306,10 @@ fm_lease_guard "$ID" "teardown (fm-teardown)"
 # Require both its pool state and the same Git common directory as the recorded
 # project; an ordinary linked worktree is not evidence that Treehouse owns it.
 is_treehouse_pool_slot() {  # <project> <worktree>
-  local project=$1 worktree=$2 slot pool state project_common slot_common
+  local project=$1 worktree=$2 slot project_common slot_common
   [ -d "$project" ] && [ -d "$worktree" ] || return 1
   slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
-  pool=$(dirname "$(dirname "$slot")")
-  state="$pool/treehouse-state.json"
-  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  fm_treehouse_pool_state_file "$slot" >/dev/null || return 1
   project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   project_common=$(CDPATH='' cd -- "$project_common" 2>/dev/null && pwd -P) || return 1

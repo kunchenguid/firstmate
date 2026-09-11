@@ -582,8 +582,8 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; treehouse command not found" >&2
     return 0
   fi
-  # Return the lease under the $HOME spelling treehouse registered, since the
-  # rollback path only ever has a resolved path; see bin/fm-wake-lib.sh's
+  # Return the lease under the spelling treehouse registered, since the rollback
+  # path only ever has a resolved path; see bin/fm-wake-lib.sh's
   # fm_treehouse_return_path.
   slot=$(fm_treehouse_return_path "$abs_home")
   ( cd "$FM_ROOT" && treehouse return --force "$slot" >/dev/null ) || {
