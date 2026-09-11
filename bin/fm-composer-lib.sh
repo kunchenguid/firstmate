@@ -659,7 +659,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local agy_prompt_row=-1 agy_footer_row=-1 agy_model_row=-1 agy_top_separator=-1
+  local agy_prompt_row=-1 agy_footer_row=-1 agy_model_row=-1
   local agy_bottom_separator=-1 agy_end_row=-1
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
@@ -723,12 +723,8 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       agy_model_row=$row
     fi
     if [ "$agy_prompt_row" -ge 0 ] && [ "$row" -gt "$agy_prompt_row" ] \
-       && [ "$agy_end_row" -lt "$agy_prompt_row" ] \
        && _fm_composer_agy_separator_row "$trimmed"; then
-      agy_end_row=$((row - 1))
       agy_bottom_separator=$row
-    elif [ "$agy_prompt_row" -lt 0 ] && _fm_composer_agy_separator_row "$trimmed"; then
-      agy_top_separator=$row
     fi
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
@@ -860,13 +856,13 @@ EOF
      && { [ "$agy_signal_row" -lt 0 ] || [ "$agy_model_row" -lt "$agy_signal_row" ]; }; then
     agy_signal_row=$agy_model_row
   fi
-  if [ "$agy_top_separator" -ge 0 ] && [ "$agy_bottom_separator" -gt "$agy_prompt_row" ]; then
+  if [ "$agy_bottom_separator" -gt "$agy_prompt_row" ] \
+     && { [ "$agy_footer_row" -gt "$agy_bottom_separator" ] \
+          || [ "$agy_model_row" -gt "$agy_bottom_separator" ]; }; then
     agy_signal_row=$agy_bottom_separator
   fi
   if [ "$agy_prompt_row" -ge 0 ] && [ "$agy_signal_row" -gt "$agy_prompt_row" ]; then
-    if [ "$agy_end_row" -lt "$agy_prompt_row" ]; then
-      agy_end_row=$((agy_signal_row - 1))
-    fi
+    agy_end_row=$((agy_signal_row - 1))
     FM_COMPOSER_SCAN_AGY_ROW=$agy_prompt_row
     FM_COMPOSER_SCAN_AGY_END=$agy_end_row
   fi
@@ -885,8 +881,7 @@ _fm_composer_classify_agy_rows() {  # <screen> <styled> <first-row> <last-row>
       case "$content" in '>'*) content=${content#>} ;; esac
     fi
     fm_composer_normalize_trim_var content
-    if [ -n "$content" ] \
-       && { [ "$row" -eq "$first" ] || ! _fm_composer_agy_furniture_row "$content"; }; then
+    if [ -n "$content" ]; then
       text_seen=1
       break
     fi
@@ -1054,11 +1049,6 @@ _fm_composer_agy_model_footer() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_AGY_MODEL_RE:-$FM_COMPOSER_AGY_MODEL_RE_DEFAULT}" sensitive
 }
 
-_fm_composer_agy_furniture_row() {  # <trimmed-row>
-  _fm_composer_agy_separator_row "$1" || _fm_composer_agy_model_footer "$1" || \
-    fm_composer_idle_matches "$1" "${FM_COMPOSER_AGY_FOOTER_RE:-$FM_COMPOSER_AGY_FOOTER_RE_DEFAULT}" sensitive
-}
-
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
 # through <cursor-row> is non-blank and carries no structural edge - the
 # contiguity proof that those rows are the bare composer's wrapped input
@@ -1192,6 +1182,7 @@ _fm_composer_select_cursorless() {
   fi
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
      && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -gt "$generic" ] \
+     && [ "$FM_COMPOSER_SELECTED_KIND" != agy ] \
      && [ "$generic" -lt "$FM_COMPOSER_SCAN_PI_OPEN" ]; then
     generic=$FM_COMPOSER_SCAN_PI_CLOSE
     FM_COMPOSER_SELECTED_KIND=pi
@@ -1286,10 +1277,6 @@ EOF
       agy)
         case "$content" in '>'*) content=${content#>} ;; esac
         fm_composer_normalize_trim_var content
-        if [ "$row" -gt "$FM_COMPOSER_SELECTED_FIRST" ] \
-           && _fm_composer_agy_furniture_row "$content"; then
-          content=
-        fi
         ;;
       box)
         if [ "$prompt_row" -lt 0 ] \

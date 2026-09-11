@@ -9,7 +9,7 @@ Antigravity CLI `agy` is a verified worker adapter for CREWMATE and SCOUT tasks 
 - The canonical launch, model and effort flags, private hook root, and brief submission are owned by `bin/fm-spawn.sh`.
 - The adapter clears inherited Antigravity and foreign-harness markers before launching a worker.
 - Child and tool processes export `ANTIGRAVITY_AGENT=1`, while exact `agy` ancestry identifies the launcher process.
-- Firstmate-owned `PreInvocation` and `Stop` hooks provide the semantic busy source and are retired with the task.
+- Firstmate-owned `PreInvocation` and `Stop` hooks provide the semantic busy source, while `PostToolUse` refreshes the shared progress marker; all are retired with the task.
 - An agy Escape interruption has no verified cancellation acknowledgement, so control and data interruption paths preserve an unconfirmed semantic state.
 - The shared composer classifier owns agy prompt recognition, draft preservation, multiline extraction, and cursor or cursorless capability handling.
 - Raw agy launches remain unwired and classify as unknown.

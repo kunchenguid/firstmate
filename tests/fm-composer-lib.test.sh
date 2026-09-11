@@ -699,6 +699,13 @@ test_agy_prompt_uses_cursor_and_model_signals_for_multiline_drafts() {
   extract=$(fm_composer_extract_selected_content "$cursorless_caps" "$screen")
   [ "$extract" = 'first line second line' ] \
     || fail "cursorless agy extraction lost multiline draft content: '$extract'"
+  screen=$'────────\n> first line\n────────\n? for shortcuts\n────────\nGemini 3.8 Flash · low'
+  out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 3)
+  [ "$out" = pending ] \
+    || fail "a multiline agy draft containing furniture-looking rows must read pending, got '$out'"
+  extract=$(fm_composer_extract_selected_content "$cursor_caps" "$screen")
+  [ "$extract" = 'first line ──────── ? for shortcuts' ] \
+    || fail "agy extraction dropped furniture-looking multiline draft content: '$extract'"
   screen=$'output\n>\n? for shortcuts\n$ live shell'
   out=$(fm_composer_classify_screen "$cursor_caps" "$screen" 1)
   [ "$out" = empty ] || fail "the cursor-anchored agy prompt must remain empty beside a lower shell, got '$out'"

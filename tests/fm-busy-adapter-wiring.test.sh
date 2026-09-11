@@ -395,7 +395,7 @@ test_agy_hooks_semantic_lifecycle() {
   settings="$state/$id.agy-hooks/.agents/hooks.json"
   assert_present "$settings" "agy spawn did not write firstmate-owned hooks"
   jq -e . "$settings" >/dev/null || fail "agy hooks are not valid JSON"
-  for ev in PreInvocation Stop; do
+  for ev in PreInvocation PostToolUse Stop; do
     jq -e ".firstmate[\"$ev\"]" "$settings" >/dev/null || fail "agy hooks lack $ev"
   done
   assert_absent "$WT_DIR/.agents/hooks.json" \
@@ -407,12 +407,18 @@ test_agy_hooks_semantic_lifecycle() {
   printf '%s' "$out" | jq -e . >/dev/null || fail "agy PreInvocation must print JSON, got '$out'"
   [ "$(classify agy "$id" "$state")" = "busy agy-hook" ] \
     || fail "agy PreInvocation must classify busy agy-hook"
+  rm -f "$state/$id.progress"
+  out=$(run_agy_hook "$settings" PostToolUse) || fail "agy PostToolUse hook failed"
+  printf '%s' "$out" | jq -e . >/dev/null || fail "agy PostToolUse must print JSON, got '$out'"
+  [ -f "$state/$id.progress" ] || fail "agy PostToolUse must refresh the progress marker"
+  [ "$(classify agy "$id" "$state")" = "busy agy-hook" ] \
+    || fail "agy PostToolUse must preserve busy agy-hook state"
   out=$(run_agy_hook "$settings" Stop) || fail "agy Stop hook failed"
   printf '%s' "$out" | jq -e . >/dev/null || fail "agy Stop must print JSON, got '$out'"
   [ -f "$state/$id.turn-ended" ] || fail "agy Stop must touch the turn-ended marker"
   [ "$(classify agy "$id" "$state")" = "idle agy-hook" ] \
     || fail "agy Stop must classify idle agy-hook"
-  pass "agy hooks open on PreInvocation and close on Stop without touching the worktree"
+  pass "agy hooks open, refresh, and close without touching the worktree"
 }
 
 test_agy_hooks_stale_incarnation_harmless() {

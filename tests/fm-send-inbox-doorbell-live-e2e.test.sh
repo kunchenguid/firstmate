@@ -280,6 +280,18 @@ EOF
     sleep 1
   done
   [ "$verdict" = empty ] || die "agy ($version): control interrupt did not return to a proven empty composer"
+  rm -f "$state/$task.progress"
+  lifecycle_progress_brief='Run the exact shell command "printf AGY_TOOL_PROGRESS" once, then stop.'
+  FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-send.sh" "$task" \
+    "$lifecycle_progress_brief" >/dev/null 2>&1 \
+    || die "agy ($version): progress probe turn could not be submitted"
+  for _ in $(seq 1 120); do
+    [ -f "$state/$task.progress" ] && break
+    sleep 1
+  done
+  [ -f "$state/$task.progress" ] \
+    || die "agy ($version): PostToolUse did not refresh progress during a real tool call"
   lifecycle_tool_brief="Run the exact shell command \`sleep 60\` and wait for it to finish. Do not run any other command."
   FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-send.sh" "$task" \

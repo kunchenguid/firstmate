@@ -307,8 +307,10 @@ SH
 test_agy_control_and_kind_contract() {
   local out
   fm_control_harness_supported agy || fail "agy must be a supported control harness"
-  out=$(fm_control_harness_family agy-1.2.0)
-  [ "$out" = agy ] || fail "agy-prefixed records must resolve to agy, got '$out'"
+  out=$(fm_control_harness_family agy)
+  [ "$out" = agy ] || fail "agy records must resolve to agy, got '$out'"
+  ! fm_control_harness_family agy-helper >/dev/null \
+    || fail "agy-helper records must not resolve to agy"
   [ "$(fm_control_interrupt_key agy)" = Escape ] || fail "agy must interrupt on Escape"
   [ "$(fm_control_interrupt_repeat agy)" = 1 ] || fail "agy must use one Escape"
   [ -z "$(fm_control_interrupt_clear_key agy)" ] || fail "agy must not clear after Escape"

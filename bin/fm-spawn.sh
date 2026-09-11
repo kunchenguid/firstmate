@@ -3472,14 +3472,16 @@ EOF
     agy)
       if [ "$RAW_LAUNCH" -eq 0 ]; then
         busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+        progress_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") progress $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
         busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source agy-hook"
         a_pre=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '{}'")
+        a_progress=$(json_escape "$progress_cmd_prefix --gen $(shell_quote "$BUSY_GEN") >/dev/null 2>&1 || true; printf '{}'")
         a_stop=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 && touch $(shell_quote "$TURNEND") || true; printf '{}'")
         AGY_HOOK_ROOT="$STATE_REAL/$ID.agy-hooks"
         [ "$RELAUNCH" -eq 1 ] || SPAWN_FRESH_WIRING_PENDING=1
         mkdir -p "$AGY_HOOK_ROOT/.agents"
         cat > "$AGY_HOOK_ROOT/.agents/hooks.json" <<EOF
-{"firstmate":{"PreInvocation":[{"command":"$a_pre"}],"Stop":[{"command":"$a_stop"}]}}
+{"firstmate":{"PreInvocation":[{"command":"$a_pre"}],"PostToolUse":[{"command":"$a_progress"}],"Stop":[{"command":"$a_stop"}]}}
 EOF
       fi
       ;;
