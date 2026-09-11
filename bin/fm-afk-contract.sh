@@ -410,9 +410,13 @@ fm_afk_contract_read_grants() {  # <path>
       if (value == "" || substr(value, 1, 1) == ".") return 0
       return value ~ /^[A-Za-z0-9._-]+$/
     }
-    /^merge_grants: -$/ && !found { found = empty = 1; next }
-    /^merge_grants:$/ && !found { found = inlist = 1; next }
-    /^merge_grants: / && !found { die("the empty form is merge_grants: -") }
+    /^merge_grants:/ {
+      if (found) die("the field is defined more than once")
+      found = 1
+      if ($0 == "merge_grants: -") { empty = 1; next }
+      if ($0 == "merge_grants:") { inlist = 1; next }
+      die("the empty form is merge_grants: -")
+    }
     inlist && /^  - / {
       id = substr($0, 5)
       if (!valid_id(id)) die("task id \"" id "\" is not a valid task id")
@@ -421,10 +425,13 @@ fm_afk_contract_read_grants() {  # <path>
       count++
       next
     }
-    found && !empty && /^[^ ]/ { done = 1; exit }
-    empty && /^[^ ]/ { done = 1; exit }
-    found && !empty && !inlist { die("a stored grant line is malformed") }
-    inlist { die("a stored grant line is malformed") }
+    inlist && /^[^ ]/ {
+      if (count == 0) die("the list form has no stored ids")
+      inlist = 0
+      next
+    }
+    empty && /^[^ ]/ { empty = 0; next }
+    inlist || empty { die("a stored grant line is malformed") }
     END {
       if (bad) exit 2
       if (!found) exit 0

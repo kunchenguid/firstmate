@@ -83,7 +83,7 @@
 # explicit captain instruction and never skips the live green check, the
 # away-grant check, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>]... [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -140,13 +140,13 @@ while [ "$#" -gt 0 ]; do
       ;;
     --allow-red)
       [ -n "${2:-}" ] || { echo "error: --allow-red requires a check name" >&2; exit 2; }
+      [ "${#ALLOW_RED[@]}" -eq 0 ] || { echo "error: --allow-red may be specified only once" >&2; exit 2; }
       ALLOW_RED+=("$2")
       shift 2
       ;;
     --allow-red=*)
-      [ -n "${1#--allow-red=}" ] || { echo "error: --allow-red requires a check name" >&2; exit 2; }
-      ALLOW_RED+=("${1#--allow-red=}")
-      shift
+      echo "error: --allow-red requires a separate check name argument" >&2
+      exit 2
       ;;
     --) shift; break ;;
     *) break ;;
@@ -765,6 +765,7 @@ require_released_captain_hold() {
 FM_PR_MERGE_AUTHORITY=
 require_away_merge_grant() {
   local yolo grants grant
+  FM_PR_MERGE_AUTHORITY=
   fm_afk_contract_present "$STATE" || return 0
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1; then
@@ -790,6 +791,14 @@ $grants
 EOF
   echo "error: task $ID is held for the captain return" >&2
   return 1
+}
+
+require_current_away_authority() {
+  require_away_merge_grant || return 1
+  if fm_afk_contract_present "$STATE" && [ "${#ALLOW_RED[@]}" -gt 0 ]; then
+    echo "error: --allow-red is attended-only; while the away-posture record exists the green check is absolute" >&2
+    return 2
+  fi
 }
 
 require_recorded_pr_identity() {
@@ -925,11 +934,9 @@ gitlab_confirm_merged() {
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
-require_away_merge_grant || exit 1
-if fm_afk_contract_present "$STATE" && [ "${#ALLOW_RED[@]}" -gt 0 ]; then
-  echo "error: --allow-red is attended-only; while the away-posture record exists the green check is absolute" >&2
-  exit 2
-fi
+away_status=0
+require_current_away_authority || away_status=$?
+[ "$away_status" -eq 0 ] || exit "$away_status"
 require_recorded_pr_identity || exit 1
 record_pr_metadata || exit 1
 require_released_captain_hold || exit 1
@@ -946,6 +953,11 @@ case "$PROVIDER" in
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     github_verify_mergeable || exit 1
+    # This last presence and authority read narrows the publication race to the
+    # forge handoff; without a shared lock, a residual sub-second race remains.
+    away_status=0
+    require_current_away_authority || away_status=$?
+    [ "$away_status" -eq 0 ] || exit "$away_status"
     merge_status=0
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
@@ -989,6 +1001,11 @@ case "$PROVIDER" in
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;
     # the conditions above are what authorize the merge.
+    # This last presence and authority read narrows the publication race to the
+    # forge handoff; without a shared lock, a residual sub-second race remains.
+    away_status=0
+    require_current_away_authority || away_status=$?
+    [ "$away_status" -eq 0 ] || exit "$away_status"
     merge_status=0
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" || merge_status=$?

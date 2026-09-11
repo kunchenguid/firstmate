@@ -573,6 +573,35 @@ test_legacy_record_without_merge_grants_reads_empty() {
   pass "a pre-field v1 record reads as empty grants rather than skipping the field"
 }
 
+test_malformed_merge_grants_refuse_validation() {
+  local home record out rc
+  home=$(make_home grants-malformed-scalar)
+  contract "$home" propose >/dev/null || fail "malformed scalar proposal failed"
+  contract "$home" confirm >/dev/null || fail "malformed scalar confirm failed"
+  record="$home/state/.afk-contract"
+  awk '{ print; if ($0 == "merge_grants: -") print "  - task-x1" }' "$record" > "$home/malformed"
+  mv "$home/malformed" "$record"
+  set +e
+  out=$(contract "$home" validate 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "indented data attached to scalar merge_grants validated"
+  assert_contains "$out" 'invalid merge_grants field' 'attached scalar data refusal wording'
+
+  home=$(make_home grants-malformed-duplicate)
+  contract "$home" propose --grant task-x1 >/dev/null || fail "duplicate field proposal failed"
+  contract "$home" confirm >/dev/null || fail "duplicate field confirm failed"
+  record="$home/state/.afk-contract"
+  printf 'merge_grants: -\n' >> "$record"
+  set +e
+  out=$(contract "$home" validate 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "duplicate merge_grants fields validated"
+  assert_contains "$out" 'invalid merge_grants field' 'duplicate field refusal wording'
+  pass "malformed and duplicate merge-grant fields fail record validation"
+}
+
 test_archive_drops_live_grants() {
   local home rc
   home=$(make_home grants-archive)
@@ -610,5 +639,6 @@ test_inputs_are_validated
 test_merge_grants_round_trip_and_read_back
 test_merge_grants_empty_form_and_usage_errors
 test_legacy_record_without_merge_grants_reads_empty
+test_malformed_merge_grants_refuse_validation
 test_archive_drops_live_grants
 

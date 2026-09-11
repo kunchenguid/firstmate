@@ -170,6 +170,9 @@ case "${1:-} ${2:-}" in
     case " $* " in
       *statusCheckRollup*)
         cat "$FM_TEST_GH_VIEW_JSON"
+        if [ -f "${FM_TEST_AWAY_RECORD_AFTER_VIEW:-}" ]; then
+          cp "$FM_TEST_AWAY_RECORD_AFTER_VIEW" "$FM_STATE_OVERRIDE/.afk-contract"
+        fi
         exit 0
         ;;
       *headRefOid*)
@@ -389,6 +392,7 @@ run_pr_merge() {
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
+  FM_TEST_AWAY_RECORD_AFTER_VIEW="$case_dir/away-record-after-view" \
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
@@ -2366,7 +2370,57 @@ test_allow_red_is_refused_while_away() {
     "github-allow-red-away: refusal did not name attended-only"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "github-allow-red-away: gh pr merge ran despite away --allow-red"
-  pass "fm-pr-merge refuses --allow-red while the away-posture record exists"
+
+  case_dir=$(make_case github-allow-red-away-after-view)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_red_json "$case_dir" "$head" lint
+  write_away_record "$case_dir" --grant task-x1
+  mv "$case_dir/state/.afk-contract" "$case_dir/away-record-after-view"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/82 \
+    --allow-red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "github-allow-red-away-after-view: late away publication must refuse --allow-red"
+  assert_grep '--allow-red is attended-only' "$case_dir/stderr" \
+    "github-allow-red-away-after-view: late refusal did not name attended-only"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-allow-red-away-after-view: gh pr merge ran after late away publication"
+  pass "fm-pr-merge rechecks away presence before an attended red merge"
+}
+
+test_allow_red_requires_one_separate_name() {
+  local case_dir rc head
+  head=afafafafafafafafafafafafafafafafafafafaf
+
+  case_dir=$(make_case github-allow-red-equals)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_red_json "$case_dir" "$head" lint
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/87 \
+    --allow-red=lint > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "github-allow-red-equals: equals form must be refused"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-allow-red-equals: gh pr merge ran for the equals alias"
+
+  case_dir=$(make_case github-allow-red-duplicate)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_red_json "$case_dir" "$head" lint
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/88 \
+    --allow-red lint --allow-red unit > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "github-allow-red-duplicate: duplicate waiver must be refused"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-allow-red-duplicate: gh pr merge ran for duplicate waivers"
+  pass "fm-pr-merge accepts exactly one separately named red-check waiver"
 }
 
 test_away_grant_and_yolo_and_hold_for_return() {
@@ -2513,6 +2567,7 @@ test_absent_user_backend_config_directory_and_backlog_still_merge
 test_backend_override_bypasses_unreadable_user_config
 test_github_red_checks_refuse_and_allow_red_waives_named
 test_allow_red_is_refused_while_away
+test_allow_red_requires_one_separate_name
 test_away_grant_and_yolo_and_hold_for_return
 test_away_grant_does_not_bypass_red_or_identity
 test_unreadable_away_record_refuses_merge
