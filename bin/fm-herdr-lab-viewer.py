@@ -14,9 +14,9 @@ this helper existed. The fix is ordering as much as sizing: the window size is
 set on the master fd BEFORE the fork, so the TUI cannot read the grid until it
 is already non-zero.
 
-The child also drops every inherited ``HERDR_*`` variable. Herdr refuses to
-launch a nested viewer inside one of its own panes, and this helper normally
-runs from exactly there.
+The child also drops the inherited ``HERDR_*`` variables listed in
+``SCRUBBED_ENV`` below. Herdr refuses to launch a nested viewer inside one of
+its own panes, and this helper normally runs from exactly there.
 
 Usage: fm-herdr-lab-viewer.py <session> <rows> <cols> <pidfile>
 
@@ -135,16 +135,20 @@ def main(argv):
     os.close(slave)
     _write_pidfile(pidfile, os.getpid(), viewer_pid)
 
-    def _terminate(_signum, _frame):
+    def _signal_viewer(number):
+        # The viewer may already be gone; that is the outcome we wanted anyway.
         try:
-            os.kill(viewer_pid, signal.SIGTERM)
+            os.kill(viewer_pid, number)
         except OSError:
             pass
+
+    def _terminate(_signum, _frame):
+        _signal_viewer(signal.SIGTERM)
 
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGINT, _terminate)
     signal.signal(signal.SIGHUP, _terminate)
-    signal.signal(signal.SIGALRM, lambda _s, _f: os.kill(viewer_pid, signal.SIGKILL))
+    signal.signal(signal.SIGALRM, lambda _s, _f: _signal_viewer(signal.SIGKILL))
 
     _drain(master)
     _terminate(None, None)
