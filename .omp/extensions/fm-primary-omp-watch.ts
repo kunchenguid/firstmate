@@ -6,9 +6,9 @@
 //   - omp auto-discovers this file from <cwd>/.omp/extensions with no trust
 //     gate, so an omp primary or secondmate started inside its home loads it
 //     without -e (naming it both ways loads it twice - verified, omp 18.1.11).
-//   - pi.sendUserMessage returns synchronously (no promise) in omp, so "Pi
+//   - pi.sendMessage returns synchronously (no promise) in omp, so "Pi
 //     accepted the follow-up" collapses to "the call returned"; consumption is
-//     still tracked at before_agent_start / message_start exactly as on Pi.
+//     still tracked at before_agent_start / custom message_start exactly as on Pi.
 //   - omp reports no session_shutdown reason, so EVERY shutdown with a pending
 //     actionable close persists the replacement handoff and the next owning
 //     session_start, in this process or a later one, replays it. Replaying a
@@ -31,15 +31,15 @@
 // Stale callbacks from a prior generation are no-ops against the active replacement.
 //
 // Delivery versus consumption (stated once here):
-// A main follow-up is delivered once omp accepts it (sendUserMessage returns).
-// The successor pipeline never waits for the model to read it: a follow-up
-// queued while main is streaming joins the running run without ever raising
-// before_agent_start, so waiting on that event stalls every later close.
-// Consumption is tracked only so a replacement can replay a follow-up omp had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// A main follow-up is delivered once omp accepts the hidden custom message
+// (sendMessage returns). The successor pipeline never waits for the model to
+// read it: a follow-up queued while main is streaming joins the running run
+// without ever raising before_agent_start, so waiting on that event stalls
+// every later close. Consumption is tracked only so a replacement can replay
+// a follow-up omp had not consumed. An idle main consumes at
+// before_agent_start; a streaming main consumes at the custom message_start
+// carrying the exact wake text; either event finishes the pending record, and
+// a still-unconsumed record rides the replacement handoff.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -58,7 +58,10 @@ import { encodeFirstmateOperationalInput } from "../../.pi/extensions/lib/fm-ope
 // rather than imported from the Pi package name.
 type ExtensionAPI = {
   on?: (event: string, handler: (event: any, ctx: any) => unknown) => void;
-  sendUserMessage: (content: string, options?: { deliverAs?: string }) => unknown;
+  sendMessage: (
+    message: { customType: string; content: string; display: boolean },
+    options?: { deliverAs?: string; triggerTurn?: boolean },
+  ) => unknown;
   registerCommand?: (name: string, command: { description: string; handler: (args: string, ctx: any) => Promise<void> | void }) => void;
   registerTool?: (tool: Record<string, unknown>) => void;
 };
@@ -141,6 +144,7 @@ const armReadyTimeoutMs = positiveInteger(
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_omp again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - omp session is shutting down";
+const watcherWakeCustomType = "firstmate-primary-omp-watcher-wake";
 
 let nextGenerationId = 0;
 let nextHandoffId = 0;
@@ -235,24 +239,6 @@ function actionableLine(output: string): string {
 function completedActionableLine(output: string): string {
   const newline = output.lastIndexOf("\n");
   return newline < 0 ? "" : actionableLine(output.slice(0, newline + 1));
-}
-
-// The text omp carries in a user message_start: sendUserMessage wraps a string
-// as one text part, so the joined text parts equal the sent content.
-function userMessageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  const parts: string[] = [];
-  for (const part of content) {
-    if (
-      typeof part === "object" && part !== null &&
-      (part as { type?: unknown }).type === "text" &&
-      typeof (part as { text?: unknown }).text === "string"
-    ) {
-      parts.push((part as { text: string }).text);
-    }
-  }
-  return parts.join("\n");
 }
 
 function nodeErrorCode(error: unknown): string {
@@ -499,12 +485,15 @@ export default function (pi: ExtensionAPI) {
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {
-      await pi.sendUserMessage(content, { deliverAs: "followUp" });
+      await pi.sendMessage(
+        { customType: watcherWakeCustomType, content, display: false },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
       throw error;
     }
-    // Accepted by omp (sendUserMessage returns synchronously there; awaiting a
+    // Accepted by omp (sendMessage returns synchronously there; awaiting a
     // non-promise resolves at once). A generation replaced while omp was
     // accepting it may have lost the follow-up with the old session, so report
     // it undelivered and let the replacement replay the still-pending record.
@@ -512,7 +501,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // omp consumed a main follow-up: an idle main at before_agent_start, a
-  // streaming main at the user message_start that joins the running run.
+  // streaming main at the custom message_start that joins the running run.
   function consumeWake(owner: SessionGeneration, text: string): void {
     for (const [token, wake] of owner.unconsumedWakes) {
       if (wake.content !== text) continue;
@@ -1023,9 +1012,18 @@ export default function (pi: ExtensionAPI) {
     consumeWake(generation, String((event as { prompt?: unknown })?.prompt ?? ""));
   });
   pi.on?.("message_start", (event) => {
-    const message = (event as { message?: { role?: unknown; content?: unknown } })?.message;
-    if (!message || message.role !== "user") return;
-    consumeWake(generation, userMessageText(message.content));
+    const message: unknown = event?.message;
+    if (
+      typeof message !== "object" ||
+      message === null ||
+      !("role" in message) ||
+      message.role !== "custom" ||
+      !("customType" in message) ||
+      message.customType !== watcherWakeCustomType ||
+      !("content" in message) ||
+      typeof message.content !== "string"
+    ) return;
+    consumeWake(generation, message.content);
   });
 
   pi.on?.("session_start", async () => {

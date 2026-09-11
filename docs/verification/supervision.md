@@ -55,6 +55,16 @@ Both tracked `.omp/extensions/*.ts` files loaded by auto-discovery alone (no `-e
 omp's `session_start` payload carries no reason field, so the adapter derives the source: the first start of the process is `startup` (or `resume` from a `--continue`/`--resume` launch line) and a later in-process start is `clear`; `tests/fm-omp-harness.test.sh` pins that mapping over a fake omp API.
 A file named both by `-e` and by auto-discovery loads twice (two factory calls, doubled `session_stop` continuations), which is why the secondmate launch names no `-e` and the per-task worker extension lives in `state/`.
 
+### omp watcher composer preservation, 2026-09-11
+
+The omp watcher transport was verified against omp 18.1.17 in the named isolated Herdr lab `fm-lab-pam-prompt-loss-258002-23766` with the tracked `.omp/extensions/fm-primary-omp-watch.ts` implementation and a deterministic watcher-arm fixture.
+The lab exercised an idle multiline draft, a running turn followed by one locally queued captain message and a second multiline draft, and two successive actionable watcher closes.
+The exact draft remained visible before and after every watcher delivery, the queued captain message entered the session once before the watcher wake, both repeated wakes entered once in their original order, and no partial draft text entered the session.
+The watcher wake is a hidden `firstmate-primary-omp-watcher-wake` custom message with `deliverAs: "followUp"` and `triggerTurn: true`, so operational input remains model-visible without claiming the captain-owned user role that clears the editor on `message_start`.
+`bash tests/fm-omp-harness.test.sh` pins the custom message type, hidden display, follow-up delivery, turn trigger, exact content, and wake consumption over a fake omp API.
+`FM_OMP_LIVE_E2E=1 bash tests/fm-omp-primary-live-e2e.test.sh` verifies through a real omp provider turn that the actionable watcher close reaches the model exactly once as hidden custom input and never as a user message.
+The tracked extension remains auto-discovered with no config or installation change, but an omp process that loaded the previous extension must restart normally after the updated file lands.
+
 ### Run-tier source vocabulary and context-reset injection
 
 The run tier depends on three facts only the vendor can supply: the session-open source it reports, whether hook stdout reaches model context on a context-RESET open rather than only a cold one, and whether a worker the hook detaches survives the hook returning.
