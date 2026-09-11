@@ -185,6 +185,14 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   A pool slot is shared across every clone of one repository origin, so a
+#   freed slot can come back registered as a worktree of a different clone.
+#   Before the base refresh and the Claude trust pre-registration run, the
+#   spawn re-registers such a slot into this project's own .git/worktrees
+#   (reregister_pooled_worktree): only a slot the pool's state file claims, best
+#   effort with the prior registration restored on any failure, never touching
+#   the working tree, so uncommitted work still reaches the refresh's clean
+#   refusal.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -2431,6 +2439,78 @@ spawn_worktree_has_origin_config() {  # <worktree>
   return 1
 }
 
+# A Treehouse pool is keyed by repository identity, not by clone: every local
+# clone of a repository shares one pool, so a slot returned by another clone's
+# teardown comes back to this spawn still registered as a git worktree of THAT
+# clone. The slot looks isolated and works for harnesses that never compare git
+# identity, but the Claude trust pre-registration below refuses any worktree
+# whose common dir is not this project's, so a freed-and-re-offered slot could
+# never launch a Claude worker. Re-register the slot into this clone's
+# .git/worktrees at allocation time, before the refresh and the trust
+# pre-registration run. The re-registration is deliberately best-effort: when
+# anything about it fails, the previous registration is restored and the spawn
+# proceeds exactly as before this control existed, with the trust check still
+# refusing a Claude launch loudly. Only a slot the pool's own state file claims
+# is ever touched, and the working tree is never written: the index is rebuilt
+# from the slot's current HEAD with read-tree, so uncommitted work would still
+# surface to the refresh's clean check below instead of being discarded.
+reregister_pooled_worktree() {  # <worktree> <project>
+  local worktree=$1 project=$2
+  local slot proj_common slot_common pool state commit admin name n old_pointer registered_common base_name
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 0
+  # A slot with no resolvable registration is refused by the isolation screen
+  # already; only a resolvable-but-foreign registration is repaired here.
+  slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+  slot_common=$(CDPATH='' cd -- "$slot_common" 2>/dev/null && pwd -P) || return 0
+  proj_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+  proj_common=$(CDPATH='' cd -- "$proj_common" 2>/dev/null && pwd -P) || return 0
+  [ "$slot_common" = "$proj_common" ] && return 0
+  # The pool-slot proof mirrors fm-teardown.sh's is_treehouse_pool_slot minus
+  # the common-dir equality this function exists to repair, plus the slot path
+  # appearing in the pool's own state. The .git guard keeps a directory that is
+  # itself a clone (a .git directory, not a registration pointer) untouched.
+  pool=$(dirname "$(dirname "$slot")")
+  state="$pool/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || return 0
+  grep -Fq -- "$slot" "$state" || return 0
+  [ -f "$slot/.git" ] || return 0
+  commit=$(git -C "$slot" rev-parse HEAD 2>/dev/null) || {
+    echo "warning: pooled worktree '$slot' is registered outside this project but its current commit could not be read; leaving the registration alone" >&2
+    return 0
+  }
+  base_name="fm-pool-$(basename "$pool")-$(basename "$(dirname "$slot")")"
+  name=$base_name
+  n=2
+  while [ -e "$proj_common/worktrees/$name" ]; do
+    name="$base_name-$n"
+    n=$((n + 1))
+  done
+  admin=$proj_common/worktrees/$name
+  old_pointer=$(cat "$slot/.git" 2>/dev/null) || old_pointer=
+  if mkdir -p "$admin" \
+     && printf '%s\n' "$slot/.git" >"$admin/gitdir" \
+     && printf '%s\n' '../..' >"$admin/commondir" \
+     && printf '%s\n' "$commit" >"$admin/HEAD" \
+     && printf 'gitdir: %s\n' "$admin" >"$slot/.git" \
+     && git -C "$slot" read-tree HEAD 2>/dev/null; then
+    registered_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || registered_common=
+    registered_common=$(CDPATH='' cd -- "$registered_common" 2>/dev/null && pwd -P) || registered_common=
+  else
+    registered_common=
+  fi
+  if [ "$registered_common" != "$proj_common" ]; then
+    rm -rf "$admin"
+    if [ -n "$old_pointer" ]; then
+      printf '%s\n' "$old_pointer" >"$slot/.git"
+    else
+      rm -f "$slot/.git"
+    fi
+    echo "warning: could not re-register pooled worktree '$slot' into project '$project'; leaving the registration as it was" >&2
+    return 0
+  fi
+  echo "reregistered: $slot"
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
@@ -3126,6 +3206,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  # Close the freed-slot registration gap before anything else reads the
+  # slot's git identity: the base refresh fetches through the slot's own
+  # registration, and the Claude trust pre-registration below refuses a slot
+  # still registered to another clone. bin/fm-spawn.sh's re-registration is
+  # best-effort and leaves every non-problem path untouched.
+  reregister_pooled_worktree "$WT" "$PROJ_ABS"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1

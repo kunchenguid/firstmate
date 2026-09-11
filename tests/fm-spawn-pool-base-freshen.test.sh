@@ -676,6 +676,141 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+# A Treehouse pool is keyed by repository identity, so every clone of one
+# origin shares it, and a slot returned by another clone comes back registered
+# as a git worktree of THAT clone. The cases here build exactly that freed-slot
+# shape: a directory in a pool layout whose .git pointer names a different
+# clone of the same origin.
+make_cross_clone_case() {  # <name> <id> <harness> [state-json 0|1]
+  local name=$1 id=$2 harness=$3 with_state=${4:-1}
+  local case_dir home project origin other pool slot fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  origin="$case_dir/origin.git"
+  other="$case_dir/other-clone"
+  pool="$case_dir/pool"
+  slot="$pool/1/$(basename "$project")"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$pool"
+  printf '%s\n' "$harness" > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  git clone --quiet "file://$origin" "$other"
+  git -C "$other" worktree add --quiet --detach "$slot" HEAD
+  if [ "$with_state" = 1 ]; then
+    printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot" > "$pool/treehouse-state.json"
+  fi
+  initial=$(git -C "$project" rev-parse HEAD)
+  printf '%s\n' "$case_dir|$home|$project|$slot|$fakebin|$other|$initial"
+}
+
+read_cross_clone_record() {
+  IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR OTHER_DIR INITIAL_SHA <<EOF
+$1
+EOF
+}
+
+slot_common_dir() {  # <slot>
+  git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null
+}
+
+test_freed_pool_slot_spawns_claude_after_reregistration() {
+  local rec id out status trust_store
+  id='pool-freed-claude-r1'
+  rec=$(make_cross_clone_case freed-claude "$id" claude)
+  read_cross_clone_record "$rec"
+  [ "$(slot_common_dir "$POOL_DIR")" != "$(slot_common_dir "$PROJECT_DIR")" ] \
+    || fail "fixture did not build a slot registered outside the spawning project"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a claude scout should spawn on a freed cross-clone pool slot"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "the claude spawn on a freed slot did not report success"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+    "the freed-slot spawn did not record the pool worktree"
+  [ "$(slot_common_dir "$POOL_DIR")" = "$(slot_common_dir "$PROJECT_DIR")" ] \
+    || fail "spawn left the freed slot registered outside the spawning project"
+  git -C "$PROJECT_DIR" worktree list | grep -Fq "$POOL_DIR" \
+    || fail "the project did not list the re-registered pool slot"
+  [ "$(git -C "$POOL_DIR" status --porcelain)" = "" ] \
+    || fail "re-registration left the slot's working tree status dirty"
+  trust_store=$CASE_DIR/home/user-home/.claude.json
+  assert_grep 'hasTrustDialogAccepted' "$trust_store" \
+    "the claude trust store was not written for the re-registered slot"
+  grep -Fq "$POOL_DIR" "$trust_store" \
+    || fail "the claude trust store named a path other than the pool slot"
+  pass "a claude scout spawns on a freed cross-clone pool slot"
+}
+
+test_freed_pool_slot_reregistration_never_discards_work() {
+  local rec id out status
+  id='pool-freed-dirty-r1'
+  rec=$(make_cross_clone_case freed-dirty "$id" codex)
+  read_cross_clone_record "$rec"
+  printf 'uncommitted edit\n' >> "$POOL_DIR/README.md"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a dirty freed slot"
+  assert_contains "$out" "is not clean" \
+    "the dirty freed slot was not refused by the base refresh"
+  assert_grep 'uncommitted edit' "$POOL_DIR/README.md" \
+    "re-registration or the refusal discarded the slot's uncommitted work"
+  pass "a dirty freed slot is refused with its uncommitted work intact"
+}
+
+test_non_pool_directory_is_left_unregistered() {
+  local rec id out status
+  id='pool-nonpool-r1'
+  rec=$(make_cross_clone_case non-pool "$id" codex 0)
+  read_cross_clone_record "$rec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a non-pool isolated worktree should keep spawning as before"$'\n'"$out"
+  assert_not_contains "$out" "reregistered" \
+    "spawn re-registered a directory the pool state does not claim"
+  for registered in "$PROJECT_DIR/.git/worktrees/"fm-pool-*; do
+    [ -e "$registered" ] || continue
+    fail "spawn created a pool registration under the project's git dir"
+  done
+  [ "$(slot_common_dir "$POOL_DIR")" = "$(slot_common_dir "$OTHER_DIR")" ] \
+    || fail "spawn moved a non-pool worktree's registration"
+  pass "a directory the pool state does not claim keeps its registration"
+}
+
+test_healthy_pool_slot_is_not_reregistered() {
+  local rec id out status
+  id='pool-healthy-r1'
+  rec=$(make_cross_clone_case healthy "$id" codex)
+  read_cross_clone_record "$rec"
+  # Rebuild the healthy shape: the slot belongs to the spawning project itself,
+  # as every fresh treehouse allocation does.
+  git -C "$OTHER_DIR" worktree remove --force "$POOL_DIR"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$POOL_DIR" HEAD
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$POOL_DIR" > "$(dirname "$(dirname "$POOL_DIR")")/treehouse-state.json"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a healthy pool slot should keep spawning as before"$'\n'"$out"
+  assert_not_contains "$out" "reregistered" \
+    "spawn re-registered a slot that already belonged to the project"
+  for registered in "$PROJECT_DIR/.git/worktrees/"fm-pool-*; do
+    [ -e "$registered" ] || continue
+    fail "spawn created a redundant pool registration for a healthy slot"
+  done
+  pass "a healthy pool slot is left untouched"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
@@ -695,5 +830,9 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_freed_pool_slot_spawns_claude_after_reregistration
+test_freed_pool_slot_reregistration_never_discards_work
+test_non_pool_directory_is_left_unregistered
+test_healthy_pool_slot_is_not_reregistered
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
