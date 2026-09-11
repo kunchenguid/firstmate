@@ -74,6 +74,12 @@ Codex's interactive TUI fired no project `SessionStart` hook at all in the same 
 Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
 The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
 
+Codex compaction was probed on 2026-09-11 with codex-cli 0.154.0 in a throwaway lab.
+The tracked `PreCompact` registration is discovered from the project layer (`hooks/list` reported it, trust-gated like every non-managed hook), but `codex exec` dispatched no `PreCompact` or `PostCompact` events around a `/compact` resume that printed `Context compacted.`, and a follow-up resume reported `source=resume` with hook stdout not injected for that source, matching the resume routing above.
+`codex app-server` `thread/compact/start` ran a full `contextCompaction` item lifecycle but could not exercise the gate headlessly because project-hook trust requires the interactive `/hooks` review and the `--dangerously-bypass-hook-trust` flag exists only on `codex exec`.
+The live guard's `probe_compact_reopen` therefore asserts the bounded-retry and surviving-channel guarantees on the exec path and will surface any version that starts dispatching the events; `tests/fm-sessionstart-hook-live-e2e.test.sh` is the command that refreshes this record.
+The 2026-09-11 refresh completed the codex exec cold, detach, resume, and post-compaction assertions; the Claude 2.1.268 refresh of the gated `/compact` step remains pending an account window and must be run before trusting the claude-side gate delivery.
+
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
 Both preconditions are load-bearing: the stock 20,000-token keep window exceeds a small lab session, and `AgentSession.compact()` aborts an in-flight turn before measuring compactable history, which otherwise discards that turn and reports `Nothing to compact (session too small)`.

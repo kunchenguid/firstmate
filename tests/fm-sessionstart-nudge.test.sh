@@ -31,6 +31,7 @@ unset NO_MISTAKES_GATE
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 RUN="$ROOT/bin/fm-sessionstart-run.sh"
+GATE="$ROOT/bin/fm-precompact-stow.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
@@ -1003,6 +1004,104 @@ test_run_gate_and_scope_are_silent() {
   pass "run wrapper: ordinary ineligible opens stay silent-zero and Pi preflight gets an explicit silent stand-down"
 }
 
+# --- the pre-compact stow gate (bin/fm-precompact-stow.sh) ---------------------
+
+run_gate() {  # <root> [args...]
+  local root=$1
+  shift
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$GATE" "$@"
+}
+
+test_precompact_gate_blocks_manual_once_claude() {
+  local root="$TMP_ROOT/gate-manual" out status=0
+  make_run_primary "$root"
+  out=$(printf '{"hook_event_name":"PreCompact","trigger":"manual"}' \
+    | run_gate "$root" --claude 2>&1 >/dev/null) || status=$?
+  expect_code 2 "$status" "the first manual compaction must block on claude"
+  assert_contains "$out" "/stow" "the block message did not ask for a /stow pass"
+  [ -f "$root/state/.precompact-stow-gate" ] \
+    || fail "the blocked manual compaction did not arm its one-shot marker"
+  status=0
+  out=$(printf '{"trigger":"manual"}' | run_gate "$root" --claude 2>&1) || status=$?
+  expect_code 0 "$status" "the manual compaction retry must pass"
+  [ -z "$out" ] || fail "the passed retry printed output: $out"
+  [ ! -f "$root/state/.precompact-stow-gate" ] \
+    || fail "the retry did not consume the one-shot marker"
+  pass "pre-compact gate: a manual compaction blocks once with the /stow ask, then the retry passes"
+}
+
+test_precompact_gate_codex_json_blocks_once() {
+  local root="$TMP_ROOT/gate-codex" out status=0
+  make_run_primary "$root"
+  out=$(printf '{"trigger":"manual"}' | run_gate "$root" --codex) || status=$?
+  expect_code 0 "$status" "the codex gate must exit 0 while blocking"
+  assert_contains "$out" '"continue":false' "the codex block did not return continue:false"
+  assert_contains "$out" 'stopReason' "the codex block did not carry a stopReason"
+  [ -f "$root/state/.precompact-stow-gate" ] \
+    || fail "the codex block did not arm its one-shot marker"
+  status=0
+  out=$(printf '{"trigger":"manual"}' | run_gate "$root" --codex) || status=$?
+  expect_code 0 "$status" "the codex retry must pass"
+  [ -z "$out" ] || fail "the codex retry printed output: $out"
+  pass "pre-compact gate: codex manual compactions get one continue:false round then pass"
+}
+
+test_precompact_gate_auto_never_blocks() {
+  local root="$TMP_ROOT/gate-auto" out status=0
+  make_run_primary "$root"
+  status=0
+  out=$(printf '{"trigger":"auto"}' | run_gate "$root" --claude 2>&1) || status=$?
+  expect_code 0 "$status" "an auto compaction must never block on claude"
+  [ -z "$out" ] || fail "the claude auto path printed output: $out"
+  out=$(printf '{"trigger":"auto"}' | run_gate "$root" --codex) || status=$?
+  expect_code 0 "$status" "an auto compaction must never block on codex"
+  assert_contains "$out" 'systemMessage' "the codex auto advisory was missing"
+  assert_not_contains "$out" 'continue":false' "the codex auto path blocked compaction"
+  [ ! -f "$root/state/.precompact-stow-gate" ] \
+    || fail "an auto compaction armed the one-shot marker"
+  pass "pre-compact gate: auto compactions pass on both harnesses without arming the gate"
+}
+
+test_precompact_gate_stale_marker_rearms() {
+  local root="$TMP_ROOT/gate-stale" out status=0 back
+  make_run_primary "$root"
+  back=$(( $(date +%s) - 7200 ))
+  if [ "$(uname)" = Darwin ]; then printf '%s\n' "$back" > "$root/state/.precompact-stow-gate"
+    touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$root/state/.precompact-stow-gate"
+  else printf '%s\n' "$back" > "$root/state/.precompact-stow-gate"
+    touch -m -d "@$back" "$root/state/.precompact-stow-gate"; fi
+  out=$(printf '{"trigger":"manual"}' | run_gate "$root" --claude 2>&1 >/dev/null) || status=$?
+  expect_code 2 "$status" "a marker past the gate window must not satisfy a new request"
+  pass "pre-compact gate: a stale marker re-arms instead of silencing later compactions"
+}
+
+test_precompact_gate_stands_down_when_ineligible() {
+  local root="$TMP_ROOT/run-gate-scope" base="$TMP_ROOT/gate-linked-base" linked="$TMP_ROOT/gate-linked"
+  local out status=0
+  make_run_primary "$root"
+  expect_silent_zero "gate env compaction" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" \
+    "$GATE" --claude --trigger manual
+  assert_absent "$root/state/.precompact-stow-gate" "a gate agent armed the compaction gate"
+
+  fm_git_worktree "$base" "$linked" fm/gate-linked
+  mkdir -p "$linked/bin" "$linked/state"
+  : > "$linked/AGENTS.md"
+  expect_silent_zero "linked worktree compaction" run_gate "$linked" --claude --trigger manual
+  assert_absent "$linked/state/.precompact-stow-gate" "an unmarked task worktree armed the compaction gate"
+  pass "pre-compact gate: a gate agent and an unmarked task worktree never arm the compaction gate"
+}
+
+test_precompact_gate_missing_trigger_defaults_to_asking() {
+  local root="$TMP_ROOT/gate-no-trigger" out status=0
+  make_run_primary "$root"
+  out=$(printf '{"hook_event_name":"PreCompact"}' | run_gate "$root" --codex) || status=$?
+  expect_code 0 "$status" "a payload with no trigger key must still gate safely"
+  assert_contains "$out" 'continue":false' "a missing trigger did not default to the manual gate"
+  pass "pre-compact gate: a payload without a trigger key defaults to asking once"
+}
+
 test_run_reports_a_failed_session_start_as_digest_text() {
   local root="$TMP_ROOT/run-unwritable" out status=0
   make_run_primary "$root"
@@ -1033,6 +1132,12 @@ test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text
+test_precompact_gate_blocks_manual_once_claude
+test_precompact_gate_codex_json_blocks_once
+test_precompact_gate_auto_never_blocks
+test_precompact_gate_stale_marker_rearms
+test_precompact_gate_stands_down_when_ineligible
+test_precompact_gate_missing_trigger_defaults_to_asking
 test_pi_startup_classifies_cli_continuations
 test_pi_sessionstart_generation_prerequisite
 test_pi_reload_releases_sessionstart_exit_listener

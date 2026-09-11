@@ -123,6 +123,12 @@ make_lab() {  # <harness> -> echoes lab dir
   ln -sf "$ROOT/bin/fm-timeout-lib.sh" "$lab/bin/fm-timeout-lib.sh"
   ln -sf "$ROOT/bin/fm-wake-lib.sh" "$lab/bin/fm-wake-lib.sh"
   ln -sf "$ROOT/bin/fm-session-lock-lib.sh" "$lab/bin/fm-session-lock-lib.sh"
+  # The REAL pre-compact stow gate plus its three self-contained libraries, so
+  # the tracked PreCompact registration is exercised as shipped, not stubbed.
+  ln -sf "$ROOT/bin/fm-precompact-stow.sh" "$lab/bin/fm-precompact-stow.sh"
+  ln -sf "$ROOT/bin/fm-gate-refuse-lib.sh" "$lab/bin/fm-gate-refuse-lib.sh"
+  ln -sf "$ROOT/bin/fm-primary-scope-lib.sh" "$lab/bin/fm-primary-scope-lib.sh"
+  ln -sf "$ROOT/bin/fm-hook-host-lib.sh" "$lab/bin/fm-hook-host-lib.sh"
   cat > "$lab/bin/fm-bootstrap.sh" <<'SH'
 #!/usr/bin/env bash
 # Outlives the hook on purpose: the marker can only appear if the worker was
@@ -306,6 +312,26 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     done
   fi
   send_line "$session" /compact
+  # The tracked PreCompact registration gates the FIRST manual compaction once:
+  # a harness that dispatches it must show the stow instruction and not compact
+  # yet, then comply on the retry. A harness with no PreCompact channel just
+  # compacts, exactly as before the gate existed.
+  n=0
+  while [ "$n" -lt 20 ] && ! grep -qx compact "$record" \
+    && ! capture "$session" | grep -Fq 'pre-compact gate'; do
+    sleep 3
+    n=$((n + 1))
+  done
+  if capture "$session" | grep -Fq 'pre-compact gate'; then
+    [ -f "$lab/state/.precompact-stow-gate" ] \
+      || { capture "$session" >&2; fail "$harness $version: the pre-compact gate blocked without arming its one-shot marker"; }
+    pass "$harness $version: the first manual /compact is gated once with a visible /stow instruction"
+    send_line "$session" /compact
+    n=0
+    while [ "$n" -lt 20 ] && ! grep -qx compact "$record"; do sleep 3; n=$((n + 1)); done
+    [ ! -f "$lab/state/.precompact-stow-gate" ] \
+      || note "$harness $version: the gate marker survived the retry (harness may not deliver a second PreCompact event)"
+  fi
   n=0
   while [ "$n" -lt 40 ] && ! grep -qx compact "$record"; do sleep 3; n=$((n + 1)); done
   if grep -qx compact "$record"; then
@@ -321,6 +347,47 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   fi
 
   tmux -L "$SOCKET" kill-session -t "$session" >/dev/null 2>&1 || true
+}
+
+# --- (d) post-compaction reopen on the run tier --------------------------------
+#
+# Headless codex exec compaction: the /compact slash runs, and whatever this
+# codex version does around it, the next reopen must still fire the tracked
+# session-open channel - a compaction that silenced it would leave the
+# compacted session blind. The compact is issued twice so that, if the version
+# dispatches the tracked PreCompact gate, the one-shot gate has stepped aside
+# by the second attempt: a gate that wedged compaction would fail the
+# 'Context compacted' assertion below.
+probe_compact_reopen() {  # <harness> <version> <lab> <resume-argv...>
+  local harness=$1 version=$2 lab=$3
+  shift 3
+  local record="$lab/record" out source compact_out
+  : > "$record"
+  ( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
+    "$@" '/compact' < /dev/null >/dev/null 2>&1 ) || true
+  [ -f "$lab/state/.precompact-stow-gate" ] \
+    && pass "$harness $version: the tracked PreCompact gate fired once on the exec compact path"
+  compact_out=$( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
+    "$@" '/compact' < /dev/null 2>&1 ) || true
+  printf '%s' "$compact_out" | grep -Fq 'Context compacted' \
+    || fail "$harness $version: the second /compact did not report 'Context compacted'; refresh this guard against that harness version (output: $(printf '%s' "$compact_out" | tail -n 3 | tr '\n' ' '))"
+  out=$( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
+    "$@" "$ASK" < /dev/null 2>&1 )
+  source=$(tail -n 1 "$record")
+  [ -n "$source" ] \
+    || { printf '# post-compact model reply: %s\n' "$out" >&2; fail "$harness $version: a post-compaction reopen fired no session-open hook, so a compacted session reopens blind"; }
+  # Source routing and its delivery semantics are owned by probe_process_opens:
+  # a digest-carrying source must also reach model context here, while a
+  # resume-classified reopen is deliberately delivered through the nudge path
+  # instead, because codex exec restores a compacted thread as a resume and
+  # injects no SessionStart stdout for it.
+  case "$source" in
+    startup|new|clear|compact)
+      printf '%s' "$out" | grep -Eq "FMHOOKTOKEN-$source-[0-9]+-$LIVE_NONCE" \
+        || { printf '# post-compact model reply: %s\n' "$out" >&2; fail "$harness $version: the post-compaction session-open output did not reach model context (source '$source')"; }
+      ;;
+  esac
+  pass "$harness $version: after a compaction the reopen still fires the session-open hook (source '$source')"
 }
 
 # --- real Pi provider prerequisite -------------------------------------------
@@ -608,7 +675,9 @@ for harness in claude codex pi; do
       probe_process_opens codex "$version" "$lab" resume \
         codex exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
         -- codex exec resume --last --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
-      note "codex $version: codex exec run-tier evidence refreshed; the interactive TUI remains uncovered because tracked project hooks provide no session-open or re-emit channel there"
+      probe_compact_reopen codex "$version" "$lab" \
+        codex exec resume --last --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
+      note "codex $version: codex exec run-tier and post-compaction evidence refreshed; the interactive TUI remains uncovered because tracked project hooks provide no session-open or re-emit channel there"
       ;;
     pi)
       probe_process_opens pi "$version" "$lab" resume \
