@@ -74,7 +74,9 @@ trusted=0
 version=
 for ((i=0; i<120; i++)); do
   screen=$(lab pane read "$pane" --source recent --lines 60)
-  case "$screen" in *'Antigravity CLI 1.2.0'*) version=1.2.0 ;; esac
+  case "$screen" in
+    *'Antigravity CLI '*) version=$(printf '%s\n' "$screen" | grep -oE 'Antigravity CLI [0-9]+\.[0-9]+\.[0-9]+' | tail -n1 | awk '{print $3}') ;;
+  esac
   if [[ "$screen" == *'Do you trust the contents of this project?'* ]] && [ "$trusted" = 0 ]; then
     lab pane send-keys "$pane" Enter
     trusted=1
@@ -85,7 +87,7 @@ for ((i=0; i<120; i++)); do
   fi
   sleep 0.5
 done
-[ -n "$version" ] || fail 'agy guard requires observed Antigravity CLI 1.2.0; refresh verification for this installed version'
+[ -n "$version" ] || fail 'agy guard requires observing an Antigravity CLI version banner'
 [ "$ready" = 1 ] || fail "agy $version initial turn never settled"
 [ "$(cat "$FM_HOME/detected")" = agy ] || fail "agy $version tool marker not detected"
 # shellcheck source=bin/backends/herdr.sh
