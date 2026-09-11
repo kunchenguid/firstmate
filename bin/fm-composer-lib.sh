@@ -667,8 +667,6 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
   FM_COMPOSER_SCAN_AGY_END=-1
   FM_COMPOSER_SCAN_AGY_BOUNDARY=-1
   FM_COMPOSER_SCAN_AGY_AMBIGUOUS=0
-  FM_COMPOSER_SCAN_AGY_AMBIGUOUS_OPEN=-1
-  FM_COMPOSER_SCAN_AGY_AMBIGUOUS_CLOSE=-1
   FM_COMPOSER_SCAN_LEFTBAR_START=-1
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
   FM_COMPOSER_SCAN_PI_PAIR_FOUND=0
@@ -677,8 +675,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local agy_opening_row=-1 agy_closing_row=-1 agy_boundary_count=0 agy_last_boundary_row=-1
-  local agy_ambiguous_first_line agy_ambiguous_first_trimmed
+  local agy_opening_row=-1 agy_closing_row=-1 agy_boundary_count=0
   local unsafe_rows='' unsafe_row
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
@@ -733,7 +730,6 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
     esac
     if [ "$harness" = agy ] && _fm_composer_agy_boundary_row "$trimmed"; then
       agy_boundary_count=$((agy_boundary_count + 1))
-      agy_last_boundary_row=$row
       if [ "$agy_boundary_count" -eq 1 ]; then
         agy_opening_row=$row
       elif [ "$agy_boundary_count" -eq 2 ]; then
@@ -900,16 +896,7 @@ EOF
       fi
     done
   elif [ "$agy_boundary_count" -gt 2 ]; then
-    agy_ambiguous_first_line=$(_fm_composer_screen_row "$((agy_opening_row + 1))" "$pane")
-    agy_ambiguous_first_trimmed=$agy_ambiguous_first_line
-    fm_composer_normalize_trim_var agy_ambiguous_first_trimmed
-    case "$agy_ambiguous_first_trimmed" in
-      '>'*)
-        FM_COMPOSER_SCAN_AGY_AMBIGUOUS=1
-        FM_COMPOSER_SCAN_AGY_AMBIGUOUS_OPEN=$agy_opening_row
-        FM_COMPOSER_SCAN_AGY_AMBIGUOUS_CLOSE=$agy_last_boundary_row
-        ;;
-    esac
+    FM_COMPOSER_SCAN_AGY_AMBIGUOUS=1
   fi
 }
 
@@ -1234,6 +1221,9 @@ _fm_composer_select_cursorless() {
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
   FM_COMPOSER_SELECTED_AMBIG=0
+  if [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ]; then
+    return 1
+  fi
   if [ "$FM_COMPOSER_SCAN_BOX_BOTTOM" -ge 0 ]; then
     generic=$FM_COMPOSER_SCAN_BOX_BOTTOM
     FM_COMPOSER_SELECTED_KIND=box
@@ -1258,13 +1248,6 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_KIND=agy
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_AGY_ROW
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_AGY_END
-  fi
-  if [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ] \
-     && [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS_CLOSE" -gt "$generic" ]; then
-    generic=$FM_COMPOSER_SCAN_AGY_AMBIGUOUS_CLOSE
-    FM_COMPOSER_SELECTED_KIND=agy-ambiguous
-    FM_COMPOSER_SELECTED_FIRST=$((FM_COMPOSER_SCAN_AGY_AMBIGUOUS_OPEN + 1))
-    FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_AGY_AMBIGUOUS_CLOSE - 1))
   fi
   if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
@@ -1339,10 +1322,7 @@ $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" "$cursor" 1 "$harness"
-  if [ -n "$cursor" ] \
-     && [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ] \
-     && [ "$cursor" -gt "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS_OPEN" ] \
-     && [ "$cursor" -lt "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS_CLOSE" ]; then
+  if [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ]; then
     return 0
   fi
   if [ -n "$cursor" ] \
@@ -1355,7 +1335,6 @@ EOF
   else
     _fm_composer_select_cursorless "$plain" || return 1
   fi
-  [ "$FM_COMPOSER_SELECTED_KIND" = agy-ambiguous ] && return 0
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
@@ -1449,9 +1428,7 @@ EOF
     if [ "$FM_COMPOSER_SCAN_UNSAFE" = 1 ]; then
       printf 'unknown'; return 0
     fi
-    if [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ] \
-       && [ "$cy" -gt "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS_OPEN" ] \
-       && [ "$cy" -lt "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS_CLOSE" ]; then
+    if [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ]; then
       printf 'unknown'; return 0
     fi
     if [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
@@ -1518,9 +1495,6 @@ EOF
     return 0
   fi
   case "$FM_COMPOSER_SELECTED_KIND" in
-    agy-ambiguous)
-      printf 'unknown'
-      ;;
     pi)
       _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
       ;;

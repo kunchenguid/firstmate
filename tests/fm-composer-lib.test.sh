@@ -863,7 +863,7 @@ test_agy_boundary_ambiguity_fails_closed() {
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 2 probe-absent agy)
   [ "$out" = unknown ] \
     || fail "a cursor outside the current AGY pair must defer, got '$out'"
-  base_screen=$'╭────────────────────────╮\n│ ❯ real draft           │\n╰────────────────────────╯'
+  base_screen=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
   rules_screen="$boundary"$'\nscrollback\n'"$boundary"$'\nmore output\n'"$boundary"$'\n'"$base_screen"
   base_out=$(fm_composer_classify_screen 'styled=1' "$base_screen")
   rules_out=$(fm_composer_classify_screen 'styled=1' "$rules_screen")
@@ -880,6 +880,22 @@ test_agy_boundary_ambiguity_fails_closed() {
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3)
   [ "$out" = empty ] \
     || fail "cursor selection must keep the lower bordered composer, got '$out'"
+  screen="$boundary"$'\nscrollback\n'"$boundary"$'\nmore output\n'"$boundary"$'\n'"$base_screen"
+  out=$(fm_composer_classify_screen 'styled=1' "$screen" '' '' agy)
+  [ "$out" = unknown ] \
+    || fail "an AGY capture with three boundaries and a lower box must defer cursorlessly, got '$out'"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 6 probe-absent agy)
+  [ "$out" = unknown ] \
+    || fail "an AGY capture with three boundaries and a lower box must defer with a cursor, got '$out'"
+  extract=$(fm_composer_extract_selected_content 'styled=1' "$screen" '' agy || true)
+  [ -z "$extract" ] \
+    || fail "an ambiguous AGY capture must not extract a lower generic composer, got '$extract'"
+  out=$(fm_composer_classify_screen 'styled=1' "$screen" '' '' codex)
+  [ "$out" = empty ] \
+    || fail "the same three-boundary capture must preserve the codex lower-box verdict, got '$out'"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 6 probe-absent codex)
+  [ "$out" = empty ] \
+    || fail "the same three-boundary capture must preserve the codex cursor verdict, got '$out'"
   pass "fm_composer: AGY rejects ambiguous boundary captures"
 }
 
