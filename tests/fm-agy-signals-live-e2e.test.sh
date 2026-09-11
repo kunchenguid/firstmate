@@ -116,6 +116,15 @@ case "$reply" in
   *80235*|*80,235*) pass "the real agy worker processed its launch prompt" ;;
   *) fail "the real agy worker never answered its launch prompt" ;;
 esac
+# The reply can render while the turn is still finishing: the busy footer stays
+# pinned until the idle composer replaces it, so wait for the settled idle row
+# before asserting what the settled pane must not match.
+idle_settled=
+for _ in $(seq 1 120); do
+  case "$(capture)" in *"? for shortcuts"*) idle_settled=1; break ;; esac
+  sleep 0.5
+done
+[ -n "$idle_settled" ] || fail "the agy composer never settled to its idle footer after the reply"
 # Scope to the visible tail the same way the owners do: mid-turn busy rows stay
 # in scrollback after the turn settles and must not count as still busy.
 printf '%s' "$screen" | grep -v '^[[:space:]]*$' | tail -12 | fm_busy_lines_match agy \
