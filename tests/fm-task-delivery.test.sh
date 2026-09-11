@@ -401,14 +401,21 @@ STUB
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
 test_project_mode_maps_the_conditional_policy() {
-  local home out err
+  local home missing_home out err status
   home="$TMP_ROOT/project-mode/home"
   mkdir -p "$home/data"
   cat > "$home/data/projects.md" <<'EOF'
 - prodproj [no-mistakes-prod-only] - fixture (added 2026-01-01)
 - yoloproj [no-mistakes-prod-only +yolo] - fixture (added 2026-01-01)
 - flatproj [direct-PR] - fixture (added 2026-01-01)
+- legacyproj - fixture (added 2026-01-01)
+- --raw [local-only] - fixture (added 2026-01-01)
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
+- malformedproj [
+- missingmodeproj [+yolo] - fixture (added 2026-01-01)
+- foo [no-mistakes] - collision fixture (added 2026-01-01)
+- \146oo [local-only] - escape-shaped fixture (added 2026-01-01)
+- 1 [no-mistakes] - numeric collision fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
@@ -418,17 +425,67 @@ EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" yoloproj 2>/dev/null)
   [ "$out" = "no-mistakes on" ] || fail "conditional policy dropped its +yolo posture (got '$out')"
 
-  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw prodproj 2>/dev/null)
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw -- prodproj 2>/dev/null)
   [ "$out" = "no-mistakes-prod-only off" ] || fail "--raw did not expose the registered annotation (got '$out')"
 
-  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw flatproj 2>/dev/null)
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw -- flatproj 2>/dev/null)
   [ "$out" = "direct-PR off" ] || fail "--raw altered a flat registered mode (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" -- --raw 2>/dev/null)
+  [ "$out" = "local-only off" ] || fail "the option boundary did not preserve an option-shaped project name (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- flatproj 2>/dev/null)
+  [ "$out" = "direct-PR off" ] || fail "strict lookup rejected a recognized registered mode (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- legacyproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "strict lookup rejected a complete legacy row (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- yoloproj 2>/dev/null)
+  [ "$out" = "no-mistakes on" ] || fail "strict lookup rejected a supported mode with +yolo (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- '\146oo' 2>/dev/null)
+  [ "$out" = "local-only off" ] || fail "escape-shaped project key collided with the plain project (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- 1 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "strict lookup rejected the registered numeric project key (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- 01 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "numeric-shaped project key collided with the registered numeric key"
+  [ -z "$out" ] || fail "numeric-shaped collision lookup emitted fallback output '$out'"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- absentproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict lookup accepted a project missing from the registry"
+  [ -z "$out" ] || fail "strict missing-project lookup emitted fallback output '$out'"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
   err=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>&1 >/dev/null)
   assert_contains "$err" "unknown mode" "a typo'd registry mode stopped warning"
-  pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- typoproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict lookup accepted an unknown registered mode"
+  [ -z "$out" ] || fail "strict unknown-mode lookup emitted fallback output '$out'"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- malformedproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict lookup accepted a malformed matching row"
+  [ -z "$out" ] || fail "strict malformed-row lookup emitted fallback output '$out'"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --strict -- missingmodeproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict lookup accepted a +yolo-only annotation"
+  [ -z "$out" ] || fail "strict +yolo-only lookup emitted fallback output '$out'"
+
+  missing_home="$TMP_ROOT/project-mode/missing-home"
+  mkdir -p "$missing_home/data"
+  out=$(FM_HOME="$missing_home" "$PROJECT_MODE" --strict -- prodproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict lookup accepted an absent registry"
+  [ -z "$out" ] || fail "strict absent-registry lookup emitted fallback output '$out'"
+  pass "fm-project-mode: registered modes map normally while strict lookup rejects unresolved registry state"
 }
 
 # Spawn and promotion refuse leftover Task-subsection placeholders through the

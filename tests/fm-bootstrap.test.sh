@@ -79,7 +79,7 @@ SH
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z}"
+  printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.60.2 (fake) 2026-08-29T21:49:09Z}"
   exit 0
 fi
 exit 0
@@ -332,10 +332,11 @@ test_no_mistakes_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum no-mistakes version is accepted^no-mistakes version v1.46.0 (fake)^empty
-newer no-mistakes minor is accepted^no-mistakes version v1.47.0 (fake)^empty
+minimum no-mistakes version is accepted^no-mistakes version v1.60.2 (fake)^empty
+newer no-mistakes minor is accepted^no-mistakes version v1.61.0 (fake)^empty
 newer no-mistakes major is accepted^no-mistakes version v2.0.0 (fake)^empty
-older no-mistakes patch reports an upgrade^no-mistakes version v1.45.4 (fake)^missing
+older no-mistakes patch reports an upgrade^no-mistakes version v1.60.1 (fake)^missing
+older no-mistakes minor reports an upgrade^no-mistakes version v1.59.9 (fake)^missing
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"

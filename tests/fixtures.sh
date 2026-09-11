@@ -25,9 +25,9 @@ FM_TEST_FIXTURES_SOURCED=1
 
 # Production floor lives in bin/fm-bootstrap.sh (NO_MISTAKES_MIN). Keep this
 # equal to that floor so a bump is one constant here plus that production pin.
-export FM_TEST_NO_MISTAKES_VERSION=1.46.0
+export FM_TEST_NO_MISTAKES_VERSION=1.60.2
 export FM_TEST_NO_MISTAKES_FAKE_VERSION="no-mistakes version v${FM_TEST_NO_MISTAKES_VERSION} (fake)"
-export FM_TEST_NO_MISTAKES_FAKE_VERSION_TS="${FM_TEST_NO_MISTAKES_FAKE_VERSION} 2026-06-27T00:02:18Z"
+export FM_TEST_NO_MISTAKES_FAKE_VERSION_TS="${FM_TEST_NO_MISTAKES_FAKE_VERSION} 2026-08-29T21:49:09Z"
 export FM_TEST_GH_AXI_VERSION=0.1.29
 
 # --- fake no-mistakes -------------------------------------------------------

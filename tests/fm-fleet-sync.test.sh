@@ -9,8 +9,9 @@
 #   - every other off-default state is left untouched and reported as a loud,
 #     quantified "STUCK: ... N commits behind ... - needs attention" warning
 #     instead of a quiet skip.
-# The pre-existing fast-forward / already-current / local-only / no-origin paths
-# must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
+# The pre-existing fast-forward, already-current, and no-origin paths must be
+# unchanged, local-only projects with origins must refresh without remote-gone
+# branch pruning, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
 #
 # It also pins the clone-root guard: a plain directory under projects/ resolves,
 # through git's upward repository discovery, to the ENCLOSING repository - in a
@@ -395,19 +396,235 @@ test_no_origin_skipped() {
   pass "no-origin clone is skipped (benign), not flagged STUCK"
 }
 
-test_local_only_skipped() {
-  local home clone out
+test_local_only_with_origin_fast_forwards() {
+  local home clone out before
   home=$(new_home)
   clone=$(build_pair "$home" iota)
   advance_origin "$home" iota C1
+  before=$(head_sha "$clone")
   mkdir -p "$home/data"
   printf -- '- iota [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
 
   out=$(run_sync "$home" "$clone")
 
-  assert_contains "$out" "iota: skipped: local-only project" "local-only clone is skipped as before"
-  assert_not_contains "$out" "STUCK" "local-only skip is not escalated to STUCK"
-  pass "local-only clone is skipped (benign), not flagged STUCK"
+  assert_contains "$out" "iota: synced" "local-only clone with an origin is refreshed"
+  assert_not_contains "$out" "skipped" "delivery mode does not suppress refresh"
+  assert_not_contains "$out" "STUCK" "safe local-only fast-forward is not flagged STUCK"
+  [ "$(head_sha "$clone")" != "$before" ] || fail "local-only clone was not moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "local-only clone did not fast-forward to origin/main"
+  pass "local-only clone with an origin is fast-forwarded"
+}
+
+test_dot_segment_path_local_only_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" iota-local-work)
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "local-only work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf -- '- iota-local-work [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(cd "$home" && run_sync "$home" ./projects/iota-local-work/.)
+
+  assert_contains "$out" "./projects/iota-local-work/.: synced" "dot-segment local-only default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "local-only remote-gone branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "local-only remote-gone branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "local-only remote-gone branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "local-only default branch did not fast-forward"
+  pass "dot-segment local-only refresh preserves remote-gone unmerged work"
+}
+
+test_option_shaped_local_only_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" --raw)
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "local-only work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf -- '- --raw [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" --raw)
+
+  assert_contains "$out" "--raw: synced" "option-shaped local-only default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "option-shaped local-only remote-gone branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "option-shaped local-only remote-gone branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "option-shaped local-only remote-gone branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "option-shaped local-only default branch did not fast-forward"
+  pass "option-shaped local-only refresh preserves remote-gone unmerged work"
+}
+
+test_external_alias_local_only_preserves_gone_unmerged_branch() {
+  local home clone alias_path out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" iota-alias-work)
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "local-only work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  alias_path="$home/external-iota-alias"
+  ln -s "$clone" "$alias_path"
+  mkdir -p "$home/data"
+  printf -- '- iota-alias-work [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$alias_path")
+
+  assert_contains "$out" "$alias_path: synced" "external-alias local-only default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "external-alias local-only remote-gone branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "external-alias local-only remote-gone branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "external-alias local-only remote-gone branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "external-alias local-only default branch did not fast-forward"
+  pass "external-alias local-only refresh preserves remote-gone unmerged work"
+}
+
+test_absent_registry_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" iota-unregistered-work)
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "unregistered local work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "iota-unregistered-work: synced" "absent-registry default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "absent-registry remote-gone branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "absent-registry remote-gone branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "absent-registry remote-gone branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "absent-registry default branch did not fast-forward"
+  pass "absent-registry refresh preserves remote-gone unmerged work"
+}
+
+test_malformed_registry_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" iota-malformed-work)
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "malformed-registry local work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf -- '- iota-malformed-work [\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "iota-malformed-work: synced" "malformed-registry default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "malformed-registry remote-gone branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "malformed-registry remote-gone branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "malformed-registry remote-gone branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "malformed-registry default branch did not fast-forward"
+  pass "malformed-registry refresh preserves remote-gone unmerged work"
+}
+
+test_missing_mode_annotation_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" iota-missing-mode-work)
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "missing-mode local work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf -- '- iota-missing-mode-work [+yolo] - test project (added 2026-09-04)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "iota-missing-mode-work: synced" "missing-mode default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "missing-mode remote-gone branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "missing-mode remote-gone branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "missing-mode remote-gone branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "missing-mode default branch did not fast-forward"
+  pass "missing-mode annotation refresh preserves remote-gone unmerged work"
+}
+
+test_escape_shaped_name_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" '\146oo')
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "escape-shaped local work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf '%s\n' \
+    '- foo [no-mistakes] - collision fixture (added 2026-09-04)' \
+    '- \146oo [local-only] - escape-shaped fixture (added 2026-09-04)' \
+    > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" '\146oo: synced' "escape-shaped default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "escape-shaped local-only branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "escape-shaped local-only branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "escape-shaped local-only branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "escape-shaped default branch did not fast-forward"
+  pass "escape-shaped project identity preserves remote-gone unmerged work"
+}
+
+test_numeric_shaped_name_preserves_gone_unmerged_branch() {
+  local home clone out feature_before
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" 01)
+  git -C "$clone" checkout -q feature
+  commit_file "$clone" local.txt local "numeric-shaped local work"
+  feature_before=$(git -C "$clone" rev-parse feature)
+  git -C "$clone" checkout -q main
+  mkdir -p "$home/data"
+  printf -- '- 1 [no-mistakes] - collision fixture (added 2026-09-04)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "01: synced" "numeric-shaped default branch is refreshed"
+  assert_not_contains "$out" "pruned feature" "unregistered numeric-shaped branch is not pruned"
+  git -C "$clone" show-ref --verify --quiet refs/heads/feature \
+    || fail "unregistered numeric-shaped branch was deleted"
+  [ "$(git -C "$clone" rev-parse feature)" = "$feature_before" ] \
+    || fail "unregistered numeric-shaped branch moved"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "numeric-shaped default branch did not fast-forward"
+  pass "numeric-shaped project identity preserves remote-gone unmerged work"
+}
+
+test_remote_backed_prunes_gone_branch() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_packed_prunable "$home" iota-remote-work)
+  mkdir -p "$home/data"
+  printf -- '- iota-remote-work [no-mistakes] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "iota-remote-work: pruned feature" "remote-backed gone branch is pruned"
+  if git -C "$clone" show-ref --verify --quiet refs/heads/feature; then
+    fail "remote-backed gone branch was retained"
+  fi
+  pass "remote-backed refresh still prunes gone branches"
 }
 
 test_single_project_by_bare_name_resolves() {
@@ -703,7 +920,16 @@ test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
-test_local_only_skipped
+test_local_only_with_origin_fast_forwards
+test_dot_segment_path_local_only_preserves_gone_unmerged_branch
+test_option_shaped_local_only_preserves_gone_unmerged_branch
+test_external_alias_local_only_preserves_gone_unmerged_branch
+test_absent_registry_preserves_gone_unmerged_branch
+test_malformed_registry_preserves_gone_unmerged_branch
+test_missing_mode_annotation_preserves_gone_unmerged_branch
+test_escape_shaped_name_preserves_gone_unmerged_branch
+test_numeric_shaped_name_preserves_gone_unmerged_branch
+test_remote_backed_prunes_gone_branch
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves
