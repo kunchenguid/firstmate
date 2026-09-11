@@ -9,7 +9,8 @@
 # The brief cases pin the away-posture redesign's return: the brief is composed
 # from the archived posture record, the outcome store, the held set, and the
 # status logs, health first, and the gate shrinks to what the away session could
-# not fix.
+# not fix. Focused fold cases pin that a blocked-then-resolved key is not a
+# blocker and that a still-open blocked key still is.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -64,6 +65,66 @@ if [ -s "$file" ]; then
 fi
 SH
   chmod +x "$dir/bin/"*.sh
+}
+
+# A live task whose status log has more than one `blocked` line for the same
+# key, then an explicit `resolved` for that key. The return gate must fold
+# through classify-lib (last event per key) and clear; counting raw `blocked`
+# lines would keep the gate closed.
+test_return_gate_folds_blocked_then_resolved() {
+  local dir out
+  dir="$TMP_ROOT/fold-blocked-then-resolved"
+  install_runner "$dir"
+  cat > "$dir/home/state/reviews.meta" <<'EOF'
+window=synthetic:fm-reviews
+backend=tmux
+kind=ship
+EOF
+  {
+    printf 'blocked [key=token]: first occurrence\n'
+    printf 'blocked [key=token]: second occurrence\n'
+    printf 'working: still going\n'
+    printf 'resolved [key=token]: token refreshed\n'
+  } > "$dir/home/state/reviews.status"
+  date +%s > "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "blocked-then-resolved should not gate return: $out"
+  assert_contains "$out" 'catch-up clear' "blocked-then-resolved did not announce a clear catch-up"
+  assert_not_contains "$out" 'firstmate-actionable blocker: reviews [key=token]' \
+    "a resolved key was still reported as a firstmate-actionable blocker"
+  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "blocked-then-resolved left the return gate behind"
+  pass "a blocked-then-resolved key is not a return-gate blocker"
+}
+
+# The same log shape with the key's last event still `blocked` must keep the
+# gate closed. A sibling resolved key must not exempt it.
+test_return_gate_blocks_on_still_open_key() {
+  local dir out rc
+  dir="$TMP_ROOT/fold-still-open"
+  install_runner "$dir"
+  cat > "$dir/home/state/reviews.meta" <<'EOF'
+window=synthetic:fm-reviews
+backend=tmux
+kind=ship
+EOF
+  {
+    printf 'blocked [key=token]: first occurrence\n'
+    printf 'resolved [key=other]: unrelated key closed\n'
+    printf 'blocked [key=token]: still open\n'
+  } > "$dir/home/state/reviews.status"
+  date +%s > "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a still-open blocked key should gate return (rc=$rc): $out"
+  assert_contains "$out" 'firstmate-actionable blocker: reviews [key=token]' \
+    "a still-open blocked key was not reported as a firstmate-actionable blocker"
+  assert_not_contains "$out" 'firstmate-actionable blocker: reviews [key=other]' \
+    "a resolved sibling key was reported as a firstmate-actionable blocker"
+  [ -s "$dir/home/state/.afk-return-catchup" ] || fail "a still-open blocked key did not persist the return gate"
+  pass "a still-open blocked key keeps the return gate closed"
 }
 
 run_return() {  # <case-dir> <mode>
@@ -693,6 +754,8 @@ test_missing_final_archive_keeps_retained_contract_gated() {
   pass "the retained contract epoch requires its final archive on every check"
 }
 
+test_return_gate_folds_blocked_then_resolved
+test_return_gate_blocks_on_still_open_key
 test_return_gate_orders_catchup_before_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker

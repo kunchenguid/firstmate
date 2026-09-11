@@ -26,6 +26,8 @@
 # durable reason, before an ordinary captain request may proceed.
 # `needs-decision:` is deliberately not part of this blocker gate. The gate
 # keeps every open blocker until that blocker's own resolution is proven.
+# Open-ness is bin/fm-classify-lib.sh's keyed fold (`status_open_decisions`), not
+# a raw count of `blocked` lines in the status log.
 # Captain-verdict outcomes are listed under "waiting on you", but cannot exempt
 # a blocker because decision-key provenance is deferred to phase 4
 # (fm-afk-clauses-execute-r1). Away-window attribution uses second-resolution
@@ -161,6 +163,9 @@ status_path_readable() {
 }
 
 scan_open_blockers() {  # -> tab-separated blocker rows
+  # Fold each live task's status log through classify-lib's keyed open/resolved
+  # owner. A key is a blocker only when that fold still has it open as
+  # `blocked`; raw `blocked` line counts would keep resolved keys gated.
   local meta id status key verb summary clean_summary open
   STATUS_SCAN_ERROR=
   for meta in "$STATE"/*.meta; do
