@@ -30,6 +30,7 @@ ok - a harness that is pid 1 of its own namespace is examined, not skipped
 ok - the descent probe reaches comm strength where the top-of-session probe sees only args
 ok - the descent probe reports no verdict from a sibling branch detection cannot reach
 ok - a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact
+ok - equal-depth descent ties prefer the comm-strength leaf regardless of spawn order
 ok - session start renders the Codex protocol for a Codex primary holding a retained CLAUDECODE
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=3666
 ```
