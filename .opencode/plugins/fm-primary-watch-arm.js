@@ -354,7 +354,7 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
   retryTimer = timer;
 }
 
-function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
+function spawnArm(paths, client, predecessorArmPid = "") {
   setArmStatus("starting");
   const env = {
     ...process.env,
@@ -420,7 +420,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       // Deliver to the session that most recently went idle, not the one that
       // first armed this watcher: a home can host more than one OpenCode
       // session, and the captain watches whichever is active.
-      const deliverTo = activeSessionID || sessionID;
+      const deliverTo = activeSessionID;
       const restoration = restoreAfterActionableClose(paths, deliverTo, client, predecessor);
       restorationInFlight = restoration;
       void restoration.then(async (result) => {
@@ -445,7 +445,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       setArmStatus("failed");
       return;
     }
-    void scheduleRetry(paths, activeSessionID || sessionID, client, classification.message, predecessor);
+    void scheduleRetry(paths, activeSessionID, client, classification.message, predecessor);
   });
   armChild.on("error", (error) => {
     if (settled) return;
@@ -459,7 +459,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     }
     void scheduleRetry(
       paths,
-      activeSessionID || sessionID,
+      activeSessionID,
       client,
       `watcher: FAILED - OpenCode arm child failed: ${error.message}`,
       String(armChild.pid ?? ""),
@@ -475,7 +475,7 @@ async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
   if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
-  return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
+  return { status: "spawned", armChild: spawnArm(paths, client, predecessorArmPid) };
 }
 
 function armAttempt(status, armChild, includeArmChild) {
