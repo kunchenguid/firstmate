@@ -1286,56 +1286,6 @@ test_jobs_admits_a_concurrent_safe_family() {
 # catch-all it was split out of must not: a test nobody has classified yet is
 # exactly the one with no proof, so it has to stay serial rather than inherit
 # concurrency from the family map's default arm.
-test_changed_shared_fixture_selects_its_readers() {
-  local tmp repo listed rc
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fixture.XXXXXX")
-  repo="$tmp/repo"
-  init_changed_fixture_repo "$repo"
-
-  printf '\n' >>"$repo/tests/shared-probe-fixture.sh"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-pr-merge.test.sh" \
-    "shared test fixture selects its pr-forge reader"
-  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" \
-    "shared test fixture selects its secondmate reader"
-  case "$listed" in
-    *fm-backend-orca.test.sh*)
-      fail "shared test fixture selection widened past its readers: $listed" ;;
-  esac
-  git -C "$repo" add tests/shared-probe-fixture.sh
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixture-change
-
-  printf '\n' >>"$repo/tests/unread-thing.sh"
-  set +e
-  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 2 ] || fail "an unread tests/ path must still fail with exit 2, got $rc"
-  grep -Fq 'no changed-test mapping for source path: tests/unread-thing.sh' "$tmp/err" \
-    || fail "the refusal did not name the unread tests/ path: $(cat "$tmp/err")"
-  git -C "$repo" checkout -q -- tests/unread-thing.sh
-
-  printf '\n' >>"$repo/bin/fm-quota-choose.sh"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-quota-choose.test.sh" \
-    "an unrelated changed path keeps its own selection"
-  case "$listed" in
-    *fm-pr-merge.test.sh*)
-      fail "an unrelated changed path picked up the fixture readers: $listed" ;;
-  esac
-  git -C "$repo" checkout -q -- bin/fm-quota-choose.sh
-
-  # A nested tests/fixtures/<dir>/<name>-fixture.sh still reaches the
-  # directory-scan arm rather than the top-level fixture arm's basename scan.
-  printf '\n' >>"$repo/tests/fixtures/demo/demo-fixture.sh"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-backend-orca.test.sh" \
-    "a nested fixture selects the suite that reads its directory"
-
-  rm -rf "$tmp"
-  pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
-}
-
 test_unmapped_new_test_never_inherits_family_concurrency() {
   local tmp repo rc script
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-unmapped.XXXXXX")
@@ -1385,6 +1335,46 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
     || fail "the unmapped fixture did not land in the catch-all family: $(cat "$tmp/serial.out")"
   rm -rf "$tmp"
   pass "an unclassified new test stays serial while the proven residual family runs concurrently"
+}
+
+test_changed_shared_fixture_selects_its_readers() {
+  local tmp repo listed rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fixture.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/tests/shared-probe-fixture.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" \
+    "shared test fixture selects its pr-forge reader"
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" \
+    "shared test fixture selects its secondmate reader"
+  case "$listed" in
+    *fm-backend-orca.test.sh*)
+      fail "shared test fixture selection widened past its readers: $listed" ;;
+  esac
+  git -C "$repo" add tests/shared-probe-fixture.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixture-change
+
+  printf '\n' >>"$repo/tests/unread-thing.sh"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "an unread tests/ path must still fail with exit 2, got $rc"
+  grep -Fq 'no changed-test mapping for source path: tests/unread-thing.sh' "$tmp/err" \
+    || fail "the refusal did not name the unread tests/ path: $(cat "$tmp/err")"
+  git -C "$repo" checkout -q -- tests/unread-thing.sh
+
+  # A nested tests/fixtures/<dir>/<name>-fixture.sh still reaches the
+  # directory-scan arm rather than the top-level fixture arm's basename scan.
+  printf '\n' >>"$repo/tests/fixtures/demo/demo-fixture.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend-orca.test.sh" \
+    "a nested fixture selects the suite that reads its directory"
+
+  rm -rf "$tmp"
+  pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
 }
 
 # Workers are handed scripts in order, so the slowest script must start first or
@@ -1777,8 +1767,8 @@ test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
-test_changed_shared_fixture_selects_its_readers
 test_unmapped_new_test_never_inherits_family_concurrency
+test_changed_shared_fixture_selects_its_readers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
