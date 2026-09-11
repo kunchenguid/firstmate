@@ -1625,9 +1625,10 @@ pass "a live pid that predates the claim is never read as a reuse"
 # the child is recognized even after it has left the runner's process group
 # and exec'd into another program - the two signals are driven apart here on
 # purpose: the process image the runner spawned is gone while the recorded
-# start identity still matches, exactly the keying the lock holder uses. With
-# the runner's whole group stopped and the child alive on its own, the
-# generation is not gone, and the wake says which child is still polling.
+# start identity still matches, because the record keys the child on its pid
+# plus its process start time, not its program image. With the runner's whole
+# group stopped and the child alive on its own, the generation is not gone,
+# and the wake says which child is still polling.
 REGROUP="$TMP_ROOT/regroup.sh"
 cat > "$REGROUP" <<'SH'
 #!/usr/bin/env bash

@@ -1333,11 +1333,16 @@ loaded_claim_child_word() {
 # path does not consult the process group, so a deliberate `start` reclaims
 # this - provided the dead generation's reservation records can still be
 # tidied, because that tidy-up is only waived for a generation proven gone, and
-# this one is not.
+# this one is not. Three branches, one per poll-child word: the child is alive,
+# the child is gone and the surviving members are unidentified, or the child's
+# state cannot be read at all.
 stranded_reused_pid_detail() {  # <source-id>
   case "$(loaded_claim_child_word)" in
     alive)
       printf '%s' "its runner no longer reads as the process that claimed it, but the polling child it started (pid ${FM_PROCEVENT_CLAIM_CHILD_PID:-?}) is still alive on the source's session, so reconcile preserves that claim and starts no replacement. Stop that child yourself if it should not be polling any more, then reclaim the source with: bin/fm-procevent.sh start $1 - that reclaims it provided the dead generation's reservation records can still be tidied, and otherwise refuses with: cannot claim source"
+      ;;
+    gone)
+      printf '%s' "its runner no longer reads as the process that claimed it and the polling child it started has exited, yet its process group still has members this home cannot identify - something that child spawned, or an unrelated group that took over the number - so reconcile preserves that claim and starts no replacement. Find out what is still polling the source before reclaiming it, then reclaim it with: bin/fm-procevent.sh start $1 - that reclaims it provided the dead generation's reservation records can still be tidied, and otherwise refuses with: cannot claim source"
       ;;
     *)
       printf '%s' "its claim names a runner that no longer reads as the process that claimed it, while its process group still has members, so reconcile preserves that claim and starts no replacement. Check that nothing is still polling the source, then reclaim it with: bin/fm-procevent.sh start $1 - that reclaims it provided the dead generation's reservation records can still be tidied, and otherwise refuses with: cannot claim source"
