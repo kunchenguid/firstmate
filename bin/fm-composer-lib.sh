@@ -659,7 +659,8 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local agy_prompt_row=-1 agy_footer_row=-1 agy_model_row=-1 agy_end_row=-1
+  local agy_prompt_row=-1 agy_footer_row=-1 agy_model_row=-1 agy_top_separator=-1
+  local agy_bottom_separator=-1 agy_end_row=-1
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
   while IFS= read -r line; do
@@ -725,6 +726,9 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
        && [ "$agy_end_row" -lt "$agy_prompt_row" ] \
        && _fm_composer_agy_separator_row "$trimmed"; then
       agy_end_row=$((row - 1))
+      agy_bottom_separator=$row
+    elif [ "$agy_prompt_row" -lt 0 ] && _fm_composer_agy_separator_row "$trimmed"; then
+      agy_top_separator=$row
     fi
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
@@ -855,6 +859,9 @@ EOF
   if [ "$agy_model_row" -gt "$agy_prompt_row" ] \
      && { [ "$agy_signal_row" -lt 0 ] || [ "$agy_model_row" -lt "$agy_signal_row" ]; }; then
     agy_signal_row=$agy_model_row
+  fi
+  if [ "$agy_top_separator" -ge 0 ] && [ "$agy_bottom_separator" -gt "$agy_prompt_row" ]; then
+    agy_signal_row=$agy_bottom_separator
   fi
   if [ "$agy_prompt_row" -ge 0 ] && [ "$agy_signal_row" -gt "$agy_prompt_row" ]; then
     if [ "$agy_end_row" -lt "$agy_prompt_row" ]; then
@@ -1359,7 +1366,9 @@ EOF
     fi
     if [ "$FM_COMPOSER_SCAN_AGY_ROW" -ge 0 ] \
        && [ "$cy" -ge "$FM_COMPOSER_SCAN_AGY_ROW" ] \
-       && [ "$cy" -le "$FM_COMPOSER_SCAN_AGY_END" ]; then
+       && { [ "$cy" -le "$FM_COMPOSER_SCAN_AGY_END" ] || \
+            { [ "$cy" -eq $((FM_COMPOSER_SCAN_AGY_END + 1)) ] \
+              && _fm_composer_agy_separator_row "$(_fm_composer_screen_row "$cy" "$plain")"; }; }; then
       _fm_composer_classify_agy_rows "$screen" "$styled" \
         "$FM_COMPOSER_SCAN_AGY_ROW" "$FM_COMPOSER_SCAN_AGY_END"
       return 0

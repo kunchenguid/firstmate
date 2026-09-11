@@ -32,12 +32,13 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fm_live_gate opt-in FM_COMPOSER_MATRIX_LIVE tmux
+fm_live_gate default-on FM_COMPOSER_MATRIX_LIVE tmux
 
 SOCKET="fm-cmx-live-$$"
 SESSION="cmxlive"
 ZELLIJ_SESSION="fm-cmx-live-zj-$$"
 CHECKED=0
+HARNESS_CHECKED=0
 FAILED=0
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup; exit 1; }
@@ -109,6 +110,7 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
       "$name" "$version" "${verdict:-unreadable}" >&2
   else
     CHECKED=$((CHECKED + 1))
+    HARNESS_CHECKED=$((HARNESS_CHECKED + 1))
     pass "$name ($version): real idle composer classifies empty"
   fi
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
@@ -116,6 +118,7 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
 
 check_agy_idle_empty() {
   local name=agy win=hx-agy verdict='' i=0 budget=${FM_COMPOSER_MATRIX_LIVE_POLLS:-45} version trust_seen=0
+  local draft='AGY_LIVE_UNSENT_DRAFT' styled plain cursor draft_verdict plain_verdict extracted
   version=$(harness_version agy)
   tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" -- \
     agy --dangerously-skip-permissions --effort low \
@@ -140,8 +143,32 @@ check_agy_idle_empty() {
       "$version" "${verdict:-unreadable}" >&2
   else
     CHECKED=$((CHECKED + 1))
+    HARNESS_CHECKED=$((HARNESS_CHECKED + 1))
     pass "agy ($version): real idle > composer plus shortcuts footer classifies empty"
   fi
+  tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l "$draft" \
+    || fail "agy ($version): could not type the unsent draft probe"
+  for i in $(seq 1 20); do
+    styled=$(fm_tmux_composer_capture "$SESSION:$win")
+    printf '%s\n' "$styled" | grep -Fq "$draft" && break
+    sleep 1
+  done
+  printf '%s\n' "$styled" | grep -Fq "$draft" \
+    || fail "agy ($version): unsent draft probe did not remain visible"
+  cursor=$(fm_tmux_composer_cursor_row "$SESSION:$win")
+  draft_verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$styled" "$cursor")
+  plain=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win")
+  plain_verdict=$(fm_composer_classify_screen 'styled=0' "$plain")
+  [ "$draft_verdict" = pending ] \
+    || fail "agy ($version): styled cursor draft classified '$draft_verdict', expected pending"
+  [ "$plain_verdict" = pending ] \
+    || fail "agy ($version): cursorless draft classified '$plain_verdict', expected pending"
+  extracted=$(fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$styled")
+  case "$extracted" in
+    *"$draft"*) ;;
+    *) fail "agy ($version): styled draft extraction lost the unsent text: $extracted" ;;
+  esac
+  pass "agy ($version): real unsent draft stays pending with styled and cursorless signals"
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
 }
 
@@ -251,5 +278,5 @@ fi
 
 # --- refuse a vacuous pass ---------------------------------------------------
 [ "$FAILED" -eq 0 ] || fail "live composer-matrix guard observed failures above"
-[ "$CHECKED" -gt 0 ] || fail "live composer-matrix guard verified nothing (no harness installed?); refusing a vacuous pass"
+[ "$HARNESS_CHECKED" -gt 0 ] || fail "live composer-matrix guard verified no installed harness (all harnesses absent?)"
 pass "live composer-matrix guard verified $CHECKED live surface(s)"
