@@ -473,6 +473,33 @@ SH
   pass "agy spawn refuses symlinked hook files without touching their targets"
 }
 
+test_agy_prepare_failure_removes_hook_root() {
+  local rec id=busy-agy-prepare-failure out status state root
+  rec=$(make_spawn_case agy-prepare-failure agy "$id")
+  read_case_record "$rec"
+  state="$HOME_DIR/state"
+  root="$state/$id.agy-hooks"
+  cat > "$FAKEBIN_DIR/mkdir" <<'SH'
+#!/usr/bin/env bash
+/bin/mkdir "$@"
+status=$?
+if [ "$status" -eq 0 ] && [ "$#" -eq 1 ] \
+   && [ "${1:-}" = "${FM_TEST_AGY_FAIL_MKDIR_PATH:-}" ]; then
+  /bin/rm -rf -- "$1"
+  exit 42
+fi
+exit "$status"
+SH
+  chmod +x "$FAKEBIN_DIR/mkdir"
+  out=$(FM_TEST_AGY_FAIL_MKDIR_PATH="$root/.agents" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "agy preparation failure must abort the spawn: $out"
+  assert_absent "$root" \
+    "agy preparation failure must remove the generated hook root"
+  pass "agy preparation failure rolls back the generated hook root"
+}
+
 test_agy_hooks_stale_incarnation_harmless() {
   local rec id=busy-agy-2 out state settings
   rec=$(make_spawn_case agy-stale agy "$id")
@@ -613,6 +640,7 @@ test_gemini_hooks_stale_incarnation_harmless
 test_agy_hooks_semantic_lifecycle
 test_agy_hooks_refuse_symlinked_root
 test_agy_hooks_refuse_symlinked_file
+test_agy_prepare_failure_removes_hook_root
 test_agy_hooks_stale_incarnation_harmless
 test_agy_hooks_are_removed_by_teardown
 test_non_agy_hooks_are_preserved_by_teardown

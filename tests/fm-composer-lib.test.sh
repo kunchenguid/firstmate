@@ -844,12 +844,19 @@ test_agy_boundary_is_locale_independent() {
 }
 
 test_generic_delivery_busy_union_includes_agy_cancel() {
-  local active='esc to cancel                                                Gemini 3.8 Flash · medium'
+  local active='esc to cancel                                                Gemini 3.8 Flash · medium' draft_screen
+  draft_screen=$'────\n> first\nesc to cancel Gemini 3.8 Flash · medium\n────\n? for shortcuts'
   if printf '%s\n' 'esc to cancel' | fm_busy_lines_match; then
     fail "generic delivery busy matcher must not classify draft text as busy"
   fi
   if printf '%s\n' 'esc to cancel' | fm_busy_lines_match agy; then
     fail "agy busy matcher must not classify draft text as busy"
+  fi
+  if printf '%s\n' "$draft_screen" | fm_busy_lines_match; then
+    fail "generic AGY busy matcher must exclude the draft region"
+  fi
+  if printf '%s\n' "$draft_screen" | fm_busy_lines_match agy; then
+    fail "AGY busy matcher must exclude the draft region"
   fi
   if ! printf '%s\n' "$active" | fm_busy_lines_match; then
     fail "generic delivery busy matcher must recognize AGY's native active row"

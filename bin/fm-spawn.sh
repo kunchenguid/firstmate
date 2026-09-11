@@ -936,7 +936,7 @@ CONFIG_INHERIT_LOCK_HELD=0
 
 spawn_fresh_wiring_rollback() {
   [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] || return 0
-  if [ -z "${AGY_HOOK_ROOT:-}" ] || ! rm -rf -- "$AGY_HOOK_ROOT"; then
+  if [ -n "${AGY_HOOK_ROOT:-}" ] && ! rm -rf -- "$AGY_HOOK_ROOT"; then
     echo "error: failed-dispatch cleanup did not remove agy hook state for $ID" >&2
     return 1
   fi
@@ -2102,6 +2102,7 @@ agy_prepare_hook_root() {
     echo "error: could not create agy hook root $root" >&2
     return 1
   fi
+  AGY_HOOK_ROOT=$root
   if [ -L "$root" ]; then
     echo "error: refusing symlinked agy hook root $root" >&2
     return 1
@@ -3547,8 +3548,8 @@ EOF
         a_pre=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '{}'")
         a_progress=$(json_escape "$progress_cmd_prefix --gen $(shell_quote "$BUSY_GEN") >/dev/null 2>&1 || true; printf '{}'")
         a_stop=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 && touch $(shell_quote "$TURNEND") || true; printf '{}'")
-        agy_prepare_hook_root "$STATE_REAL/$ID.agy-hooks" "$STATE_REAL" || exit 1
         [ "$RELAUNCH" -eq 1 ] || SPAWN_FRESH_WIRING_PENDING=1
+        agy_prepare_hook_root "$STATE_REAL/$ID.agy-hooks" "$STATE_REAL" || exit 1
         agy_write_hook_file "$AGY_HOOK_SETTINGS" "$STATE_REAL" <<EOF || exit 1
 {"firstmate":{"PreInvocation":[{"command":"$a_pre"}],"PostToolUse":[{"command":"$a_progress"}],"Stop":[{"command":"$a_stop"}]}}
 EOF

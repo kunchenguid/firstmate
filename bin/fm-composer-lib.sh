@@ -311,7 +311,7 @@ fm_composer_strip_ghost() {
 # part of that union for the same reason the others are: without it a cursor
 # submit could never be acknowledged, because cursor parks its terminal cursor
 # outside its composer and the composer verdict is therefore always `unknown`.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|^[[:space:]]*esc to cancel[[:space:]]+.*[[:space:]]·[[:space:]]+(low|medium|high)[[:space:]]*$|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
@@ -346,7 +346,7 @@ FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
-  local harness=${1:-} lines regex
+  local harness=${1:-} lines regex agy_lines
   IFS= read -r -d '' lines || true
   if [ -n "${FM_BUSY_REGEX:-}" ]; then
     regex=$FM_BUSY_REGEX
@@ -368,6 +368,14 @@ fm_busy_lines_match() {  # [harness]
         regex=
         ;;
     esac
+  fi
+  if [ "$harness" = agy ]; then
+    lines=$(_fm_composer_agy_busy_scope "$lines")
+  elif [ -z "${FM_BUSY_REGEX:-}" ] && [ -z "$harness" ]; then
+    agy_lines=$(_fm_composer_agy_busy_scope "$lines")
+    if printf '%s' "$agy_lines" | grep -qiE "$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT"; then
+      return 0
+    fi
   fi
   [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
 }
@@ -1070,6 +1078,45 @@ _fm_composer_agy_footer_row() {  # <trimmed-row>
     *'? for shortcuts'*|*' · low'|*' · medium'|*' · high') return 0 ;;
     *) return 1 ;;
   esac
+}
+
+_fm_composer_agy_busy_scope() {  # <plain-screen>
+  local screen=$1 line trimmed row=0 prompt=-1 last_boundary=-1
+  local rule_count=0 footer_after_boundary=0
+  while IFS= read -r line; do
+    row=$((row + 1))
+    trimmed=$line
+    fm_composer_normalize_trim_var trimmed
+    if [ "$prompt" -lt 0 ]; then
+      case "$trimmed" in
+        '>'*) prompt=$row ;;
+      esac
+    fi
+    if [ "$prompt" -ge 0 ] && [ "$row" -gt "$prompt" ]; then
+      if _fm_composer_agy_boundary_row "$trimmed"; then
+        rule_count=$((rule_count + 1))
+        last_boundary=$row
+        footer_after_boundary=0
+      elif [ "$last_boundary" -ge 0 ] \
+           && _fm_composer_agy_footer_row "$trimmed"; then
+        footer_after_boundary=1
+      fi
+    fi
+  done <<< "$screen"
+  if [ "$prompt" -lt 0 ] || [ "$last_boundary" -lt 0 ]; then
+    printf '%s' "$screen"
+    return 0
+  fi
+  if [ "$footer_after_boundary" -ne 1 ] && [ "$rule_count" -ne 1 ]; then
+    return 0
+  fi
+  row=0
+  while IFS= read -r line; do
+    row=$((row + 1))
+    if [ "$row" -lt "$prompt" ] || [ "$row" -gt "$last_boundary" ]; then
+      printf '%s\n' "$line"
+    fi
+  done <<< "$screen"
 }
 
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
