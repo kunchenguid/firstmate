@@ -97,10 +97,20 @@ EOF
 }
 
 test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
-  local dir out rc gate wake_count
+  local dir out rc gate wake_count i
   dir="$TMP_ROOT/ordering"
   install_runner "$dir"
   seed_live_blocker "$dir" herdr synthetic-dependency
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=1
+    while [ "$i" -le 20 ]; do
+      printf -- '- [ ] queued-%02d - Queued gate %02d (repo: sample) (kind: ship) (since 2026-06-%02d)\n' \
+        "$i" "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$dir/home/data/backlog.md"
   date +%s > "$dir/home/state/.afk"
   printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations"
   printf 'fm away-mode inject WEDGED: 4555s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
@@ -137,12 +147,15 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   # do is stop the fleet read, so the worker has to reach Underway at all.
   printf '%s' "$out" | jq -e '
     (.in_flight | any(.id == "repair-task"))
+    and (.gates[0].id == "(return-catchup)")
+    and (.gates | length == 21)
+    and ([.gates[] | select(.id | startswith("queued-"))] | length == 20)
     and (.gates | any(.id == "(return-catchup)"
                       and .owner == "(main)"
                       and .reason == "away-return catch-up"
                       and (.title | test("^1 blocker"))))
     and ([.decisions_open[].id] | index("(return-catchup)") | not)' >/dev/null \
-    || fail "Bearings did not project the catch-up posture as an action-free gate row: $out"
+    || fail "Bearings did not reserve the catch-up posture outside bounded action-free gate rows: $out"
 
   # The guard itself still separates its two branches by exit status, so an
   # active away window keeps refusing while catch-up reports.

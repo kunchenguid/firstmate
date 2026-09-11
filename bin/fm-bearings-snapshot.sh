@@ -537,19 +537,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ (.secondmate_current.records // [])[] | .queued[]?
          | select(.hold_kind == "captain" and projected_deferred_hold) ]
      | length) as $decisions_marked_deferred
-  | ((if ($return_catchup.pending // false) then
-        [{id:"(return-catchup)",
-          title:((if ($return_catchup.blockers // 0) > 0 then
-                    "\($return_catchup.blockers) blocker(s) to clear before ordinary work"
-                  elif (($return_catchup.reason // "") != "") then
-                    ("catch-up retained: " +
-                     ($return_catchup.reason | sub("[,;] *catch-up stays gated$"; "")))
-                  else "away-return catch-up is still open" end) | trunc(60)),
-          blocked_by:"-",
-          reason:"away-return catch-up",
-          owner:"(main)"}]
-      else [] end)
-     + (if (.main_inventory.valid == false) then
+  | (if ($return_catchup.pending // false) then
+       [{id:"(return-catchup)",
+         title:((if ($return_catchup.blockers // 0) > 0 then
+                   "\($return_catchup.blockers) blocker(s) to clear before ordinary work"
+                 elif (($return_catchup.reason // "") != "") then
+                   ("catch-up retained: " +
+                    ($return_catchup.reason | sub("[,;] *catch-up stays gated$"; "")))
+                 else "away-return catch-up is still open" end) | trunc(60)),
+         blocked_by:"-",
+         reason:"away-return catch-up",
+         owner:"(main)"}]
+     else [] end) as $return_catchup_gate
+  | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
           blocked_by:"-",
@@ -600,8 +600,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
                             artifact:(landed_artifact // "-"),owner:.home_id})),
-      gates: ($gates_all | newest_filed_first
-              | if $all_queued == 1 then . else .[:$gates_n] end),
+      gates: ($return_catchup_gate
+              + ($gates_all | newest_filed_first
+                 | if $all_queued == 1 then . else .[:$gates_n] end)),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
       recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
     }
