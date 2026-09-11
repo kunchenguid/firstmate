@@ -185,7 +185,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as the session's first real captain message |
-| `/bearings`        | Generate a concise four-section chat digest from bounded fleet state, including registered remote-home ledgers; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` for live GitHub enrichment |
+| `/bearings`        | Generate a concise four-section chat digest from bounded fleet state, including registered remote-home ledgers; use `/bearings file` to also replace today's dated report in `data/`, `/bearings lavish` to also build and arm the interactive fleet board, and add `include PRs` for live GitHub enrichment |
 | `/updatefirstmate` | Fast-forward the running firstmate and its secondmates, then persist and restart every live mate successfully left on the target commit - including already-current homes - with an honest re-read nudge only when restart cannot be proven |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
 
@@ -193,8 +193,10 @@ Bearings invocation examples:
 
 - `/bearings` returns the fresh four-section digest in chat only.
 - `/bearings include PRs` keeps chat-only mode and opts into live PR enrichment.
-- `/bearings file` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch and links it from the four-section chat digest.
+- `/bearings file` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch, links it from the four-section chat digest, and then offers `/bearings lavish` when the report has the structure to deserve a richer review surface.
 - `/bearings file include PRs` combines the dated report with live PR enrichment.
+- `/bearings lavish` builds and arms the interactive fleet board, where the captain answers Captain's Call items directly, and puts its URL inside the four-section chat digest.
+- `/bearings lavish include PRs` combines the board with live PR enrichment.
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 

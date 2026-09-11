@@ -714,10 +714,13 @@ record_autoarm_owner() {
 # OTHER than the lock's own reproduces pid reuse - the recorded claimant is gone
 # and an unrelated live process now answers to its number.
 record_autoarm_owner_identity() {
-  local dir=$1 pid=$2 identity
+  local dir=$1 pid=$2 identity start_identity
   identity=$(fm_test_pid_identity "$pid") || return 1
   [ -n "$identity" ] || return 1
   printf '%s\n' "$identity" > "$dir/state/.claude-autoarm.lock/pid-identity"
+  start_identity=$(fm_test_pid_start_identity "$pid") || return 1
+  [ -n "$start_identity" ] || return 1
+  printf '%s\n' "$start_identity" > "$dir/state/.claude-autoarm.lock/pid-start"
 }
 
 # <dir> <epoch-seq> <owner-pid> <outcome>, aged well past any freshness window.
@@ -757,6 +760,72 @@ test_abandoned_owner_claim_is_reclaimed_and_rearms() {
   assert_absent "$dir/state/.claude-autoarm.lock" "reclaimed cycle left an owner lock behind"
   assert_absent "$dir/state/.claude-autoarm.lock.steal" "reclaim left its serialization mutex behind"
   pass "auto-arm: an abandoned owner claim is reclaimed so a lapsed cycle re-arms"
+}
+
+# The 2026-08-17 frozen-ledger wedge: a ROLE-LESS micro-mutex hold (no legacy
+# role file - just a claim/write section whose holder was killed mid-hold)
+# whose recorded pid a live unrelated process later reuses. Every firing then
+# fails fm_autoarm_claim_next's lock acquisition and exits 0 silently, so the
+# ledger freezes at the previous terminal outcome while the guard blocks every
+# turn end. The start-time-hardened steal must reclaim it and re-arm, without
+# ever signalling the reused pid: the hold records both facts, but holder
+# liveness reads the start time, so the reused pid is seen for what it is.
+test_wedged_roleless_claim_mutex_reused_pid_rearms() {
+  local dir out status reused reused_identity recorded reused_start recorded_start
+  dir=$(make_primary_dir "$TMP_ROOT/wedged-roleless-mutex")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  reused=$!
+  reused_identity=$(fm_test_pid_identity "$reused") || fail "could not identify the reused pid"
+  recorded=$(fm_test_pid_identity "$$") || fail "could not fabricate the dead holder's identity"
+  [ "$recorded" != "$reused_identity" ] || fail "fixture identities did not diverge"
+  reused_start=$(fm_test_pid_start_identity "$reused") || fail "could not read the reused pid's start time"
+  recorded_start=$(fm_test_pid_start_identity "$$") || fail "could not fabricate the dead holder's start time"
+  [ "$recorded_start" != "$reused_start" ] || fail "fixture start times did not diverge"
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$reused" > "$dir/state/.claude-autoarm.lock/pid"
+  printf '%s\n' "$recorded" > "$dir/state/.claude-autoarm.lock/pid-identity"
+  printf '%s\n' "$recorded_start" > "$dir/state/.claude-autoarm.lock/pid-start"
+  record_autoarm_epoch "$dir" 2688 999999 rewake
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill -0 "$reused" 2>/dev/null || fail "the reused pid was signalled during the identity steal"
+  kill "$reused" 2>/dev/null || true
+  wait "$reused" 2>/dev/null || true
+  expect_code 2 "$status" "a wedged role-less claim mutex must be reclaimed, not deferred to forever"
+  [ -e "$dir/state/arm-ran" ] || fail "the wedged mutex left the home unarmed with work in flight"
+  assert_contains "$out" "firstmate watcher wake" "the reclaimed cycle must still translate its wake"
+  [ "$(epoch_field "$dir" epoch)" -gt 2688 ] || fail "reclaimed cycle did not advance the frozen ledger: $(epoch_field "$dir" epoch)"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "reclaimed cycle did not record its own outcome: $(epoch_outcome "$dir")"
+  assert_absent "$dir/state/.claude-autoarm.lock" "reclaimed cycle left the wedged owner lock behind"
+  pass "auto-arm: a role-less claim-mutex hold wedged by a reused pid is reclaimed and re-arms"
+}
+
+# The honest-contention boundary of that steal: the same role-less hold whose
+# live pid still answers to the recorded identity IS another participant's
+# short ledger section, and the firing must keep today's silent defer.
+test_live_matching_identity_roleless_hold_defers_silently() {
+  local dir out status holder holder_identity holder_start
+  dir=$(make_primary_dir "$TMP_ROOT/matching-roleless-mutex")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  holder=$!
+  holder_identity=$(fm_test_pid_identity "$holder") || fail "could not identify the live holder"
+  holder_start=$(fm_test_pid_start_identity "$holder") || fail "could not read the live holder's start time"
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$holder" > "$dir/state/.claude-autoarm.lock/pid"
+  printf '%s\n' "$holder_identity" > "$dir/state/.claude-autoarm.lock/pid-identity"
+  printf '%s\n' "$holder_start" > "$dir/state/.claude-autoarm.lock/pid-start"
+  record_autoarm_epoch "$dir" 2688 999999 rewake
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 0 "$status" "a genuinely live role-less hold must defer to the next firing"
+  [ -z "$out" ] || fail "deferring to a live role-less hold produced output: $out"
+  assert_absent "$dir/state/arm-ran" "a live role-less hold was stolen and double-armed"
+  [ "$(epoch_field "$dir" epoch)" = 2688 ] || fail "deferred firing rewrote the terminal ledger entry"
+  pass "auto-arm: a live matching-identity role-less hold still defers silently"
 }
 
 test_arming_claim_with_fresh_beacon_is_never_reclaimed() {
@@ -1220,6 +1289,8 @@ test_arms_for_x_mode_poll_need_without_inflight
 test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_abandoned_owner_claim_is_reclaimed_and_rearms
+test_wedged_roleless_claim_mutex_reused_pid_rearms
+test_live_matching_identity_roleless_hold_defers_silently
 test_arming_claim_with_fresh_beacon_is_never_reclaimed
 test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed
 test_claim_not_named_by_the_ledger_is_never_reclaimed

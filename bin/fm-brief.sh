@@ -48,6 +48,25 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# PR-bearing ship briefs (no-mistakes, direct-PR) carry a "# Screenshots and PR
+# media" section: visual evidence is committed into the branch under
+# .github/pr-media/<task-id>/ and referenced by the branch's GitHub blob URL with
+# ?raw=true, which renders inline in a PR body even on a private repository;
+# local filesystem paths are forbidden because no reviewer can open them.
+# Private-repo inline rendering was confirmed by direct captain verification on
+# 2026-08-18 - a signed-in browser displayed a blob ?raw=true image on the
+# private Scripe-GmbH/scripe repository.
+# no-mistakes mode carries those image lines in --intent, the only worker text
+# the pipeline keeps verbatim when it regenerates the PR body; direct-PR mode
+# writes them into the PR body. local-only has no PR, so the section is omitted.
+# The no-mistakes carry also warns that attaching an image as pipeline run
+# evidence renders as a machine-local "local file:" path in the PR body and
+# never substitutes for the committed-blob route.
+# Rule 4's nonterminal working: clause defers to the Definition of done for the
+# one stop-and-wait report a mode may name; bin/fm-dod-lib.sh owns that gate.
+# Ship and scout rules carry a wait-discipline rule: wait on your own pid or
+# your own output artifact, never a machine-wide process match, and re-read the
+# artifact before reporting anything as still running.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -403,6 +422,11 @@ The report is the only thing that survives, so anything worth keeping must be in
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Wait only on your own work: watch your own process id or your own output artifact, never a
+   machine-wide process match such as \`pgrep -f\` - that matches sibling lanes and your own
+   shell, and can outlive the thing you meant to wait for. Before reporting anything as still
+   running, re-read its result artifact: a result already on disk means the wait is over,
+   whatever the process table says.
 
 $INBOX_SECTION
 
@@ -426,19 +450,37 @@ fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
+    MEDIA_CARRY="Put those image lines in the PR body you open."
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     ;;
   local-only)
     SETUP2=""
+    MEDIA_CARRY=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     ;;
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    MEDIA_CARRY="Put those image lines in your \`--intent\`: the pipeline keeps the intent verbatim in the PR body and rewrites every other section on each run.
+Attaching an image as pipeline run evidence never substitutes for that: the pipeline renders an evidence attachment in the PR body as \`local file: /var/folders/...\`, a machine-local path no reviewer can open, inside a section it rewrites every run, so it cannot be hand-fixed afterwards.
+Any image that must appear in the PR body goes through the committed \`.github/pr-media/$ID/\` file and its blob URL carried in \`--intent\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+
+# PR-bearing modes get the media contract; local-only has no PR body to render into.
+MEDIA_SECTION=""
+if [ -n "$MEDIA_CARRY" ]; then
+  IFS= read -r -d '' MEDIA_SECTION <<EOF || true
+# Screenshots and PR media
+When a screenshot, GIF, or recording is part of the deliverable, commit it into your branch under \`.github/pr-media/$ID/\` and reference it as \`![what it shows](https://github.com/<owner>/<repo>/blob/fm/$ID/.github/pr-media/$ID/<file>?raw=true)\`, using the owner/repo your branch is pushed to.
+That URL renders inline in the PR body, private repository included; it stops resolving once the PR merges and the branch is deleted, though the image file itself lands on the default branch with the change.
+Never paste a local filesystem path into a PR body - nobody else can open it.
+$MEDIA_CARRY
+
+EOF
+fi
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -471,7 +513,8 @@ $RULE1
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
-   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   turn after it; continue the same stage until a gate the Definition of done explicitly
+   defines - its \`done:\` gate, or a stop-and-wait report it names verbatim.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
@@ -494,6 +537,11 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Wait only on your own work: watch your own process id or your own output artifact, never a
+   machine-wide process match such as \`pgrep -f\` - that matches sibling lanes and your own
+   shell, and can outlive the thing you meant to wait for. Before reporting anything as still
+   running, re-read its result artifact: a result already on disk means the wait is over,
+   whatever the process table says.
 
 $INBOX_SECTION
 
@@ -504,6 +552,6 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
-$DOD
+$MEDIA_SECTION$DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"

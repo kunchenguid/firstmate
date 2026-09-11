@@ -75,11 +75,41 @@
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
-#   3. only when neither materializes is the auto-arm genuinely absent: re-block
-#      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
-#      (default 3) consecutive blocks per session - safely below Claude Code's
-#      hard 8-consecutive-block override - then allow one loud attended
-#      fail-open only for an already verified failure episode.
+#   3. when neither materializes the auto-arm is genuinely absent for an event
+#      epoch it provably fired on (Claude runs the Stop batch in parallel and
+#      exit 2 never suppresses the sibling), so the guard restores the standing
+#      cycle itself: it spawns the watcher singleton detached and verifies it
+#      against the same strict predicate within FM_CLAUDE_GUARD_ARM_CONFIRM
+#      seconds (default 10, 30 on Git Bash/MSYS - the same window
+#      bin/fm-watch-arm.sh confirms its own arms in). That arm runs
+#      UNCONDITIONALLY and is never
+#      budget-limited. Arming and blocking are different actions carrying
+#      different risks: restoring a watcher is recovery, and only blocking
+#      needs a ceiling, because blocking past Claude Code's hard
+#      8-consecutive-block override force-ends the turn with no attended alarm.
+#      A blocked turn is visible and bounded; a fleet left with no watcher is
+#      silent, so gating recovery on a spent budget would trade a bounded
+#      annoyance for the far worse failure. The budget decides only what
+#      FOLLOWS a successful arm: with a slot left, block once with the
+#      restored-cycle banner so one handling turn drains what the lapse queued;
+#      with the budget spent, ALLOW the stop and say so loudly rather than
+#      block again. Allowing is safe there because the cycle is live and
+#      verified and bin/fm-watch.sh queues every actionable wake durably
+#      through fm_wake_append before closing, so the next drain presents
+#      anything the lapse queued;
+#   4. only when that last resort cannot verify a cycle: re-block with the
+#      repair banner, then allow one loud attended fail-open for an already
+#      verified failure episode. FM_CLAUDE_TURNEND_BLOCK_BUDGET (default 3) is
+#      the gate on reaching that fail-open, NOT a ceiling on blocking itself:
+#      with no verified failure episode terminal_fail_open refuses and
+#      block_stop runs, so a watcher that can never be armed keeps blocking on
+#      every later stop, past the 8-consecutive-block override. Two things
+#      narrow the budget further: budget_account_current_epoch advances the
+#      count only when the ledger's epoch differs from the one already
+#      recorded, so a slot is spent per auto-arm GENERATION rather than per
+#      stop, and a generation that never advances - the hook disabled, or the
+#      script erroring before its first ledger write - never advances the count
+#      at all. docs/turnend-guard.md owns that caveat.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -454,8 +484,111 @@ if autoarm_owns_recovery; then
   exit 0
 fi
 
-# The auto-arm genuinely failed to establish: consume the bounded re-block
-# budget before considering the verified one-time attended fail-open.
+# --- guard-owned last-resort arm ---------------------------------------------
+# Claude runs both Stop hooks of the batch in parallel and a guard exit 2 never
+# suppresses the asyncRewake sibling (verified live, docs/verification/
+# supervision.md "Stop hook execution semantics"), so reaching this point means
+# the auto-arm fired for this very Stop and still claimed nothing: it is wedged,
+# gated, or dead. Re-blocking alone cannot restore supervision - it only forces
+# turns that end against the same absent claim - so the synchronous guard
+# restores the standing cycle itself. It spawns the home-scoped watcher
+# singleton detached (own process group via monitor mode, nohup, stdio
+# detached, the same three-way detachment bin/fm-startup-network.sh documents)
+# so the cycle survives this hook's exit, then verifies honestly against the
+# same strict predicate before claiming recovery. The watcher queues every
+# actionable wake durably (fm_wake_append) before closing, so a close with no
+# listening arm loses nothing: the next drain presents it. The singleton lock
+# makes a race with a late-claiming auto-arm harmless - one of the two attaches
+# or stands down. While away mode is active the daemon owns the watcher, so the
+# guard never spawns over it.
+# The confirm default is DERIVED from the same OSTYPE switch bin/fm-watch-arm.sh
+# uses for its own arm window rather than set to a separate number: the window
+# this guard confirms in must never be tighter than the arm layer it is
+# confirming, or the guard reports a failure the arm had not yet had time to
+# avoid, and that is a false-alarm generator. Git Bash/MSYS pays a much higher
+# fork cost while the watcher completes its pre-lock migration, so its default
+# is wider for the same reason fm-watch-arm's is.
+case "${OSTYPE:-}" in
+  msys*|mingw*|cygwin*) GUARD_ARM_CONFIRM_DEFAULT=30 ;;
+  *) GUARD_ARM_CONFIRM_DEFAULT=10 ;;
+esac
+
+guard_last_resort_arm() {
+  local monitor_was_on=0 confirm deadline
+  [ ! -e "$STATE/.afk" ] || return 1
+  [ -x "$WATCH" ] || return 1
+  confirm=${FM_CLAUDE_GUARD_ARM_CONFIRM:-$GUARD_ARM_CONFIRM_DEFAULT}
+  case "$confirm" in ''|*[!0-9]*|0) confirm=$GUARD_ARM_CONFIRM_DEFAULT ;; esac
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  nohup "$WATCH" >/dev/null 2>&1 </dev/null &
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+  deadline=$(( $(date +%s) + confirm + 1 ))
+  while :; do
+    fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 0.2
+  done
+}
+
+# Restoring the watcher is RECOVERY, so it runs unconditionally: not gated on
+# the block budget, on COUNT, or on whether the bookkeeping below could take
+# its lock. The budget exists to bound BLOCKING, because blocking past Claude
+# Code's hard 8-consecutive-block override force-ends the turn with no attended
+# alarm. Those are two different actions with two different risks and only one
+# of them needs a ceiling: a blocked turn is visible and bounded, while a fleet
+# left with no watcher is silent, so standing the arm down for a spent budget
+# would trade a bounded annoyance for the far worse failure.
+# The budget therefore decides only what follows a successful arm. With a slot
+# left, block once so one handling turn drains what the lapse queued. With the
+# budget spent, allow the stop instead of blocking again: the cycle is live and
+# verified, and bin/fm-watch.sh queues every actionable wake durably through
+# fm_wake_append before closing, so the next drain presents anything the lapse
+# queued and nothing is lost by not forcing a handling turn here. That allow is
+# loud rather than silent - the harness delivers collected stderr only on exit
+# 2, so the banner is repeated as a systemMessage, which is how an allowed stop
+# speaks.
+# The episode reset that used to run on this path is deliberately absent: it
+# deletes the block-budget file along with the failure notice and alarm, so an
+# arm that both spent a slot and reset would erase the very progression that
+# paces it, and would keep the terminal fail-open unreachable forever by
+# clearing the notice it verifies. An episode ends when a stop is allowed on
+# health alone, not when a block is issued; the following healthy stop performs
+# that reset through the ordinary recovery path above.
+if guard_last_resort_arm; then
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  if budget_account_current_epoch && [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
+    {
+      printf '●%s\n' "$rule"
+      printf '●  SUPERVISION RESTORED BY THE TURN-END GUARD (last resort), TURN ALLOWED\n'
+      printf '●  The Stop-owned auto-arm claimed nothing again, so this guard started the home\n'
+      printf '●  watcher itself (pid %s, beacon fresh) and verified it live.\n' "$FM_WATCHER_HEALTHY_PID"
+      printf '●  The block budget is spent, so this turn is ALLOWED instead of blocked again.\n'
+      printf '●  Nothing is lost: the restored watcher queues every actionable wake durably, so\n'
+      printf '●  run bin/fm-wake-drain.sh at the start of your next turn to pick them up.\n'
+      printf '●  The automatic Stop-hook arm is still broken - diagnose it when you can.\n'
+      printf '●  Do not run bin/fm-watch-arm.sh yourself.\n'
+      printf '●%s\n' "$rule"
+    } >&2
+    printf '{"systemMessage":"SUPERVISION RESTORED BY THE TURN-END GUARD (last resort), TURN ALLOWED: the Stop-owned auto-arm claimed nothing again, so this guard started and verified the home watcher itself (pid %s), and the block budget is spent so this turn is allowed instead of blocked again. The restored watcher queues every actionable wake durably - run bin/fm-wake-drain.sh at the start of your next turn. The automatic Stop-hook arm is still broken and needs diagnosis."}\n' "$FM_WATCHER_HEALTHY_PID"
+    exit 0
+  fi
+  {
+    printf '●%s\n' "$rule"
+    printf '●  SUPERVISION RESTORED BY THE TURN-END GUARD (last resort)\n'
+    printf '●  The Stop-owned auto-arm claimed nothing for this event epoch, so this guard\n'
+    printf '●  started the home watcher itself (pid %s, beacon fresh) and verified it live.\n' "$FM_WATCHER_HEALTHY_PID"
+    printf '●  One handling turn now: run bin/fm-wake-drain.sh, handle anything pending, then\n'
+    printf '●  end the turn - the standing cycle is live and a healthy next stop is allowed.\n'
+    printf '●  Do not run bin/fm-watch-arm.sh yourself.\n'
+    printf '●%s\n' "$rule"
+  } >&2
+  exit 2
+fi
+
+# The auto-arm genuinely failed to establish and the last resort could not
+# verify a cycle either: consume the re-block budget before considering the
+# verified one-time attended fail-open.
 budget_account_current_epoch || block_stop
 terminal_fail_open
 terminal_status=$?

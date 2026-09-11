@@ -45,11 +45,18 @@
 # on a remote yet the change is fully in main.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
-# the PR head. A diverged copy is not treated as landed: path-set coverage, git
-# cherry, and merge-tree containment each fail to prove content landed without also
-# accepting unlanded edits to the same paths. Teardown still accepts a merged PR
-# whose head contains the current local work (ancestor or equivalent patch ids),
-# or a clean content-in-default tree match. Anything else refuses.
+# the PR head. Teardown accepts a merged PR whose head contains the current local
+# work (ancestor or equivalent patch ids), or a content match against the default
+# branch. The content check compares only the paths the not-on-a-remote commits
+# themselves changed, so a branch far behind the default branch still reads as landed
+# when the default branch matches it at every one of those paths; content_in_default
+# owns that rule and why it is not a loosening. Path membership alone never proves
+# landing - a touched path whose content differs still refuses - which is what keeps
+# a diverged copy carrying the same files with different bytes from being discarded,
+# and a comparison that cannot be trusted to be current refuses as well.
+# Every such refusal names the unmatched paths, or why the check could not run, and
+# any commits a merged PR head does not contain, so the operator can judge it from
+# the refusal instead of reaching for --force to find out.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -1277,10 +1284,31 @@ patch_id_for_commit() {
     | awk 'NR == 1 { print $1 }'
 }
 
+# Which of this worktree's at-risk commits the merged PR head does not account
+# for, recorded so a refusal can say how the local work relates to what merged
+# rather than leaving the operator to compare the two histories by hand. Empty
+# whenever the comparison itself was inconclusive, because "no evidence" must
+# never read as "every commit matched" - and never as "the PR head lacks this
+# work" either: whenever the comparison could not run, the note below records
+# what actually happened so a refusal states only what was verified. All three
+# are cleared at pr_is_merged's entry, so a resolution from an earlier safety
+# pass in this same process can never be reported by a later one.
+TEARDOWN_PR_UNMATCHED_COMMITS=()
+TEARDOWN_MERGED_PR_REF=
+TEARDOWN_PR_CHECK_NOTE=
+
 unpushed_patches_are_in_pr_head() {
   local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
+  TEARDOWN_PR_UNMATCHED_COMMITS=()
+  TEARDOWN_PR_CHECK_NOTE=
+  if ! current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null); then
+    TEARDOWN_PR_CHECK_NOTE="this worktree's HEAD could not be resolved, so nothing was compared against it"
+    return 1
+  fi
+  if ! base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null); then
+    TEARDOWN_PR_CHECK_NOTE="it shares no common ancestor with this work, so nothing was compared against it"
+    return 1
+  fi
   pr_patch_ids=$(
     git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
       | while IFS= read -r commit; do
@@ -1288,18 +1316,33 @@ unpushed_patches_are_in_pr_head() {
         done \
       | sed '/^$/d' \
       | sort -u
-  ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
-  [ -n "$unpushed" ] || return 1
+  )
+  if [ -z "$pr_patch_ids" ]; then
+    TEARDOWN_PR_CHECK_NOTE="no patch ids could be read from it, so nothing was compared against it"
+    return 1
+  fi
+  if ! unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null); then
+    TEARDOWN_PR_CHECK_NOTE="the commits that are on no remote could not be listed, so nothing was compared against it"
+    return 1
+  fi
+  if [ -z "$unpushed" ]; then
+    TEARDOWN_PR_CHECK_NOTE="no commits are on no remote, so nothing was compared against it"
+    return 1
+  fi
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
-    [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
+    patch_id=$(patch_id_for_commit "$commit")
+    if [ -z "$patch_id" ]; then
+      TEARDOWN_PR_UNMATCHED_COMMITS=()
+      TEARDOWN_PR_CHECK_NOTE="no patch id could be computed for $commit, so the comparison did not finish"
+      return 1
+    fi
+    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" && continue
+    TEARDOWN_PR_UNMATCHED_COMMITS+=("$(git -C "$WT" log --oneline -1 "$commit" 2>/dev/null || printf '%s' "$commit")")
   done <<EOF
 $unpushed
 EOF
+  [ "${#TEARDOWN_PR_UNMATCHED_COMMITS[@]}" -eq 0 ]
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
@@ -1309,6 +1352,9 @@ EOF
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
+  TEARDOWN_MERGED_PR_REF=
+  TEARDOWN_PR_UNMATCHED_COMMITS=()
+  TEARDOWN_PR_CHECK_NOTE=
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
@@ -1326,9 +1372,19 @@ pr_is_merged() {
     MERGED|merged) ;;
     *) return 1 ;;
   esac
-  [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  TEARDOWN_MERGED_PR_REF=${resolved_url:-$target}
+  if [ -z "$head" ]; then
+    TEARDOWN_PR_CHECK_NOTE="it reported no head commit, so nothing was compared against it"
+    return 1
+  fi
+  if ! ensure_commit_object "$target" "$head"; then
+    TEARDOWN_PR_CHECK_NOTE="its head $head is not available locally and could not be fetched, so nothing was compared against it"
+    return 1
+  fi
+  if ! current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null); then
+    TEARDOWN_PR_CHECK_NOTE="this worktree's HEAD could not be resolved, so nothing was compared against it"
+    return 1
+  fi
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
   elif unpushed_patches_are_in_pr_head "$head"; then
@@ -1336,35 +1392,125 @@ pr_is_merged() {
   fi
   [ "$landed" = 1 ] || return 1
   if [ -z "$PR_URL" ]; then
-    [ -n "$resolved_url" ] || return 1
+    if [ -z "$resolved_url" ]; then
+      TEARDOWN_PR_CHECK_NOTE="its head does contain this work, but it reported no URL to record"
+      return 1
+    fi
     PR_URL=$resolved_url
   fi
   return 0
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# What the landed-work check could not account for, for the refusal to print.
+# Empty until content_in_default runs; the note records why it could not finish
+# when it returned inconclusive, so a refusal distinguishes "this work is
+# missing from the default branch" from "the comparison never ran".
+TEARDOWN_UNACCOUNTED_PATHS=()
+TEARDOWN_DEFAULT_REF=
+TEARDOWN_CONTENT_CHECK_NOTE=
+
+# The paths this worktree's at-risk commits touched - every commit reachable from
+# HEAD but from no remote-tracking branch, which is exactly the work the caller is
+# refusing over. Each commit is diffed against every parent (-m) and a root commit
+# against the empty tree (--root), so a merge's own conflict resolution cannot hide
+# a path that an ordinary log walk skips. Rename detection stays off so a rename
+# reports both its old and its new path. Prints git's own quoted path per line, the
+# same quoting the comparison below produces, so the two sets compare exactly.
+# Returns non-zero only when the set cannot be established, never when it is empty:
+# commits that changed no path put no content at risk, and no commit at all means
+# the fetch the caller just ran put every HEAD commit on a remote-tracking ref -
+# the "not on any remote" premise was a stale view of the remote, not lost work.
+at_risk_commit_paths() {
+  local commits types
+  commits=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  [ -n "$commits" ] || return 0
+  # diff-tree --stdin diffs the whole list in one process, but it SKIPS an object
+  # it cannot read and still exits 0 - which would silently shrink the at-risk set
+  # and make the check permissive. So every commit is proven readable first, and
+  # anything else leaves the set unestablished rather than smaller.
+  types=$(printf '%s\n' "$commits" | git -C "$WT" cat-file --batch-check='%(objecttype)' 2>/dev/null) || return 1
+  [ "$(printf '%s\n' "$types" | LC_ALL=C sort -u)" = commit ] || return 1
+  [ "$(printf '%s\n' "$types" | grep -c '^')" = "$(printf '%s\n' "$commits" | grep -c '^')" ] || return 1
+  printf '%s\n' "$commits" \
+    | git -C "$WT" diff-tree -r -m --root --no-commit-id --name-only --stdin 2>/dev/null
+}
+
+# Is every change the at-risk commits made already present in the up-to-date
+# default branch? Fetches first, then compares ONLY the paths those commits
+# touched: when the default branch's content at every one of them already matches
+# HEAD's, those commits added nothing the default branch lacks and the work is
+# present however far behind the branch otherwise is (a path both sides lack -
+# a landed deletion - matches). Every other path in HEAD is still at its
+# merge-base content, which is by definition already in history.
+# Scoping the comparison this way is what makes it survive a stale branch: the
+# whole-tree 3-way merge it replaces reported a conflict whenever the default
+# branch had since rewritten a region the branch also touched, which is drift,
+# not lost work. It is not more permissive - a touched path the default branch
+# does not match, including one it does not have at all, still refuses, and the
+# unmatched paths are recorded for the refusal to name.
+# Returns non-zero when inconclusive (no default ref, an unreachable remote, or
+# an unreadable commit list), so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
+  local name ref touched differing unaccounted path
+  TEARDOWN_UNACCOUNTED_PATHS=()
+  TEARDOWN_DEFAULT_REF=
+  TEARDOWN_CONTENT_CHECK_NOTE=
+  if ! name=$(default_branch); then
+    TEARDOWN_CONTENT_CHECK_NOTE="cannot determine the default branch for $PROJ"
+    return 1
+  fi
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    if ! git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1; then
+      TEARDOWN_CONTENT_CHECK_NOTE="cannot refresh origin/$name, so the comparison would trust a stale copy"
+      return 1
+    fi
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
+    TEARDOWN_CONTENT_CHECK_NOTE="no $name ref to compare against"
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
+  if ! git -C "$WT" rev-parse --quiet --verify "$ref^{commit}" >/dev/null 2>&1; then
+    TEARDOWN_CONTENT_CHECK_NOTE="$ref does not resolve to a commit"
+    return 1
+  fi
+  TEARDOWN_DEFAULT_REF=$ref
+  if ! touched=$(at_risk_commit_paths); then
+    TEARDOWN_CONTENT_CHECK_NOTE="cannot list the paths the commits that are on no remote changed"
+    return 1
+  fi
+  [ -n "$touched" ] || return 0
+  if ! differing=$(git -C "$WT" diff --no-renames --name-only "$ref" HEAD -- 2>/dev/null); then
+    TEARDOWN_CONTENT_CHECK_NOTE="cannot compare the worktree against $ref"
+    return 1
+  fi
+  # Both sides are sorted by the same command under the same collation, so comm's
+  # set intersection is exact rather than dependent on git's own output order.
+  # Every step is status-checked: this function runs inside an `if !` condition,
+  # which suppresses errexit for the whole call, so a step that failed silently
+  # would leave an empty result reading as "nothing unaccounted for" - the exact
+  # permissive verdict this gate exists to prevent.
+  if ! touched=$(printf '%s\n' "$touched" | LC_ALL=C sort -u); then
+    TEARDOWN_CONTENT_CHECK_NOTE="cannot order the paths the commits that are on no remote changed"
+    return 1
+  fi
+  if ! differing=$(printf '%s\n' "$differing" | LC_ALL=C sort -u); then
+    TEARDOWN_CONTENT_CHECK_NOTE="cannot order the paths that differ from $ref"
+    return 1
+  fi
+  if ! unaccounted=$(LC_ALL=C comm -12 \
+      <(printf '%s\n' "$touched") <(printf '%s\n' "$differing")); then
+    TEARDOWN_CONTENT_CHECK_NOTE="cannot intersect the touched paths with what $ref does not match"
+    return 1
+  fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    TEARDOWN_UNACCOUNTED_PATHS+=("$path")
+  done <<EOF
+$unaccounted
+EOF
+  [ "${#TEARDOWN_UNACCOUNTED_PATHS[@]}" -eq 0 ]
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
@@ -1376,6 +1522,59 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+# Print what the landed-work check could not account for. A refusal that only
+# names the commits leaves the operator to reconstruct by hand which of them the
+# default branch is missing and how they relate to a PR that did merge - and the
+# quickest way out of that is --force, the one command hard rule 3 reserves for
+# explicit captain discard authority. So the refusal carries that evidence
+# itself: the touched paths the default branch does not match, or why the
+# comparison could not run, plus the commits a merged PR head does not contain.
+# Lists are capped; this explains a refusal, it never replaces inspecting the
+# worktree.
+TEARDOWN_EVIDENCE_PATH_LIMIT=${FM_TEARDOWN_EVIDENCE_PATH_LIMIT:-10}
+case "$TEARDOWN_EVIDENCE_PATH_LIMIT" in ''|*[!0-9]*) TEARDOWN_EVIDENCE_PATH_LIMIT=10 ;; esac
+TEARDOWN_EVIDENCE_COMMIT_LIMIT=${FM_TEARDOWN_EVIDENCE_COMMIT_LIMIT:-5}
+case "$TEARDOWN_EVIDENCE_COMMIT_LIMIT" in ''|*[!0-9]*) TEARDOWN_EVIDENCE_COMMIT_LIMIT=5 ;; esac
+teardown_report_unlanded_evidence() {
+  local total shown item
+  total=${#TEARDOWN_UNACCOUNTED_PATHS[@]}
+  if [ "$total" -gt 0 ]; then
+    printf 'paths these commits changed that %s does not match:\n' \
+      "${TEARDOWN_DEFAULT_REF:-the default branch}" >&2
+    shown=0
+    for item in "${TEARDOWN_UNACCOUNTED_PATHS[@]}"; do
+      [ "$shown" -lt "$TEARDOWN_EVIDENCE_PATH_LIMIT" ] || break
+      printf '  %s\n' "$item" >&2
+      shown=$((shown + 1))
+    done
+    [ "$total" -le "$shown" ] || printf '  ... and %s more\n' "$((total - shown))" >&2
+  elif [ -n "$TEARDOWN_CONTENT_CHECK_NOTE" ]; then
+    printf 'could not check the default branch for this work: %s\n' \
+      "$TEARDOWN_CONTENT_CHECK_NOTE" >&2
+  fi
+  [ -n "$TEARDOWN_MERGED_PR_REF" ] || return 0
+  total=${#TEARDOWN_PR_UNMATCHED_COMMITS[@]}
+  if [ "$total" -eq 0 ]; then
+    if [ -n "$TEARDOWN_PR_CHECK_NOTE" ]; then
+      printf 'merged PR %s: %s\n' \
+        "$TEARDOWN_MERGED_PR_REF" "$TEARDOWN_PR_CHECK_NOTE" >&2
+    else
+      printf 'merged PR %s was found, but this work could not be compared against its head.\n' \
+        "$TEARDOWN_MERGED_PR_REF" >&2
+    fi
+    return 0
+  fi
+  printf 'merged PR %s does not contain %s of these commits:\n' \
+    "$TEARDOWN_MERGED_PR_REF" "$total" >&2
+  shown=0
+  for item in "${TEARDOWN_PR_UNMATCHED_COMMITS[@]}"; do
+    [ "$shown" -lt "$TEARDOWN_EVIDENCE_COMMIT_LIMIT" ] || break
+    printf '  %s\n' "$item" >&2
+    shown=$((shown + 1))
+  done
+  [ "$total" -le "$shown" ] || printf '  ... and %s more\n' "$((total - shown))" >&2
 }
 
 # The completion links this teardown already holds locally. A scout's
@@ -1701,6 +1900,7 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      teardown_report_unlanded_evidence
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi

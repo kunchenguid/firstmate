@@ -378,6 +378,9 @@ STUB
     "promoted no-mistakes worker did not receive the structured escalation event"
   assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \
     "promoted no-mistakes worker did not receive the --yes prohibition"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'In this mode `done:` is reserved for exactly one event: the PR is open and its CI checks are green.' "$payload" \
+    "promoted no-mistakes worker did not receive the green-CI done: reservation"
   assert_grep "It is banned fleet-wide" "$payload" \
     "promoted no-mistakes worker did not receive the fleet-wide ban wording"
 

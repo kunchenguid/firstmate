@@ -20,6 +20,11 @@
 # bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
 # through the helpers below. Other mentions of `--intent` point here rather than
 # restating the rule.
+# The no-mistakes block reserves "done:" for a green-CI PR: the implementation
+# commit is reported as a nonterminal working: line, the one stop-and-wait
+# exception the status protocol (rule 4 of every ship and scout brief) names,
+# because five lanes on 2026-08-18 read the old "complete when committed" gate
+# as satisfied at an unpushed commit.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
@@ -198,7 +203,6 @@ fm_dod_block() {  # <mode> <task-id>
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -218,8 +222,9 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+In this mode \`done:\` is reserved for exactly one event: the PR is open and its CI checks are green.
+An implementation commit is not done, an unpushed branch is not done, and an open PR whose CI is still running or red is not done - never report \`done:\` for any of those.
+When the implementation is committed on your branch, append \`working: implementation committed, ready for validation\` to the status file and stop; this stop-and-wait report is the one named exception to rule 4, because firstmate must send you the validation instruction.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.

@@ -869,6 +869,129 @@ test_worker_role_scope() {
 }
 
 test_worker_role_scope
+# Visual evidence must reach the PR as an inline image, never as a local
+# filesystem path, and the carrying channel differs by mode: no-mistakes keeps
+# only the worker's --intent verbatim when it regenerates the PR body, while a
+# direct-PR worker writes the body itself. local-only has no PR body at all.
+test_ship_pr_media_contract_by_mode() {
+  local home brief
+  home="$TMP_ROOT/pr-media-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" media-nm-c1 some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/media-nm-c1/brief.md"
+  assert_grep "# Screenshots and PR media" "$brief" "no-mistakes brief lost the PR media section"
+  assert_grep "commit it into your branch under \`.github/pr-media/media-nm-c1/\`" "$brief" \
+    "no-mistakes brief must name the task-scoped media directory"
+  assert_grep 'blob/fm/media-nm-c1/.github/pr-media/media-nm-c1/<file>?raw=true' "$brief" \
+    "no-mistakes brief must give the branch blob URL with ?raw=true"
+  assert_grep "Never paste a local filesystem path into a PR body" "$brief" \
+    "no-mistakes brief must forbid local filesystem paths"
+  assert_grep "it stops resolving once the PR merges and the branch is deleted" "$brief" \
+    "no-mistakes brief must disclose that the blob URL dies with the merged branch"
+  assert_no_grep "for as long as the branch exists" "$brief" \
+    "no-mistakes brief must not claim the blob URL outlives its branch"
+  assert_grep "Put those image lines in your \`--intent\`" "$brief" \
+    "no-mistakes brief must carry the image lines through --intent"
+  assert_no_grep "Put those image lines in the PR body you open" "$brief" \
+    "no-mistakes brief must not tell the worker to write the pipeline-owned PR body"
+  assert_grep "Attaching an image as pipeline run evidence never substitutes for that" "$brief" \
+    "no-mistakes brief must say evidence attachments do not replace the committed-blob route"
+  assert_grep "local file: /var/folders/" "$brief" \
+    "no-mistakes brief must name the machine-local rendering an evidence attachment produces"
+  assert_grep "inside a section it rewrites every run, so it cannot be hand-fixed afterwards" "$brief" \
+    "no-mistakes brief must explain why the evidence rendering cannot be hand-fixed"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" media-direct-c2 some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/media-direct-c2/brief.md"
+  assert_grep "# Screenshots and PR media" "$brief" "direct-PR brief lost the PR media section"
+  assert_grep 'blob/fm/media-direct-c2/.github/pr-media/media-direct-c2/<file>?raw=true' "$brief" \
+    "direct-PR brief must give the branch blob URL with ?raw=true"
+  assert_grep "Put those image lines in the PR body you open" "$brief" \
+    "direct-PR brief must carry the image lines in the PR body"
+  assert_no_grep "--intent" "$brief" "direct-PR brief must not mention --intent"
+  assert_no_grep "pipeline run evidence" "$brief" \
+    "direct-PR brief has no pipeline evidence channel and must not warn about one"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" media-local-c3 some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/media-local-c3/brief.md"
+  assert_no_grep "# Screenshots and PR media" "$brief" \
+    "local-only brief has no PR body and must not carry the PR media section"
+  pass "fm-brief.sh: PR media contract is inline-image only and carried per delivery mode"
+}
+
+# Five lanes on 2026-08-18 reported done: at an unpushed implementation commit on
+# no-mistakes mode because the DOD's first gate read as satisfiable at the commit.
+# done: is reserved per mode for the delivered state - green-CI PR (no-mistakes),
+# open PR (direct-PR), ready branch (local-only) - and the no-mistakes commit
+# report is a nonterminal working: line the rules name as the one stop-and-wait
+# exception.
+test_done_gate_is_delivery_not_commit() {
+  local home brief
+  home="$TMP_ROOT/done-gate-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" done-gate-nm some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/done-gate-nm/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'In this mode `done:` is reserved for exactly one event: the PR is open and its CI checks are green.' "$brief" \
+    "no-mistakes DOD must reserve done: for the green-CI PR"
+  assert_grep "An implementation commit is not done, an unpushed branch is not done" "$brief" \
+    "no-mistakes DOD must spell out that a commit does not satisfy done"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and braces must stay literal
+  assert_no_grep 'append `done: {summary}`' "$brief" \
+    "no-mistakes DOD must not offer a done: gate at the implementation commit"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `working: implementation committed, ready for validation`' "$brief" \
+    "no-mistakes DOD must report the implementation commit as a nonterminal working: line"
+  assert_grep "the one named exception to rule 4" "$brief" \
+    "no-mistakes DOD must anchor its stop-and-wait report to the rule 4 carve-out"
+  assert_grep "or a stop-and-wait report it names verbatim" "$brief" \
+    "no-mistakes rules must carve out DOD-named stop-and-wait reports from the nonterminal working: rule"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and braces must stay literal
+  assert_grep 'append `done: PR {url} checks green`' "$brief" \
+    "no-mistakes DOD lost its terminal green-CI done gate"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" done-gate-direct some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/done-gate-direct/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and braces must stay literal
+  assert_grep 'push your branch and open a PR with `gh-axi`, then append `done: PR {url}`' "$brief" \
+    "direct-PR DOD must keep done: at the opened PR"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" done-gate-local some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/done-gate-local/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `done: ready in branch fm/done-gate-local`' "$brief" \
+    "local-only DOD must keep done: at the ready branch"
+  pass "fm-brief.sh: done: is reserved for each mode's delivered state, never the bare commit"
+}
+
+# Three lanes on 2026-08-23 each invented a wait that outlived what it waited
+# for - a poll on a file never written, an until-loop on a machine-wide pgrep
+# matching sibling lanes and its own shell, a sleep loop around an unchanging
+# status call - and all looked healthy while doing nothing. Ship and scout
+# rules now carry the wait-discipline rule; a secondmate charter runs its own
+# firstmate home and takes no worker rules, so it is exempt.
+test_wait_discipline_rule_in_ship_and_scout() {
+  local home kind brief
+  home="$TMP_ROOT/wait-discipline-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "wait-rule-$kind" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "wait-rule-$kind" some-proj --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/wait-rule-$kind/brief.md"
+    assert_grep "Wait only on your own work: watch your own process id or your own output artifact" "$brief" \
+      "$kind brief lost the own-pid-or-own-artifact wait rule"
+    assert_grep "machine-wide process match such as \`pgrep -f\` - that matches sibling lanes and your own" "$brief" \
+      "$kind brief must ban machine-wide process matches and say why"
+    assert_grep "re-read its result artifact: a result already on disk means the wait is over" "$brief" \
+      "$kind brief must require re-reading the artifact before reporting still-running"
+  done
+  pass "fm-brief.sh: ship and scout rules carry the wait-discipline contract"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -877,6 +1000,9 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
+test_ship_pr_media_contract_by_mode
+test_done_gate_is_delivery_not_commit
+test_wait_discipline_rule_in_ship_and_scout
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording

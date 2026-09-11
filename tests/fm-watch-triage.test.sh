@@ -4009,21 +4009,42 @@ pe_case() {  # <dir> <command>...
    FM_PROCEVENT_CLAIM_ROOT="$dir/claims" FM_HOME="$dir" "$ROOT/bin/fm-procevent.sh" "$@")
 }
 
-# Capture one real process-event result into <dir>'s home, then retire the
-# source so the fixture holds exactly the reported end state: one durably
-# captured, unhandled, queued result and no remaining poll work.
-seed_captured_procevent_result() {  # <dir>
-  local dir=$1 i=0
+# Capture one real process-event result into <dir>'s home through the real
+# runner, then retire the source so the fixture holds exactly the reported end
+# state: one durably captured, unhandled, queued result and no remaining poll
+# work. Every step is the production path; nothing here is pre-seeded.
+#
+# The wait is for the RUNNER TO FINISH, not for the first sight of its wake row.
+# A runner publishes while it still owns the source, so retiring at that first
+# sight always hands `retire` a live runner to signal-kill mid-exit. That
+# teardown is bounded - a TERM ladder, then a KILL ladder - and reports "cannot
+# confirm runner identity" when an exit outlives it, which would surface here as
+# a result that was never captured at all. `list` is the public view of that
+# ownership: waiting for the source to read unowned with its result pending
+# settles in about a third of a second and leaves retire nothing to signal.
+# Each step names its own failure, so a future break is never misread as a
+# capture that did not happen.
+seed_captured_procevent_result() {  # <dir>; fails the test rather than returning
+  local dir=$1 i=0 settled=''
   pe_case "$dir" register lavish delivery-src -- \
-    /bin/sh -c 'printf "session:\n  file: /a.html\n  status: waiting\n"' >/dev/null || return 1
-  pe_case "$dir" reconcile >/dev/null || return 1
+    /bin/sh -c 'printf "session:\n  file: /a.html\n  status: waiting\n"' >/dev/null \
+    || fail "the fixture could not register its process-event source"
+  pe_case "$dir" reconcile >/dev/null \
+    || fail "the fixture could not start a runner for its process-event source"
   while [ "$i" -lt 100 ]; do
-    [ -s "$dir/state/.wake-queue" ] && break
+    settled=$(pe_case "$dir" list | awk '$1 == "delivery-src" { print $3, $4 }')
+    [ "$settled" = "none 1" ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  pe_case "$dir" retire delivery-src >/dev/null || return 1
-  [ -s "$dir/state/.wake-queue" ]
+  [ "$settled" = "none 1" ] \
+    || fail "the runner never captured a result and released the source (last seen: ${settled:-no source listed})"
+  grep -F "procevent lavish delivery-src 1" "$dir/state/.wake-queue" >/dev/null \
+    || fail "the captured result was never published to the durable queue"
+  pe_case "$dir" retire delivery-src >/dev/null \
+    || fail "the fixture could not retire its finished process-event source"
+  [ -s "$dir/state/.wake-queue" ] \
+    || fail "retiring the finished source dropped the captured result's durable wake"
 }
 
 # The watcher, scoped by FM_HOME rather than FM_STATE_OVERRIDE, so the
@@ -4040,9 +4061,7 @@ test_procevent_captured_result_surfaces_proactively() {
   local dir state out drain_out pid beacon_age
   dir=$(make_case procevent-delivery); state="$dir/state"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
-  seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
-  grep -F "procevent lavish delivery-src 1" "$state/.wake-queue" >/dev/null \
-    || fail "the captured result was never published to the durable queue"
+  seed_captured_procevent_result "$dir"
 
   procevent_watch_bg "$dir" "$out"
   pid=$!
@@ -4066,7 +4085,7 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   local dir state out replay_out replay_err pid before after sequence generation
   dir=$(make_case procevent-redrain); state="$dir/state"
   out="$dir/watch.out"; replay_out="$dir/replay.out"; replay_err="$dir/replay.err"
-  seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
+  seed_captured_procevent_result "$dir"
 
   procevent_watch_bg "$dir" "$out"
   pid=$!

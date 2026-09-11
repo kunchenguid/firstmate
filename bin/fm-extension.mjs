@@ -2054,11 +2054,18 @@ async function claimInheritedLifecycleLock(home) {
   return mode;
 }
 
+// The claim files fm_lock_claim (bin/fm-wake-lib.sh) may leave beside "pid"
+// in the owner directory: the holder's program identity and start time. Both
+// are best-effort on the shell side, so only "pid" is required here; the rest
+// go with force, mirroring fm_lock_clean_known_files.
+const LIFECYCLE_LOCK_OPTIONAL_CLAIM_FILES = ["pid-identity", "pid-start"];
+
 async function releaseLifecycleLock() {
   await assertLifecycleLockOwned();
   const { lockPath, ownerPath } = activeLifecycleLock;
   await unlink(lockPath);
   await unlink(path.join(ownerPath, "pid"));
+  for (const name of LIFECYCLE_LOCK_OPTIONAL_CLAIM_FILES) await rm(path.join(ownerPath, name), { force: true });
   await rmdir(ownerPath);
   activeLifecycleLock = null;
 }

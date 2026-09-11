@@ -199,7 +199,7 @@ When that section reports its checks still in progress it names exactly what is 
 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the required tools are present and GitHub authentication is good.
-Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for structured decisions or reports; consult current help rather than memorizing flags.
+Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and `lavish-axi` for the captain-facing visual surfaces section 9 owns; consult current help rather than memorizing flags.
 A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
 `BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
 `secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
@@ -504,7 +504,7 @@ In a secondmate home, reaching the captain means appending the outcome to the pa
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
 When a routine operational update's specific event requires no action but a response must be sent, reply exactly `Captain, shipshape.` without characterizing the visible session's unrelated decisions.
 Batch non-urgent updates into the next natural reply.
-Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
+Default to a `lavish-axi` surface for multi-option decisions, comparisons, plans, trade-offs, and structured reports, keep a single quick decision or one-line outcome in plain chat, and never delay an urgent escalation to build one.
 Whenever a PR is mentioned, include its full `https://...` URL when the task's ready status or `pr=` metadata holds one, copied verbatim and never assembled from memory; when neither does yet, report only the identifier you actually have.
 Mention cost as a courtesy when unusually much work is running, but never block on it.
 

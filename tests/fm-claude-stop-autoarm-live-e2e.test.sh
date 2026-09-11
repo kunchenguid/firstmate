@@ -31,7 +31,9 @@ LIVE_OWNER_HOME="$LAB/live-owner-home"
 TRANSCRIPT="$LAB/claude.jsonl"
 CLAUDE_VERSION=$(claude --version)
 
+WEDGE_PID=
 cleanup() {
+  [ -z "$WEDGE_PID" ] || kill "$WEDGE_PID" 2>/dev/null || true
   rm -rf "$LAB"
 }
 trap cleanup EXIT
@@ -75,6 +77,31 @@ printf 'project=fixture\nwindow=fixture\nbackend=tmux\n' > "$HOME_DIR/state/task
 # harness owner under fm_harness_pid_alive, matching the reproduced incident.
 printf '9999999\n' > "$HOME_DIR/state/.lock"
 
+# Pre-wedge the auto-arm claim mutex with the 2026-08-17 frozen-ledger shape:
+# a role-less hold whose recorded holder died mid-hold and whose pid a live
+# unrelated process now answers to. The first live firing must reclaim it
+# through the start-time-hardened steal - the hold records both the holder's
+# identity and its start time, and holder liveness reads the start time - or
+# every later assertion below fails with a frozen ledger.
+sleep 600 &
+WEDGE_PID=$!
+WEDGE_IDENTITY=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$") \
+  || fail "could not fabricate the dead holder's identity"
+WEDGE_LIVE_IDENTITY=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$WEDGE_PID") \
+  || fail "could not identify the live reused pid"
+[ "$WEDGE_IDENTITY" != "$WEDGE_LIVE_IDENTITY" ] || fail "wedge fixture identities did not diverge"
+WEDGE_START=$(bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$") \
+  || fail "could not fabricate the dead holder's start time"
+WEDGE_LIVE_START=$(bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$WEDGE_PID") \
+  || fail "could not read the live reused pid's start time"
+[ "$WEDGE_START" != "$WEDGE_LIVE_START" ] || fail "wedge fixture start times did not diverge"
+mkdir -p "$HOME_DIR/state/.claude-autoarm.lock"
+printf '%s\n' "$WEDGE_PID" > "$HOME_DIR/state/.claude-autoarm.lock/pid"
+printf '%s\n' "$WEDGE_IDENTITY" > "$HOME_DIR/state/.claude-autoarm.lock/pid-identity"
+printf '%s\n' "$WEDGE_START" > "$HOME_DIR/state/.claude-autoarm.lock/pid-start"
+printf 'epoch=2688 owner_pid=9999998 outcome=rewake updated_at=1\n' > "$HOME_DIR/state/.claude-autoarm-epoch"
+touch -t 202001010000 "$HOME_DIR/state/.claude-autoarm-epoch"
+
 # Rapid-death arm fixture: started plus an immediate actionable reason, the
 # exact spent-Stop edge shape. Runs 1-2 close actionable; run 3 closes clean so
 # a misbehaving session can never loop forever.
@@ -105,7 +132,7 @@ printf 'stale: fixture-rapid drained\n'
 SH
 chmod +x "$PROJECT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-wake-drain.sh"
 
-PROMPT='Run exactly `bin/fm-session-start.sh` with Bash as your first tool call. After reading its complete digest, reply with exactly CYCLE0 and stop. Whenever a Stop hook feedback message wakes you, run exactly `bin/fm-wake-drain.sh` once with Bash, then reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command, and never use any other tool.'
+PROMPT='If the session-start digest was not already emitted by a session-open hook, run exactly `bin/fm-session-start.sh` with Bash as your first tool call. Then reply with exactly CYCLE0 and stop. Whenever a Stop hook feedback message wakes you, run exactly `bin/fm-wake-drain.sh` once with Bash, then reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command, and never use any other tool.'
 
 (
   cd "$PROJECT" || exit 1
@@ -122,8 +149,17 @@ REWAKES=$(grep -c 'Stop hook feedback' "$TRANSCRIPT" 2>/dev/null || true)
 [ "$REWAKES" -ge 2 ] || fail "expected at least 2 exit-2 rewake deliveries, got $REWAKES"
 grep -q 'stale: fixture-rapid-1' "$TRANSCRIPT" || fail "first rapid rewake reason missing from the transcript"
 grep -q 'stale: fixture-rapid-2' "$TRANSCRIPT" || fail "second rapid rewake reason missing from the transcript"
-[ "$(sed -n '1p' "$HOME_DIR/state/tool-calls.log" 2>/dev/null)" = 'bin/fm-session-start.sh' ] \
-  || fail "fresh Claude session did not run session start first: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
+# Claude is a run-tier harness (docs/sessionstart-nudge.md): its tracked
+# SessionStart hook runs fm-session-start.sh itself before the first model
+# turn, and hook processes bypass the PreToolUse logger. Session start having
+# run is therefore proven by its fixture drain (the 3-drain count above) and
+# the reclaimed session lock below, while the model's own first call is
+# session start only when the hook tier did not already run it.
+FIRST_TOOL_CALL=$(sed -n '1p' "$HOME_DIR/state/tool-calls.log" 2>/dev/null)
+case "$FIRST_TOOL_CALL" in
+  'bin/fm-session-start.sh'|'bin/fm-wake-drain.sh') ;;
+  *) fail "fresh Claude session opened with an unexpected first tool call: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)" ;;
+esac
 [ "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" != 9999999 ] \
   || fail "session start did not reclaim the stale dead-owner lock"
 if [ -f "$HOME_DIR/state/tool-calls.log" ]; then
@@ -137,6 +173,10 @@ fi
 [ "$(sed -n 's/^.*outcome=\([a-z][a-z]*\) .*$/\1/p' "$HOME_DIR/state/.claude-autoarm-epoch" 2>/dev/null)" = rewake ] \
   || fail "auto-arm epoch ledger must record the rewake outcome"
 [ ! -e "$HOME_DIR/state/.claude-autoarm.lock" ] || fail "auto-arm owner lock was left behind"
+EPOCH_SEQ=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*$/\1/p' "$HOME_DIR/state/.claude-autoarm-epoch" 2>/dev/null)
+[ -n "$EPOCH_SEQ" ] && [ "$EPOCH_SEQ" -gt 2688 ] \
+  || fail "the pre-wedged frozen ledger was never advanced (epoch=$EPOCH_SEQ)"
+kill -0 "$WEDGE_PID" 2>/dev/null || fail "the wedge's reused pid was signalled during the identity steal"
 
 # Live-owner negative control: a separate supported-harness process owns a
 # second isolated home while another Stop hook fires from the same primary
@@ -160,4 +200,4 @@ printf '%s\n' '{"session_id":"live-owner-control"}' \
 [ ! -s "$LAB/live-owner.out" ] && [ ! -s "$LAB/live-owner.err" ] || fail "competing Stop hook produced a rewake while another live session owned the home"
 wait "$LIVE_OWNER_PID"
 
-printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"
+printf 'ok - Claude %s live E2E reclaimed a stale session lock and a pid-reuse-wedged claim mutex, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"

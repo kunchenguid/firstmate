@@ -308,6 +308,215 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
   pass "live steal mutex is not reclaimed"
 }
 
+# Identity-hardened reclaim: a hold left by a holder killed mid-hold, whose pid
+# a live unrelated process later reuses, must be stolen - the recorded start
+# time disproves the reused pid - while the reused process itself is never
+# signalled. The two liveness signals (pid aliveness, recorded start time) are
+# driven apart deliberately and the divergence is asserted, so the case cannot
+# go quietly vacuous.
+test_lock_steals_live_reused_pid_with_mismatched_identity() {
+  local dir state lockdir live live_identity stale_identity rc newpid
+  dir=$(make_case lock-reused-pid-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  live_identity=$(bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not identify the live reuse pid"
+  stale_identity='proc-starttime=stale-holder-killed-mid-hold'
+  [ "$stale_identity" != "$live_identity" ] || fail "fixture identities did not diverge"
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  printf '%s\n' "$stale_identity" > "$lockdir/pid-start"
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lockdir") || rc=$?
+  is_live_non_zombie "$live" || fail "identity-mismatch steal signalled the reused pid"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "acquirer failed to steal a reused-pid hold with mismatched identity (rc=$rc)"
+  [ "$newpid" != "$live" ] || fail "reused-pid hold was not replaced (still $live)"
+  [ -n "$newpid" ] || fail "reclaimed lock has no pid recorded"
+  pass "a live reused pid with mismatched recorded identity is reclaimed without being signalled"
+}
+
+# The same live pid holding with its own matching recorded start time is a
+# genuine holder and must be refused, proving the start-time check gates the
+# steal rather than the pid's mere existence in both directions.
+test_lock_keeps_live_holder_with_matching_identity() {
+  local dir state lockdir live live_identity out lockpid
+  dir=$(make_case lock-matching-identity)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  live_identity=$(bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not identify the live holder pid"
+  [ -n "$live_identity" ] || fail "live holder identity computed empty"
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  printf '%s\n' "$live_identity" > "$lockdir/pid-start"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "live matching-identity hold was stolen: $out" ;;
+  esac
+  case "$out" in
+    *"held=$live"*) ;;
+    *) fail "live matching-identity holder not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  [ "$lockpid" = "$live" ] || fail "live matching-identity holder's lock pid was clobbered (got '$lockpid')"
+  pass "a live holder whose recorded identity matches is never stolen"
+}
+
+# Every fresh hold must record its holder's identity, or the reuse protection
+# above never engages for the holds this build creates.
+test_lock_claim_records_holder_identity() {
+  local dir state lockdir rc
+  dir=$(make_case lock-claim-identity)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    # Resolve the holder pid in this frame: inside $(...) BASHPID is the
+    # substitution child, whose /proc start time never matches the holder.
+    fm_current_pid holder || exit 6
+    fm_lock_try_acquire "$2" || exit 7
+    recorded=$(cat "$2/pid-identity" 2>/dev/null || true)
+    [ -n "$recorded" ] || exit 8
+    current=$(fm_pid_identity "$holder" 2>/dev/null) || exit 9
+    [ "$recorded" = "$current" ] || exit 10
+    recorded=$(cat "$2/pid-start" 2>/dev/null || true)
+    [ -n "$recorded" ] || exit 11
+    current=$(fm_pid_start_identity "$holder" 2>/dev/null) || exit 12
+    [ "$recorded" = "$current" ] || exit 13
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "fresh hold did not record its holder identity (rc=$rc)"
+  pass "a fresh lock hold records the holder's pid-identity and start time"
+}
+
+# A holder that exec's into another program is the ordinary "take the lock, then
+# become the long-lived thing" shape: one process throughout, same pid, same
+# start time, an entirely different command. Holder liveness must still read it
+# as the genuine holder. The two signals are driven apart deliberately - the
+# full pid-identity is asserted to have CHANGED across the exec while the
+# recorded start time is asserted to have survived it - so the case cannot go
+# quietly vacuous, and the contender is then required to refuse the steal.
+# Comparing pid-identity here instead would call a live holder dead and hand its
+# lock away mid-hold.
+test_lock_keeps_live_holder_that_exec_changed_its_command() {
+  local dir state lockdir ready holder before after now_start recorded out lockpid i
+  dir=$(make_case lock-exec-holder)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  ready="$dir/held"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    fm_pid_identity "${BASHPID:-$$}" > "$3.identity" 2>/dev/null
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    exec sleep 300
+  ' _ "$LIB" "$lockdir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$ready" ] || { kill "$holder" 2>/dev/null || true; fail "exec holder never took the lock"; }
+  before=$(cat "$ready.identity" 2>/dev/null || true)
+  after=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder" 2>/dev/null || true)
+  now_start=$(bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$LIB" "$holder" 2>/dev/null || true)
+  recorded=$(cat "$lockdir/pid-start" 2>/dev/null || true)
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ -n "$before" ] && [ -n "$after" ] \
+    || fail "could not read the exec holder's identity on both sides of the exec"
+  [ "$before" != "$after" ] \
+    || fail "fixture did not diverge: the exec left pid-identity unchanged, so this case proves nothing"
+  [ -n "$recorded" ] && [ "$recorded" = "$now_start" ] \
+    || fail "the exec changed the holder's recorded start time (recorded '$recorded', now '$now_start')"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "a live holder that exec'd into another program had its lock stolen: $out" ;;
+  esac
+  case "$out" in
+    *"held=$holder"*) ;;
+    *) fail "exec'd holder not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  [ "$lockpid" = "$holder" ] || fail "exec'd holder's lock pid was clobbered (got '$lockpid')"
+  pass "a live holder that exec'd into another program keeps its lock"
+}
+
+# Holder liveness keys on string equality of the recorded start time, and the
+# `ps -o lstart` fallback renders that time in the caller's zone. A contender
+# under a different TZ than the holder must still read a live holder as the
+# same process: without the TZ pin the same instant renders as two strings and
+# the live holder is stolen from mid-hold. The zones are chosen 16 hours apart
+# and the raw unpinned rendering is asserted to differ between them, so the case
+# cannot pass on a host where both zones happen to agree.
+test_lock_keeps_live_holder_across_caller_timezones() {
+  local dir state lockdir ready holder raw_tokyo raw_la out lockpid i
+  dir=$(make_case lock-tz-holder)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  ready="$dir/held"
+  TZ=Asia/Tokyo FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    exec sleep 300
+  ' _ "$LIB" "$lockdir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$ready" ] || { kill "$holder" 2>/dev/null || true; fail "Tokyo holder never took the lock"; }
+  raw_tokyo=$(TZ=Asia/Tokyo LC_ALL=C ps -p "$holder" -o lstart= 2>/dev/null || true)
+  raw_la=$(TZ=America/Los_Angeles LC_ALL=C ps -p "$holder" -o lstart= 2>/dev/null || true)
+  out=$(TZ=America/Los_Angeles FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ -n "$raw_tokyo" ] && [ -n "$raw_la" ] \
+    || fail "could not render the holder's start time in both zones"
+  [ "$raw_tokyo" != "$raw_la" ] \
+    || fail "fixture did not diverge: unpinned lstart rendered identically in both zones, so this case proves nothing"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "a live holder was stolen by a contender running under a different TZ: $out" ;;
+  esac
+  case "$out" in
+    *"held=$holder"*) ;;
+    *) fail "cross-zone holder not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  [ "$lockpid" = "$holder" ] || fail "cross-zone holder's lock pid was clobbered (got '$lockpid')"
+  pass "a live holder keeps its lock against a contender running under a different TZ"
+}
+
 test_lock_does_not_steal_live_lock() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-noop)
@@ -1114,6 +1323,11 @@ test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
+test_lock_steals_live_reused_pid_with_mismatched_identity
+test_lock_keeps_live_holder_with_matching_identity
+test_lock_keeps_live_holder_that_exec_changed_its_command
+test_lock_keeps_live_holder_across_caller_timezones
+test_lock_claim_records_holder_identity
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate

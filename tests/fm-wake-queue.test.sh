@@ -697,8 +697,29 @@ SH
   pass "structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes"
 }
 
+# assert_full_annotation <drain-out> <status-key> <status-file> <message>: assert
+# that <drain-out> carries the drain's unread-status annotation for <status-key>
+# with the status file's bytes reproduced in full.
+#
+# The UNREAD STATUS section is deliberately unbounded - it exists so an answer
+# buried under later routine lines is never dropped - so a single annotation can
+# be arbitrarily long, which puts it past the size a grep PATTERN may be (see
+# CONTRIBUTING.md "Testing"). Matching a whole annotation line as a grep pattern
+# would therefore measure the assertion tool's budget rather than the drain, so
+# select the line by its short key prefix and compare the bytes with cmp, which
+# has no pattern-size limit and stays exact at any annotation length.
+assert_full_annotation() {
+  local out=$1 key=$2 status_file=$3 message=$4 prefix found expected
+  prefix="wake annotation: latest wake-EVENT observed at drain, not current state: $key: "
+  found="$out.$key.found"
+  expected="$out.$key.expected"
+  grep -F "$prefix" "$out" > "$found" || fail "$message"
+  { printf '%s' "$prefix"; cat "$status_file"; } > "$expected"
+  cmp -s "$expected" "$found" || fail "$message"
+}
+
 test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
-  local dir state out i raw_count expected
+  local dir state out i raw_count
   dir=$(make_case complete-enrichment)
   state="$dir/state"
   out="$dir/drain.out"
@@ -724,14 +745,12 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
 
-  expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
-  grep -Fx "$expected" "$out" >/dev/null \
-    || fail "the oversized unread status line was truncated or omitted"
+  assert_full_annotation "$out" huge.status "$state/huge.status" \
+    "the oversized unread status line was truncated or omitted"
   i=1
   while [ "$i" -le 8 ]; do
-    expected="wake annotation: latest wake-EVENT observed at drain, not current state: many-$i.status: $(cat "$state/many-$i.status")"
-    grep -Fx "$expected" "$out" >/dev/null \
-      || fail "readable status many-$i was truncated or omitted"
+    assert_full_annotation "$out" "many-$i.status" "$state/many-$i.status" \
+      "readable status many-$i was truncated or omitted"
     i=$((i + 1))
   done
   if grep -E '^wake annotation:.*(truncated|omitted)' "$out" >/dev/null; then
@@ -1687,6 +1706,149 @@ SH
   pass "bounded acquire hands ownership to the waiting caller after contention"
 }
 
+# The bounded acquire transfers the hold from its timed helper to the caller, so
+# the whole holder record must move, not just the pid. A leftover helper
+# pid-start makes fm_lock_holder_alive measure the live caller against a dead
+# process's start time, read the genuine holder as dead, and hand a contender a
+# lock that is still held - the queue rewrite/append overlap that drops wakes.
+# The fixture drives the two start signals apart deterministically instead of
+# waiting for the acquire to span a wall-clock second, and asserts that
+# divergence, so the case cannot pass vacuously.
+test_bounded_lock_handoff_refuses_a_third_contender() {
+  local dir state lock holder_pid waiter_pid i real_sleep sleep_log no_proc
+  local probe_a probe_b start_a start_b contender_rc contender_out
+  dir=$(make_case bounded-handoff-third-contender)
+  state="$dir/state"
+  lock="$state/.fixture.lock"
+  sleep_log="$dir/waiter-sleeps"
+  no_proc="$dir/no-proc"
+  real_sleep=$(command -v sleep) || fail "sleep is unavailable for the handoff fixture"
+  cat > "$dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_HANDOFF_SLEEP_LOG:-}" ]; then
+  printf '%s\n' "${1:-}" >> "$FM_HANDOFF_SLEEP_LOG"
+fi
+exec "${FM_HANDOFF_REAL_SLEEP:-/bin/sleep}" "$@"
+SH
+  chmod +x "$dir/fakebin/sleep"
+  # A start time that is a pure function of the pid: every distinct process gets
+  # a distinct one on every host, which is exactly the divergence a real
+  # handoff produces only when it happens to cross a second boundary.
+  cat > "$dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+pid=
+want_command=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p) pid=${2:-}; shift 2 || exit 1 ;;
+    -o)
+      case "${2:-}" in command=*|command) want_command=1 ;; esac
+      shift 2 || exit 1
+      ;;
+    *) shift ;;
+  esac
+done
+case "$pid" in ''|*[!0-9]*) exit 1 ;; esac
+kill -0 "$pid" 2>/dev/null || exit 1
+if [ "$want_command" -eq 1 ]; then
+  printf 'Thu Jan  1 00:00:00 2026 fixture-process-%s\n' "$pid"
+else
+  printf 'Thu Jan  1 00:00:00 2026 start-of-%s\n' "$pid"
+fi
+SH
+  chmod +x "$dir/fakebin/ps"
+
+  "$real_sleep" 30 & probe_a=$!
+  "$real_sleep" 30 & probe_b=$!
+  start_a=$(PATH="$dir/fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" \
+    bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$probe_a" || true)
+  start_b=$(PATH="$dir/fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" \
+    bash -c '. "$1"; fm_pid_start_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$probe_b" || true)
+  kill "$probe_a" "$probe_b" 2>/dev/null || true
+  wait "$probe_a" 2>/dev/null || true
+  wait "$probe_b" 2>/dev/null || true
+  [ -n "$start_a" ] && [ -n "$start_b" ] \
+    || fail "the handoff fixture could not read a process start identity at all"
+  [ "$start_a" != "$start_b" ] \
+    || fail "the handoff fixture gives two distinct processes the same start identity, so a stale record would not be detectable"
+
+  PATH="$dir/fakebin:$PATH" FM_HANDOFF_REAL_SLEEP="$real_sleep" \
+    FM_PROC_ROOT_OVERRIDE="$no_proc" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 10
+    printf "ready\n" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/holder.ready" "$dir/release-holder" &
+  holder_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/holder.ready" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "third-contender fixture holder never acquired its lock"; }
+
+  PATH="$dir/fakebin:$PATH" FM_HANDOFF_SLEEP_LOG="$sleep_log" FM_HANDOFF_REAL_SLEEP="$real_sleep" \
+    FM_PROC_ROOT_OVERRIDE="$no_proc" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait_bounded "$2" 5 || exit 11
+    current=${BASHPID:-$$}
+    printf "%s\n" "$current" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    [ "$(cat "$2/pid" 2>/dev/null || true)" = "$current" ] || exit 12
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/waiter.ready" "$dir/release-waiter" &
+  waiter_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && ! grep -Fx '0.1' "$sleep_log" >/dev/null 2>&1; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -Fx '0.1' "$sleep_log" >/dev/null 2>&1 \
+    || { kill "$holder_pid" "$waiter_pid" 2>/dev/null || true; fail "bounded helper never entered its contended wait"; }
+
+  : > "$dir/release-holder"
+  wait "$holder_pid" \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "third-contender fixture holder did not release cleanly"; }
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/waiter.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/waiter.ready" ] \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded waiter did not acquire after contention cleared"; }
+  [ "$(cat "$dir/waiter.ready")" = "$waiter_pid" ] \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand lock ownership to its caller"; }
+
+  contender_rc=0
+  contender_out=$(PATH="$dir/fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then
+      printf "stole\n"
+      exit 0
+    fi
+    printf "%s\n" "${FM_LOCK_HELD_PID:-}"
+    exit 3
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock") || contender_rc=$?
+  if [ "$contender_rc" -ne 3 ]; then
+    kill "$waiter_pid" 2>/dev/null || true
+    fail "a third contender took the lock the bounded caller still holds (rc=$contender_rc, saw '$contender_out')"
+  fi
+  [ "$contender_out" = "$waiter_pid" ] \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "the refused contender named holder '$contender_out', not the bounded caller $waiter_pid"; }
+  [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$waiter_pid" ] \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "the holder record no longer names the bounded caller after a refused contender"; }
+
+  : > "$dir/release-waiter"
+  wait "$waiter_pid" || fail "caller could not release its handed-off lock after refusing a contender"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] \
+    || fail "handed-off lock remained after caller release"
+  pass "a handed-off bounded lock still reads as held by its live caller"
+}
+
 # A live-but-stuck presentation lock must not strand the executable drain. The
 # presentation remains retriable on the next pass, while the separate queue
 # mutation lock keeps its blocking all-or-nothing acknowledgement contract.
@@ -1910,6 +2072,7 @@ test_historical_annotation_skips_announced_status() {
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
+test_bounded_lock_handoff_refuses_a_third_contender
 test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure
 test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once
