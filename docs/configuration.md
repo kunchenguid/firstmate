@@ -455,11 +455,11 @@ Its `remove` action excises only the marker-delimited Firstmate region and remov
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
-## Disabled harnesses (config/disabled-adapters)
+## Disabled adapters (config/disabled-adapters)
 
-This fork's tracked `config/disabled-adapters` policy holds one lowercase harness name per non-comment line.
-`fm-harness.sh` refuses each listed harness, `fm-spawn.sh` enforces that refusal before launch, and `fm-test-run.sh` omits its dedicated tests from default selection and coverage accounting.
-The policy is inherited into secondmate homes, so an upstream sync cannot reactivate a listed harness.
+This fork's tracked `config/disabled-adapters` policy holds one lowercase harness or runtime-backend name per non-comment line.
+`fm-harness.sh` and `fm-backend.sh` refuse listed selections before launch or auto-detection, and `fm-test-run.sh` omits their dedicated tests from default selection and coverage accounting.
+The policy is inherited into secondmate homes, so an upstream sync cannot reactivate a listed adapter.
 Only the repository owner may remove a name from this file.
 
 ## Worker launch environment (config/launch-env-allowlist)

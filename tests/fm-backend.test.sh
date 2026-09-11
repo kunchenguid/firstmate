@@ -39,6 +39,7 @@ fm_git_identity fmtest fmtest@example.invalid
 . "$ROOT/bin/fm-backend.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
+FM_DISABLED_ADAPTERS_CONFIG="$TMP_ROOT/unconfigured/disabled-adapters"
 # A claude spawn writes workspace trust into the launching user's own store,
 # and the script resolves it as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so the value
 # is pinned EMPTY beside the throwaway HOME: an inherited one would beat that
@@ -547,6 +548,62 @@ test_backend_validate_spawn_accepts_orca() {
   out=$(fm_backend_validate_spawn "tmux herdr" 2>&1) && fail "fm_backend_validate_spawn should refuse a multi-token backend name"
   assert_contains "$out" "unknown backend 'tmux herdr'" "fm_backend_validate_spawn accepted a multi-token backend name"
   pass "fm_backend_validate_spawn: all implemented lifecycle backends are spawn-supported"
+}
+
+test_tracked_policy_blocks_every_disabled_backend_and_test_lane() {
+  local policy backend out status listed coverage cfg
+  local -a configured
+  policy="$ROOT/config/disabled-adapters"
+  [ -f "$policy" ] || fail "tracked disabled-adapters policy is missing"
+  listed=$(FM_CONFIG_OVERRIDE="$ROOT/config" "$ROOT/bin/fm-test-run.sh" --list --all)
+  mapfile -t configured < <(grep -Ev '^(#|$)' "$policy")
+
+  for backend in "${configured[@]}"; do
+    case "$backend" in zellij|orca|cmux) ;; *) continue ;; esac
+    set +e
+    out=$(FM_DISABLED_ADAPTERS_CONFIG="$policy" fm_backend_validate_spawn "$backend" 2>&1)
+    status=$?
+    set -e
+    [ "$status" -ne 0 ] || fail "disabled backend '$backend' passed the spawn gate"
+    assert_contains "$out" "backend '$backend' is disabled by config/disabled-adapters" \
+      "disabled backend '$backend' did not fail through the policy gate"
+  done
+
+  cfg="$TMP_ROOT/disabled-backend-config"
+  mkdir -p "$cfg"
+  printf 'orca\n' > "$cfg/backend"
+  set +e
+  out=$(FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" FM_DISABLED_ADAPTERS_CONFIG="$policy" fm_backend_name 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a disabled configured backend should refuse"
+  assert_contains "$out" "backend 'orca' is disabled by config/disabled-adapters" \
+    "disabled configured backend did not name the policy"
+
+  set +e
+  out=$(unset TMUX HERDR_ENV; FM_DISABLED_ADAPTERS_CONFIG="$policy" CMUX_WORKSPACE_ID=test fm_backend_detect 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "a disabled detected backend should refuse"
+  assert_contains "$out" "backend 'cmux' is disabled by config/disabled-adapters" \
+    "disabled detected backend did not name the policy"
+
+  for backend in zellij orca cmux; do
+    case "$backend" in
+      zellij) paths='tests/fm-backend-zellij-smoke.test.sh tests/fm-backend-zellij.test.sh' ;;
+      orca) paths='tests/fm-backend-orca.test.sh' ;;
+      cmux) paths='tests/fm-backend-cmux-smoke.test.sh tests/fm-backend-cmux.test.sh tests/fm-cmux-claude-composer-live-e2e.test.sh' ;;
+    esac
+    for path in $paths; do
+      printf '%s\n' "$listed" | grep -Fqx "$path" \
+        && fail "disabled backend '$backend' still selects $path"
+    done
+  done
+
+  coverage=$(FM_CONFIG_OVERRIDE="$ROOT/config" "$ROOT/bin/fm-test-run.sh" --check-coverage)
+  assert_contains "$coverage" "FM_TEST_COVERAGE ok" \
+    "disabled backend policy broke test coverage accounting"
+  pass "tracked disabled backends cannot spawn, auto-detect, or select dedicated test lanes"
 }
 
 test_meta_get_and_backend_of_meta() {
@@ -1184,6 +1241,7 @@ test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
+test_tracked_policy_blocks_every_disabled_backend_and_test_lane
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta

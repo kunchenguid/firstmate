@@ -1243,6 +1243,9 @@ disabled_adapter_for_test() {  # <test-path>
     fm-rovo-harness.test.sh|fm-rovo-signals-live-e2e.test.sh) printf '%s\n' rovo ;;
     fm-omp-harness.test.sh|fm-omp-primary-live-e2e.test.sh) printf '%s\n' omp ;;
     fm-cursor-harness.test.sh|fm-cursor-primary.test.sh|fm-cursor-primary-live-e2e.test.sh|fm-wake-drain-open-decisions-cursor.test.sh) printf '%s\n' cursor ;;
+    fm-backend-zellij-smoke.test.sh|fm-backend-zellij.test.sh) printf '%s\n' zellij ;;
+    fm-backend-orca.test.sh) printf '%s\n' orca ;;
+    fm-backend-cmux-smoke.test.sh|fm-backend-cmux.test.sh|fm-cmux-claude-composer-live-e2e.test.sh) printf '%s\n' cmux ;;
     *) return 1 ;;
   esac
 }

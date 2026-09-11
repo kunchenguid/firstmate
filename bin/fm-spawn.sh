@@ -1947,8 +1947,8 @@ if [ "$KIND" = secondmate ]; then
 fi
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
-# default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown or
-# non-spawn-capable backends. The resolved value is
+# default tmux (fm_backend_name). fm_backend_validate_spawn refuses unknown,
+# disabled, or non-spawn-capable backends. The resolved value is
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
 # so the default path's meta stays byte-identical.
@@ -1956,7 +1956,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
   if [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
   else
-    BACKEND=$(fm_backend_name)
+    BACKEND=$(fm_backend_name) || exit 1
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1

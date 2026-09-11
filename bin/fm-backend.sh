@@ -53,6 +53,9 @@ FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+FM_DISABLED_ADAPTERS_CONFIG="$FM_BACKEND_CONFIG_DIR/disabled-adapters"
+# shellcheck source=bin/fm-disabled-adapters-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-disabled-adapters-lib.sh"
 
 # Verified backend adapters. Extend only after a backend gets its own
 # bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
@@ -87,10 +90,34 @@ fm_backend_is_known() {  # <name>
   fm_backend_list_contains "$FM_BACKEND_KNOWN" "$1"
 }
 
+fm_backend_refuse_disabled() {  # <name>
+  local name=$1 rc
+  if fm_disabled_adapter "$name"; then
+    printf "error: backend '%s' is disabled by config/disabled-adapters\n" "$name" >&2
+    return 1
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] || return "$rc"
+  fi
+}
+
+fm_backend_print_selected() {  # <name>
+  fm_backend_refuse_disabled "$1" || return
+  printf '%s' "$1"
+}
+
+fm_backend_detect_selected() {  # <name> <signal>
+  FM_BACKEND_DETECTED=$1
+  FM_BACKEND_DETECT_SIGNAL=$2
+  fm_backend_refuse_disabled "$1" || return 2
+  printf '%s' "$1"
+}
+
 # fm_backend_detect: detect the runtime firstmate itself is CURRENTLY executing
 # inside, from verified environment markers (mirrors bin/fm-harness.sh's
 # env-marker detection layer for harnesses). Prints the detected backend name
-# and returns 0, or returns 1 when nothing is detected. Nesting resolves
+# and returns 0, returns 1 when nothing is detected, and returns 2 when the
+# detected backend is disabled by policy. Nesting resolves
 # INNERMOST-first: tmux sets $TMUX in every process running inside it, even a
 # tmux started inside a herdr pane, so $TMUX is checked first and wins over
 # HERDR_ENV=1 in that nested case. herdr injects HERDR_ENV=1 (plus
@@ -141,27 +168,20 @@ fm_backend_detect() {
   FM_BACKEND_DETECTED=""
   FM_BACKEND_DETECT_SIGNAL=""
   if [ -n "${TMUX:-}" ]; then
-    FM_BACKEND_DETECTED=tmux
-    FM_BACKEND_DETECT_SIGNAL=TMUX
-    printf 'tmux'
-    return 0
+    fm_backend_detect_selected tmux TMUX
+    return
   fi
   if [ "${HERDR_ENV:-}" = "1" ]; then
-    FM_BACKEND_DETECTED=herdr
-    FM_BACKEND_DETECT_SIGNAL=HERDR_ENV
-    printf 'herdr'
-    return 0
+    fm_backend_detect_selected herdr HERDR_ENV
+    return
   fi
   if [ -n "${CMUX_WORKSPACE_ID:-}" ]; then
-    FM_BACKEND_DETECTED=cmux
-    FM_BACKEND_DETECT_SIGNAL=CMUX_WORKSPACE_ID
-    printf 'cmux'
-    return 0
+    fm_backend_detect_selected cmux CMUX_WORKSPACE_ID
+    return
   fi
   if fm_backend_detect_cmux_fallback; then
-    FM_BACKEND_DETECTED=cmux
-    printf 'cmux'
-    return 0
+    fm_backend_detect_selected cmux "$FM_BACKEND_DETECT_SIGNAL"
+    return
   fi
   return 1
 }
@@ -234,24 +254,25 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
 # precedence over this resolution entirely; it is not read here. Auto-detect
 # fires only when nothing was explicitly configured, so an explicit setting
-# always wins. Selecting herdr or cmux via auto-detect prints one loud stderr
+# always wins. A disabled explicit or detected backend refuses instead of
+# falling back. Selecting herdr or cmux via auto-detect prints one loud stderr
 # notice (both are experimental); auto-detecting tmux stays silent - it is
 # today's default-path behavior and callers must see zero change. The cmux
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
 # distinct from the primary-marker case.
 fm_backend_name() {
-  local line v detected marker
+  local line v detected marker rc
   if [ -n "${FM_BACKEND:-}" ]; then
-    printf '%s' "$FM_BACKEND"
-    return 0
+    fm_backend_print_selected "$FM_BACKEND"
+    return
   fi
   if [ -f "$FM_BACKEND_CONFIG_DIR/backend" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       v=$(printf '%s' "$line" | tr -d '[:space:]')
       if [ -n "$v" ]; then
-        printf '%s' "$v"
-        return 0
+        fm_backend_print_selected "$v"
+        return
       fi
     done < "$FM_BACKEND_CONFIG_DIR/backend"
   fi
@@ -272,8 +293,11 @@ fm_backend_name() {
     fi
     printf '%s' "$detected"
     return 0
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] || return "$rc"
   fi
-  printf 'tmux'
+  fm_backend_print_selected tmux
 }
 
 # fm_backend_validate: refuse an unknown backend LOUDLY. Silent on success.
@@ -289,6 +313,7 @@ fm_backend_validate() {  # <name>
 fm_backend_validate_spawn() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
+  fm_backend_refuse_disabled "$name" || return
   fm_backend_list_contains "$FM_BACKEND_SPAWN" "$name" && return 0
   echo "error: backend '$name' does not support task spawning yet (spawn-supported: $FM_BACKEND_SPAWN)" >&2
   return 1

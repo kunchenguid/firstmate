@@ -68,6 +68,8 @@ test_disabled_harness_refuses_detected_and_alias_values() {
   [ "$status" -ne 0 ] || fail "the cursor-agent alias should refuse when cursor is disabled"
   assert_contains "$out" "harness 'cursor-agent' is disabled by config/disabled-adapters" \
     "disabled cursor alias did not name the policy"
+  out=$(CLAUDECODE=1 run_harness)
+  [ "$out" = claude ] || fail "an enabled harness should read the complete policy file, got '$out'"
   rm -f "$CONFIG/disabled-adapters"
   pass "fm-harness: disabled-adapters policy blocks detected and alias harnesses"
 }
@@ -118,7 +120,9 @@ test_tracked_policy_blocks_every_listed_harness_and_test_lane() {
   listed=$(FM_CONFIG_OVERRIDE="$ROOT/config" "$ROOT/bin/fm-test-run.sh" --list --all)
 
   while IFS= read -r adapter; do
-    case "$adapter" in ''|\#*) continue ;; esac
+    case "$adapter" in
+      ''|\#*|zellij|orca|cmux) continue ;;
+    esac
     if policy_out=$(FM_CONFIG_OVERRIDE="$ROOT/config" "$HARNESS" validate "$adapter" 2>&1); then
       fail "disabled adapter '$adapter' passed the policy gate"
     else
@@ -143,7 +147,7 @@ test_tracked_policy_blocks_every_listed_harness_and_test_lane() {
   coverage=$(FM_CONFIG_OVERRIDE="$ROOT/config" "$ROOT/bin/fm-test-run.sh" --check-coverage)
   assert_contains "$coverage" "FM_TEST_COVERAGE ok" \
     "disabled adapter policy broke test coverage accounting"
-  pass "tracked disabled adapters cannot spawn or select their dedicated test lanes"
+  pass "tracked disabled harnesses cannot spawn or select their dedicated test lanes"
 }
 
 test_verified_marker_precedes_other_markers
