@@ -187,30 +187,53 @@ fm_herdr_lab_viewer_reason() { # <session>
   printf '%s' "$out" | jq -r '.result.reason // empty' 2>/dev/null
 }
 
-fm_herdr_lab_viewer_recorded_pid() { # <session> <launcher|viewer>
-  local record pid
+fm_herdr_lab_process_start() { # <pid>
+  LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+fm_herdr_lab_viewer_recorded_value() { # <session> <key>
+  local record value
   record=$(fm_herdr_lab_viewer_record_path "$1")
   [ -f "$record" ] || return 1
-  pid=$(sed -n "s/^$2=//p" "$record" | head -n 1)
+  value=$(sed -n "s/^$2=//p" "$record" | head -n 1)
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+fm_herdr_lab_viewer_owned_pid() { # <session> <launcher|viewer>
+  local pid recorded_start current_start
+  pid=$(fm_herdr_lab_viewer_recorded_value "$1" "$2_pid") || return 1
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  recorded_start=$(fm_herdr_lab_viewer_recorded_value "$1" "$2_start") || return 1
+  current_start=$(fm_herdr_lab_process_start "$pid") || return 1
+  [ -n "$current_start" ] && [ "$current_start" = "$recorded_start" ] || return 1
   printf '%s' "$pid"
 }
 
-fm_herdr_lab_viewer_signal_pid() { # <pid> <signal>
-  kill -0 "$1" 2>/dev/null || return 0
-  kill "-$2" "$1" 2>/dev/null || true
+fm_herdr_lab_viewer_signal() { # <session> <launcher|viewer> <signal>
+  local pid
+  pid=$(fm_herdr_lab_viewer_owned_pid "$1" "$2") || return 0
+  kill "-$3" "$pid" 2>/dev/null || true
 }
 
 # True while this lab owns a viewer process that is still running.
 fm_herdr_lab_viewer_owned_alive() { # <session>
-  local role pid
+  local role
   for role in viewer launcher; do
-    pid=$(fm_herdr_lab_viewer_recorded_pid "$1" "$role") || continue
-    kill -0 "$pid" 2>/dev/null && return 0
+    fm_herdr_lab_viewer_owned_pid "$1" "$role" >/dev/null && return 0
   done
   return 1
+}
+
+fm_herdr_lab_viewer_session_stopped_or_absent() { # <session>
+  local sessions running
+  sessions=$(fm_herdr_lab_session_list "$1" 2>/dev/null) || return 1
+  running=$(printf '%s' "$sessions" | jq -r --arg name "$1" \
+    '[.sessions[]? | select(.name == $name) | .running] | if length == 0 then "absent" elif length == 1 then .[0] else "ambiguous" end' \
+    2>/dev/null) || return 1
+  [ "$running" = false ] || [ "$running" = absent ]
 }
 
 fm_herdr_lab_viewer_start() { # <session>
@@ -238,8 +261,7 @@ fm_herdr_lab_viewer_start() { # <session>
   [ -f "$launcher" ] || { fm_herdr_lab_error "missing viewer launcher at $launcher"; return 1; }
   log=$(fm_herdr_lab_viewer_log_path "$name")
   mkdir -p "$(fm_herdr_lab_state_dir)" || return 1
-  nohup python3 "$launcher" "$name" \
-    "${FM_HERDR_LAB_VIEWER_ROWS:-40}" "${FM_HERDR_LAB_VIEWER_COLS:-120}" "$record" \
+  nohup python3 "$launcher" "$name" 40 120 "$record" \
     >"$log" 2>&1 &
   disown 2>/dev/null || true
 
@@ -248,7 +270,7 @@ fm_herdr_lab_viewer_start() { # <session>
   while [ "$waited" -lt "$attempt" ]; do
     reason=$(fm_herdr_lab_viewer_reason "$name") || reason=
     if [ "$reason" = cleared ]; then
-      pid=$(fm_herdr_lab_viewer_recorded_pid "$name" viewer) || pid=unknown
+      pid=$(fm_herdr_lab_viewer_owned_pid "$name" viewer) || pid=unknown
       printf 'viewer attached to %s (pid %s)\n' "$name" "$pid"
       return 0
     fi
@@ -262,7 +284,7 @@ fm_herdr_lab_viewer_start() { # <session>
 }
 
 fm_herdr_lab_viewer_stop() { # <session>
-  local name=$1 record log role pid waited attempt reason
+  local name=$1 record log role waited attempt reason
   local timeout=${FM_HERDR_LAB_VIEWER_TIMEOUT:-30}
   fm_herdr_lab_validate_name "$name" || return 1
   record=$(fm_herdr_lab_viewer_record_path "$name")
@@ -272,8 +294,7 @@ fm_herdr_lab_viewer_stop() { # <session>
   [ -f "$record" ] || return 0
 
   for role in viewer launcher; do
-    pid=$(fm_herdr_lab_viewer_recorded_pid "$name" "$role") || continue
-    fm_herdr_lab_viewer_signal_pid "$pid" TERM
+    fm_herdr_lab_viewer_signal "$name" "$role" TERM
   done
   waited=0
   while fm_herdr_lab_viewer_owned_alive "$name" && [ "$waited" -lt 50 ]; do
@@ -281,18 +302,15 @@ fm_herdr_lab_viewer_stop() { # <session>
     waited=$((waited + 1))
   done
   for role in viewer launcher; do
-    pid=$(fm_herdr_lab_viewer_recorded_pid "$name" "$role") || continue
-    fm_herdr_lab_viewer_signal_pid "$pid" KILL
+    fm_herdr_lab_viewer_signal "$name" "$role" KILL
   done
 
-  # Both recorded processes are already gone by here, so an unreadable reason
-  # means the session itself is stopped or absent rather than a viewer this
-  # helper still has to detach.
   waited=0
   attempt=$((timeout * 5))
   while [ "$waited" -lt "$attempt" ]; do
     reason=$(fm_herdr_lab_viewer_reason "$name") || reason=
-    if [ "$reason" = no_foreground_client ] || [ -z "$reason" ]; then
+    if [ "$reason" = no_foreground_client ] \
+      || { [ -z "$reason" ] && fm_herdr_lab_viewer_session_stopped_or_absent "$name"; }; then
       rm -f "$record" "$log"
       return 0
     fi

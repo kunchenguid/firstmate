@@ -65,6 +65,7 @@ case "$1 ${2:-}" in
     printf '%s\n' deleted > "$state/$session"
     ;;
   "terminal title")
+    [ "${FM_FAKE_HERDR_TITLE_FAIL:-}" != 1 ] || exit 94
     reason=no_foreground_client
     [ ! -f "$state/$session.foreground" ] || reason=$(cat "$state/$session.foreground")
     jq -nc --arg reason "$reason" '{result:{reason:$reason,type:"client_window_title"}}'
@@ -87,6 +88,7 @@ run_with_fake() {
     FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
+    FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     FM_HERDR_LAB_VIEWER_TIMEOUT="${FM_HERDR_LAB_VIEWER_TIMEOUT:-1}" \
     "$@"
@@ -260,6 +262,13 @@ test_viewer_refuses_unowned_sessions() {
   pass "fm-herdr-lab: the viewer attaches only to a session this lab owns"
 }
 
+write_viewer_record() {
+  local record=$1 pid=$2 start
+  start=$(fm_herdr_lab_process_start "$pid") || fail "could not identify viewer fixture process"
+  printf 'launcher_pid=%s\nlauncher_start=%s\nviewer_pid=%s\nviewer_start=%s\n' \
+    "$pid" "$start" "$pid" "$start" > "$record"
+}
+
 test_viewer_stop_only_signals_owned_processes() {
   local name="fm-lab-viewer-stop-$$" record status=0 holder_pid
   run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-stop fixture provision failed"
@@ -276,14 +285,24 @@ test_viewer_stop_only_signals_owned_processes() {
   # foreground client again.
   sleep 20 &
   holder_pid=$!
-  printf 'launcher=%s\nviewer=%s\n' "$holder_pid" "$holder_pid" > "$record"
+  write_viewer_record "$record" "$holder_pid"
   status=0
   run_with_fake fm_herdr_lab_viewer_stop "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "stop must fail while the session still reports a foreground client"
+  wait "$holder_pid" 2>/dev/null || true
   kill -0 "$holder_pid" 2>/dev/null && fail "stop left the recorded viewer process running"
   assert_present "$record" "a failed detach discarded the viewer record it still needs"
 
+  sleep 20 &
+  holder_pid=$!
+  printf 'launcher_pid=%s\nlauncher_start=not-this-process\nviewer_pid=%s\nviewer_start=not-this-process\n' \
+    "$holder_pid" "$holder_pid" > "$record"
   printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
+  run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "stop rejected a stale process record"
+  kill -0 "$holder_pid" 2>/dev/null || fail "stop signalled a PID whose recorded identity did not match"
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
   run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "stop failed once the client had detached"
   assert_absent "$record" "a confirmed detach left the viewer record behind"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after viewer stop failed"
@@ -297,7 +316,7 @@ test_teardown_refuses_while_viewer_attached() {
   printf '%s\n' cleared > "$FAKE_STATE/$name.foreground"
   sleep 20 &
   holder_pid=$!
-  printf 'launcher=%s\nviewer=%s\n' "$holder_pid" "$holder_pid" > "$record"
+  write_viewer_record "$record" "$holder_pid"
   : > "$FAKE_LOG"
   run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "teardown must refuse while an owned viewer is still attached"
@@ -309,6 +328,19 @@ test_teardown_refuses_while_viewer_attached() {
   printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after the viewer detached failed"
   pass "fm-herdr-lab: teardown refuses to destroy a session an attached viewer still holds"
+}
+
+test_viewer_stop_retains_record_when_detach_is_unreadable() {
+  local name="fm-lab-viewer-unreadable-$$" record status=0
+  run_with_fake fm_herdr_lab_provision "$name" || fail "unreadable-detach fixture provision failed"
+  record=$(run_with_fake fm_herdr_lab_viewer_record_path "$name")
+  printf 'launcher_pid=99999999\nlauncher_start=stale\nviewer_pid=99999999\nviewer_start=stale\n' > "$record"
+  FM_FAKE_HERDR_TITLE_FAIL=1 run_with_fake fm_herdr_lab_viewer_stop "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "an unreadable detach result on a running session must fail closed"
+  assert_present "$record" "an unreadable detach result discarded the ownership record"
+  printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after a confirmed detach failed"
+  pass "fm-herdr-lab: unreadable detach results fail closed on running sessions"
 }
 
 test_viewer_launcher_refuses_unsafe_arguments() {
@@ -342,4 +374,5 @@ test_timed_out_provision_cancels_late_launch
 test_viewer_refuses_unowned_sessions
 test_viewer_stop_only_signals_owned_processes
 test_teardown_refuses_while_viewer_attached
+test_viewer_stop_retains_record_when_detach_is_unreadable
 test_viewer_launcher_refuses_unsafe_arguments

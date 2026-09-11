@@ -310,6 +310,9 @@ jobs:
           bin/fm-test-run.sh --family real-herdr-gated \
             --fail-on-gate-skip 'herdr not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
+          bin/fm-test-run.sh tests/fm-herdr-attached-viewer-live-e2e.test.sh \
+            --fail-on-gate-skip 'herdr not found' \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr-attached-viewer.json"
       - name: Cleanup job-owned Herdr lab sessions
         if: always()
         run: |
@@ -327,6 +330,7 @@ jobs:
           name: fm-test-timing-herdr
           path: |
             ${{ runner.temp }}/fm-test/fm-test-timing-herdr.json
+            ${{ runner.temp }}/fm-test/fm-test-timing-herdr-attached-viewer.json
             ${{ runner.temp }}/fm-herdr/sessions-before.json
             ${{ runner.temp }}/fm-herdr/default-server.log
           if-no-files-found: warn

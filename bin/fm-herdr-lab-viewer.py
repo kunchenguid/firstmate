@@ -32,6 +32,7 @@ import os
 import re
 import signal
 import struct
+import subprocess
 import sys
 import termios
 
@@ -81,10 +82,29 @@ def _child(slave, master, session):
     os._exit(127)
 
 
+def _process_start(pid):
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    value = result.stdout.strip()
+    if not value:
+        raise RuntimeError("process start time unavailable")
+    return value
+
+
 def _write_pidfile(path, launcher_pid, viewer_pid):
+    launcher_start = _process_start(launcher_pid)
+    viewer_start = _process_start(viewer_pid)
     temporary = "%s.%d.tmp" % (path, launcher_pid)
     with open(temporary, "w", encoding="utf-8") as handle:
-        handle.write("launcher=%d\nviewer=%d\n" % (launcher_pid, viewer_pid))
+        handle.write("launcher_pid=%d\n" % launcher_pid)
+        handle.write("launcher_start=%s\n" % launcher_start)
+        handle.write("viewer_pid=%d\n" % viewer_pid)
+        handle.write("viewer_start=%s\n" % viewer_start)
     os.rename(temporary, path)
 
 
@@ -133,7 +153,20 @@ def main(argv):
         _child(slave, master, session)
 
     os.close(slave)
-    _write_pidfile(pidfile, os.getpid(), viewer_pid)
+    try:
+        _write_pidfile(pidfile, os.getpid(), viewer_pid)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        sys.stderr.write("fm-herdr-lab-viewer: could not record process identity: %s\n" % error)
+        try:
+            os.kill(viewer_pid, signal.SIGKILL)
+        except OSError:
+            pass
+        os.close(master)
+        try:
+            os.waitpid(viewer_pid, 0)
+        except OSError:
+            pass
+        return 3
 
     def _signal_viewer(number):
         # The viewer may already be gone; that is the outcome we wanted anyway.
