@@ -89,6 +89,7 @@ Capture remains bounded and locally trimmed after `read-screen` becomes availabl
 
 `current_directory` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
 Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
+cmux exposes no per-surface foreground process either, so that discovery cannot tell a slow `git fetch origin` inside `treehouse get` from a refusal; it polls the path alone under the larger `FM_SPAWN_ACQUIRE_TIMEOUT` bound owned by the [`fm-spawn.sh` header](../bin/fm-spawn.sh), and a refusal names the foreground as unreadable.
 
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through cmux's submit machinery.
 On the typed plane, literal send and Enter are separate calls.

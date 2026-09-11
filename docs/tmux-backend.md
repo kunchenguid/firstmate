@@ -67,6 +67,14 @@ Cursor is identified from its exact `cursor-agent` identity or versioned install
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
 
+### Worktree acquisition wait
+
+After a ship or scout spawn sends `treehouse get` into the new window, it waits for `#{pane_current_path}` to settle on an isolated worktree.
+`treehouse get` runs `git fetch origin` before it enters the worktree subshell, so that path reads the project for the whole fetch, exactly as it does after treehouse refuses and exits.
+The wait therefore also reads the pane tty's foreground process group through `ps`, with `#{pane_current_command}` as the fallback when the process table is unreadable, to tell a fetch still under way from a shell that has already returned.
+While treehouse or a child of it holds the foreground, the spawn keeps waiting under `FM_SPAWN_ACQUIRE_TIMEOUT`; once the foreground is a shell again, the 60-second path-settle bound applies, and a shell back in the project directory fails at once with the pane's last lines.
+The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns the bounds and the refusal wording, and `tests/fm-spawn-worktree-settle.test.sh` plus the reader case in `tests/fm-tmux-agent-liveness.test.sh` pin the behavior.
+
 ### Composer, busy state, and delivery
 
 Agent liveness and composer safety are separate checks.

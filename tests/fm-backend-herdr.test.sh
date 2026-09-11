@@ -3686,6 +3686,34 @@ test_current_path_reads_cwd() {
   pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the frozen creation-time cwd"
 }
 
+# The post-`treehouse get` wait in fm-spawn.sh needs the pane's foreground
+# process group, not only its cwd: treehouse fetches BEFORE it enters the
+# worktree subshell, so foreground_cwd reads the project for the whole fetch
+# exactly as it does after a refusal. The reader must name every process in
+# the group with its cwd and cmdline, keep an empty middle field as its own
+# tab-delimited slot, tolerate a release that omits cwd or cmdline, and
+# describe only the pane it was asked about.
+test_foreground_processes_reads_process_info() {
+  local dir log resp fb out expected
+  dir="$TMP_ROOT/fg"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":10,"foreground_process_group_id":20,"foreground_processes":[{"pid":20,"name":"treehouse","cmdline":"treehouse get","cwd":"/tmp/proj"},{"pid":21,"name":"git","argv":["git","fetch","origin"],"cwd":"/tmp/proj"},{"pid":22,"name":"ssh"}]}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w9:p9","foreground_processes":[{"pid":30,"name":"zsh","cmdline":"-zsh","cwd":"/tmp/elsewhere"}]}}}' > "$resp/2.out"
+  printf '1\n' > "$resp/3.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_foreground_processes default:w1:p2' "$ROOT" )
+  expected=$(printf 'treehouse\t/tmp/proj\ttreehouse get\ngit\t/tmp/proj\tgit fetch origin\nssh\t\t')
+  [ "$out" = "$expected" ] || fail "foreground_processes should print one name/cwd/cmdline line per foreground process, got:"$'\n'"$out"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''process-info'$'\x1f''--pane'$'\x1f''w1:p2' "foreground_processes did not call pane process-info for the pane"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_foreground_processes default:w1:p2' "$ROOT" )
+  [ -z "$out" ] || fail "a process-info body for another pane must print nothing, got '$out'"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_foreground_processes default:w1:p2 && echo "rc=0"' "$ROOT" )
+  [ -z "$out" ] || fail "a failed process-info read must print nothing and fail, got '$out'"
+  pass "fm_backend_herdr_foreground_processes: names every foreground process with cwd and cmdline, only for the asked pane"
+}
+
 # --- busy_state (semantic agent state) ---------------------------------------
 
 test_busy_state_working_maps_to_busy() {
@@ -5305,6 +5333,7 @@ test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
+test_foreground_processes_reads_process_info
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent

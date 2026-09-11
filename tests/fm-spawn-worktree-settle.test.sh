@@ -19,6 +19,18 @@
 # comparing only against the project adopted it and the isolation guard then
 # refused the launch. The cases below cover both the transient and the pane
 # that never leaves the primary at all.
+#
+# The loop's bound is two-phase (bin/fm-spawn.sh header, FM_SPAWN_ACQUIRE_TIMEOUT):
+# `treehouse get` runs `git fetch origin` BEFORE it enters the worktree
+# subshell, so the pane's path reads the project for the whole fetch exactly
+# as it does after a pool-cap refusal. The fake tmux below therefore also
+# answers `#{pane_current_command}` (treehouse for the first
+# FM_FAKE_TREEHOUSE_READS path reads, then the shell named by
+# FM_FAKE_PANE_SHELL) and `capture-pane` (FM_FAKE_PANE_TAIL), and the later
+# cases pin that a fetch outlasting the old 60s budget still spawns, that an
+# acquisition past its own bound is reported as still running, that a
+# refusal fails fast with the pane's own reason, and that an unreadable
+# foreground is named as such.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -51,8 +63,24 @@ case "$*" in
     fi
     exit 0
     ;;
+  # The foreground view: the spawn reads it right after each path read, so
+  # the path read count is the poll number. No tty is reported, so the
+  # reader's process-table half is skipped and the title alone answers.
+  *"#{pane_current_command}"*)
+    countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
+    n=0
+    [ -f "$countfile" ] && n=$(cat "$countfile")
+    if [ "$n" -le "${FM_FAKE_TREEHOUSE_READS:-0}" ]; then
+      printf 'treehouse\n'
+    else
+      printf '%s\n' "${FM_FAKE_PANE_SHELL-zsh}"
+    fi
+    exit 0
+    ;;
+  *"#{pane_tty}"*) printf '\n'; exit 0 ;;
 esac
 case "${1:-}" in
+  capture-pane) printf '%b' "${FM_FAKE_PANE_TAIL:-}"; exit 0 ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
@@ -65,13 +93,16 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-# make_settle_case <name> <id> <stale_reads> builds a home, a primary project
-# with a real worktree (the eventual settled path), and a separate real git
-# repo standing in for the stale path (a real checkout of something else
-# entirely, distinct from both the project and the worktree - mirroring the
-# live incident where the stale read was another real firstmate home).
+# make_settle_case <name> <id> <stale_reads> [project] builds a home, a primary
+# project with a real worktree (the eventual settled path), and a separate
+# real git repo standing in for the stale path (a real checkout of something
+# else entirely, distinct from both the project and the worktree - mirroring
+# the live incident where the stale read was another real firstmate home).
+# With `project` as the fourth argument the stale path is the project itself,
+# which is what the pane reads while `treehouse get` is still fetching and
+# after it has refused.
 make_settle_case() {
-  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile
+  local name=$1 id=$2 stale_reads=$3 stale_kind=${4:-other} case_dir home proj wt stale fakebin countfile
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -82,7 +113,11 @@ make_settle_case() {
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
-  fm_git_init_commit "$stale"
+  if [ "$stale_kind" = project ]; then
+    stale=$proj
+  else
+    fm_git_init_commit "$stale"
+  fi
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
@@ -102,6 +137,18 @@ $1
 EOF
 }
 
+# Foreground knobs for the fake pane, reset per case: how many polls report
+# treehouse in the foreground, which shell name follows (empty = the
+# foreground cannot be read at all), the pane's rendered tail, and the
+# acquisition bound under test.
+reset_settle_knobs() {
+  TREEHOUSE_READS=0
+  PANE_SHELL=zsh
+  PANE_TAIL=
+  ACQUIRE_TIMEOUT=
+}
+reset_settle_knobs
+
 run_settle_spawn() {
   local id=$1
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -110,6 +157,8 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_TREEHOUSE_READS="$TREEHOUSE_READS" FM_FAKE_PANE_SHELL="$PANE_SHELL" \
+    FM_FAKE_PANE_TAIL="$PANE_TAIL" FM_SPAWN_ACQUIRE_TIMEOUT="$ACQUIRE_TIMEOUT" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -200,30 +249,160 @@ test_transient_primary_checkout_is_not_accepted() {
 }
 
 # A pane that never leaves the primary checkout must still fail at the deadline
-# rather than waiting forever or recording the primary.
+# rather than waiting forever or recording the primary. Its foreground is a
+# shell that was never seen running treehouse, and the refusal must say
+# exactly that instead of claiming treehouse entered nothing.
 test_primary_checkout_that_never_settles_fails_at_the_deadline() {
-  local rec id out status
+  local rec id out status reads
   id=settle-primary-stuck-z4
   rec=$(make_primary_case settle-primary-stuck "$id" 100000)
   read_settle_record "$rec"
   fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
 
   out=$(run_settle_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
-  assert_contains "$out" "did not enter an isolated worktree" \
-    "spawn did not explain that the pane never reached an isolated worktree"
+  assert_contains "$out" "foreground was a shell, not treehouse get" \
+    "spawn did not explain that the pane's foreground was a shell"
+  assert_contains "$out" "never seen running" \
+    "spawn did not say treehouse get was never observed"
+  assert_not_contains "$out" "did not enter" \
+    "spawn claimed treehouse did not enter a worktree without evidence it ran"
   assert_contains "$out" "$STALE_DIR" \
     "the refusal did not name the path the pane kept reporting"
   assert_contains "$out" "repository's primary checkout" \
     "the refusal did not say why that path was rejected"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -le 62 ] || fail "a shell foreground must stay under the 60s settle bound, but the spawn polled $reads times"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
+}
+
+# The 2026-09-11 incident: `treehouse get` fetches BEFORE it enters the
+# worktree, and on a slow origin the fetch outlasted the fixed 60s budget. The
+# pane reads the project path with treehouse in the foreground for 70 polls,
+# then the worktree; the spawn must keep waiting and succeed. The read count
+# is asserted above the old budget so the case cannot go quietly vacuous.
+test_slow_fetch_past_the_old_budget_still_spawns() {
+  local rec id out status reads
+  id=settle-slow-fetch-z5
+  rec=$(make_settle_case settle-slow-fetch "$id" 70 project)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  TREEHOUSE_READS=70
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should wait out a slow fetch while treehouse is still running"$'\n'"$out"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the worktree treehouse eventually entered"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -gt 60 ] || fail "the fetch was meant to outlast the old 60-read budget, but the spawn only polled $reads times"
+  [ "$reads" -eq 72 ] || fail "expected the 70 fetching reads plus the two agreeing worktree reads, got $reads"
+  pass "a fetch outlasting the old 60s budget still spawns while treehouse is running"
+}
+
+# An acquisition that never finishes is reported as exactly that: treehouse
+# still running, the bound it exceeded, the foreground, and the pane's own
+# last lines. It must never claim treehouse failed to enter a worktree.
+test_acquisition_past_its_bound_is_reported_as_still_running() {
+  local rec id out status reads
+  id=settle-fetch-bound-z6
+  rec=$(make_settle_case settle-fetch-bound "$id" 100000 project)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  TREEHOUSE_READS=100000
+  ACQUIRE_TIMEOUT=7
+  PANE_TAIL='$ treehouse get\nFetching origin...\n'
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane whose acquisition never finished"$'\n'"$out"
+  assert_contains "$out" "treehouse get is still running after the 7s acquisition bound (FM_SPAWN_ACQUIRE_TIMEOUT)" \
+    "spawn did not report the acquisition as still running under its bound"
+  assert_contains "$out" "foreground now: treehouse" \
+    "spawn did not print the pane's foreground process"
+  assert_contains "$out" "| Fetching origin..." \
+    "spawn did not print the pane's last lines verbatim"
+  assert_not_contains "$out" "did not enter" \
+    "spawn claimed treehouse did not enter a worktree while it was still running"
+  assert_not_contains "$out" "exited without entering" \
+    "spawn claimed treehouse exited while it was still running"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -le 9 ] || fail "the 7s acquisition bound was not honoured: the spawn polled $reads times"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an acquisition past its bound is reported as still running, with the pane's foreground and last lines"
+}
+
+# The pool-cap incident: treehouse refuses in about 3s with a one-line reason
+# on the pane and the shell returns to the project directory. The spawn must
+# fail as soon as the shell is back there, not after the 60s bound, and the
+# refusal must carry treehouse's own line.
+test_pool_cap_refusal_fails_fast_with_the_pane_reason() {
+  local rec id out status reads
+  id=settle-pool-cap-z7
+  rec=$(make_settle_case settle-pool-cap "$id" 100000 project)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  TREEHOUSE_READS=2
+  PANE_TAIL='$ treehouse get\nerror: all 16 worktrees are in use or dirty (max_trees = 16); return one with treehouse return\n$ \n\n'
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane whose treehouse get refused"$'\n'"$out"
+  assert_contains "$out" "treehouse get exited without entering a worktree" \
+    "spawn did not report that treehouse exited without entering"
+  assert_contains "$out" "back in the spawning project '$PROJ_DIR'" \
+    "spawn did not say the shell returned to the project"
+  assert_contains "$out" "| error: all 16 worktrees are in use or dirty (max_trees = 16)" \
+    "spawn did not relay treehouse's own refusal line from the pane"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -le 6 ] || fail "the refusal should fail fast once the shell is back in the project, but the spawn polled $reads times"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a treehouse refusal fails fast and relays the pane's own reason"
+}
+
+# A backend that cannot read the pane's foreground gets today's path-only
+# poll under the larger acquisition bound, and the refusal names that gap
+# instead of guessing which way treehouse went.
+test_unreadable_foreground_waits_the_acquisition_bound_and_says_so() {
+  local rec id out status reads
+  id=settle-blind-z8
+  rec=$(make_primary_case settle-blind "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  PANE_SHELL=
+  ACQUIRE_TIMEOUT=3
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never reported a worktree"$'\n'"$out"
+  assert_contains "$out" "cannot read the pane's foreground process" \
+    "spawn did not say the foreground was unreadable"
+  assert_contains "$out" "3s acquisition bound (FM_SPAWN_ACQUIRE_TIMEOUT)" \
+    "spawn did not wait under the acquisition bound"
+  assert_contains "$out" "foreground now: unreadable on backend 'tmux'" \
+    "spawn did not report the unreadable foreground"
+  assert_not_contains "$out" "did not enter" \
+    "spawn claimed treehouse did not enter a worktree without any evidence"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -le 5 ] || fail "the 3s acquisition bound was not honoured for an unreadable foreground: the spawn polled $reads times"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an unreadable foreground waits the acquisition bound and is named as unreadable"
 }
 
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_slow_fetch_past_the_old_budget_still_spawns
+test_acquisition_past_its_bound_is_reported_as_still_running
+test_pool_cap_refusal_fails_fast_with_the_pane_reason
+test_unreadable_foreground_waits_the_acquisition_bound_and_says_so
 
 echo "# all fm-spawn-worktree-settle tests passed"
