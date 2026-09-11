@@ -130,7 +130,7 @@ check_agy_idle_empty() {
       trust_seen=1
       sleep 1
     fi
-    verdict=$(fm_tmux_composer_state "$SESSION:$win")
+    verdict=$(fm_tmux_composer_state "$SESSION:$win" agy)
     [ "$verdict" = empty ] && break
     i=$((i + 1))
     sleep 1
@@ -156,14 +156,14 @@ check_agy_idle_empty() {
   printf '%s\n' "$styled" | grep -Fq "$draft" \
     || fail "agy ($version): unsent draft probe did not remain visible"
   cursor=$(fm_tmux_composer_cursor_row "$SESSION:$win")
-  draft_verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$styled" "$cursor")
+  draft_verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$styled" "$cursor" '' agy)
   plain=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win")
-  plain_verdict=$(fm_composer_classify_screen 'styled=0' "$plain")
+  plain_verdict=$(fm_composer_classify_screen 'styled=0' "$plain" '' '' agy)
   [ "$draft_verdict" = pending ] \
     || fail "agy ($version): styled cursor draft classified '$draft_verdict', expected pending"
   [ "$plain_verdict" = pending ] \
     || fail "agy ($version): cursorless draft classified '$plain_verdict', expected pending"
-  extracted=$(fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$styled")
+  extracted=$(fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$styled" "$cursor" agy)
   case "$extracted" in
     *"$draft"*) ;;
     *) fail "agy ($version): styled draft extraction lost the unsent text: $extracted" ;;

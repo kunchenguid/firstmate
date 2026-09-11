@@ -100,10 +100,10 @@ launch_cmd() {  # <name>
 # and skips only on visibly pending text, so a harness whose idle screen the
 # classifier cannot positively identify still gets its doorbell (the composer
 # matrix guard, not this one, owns re-proving the classifier per release).
-wait_ready() {  # <window>
-  local win=$1 i=0 budget=60 verdict dismissed=0 screen
+wait_ready() {  # <window> [harness]
+  local win=$1 harness=${2:-} i=0 budget=60 verdict dismissed=0 screen
   while [ "$i" -lt "$budget" ]; do
-    verdict=$(fm_tmux_composer_state "$SESSION:$win")
+    verdict=$(fm_tmux_composer_state "$SESSION:$win" "$harness")
     [ "$verdict" = empty ] && return 0
     i=$((i + 1))
     # Dismiss one non-trust startup modal (update prompts), as the composer
@@ -134,7 +134,7 @@ check_harness_doorbell() {  # <name>
   tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" \
     -- bash -lc "$cmd" \
     || { FAILED=1; printf 'not ok - %s (%s): could not launch in the isolated tmux server\n' "$name" "$version" >&2; return 0; }
-  wait_ready "$win"; ready_rc=$?
+  wait_ready "$win" "$name"; ready_rc=$?
   if [ "$ready_rc" -eq 1 ]; then
     FAILED=1
     printf 'not ok - %s (%s): composer stayed visibly pending; the pane is not steerable\n' "$name" "$version" >&2
@@ -275,7 +275,7 @@ EOF
     || die "agy ($version): control-plane interrupt did not preserve unknown semantic state"
   for _ in $(seq 1 60); do
     verdict=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state "$2"' _ "$ROOT" "$target" 2>/dev/null || true)
+      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state "$2" agy' _ "$ROOT" "$target" 2>/dev/null || true)
     [ "$verdict" = empty ] && break
     sleep 1
   done
