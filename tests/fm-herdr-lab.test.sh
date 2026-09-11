@@ -269,6 +269,42 @@ write_viewer_record() {
     "$pid" "$start" "$pid" "$start" > "$record"
 }
 
+test_viewer_start_validates_timeout_before_launch() {
+  local name="fm-lab-viewer-timeout-$$" log out status value
+  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-timeout fixture provision failed"
+  log=$(run_with_fake fm_herdr_lab_viewer_log_path "$name")
+  for value in 0 -1 0.5; do
+    status=0
+    out=$(FM_HERDR_LAB_VIEWER_TIMEOUT="$value" run_with_fake fm_herdr_lab_viewer_start "$name" 2>&1) || status=$?
+    expect_code 1 "$status" "invalid viewer timeout '$value' must be refused"
+    assert_contains "$out" "must be a positive integer" "invalid viewer timeout refusal was unclear"
+    assert_absent "$log" "invalid viewer timeout '$value' launched the viewer"
+  done
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-timeout fixture teardown failed"
+  pass "fm-herdr-lab: viewer timeout is validated before launch"
+}
+
+test_viewer_start_requires_its_owned_process() {
+  local name="fm-lab-viewer-ownership-$$" out status=0 marker="$TMP_ROOT/viewer-launched"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-ownership fixture provision failed"
+  printf '%s\n' cleared > "$FAKE_STATE/$name.foreground"
+  cat > "$FAKEBIN/python3" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_FAKE_VIEWER_MARKER"
+exit 0
+SH
+  chmod +x "$FAKEBIN/python3"
+  out=$(FM_FAKE_VIEWER_MARKER="$marker" run_with_fake fm_herdr_lab_viewer_start "$name" 2>&1) || status=$?
+  rm -f "$FAKEBIN/python3"
+  expect_code 1 "$status" "a foreign foreground client must not satisfy viewer start"
+  assert_present "$marker" "viewer ownership fixture did not launch"
+  assert_contains "$out" "did not become the foreground client" "ownership failure did not time out clearly"
+  assert_not_contains "$out" "viewer attached" "start claimed a foreign foreground client as its own"
+  printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-ownership fixture teardown failed"
+  pass "fm-herdr-lab: viewer start requires an identity-matched owned process"
+}
+
 test_viewer_stop_only_signals_owned_processes() {
   local name="fm-lab-viewer-stop-$$" record status=0 holder_pid
   run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-stop fixture provision failed"
@@ -372,6 +408,8 @@ test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch
 test_viewer_refuses_unowned_sessions
+test_viewer_start_validates_timeout_before_launch
+test_viewer_start_requires_its_owned_process
 test_viewer_stop_only_signals_owned_processes
 test_teardown_refuses_while_viewer_attached
 test_viewer_stop_retains_record_when_detach_is_unreadable

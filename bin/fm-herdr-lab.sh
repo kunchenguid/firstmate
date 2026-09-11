@@ -236,10 +236,24 @@ fm_herdr_lab_viewer_session_stopped_or_absent() { # <session>
   [ "$running" = false ] || [ "$running" = absent ]
 }
 
+fm_herdr_lab_viewer_timeout() {
+  local raw=${FM_HERDR_LAB_VIEWER_TIMEOUT:-30}
+  if [[ ! "$raw" =~ ^[0-9]+$ ]] || [[ ! "$raw" =~ [1-9] ]]; then
+    fm_herdr_lab_error "FM_HERDR_LAB_VIEWER_TIMEOUT must be a positive integer"
+    return 1
+  fi
+  raw=${raw#"${raw%%[!0]*}"}
+  [ "${#raw}" -le 9 ] || {
+    fm_herdr_lab_error "FM_HERDR_LAB_VIEWER_TIMEOUT is too large"
+    return 1
+  }
+  printf '%s' "$raw"
+}
+
 fm_herdr_lab_viewer_start() { # <session>
-  local name=$1 record log launcher waited attempt reason pid
-  local timeout=${FM_HERDR_LAB_VIEWER_TIMEOUT:-30}
+  local name=$1 record log launcher waited attempt reason pid timeout
   fm_herdr_lab_validate_name "$name" || return 1
+  timeout=$(fm_herdr_lab_viewer_timeout) || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
   command -v python3 >/dev/null 2>&1 || { fm_herdr_lab_error "python3 is required for the lab viewer"; return 1; }
@@ -270,9 +284,11 @@ fm_herdr_lab_viewer_start() { # <session>
   while [ "$waited" -lt "$attempt" ]; do
     reason=$(fm_herdr_lab_viewer_reason "$name") || reason=
     if [ "$reason" = cleared ]; then
-      pid=$(fm_herdr_lab_viewer_owned_pid "$name" viewer) || pid=unknown
-      printf 'viewer attached to %s (pid %s)\n' "$name" "$pid"
-      return 0
+      pid=$(fm_herdr_lab_viewer_owned_pid "$name" viewer) || pid=
+      if [ -n "$pid" ]; then
+        printf 'viewer attached to %s (pid %s)\n' "$name" "$pid"
+        return 0
+      fi
     fi
     sleep 0.2
     waited=$((waited + 1))
@@ -284,9 +300,9 @@ fm_herdr_lab_viewer_start() { # <session>
 }
 
 fm_herdr_lab_viewer_stop() { # <session>
-  local name=$1 record log role waited attempt reason
-  local timeout=${FM_HERDR_LAB_VIEWER_TIMEOUT:-30}
+  local name=$1 record log role waited attempt reason timeout
   fm_herdr_lab_validate_name "$name" || return 1
+  timeout=$(fm_herdr_lab_viewer_timeout) || return 1
   record=$(fm_herdr_lab_viewer_record_path "$name")
   log=$(fm_herdr_lab_viewer_log_path "$name")
   # An absent record means this lab owns no viewer. Any client attached in that
