@@ -2488,6 +2488,34 @@ test_projection_seeded_prune_refuses_active_tab() {
   pass "herdr presentation focus: projected seeded pruning refuses the active tab"
 }
 
+test_sidebar_labels_are_compact_and_parent-aware() {
+  local main secondmate worker long_worker
+  main=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_label main ignored' "$ROOT")
+  secondmate=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_label secondmate 2ndmate-shipwright' "$ROOT")
+  worker=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_label worker fm-art-4401 firstmate' "$ROOT")
+  long_worker=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_label worker fm-fix-herdr-sidebar-names 2ndmate-shipwright' "$ROOT")
+  [ "$main" = '● main' ] || fail "primary sidebar label was wrong: $main"
+  [ "$secondmate" = '● shipwright' ] || fail "secondmate sidebar label was wrong: $secondmate"
+  [ "$worker" = '└ 4401 ·main' ] || fail "primary worker sidebar label was wrong: $worker"
+  [ "$long_worker" = '└ -names ·sh' ] || fail "long secondmate worker label was wrong: $long_worker"
+  [ "${#main}" -le 12 ] && [ "${#secondmate}" -le 12 ] \
+    && [ "${#worker}" -le 12 ] && [ "${#long_worker}" -le 12 ] \
+    || fail "sidebar labels exceeded the twelve-character budget"
+  pass "herdr sidebar labels: role glyphs, distinctive tails, parent suffixes, and a twelve-character cap"
+}
+
+test_sidebar_metadata_targets_the_exact_pane() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/sidebar-metadata"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_report_sidebar_metadata fmtest w7:p2 worker fm-art-4401 firstmate w1' "$ROOT" 2>&1) \
+    || fail "sidebar metadata publication failed: $out"
+  assert_contains "$(cat "$log")" $'HERDR_SESSION=fmtest\x1fpane\x1freport-metadata\x1fw7:p2\x1f--source\x1ffirstmate\x1f--title\x1f└ 4401 ·main\x1f--display-agent\x1f└ 4401 ·main\x1f--token\x1fparent-workspace=w1' \
+    "sidebar metadata did not target the exact pane with the compact title and parent binding"
+  pass "herdr sidebar metadata: compact title and parent binding are written to the exact pane"
+}
+
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
   local primary secondmate token
   token='AbCdEfGhIjKlMnOpQrStUv'
@@ -2540,6 +2568,34 @@ SH
   assert_not_contains "$(cat "$log")" $'session\x1fdelete' "projection ordering called session delete"
   assert_not_contains "$(cat "$log")" $'workspace\x1frename' "projection ordering called a label-based workspace mutation"
   pass "herdr presentation ordering: exact new workspace appends to the primary block while focus and relative orders stay stable"
+}
+
+test_projection_order_uses_exact_parent_token_for_new_children() {
+  local dir log resp fb mover mover_log out status
+  dir="$TMP_ROOT/projection-order-parent-token"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
+  : > "$log"; : > "$mover_log"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w3","label":"2ndmate-alpha"},{"workspace_id":"w4","label":"└ foreign · p:AbCdEfGhIjKlMnOpQrStUv","tokens":{"parent":"w3"}},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","tokens":{"parent":"w1"}}]}}' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$FM_FAKE_MOVER_LOG"
+printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","tokens":{"parent":"w1"}},{"workspace_id":"w3","label":"2ndmate-alpha"},{"workspace_id":"w4","label":"└ foreign · p:AbCdEfGhIjKlMnOpQrStUv","tokens":{"parent":"w3"}}]}}'
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w3\\tw3:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w5 firstmate w1' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "token-aware projection ordering must not fail: $out"
+  [ -z "$out" ] || fail "token-aware projection ordering emitted a warning: $out"
+  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'w5$'\t'1 ] \
+    || fail "token-aware ordering did not insert the child after its exact parent: $(cat "$mover_log")"
+  pass "herdr presentation ordering: a new child's exact parent token keeps foreign children out of its block"
 }
 
 test_projection_order_secondmate_parent_block() {
@@ -4814,8 +4870,11 @@ test_kill_focused_workspace_stays_plain_close
 test_endpoint_confirmed_gone_gates_on_structured_presence
 test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
+test_sidebar_labels_are_compact_and_parent-aware
+test_sidebar_metadata_targets_the_exact_pane
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
+test_projection_order_uses_exact_parent_token_for_new_children
 test_projection_order_secondmate_parent_block
 test_projection_order_foreign_legacy_child_is_read_only
 test_projection_order_allows_intervening_parent_child_block

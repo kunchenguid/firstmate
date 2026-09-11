@@ -781,6 +781,9 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
   case "$task" in
     fm-*) task=${task#fm-} ;;
   esac
+  case "$task" in
+    art-*) task=${task#art-} ;;
+  esac
   printf '%s' "$task"
 }
 
@@ -790,6 +793,91 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
 # Labels and tokens remain non-authoritative correlators only.
 fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
+}
+
+# fm_backend_herdr_sidebar_tail: keep the distinctive tail of an ASCII id in
+# the fixed-width sidebar budget. Herdr renders the two glyphs used below as
+# one cell each on the supported terminal surfaces.
+fm_backend_herdr_sidebar_tail() {  # <text> <max-cells>
+  local text=$1 max=$2 start
+  case "$max" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$max" -gt 0 ] || return 0
+  if [ "${#text}" -gt "$max" ]; then
+    start=$(( ${#text} - max ))
+    text=${text:$start:$max}
+  fi
+  printf '%s' "$text"
+}
+
+# fm_backend_herdr_sidebar_parent_suffix: compact parent identity used when
+# Herdr shows agents without their workspace nesting.
+fm_backend_herdr_sidebar_parent_suffix() {  # <workspace-label>
+  local parent=$1 id
+  case "$parent" in
+    firstmate|main) printf 'main' ;;
+    2ndmate-*)
+      id=${parent#2ndmate-}
+      printf '%s' "${id:0:2}" | tr '[:upper:]' '[:lower:]'
+      ;;
+    *) printf '%s' "${parent:0:2}" | tr '[:upper:]' '[:lower:]' ;;
+  esac
+}
+
+# fm_backend_herdr_sidebar_label: the only owner of visible Herdr agent names.
+# Parent labels use a role marker and the full identity within twelve cells; worker
+# labels use a corner, the distinctive task tail, and a compact parent suffix.
+# The underlying workspace and tab labels remain longer recovery correlators.
+fm_backend_herdr_sidebar_label() {  # <main|secondmate|worker> <id> [<parent-label>]
+  local role=$1 id=$2 parent=${3:-} prefix suffix available task parent_id
+  case "$role" in
+    main)
+      printf '%s' '● main'
+      ;;
+    secondmate)
+      case "$id" in 2ndmate-*) parent_id=${id#2ndmate-} ;; *) parent_id=$id ;; esac
+      parent_id=$(fm_backend_herdr_sidebar_tail "$parent_id" 10)
+      printf '● %s' "$parent_id"
+      ;;
+    worker)
+      prefix='└ '
+      task=$(fm_backend_herdr_projection_concise_task_label "$id")
+      suffix=
+      if [ -n "$parent" ]; then
+        suffix=" ·$(fm_backend_herdr_sidebar_parent_suffix "$parent")"
+      fi
+      available=$((12 - ${#prefix} - ${#suffix}))
+      [ "$available" -gt 0 ] || { suffix=; available=$((12 - ${#prefix})); }
+      task=$(fm_backend_herdr_sidebar_tail "$task" "$available")
+      printf '%s%s%s' "$prefix" "$task" "$suffix"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_herdr_report_sidebar_metadata: apply one display-only title to an
+# exact pane. A metadata failure is caller-visible but never changes endpoint
+# authority or lifecycle state.
+fm_backend_herdr_report_sidebar_metadata() {  # <session> <pane> <role> <id> [<parent-label>] [<parent-workspace>]
+  local session=$1 pane=$2 role=$3 id=$4 parent=${5:-} parent_workspace=${6:-} title
+  title=$(fm_backend_herdr_sidebar_label "$role" "$id" "$parent") || return 1
+  if [ "$role" = worker ] && [ -n "$parent_workspace" ]; then
+    fm_backend_herdr_cli "$session" pane report-metadata "$pane" \
+      --source firstmate --title "$title" --display-agent "$title" \
+      --token "parent-workspace=$parent_workspace" >/dev/null 2>&1
+  else
+    fm_backend_herdr_cli "$session" pane report-metadata "$pane" \
+      --source firstmate --title "$title" --display-agent "$title" >/dev/null 2>&1
+  fi
+}
+
+# fm_backend_herdr_projection_workspace_bind_parent: retain the exact parent
+# workspace on the disposable projection as display-only metadata. Ordering can
+# then distinguish new-format children without trusting their mutable labels.
+fm_backend_herdr_projection_workspace_bind_parent() {  # <session> <workspace> <parent-workspace>
+  local session=$1 workspace=$2 parent_workspace=$3
+  [ -n "$session" ] && [ -n "$workspace" ] && [ -n "$parent_workspace" ] || return 1
+  fm_backend_herdr_cli "$session" workspace report-metadata "$workspace" \
+    --source firstmate --token "parent=$parent_workspace" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
@@ -1445,13 +1533,18 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     def is_new_child:
       (.label | type) == "string"
       and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
+    def has_parent_token:
+      (.tokens.parent | type) == "string" and (.tokens.parent | length) > 0;
     def is_legacy_child:
       (.label | type) == "string"
       and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
     def is_legacy_child_for($owner):
       is_legacy_child and (.label | startswith($owner + "/"));
-    def is_child_for($owner):
-      is_new_child or is_legacy_child_for($owner);
+    def is_child_for($owner_ws; $owner):
+      if has_parent_token
+      then .tokens.parent == $owner_ws
+      else is_new_child or is_legacy_child_for($owner)
+      end;
     (.result.workspaces // null) as $spaces
     | select(($spaces | type) == "array" and ($spaces | length) > 0)
     | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $created)]) as $matches
@@ -1465,7 +1558,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     | (
         reduce range($pidx + 1; $current) as $i (
           0;
-          if ($spaces[$i] | is_child_for($parent)) and (. == ($i - $pidx - 1))
+          if ($spaces[$i] | is_child_for($parent_ws; $parent)) and (. == ($i - $pidx - 1))
           then . + 1
           else .
           end
@@ -1477,7 +1570,11 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
         elif ($spaces[$i] | is_top_level_parent) then
           .active_parent = $spaces[$i].label
         elif ($spaces[$i] | is_new_child) then
-          if .active_parent == null then .valid = false else . end
+          if ($spaces[$i] | has_parent_token) then
+            .active_parent = null
+          elif .active_parent == null then
+            .valid = false
+          else . end
         elif ($spaces[$i] | is_legacy_child) then
           .active_parent as $owner
           | if $owner == null then

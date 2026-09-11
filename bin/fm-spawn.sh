@@ -1634,7 +1634,8 @@ spawn_abort_cleanup() {
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
-    if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
+    if ! spawn_herdr_presentation_order_lock_acquire \
+      "${HERDR_PROJECTION_ABORT_SESSION:-}" "${FM_BACKEND_HERDR_ABORT_LOCK_ATTEMPTS:-50}"; then
       echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
       HERDR_PROJECTION_ABORT_CLEANUP=0
     fi
@@ -4042,11 +4043,11 @@ case "$BACKEND" in
       HERDR_LABEL_HOME=$PROJ_ABS
       HERDR_LAUNCHER_RELATIONSHIP=other-home
     fi
+    HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
-      HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
@@ -4144,6 +4145,10 @@ case "$BACKEND" in
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+            if ! fm_backend_herdr_projection_workspace_bind_parent \
+              "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_WORKSPACE_ID"; then
+              echo "warning: herdr presentation could not record the exact owning workspace for visual ordering" >&2
+            fi
             fm_backend_herdr_projection_order_best_effort \
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
@@ -4240,6 +4245,42 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+fi
+if [ "$BACKEND" = herdr ]; then
+  # Herdr's agent list exposes these display-only fields; keep technical tab
+  # and workspace labels untouched because recovery owns their exact grammar.
+  if [ -z "${HERDR_PARENT_LABEL:-}" ]; then
+    HERDR_PARENT_LABEL=$(FM_HOME="${HERDR_LABEL_HOME:-$FM_HOME}" fm_backend_herdr_workspace_label)
+  fi
+  if [ "$KIND" = secondmate ]; then
+    if ! fm_backend_herdr_report_sidebar_metadata \
+      "$HERDR_SES" "$HERDR_PANE_ID" secondmate "$HERDR_PARENT_LABEL"; then
+      echo "warning: herdr could not publish the secondmate sidebar title; the technical workspace label remains available" >&2
+    fi
+    if [ -n "${FM_BACKEND_HERDR_LAUNCHER_PANE_ID:-}" ] \
+      && ! fm_backend_herdr_report_sidebar_metadata \
+        "$HERDR_SES" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" main firstmate; then
+      echo "warning: herdr could not refresh the main sidebar title" >&2
+    fi
+  else
+    if ! fm_backend_herdr_report_sidebar_metadata \
+      "$HERDR_SES" "$HERDR_PANE_ID" worker "$ID" "$HERDR_PARENT_LABEL" \
+      "${HERDR_PARENT_WORKSPACE_ID:-}"; then
+      echo "warning: herdr could not publish the worker sidebar title; the technical task label remains available" >&2
+    fi
+    if [ -n "${FM_BACKEND_HERDR_LAUNCHER_PANE_ID:-}" ]; then
+      if [ "$HERDR_PARENT_LABEL" = firstmate ]; then
+        HERDR_PARENT_ROLE=main
+      else
+        HERDR_PARENT_ROLE=secondmate
+      fi
+      if ! fm_backend_herdr_report_sidebar_metadata \
+        "$HERDR_SES" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" \
+        "$HERDR_PARENT_ROLE" "$HERDR_PARENT_LABEL"; then
+        echo "warning: herdr could not refresh the parent sidebar title" >&2
+      fi
+    fi
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
@@ -4553,9 +4594,21 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$ACCESS" != reade
       echo "error: treehouse acquisition returned a contradictory task holder" >&2
       exit 1
     }
-    TREEHOUSE_SLOT=$(printf '%s\n' "$TREEHOUSE_ALLOCATION" | jq -r '.name // empty') || {
-      echo "error: treehouse acquisition returned an unreadable slot identity" >&2
-      exit 1
+    TREEHOUSE_SLOT=$(printf '%s\n' "$TREEHOUSE_ALLOCATION" | jq -er '.name | strings | select(length>0)' 2>/dev/null) || {
+      # Current Treehouse releases omit the slot name from `get --json`, while
+      # `status --json` exposes it. Bind that name to the same path, lease, and
+      # holder before recording it; recovery refuses to guess any of them.
+      TREEHOUSE_SLOT=$(CDPATH='' cd -- "$PROJ_ABS" \
+        && treehouse status --json 2>/dev/null \
+        | jq -er --arg path "$WT" --arg real "$(real_path_or_raw "$WT")" \
+          --arg lease "$TREEHOUSE_LEASE" --arg holder "$TREEHOUSE_HOLDER" '
+            [.[] | select((.lease_id|tostring) == $lease
+              and (.lease_holder|tostring) == $holder
+              and (((.path|tostring) == $path) or ((.path|tostring) == $real)))]
+            | if length == 1 then .[0].name | strings | select(length > 0) else error("ambiguous treehouse slot") end') || {
+        echo "error: treehouse acquisition returned an unreadable slot identity" >&2
+        exit 1
+      }
     }
   fi
   spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")"
@@ -5374,7 +5427,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind access mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree treehouse_slot treehouse_lease project harness kind access mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)

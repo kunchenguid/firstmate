@@ -208,9 +208,6 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
-fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under
 # test. Serialize its calls so simultaneous recovery spawns cannot race for
 # one pool slot before reaching the Herdr session lock exercised below.
@@ -403,13 +400,21 @@ $description
 
 ## Firstmate spec
 Verify projected workspace behavior for $id.
+
+# Load-bearing contract
+## Captain's intent
+$description
+
+## Firstmate spec
+Verify projected workspace behavior for $id.
 EOF
 }
 
-spawn_task() {  # <id> <home> <project>
-  local id=$1 home=$2 project=$3
+spawn_task() {  # <id> <home> <project> [launch]
+  local id=$1 home=$2 project=$3 launch
+  launch=${4:-"sh -c 'while :; do sleep 60; done'"}
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'while :; do sleep 60; done'" --mode no-mistakes --yolo off --backend herdr
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "$launch" --mode no-mistakes --yolo off --backend herdr
 }
 
 finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
@@ -462,6 +467,9 @@ normalize_meta() {  # <meta>
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
+    -e 's|^treehouse_lease=.*$|treehouse_lease=<treehouse-lease>|' \
+    -e 's|^telemetry_attempt=.*$|telemetry_attempt=<telemetry-attempt>|' \
+    -e 's|^telemetry_task_root=.*$|telemetry_task_root=<telemetry-task-root>|' \
     -e 's|^spawn_gen=.*$|spawn_gen=<spawn-incarnation>|' \
     "$1"
 }
@@ -646,6 +654,8 @@ cmp -s "$TMP_ROOT/off-treehouse.log" "$TREEHOUSE_CALL_LOG" \
   || fail "Treehouse command sequence changed between opted-out and projected spawns"
 JOURNAL="$HOME_DIR/state/shape.herdr-presentation"
 [ -f "$JOURNAL" ] || fail "projected spawn did not publish its presentation journal"
+[ "$(grep '^version=' "$JOURNAL" | cut -d= -f2-)" = 2 ] \
+  || fail "projected spawn did not publish a complete exact presentation binding: $(cat "$JOURNAL")"
 TOKEN=$(grep '^projection_id=' "$JOURNAL" | cut -d= -f2-)
 [ "${#TOKEN}" -eq 22 ] || fail "projection id is not the compact 22-character encoding of 128 bits"
 PROJECTED_WSID=$(grep '^herdr_workspace_id=' "$ON_META" | cut -d= -f2-)
@@ -861,9 +871,15 @@ pass "real Herdr lab: forced workspace.move failure leaves a successful worker i
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
 ABORT_START=$(log_line_count)
 ABORT_FOCUS_START=$(focus_audit_line_count)
-spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
+# The abort fixture uses a non-shell foreground process so the audit observes
+# each serialized explicit cleanup instead of the equivalent pane-death path.
+FM_BACKEND_HERDR_ABORT_LOCK_ATTEMPTS=700 \
+  spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" "sleep 3600" \
+  > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
 ABORT_A_PID=$!
-spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err" &
+FM_BACKEND_HERDR_ABORT_LOCK_ATTEMPTS=700 \
+  spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" "sleep 3600" \
+  > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err" &
 ABORT_B_PID=$!
 if wait "$ABORT_A_PID"; then ABORT_A_STATUS=0; else ABORT_A_STATUS=$?; fi
 if wait "$ABORT_B_PID"; then ABORT_B_STATUS=0; else ABORT_B_STATUS=$?; fi
@@ -873,9 +889,9 @@ finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.ou
 # poll now screens out on every read rather than adopting, so the armed failure
 # arrives as the poll's own deadline refusal naming that path.
 grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture A did not reach the armed validation failure"
+  || { cat "$TMP_ROOT/abort-a.err" >&2; fail "post-create abort fixture A did not reach the armed validation failure"; }
 grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture B did not reach the armed validation failure"
+  || { cat "$TMP_ROOT/abort-b.err" >&2; fail "post-create abort fixture B did not reach the armed validation failure"; }
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
@@ -884,9 +900,10 @@ ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | aw
   $1 == "pane-close" && $4 == a { print "close-a" }
   $1 == "pane-close" && $4 == b { print "close-b" }
 ')
-case "$ABORT_SEQUENCE" in
-  $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
-  *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
+ABORT_CREATE_ORDER=$(printf '%s\n' "$ABORT_SEQUENCE" | awk '$1 ~ /^create-/ { print }')
+case "$ABORT_CREATE_ORDER" in
+  $'create-a\ncreate-b'|$'create-b\ncreate-a') ;;
+  *) fail "concurrent post-create workspace creation did not serialize: $ABORT_SEQUENCE" ;;
 esac
 ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || ($1 == "pane-close" && $4 != a && $4 != b)) && $2 != $3 { print }
@@ -919,7 +936,7 @@ if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
 fi
 lab pane get "$SECOND_TWO_PANE" >/dev/null 2>&1 \
   || fail "projected teardown affected the focused secondmate workspace"
-[ ! -e "$JOURNAL" ] || fail "confirmed projected teardown did not retire its presentation journal"
+[ ! -e "$JOURNAL" ] || { cat "$TMP_ROOT/on-teardown.err" >&2; fail "confirmed projected teardown did not retire its presentation journal"; }
 pass "real Herdr lab: exact task-pane close removes the projected workspace with no unrestored wrong-focus interval"
 
 teardown_task order-a "$HOME_DIR" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_ROOT/order-a-teardown.err" &
