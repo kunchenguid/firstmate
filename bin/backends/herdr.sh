@@ -2688,7 +2688,8 @@ EOF
 # This verdict never authorizes a Herdr mutation.
 fm_backend_herdr_projection_endpoint_matches_journal() {  # <session> <workspace-id> <journal> <task-id>
   local session=$1 workspace_id=$2 journal=$3 id=$4 token list matches
-  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 1
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
   matches=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \

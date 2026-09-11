@@ -2962,6 +2962,7 @@ remove_secondmate_registry_entry() {
 }
 
 require_exclusive_task_worktree_slot || exit 1
+TEARDOWN_WORKTREE_OWNED=1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
