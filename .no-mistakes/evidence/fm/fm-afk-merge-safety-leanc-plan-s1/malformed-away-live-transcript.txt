@@ -1,0 +1,9 @@
+$ append a duplicate top-level merge_grants definition; validate
+fm-afk-contract: record /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-malformed-62081/state/.afk-contract has an invalid merge_grants field: the field is defined more than once
+fm-afk-contract: record /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-malformed-62081/state/.afk-contract has no valid merge_grants field
+duplicate-field validate exit=1
+
+$ attach list content to scalar merge_grants: -; validate
+fm-afk-contract: record /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-malformed-62081/state/.afk-contract has an invalid merge_grants field: a stored grant line is malformed
+fm-afk-contract: record /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-malformed-62081/state/.afk-contract has no valid merge_grants field
+scalar-with-content validate exit=1

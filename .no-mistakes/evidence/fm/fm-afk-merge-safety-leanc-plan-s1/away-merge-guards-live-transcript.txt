@@ -1,0 +1,14 @@
+$ fm-afk-contract.sh grants
+task-granted
+
+$ fm-pr-merge.sh task-ungranted PR
+error: task task-ungranted is held for the captain return
+ungranted exit=1
+
+$ fm-pr-merge.sh task-granted PR --allow-red "PR must be raised via no-mistakes"
+error: --allow-red is attended-only; while the away-posture record exists the green check is absolute
+away-allow-red exit=2
+
+$ live GitHub PR identity before and after
+before: {"headRefOid":"2b20dd8831db3fc1d52b4043e702b7d9159083e2","mergedAt":null,"state":"OPEN"}
+after:  {"headRefOid":"2b20dd8831db3fc1d52b4043e702b7d9159083e2","mergedAt":null,"state":"OPEN"}

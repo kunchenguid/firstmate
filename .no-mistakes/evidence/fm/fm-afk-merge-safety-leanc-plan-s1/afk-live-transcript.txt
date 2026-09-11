@@ -1,0 +1,29 @@
+$ fm-afk-contract.sh propose --words ... --grant task-live --grant task-next
+Away posture read-back (proposed, not yet confirmed):
+  entered: 2026-09-11T15:21:07Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  merge when green (task ids): task-live, task-next
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    merge only the tasks I named when green
+  accepted clauses:
+    (none)
+  refused clauses:
+    (none)
+  everything else waits for your return: no red merge without its named check, no discard without a named object and condition, never credentials, legal, financial, or attended prompts, nothing by analogy, and every clause expires at return.
+  hard rule: forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text; no recorded clause is authority by itself.
+  recorded clauses are held for the return brief and are not executed by this release.
+Say go to confirm; restate any refused clause first if you want it recorded.
+
+$ fm-afk-contract.sh confirm
+Away posture confirmed at 2026-09-11T15:21:07Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. No mandate clauses recorded. Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself. Expected return: not given. Spend cap: 4 concurrent workers.
+
+$ fm-afk-contract.sh grants
+task-live
+task-next
+
+$ fm-afk-contract.sh archive; then grants
+/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-afk-48611/state/afk-contracts/1789140067.afk-contract
+fm-afk-contract: no record at /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.nm-live-afk-48611/state/.afk-contract
+grants-after-archive exit=1

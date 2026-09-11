@@ -1,0 +1,16 @@
+$ fm-pr-merge task URL --allow-red=ci
+error: --allow-red requires a separate check name argument
+exit=2
+
+$ fm-pr-merge task URL --allow-red ci --allow-red lint
+error: --allow-red may be specified only once
+exit=2
+
+$ fm-pr-merge task URL -- --auto
+error: extra merge arguments must not request auto-merge, a protection bypass, or branch deletion; pass --attended-override only for an explicit captain instruction
+exit=1
+
+$ fm-pr-merge task URL -- --match-head-commit deadbeef
+error: extra merge arguments must not override the head commit
+exit=1
+

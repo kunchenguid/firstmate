@@ -1,0 +1,6 @@
+$ fm-pr-merge.sh task-malformed PR  # yolo=on, malformed duplicate merge_grants
+error: PR merge refused - the away-posture record could not be read; nothing was merged
+malformed-away merge exit=1
+
+before: {"headRefOid":"2b20dd8831db3fc1d52b4043e702b7d9159083e2","mergedAt":null,"state":"OPEN"}
+after:  {"headRefOid":"2b20dd8831db3fc1d52b4043e702b7d9159083e2","mergedAt":null,"state":"OPEN"}

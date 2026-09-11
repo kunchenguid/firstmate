@@ -1,0 +1,39 @@
+$ gh pr view ... (live safety precondition summary)
+{
+  "state": "OPEN",
+  "isDraft": false,
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "UNSTABLE",
+  "headRefOid": "2b20dd8831db3fc1d52b4043e702b7d9159083e2",
+  "notGreen": [
+    {
+      "name": "PR must be raised via no-mistakes",
+      "status": "COMPLETED",
+      "conclusion": "FAILURE",
+      "state": null
+    },
+    {
+      "name": "Behavior portable serial 3",
+      "status": "COMPLETED",
+      "conclusion": "FAILURE",
+      "state": null
+    }
+  ]
+}
+
+$ fm-pr-merge.sh task-live-gate PR --allow-red "PR must be raised via no-mistakes"
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.pi/extensions/fm-primary-turnend-guard.ts -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M27PDGBK6ZXQJDV8YTMG9501/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+armed: state/task-live-gate.check.sh
+error: refusing to merge https://github.com/kunchenguid/firstmate/pull/4158
+  - check 'Behavior portable serial 3' is not green
+error: these checks are not green: Behavior portable serial 3
+merge-command exit=1
+
+$ gh pr view ... (post-attempt identity)
+{"headRefOid":"2b20dd8831db3fc1d52b4043e702b7d9159083e2","mergedAt":null,"state":"OPEN"}
