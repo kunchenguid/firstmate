@@ -5,6 +5,7 @@ description: >-
   Use before deciding any ask-user finding.
   This skill is the single owner of finding-decision policy: firstmate always applies judgment, decides findings that are unambiguous toward accepted intent, and escalates only genuinely ambiguous, expanding, or destructive ones.
   Finding authority is this skill's criteria, not the project's yolo posture.
+  Also owns the rule that a finding which is one instance of a broader defect class is enumerated up front and decided once, rather than routed one instance at a time.
 user-invocable: false
 metadata:
   internal: true
@@ -35,6 +36,16 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
    - repeated same-theme findings when incremental corrections are preserving a questionable abstraction rather than closing independent defects
    - destructive, irreversible, and genuinely security-sensitive choices, which always escalate under the stronger existing captain boundary
 5. Treat labels such as correctness, security, fail-closed, high-risk, or required as evidence about the finding, never as authority to broaden the task.
+
+## Sweep the defect class, decide once
+
+A finding is often one instance of a class: one caller of a shared helper, one use of a repeated idiom, one site of a swallowed-failure convention.
+When the finding is one instance of such a class, enumerate that whole class before deciding the instance in front of you.
+Direct the worker to find every occurrence of that class and report them as one set, which is evidence-gathering and never a license to correct them.
+If that steer goes out while a decision is parked, it must say the decision stays open, and the worker appends no resolved event until the batched decision returns through the gate.
+Then bring one decision that covers the whole class, and let only that decision, returned through the active validation gate, authorize folding the corrections into one round.
+Enumerating the class is not contract expansion, because it only establishes the real size of the defect the accepted contract already requires fixing.
+The sweep changes only the size of the evidence, never the authority: the numbered procedure above still decides who answers the batched correction, still applies its stronger destructive, irreversible, and security-sensitive captain boundaries, and still fires step 4's repeated-same-theme escalation on that bullet's own condition alone.
 
 ## Captain-facing escalation
 

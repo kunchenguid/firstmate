@@ -6,6 +6,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BRIEF="$ROOT/bin/fm-brief.sh"
+OWNER="$ROOT/.agents/skills/ask-user-authority/SKILL.md"
+AGENTS="$ROOT/AGENTS.md"
 TMP_ROOT=$(fm_test_tmproot fm-ask-user-authority)
 
 test_primary_and_secondmate_instruction_generation() {
@@ -39,4 +41,49 @@ test_primary_and_secondmate_instruction_generation() {
   pass "primary workers and secondmates receive the authority rule through generated instructions"
 }
 
+# The class-sweep rule has its own motivating evidence: one queue-refresh fix
+# cost the captain roughly nine separate ask-user decisions, each another caller
+# that ignored a swallowed failure, before the class was swept and decided once.
+# The rule is applypass-specific and layers on top of the upstream procedure, so
+# it is pinned here against the wording it actually cross-references.
+# shellcheck disable=SC2016
+test_defect_class_is_swept_and_decided_once() {
+  local brief_contract
+  assert_grep '## Sweep the defect class, decide once' "$OWNER" \
+    "class-sweep rule is missing from its owner"
+  assert_grep 'When the finding is one instance of such a class, enumerate that whole class before deciding the instance in front of you' "$OWNER" \
+    "class-sweep rule fires unconditionally or no longer enumerates the class up front"
+  assert_grep 'find every occurrence of that class and report them as one set, which is evidence-gathering and never a license to correct them' "$OWNER" \
+    "class-sweep enumeration is no longer marked report-only"
+  assert_grep 'it must say the decision stays open, and the worker appends no resolved event until the batched decision returns through the gate' "$OWNER" \
+    "an enumeration steer can silently close a parked captain decision"
+  assert_grep 'bring one decision that covers the whole class, and let only that decision, returned through the active validation gate, authorize folding the corrections into one round' "$OWNER" \
+    "class-sweep rule lost the single batched decision that alone authorizes the corrections"
+  assert_grep 'Enumerating the class is not contract expansion' "$OWNER" \
+    "class-sweep rule no longer distinguishes enumeration from contract expansion"
+  assert_grep 'The sweep changes only the size of the evidence, never the authority' "$OWNER" \
+    "class-sweep rule stopped deferring authority to the numbered procedure"
+  # Anchored on the escalation bullet the sweep defers to. Upstream folded the
+  # old step 7 into step 4's repeated-same-theme bullet, so this pointer must
+  # track that bullet and not a step number that no longer exists.
+  assert_grep "still fires step 4's repeated-same-theme escalation on that bullet's own condition alone" "$OWNER" \
+    "consolidated authority pointer lost the stronger boundaries or the escalation it defers to"
+  assert_grep 'repeated same-theme findings when incremental corrections are preserving a questionable abstraction' "$OWNER" \
+    "the escalation bullet the class-sweep pointer defers to is gone"
+
+  brief_contract=$(awk '
+    /^## 11\. Crewmate briefs$/ { found = 1; next }
+    found && /^## 12\./ { exit }
+    found { print }
+  ' "$AGENTS")
+  assert_contains "$brief_contract" 'enumerate every occurrence of that class and report them as one set' \
+    "brief contract does not require systemic work to be swept in one set"
+  assert_contains "$brief_contract" '`ask-user-authority` owns the matching one-batched-decision rule' \
+    "brief contract does not point at the class-sweep owner"
+  assert_no_grep 'enumerate that whole class before deciding the instance in front of you' "$AGENTS" \
+    "AGENTS.md carries a second copy of the class-sweep procedure instead of pointing at its owner"
+  pass "a defect class is enumerated up front and decided in one batched decision"
+}
+
 test_primary_and_secondmate_instruction_generation
+test_defect_class_is_swept_and_decided_once

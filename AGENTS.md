@@ -535,6 +535,8 @@ Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) wit
 `bin/fm-dod-lib.sh` owns what a no-mistakes worker may pass as `--intent` and its rule that the string must be self-sufficient.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
+When a fix, audit, or review task looks systemic, such as a shared helper, a repeated idiom, or a shared error-handling convention, brief the worker to enumerate every occurrence of that class and report them as one set instead of stopping at the first instance; `ask-user-authority` owns the matching one-batched-decision rule.
+
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
