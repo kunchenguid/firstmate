@@ -918,6 +918,8 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
+SPAWN_FRESH_WIRING_PENDING=0
+AGY_HOOK_ROOT=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
@@ -931,14 +933,28 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
+spawn_fresh_wiring_rollback() {
+  [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] || return 0
+  if [ -z "${AGY_HOOK_ROOT:-}" ] || ! rm -rf -- "$AGY_HOOK_ROOT"; then
+    echo "error: failed-dispatch cleanup did not remove agy hook state for $ID" >&2
+    return 1
+  fi
+  SPAWN_FRESH_WIRING_PENDING=0
+}
+
 spawn_fresh_commit_rollback() {
+  local status=0
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
       "$FM_ROOT/bin/fm-busy-event.sh" "$STATE" "$ID" "${BUSY_GEN:-}"; then
     SPAWN_FRESH_COMMIT_PENDING=0
-    return 0
+  else
+    echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    status=1
   fi
-  echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
-  return 1
+  if ! spawn_fresh_wiring_rollback; then
+    status=1
+  fi
+  return "$status"
 }
 
 parse_orca_worktree_result() {
@@ -1047,6 +1063,11 @@ spawn_abort_cleanup() {
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
     if ! spawn_fresh_commit_rollback; then
+      status=1
+    fi
+  fi
+  if [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ]; then
+    if ! spawn_fresh_wiring_rollback; then
       status=1
     fi
   fi
@@ -3455,6 +3476,7 @@ EOF
         a_pre=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '{}'")
         a_stop=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 && touch $(shell_quote "$TURNEND") || true; printf '{}'")
         AGY_HOOK_ROOT="$STATE_REAL/$ID.agy-hooks"
+        [ "$RELAUNCH" -eq 1 ] || SPAWN_FRESH_WIRING_PENDING=1
         mkdir -p "$AGY_HOOK_ROOT/.agents"
         cat > "$AGY_HOOK_ROOT/.agents/hooks.json" <<EOF
 {"firstmate":{"PreInvocation":[{"command":"$a_pre"}],"Stop":[{"command":"$a_stop"}]}}
@@ -4182,6 +4204,9 @@ else
     SPAWN_BACKLOG_COMMIT_STATUS=0
     SPAWN_FRESH_COMMIT_PENDING=0
   fi
+fi
+if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -eq 0 ]; then
+  SPAWN_FRESH_WIRING_PENDING=0
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
