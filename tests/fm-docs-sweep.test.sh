@@ -245,6 +245,7 @@ test_scoped_subdir_root_resolves_refs_against_enclosing_repo() {
   mkdir -p "$tmp/repo/bin" "$tmp/repo/docs"
   git -C "$tmp/repo" init -q
   : > "$tmp/repo/bin/real.sh"
+  # shellcheck disable=SC2016 # Backticks are literal markdown code spans.
   printf 'Run `bin/real.sh`, not `bin/gone.sh`.\n' > "$tmp/repo/docs/guide.md"
 
   out=$("$SWEEP" --root "$tmp/repo/docs" 2>&1)
