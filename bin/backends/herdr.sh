@@ -2092,8 +2092,13 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #                settle window and the first agent or shell reading wins; only
 #                an exhausted window keeps `other`.
 #   unreadable - process-info failed, described a different pane, named no
-#                shell pid, listed no foreground process, or the process table
-#                could not be read or does not contain the shell pid.
+#                shell pid, or the process table could not be read or does not
+#                contain the shell pid. An empty foreground-process list is NOT
+#                unreadable: it is the real, momentary shape of the exec-to-
+#                shell handoff (the harness process has exited but Herdr has
+#                not yet repopulated the foreground group), so it is treated
+#                like a shells-only foreground and settled by the same
+#                descendant-process check below.
 #
 # Verified on Herdr 0.9.0 (docs/verification/runtime-backends.md "Stale agent
 # registration"): process-info's `.name` is the kernel process name (`node` for
@@ -2130,7 +2135,6 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
   count=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) \
     || { printf 'unreadable'; return 0; }
-  [ "$count" -ge 1 ] 2>/dev/null || { printf 'unreadable'; return 0; }
   i=0
   while [ "$i" -lt "$count" ]; do
     pid=$(printf '%s' "$info" | jq -r --argjson i "$i" \
