@@ -210,7 +210,7 @@ async function noteIdleSession(client, sessionID) {
   const sequence = ++idleSequence;
   const resolved = await resolveCaptainSession(client, sessionID);
   const next = resolved || (!activeSessionID ? sessionID : activeSessionID);
-  if (next !== activeSessionID && sequence > activeSequence) {
+  if ((resolved || !activeSessionID) && sequence > activeSequence) {
     activeSessionID = next;
     activeSequence = sequence;
   }

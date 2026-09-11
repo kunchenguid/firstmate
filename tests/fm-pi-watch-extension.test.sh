@@ -4007,6 +4007,7 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const deliveries = [];
 const client = {
   session: {
+    get: async () => ({ data: {} }),
     promptAsync: async (request) => {
       deliveries.push({ sessionID: request.path?.id, text: request.body.parts[0].text });
     },
