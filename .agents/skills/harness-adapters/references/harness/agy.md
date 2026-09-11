@@ -35,8 +35,8 @@ The ancestry detector and tmux liveness classifier match the exact command name 
 The canonical adapter creates `state/<id>.agy-hooks/.agents/hooks.json` and passes that absolute directory through `--add-dir`.
 The task worktree's own `.agents/hooks.json` is never written or removed by the adapter.
 The `PreInvocation` hook records `busy` with source `agy-hook` and the `Stop` hook records `idle` and touches `state/<id>.turn-ended`.
-The live probe showed that Escape canceled a long-running tool call without emitting `Stop`, so `fm-control.sh` and the `fm-send.sh --key` path record `idle` with source `fm-interrupt` after delivering Escape.
-Hook commands consume the JSON stdin contract and return `{}` on stdout so the worker's lifecycle is not broken by firstmate state handling.
+The live probe showed that Escape canceled a long-running tool call without emitting `Stop`, so the interruption paths preserve an unconfirmed semantic state until cancellation is independently confirmed.
+Hook commands receive the JSON stdin contract and return `{}` on stdout so the worker's lifecycle is not broken by firstmate state handling.
 Raw launch commands remain unwired and classify unknown, matching the other adapter escape hatches.
 
 ## Composer safety

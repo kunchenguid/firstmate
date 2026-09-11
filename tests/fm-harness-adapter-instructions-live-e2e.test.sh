@@ -92,7 +92,7 @@ if ! diff -u \
   <(jq -S . "$TMP_ROOT/normalized-response.json") > "$TMP_ROOT/diff"; then
   fail "local model $MODEL did not follow the routing instructions: $(tr '\n' ' ' < "$TMP_ROOT/diff")"
 fi
-pass "local model $MODEL selected every operation scenario and all ten harness identities"
+pass "local model $MODEL selected every requested operation scenario with literal router paths"
 
 CHECKED=0
 MISSING=
