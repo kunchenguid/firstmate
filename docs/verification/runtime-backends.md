@@ -1229,7 +1229,19 @@ So the `foreground_cwd` read in `fm_backend_herdr_current_path` follows the subs
 
 `tests/fm-backend-herdr.test.sh` pins the reader portably with a canned `process-info` body in this shape (`test_foreground_processes_reads_process_info`): one `name`, `cwd`, `cmdline` line per foreground process, an empty field kept as its own slot, `cmdline` falling back to the joined `argv`, and nothing printed for another pane or a failed read.
 `tests/fm-spawn-worktree-settle.test.sh` pins the wait that consumes it.
-No live guard refreshes this record; refresh it by repeating the commands above on an installed Herdr during a fetch that outlasts the 60-second path-settle bound.
+The live guard that refreshes this record runs wherever Herdr and jq are installed, touches no treehouse pool and no network (the `treehouse` it runs is a symlink to `sleep` on a temporary PATH), and fails naming the installed Herdr version when `pane process-info` stops carrying the name, `cwd`, or `cmdline` the reader depends on:
+
+```sh
+tests/fm-backend-herdr-foreground-smoke.test.sh
+```
+
+Observed 2026-09-11 on macOS aarch64 against Herdr 0.8.2 (the kernel name of a symlink to `sleep` is `sleep` on macOS, so the process is named by its command line there, as the spawn wait allows):
+
+```text
+ok - real herdr 0.8.2: the foreground reader names a running treehouse process (name=sleep) with its cwd and cmdline
+ok - real herdr 0.8.2: the idle shell pane is reported without naming treehouse
+ok - real herdr: a pane the session does not have prints nothing
+```
 
 ### Away-mode transport
 
