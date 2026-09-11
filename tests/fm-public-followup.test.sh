@@ -309,8 +309,8 @@ test_ambient_tasks_axi_env_never_reaches_a_real_backlog() {
 
   cmp -s "$decoy" "$decoy.expected" \
     || fail "the suite's seeding wrote the ambient TASKS_AXI_FILE backlog instead of the fixture"
-  [ "$(ls -A "$decoy_dir" | sort | tr '\n' ' ')" = "backlog.md backlog.md.expected " ] \
-    || fail "the suite's seeding left an artifact beside the ambient TASKS_AXI_FILE backlog: $(ls -A "$decoy_dir" | tr '\n' ' ')"
+  [ "$(find "$decoy_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ')" = "backlog.md backlog.md.expected " ] \
+    || fail "the suite's seeding left an artifact beside the ambient TASKS_AXI_FILE backlog: $(find "$decoy_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ')"
   fixture_state=$(task_state "$home" pf-ambient)
   [ "$fixture_state" != absent ] \
     || fail "the fixture backlog does not hold the obligation seeded under the ambient override"
