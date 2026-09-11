@@ -32,9 +32,14 @@
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
-#              SAME endpoint and SAME worktree, on the same or a newly chosen
-#              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. An explicit `default` model or effort clears that
+#              SAME worktree, on the same or a newly chosen harness/model/
+#              effort - so switching harness is one ordinary use of this verb.
+#              Normally this reuses the SAME endpoint too; the one exception is
+#              a recorded endpoint the backend positively reports "missing"
+#              (authoritatively gone, not merely agent-free), where relaunch
+#              opens a FRESH endpoint bound to the same recorded worktree and
+#              task identity instead, since there is nothing left to adopt.
+#              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
 #              plus its optional model and effort tokens) exactly as any other
@@ -46,12 +51,12 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
-#              Records a durable checkpoint and that note, exits the old agent,
-#              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
-#              the prior durable record in place and reports the concrete
-#              state; it never leaves a half-transitioned task claiming to be
-#              running.
+#              Records a durable checkpoint and that note, exits the old agent
+#              (skipped when its endpoint is already positively missing), then
+#              delegates the launch to its single owner, bin/fm-spawn.sh
+#              --relaunch. A failure before publication keeps the prior
+#              durable record in place and reports the concrete state; it
+#              never leaves a half-transitioned task claiming to be running.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -787,7 +792,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line endpoint_was_missing=0
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -825,7 +830,19 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  # A positively "missing" endpoint has no agent to stop - do_exit would only
+  # die on it. bin/fm-spawn.sh's --relaunch is the recovery owner: given
+  # RELAUNCH_STATE=missing it opens a FRESH endpoint bound to this same
+  # recorded worktree instead of adopting the (gone) one. Every other
+  # non-"alive" state (ambiguous, unreadable, unverified) still refuses
+  # exactly as do_exit already refuses it.
+  case "$(agent_state)" in
+    missing)
+      endpoint_was_missing=1
+      exit_result="not-needed: endpoint already missing"
+      ;;
+    *) exit_result=$(do_exit) ;;
+  esac
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -842,6 +859,17 @@ do_relaunch() {
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
       || RELAUNCH_META_PUBLISHED=1
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
+  fi
+
+  if [ "$endpoint_was_missing" = 1 ]; then
+    # The recovery launch opened a FRESH endpoint, not the one T/BACKEND were
+    # bound to at the top of this script (the now-gone recorded endpoint).
+    # Re-read the just-published record so the postcondition poll below
+    # watches the endpoint that actually exists.
+    fm_backend_validate_task_endpoint "$META" "$ID" \
+      || die "$ID's replacement was launched on $TARGET_HARNESS, but its freshly published endpoint could not be re-validated"
+    BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+    T=$FM_BACKEND_VALIDATED_TARGET
   fi
 
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {

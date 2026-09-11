@@ -28,21 +28,29 @@
 #   instruction files or a secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
-#   task's own recorded endpoint and worktree instead of creating either. It is
-#   the launch half of the control plane (bin/fm-control.sh relaunch), which
-#   owns the checkpoint, the progress note, stopping the previous agent, and the
-#   transaction; call fm-control rather than this flag directly unless you are
-#   deliberately re-launching an already-stopped task. Every identity axis -
-#   backend, kind, project or home, worktree, endpoint - comes from the task's
-#   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
+#   task's own recorded worktree, normally reusing its recorded endpoint too,
+#   instead of creating either. It is the launch half of the control plane
+#   (bin/fm-control.sh relaunch), which owns the checkpoint, the progress note,
+#   stopping the previous agent, and the transaction; call fm-control rather
+#   than this flag directly unless you are deliberately re-launching an
+#   already-stopped task. Every identity axis - backend, kind, project or
+#   home, worktree, endpoint - comes from the task's validated
+#   state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
 #   model, and effort may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
-#   the new incarnation. The replacement still never starts outside the copy
-#   holding the work: a Herdr shell that has drifted out of the recorded
-#   worktree is told once to return, and only a shell that will not go refuses.
+#   the new incarnation. When that endpoint reads positively "missing" (the
+#   backend confirms it is gone outright, not merely agent-free - a vanished
+#   Herdr pane after its runtime ran out of credits, for example), relaunch
+#   instead opens a FRESH endpoint on the same backend, bound to the SAME
+#   recorded worktree and task identity, and publishes it atomically: never a
+#   second worktree, never discarded or reset work. Every other non-"dead"
+#   state (alive, ambiguous, unreadable, unverified) still refuses. The
+#   replacement still never starts outside the copy holding the work: a Herdr
+#   shell that has drifted out of the recorded worktree is told once to
+#   return, and only a shell that will not go refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -1249,6 +1257,14 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+# RELAUNCH_ENDPOINT_MISSING=1 marks the recovery case: the backend positively
+# confirms the recorded endpoint itself is gone (state "missing"), not merely
+# agent-free (state "dead"). Adoption is impossible with nothing to adopt, so
+# this drives the endpoint-creation step below to open a FRESH endpoint bound
+# to the task's already-recorded worktree instead of reusing RELAUNCH_TARGET.
+# Every other non-"dead" state (alive, ambiguous, unreadable, unverified)
+# still refuses exactly as before.
+RELAUNCH_ENDPOINT_MISSING=0
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1283,10 +1299,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  case "$RELAUNCH_STATE" in
+    dead) ;;
+    missing) RELAUNCH_ENDPOINT_MISSING=1 ;;
+    *)
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+      ;;
+  esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -2603,16 +2623,64 @@ fi
 
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
-  # Adopt the recorded endpoint instead of creating one. This is what keeps a
-  # relaunch a REPLACEMENT rather than a second copy of the task: no new
-  # terminal, no second worktree, and every uncommitted change left exactly
-  # where the previous agent left it.
-  T=$RELAUNCH_TARGET
   # A secondmate's home already resolved WT above through the same validation a
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
-  WT_TARGET=$T
-  SES=${T%%:*}
+  if [ "$RELAUNCH_ENDPOINT_MISSING" -eq 1 ]; then
+    # Recovery: the recorded endpoint is authoritatively gone, so there is
+    # nothing to adopt. Open a FRESH endpoint bound to the SAME already-
+    # recorded worktree (never a new one) using each backend's ordinary
+    # task-creation primitive, passing WT itself as the initial cwd so the
+    # replacement lands directly in the recorded local copy with no
+    # `treehouse get` and no new worktree allocation. Presentation/projection
+    # placement (herdr) is deliberately skipped here: the prior placement
+    # record may itself be stale, and this is a narrow recovery corridor
+    # where a flat placement is correct and simplest.
+    case "$BACKEND" in
+      tmux)
+        SES=$(fm_backend_tmux_container_ensure)
+        WID=$(fm_backend_tmux_create_task "$SES" "$W" "$WT") || exit 1
+        T="$SES:$W"
+        WT_TARGET="$WID"
+        ;;
+      herdr)
+        HERDR_LABEL_HOME=$FM_HOME
+        HERDR_LAUNCHER_RELATIONSHIP=launcher-home
+        if [ "$KIND" = secondmate ]; then
+          HERDR_LABEL_HOME=$WT
+          HERDR_LAUNCHER_RELATIONSHIP=other-home
+        fi
+        HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$WT" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
+        CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+        HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+        HERDR_SES=${CONTAINER%%:*}
+        HERDR_WORKSPACE_ID=${CONTAINER#*:}
+        HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+        read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$HERDR_TASK_IDS
+EOF
+        [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ] || {
+          echo "error: herdr did not return a tab/pane id for $W" >&2
+          exit 1
+        }
+        T="$HERDR_SES:$HERDR_PANE_ID"
+        ;;
+      *)
+        echo "error: backend '$BACKEND' cannot recover a missing endpoint; only tmux and herdr have verified recovery mechanics" >&2
+        exit 1
+        ;;
+    esac
+    WT_TARGET=$T
+    SES=${T%%:*}
+  else
+    # Adopt the recorded endpoint instead of creating one. This is what keeps a
+    # relaunch a REPLACEMENT rather than a second copy of the task: no new
+    # terminal, no second worktree, and every uncommitted change left exactly
+    # where the previous agent left it.
+    T=$RELAUNCH_TARGET
+    WT_TARGET=$T
+    SES=${T%%:*}
+  fi
 else
 case "$BACKEND" in
   tmux)

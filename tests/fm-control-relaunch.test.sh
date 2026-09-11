@@ -111,6 +111,19 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  has-session|new-session|set-window-option) exit 0 ;;
+  new-window)
+    shift
+    wname=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -n) wname=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ -z "$wname" ] || printf '%s\n' "$wname" >> "$D/windows"
+    printf '@fresh\n'
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -1400,6 +1413,82 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
+# --- 7. recovering a positively MISSING endpoint (glint-sld-proof-k4) --------
+#
+# The stranding this covers: the recorded endpoint (the tmux window in this
+# hermetic suite) is not merely agent-free, it is authoritatively GONE - a
+# Herdr pane vanishing after its runtime ran out of credits is the real
+# incident this models, but tmux is the reference backend the state machine
+# is pinned against here. Every prior verb refused this ("dead" was the only
+# license to relaunch); now "missing" opens a FRESH endpoint bound to the
+# SAME recorded worktree instead of adopting the (gone) one, never a second
+# worktree, never discarded work.
+
+test_spawn_relaunch_recovers_a_positively_missing_endpoint() {
+  local dir out rc new_window
+  dir=$(new_case missing-spawn rl60)
+  add_ship_task "$dir" rl60 claude
+  # The recorded window is now gone: not in the session's window list at all.
+  : > "$dir/fake/windows"
+  printf 'unfinished task work\n' > "$dir/wt/task.txt"
+
+  out=$(run_spawn "$dir" rl60 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "relaunching a positively missing endpoint should recover it"$'\n'"$out"
+  new_window=$(meta_field "$dir" rl60 window)
+  [ "$new_window" != "fmses:fm-rl60" ] \
+    || fail "recovery must open a FRESH endpoint, not claim to reuse the one that is gone"
+  [ -n "$new_window" ] || fail "recovery did not record a new endpoint at all"
+  [ "$(meta_field "$dir" rl60 worktree)" = "$dir/wt" ] \
+    || fail "recovery must reuse the SAME recorded worktree, never allocate a new one"
+  [ "$(meta_field "$dir" rl60 kind)" = ship ] || fail "kind must survive missing-endpoint recovery"
+  assert_grep "unfinished task work" "$dir/wt/task.txt" \
+    "recovery discarded uncommitted work in the recorded worktree"
+  pass "fm-spawn --relaunch: recovers a positively missing endpoint by opening a fresh one bound to the same worktree"
+}
+
+test_control_relaunch_recovers_a_positively_missing_endpoint() {
+  local dir out rc new_window
+  dir=$(new_case missing-control rl61)
+  add_ship_task "$dir" rl61 claude
+  : > "$dir/fake/windows"
+
+  out=$(run_control "$dir" rl61 relaunch --note "recovering from a vanished pane"); rc=$?
+  expect_code 0 "$rc" "fm-control relaunch should recover a positively missing endpoint"$'\n'"$out"
+  assert_contains "$out" "relaunched rl61 harness=claude" "the outcome should report success"
+  new_window=$(meta_field "$dir" rl61 window)
+  [ "$new_window" != "fmses:fm-rl61" ] \
+    || fail "recovery must open a fresh endpoint, not claim to reuse the one that is gone"
+  [ "$(meta_field "$dir" rl61 worktree)" = "$dir/wt" ] \
+    || fail "recovery must reuse the SAME recorded worktree"
+  [ "$(journal_field "$dir" rl61 phase)" = complete ] \
+    || fail "the transaction journal should end complete"
+  assert_no_grep "/exit" "$dir/fake/literal" \
+    "there is no agent at a missing endpoint, so no exit command should ever be sent"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  pass "fm-control relaunch: recovers a positively missing endpoint end to end (skips the exit step, opens a fresh endpoint, confirms it comes up alive)"
+}
+
+test_spawn_relaunch_still_refuses_an_ambiguous_or_unreadable_endpoint() {
+  local dir out rc
+  dir=$(new_case unreadable-spawn rl62)
+  add_ship_task "$dir" rl62 claude
+  mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = list-windows ]; then
+  echo "some other tmux failure" >&2
+  exit 1
+fi
+exec "$dir/fakebin/tmux-real" "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+
+  out=$(run_spawn "$dir" rl62 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunching an unreadable endpoint must still refuse, never guess recovery"
+  assert_contains "$out" "positively agent-free endpoint" "the refusal should demand an agent-free endpoint"
+  pass "fm-spawn --relaunch: an ambiguous or unreadable endpoint state still refuses, only 'missing' recovers"
+}
+
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   local dir meta target out rc
   dir=$(new_case symlink-meta rl37)
@@ -1611,3 +1700,8 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_spawn_relaunch_recovers_a_positively_missing_endpoint
+test_control_relaunch_recovers_a_positively_missing_endpoint
+test_spawn_relaunch_still_refuses_an_ambiguous_or_unreadable_endpoint
+
+echo "# all fm-control-relaunch tests passed"
