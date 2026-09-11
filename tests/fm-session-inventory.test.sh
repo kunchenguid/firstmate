@@ -338,6 +338,18 @@ os.waitpid(pid, 0)
 sys.stdout.buffer.write(out)
 PY
 
+# The longest line of the rendered TABLE, in the columns a terminal spends on
+# it. The title, a source diagnostic, and the close commands are deliberately
+# left whole to wrap rather than be cut, so they are not measured here.
+# Continuation bytes are dropped before measuring, because the renderer truncates
+# with an ellipsis and a byte count would report that one column as three.
+longest_table_line() {  # <rendered>
+  printf '%s\n' "$1" | tr -d '\r' | LC_ALL=C awk '
+      /^ *KIND +WHAT/ { intable = 1 }
+      /^To close/ { intable = 0 }
+      intable { line = $0; gsub(/[\200-\277]/, "", line); print length(line) }' | sort -n | tail -1
+}
+
 run_view_on_pty() {  # <columns> <home> <args...>
   local cols=$1 home=$2
   shift 2
@@ -1196,10 +1208,7 @@ test_view_is_readable_narrow_and_without_colour() {
   # rather than be cut, because a truncated home path, reason, or command is
   # worse than a wrapped one.
   narrow=$(COLUMNS=50 run_view "$home" --color never)
-  longest=$(printf '%s\n' "$narrow" | LC_ALL=C awk '
-      /^ *KIND +WHAT/ { intable = 1 }
-      /^To close/ { intable = 0 }
-      intable { print length }' | sort -n | tail -1)
+  longest=$(longest_table_line "$narrow")
   [ -n "$longest" ] && [ "$longest" -le 50 ] \
     || fail "the table must fit a 50-column pane, longest table line was ${longest:-unknown}"
   assert_contains "$narrow" "FM_HOME=$home bin/fm-teardown.sh a-very-long-worker-identifier-for-width" \
@@ -1212,6 +1221,33 @@ test_view_is_readable_narrow_and_without_colour() {
   esac
 
   pass "view: readable without colour and in a narrow pane, with close commands intact"
+}
+
+# EVERY COLUMN THE PANE HAS, AND NEVER ONE MORE. A table line wider than the
+# pane wraps each row onto a second line carrying nothing but its own trailing
+# spaces, so the table renders at twice its height and the header leaves a short
+# pane entirely - the one-glance reading this view exists for, lost to a column
+# budget that no longer matches what a row prints. The widths swept here are the
+# ones that occur: a WezTerm side pane, both sides of the 60-column threshold
+# where the belongs-to column is dropped, both sides of the 78-column one where
+# the task column appears, and a full window.
+test_the_table_fits_every_pane_width() {
+  local home rendered width longest
+  home=$(make_home pane-budget)
+  write_worker "$home" a-worker-with-a-deliberately-long-identifier 9
+  finish_backlog "$home"
+  write_lavish_stub "$FAKEBIN"
+
+  for width in 46 59 60 77 78 80 100 120; do
+    rendered=$(COLUMNS=$width run_view "$home" --color never) \
+      || fail "the view must render at $width columns"
+    longest=$(longest_table_line "$rendered")
+    [ -n "$longest" ] || fail "no table was rendered at $width columns"
+    [ "$longest" -le "$width" ] \
+      || fail "the table must fit a $width-column pane, longest table line was $longest"
+  done
+
+  pass "view: the table fits the pane at every width, from a side pane to a full window"
 }
 
 # THE PANE DECIDES THE WIDTH, AND NOTHING ELSE MAY. The captain keeps this open
@@ -1235,10 +1271,7 @@ test_the_pane_lays_out_for_the_terminal_it_is_in() {
   assert_contains "$out" "KIND" "the watched pane must draw its table"
   assert_not_contains "$out" "BELONGS TO" \
     "a 46-column pane must drop the belongs-to column, not lay out at the default width"
-  longest=$(printf '%s\n' "$out" | tr -d '\r' | LC_ALL=C awk '
-      /^ *KIND +WHAT/ { intable = 1 }
-      /^To close/ { intable = 0 }
-      intable { print length }' | sort -n | tail -1)
+  longest=$(longest_table_line "$out")
   [ -n "$longest" ] && [ "$longest" -le 46 ] \
     || fail "the watched table must fit the 46-column pane, longest table line was ${longest:-unknown}"
 
@@ -1252,6 +1285,9 @@ test_the_pane_lays_out_for_the_terminal_it_is_in() {
     || fail "the watched pane must render on a wide terminal"
   assert_contains "$out" "BELONGS TO" \
     "a 120-column pane must use the width it has, whatever COLUMNS was set to"
+  longest=$(longest_table_line "$out")
+  [ -n "$longest" ] && [ "$longest" -le 120 ] \
+    || fail "the watched table must fit the 120-column pane, longest table line was ${longest:-unknown}"
 
   pass "view: the pane lays out for the terminal it is in, watched or not"
 }
@@ -1969,6 +2005,7 @@ test_review_page_with_queued_notes_needs_confirmation
 test_a_review_path_with_a_comma_reaches_lavish_whole
 test_unreadable_source_is_disclosed_not_counted_as_zero
 test_view_is_readable_narrow_and_without_colour
+test_the_table_fits_every_pane_width
 test_the_pane_lays_out_for_the_terminal_it_is_in
 test_view_refuses_a_cadence_below_the_floor
 test_inventory_makes_no_cross_home_network_read

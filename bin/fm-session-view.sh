@@ -194,12 +194,24 @@ render_once() {  # <width>
     # and its note still travel with every command.
     | ([.rows[] | select(.close != null) | select($stale_only == 0 or .stale)]) as $closeable
     | 7 as $kindw
+    | 8 as $agew
+    | 12 as $belongmin
     # AGE is what the "!" marks: running time for a worker with a live process,
     # and the age of the work itself for one with none. TASK is how long the
     # work has existed, and is shown only when there is room for it.
     | (if $w < 78 then 0 else 6 end) as $taskw
-    | ([($w - 7 - 12 - 12 - $taskw), 34] | min) as $whatw
-    | (if $narrow == 1 then 0 else ([($w - $kindw - $whatw - $taskw - 12), 12] | max) end) as $belongw
+    # EVERYTHING A LINE SPENDS BEFORE THE TWO ELASTIC COLUMNS GET ANY OF IT: the
+    # "!" marker and the space after it, the space after KIND, the space before
+    # BELONGS TO when that column is shown at all, the two before AGE, and the
+    # KIND and AGE columns themselves. It is counted here, once, from the parts
+    # the rows below actually print, because a second hand-totalled copy of it
+    # drifted two columns out of step and made every line wider than the pane:
+    # each row then wrapped onto a second line holding nothing but its own
+    # trailing spaces, the table rendered at twice its height, and the header
+    # left a short pane entirely.
+    | (2 + $kindw + 1 + (if $narrow == 1 then 0 else 1 end) + 2 + $agew) as $chrome
+    | ([($w - $chrome - $taskw - (if $narrow == 1 then 0 else $belongmin end)), 34] | min) as $whatw
+    | (if $narrow == 1 then 0 else ([($w - $chrome - $whatw - $taskw), $belongmin] | max) end) as $belongw
     | bold("Sessions - \(.fm_home)"),
       dim("\(.generated) - \(.counts.total) running, \(.counts.stale) over \(.stale_after_days) days"
           + (if $watching == 1 then " - redraw every \($interval)s" else "" end)),
@@ -237,13 +249,13 @@ render_once() {  # <width>
        else
          bold("  " + pad("KIND"; $kindw) + " " + pad("WHAT"; $whatw)
               + (if $narrow == 1 then "" else " " + pad("BELONGS TO"; $belongw) end)
-              + "  " + pad("AGE"; 8)
+              + "  " + pad("AGE"; $agew)
               + (if $taskw == 0 then "" else pad("TASK"; $taskw) end)),
          ($shown[] |
            (if .stale then warn("!") else " " end) + " "
            + pad(kind_text; $kindw) + " " + pad(clip(what; $whatw); $whatw)
            + (if $narrow == 1 then "" else " " + pad(clip_tail(.belongs_to; $belongw); $belongw) end)
-           + "  " + pad(age_text; 8)
+           + "  " + pad(age_text; $agew)
            + (if $taskw == 0 then "" else pad(task_age_text; $taskw) end))
        end),
       (.harness_sessions as $h
