@@ -172,7 +172,7 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
 # of only their detached halves. bin/fm-herdr-lab-viewer.py owns the pty and
 # environment mechanics; the guards below own who may be attached to.
 
-readonly fm_herdr_lab_viewer_timeout_seconds=2
+readonly fm_herdr_lab_viewer_timeout_seconds=5
 
 fm_herdr_lab_viewer_record_path() { # <session>
   printf '%s/%s.viewer' "$(fm_herdr_lab_state_dir)" "$1"
@@ -244,7 +244,7 @@ fm_herdr_lab_viewer_session_stopped_or_absent() { # <session>
 }
 
 fm_herdr_lab_viewer_start() { # <session>
-  local name=$1 record log launcher waited attempt reason pid timeout=$fm_herdr_lab_viewer_timeout_seconds
+  local name=$1 record log launcher launcher_pid waited attempt reason pid timeout=$fm_herdr_lab_viewer_timeout_seconds
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
@@ -267,9 +267,8 @@ fm_herdr_lab_viewer_start() { # <session>
   [ -f "$launcher" ] || { fm_herdr_lab_error "missing viewer launcher at $launcher"; return 1; }
   log=$(fm_herdr_lab_viewer_log_path "$name")
   mkdir -p "$(fm_herdr_lab_state_dir)" || return 1
-  nohup python3 "$launcher" "$name" 40 120 "$record" \
-    >"$log" 2>&1 &
-  disown 2>/dev/null || true
+  nohup python3 "$launcher" "$name" "$record" >"$log" 2>&1 &
+  launcher_pid=$!
 
   waited=0
   attempt=$((timeout * 5))
@@ -278,6 +277,7 @@ fm_herdr_lab_viewer_start() { # <session>
     if [ "$reason" = cleared ]; then
       pid=$(fm_herdr_lab_viewer_owned_pid "$name" viewer) || pid=
       if [ -n "$pid" ]; then
+        disown "$launcher_pid" 2>/dev/null || true
         printf 'viewer attached to %s (pid %s)\n' "$name" "$pid"
         return 0
       fi
@@ -285,6 +285,7 @@ fm_herdr_lab_viewer_start() { # <session>
     sleep 0.2
     waited=$((waited + 1))
   done
+  fm_herdr_lab_cancel_provision "$launcher_pid"
   fm_herdr_lab_error "lab viewer did not become the foreground client of '$name' within $timeout seconds (last reason: ${reason:-<unreadable>})"
   [ ! -s "$log" ] || fm_herdr_lab_error "viewer log: $(tail -n 5 "$log" | tr '\n' ' ')"
   fm_herdr_lab_viewer_stop "$name" >/dev/null 2>&1 || true

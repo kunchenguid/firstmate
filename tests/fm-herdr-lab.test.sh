@@ -220,6 +220,9 @@ test_timed_out_provision_cancels_late_launch() {
   cat > "$FAKEBIN/sleep" <<'SH'
 #!/usr/bin/env bash
 if [ "${FM_FAKE_HERDR_FAST_POLL:-}" = 1 ]; then
+  while [ -n "${FM_FAKE_HERDR_WAIT_MARKER:-}" ] && [ ! -f "$FM_FAKE_HERDR_WAIT_MARKER" ]; do
+    "$FM_FAKE_HERDR_REAL_SLEEP" 0.01
+  done
   exit 0
 fi
 exec "$FM_FAKE_HERDR_REAL_SLEEP" "$@"
@@ -266,6 +269,33 @@ write_viewer_record() {
   start=$(fm_herdr_lab_process_start "$pid") || fail "could not identify viewer fixture process"
   printf 'launcher_pid=%s\nlauncher_start=%s\nviewer_pid=%s\nviewer_start=%s\n' \
     "$pid" "$start" "$pid" "$start" > "$record"
+}
+
+test_viewer_start_cancels_an_unrecorded_launcher() {
+  local name="fm-lab-viewer-late-$$" out status=0 launcher_pid
+  local started="$TMP_ROOT/viewer-launcher-started" attached="$TMP_ROOT/viewer-late-attach"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-late fixture provision failed"
+  cat > "$FAKEBIN/python3" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_FAKE_VIEWER_STARTED"
+"$FM_FAKE_HERDR_REAL_SLEEP" 0.5
+: > "$FM_FAKE_VIEWER_ATTACHED"
+exec "$FM_FAKE_HERDR_REAL_SLEEP" 20
+SH
+  chmod +x "$FAKEBIN/python3"
+  out=$(FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_WAIT_MARKER="$started" \
+    FM_FAKE_VIEWER_STARTED="$started" FM_FAKE_VIEWER_ATTACHED="$attached" \
+    run_with_fake fm_herdr_lab_viewer_start "$name" 2>&1) || status=$?
+  rm -f "$FAKEBIN/python3"
+  expect_code 1 "$status" "an unrecorded launcher must not outlive viewer start"
+  assert_present "$started" "delayed viewer launcher did not start"
+  launcher_pid=$(cat "$started")
+  kill -0 "$launcher_pid" 2>/dev/null && fail "timed-out viewer launcher remained alive"
+  "$REAL_SLEEP" 0.6
+  assert_absent "$attached" "timed-out viewer launcher attached after start failed"
+  assert_contains "$out" "did not become the foreground client" "launcher timeout was unclear"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-late fixture teardown failed"
+  pass "fm-herdr-lab: timed-out viewer startup cancels its exact launcher"
 }
 
 test_viewer_start_requires_its_owned_process() {
@@ -370,22 +400,16 @@ test_viewer_stop_retains_record_when_detach_is_unreadable() {
 test_viewer_launcher_refuses_unsafe_arguments() {
   local launcher="$ROOT/bin/fm-herdr-lab-viewer.py" status=0
   command -v python3 >/dev/null 2>&1 || { pass "fm-herdr-lab: viewer launcher argument guard (skipped, no python3)"; return; }
-  python3 "$launcher" default 40 120 "$TMP_ROOT/pid" >/dev/null 2>&1 || status=$?
+  python3 "$launcher" default "$TMP_ROOT/pid" >/dev/null 2>&1 || status=$?
   expect_code 2 "$status" "the launcher must refuse the default session"
   status=0
-  python3 "$launcher" arbitrary-session 40 120 "$TMP_ROOT/pid" >/dev/null 2>&1 || status=$?
+  python3 "$launcher" arbitrary-session "$TMP_ROOT/pid" >/dev/null 2>&1 || status=$?
   expect_code 2 "$status" "the launcher must refuse a non-lab session name"
   status=0
-  python3 "$launcher" fm-lab-args 0 120 "$TMP_ROOT/pid" >/dev/null 2>&1 || status=$?
-  expect_code 2 "$status" "a zero-row grid is the exact defect this helper exists to avoid"
-  status=0
-  python3 "$launcher" fm-lab-args 40 0 "$TMP_ROOT/pid" >/dev/null 2>&1 || status=$?
-  expect_code 2 "$status" "a zero-column grid is the exact defect this helper exists to avoid"
-  status=0
-  python3 "$launcher" fm-lab-args 40 120 relative-pidfile >/dev/null 2>&1 || status=$?
+  python3 "$launcher" fm-lab-args relative-pidfile >/dev/null 2>&1 || status=$?
   expect_code 2 "$status" "the launcher must refuse a relative pidfile path"
   assert_absent "$TMP_ROOT/pid" "a refused launch still wrote a pid record"
-  pass "fm-herdr-lab: the viewer launcher refuses unsafe sessions and zero-sized grids"
+  pass "fm-herdr-lab: the viewer launcher refuses unsafe sessions and pidfiles"
 }
 
 test_refuses_unsafe_names
@@ -396,6 +420,7 @@ test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch
 test_viewer_refuses_unowned_sessions
+test_viewer_start_cancels_an_unrecorded_launcher
 test_viewer_start_requires_its_owned_process
 test_viewer_stop_only_signals_owned_processes
 test_teardown_refuses_while_viewer_attached

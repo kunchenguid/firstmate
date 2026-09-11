@@ -18,11 +18,11 @@ The child also drops the inherited ``HERDR_*`` variables listed in
 ``SCRUBBED_ENV`` below. Herdr refuses to launch a nested viewer inside one of
 its own panes, and this helper normally runs from exactly there.
 
-Usage: fm-herdr-lab-viewer.py <session> <rows> <cols> <pidfile>
+Usage: fm-herdr-lab-viewer.py <session> <pidfile>
 
 Exit status:
   0  the viewer ran and exited;
-  2  arguments were invalid;
+  2  the session or pidfile was invalid;
   3  the pty or the viewer process could not be created.
 """
 
@@ -52,14 +52,8 @@ SCRUBBED_ENV = (
 SESSION_PATTERN = re.compile(r"\Afm-lab-[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 TERMINATE_GRACE_SECONDS = 5.0
 READ_CHUNK = 65536
-
-
-def _positive_int(raw):
-    try:
-        value = int(raw, 10)
-    except ValueError:
-        return None
-    return value if value > 0 else None
+ROWS = 40
+COLS = 120
 
 
 def _child(slave, master, session):
@@ -120,17 +114,12 @@ def _drain(master):
 
 
 def main(argv):
-    if len(argv) != 5:
-        sys.stderr.write("fm-herdr-lab-viewer: usage: <session> <rows> <cols> <pidfile>\n")
+    if len(argv) != 3:
+        sys.stderr.write("fm-herdr-lab-viewer: usage: <session> <pidfile>\n")
         return 2
-    session, raw_rows, raw_cols, pidfile = argv[1:]
+    session, pidfile = argv[1:]
     if session == "default" or not SESSION_PATTERN.match(session):
         sys.stderr.write("fm-herdr-lab-viewer: refusing session %r\n" % session)
-        return 2
-    rows = _positive_int(raw_rows)
-    cols = _positive_int(raw_cols)
-    if rows is None or cols is None:
-        sys.stderr.write("fm-herdr-lab-viewer: rows and cols must be positive integers\n")
         return 2
     if not os.path.isabs(pidfile):
         sys.stderr.write("fm-herdr-lab-viewer: pidfile must be an absolute path\n")
@@ -142,7 +131,7 @@ def main(argv):
         sys.stderr.write("fm-herdr-lab-viewer: could not create a pty: %s\n" % error)
         return 3
     # Before the fork, so the TUI's first grid read already sees a real size.
-    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 
     try:
         viewer_pid = os.fork()
@@ -151,6 +140,17 @@ def main(argv):
         return 3
     if viewer_pid == 0:
         _child(slave, master, session)
+
+    def _cancel_before_record(signum, _frame):
+        try:
+            os.kill(viewer_pid, signal.SIGKILL)
+        except OSError:
+            pass
+        os._exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _cancel_before_record)
+    signal.signal(signal.SIGINT, _cancel_before_record)
+    signal.signal(signal.SIGHUP, _cancel_before_record)
 
     os.close(slave)
     try:
