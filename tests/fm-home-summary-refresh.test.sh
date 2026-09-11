@@ -18,6 +18,7 @@ LARGE_HOME="$TMP_ROOT/large-home"
 STATELESS_HOME="$TMP_ROOT/stateless-home"
 LARGE_CHILD_HOME="$TMP_ROOT/large-child-home"
 LARGE_PARENT_HOME="$TMP_ROOT/large-parent-home"
+DECISIONS_HOME="$TMP_ROOT/decisions-home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 WATCH_PID=
 SLOW_WRITER_PID=
@@ -256,6 +257,69 @@ jq -e '.secondmate_current.records[0]
   "$TMP_ROOT/large-parent-snapshot.json" >/dev/null \
   || fail "parent fleet snapshot did not preserve the large child invalidity"
 pass "parent snapshot consumes large child ledgers without argument transport"
+
+# A single long-lived task's whole-status-log open-decision fold has no size
+# bound of its own: every still-open needs-decision/blocked note accumulates
+# until resolved. That per-task payload rides through fm-fleet-snapshot.sh
+# independently of the backlog-transport fix above, so it needs its own
+# argv-safe proof: many distinct never-resolved decisions on one in-flight
+# task, each long enough that the accumulated fold decisively exceeds Linux's
+# 128 KiB MAX_ARG_STRLEN per-argument limit.
+mkdir -p "$DECISIONS_HOME/state" "$DECISIONS_HOME/data" "$DECISIONS_HOME/config" \
+  "$DECISIONS_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$DECISIONS_HOME/AGENTS.md"
+printf 'decisions\n' > "$DECISIONS_HOME/.fm-secondmate-home"
+cat > "$DECISIONS_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] held-task - Task with many long-held decisions (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+fm_write_meta "$DECISIONS_HOME/state/held-task.meta" \
+  "window=fmtest:fm-held-task" \
+  "project=firstmate" \
+  "harness=claude" \
+  "kind=ship" \
+  "mode=no-mistakes" \
+  "spawn_gen=fm.held123456"
+# Few distinct keys, each with a long note: status_open_decisions folds the
+# open set with an O(n^2) per-key scan, so many short-lived keys would make
+# this fixture pathologically slow without adding argv-transport coverage.
+# The fold's cost tracks key COUNT; the argv limit tracks folded BYTE size, so
+# few keys with long notes exercises the byte limit without that slowdown.
+decisions_note=$(printf 'z%.0s' $(seq 1 2500))
+i=1
+while [ "$i" -le 60 ]; do
+  printf 'needs-decision [key=decision-%s]: %s\n' "$i" "$decisions_note"
+  i=$((i + 1))
+done > "$DECISIONS_HOME/state/held-task.status"
+[ "$(wc -c < "$DECISIONS_HOME/state/held-task.status")" -gt 131072 ] \
+  || fail "large open-decisions fixture did not exceed the per-argument limit"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$DECISIONS_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/decisions-summary.json" \
+  2> "$TMP_ROOT/decisions-summary.err" \
+  || fail "secondmate home-summary mode failed for many long held decisions: $(cat "$TMP_ROOT/decisions-summary.err")"
+[ ! -s "$TMP_ROOT/decisions-summary.err" ] \
+  || fail "secondmate home-summary mode reported an error for many long held decisions: $(cat "$TMP_ROOT/decisions-summary.err")"
+jq -e '.schema == "fm-secondmate-home-summary.v1"
+  and .counts.decisions_open == 60
+  and .counts.endpoints == 1
+  and (.endpoints | length) == 1
+  and (.endpoints[0].id == "held-task")
+  and (.decisions_open | length) == 20
+  and (.omitted[] | select(.surface == "decisions_open") | .count) == 40' \
+  "$TMP_ROOT/decisions-summary.json" >/dev/null \
+  || fail "large open-decisions summary dropped or truncated the held task's decisions: $(cat "$TMP_ROOT/decisions-summary.json")"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$DECISIONS_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "home-summary writer failed for many long held decisions"
+jq -e '.schema == "fm-secondmate-home-summary.v1" and .counts.decisions_open == 60' \
+  "$DECISIONS_HOME/state/home-summary.json" >/dev/null \
+  || fail "large open-decisions home-summary was not published with its full decision count"
+pass "many long held decisions on one task publish without exec argument transport"
 
 mkdir -p "$CADENCE_HOME/state" "$CADENCE_HOME/data" "$CADENCE_HOME/config" \
   "$CADENCE_HOME/projects"
