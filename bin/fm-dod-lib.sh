@@ -5,9 +5,15 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
-# stdout with no trailing blank line. The caller validates the mode; an unknown
-# mode is refused rather than silently rendered as the pipeline contract.
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [<issue-sourced>]
+# prints the block on stdout with no trailing blank line. The caller validates
+# the mode; an unknown mode is refused rather than silently rendered as the
+# pipeline contract.
+# A third argument of 1 marks a task dispatched from a GitLab issue (bin/fm-brief.sh
+# --issue). It only qualifies where the no-mistakes done gate ends: such a task
+# is done once it has also set its merge request's title and description, which
+# the brief's own `# GitLab issue` section defines and this file never restates.
+# bin/fm-promote.sh omits it: a promoted scout is never issue-sourced.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
@@ -39,16 +45,24 @@ Other projects retain their own instructions unchanged.
 EOF
 }
 
-# Return 0 when a Task subsection still consists only of its scaffold
-# placeholder. A missing file and legacy briefs carry no such placeholders.
+# Return 0 when a Task subsection still carries a scaffold placeholder token on
+# a line of its own, which is how both scaffolds emit it - alone in the
+# subsection, or surrounded by generated context as bin/fm-brief.sh --issue
+# writes it. Anything else is filled text that merely names the token: prose
+# about the scaffolding, a backticked example, or a "> " quote of issue text
+# that happens to contain it. A missing file and legacy briefs carry no such
+# placeholders.
 fm_brief_task_placeholders_present() {  # <file>
   local file=$1 intent spec
   [ -f "$file" ] || return 1
   intent=$(fm_brief_task_heading_body "$file" "## Captain's intent")
   spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
-  [ "$(printf '%s' "$intent" | tr -d '[:space:]')" = '{TASK}' ] && return 0
-  [ "$(printf '%s' "$spec" | tr -d '[:space:]')" = '{FIRSTMATE_SPEC}' ] && return 0
-  return 1
+  printf '%s\n%s\n' "$intent" "$spec" | awk '
+    { line = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      if (line == "{TASK}" || line == "{FIRSTMATE_SPEC}") { found = 1; exit }
+    }
+    END { exit found ? 0 : 1 }'
 }
 
 # Parse an exact ATX heading outside fenced blocks. Body mode prints through
@@ -190,8 +204,8 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+fm_dod_block() {  # <mode> <task-id> [<issue-sourced>]
+  local mode=$1 id=$2 issue_sourced=${3:-0} finish
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -215,6 +229,10 @@ The configured merge authority approves the ready branch, then firstmate merges 
 EOF
       ;;
     no-mistakes)
+      # shellcheck disable=SC2016  # single quotes are deliberate: these are literal brief sentences whose backtick-wrapped `done:` and `# GitLab issue` spans must reach the reading agent verbatim.
+      finish='append `done: PR {url} checks green` and stop. You are finished.'
+      # shellcheck disable=SC2016  # same literal brief text as above.
+      [ "$issue_sourced" != 1 ] || finish='this task is not finished yet: carry out the merge-request step the `# GitLab issue` section of this brief requires, then append `done: PR {url} checks green` and stop.'
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
@@ -245,7 +263,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), $finish
 EOF
       ;;
     *)

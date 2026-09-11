@@ -573,6 +573,48 @@ A fail-closed poll that already queued a wake, and a timeout, always print so th
 `FM_MAIL_CHECK_BUDGET` (default 15, valid 5..25) bounds one standing poll and is cut down to fit `FM_CHECK_TIMEOUT`.
 `bin/fm-mail-check.sh disarm` removes the standing check.
 
+## GitLab issue intake (config/gitlab-issues.json)
+
+`config/gitlab-issues.json` is an optional local, gitignored description of the GitLab group whose issues humans hand to this home by label.
+When it is present and the check is armed, [`bin/fm-gitlab-issues.sh`](../bin/fm-gitlab-issues.sh) polls that group through `glab api` on the watcher's normal cadence and wakes firstmate once for every issue that newly carries an intake label.
+Picking up an issue is opt-in: nothing is reported until a human puts an intake label on it, and firstmate never closes an issue.
+The check only notices and records; classifying, labelling, and answering the issue belong to the agent-only skill that consumes the pending records, not to this file or this script.
+
+This section is the single owner of the canonical schema.
+`bin/fm-gitlab-issues.sh` owns the poll mechanics, the report line, the seen and pending records, and the poll-error cadence.
+[`docs/gitlab-issue-intake.md`](gitlab-issue-intake.md) is the operating guide for the human side of that flow: the bot account and its login, the group-level `fm::` labels, which of them a human sets, and who merges and closes.
+
+```json
+{
+  "host": "<GitLab host name, for example gitlab.example.com>",
+  "group": "<full group path, for example team/platform>",
+  "projects": ["<optional project path relative to the group, or a full path_with_namespace>"],
+  "intake_labels": ["<optional labels that hand an issue to firstmate, default fm::todo and fm::human-replied>"],
+  "label_prefix": "<optional scoped-label prefix firstmate owns, default fm::>",
+  "max_in_flight": 3
+}
+```
+
+`host` and `group` are required.
+The host is passed to `glab api --hostname` on every call, so the poll never depends on the git remote of whatever directory the watcher happens to run in; `glab` must already be authenticated to that host.
+The group is queried as a whole, so its subgroups' projects are included, and an empty or absent `projects` list means every project in the group.
+A `projects` entry narrows the poll to those projects, whether written relative to the group (`backend-app`) or as a full `path_with_namespace` (`team/platform/backend-app`); the list may grow without any code change.
+`intake_labels` are the labels a human uses to hand an issue over; each is polled separately, so an issue carrying two of them is reported once per label.
+`label_prefix` and `max_in_flight` are read by firstmate, not by the poll: the prefix names the scoped-label family issue state lives in, and `max_in_flight` is the number of intake issues firstmate should work at once.
+A malformed or incomplete file is reported naming the field, `arm` refuses it, and `check` with no file at all prints nothing.
+
+Arm the check once per home with `bin/fm-gitlab-issues.sh arm`.
+That writes `state/gitlab-issues.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it every `FM_CHECK_INTERVAL` and turns its one line into a `check:` wake; no separate schedule and no conversational network call is involved.
+Registering the check is itself a reason to watch, so the home keeps a watcher for it after the last task is torn down, and `disarm` is what ends that need.
+`bin/fm-gitlab-issues.sh disarm` retires the shim and its trust binding through `bin/fm-check-unregister.sh` and removes the seen, pending, and error records, together with the `state/.gitlab-issues.lock` described below and its owner directory when a poll killed mid-sweep left them behind and nothing is left to reclaim them.
+The report line is `gitlab-issue <n> new: <path>#<iid>(<label>) ...`, bounded to a handful of entries with the rest counted, and the full details of every reported issue are appended as JSON lines to `state/.gitlab-issues-pending`, which `bin/fm-gitlab-issues.sh pending` prints and `bin/fm-gitlab-issues.sh handled <path>#<iid>` clears.
+`state/.gitlab-issues-seen` remembers each reported (issue, label) pair for as long as the issue carries that label, so the same pair is reported once, while a label removed and later put back is reported again.
+Both writers of the pending record, the check's append and `handled`'s rewrite, run under `state/.gitlab-issues.lock`, the repo's portable lock, so neither can lose the other's change; a check that cannot take the lock before its sweep deadline reports a poll error and leaves the seen record untouched, so the next poll reports the pairs.
+A `glab` or `jq` failure prints `gitlab-issue poll error: <reason>` once per reason per hour instead of on every sweep, and a failed sweep never drops the seen record.
+Every `glab` call is bounded by `FM_GITLAB_ISSUES_CALL_SECS` (default 10) and the whole sweep is kept inside `FM_CHECK_TIMEOUT` (default 30), so a slow or hung GitLab reports a poll error rather than being killed silently by the watcher.
+When the file is present, bootstrap reports a missing `glab` or `jq` with the ordinary `MISSING:` line.
+This file is not inherited by secondmate homes: a dedicated secondmate home that owns an intake flow keeps its own copy, and the main home is not assumed anywhere.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -964,6 +1006,9 @@ FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 pro
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
+FM_GITLAB_ISSUES_CALL_SECS=10   # 1..30 seconds allowed for one glab api call by the GitLab issue intake poll; also cut to what is left of FM_CHECK_TIMEOUT
+FM_GITLAB_ISSUES_ERROR_SECS=3600   # seconds the same GitLab issue poll error stays reported once before it is reported again
+FM_GITLAB_ISSUES_NOW=   # test override for the GitLab issue poll's record clock; the sweep deadline still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no activity in its owning home; 1..86400

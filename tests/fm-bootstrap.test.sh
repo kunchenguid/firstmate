@@ -683,6 +683,34 @@ ROWS
   pass "bootstrap: JSON-emitting backends require jq (their genuine dep), never tmux"
 }
 
+test_gitlab_issue_intake_config_requires_glab() {
+  local case_dir fakebin out
+  # config/gitlab-issues.json is what opts a home into the GitLab issue poll, so
+  # glab is a genuine dependency only when it is present. A home without the file
+  # must never be told glab is missing; a home with it gets the ordinary MISSING
+  # line, with the one-line Homebrew/Linuxbrew install, and jq is reported once.
+  case_dir="$TMP_ROOT/gitlab-intake"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" glab)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "glab" "a home without config/gitlab-issues.json must not require glab"
+
+  printf '{"host":"gitlab.example.test","group":"acme/tools"}\n' > "$case_dir/home/config/gitlab-issues.json"
+  out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" glab)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: glab (install: brew install glab" "a home with config/gitlab-issues.json must report a missing glab with its install line"
+  assert_not_contains "$out" "MISSING_MANUAL: glab" "glab has a one-line install and must not be reported as manual"
+  [ "$(printf '%s\n' "$out" | grep -c 'MISSING: jq')" -le 1 ] || fail "jq must be reported at most once: $out"
+
+  fm_fake_exit0 "$fakebin" glab
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: glab" "an installed glab was still reported missing"
+  pass "bootstrap: config/gitlab-issues.json makes glab a required tool, reported with its install line"
+}
+
 test_treehouse_lease_check_follows_resolved_backend() {
   local case_dir fakebin out
   # A treehouse that lacks durable --lease support is only a problem for a backend
@@ -1168,6 +1196,7 @@ test_herdr_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
+test_gitlab_issue_intake_config_requires_glab
 test_treehouse_lease_check_follows_resolved_backend
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets

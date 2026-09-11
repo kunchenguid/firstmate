@@ -12,7 +12,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--issue <issue-url> --issue-part <n>/<N>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -28,6 +28,58 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --issue <issue-url> scaffolds work dispatched from a GitLab issue. It writes
+#   the issue itself into `## Captain's intent` as CONTEXT - canonical URL,
+#   project path, author, state, title, description, and the issue's comments,
+#   read through `bin/fm-gitlab-issue.sh show` - so the worker reads the original
+#   request without calling GitLab. A scope sentence naming this task's `<n>/<N>`
+#   position follows the context, and the `{TASK}` placeholder closes the
+#   subsection for Firstmate to fill with THIS subtask's own work - so a
+#   no-mistakes `--intent` taken from that subsection asks for this subtask
+#   alone. The scope sentence precedes the fill because an unfenced heading
+#   inside the fill ends the subsection. When the issue was split (`<N>` above
+#   one) that sentence says the issue's other subtasks are neither this task's
+#   scope nor its acceptance criteria; for `1/1` it says the unsplit issue is
+#   this task's whole work, so its content is context and criteria both.
+#   `{FIRSTMATE_SPEC}` keeps its meaning and stays out of `--intent`. Every line of
+#   issue-authored text is quoted with a leading "> ", so a heading or code
+#   fence written in the issue cannot end that subsection or restructure the
+#   sections after it. bin/fm-gitlab-issue-lib.sh owns the accepted URL shape
+#   and the canonical spelling; the scaffold records it as a fixed
+#   machine-readable "Issue contract: issue=<url>" line that bin/fm-spawn.sh
+#   checks against its own --issue. A brief whose mode actually produces a
+#   merge request also carries the generated small-merge-request contract: one
+#   reviewable merge request for the task, its title, a "Related to #<iid>" line
+#   and never a closing keyword (the human closes the issue), and the regression
+#   test for a reproduced bug, which the block places on this merge request or
+#   on subtask 1's from the `<n>/<N>` position the scaffold already resolved,
+#   never from what the spec happens to restate. The merge request
+#   is a GitLab one, so the block names `glab` as its tool in both modes. Under
+#   --mode no-mistakes the pipeline is what opens it, so the block also makes
+#   setting its title and description the worker's last step - metadata of an
+#   already-open merge request, edited after the run, never code the pipeline
+#   owns - and bin/fm-dod-lib.sh puts that step inside the no-mistakes done gate
+#   for an issue-sourced task. Under --mode direct-PR the worker opens the merge
+#   request itself with `glab`, and the block says so explicitly, overriding the
+#   definition of done's `gh-axi` sentence - the GitHub path, which cannot open a
+#   GitLab merge request. --mode local-only is refused: it opens no merge
+#   request, and an issue subtask exists to produce one. The block is generated
+#   build guidance rather than the captain's words, and it sits outside `# Task`
+#   so it never becomes no-mistakes `--intent`. --issue is a ship flag, refused
+#   on --scout (a scout delivers a report, not a merge request) and on
+#   --secondmate, and needs glab and jq on PATH; an issue that
+#   cannot be read refuses the scaffold instead of writing a brief the worker
+#   cannot act on. The issue must belong to <repo-name>'s own GitLab project -
+#   compared against the project path the issue itself reports, by full path or
+#   by project name - because a merge request's bare "#<iid>" resolves against
+#   the merge request's own project, so a cross-project pairing would silently
+#   reference a different or missing issue.
+#   --issue-part <n>/<N> is REQUIRED with --issue and refused without it: it is
+#   this task's resolved position among the subtasks the issue was split into,
+#   and the required merge request title carries it, e.g. "#<iid> [2/3] <work>".
+#   Firstmate planned the split, so it always knows the position; a missing one
+#   is a caller mistake that fails here rather than reaching a merge request
+#   title as a placeholder.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
@@ -90,6 +142,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-gitlab-issue-lib.sh
+. "$SCRIPT_DIR/fm-gitlab-issue-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -121,6 +175,10 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+ISSUE_ARG=
+ISSUE_SET=0
+ISSUE_PART=
+ISSUE_PART_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -130,6 +188,8 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      issue) ISSUE_ARG=$a; ISSUE_SET=1 ;;
+      issue-part) ISSUE_PART=$a; ISSUE_PART_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -142,6 +202,10 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --issue) want_value=issue ;;
+    --issue=*) ISSUE_ARG=${a#--issue=}; ISSUE_SET=1 ;;
+    --issue-part) want_value=issue-part ;;
+    --issue-part=*) ISSUE_PART=${a#--issue-part=}; ISSUE_PART_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -179,6 +243,49 @@ fi
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
+fi
+
+# The issue URL is validated before anything is written or fetched, by the same
+# library every other issue-aware surface uses (bin/fm-gitlab-issue-lib.sh).
+if [ "$ISSUE_SET" -eq 1 ]; then
+  if [ "$KIND" != ship ]; then
+    echo "error: --issue applies only to ship briefs; a scout delivers a report and a secondmate charter is not issue work" >&2
+    exit 1
+  fi
+  if [ "$MODE" = local-only ]; then
+    echo "error: --issue cannot ship --mode local-only: local-only opens no merge request, and every subtask dispatched from an issue must produce one small merge request for the human to review and merge" >&2
+    exit 1
+  fi
+  fm_gitlab_issue_url_parse "$ISSUE_ARG" || {
+    echo "error: --issue is not a GitLab issue URL (expected https://<host>/<group>/<project>/-/issues/<iid>): $ISSUE_ARG" >&2
+    exit 1
+  }
+  # The merge request title must name this subtask's position, so the caller
+  # that planned the split states it here rather than the worker guessing it.
+  [ "$ISSUE_PART_SET" -eq 1 ] || {
+    echo "error: --issue requires --issue-part <n>/<N>, this task's position among the subtasks the issue was split into; the merge request title must carry it" >&2
+    exit 1
+  }
+fi
+
+if [ "$ISSUE_PART_SET" -eq 1 ]; then
+  [ "$ISSUE_SET" -eq 1 ] || {
+    echo "error: --issue-part is this task's position among one issue's subtasks; pass it with --issue or not at all" >&2
+    exit 1
+  }
+  case "$ISSUE_PART" in
+    [1-9]*/[1-9]*) ISSUE_PART_N=${ISSUE_PART%%/*}; ISSUE_PART_TOTAL=${ISSUE_PART#*/} ;;
+    *) ISSUE_PART_N=; ISSUE_PART_TOTAL= ;;
+  esac
+  case "$ISSUE_PART_N$ISSUE_PART_TOTAL" in
+    '' | *[!0-9]*)
+      echo "error: --issue-part must be <n>/<N>, two positive whole numbers (got '$ISSUE_PART')" >&2
+      exit 1 ;;
+  esac
+  [ "$ISSUE_PART_N" -le "$ISSUE_PART_TOTAL" ] || {
+    echo "error: --issue-part <n>/<N> needs n no larger than N: this task cannot be subtask $ISSUE_PART_N of $ISSUE_PART_TOTAL" >&2
+    exit 1
+  }
 fi
 
 BRIEF="$DATA/$ID/brief.md"
@@ -311,6 +418,136 @@ fi
 
 REPO=${POS[1]}
 
+# Quote every line of issue-authored text. The leading "> " keeps a heading or
+# a code fence written by a human on GitLab from ending `## Captain's intent`
+# or restructuring the sections after it, while leaving the words verbatim.
+issue_quote() {
+  awk '{ sub(/\r$/, ""); if ($0 == "") print ">"; else print "> " $0 }'
+}
+
+issue_show_field() {  # <jq-filter>
+  printf '%s\n' "$ISSUE_SHOW" | jq -r "$1"
+}
+
+# The captain-facing half of --issue: the issue as CONTEXT, the sentence that
+# limits the ask to this subtask, and last the retained {TASK} placeholder
+# Firstmate fills with this subtask's own work. The whole subsection is what a
+# no-mistakes run passes as --intent, so the issue must read as context for one
+# subtask's work rather than as N subtasks' acceptance criteria. The scope
+# sentence goes before {TASK} because an unfenced heading in that fill ends the
+# subsection, and anything rendered after it would leave with the truncation.
+render_issue_intent() {
+  local title description notes
+  title=$(issue_show_field '.title // ""')
+  description=$(issue_show_field '.description // ""')
+  notes=$(issue_show_field '.notes[]? | "@" + (.author.username // "unknown") + " at " + (.created_at // "unknown time") + ":\n" + (.body // "") + "\n"')
+  printf 'CONTEXT - this task was dispatched from GitLab issue #%s in %s, opened by @%s and currently %s:\n' \
+    "$FM_GITLAB_ISSUE_IID" "$ISSUE_PROJECT_PATH" "$ISSUE_AUTHOR" "$ISSUE_STATE"
+  printf '%s\n\n' "$FM_GITLAB_ISSUE_URL"
+  printf 'The issue is quoted below as it was written; the leading "> " on each line is the quote, not part of the text.\n\n'
+  printf 'Title:\n'
+  printf '%s\n' "$title" | issue_quote
+  if [ -n "$(printf '%s' "$description" | tr -d '[:space:]')" ]; then
+    printf '\nDescription:\n'
+    printf '%s\n' "$description" | issue_quote
+  else
+    printf '\nDescription: the issue has none.\n'
+  fi
+  if [ -n "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+    printf '\nComments on the issue, oldest first:\n'
+    printf '%s\n' "$notes" | issue_quote
+  else
+    printf '\nThe issue has no comments.\n'
+  fi
+  printf '\nSCOPE - this task is subtask %s of the %s that issue #%s was split into.\n' \
+    "$ISSUE_PART_N" "$ISSUE_PART_TOTAL" "$FM_GITLAB_ISSUE_IID"
+  if [ "$ISSUE_PART_TOTAL" -gt 1 ]; then
+    printf 'Only the work stated below is in scope, and only it is this task'"'"'s acceptance criteria.\n'
+    printf 'The issue above is context for reading that work, not a checklist for this task: the issue'"'"'s other subtasks are NOT this task'"'"'s work, NOT its scope, and NOT its acceptance criteria - they are dispatched separately.\n'
+  else
+    printf 'The issue was not split, so the issue above IS the whole of this task'"'"'s work: its content is this task'"'"'s context AND its acceptance criteria.\n'
+  fi
+  printf '\nTHE WORK OF THIS TASK, which is what you are asked to deliver:\n'
+  printf '{TASK}\n'
+}
+
+ISSUE_SHOW=
+ISSUE_BLOCK=
+CAPTAIN_INTENT_BODY='{TASK}'
+if [ "$ISSUE_SET" -eq 1 ]; then
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: --issue needs jq on PATH to read the issue" >&2
+    exit 1
+  }
+  ISSUE_SHOW=$("$FM_ROOT/bin/fm-gitlab-issue.sh" show "$FM_GITLAB_ISSUE_URL") || {
+    echo "error: --issue could not read $FM_GITLAB_ISSUE_URL; no brief was written" >&2
+    exit 1
+  }
+  ISSUE_PROJECT_PATH=$(issue_show_field '.project_path_with_namespace // ""')
+  [ -n "$ISSUE_PROJECT_PATH" ] || ISSUE_PROJECT_PATH=$FM_GITLAB_ISSUE_PATH
+  # A merge request's bare `#<iid>` resolves against the merge request's own
+  # project, so an issue from another project would cross-link a different or
+  # missing issue. The task's project must be the issue's own.
+  if [ "$REPO" != "$ISSUE_PROJECT_PATH" ] && [ "$REPO" != "${ISSUE_PROJECT_PATH##*/}" ]; then
+    echo "error: --issue belongs to GitLab project $ISSUE_PROJECT_PATH but this brief is for project $REPO; \`Related to #$FM_GITLAB_ISSUE_IID\` in a $REPO merge request would point at a different issue" >&2
+    exit 1
+  fi
+  ISSUE_AUTHOR=$(issue_show_field '.author.username // "unknown"')
+  ISSUE_STATE=$(issue_show_field '.state // "unknown"')
+  CAPTAIN_INTENT_BODY=$(render_issue_intent)
+
+  # Generated build guidance, never the captain's words: it stays outside
+  # `# Task` so it is not carried into a no-mistakes `--intent`. The
+  # "Issue contract: issue=" line is what bin/fm-spawn.sh checks its own
+  # --issue against.
+  IFS= read -r -d '' ISSUE_SECTION <<EOF || true
+# GitLab issue
+Issue contract: issue=$FM_GITLAB_ISSUE_URL
+This task was dispatched from that issue, quoted under \`## Captain's intent\` above.
+The human who opened it owns it: never close it, never change its labels, and never comment on it - firstmate reports back to the issue.
+EOF
+  ISSUE_SECTION=${ISSUE_SECTION%$'\n'}
+  # The scaffold already resolved and validated this task's position, so the
+  # regression-test obligation is stated from that, never deferred to whatever
+  # the firstmate spec happens to restate about which subtask this is.
+  if [ "$ISSUE_PART_N" -eq 1 ]; then
+    ISSUE_REGRESSION_RULE="When the issue is a bug that was reproduced, the regression test ships with the first subtask's merge request, and this task IS subtask 1 of $ISSUE_PART_TOTAL: this merge request must contain it."
+  else
+    ISSUE_REGRESSION_RULE="When the issue is a bug that was reproduced, the regression test ships with subtask 1's merge request; this task is subtask $ISSUE_PART_N of $ISSUE_PART_TOTAL, so carrying it is not this merge request's job."
+  fi
+  IFS= read -r -d '' ISSUE_MR_SECTION <<EOF || true
+Ship exactly one merge request for this task by default, small enough that a human reviews the whole diff in one reading.
+If the work genuinely cannot land as one reviewable change, say so to firstmate instead of splitting or stacking merge requests on your own.
+Title it \`#$FM_GITLAB_ISSUE_IID [$ISSUE_PART_N/$ISSUE_PART_TOTAL] <what this task changes>\`, where $ISSUE_PART_N/$ISSUE_PART_TOTAL is this task's resolved position among the subtasks issue #$FM_GITLAB_ISSUE_IID was split into - do not change it.
+The description must carry the line \`Related to #$FM_GITLAB_ISSUE_IID\` and must never carry \`Closes\`, \`Fixes\`, \`Resolves\`, or any other closing keyword: the human closes the issue after reviewing every merge request.
+$ISSUE_REGRESSION_RULE
+EOF
+  ISSUE_SECTION="$ISSUE_SECTION"$'\n\n'"${ISSUE_MR_SECTION%$'\n'}"
+  # Who opens the merge request differs by mode, and the tool never does: this
+  # work lands on GitLab, so it is glab either way.
+  if [ "$MODE" = no-mistakes ]; then
+    IFS= read -r -d '' ISSUE_TOOL_SECTION <<EOF || true
+The no-mistakes pipeline opens this merge request for you, so setting its title and description is your last step, not the pipeline's.
+After the pipeline reports CI green, set the open merge request's title and description to exactly the form above with \`glab mr update\`, and only then report done.
+That step edits the metadata of an already-open merge request: it changes no code and it happens after the run has finished, so it is not the hand-editing of findings the pipeline owns.
+EOF
+  else
+    IFS= read -r -d '' ISSUE_TOOL_SECTION <<EOF || true
+You open this merge request yourself, and it lives on GitLab: push your branch and open it with \`glab\` (\`glab mr create\`), giving it the title and description required above.
+This sentence overrides the definition of done below where it says to open the PR with \`gh-axi\`: \`gh-axi\` is the GitHub tool and cannot open a GitLab merge request, so for this task \`glab\` is the one that applies.
+EOF
+  fi
+  ISSUE_SECTION="$ISSUE_SECTION"$'\n\n'"${ISSUE_TOOL_SECTION%$'\n'}"
+  ISSUE_BLOCK=$'\n'"$ISSUE_SECTION"$'\n'
+fi
+# --issue supplies the issue as context around {TASK}, so both placeholders are
+# still Firstmate's to fill.
+PLACEHOLDER_HINT='{TASK} and {FIRSTMATE_SPEC}'
+ISSUE_LABEL=
+if [ "$ISSUE_SET" -eq 1 ]; then
+  ISSUE_LABEL=", issue=#$FM_GITLAB_ISSUE_IID"
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -343,10 +580,10 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
-IFS= read -r -d '' TASK_SECTION <<'EOF' || true
+IFS= read -r -d '' TASK_SECTION <<EOF || true
 # Task
 ## Captain's intent
-{TASK}
+$CAPTAIN_INTENT_BODY
 
 ## Firstmate spec
 {FIRSTMATE_SPEC}
@@ -438,13 +675,13 @@ case "$MODE" in
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$ISSUE_SET") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
-
+$ISSUE_BLOCK
 $HERDR_SECTION
 
 # Setup
@@ -506,4 +743,4 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+echo "scaffolded: $BRIEF (ship, mode=$MODE$ISSUE_LABEL; replace $PLACEHOLDER_HINT)"
