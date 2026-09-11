@@ -70,10 +70,10 @@ Every pane operation passes an explicit `--pane-id` because a new session can fo
 Worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
 This active probe is scoped to spawn-time worktree discovery and is not advertised as a general live-cwd API.
 Zellij exposes no per-pane foreground process either, so that discovery cannot tell a slow `git fetch origin` inside `treehouse get` from a refusal.
-The pane text stands in for the foreground: treehouse's own `Entered worktree` line starts the 60-second path-settle bound, and an `error:` line or the `max_trees` pool-cap line seen after the echoed command and before any entry fails the spawn at once with the pane's last lines.
-Once the entry line has been seen, the pane text is not read again, so the nested shell's own startup errors are never taken for a refusal.
-A pane that shows neither gives up at that same bound, and the refusal names the foreground as unreadable.
-The larger `FM_SPAWN_ACQUIRE_TIMEOUT` bound needs a foreground reader that shows treehouse running, because the spawn holds the per-project Treehouse lock across the wait; the [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns both bounds.
+The pane's own text stands in for the foreground, and the [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns what that text means and both bounds of the wait.
+The larger `FM_SPAWN_ACQUIRE_TIMEOUT` bound never applies here, because the spawn holds the per-project Treehouse lock across the wait and waits longer only on positive evidence.
+A refusal treehouse prints before entry fails the spawn at once with the pane's last lines.
+A `treehouse get` that has not printed its `Entered worktree` line within the 60-second path-settle bound is given up on, and the refusal names the foreground as unreadable.
 
 `new-tab` has no no-focus flag and temporarily focuses the created tab in attached clients.
 The adapter records the previously active tab and immediately restores it with `go-to-tab-by-id`.
