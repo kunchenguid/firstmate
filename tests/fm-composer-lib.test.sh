@@ -24,6 +24,19 @@ set -u
 # classify <bordered> <content> [idle_re] -> echoes the verdict.
 classify() { fm_composer_classify_content "$@"; }
 
+test_compare_normalizer_preserves_separators() {
+  local out
+  out=$(fm_composer_normalize_compare_text foobar)
+  [ "$out" = foobar ] || fail "comparison normalization changed plain text: '$out'"
+  out=$(fm_composer_normalize_compare_text 'foo bar')
+  [ "$out" = 'foo bar' ] || fail "comparison normalization changed meaningful spaces: '$out'"
+  out=$(fm_composer_normalize_compare_text $'foo\nbar')
+  [ "$out" = 'foo bar' ] || fail "comparison normalization did not fold wrapping whitespace: '$out'"
+  [ "$(fm_composer_normalize_compare_text 'foobar')" != "$(fm_composer_normalize_compare_text 'foo bar')" ] \
+    || fail "comparison normalization erased a meaningful separator"
+  pass "fm_composer_normalize_compare_text: wrapping folds, meaningful separators survive"
+}
+
 # --- Safety fix: bare shell prompt is NOT an empty agent composer -----------
 
 test_bare_shell_glyphs_are_unknown() {
@@ -988,6 +1001,7 @@ test_agy_prompt_preserves_furniture_looking_drafts() {
 }
 
 test_bare_shell_glyphs_are_unknown
+test_compare_normalizer_preserves_separators
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty

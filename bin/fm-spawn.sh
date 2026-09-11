@@ -1000,7 +1000,8 @@ spawn_abort_cleanup() {
         "$RELAUNCH_REPLACEMENT_HARNESS" \
         "$RELAUNCH_REPLACEMENT_WT" \
         "$RELAUNCH_REPLACEMENT_STATE" \
-        "$ID"; then
+        "$ID" \
+        "$AGY_HOOK_ROOT_CREATED"; then
       echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
     fi
     if [ -n "$RELAUNCH_REPLACEMENT_BUSY_GEN" ]; then
@@ -1145,7 +1146,8 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
+  local harness=$1 wt=$2 state=$3 id=$4 agy_root_owned=${5:-1}
+  local token_path token auth_path path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -1169,8 +1171,17 @@ clear_relaunch_harness_wiring() {
       if [ "$harness" != agy ] || [ "$path" != "$state/$id.agy-hooks" ]; then
         return 1
       fi
+      if [ "$agy_root_owned" != 1 ]; then
+        echo "warning: retaining pre-existing agy hook root $path after aborted relaunch of $id" >&2
+        return 1
+      fi
       rm -rf -- "$path" || return 1
     else
+      if [ "$harness" = agy ] && [ "$path" = "$state/$id.agy-hooks" ] \
+          && [ "$agy_root_owned" != 1 ]; then
+        echo "warning: retaining pre-existing agy hook path $path after aborted relaunch of $id" >&2
+        return 1
+      fi
       rm -f -- "$path" || return 1
     fi
   done <<EOF
