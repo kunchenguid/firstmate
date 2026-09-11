@@ -215,21 +215,32 @@ fm_herdr_lab_viewer_recorded_value() { # <session> <key>
   printf '%s' "$value"
 }
 
-fm_herdr_lab_viewer_owned_pid() { # <session> <launcher|viewer>
-  local pid recorded_start current_start launcher_pid parent_pid
-  pid=$(fm_herdr_lab_viewer_recorded_value "$1" "$2_pid") || return 1
-  case "$pid" in
-    ''|*[!0-9]*) return 1 ;;
+fm_herdr_lab_viewer_owned_pair() { # <session>
+  local launcher_pid viewer_pid launcher_start viewer_start current_start parent_pid
+  launcher_pid=$(fm_herdr_lab_viewer_recorded_value "$1" launcher_pid) || return 1
+  viewer_pid=$(fm_herdr_lab_viewer_recorded_value "$1" viewer_pid) || return 1
+  case "$launcher_pid:$viewer_pid" in
+    *[!0-9:]*) return 1 ;;
   esac
-  recorded_start=$(fm_herdr_lab_viewer_recorded_value "$1" "$2_start") || return 1
-  current_start=$(fm_herdr_lab_process_start "$pid") || return 1
-  [ -n "$current_start" ] && [ "$current_start" = "$recorded_start" ] || return 1
-  if [ "$2" = viewer ]; then
-    launcher_pid=$(fm_herdr_lab_viewer_owned_pid "$1" launcher) || return 1
-    parent_pid=$(fm_herdr_lab_process_parent "$pid") || return 1
-    [ "$parent_pid" = "$launcher_pid" ] || return 1
-  fi
-  printf '%s' "$pid"
+  launcher_start=$(fm_herdr_lab_viewer_recorded_value "$1" launcher_start) || return 1
+  viewer_start=$(fm_herdr_lab_viewer_recorded_value "$1" viewer_start) || return 1
+  current_start=$(fm_herdr_lab_process_start "$launcher_pid") || return 1
+  [ -n "$current_start" ] && [ "$current_start" = "$launcher_start" ] || return 1
+  current_start=$(fm_herdr_lab_process_start "$viewer_pid") || return 1
+  [ -n "$current_start" ] && [ "$current_start" = "$viewer_start" ] || return 1
+  parent_pid=$(fm_herdr_lab_process_parent "$viewer_pid") || return 1
+  [ "$parent_pid" = "$launcher_pid" ] || return 1
+  printf '%s %s' "$launcher_pid" "$viewer_pid"
+}
+
+fm_herdr_lab_viewer_owned_pid() { # <session> <launcher|viewer>
+  local pair
+  pair=$(fm_herdr_lab_viewer_owned_pair "$1") || return 1
+  case "$2" in
+    launcher) printf '%s' "${pair%% *}" ;;
+    viewer) printf '%s' "${pair#* }" ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_herdr_lab_viewer_signal() { # <session> <launcher|viewer> <signal>
@@ -240,11 +251,7 @@ fm_herdr_lab_viewer_signal() { # <session> <launcher|viewer> <signal>
 
 # True while this lab owns a viewer process that is still running.
 fm_herdr_lab_viewer_owned_alive() { # <session>
-  local role
-  for role in viewer launcher; do
-    fm_herdr_lab_viewer_owned_pid "$1" "$role" >/dev/null && return 0
-  done
-  return 1
+  fm_herdr_lab_viewer_owned_pair "$1" >/dev/null
 }
 
 fm_herdr_lab_viewer_session_stopped_or_absent() { # <session>
@@ -363,8 +370,11 @@ fm_herdr_lab_viewer_start() { # <session>
   local name=$1 status
   fm_herdr_lab_validate_name "$name" || return 1
   fm_herdr_lab_viewer_lock "$name" || return 1
-  fm_herdr_lab_viewer_start_locked "$name"
-  status=$?
+  if fm_herdr_lab_viewer_start_locked "$name"; then
+    status=0
+  else
+    status=$?
+  fi
   fm_herdr_lab_viewer_unlock "$name" || return 1
   return "$status"
 }
@@ -373,8 +383,11 @@ fm_herdr_lab_viewer_stop() { # <session>
   local name=$1 status
   fm_herdr_lab_validate_name "$name" || return 1
   fm_herdr_lab_viewer_lock "$name" || return 1
-  fm_herdr_lab_viewer_stop_locked "$name"
-  status=$?
+  if fm_herdr_lab_viewer_stop_locked "$name"; then
+    status=0
+  else
+    status=$?
+  fi
   fm_herdr_lab_viewer_unlock "$name" || return 1
   return "$status"
 }

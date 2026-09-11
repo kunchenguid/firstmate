@@ -304,7 +304,7 @@ family_for_basename() {
     fm-backend-herdr-focus-flash-e2e.test.sh|\
     fm-backend-herdr-stale-active-tab-e2e.test.sh|\
     fm-backend-herdr-agent-exit-shell-e2e.test.sh|\
-    fm-herdr-session-cleanup-e2e.test.sh|\
+    fm-herdr-attached-viewer-live-e2e.test.sh|fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
     fm-control-herdr-smoke.test.sh)
       printf '%s\n' real-herdr-gated
@@ -338,7 +338,6 @@ family_for_basename() {
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|\
-    fm-herdr-attached-viewer-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\

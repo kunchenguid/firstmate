@@ -418,12 +418,31 @@ test_viewer_stop_requires_the_recorded_parent() {
   write_viewer_record "$record" "$launcher_pid" "$viewer_pid"
   printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
   run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "parent-mismatch stop failed"
+  kill -0 "$launcher_pid" 2>/dev/null || fail "stop signalled a launcher without its recorded child"
   kill -0 "$viewer_pid" 2>/dev/null || fail "stop signalled a viewer outside the recorded launcher"
+  kill "$launcher_pid" "$viewer_pid" 2>/dev/null || true
   wait "$launcher_pid" 2>/dev/null || true
-  kill "$viewer_pid" 2>/dev/null || true
   wait "$viewer_pid" 2>/dev/null || true
   run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-parent fixture teardown failed"
   pass "fm-herdr-lab: viewer ownership requires the recorded parent"
+}
+
+test_viewer_failure_releases_transition_lock() {
+  local name="fm-lab-viewer-unlock-$$" record lock status=0 pair="$TMP_ROOT/viewer-unlock-pair"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-unlock fixture provision failed"
+  record=$(run_with_fake fm_herdr_lab_viewer_record_path "$name")
+  lock=$(run_with_fake fm_herdr_lab_viewer_lock_path "$name")
+  start_viewer_fixture "$pair"
+  write_viewer_record "$record" "$FIXTURE_LAUNCHER_PID" "$FIXTURE_VIEWER_PID"
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" viewer start "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "starting an already-running viewer must fail"
+  assert_absent "$lock" "failed viewer start leaked its transition lock"
+  printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" viewer stop "$name" || fail "stop remained blocked after failed start"
+  wait "$FIXTURE_LAUNCHER_PID" 2>/dev/null || true
+  assert_absent "$lock" "successful viewer stop leaked its transition lock"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-unlock fixture teardown failed"
+  pass "fm-herdr-lab: viewer failures release the transition lock under errexit"
 }
 
 test_teardown_refuses_while_viewer_attached() {
@@ -489,6 +508,7 @@ test_concurrent_viewer_start_is_refused
 test_viewer_start_requires_its_owned_process
 test_viewer_stop_only_signals_owned_processes
 test_viewer_stop_requires_the_recorded_parent
+test_viewer_failure_releases_transition_lock
 test_teardown_refuses_while_viewer_attached
 test_viewer_stop_retains_record_when_detach_is_unreadable
 test_viewer_launcher_refuses_unsafe_arguments
