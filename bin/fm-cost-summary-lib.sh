@@ -34,12 +34,24 @@
 
 set -eu
 
+_FM_COST_SUMMARY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_COST_SUMMARY_LIB_DIR="."
+# shellcheck source=bin/fm-classify-lib.sh
+. "$_FM_COST_SUMMARY_LIB_DIR/fm-classify-lib.sh"
+
 fm_cost_claude_dir() {  # <worktree>
   printf '%s\n' "${HOME}/.claude/projects/$(printf '%s' "$1" | tr '/.' '--')"
 }
 
 fm_cost_pi_dir() {  # <worktree>
-  printf '%s\n' "${HOME}/.pi/agent/sessions/--$(printf '%s' "$1" | tr '/' '-')--"
+  printf '%s\n' "${HOME}/.pi/agent/sessions/--$(printf '%s' "${1#/}" | tr '/' '-')--"
+}
+
+_fm_cost_file_mtime_epoch() {  # <file>
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C /usr/bin/stat -f '%m' "$1" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%Y' "$1" 2>/dev/null
+  fi
 }
 
 # Sums one already-computed cost field per matching jsonl file (either the
@@ -47,14 +59,18 @@ fm_cost_pi_dir() {  # <worktree>
 # holds, for an incremental one), streamed rather than slurped so a large
 # session file is never read whole into memory. Echoes a JSON number, or
 # "null" when nothing was found or jq is unavailable.
-fm_cost_sum_jq_field() {  # <dir> <mtime-lower-bound-date> <jq-select-filter> <last-only: 0|1>
-  local dir=$1 since=$2 filt=$3 last_only=$4 f v total found file_total file_found
+fm_cost_sum_jq_field() {  # <dir> <mtime-lower-bound-iso8601> <jq-select-filter> <last-only: 0|1>
+  local dir=$1 since=$2 filt=$3 last_only=$4 f v total found file_total file_found since_epoch file_epoch
   command -v jq >/dev/null 2>&1 || { printf 'null\n'; return 0; }
   [ -d "$dir" ] || { printf 'null\n'; return 0; }
+  since_epoch=$(fm_utc_iso_to_epoch "$since") || since_epoch=0
   total=0
   found=0
   while IFS= read -r f; do
     [ -f "$f" ] || continue
+    file_epoch=$(_fm_cost_file_mtime_epoch "$f") || file_epoch=0
+    [ -n "$file_epoch" ] || file_epoch=0
+    [ "$file_epoch" -ge "$since_epoch" ] 2>/dev/null || continue
     file_total=0
     file_found=0
     while IFS= read -r v; do
@@ -70,7 +86,7 @@ fm_cost_sum_jq_field() {  # <dir> <mtime-lower-bound-date> <jq-select-filter> <l
     [ "$file_found" = 1 ] || continue
     found=1
     total=$(awk -v a="$total" -v b="$file_total" 'BEGIN { printf "%.10f", a + b }')
-  done < <(find "$dir" -maxdepth 1 -type f -name '*.jsonl' -newermt "$since" 2>/dev/null)
+  done < <(find "$dir" -maxdepth 1 -type f -name '*.jsonl' 2>/dev/null)
   if [ "$found" -eq 1 ]; then
     printf '%s\n' "$total"
   else

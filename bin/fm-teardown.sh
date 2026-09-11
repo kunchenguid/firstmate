@@ -3355,7 +3355,9 @@ fi
 # block the teardown it is only recording a summary of.
 if [ "$KIND" != secondmate ]; then
   TEARDOWN_LANDED=null
-  [ "$KIND" != ship ] || TEARDOWN_LANDED=true
+  if [ "$KIND" = ship ] && [ "$FORCE" != "--force" ]; then
+    TEARDOWN_LANDED=true
+  fi
   fm_cost_summary_write "$DATA" "$ID" "$META" "$KIND" "$PR_URL" "$TEARDOWN_LANDED" || true
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
