@@ -45,16 +45,16 @@ jobs:
         run: bin/fm-lint.sh --ci-fast modules/fm-state-reader/src/adapters/procevent.sh
 
   modules:
-    name: Shared module contracts
+    name: Module contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
-      - name: Verify shared module contracts and process-event composition
-        run: bin/fm-test-run.sh tests/fm-modules.test.sh tests/fm-peer-message.test.sh
+      - name: Verify shared module contracts, routing, and process-event composition
+        run: bin/fm-test-run.sh tests/fm-modules.test.sh tests/fm-peer-message.test.sh tests/fm-tachikoma.test.sh tests/fm-model-telemetry.test.sh tests/fm-model-usage.test.sh
 
   critical-teardown:
     name: Critical teardown safety

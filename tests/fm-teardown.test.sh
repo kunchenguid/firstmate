@@ -167,17 +167,13 @@ exit 0
 SH
   chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
 
-  # Bare origin so the clone has an `origin` remote and origin/HEAD.
-  git init -q --bare "$case_dir/origin.git"
-  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
-  # Seed origin with one commit BEFORE cloning so the clone is not empty.
-  git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
-  git -C "$case_dir/_seed" -c user.email=t@t -c user.name=t \
+  # Seed a local bare fixture by cloning, never by disabling push protection.
+  git init -q --initial-branch=main "$case_dir/project"
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
     commit -q --allow-empty -m "origin baseline"
-  git -C "$case_dir/_seed" push -q origin main
-  rm -rf "$case_dir/_seed"
-  # Clone as the project; give it a `main` branch and an origin/HEAD.
-  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git clone -q --bare "$case_dir/project" "$case_dir/origin.git"
+  git -C "$case_dir/project" remote add origin "$case_dir/origin.git"
+  git -C "$case_dir/project" fetch -q origin
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
   # Add a worktree on a fresh task branch; that branch is where the crewmate commits.
   git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
@@ -242,7 +238,7 @@ land_on_origin_main() {
   printf '%s\n' "$content" > "$tmp/$file"
   git -C "$tmp" add -- "$file"
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
-  git -C "$tmp" push -q origin HEAD:main
+  git -C "$case_dir/origin.git" fetch -q "$tmp" HEAD:refs/heads/main
   rm -rf "$tmp"
 }
 
@@ -289,7 +285,7 @@ setup_squash_rebased_history() {
   printf '%s\n' base > "$tmp/shared.txt"
   git -C "$tmp" add -- shared.txt
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "shared base"
-  git -C "$tmp" push -q origin main
+  git -C "$case_dir/origin.git" fetch -q "$tmp" main:refs/heads/main
   git -C "$case_dir/wt" fetch -q origin
   git -C "$case_dir/wt" reset -q --hard origin/main
   rm -rf "$tmp"
@@ -306,7 +302,7 @@ setup_squash_rebased_history() {
   printf '%s\n' base main-edit > "$tmp/shared.txt"
   git -C "$tmp" add -- shared.txt
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "main edits shared"
-  git -C "$tmp" push -q origin main
+  git -C "$case_dir/origin.git" fetch -q "$tmp" main:refs/heads/main
   rm -rf "$tmp"
 
   tmp="$case_dir/_pipeline"
@@ -324,7 +320,7 @@ setup_squash_rebased_history() {
   git -C "$tmp" checkout -q main
   git -C "$tmp" merge -q --squash fm/task-x1 >/dev/null
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "feat: squash (#7)"
-  git -C "$tmp" push -q origin main
+  git -C "$case_dir/origin.git" fetch -q "$tmp" main:refs/heads/main
   rm -rf "$tmp"
 
   git -C "$case_dir/project" fetch -q origin
@@ -630,6 +626,39 @@ run_teardown() {
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+record_teardown_model_attempt() {
+  local case_dir=$1 payload attempt
+  payload=$(jq -cn '{attemptClass:"real",source:"firstmate",taskRootId:null,parentAttemptId:null,projectRef:"project_0123456789abcdef",taskClass:"bounded-implementation-proven-root-fix",tuple:{harness:"fixture-unobserved",provider:null,model:"fixture",effort:"high",modelVersion:"fixture",cliVersion:"fixture-1"},selection:{matchedRule:"default",configSha256:null,fitReasons:[],candidateAssessments:[],quota:{decision:"not-applicable",headroom:"unknown",runway:"unknown",observedAt:null}},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},startedAt:"2026-08-02T00:00:00Z",privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}')
+  attempt=$(FM_HOME="$case_dir" "$ROOT/bin/fm-model-telemetry.sh" intake --state "$case_dir/state" --task task-x1 --payload "$payload" | jq -er .attemptId) || fail "teardown telemetry intake failed"
+  printf 'telemetry_attempt=%s\n' "$attempt" >> "$case_dir/state/task-x1.meta"
+}
+
+test_teardown_seals_observations_without_equating_cleanup_with_success() {
+  local case_dir result rc kind expected
+  for kind in landed pushed discarded; do
+    case_dir=$(make_case "telemetry-$kind")
+    write_meta "$case_dir" local-only ship
+    wt_commit_file "$case_dir" feature.txt "work" "fixture work"
+    expected=incomplete
+    case "$kind" in
+      landed) git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"; expected=accepted ;;
+      pushed) add_fork_with_pushed_branch "$case_dir" ;;
+      discarded) expected=cancelled ;;
+    esac
+    record_teardown_model_attempt "$case_dir"
+    if [ "$kind" = discarded ]; then
+      result=$(run_teardown "$case_dir" --force 2>&1); rc=$?
+    else
+      result=$(run_teardown "$case_dir" 2>&1); rc=$?
+    fi
+    [ "$rc" -eq 0 ] || fail "telemetry $kind teardown failed: $result"
+    [ ! -f "$case_dir/state/task-x1.meta" ] || fail "telemetry $kind left task metadata"
+    result=$(FM_HOME="$case_dir" "$ROOT/bin/fm-model-telemetry.sh" sheet --format json)
+    printf '%s' "$result" | jq -e --arg expected "$expected" '.[]|select(.taskId=="task-x1")|.state=="terminal" and .classification==$expected and .metrics.relaunches==0 and .metrics.assistantTurns==null and .metrics.testRed==null and .usageSource=="no-verified-source"' >/dev/null || fail "telemetry $kind confused cleanup permission with acceptance or lost unknowns: $result"
+  done
+  pass "teardown seals exact attempts before cleanup and never treats a pushed branch as accepted"
 }
 
 setup_allow_local_teardown() {
@@ -3907,6 +3936,7 @@ EOF
   pass "reader scratch teardown skips treehouse return and removes its task temp root"
 }
 
+test_teardown_seals_observations_without_equating_cleanup_with_success
 test_local_only_fork_remote_allows
 test_teardown_skips_pipeline_retirement_when_nested_home_is_gone
 test_teardown_retires_pipeline_records_on_normal_remove

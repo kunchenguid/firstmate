@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "enabled": false,
+  "catalogSha256": null,
+  "dispatchSha256": null,
+  "allowedHarnesses": [],
+  "disabledPools": [],
+  "maxLoadPerCpu": 2,
+  "explorationRate": 0.1,
+  "unmeasuredRate": 0.05,
+  "unmeasuredDailyCap": 1,
+  "rules": [],
+  "bindings": []
+}

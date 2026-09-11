@@ -296,7 +296,7 @@ family_for_basename() {
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-search.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|fm-lint-workflows.test.sh|\
     fm-macos-scope.test.sh|\
-    fm-model-telemetry.test.sh|fm-model-usage.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-model-telemetry.test.sh|fm-model-usage.test.sh|fm-tachikoma.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-ci-water7.test.sh|fm-install-chrome.test.sh|\
     fm-quota-utilization.test.sh|\
     fm-harness-adapter-references.test.sh|\
@@ -1719,7 +1719,7 @@ families_for_changed_path() {
       # lane's contract coverage re-runs.
       printf '%s\n' real-herdr-gated
       ;;
-    bin/fm-model-telemetry.sh|bin/fm-model-usage.mjs)
+    bin/fm-model-telemetry.sh|bin/fm-model-usage.mjs|bin/fm-tachikoma.sh|modules/tachikoma/*)
       printf '%s\n' pure-contract-unit
       ;;
     bin/fm-canonical-guard-benchmark.sh|scripts/canonical-guard-benchmark/*)

@@ -123,6 +123,9 @@
     }
   ],
   "surfaces": [
+    { "path": "modules/tachikoma/AGENTS.md", "audience": "agent-runtime" },
+    { "path": "modules/tachikoma/CLAUDE.md", "audience": "agent-runtime" },
+    { "path": "modules/tachikoma/README.md", "audience": "operator-current" },
     { "path": "modules/fm-tui-core/AGENTS.md", "audience": "agent-runtime" },
     { "path": "modules/fm-tui-core/CLAUDE.md", "audience": "agent-runtime" },
     { "path": "modules/fm-state-reader/README.md", "audience": "operator-current" },

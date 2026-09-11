@@ -122,6 +122,13 @@
 # cost computed from its own token counts and price catalog, which is the
 # estimate this ledger refuses. Cost therefore stays null until such a source
 # exists, and null stays distinct from a reported zero.
+# Every new terminal carries metrics: assistantTurns (Pi assistant-message turns,
+# including tool-loop turns), relaunches at seal time, and nullable testRed,
+# testGreen, blockers, and reviewFindings. terminal-facts accepts those four
+# counters in optional metrics from a mechanical producer with attempt identity;
+# absent observations stay null, never a clean zero. The graph projection has
+# lifecycle steps, not test assertions or findings, so it cannot supply them.
+# Cleanup collects the available session facts before removing task identity.
 # New events are at most 64 KiB, use schema firstmate.model-run-telemetry/v1,
 # and reject every field outside the V1 whitelist. New intake events may carry
 # the explicit exploration decision and an OS-observed machine-load snapshot;
@@ -251,9 +258,9 @@ validate_intake() {
       (if has("accountProfile") then .harness=="claude" and (.accountProfile|accountprofile) else true end);
     def selection_keys:
       has("matchedRule") and has("configSha256") and has("fitReasons") and has("candidateAssessments") and has("quota")
-      and all(keys[]; . as $k | (["matchedRule","configSha256","fitReasons","candidateAssessments","quota","routingSource","dispatchAttestation","dispatchModelFamily"] | index($k)) != null);
+      and all(keys[]; . as $k | (["matchedRule","configSha256","fitReasons","candidateAssessments","quota","routingSource","dispatchAttestation","dispatchModelFamily","tachikomaDecision"] | index($k)) != null);
     def dispatch_attestation:
-      (.routingSource==null or (.routingSource|oneof(["captain","profile","fallback","secondmate-config"]))) and
+      (.routingSource==null or (.routingSource|oneof(["captain","profile","fallback","secondmate-config","tachikoma"]))) and
       (.dispatchModelFamily==null or (.dispatchModelFamily|type=="string" and length>=1 and length<=96)) and
       (.dispatchAttestation as $da | ($da==null or
         ($da|keys_are(["kind"]) and $da.kind=="resolved") or
@@ -261,6 +268,7 @@ validate_intake() {
           ($da.reason|type=="string" and length>=1 and length<=160))));
     def selection:
       selection_keys and
+      (if has("tachikomaDecision") then .routingSource=="tachikoma" and (.tachikomaDecision|type=="string" and test("^[0-9a-f-]{36}$")) else .routingSource!="tachikoma" end) and
       (.matchedRule==null or (.matchedRule|type=="string" and test("^(rule-[0-9]+|default)$"))) and
       (.configSha256==null or (.configSha256|sha)) and
       (.fitReasons|type=="array" and length<=12 and all(.[]; oneof(["captain-override","task-class","required-tool","catalog-support","native-adapter","oracle-strength","tie-break"]))) and
@@ -346,6 +354,7 @@ validate_terminal() {
     def safeid: type=="string" and length>=1 and length<=96 and test("^[A-Za-z0-9._:-]+$");
     def dt: type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$");
     def terminal_keys:
+      del(.metrics) |
       (keys|sort)==(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification"]|sort) or
       (keys|sort)==(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification","gateFacts"]|sort) or
       (keys|sort)==(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification","usageSource"]|sort) or
@@ -353,6 +362,7 @@ validate_terminal() {
     def usage_source:
       (.usageSource==null or (.usageSource|oneof(["recorded","no-verified-source","session-not-found","session-matched-no-tokens","unreadable","worktree-missing"])));
     (terminal_keys) and
+    (if has("metrics") then (.metrics|keys_are(["assistantTurns","relaunches","testRed","testGreen","blockers","reviewFindings"]) and all(.[]; .==null or (type=="number" and floor==. and .>=0))) else true end) and
     usage_source and
     (.classification|oneof(["accepted","rejected","failed","refused","timed-out","quota-stopped","cancelled","incomplete"])) and
     (.refusalQuality|oneof(["compliant","noncompliant","not-applicable","unknown"])) and
@@ -387,10 +397,12 @@ validate_terminal_facts() {
     def keys_are($a): (keys|sort)==($a|sort);
     def oneof($a): . as $v | ($a|index($v))!=null;
     def safeid: type=="string" and length>=1 and length<=160;
-    (keys_are(["gate","outcomeLink","usage"]) or keys_are(["gate","outcomeLink","usage","wallSeconds"]) or
+    (del(.assistantTurns,.metrics) | (keys_are(["gate","outcomeLink","usage"]) or keys_are(["gate","outcomeLink","usage","wallSeconds"]) or
      keys_are(["gate","outcomeLink","usage","usageSource"]) or keys_are(["gate","outcomeLink","usage","wallSeconds","usageSource"]) or
      keys_are(["gate","outcomeLink","usage","primaryFailureClass"]) or keys_are(["gate","outcomeLink","usage","wallSeconds","primaryFailureClass"]) or
-     keys_are(["gate","outcomeLink","usage","usageSource","primaryFailureClass"]) or keys_are(["gate","outcomeLink","usage","wallSeconds","usageSource","primaryFailureClass"])) and
+     keys_are(["gate","outcomeLink","usage","usageSource","primaryFailureClass"]) or keys_are(["gate","outcomeLink","usage","wallSeconds","usageSource","primaryFailureClass"]))) and
+    (.assistantTurns==null or (.assistantTurns|type=="number" and floor==. and .>=0)) and
+    (if has("metrics") then (.metrics|keys_are(["testRed","testGreen","blockers","reviewFindings"]) and all(.[]; .==null or (type=="number" and floor==. and .>=0))) else true end) and
     (.gate|keys_are(["source","result","stepReruns"]) and
       (.source|oneof(["no-mistakes","delivery","task-terminal","teardown"])) and
       (.result|oneof(["green","failed","cancelled","incomplete"])) and
@@ -438,7 +450,7 @@ validate_spawn_failure() {
       (.cliVersion==null or (.cliVersion|type=="string" and length<=160)) and
       (if has("accountProfile") then .harness=="claude" and (.accountProfile|accountprofile) else true end);
     def dispatch_attestation:
-      (.routingSource==null or (.routingSource|oneof(["captain","profile","fallback","secondmate-config"]))) and
+      (.routingSource==null or (.routingSource|oneof(["captain","profile","fallback","secondmate-config","tachikoma"]))) and
       (.dispatchModelFamily==null or (.dispatchModelFamily|type=="string" and length>=1 and length<=96)) and
       (.dispatchAttestation==null or
         (.dispatchAttestation as $da | ($da==null or
@@ -835,6 +847,11 @@ append_terminal_event() {
   intake_event=$(find_intake "$attempt") ||
     die "terminal has no intake row for attempt $attempt in $LEDGER; restore that intake row before this task can be sealed"
   privacy=$(printf '%s' "$intake_event" | jq -cS .privacy)
+  local relaunches root
+  root=$(printf '%s' "$intake_event" | jq -r .intake.taskRootId)
+  relaunches=$(jq -s --arg root "$root" --arg v "$SCHEMA_VERSION" --arg attempt "$attempt" '[.[] | select(.schemaVersion==$v and .eventType=="attempt-intake" and .intake.taskRootId==$root) | .attemptId] | index($attempt)' "$LEDGER")
+  canonical=$(printf '%s' "$canonical" | jq -cS --argjson relaunches "$relaunches" '. + {metrics:({assistantTurns:null,testRed:null,testGreen:null,blockers:null,reviewFindings:null} + (.metrics // {}) + {relaunches:$relaunches})}')
+  validate_terminal "$canonical"
   event=$(jq -cnS --arg v "$SCHEMA_VERSION" --arg eid "mre_$(new_uuid)" --arg aid "$attempt" --arg at "$(now_rfc3339)" --argjson privacy "$privacy" --argjson terminal "$canonical" \
     '{schemaVersion:$v,eventType:"attempt-terminal",eventId:$eid,attemptId:$aid,recordedAt:$at,privacy:$privacy,terminal:$terminal}')
   validate_event "$event" attempt-terminal
@@ -901,7 +918,7 @@ terminal_command() {
   attempt=$(resolve_attempt_for_task "$task" "$attempt_arg")
   status=recorded
   if existing=$(find_terminal "$attempt"); then
-    if [ "$(printf '%s' "$existing" | jq -cS .terminal)" = "$canonical" ]; then
+    if [ "$(printf '%s' "$existing" | jq -cS --argjson expected "$canonical" '.terminal | if ($expected|has("metrics")) then (if $expected.metrics.relaunches==null then .metrics.relaunches=null else . end) else del(.metrics) end')" = "$canonical" ]; then
       status=duplicate
     else
       die "terminal-conflict"
@@ -944,7 +961,8 @@ terminal_facts_command() {
        flags:{tool:false,transport:false,environment:false,externalWait:false,scopeChange:false,quota:false},
        reclassification:{fromTaskClass:null,toTaskClass:null,reasonCodes:["none"],escalated:false},
        gateFacts:($facts.gate | .source=(if (.source|IN("task-terminal","teardown")) then "delivery" else .source end))}
-       + (if $usageSource==null then {} else {usageSource:$usageSource} end))')
+       + (if $usageSource==null then {} else {usageSource:$usageSource} end)
+       + {metrics:({assistantTurns:($facts.assistantTurns // null),relaunches:null,testRed:null,testGreen:null,blockers:null,reviewFindings:null} + ($facts.metrics // {}))})')
     validate_terminal "$terminal"
     append_terminal_event "$attempt" "$terminal"
     status=recorded
@@ -1103,7 +1121,8 @@ usage_command() {
       die "session usage collection failed"
   fi
   printf '%s' "$observation" | jq -e '
-    (keys|sort)==["usage","usageSource","wallSeconds"] and
+    ((del(.assistantTurns)|keys|sort)==["usage","usageSource","wallSeconds"]) and
+    (.assistantTurns==null or (.assistantTurns|type=="number" and floor==. and .>=0)) and
     (.usage|keys|sort)==["cost","currency","inputTokens","outputTokens"] and
     all([.usage.inputTokens,.usage.outputTokens,.usage.cost][]; .==null or (type=="number" and .>=0)) and
     (.usage.currency==null or (.usage.currency|type=="string" and test("^[A-Z]{3}$"))) and
@@ -1124,7 +1143,7 @@ sheet_json() {
       ($t.terminal.classification // null) as $classification |
       ($t.terminal.gateFacts.stepReruns // null) as $reruns |
       ($t.terminal.usage.cost // null) as $cost |
-      {recordType:"attempt",schemaVersion:$v,attemptId:$i.attemptId,taskId:($i.taskId // null),quotaDecision:($i.intake.selection.quota.decision // null),usageSource:(if $t==null then null elif $t.terminal.usageSource==null then "absent" else $t.terminal.usageSource end),taskRootId:$i.intake.taskRootId,parentAttemptId:$i.intake.parentAttemptId,source:$i.intake.source,attemptClass:$i.intake.attemptClass,projectRef:$i.intake.projectRef,taskClass:$i.intake.taskClass,harness:$i.intake.tuple.harness,provider:$i.intake.tuple.provider,model:$i.intake.tuple.model,modelVersion:$i.intake.tuple.modelVersion,cliVersion:$i.intake.tuple.cliVersion,effort:$i.intake.tuple.effort,
+      {recordType:"attempt",schemaVersion:$v,attemptId:$i.attemptId,tachikomaDecision:($i.intake.selection.tachikomaDecision // null),metrics:($t.terminal.metrics // null),taskId:($i.taskId // null),quotaDecision:($i.intake.selection.quota.decision // null),usageSource:(if $t==null then null elif $t.terminal.usageSource==null then "absent" else $t.terminal.usageSource end),taskRootId:$i.intake.taskRootId,parentAttemptId:$i.intake.parentAttemptId,source:$i.intake.source,attemptClass:$i.intake.attemptClass,projectRef:$i.intake.projectRef,taskClass:$i.intake.taskClass,harness:$i.intake.tuple.harness,provider:$i.intake.tuple.provider,accountProfile:($i.intake.tuple.accountProfile // null),model:$i.intake.tuple.model,modelVersion:$i.intake.tuple.modelVersion,cliVersion:$i.intake.tuple.cliVersion,effort:$i.intake.tuple.effort,
        exploration:($i.intake.exploration.kind // null),machineLoadAverage1m:($i.intake.exploration.machineCondition.loadAverage1m // null),machineLogicalCpuCount:($i.intake.exploration.machineCondition.logicalCpuCount // null),
        state:(if $t==null then "open" else "terminal" end),classification:$classification,
        quality:(if $t==null then null elif $classification!="accepted" then $classification elif $reruns==null then "accepted-step-reruns-unknown" elif $reruns==0 then "accepted-first-pass" else "accepted-after-step-reruns" end),

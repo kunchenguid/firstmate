@@ -16,7 +16,8 @@ This skill is the single owner of the completion-aware profile-array selection p
 `AGENTS.md` section 4 owns the always-loaded intake boundary, load trigger, malformed-config refusal, every-candidate accounting, and strongest-reasoning/tie safety rules.
 `harness-adapters` owns harness verification, model/provider discovery, and effort fallback.
 `quota-axi` remains data-only: it publishes `spendPriority` as a comparable scalar and never recommends, selects, ranks, or infers a route.
-Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy, or producer-side route recommendation.
+Do not add a daemon, opaque composite score, hard-coded model-specific policy, or producer-side route recommendation.
+The explicitly enabled module path, including approved weighted coding exploration, is owned by `bin/fm-tachikoma.sh --help`; it requires a reviewed, source-hash-bound policy compilation rather than interpreting the prose below.
 Deterministic shell owns only schema, configuration, and version validation plus concrete spawn safeguards; every model-to-provider, provider-to-credential, and quota-applicability relation is yours to establish transparently and to show your evidence for.
 
 ## Worker-side quota helper

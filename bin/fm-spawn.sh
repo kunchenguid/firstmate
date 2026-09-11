@@ -83,6 +83,12 @@
 #   complete config/secondmate-harness tuple owns harness, model, and effort and
 #   no explicit or positional tuple override was supplied. Bootstrap recovery
 #   therefore preserves truthful provenance without relying on caller flags.
+#   --dispatch-tachikoma is an alternative attestation for fresh ordinary tasks.
+#   It requires --task-class and an explicitly enabled config/tachikoma/policy.json,
+#   asks fm-tachikoma before launch, and owns all model/quota/provenance axes.
+#   It cannot accompany other routing flags or positional harnesses. Batch tasks
+#   route independently; relaunches and persistent supervisors retain their
+#   existing explicit routing paths. No service is auto-started.
 #   --task-class records the intake classification in model telemetry; absent stays
 #   unresolved for compatibility. --exploration records firstmate's deliberate
 #   model/effort rotation, requires both axes explicitly, and is accepted only
@@ -755,6 +761,8 @@ ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA=0
 BACKLOG_TITLE=
 BACKLOG_TITLE_SET=0
 DISPATCH_RESOLVED=0
+DISPATCH_TACHIKOMA=0
+TACHIKOMA_DECISION=
 DISPATCH_OVERRIDE_REASON=
 DISPATCH_OVERRIDE_REASON_SET=0
 DISPATCH_PROVIDER=
@@ -853,6 +861,7 @@ for a in "$@"; do
     --telemetry-parent) want_value=telemetry-parent ;;
     --telemetry-parent=*) TELEMETRY_PARENT=${a#--telemetry-parent=} ;;
     --dispatch-resolved) DISPATCH_RESOLVED=1 ;;
+    --dispatch-tachikoma) DISPATCH_TACHIKOMA=1 ;;
     --dispatch-override-reason) want_value=dispatch-override-reason ;;
     --dispatch-override-reason=*) DISPATCH_OVERRIDE_REASON=${a#--dispatch-override-reason=}; DISPATCH_OVERRIDE_REASON_SET=1 ;;
     --dispatch-provider) want_value=dispatch-provider ;;
@@ -871,6 +880,22 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+# The opt-in router owns the complete tuple and its provenance, never a subset.
+if [ "$DISPATCH_TACHIKOMA" -eq 1 ]; then
+  if [ "$DISPATCH_RESOLVED" -eq 1 ] || [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 1 ] \
+    || [ "$HARNESS_SET" -eq 1 ] || [ "$MODEL_SET" -eq 1 ] || [ "$EFFORT_SET" -eq 1 ] \
+    || [ "$ACCOUNT_PROFILE_SET" -eq 1 ] || [ "$DISPATCH_PROVIDER_SET" -eq 1 ] \
+    || [ "$DISPATCH_MODEL_FAMILY_SET" -eq 1 ] || [ "$ROUTING_SOURCE_SET" -eq 1 ] \
+    || [ "$MATCHED_RULE_SET" -eq 1 ] || [ "$QUOTA_DECISION_SET" -eq 1 ] \
+    || [ "$QUOTA_HEADROOM_SET" -eq 1 ] || [ "$QUOTA_RUNWAY_SET" -eq 1 ]; then
+    echo "error: --dispatch-tachikoma cannot be combined with explicit routing axes or another attestation" >&2
+    exit 1
+  fi
+  if [ "$KIND" = secondmate ] || [ "$RELAUNCH" -eq 1 ] || [ "$TASK_CLASS_SET" -eq 0 ]; then
+    echo "error: --dispatch-tachikoma requires a fresh ordinary task and an explicit --task-class" >&2
+    exit 1
+  fi
+fi
 [ "$ACCESS_SET" -eq 0 ] || [ -n "$ACCESS" ] || { echo "error: --access requires a non-empty value" >&2; exit 1; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
@@ -1779,7 +1804,7 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
   [ "$RESUME_SESSION_SET" -eq 0 ] || { echo "error: --resume-session is single-task only" >&2; exit 1; }
-  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+  if [ "$KIND" != secondmate ] && [ "$DISPATCH_TACHIKOMA" -eq 0 ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     fm_record_spawn_failure validation "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)."
     exit 1
@@ -1809,6 +1834,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA" -eq 0 ] || shared_args+=(--allow-no-mistakes-without-reviewer-quota)
   [ "$DISPATCH_RESOLVED" -eq 0 ] || shared_args+=(--dispatch-resolved)
+  [ "$DISPATCH_TACHIKOMA" -eq 0 ] || shared_args+=(--dispatch-tachikoma)
   [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 0 ] || shared_args+=(--dispatch-override-reason "$DISPATCH_OVERRIDE_REASON")
   [ "$ACCOUNT_PROFILE_SET" -eq 0 ] || shared_args+=(--account-profile "$ACCOUNT_PROFILE")
   [ "$DISPATCH_PROVIDER_SET" -eq 0 ] || shared_args+=(--dispatch-provider "$DISPATCH_PROVIDER")
@@ -2088,6 +2114,34 @@ else
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+if [ "$DISPATCH_TACHIKOMA" -eq 1 ]; then
+  [ -z "$ARG3" ] || { echo "error: --dispatch-tachikoma cannot override a positional harness" >&2; exit 1; }
+  TACHIKOMA_ROUTE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tachikoma.sh" route \
+    --task "$ID" --class "$TASK_CLASS" --repo "$(basename "$PROJ")" --brief "$DATA/$ID/brief.md" --require-enabled) || exit "$?"
+  ARG3=$(printf '%s' "$TACHIKOMA_ROUTE" | jq -er '.harness')
+  MODEL=$(printf '%s' "$TACHIKOMA_ROUTE" | jq -er '.model')
+  EFFORT=$(printf '%s' "$TACHIKOMA_ROUTE" | jq -r '.effort // empty')
+  MODEL_SET=1
+  [ -z "$EFFORT" ] || EFFORT_SET=1
+  ACCOUNT_PROFILE=$(printf '%s' "$TACHIKOMA_ROUTE" | jq -r '.accountProfile // empty')
+  [ -z "$ACCOUNT_PROFILE" ] || ACCOUNT_PROFILE_SET=1
+  DISPATCH_PROVIDER=$(printf '%s' "$TACHIKOMA_ROUTE" | jq -er '.provider')
+  DISPATCH_MODEL_FAMILY=$(printf '%s' "$TACHIKOMA_ROUTE" | jq -er '.modelFamily')
+  MATCHED_RULE=$(printf '%s' "$TACHIKOMA_ROUTE" | jq -er '.matchedRule')
+  TACHIKOMA_DECISION=$(printf '%s' "$TACHIKOMA_ROUTE" | jq -er '.decisionId')
+  DISPATCH_RESOLVED=1
+  DISPATCH_PROVIDER_SET=1
+  DISPATCH_MODEL_FAMILY_SET=1
+  MATCHED_RULE_SET=1
+  ROUTING_SOURCE=tachikoma
+  ROUTING_SOURCE_SET=1
+  QUOTA_DECISION=selected
+  QUOTA_DECISION_SET=1
+  QUOTA_HEADROOM=$(printf '%s' "$TACHIKOMA_ROUTE" | jq -r '. as $d | .alternatives[] | select(.harness==$d.harness and .model==$d.model and .effort==$d.effort and (.accountProfile // null)==($d.accountProfile // null)) | if .feasibility=="proven" then "sufficient" else "unmeasurable" end')
+  QUOTA_HEADROOM_SET=1
+  QUOTA_RUNWAY=$QUOTA_HEADROOM
+  QUOTA_RUNWAY_SET=1
+fi
 if [ "$KIND" = secondmate ]; then
   SECONDMATE_CONFIG_OWNS_TUPLE=0
   if [ "$HARNESS_SET" -eq 0 ] && [ "$MODEL_SET" -eq 0 ] && [ "$EFFORT_SET" -eq 0 ] && [ -z "$ARG3" ] \
@@ -5256,7 +5310,8 @@ TELEMETRY_INTAKE=$(jq -cn \
   --argjson machine "$TELEMETRY_MACHINE_CONDITION" \
   --arg config "$TELEMETRY_CONFIG_SHA" --arg started "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
   --arg provider "$DISPATCH_PROVIDER" --arg modelFamily "$DISPATCH_MODEL_FAMILY" \
-  --arg routingSource "$ROUTING_SOURCE" \
+  --arg routingSource "$ROUTING_SOURCE" --arg tachikomaDecision "$TACHIKOMA_DECISION" \
+  --argjson tachikomaRoute "${TACHIKOMA_ROUTE:-null}" \
   --argjson dispatchResolved "$DISPATCH_RESOLVED" \
   --arg overrideReason "$DISPATCH_OVERRIDE_REASON" \
   --argjson overrideReasonSet "$DISPATCH_OVERRIDE_REASON_SET" \
@@ -5270,13 +5325,14 @@ TELEMETRY_INTAKE=$(jq -cn \
    def selectionExtras:
      {}
      | (if $routingSource=="" then . else . + {routingSource:$routingSource} end)
+     | (if $tachikomaDecision=="" then . else . + {tachikomaDecision:$tachikomaDecision} end)
      | (if $modelFamily=="" then . else . + {dispatchModelFamily:$modelFamily[0:96]} end)
      | (if dispatchAttestation==null then . else . + {dispatchAttestation:dispatchAttestation} end);
    def quotaObj:
      {decision:(if $quotaDecision=="" then "not-applicable" else $quotaDecision end),
       headroom:(if $quotaHeadroom=="" then "unknown" else $quotaHeadroom end),
       runway:(if $quotaRunway=="" then "unknown" else $quotaRunway end),
-      observedAt:null};
+      observedAt:($tachikomaRoute.quotaObservedAt // null)};
    {attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:$project,taskClass:$taskClass,tuple:tuple,
     selection:({matchedRule:(if $matchedRuleSet==1 then $matchedRule else null end),configSha256:(if $config=="" then null else $config end),fitReasons:[],candidateAssessments:[{tuple:tuple,eligibility:"selected",reasons:[]}],quota:quotaObj} + selectionExtras),
     neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},exploration:{kind:$exploration,machineCondition:$machine},startedAt:$started,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}')
@@ -5342,6 +5398,7 @@ preserve_relaunch_meta() {
   # Other legacy metas stay byte-identical, and the escalation ladder
   # (fm-harness.sh escalate) reads absent as unknown provenance and stops.
   [ -z "$ROUTING_SOURCE" ] || echo "routing_source=$ROUTING_SOURCE"
+  [ -z "$TACHIKOMA_DECISION" ] || echo "tachikoma_decision=$TACHIKOMA_DECISION"
   echo "telemetry_attempt=$TELEMETRY_ATTEMPT"
   echo "telemetry_task_root=$TELEMETRY_TASK_ROOT"
   [ -z "$TASK_BASE_COMMIT" ] || echo "base_commit=$TASK_BASE_COMMIT"
@@ -5391,7 +5448,9 @@ preserve_relaunch_meta() {
   if [ -f "$CONFIG/crew-dispatch.json" ] || [ -f "$DATA/quota-cooldowns.json" ] \
     || [ "$DISPATCH_RESOLVED" -eq 1 ] || [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 1 ] \
     || [ "$DISPATCH_PROVIDER_SET" -eq 1 ] || [ "$DISPATCH_MODEL_FAMILY_SET" -eq 1 ]; then
-    if [ "$DISPATCH_RESOLVED" -eq 1 ]; then
+    if [ "$DISPATCH_TACHIKOMA" -eq 1 ]; then
+      echo "dispatch=tachikoma"
+    elif [ "$DISPATCH_RESOLVED" -eq 1 ]; then
       echo "dispatch=resolved"
     elif [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 1 ]; then
       echo "dispatch=override"

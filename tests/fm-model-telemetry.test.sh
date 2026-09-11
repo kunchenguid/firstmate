@@ -1109,6 +1109,33 @@ test_intake_refuses_unknown_quota_decision_and_sheet_surfaces_it() {
   pass "new intake refuses an unknown quota decision and the sheet surfaces quotaDecision"
 }
 
+test_terminal_metrics_keep_observation_and_unknown_distinct() {
+  local home first attempt root payload result before
+  home=$(make_home terminal-metrics)
+  first=$(run_intake "$home" metrics "$(intake_payload)") || fail "metrics intake failed"
+  attempt=$(printf '%s' "$first" | jq -r .attemptId)
+  root=$(printf '%s' "$first" | jq -r .taskRootId)
+  payload=$(terminal_facts_payload green 0 | jq -c '. + {assistantTurns:4,metrics:{testRed:2,testGreen:3,blockers:null,reviewFindings:0}}')
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task metrics --payload "$payload" >/dev/null || fail "observed terminal metrics rejected"
+  result=$(FM_HOME="$home" "$TELEMETRY" sheet --format json)
+  printf '%s' "$result" | jq -e --arg a "$attempt" '.[]|select(.attemptId==$a)|.metrics=={assistantTurns:4,relaunches:0,testRed:2,testGreen:3,blockers:null,reviewFindings:0}' >/dev/null || fail "terminal dropped metrics or invented zero"
+  run_intake "$home" metrics-retry "$(intake_payload gpt-5 high "$root" "$attempt")" >/dev/null || fail "retry metrics intake failed"
+  FM_HOME="$home" "$TELEMETRY" seal-or-incomplete --state "$home/state" --task metrics-retry >/dev/null || fail "retry seal failed"
+  result=$(FM_HOME="$home" "$TELEMETRY" sheet --format json)
+  printf '%s' "$result" | jq -e '.[]|select(.taskId=="metrics-retry")|.metrics=={assistantTurns:null,relaunches:1,testRed:null,testGreen:null,blockers:null,reviewFindings:null}' >/dev/null || fail "incomplete terminal lost relaunch count or fabricated facts"
+  run_intake "$home" invalid-metrics "$(intake_payload)" >/dev/null || fail "invalid metrics intake failed"
+  before=$(wc -l < "$home/data/routing-outcomes.jsonl")
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task invalid-metrics \
+    --payload "$(printf '%s' "$payload" | jq -c '.metrics.testRed=-1')" >/dev/null 2>&1 && fail "negative observed count accepted"
+  [ "$(wc -l < "$home/data/routing-outcomes.jsonl")" -eq "$before" ] || fail "invalid observation mutated ledger"
+  payload=$(terminal_payload accepted | jq -c '. + {metrics:{assistantTurns:1,relaunches:null,testRed:null,testGreen:null,blockers:null,reviewFindings:null}}')
+  FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task invalid-metrics --payload "$payload" >/dev/null || fail "explicit metric terminal failed"
+  attempt=$(jq -r 'select(.eventType=="attempt-terminal")|.attemptId' "$home/data/routing-outcomes.jsonl" | tail -1)
+  FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task invalid-metrics --attempt "$attempt" --payload "$payload" >/dev/null || fail "identical metrics terminal replay failed"
+  pass "terminal metrics retain observed zero, unavailable null, and relaunch identity"
+}
+
+test_terminal_metrics_keep_observation_and_unknown_distinct
 test_terminals_and_retry_links
 test_crash_recovery_and_terminal_idempotency
 test_relaunch_supersedes_stale_receipt

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tachikoma reviewed routing policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "enabled"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "enabled": { "type": "boolean", "default": false },
+    "catalogSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+    "dispatchSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+    "allowedHarnesses": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "disabledPools": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "maxLoadPerCpu": { "type": "number", "exclusiveMinimum": 0, "default": 2 },
+    "explorationRate": { "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 0.1 },
+    "unmeasuredRate": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "default": 0.05 },
+    "unmeasuredDailyCap": { "type": "integer", "minimum": 1, "default": 1 },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["repo", "taskClass", "matchedRule", "horizonSeconds", "strongestOnly", "selectionStrategy"],
+        "properties": {
+          "repo": { "type": "string" }, "taskClass": { "type": "string" },
+          "matchedRule": { "type": "string", "pattern": "^(default|rule-[1-9][0-9]*)$" },
+          "horizonSeconds": { "type": "number", "exclusiveMinimum": 0 },
+          "strongestOnly": { "type": "boolean" },
+          "selectionStrategy": { "enum": ["highest-priority", "quota-weighted"] }
+        }
+      }
+    },
+    "bindings": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["harness", "model", "effort", "pool", "catalogModel", "quotaProvider", "modelFamily", "quotaScopes", "strongest"],
+        "properties": {
+          "harness": { "type": "string" }, "model": { "type": "string" },
+          "effort": { "enum": [null, "low", "medium", "high", "xhigh", "max"] },
+          "pool": { "type": "string" }, "catalogModel": { "type": "string" },
+          "quotaProvider": { "type": "string" }, "modelFamily": { "type": "string" },
+          "quotaScopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+          "strongest": { "type": "boolean" },
+          "qualityPrior": { "type": "number", "minimum": 0, "maximum": 1 },
+          "modelVersion": { "type": "string" }, "cliVersion": { "type": "string" },
+          "accountProfile": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9-]{0,31}$" }
+        }
+      }
+    }
+  }
+}

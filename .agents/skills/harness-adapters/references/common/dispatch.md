@@ -7,6 +7,9 @@ Load this with the selected tool reference for dispatch, start, or adapter verif
 Use the router's detection and safety sections for static crew and secondmate harness resolution and all explicit overrides.
 `config/crew-dispatch.json` can override that static default for one crewmate or scout with concrete harness, model, and effort axes.
 For a profile array, load `quota-array-dispatch` after establishing harness and provider facts here.
+Always consult `bin/fm-tachikoma.sh status --json` at fresh task intake; when activation is off, continue through the existing profile/quota routing and its manual attestation.
+When enabled, use `bin/fm-spawn.sh --dispatch-tachikoma` without a separate routing preflight that would spend exploration allowance twice; `bin/fm-tachikoma.sh --help` owns its reviewed policy compilation, required classification, refusals, and manual activation.
+Only an off or absent activation falls back; a routing error never silently changes the selection path, and the router never interprets natural-language rules or enables itself.
 
 `../secondmate-provisioning/SKILL.md` owns inherited local material.
 Its harness consequence is that a secondmate's workers receive literal `config/crew-harness` and `config/crew-dispatch.json`, while the primary-only `config/secondmate-harness` is never inherited because secondmates do not spawn secondmates.

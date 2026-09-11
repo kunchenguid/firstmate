@@ -246,6 +246,38 @@ test_backlog_title_surfaces_full_add_diagnostic() {
   pass "failed backlog creation preserves the complete tasks-axi diagnostic"
 }
 
+test_tachikoma_routes_through_real_spawn_and_telemetry() {
+  local rec id out status
+  id=tachikoma-compose
+  rec=$(make_spawn_case tachikoma-compose pi "$id")
+  read_case_record "$rec"
+  fm_test_write_active_treehouse_fake "$FAKEBIN_DIR" "$WT_DIR"
+  mkdir -p "$HOME_DIR/config/tachikoma"
+  node - "$HOME_DIR" <<'NODE'
+const fs=require('fs'),c=require('crypto'),p=process.argv[2];
+const put=(f,v)=>fs.writeFileSync(p+'/'+f,JSON.stringify(v));
+put('config/model-catalog.json',{pools:[{pool:'subscription',provider:'example',plan:'paid',harness:'pi',account:'fixture',models:['example-model'],quota_readable:true}]});
+const profile={harness:'pi',model:'example/example-model',effort:'high'};
+put('config/crew-dispatch.json',{default:profile});
+const sha=f=>c.createHash('sha256').update(fs.readFileSync(p+'/'+f)).digest('hex');
+put('config/tachikoma/policy.json',{schemaVersion:1,enabled:true,catalogSha256:sha('config/model-catalog.json'),dispatchSha256:sha('config/crew-dispatch.json'),allowedHarnesses:['pi'],disabledPools:[],maxLoadPerCpu:100000,rules:[{repo:'project',taskClass:'bounded-implementation-proven-root-fix',matchedRule:'default',horizonSeconds:60,strongestOnly:false,selectionStrategy:'quota-weighted'}],bindings:[{...profile,pool:'subscription',catalogModel:'example-model',quotaProvider:'example',modelFamily:'example',quotaScopes:['all_models'],strongest:true,qualityPrior:0.7}]});
+NODE
+  cat > "$FAKEBIN_DIR/quota-axi" <<'QUOTA'
+#!/usr/bin/env bash
+printf 'generatedAt: "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf '%s\n' 'quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:' '  example,all_models,90,1,through_reset,established,weekly,unknown'
+QUOTA
+  chmod +x "$FAKEBIN_DIR/quota-axi"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode direct-PR --yolo off --dispatch-tachikoma --task-class bounded-implementation-proven-root-fix)
+  status=$?
+  expect_code 0 "$status" "Tachikoma composition: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi example/example-model high
+  assert_grep 'routing_source=tachikoma' "$HOME_DIR/state/$id.meta" "missing router provenance"
+  jq -se 'any(.[]; .intake.selection.routingSource=="tachikoma" and (.intake.selection.tachikomaDecision|length)==36 and .intake.selection.quota.headroom=="sufficient" and .intake.selection.quota.observedAt!=null)' "$HOME_DIR/data/routing-outcomes.jsonl" >/dev/null || fail "intake lost decision identity"
+  [ "$(wc -l < "$HOME_DIR/data/tachikoma/decisions.jsonl" | tr -d ' ')" = 1 ] || fail "spawn routed more than once"
+  pass "Tachikoma selection reaches real spawn metadata, launch construction, and immutable telemetry"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -1345,6 +1377,7 @@ SH
   done
 }
 
+test_tachikoma_routes_through_real_spawn_and_telemetry
 test_launch_environment_allowlist
 test_launch_environment_invalid_config_refuses
 test_launch_environment_inaccessible_config_refuses

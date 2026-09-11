@@ -17,7 +17,7 @@ const emptyUsage = { inputTokens: null, outputTokens: null, cost: null, currency
 // usage explicitly rather than silently omitting it. "recorded" means token
 // totals were read from a verified durable session log; the other values name
 // the specific reason no token count is present.
-function emit(inputTokens, outputTokens, wallSeconds, usageSource) {
+function emit(inputTokens, outputTokens, wallSeconds, usageSource, assistantTurns = null) {
   const hasUsage = Number.isFinite(inputTokens) && Number.isFinite(outputTokens);
   const source = usageSource || (hasUsage ? "recorded" : "session-not-found");
   process.stdout.write(`${JSON.stringify({
@@ -26,6 +26,7 @@ function emit(inputTokens, outputTokens, wallSeconds, usageSource) {
       : emptyUsage,
     wallSeconds: Number.isFinite(wallSeconds) && wallSeconds >= 0 ? wallSeconds : null,
     usageSource: source,
+    assistantTurns,
   })}\n`);
 }
 
@@ -197,6 +198,7 @@ function piUsage() {
   const sessions = new Set();
   let wallSeconds = 0;
   let durationMatched = false;
+  let assistantTurns = 0;
   for (const file of regularJsonlFiles(piProjectRoot(root))) {
     const lines = rawLines(file);
     const meta = parseLine(lines[0]);
@@ -208,11 +210,11 @@ function piUsage() {
     sessions.add(meta.id);
     let sessionMatched = false;
     for (const line of lines) {
-      if (!line.includes('"role":"assistant"')) continue;
+      if (!line.includes('"assistant"')) continue;
       const row = parseLine(line);
-      const usage = row?.type === "message" && row.message?.role === "assistant"
-        ? row.message?.usage
-        : null;
+      const isAssistant = row?.type === "message" && row.message?.role === "assistant";
+      if (isAssistant) assistantTurns++;
+      const usage = isAssistant ? row.message?.usage : null;
       const cacheRead = usage?.cacheRead ?? 0;
       const cacheWrite = usage?.cacheWrite ?? 0;
       if (!usage || ![usage.input, cacheRead, cacheWrite, usage.output].every(Number.isFinite)) continue;
@@ -228,6 +230,7 @@ function piUsage() {
     inputTokens: matched ? input : null,
     outputTokens: matched ? output : null,
     wallSeconds: durationMatched ? wallSeconds : null,
+    assistantTurns: durationMatched ? assistantTurns : null,
   };
 }
 
@@ -286,4 +289,4 @@ const matched = Number.isFinite(observation.inputTokens) && Number.isFinite(obse
 // harness-capability gap as a teardown-timing one.
 const sessionWithoutTokens = !matched && Number.isFinite(observation.wallSeconds);
 emit(observation.inputTokens, observation.outputTokens, observation.wallSeconds,
-  matched ? "recorded" : (sessionWithoutTokens ? "session-matched-no-tokens" : harnessSource));
+  matched ? "recorded" : (sessionWithoutTokens ? "session-matched-no-tokens" : harnessSource), observation.assistantTurns ?? null);

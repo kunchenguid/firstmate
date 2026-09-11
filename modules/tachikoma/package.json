@@ -1,0 +1,12 @@
+{
+  "name": "@firstmate/tachikoma",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.mjs",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "run": "node src/adapters/cli.mjs",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

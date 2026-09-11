@@ -3196,6 +3196,45 @@ if [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
+# Seal while the exact task/session identity still exists. Cleanup permission
+# is not acceptance: only an observed merge, local ancestry, or completed report
+# gate supplies green. Missing evidence stays incomplete; explicit discard is
+# cancelled. A seal failure retains the records and local copy for retry.
+TELEMETRY_ATTEMPT=$(meta_value "$META" telemetry_attempt)
+if [ "$KIND" != secondmate ] && [ -n "$TELEMETRY_ATTEMPT" ]; then
+  TELEMETRY_RESULT=incomplete
+  TELEMETRY_OUTCOME_KIND=none
+  TELEMETRY_OUTCOME_ID=
+  if [ "$FORCE" = "--force" ]; then
+    TELEMETRY_RESULT=cancelled
+  elif [ "$KIND" = scout ]; then
+    TELEMETRY_RESULT=green
+    TELEMETRY_OUTCOME_KIND=report
+    TELEMETRY_OUTCOME_ID=$(shasum -a 256 "$DATA/$ID/report.md" | awk '{print $1}')
+  elif [ -d "$WT" ]; then
+    if [ "$MODE" = local-only ]; then
+      TELEMETRY_DEFAULT=$(default_branch) || TELEMETRY_DEFAULT=
+      if [ -n "$TELEMETRY_DEFAULT" ] && git -C "$WT" merge-base --is-ancestor HEAD "$TELEMETRY_DEFAULT"; then
+        TELEMETRY_RESULT=green
+        TELEMETRY_OUTCOME_KIND=commit
+        TELEMETRY_OUTCOME_ID=$(git -C "$WT" rev-parse HEAD)
+      fi
+    elif pr_is_merged "$(git -C "$WT" rev-parse --abbrev-ref HEAD)"; then
+      TELEMETRY_RESULT=green
+      TELEMETRY_OUTCOME_KIND=pull-request
+      TELEMETRY_OUTCOME_ID=$PR_URL
+    fi
+  fi
+  TELEMETRY_USAGE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-model-telemetry.sh" usage --attempt "$TELEMETRY_ATTEMPT" --worktree "$WT") || exit 1
+  TELEMETRY_FACTS=$(printf '%s' "$TELEMETRY_USAGE" | jq -c \
+    --arg result "$TELEMETRY_RESULT" --arg kind "$TELEMETRY_OUTCOME_KIND" --arg id "$TELEMETRY_OUTCOME_ID" \
+    '. + {gate:{source:"delivery",result:$result,stepReruns:null},outcomeLink:{kind:$kind,id:(if $id=="" then null else $id end)}}')
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-model-telemetry.sh" terminal-facts --state "$STATE" --task "$ID" \
+    --attempt "$TELEMETRY_ATTEMPT" --payload "$TELEMETRY_FACTS" >/dev/null || exit 1
+fi
+
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
