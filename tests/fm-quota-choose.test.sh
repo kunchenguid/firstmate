@@ -27,6 +27,8 @@ NO_APPLICABLE="$LAB/no-applicable.json"
 APPLICABLE_VETO="$LAB/applicable-veto.json"
 MUSE_EXHAUSTED="$LAB/muse-exhausted.json"
 MUSE_POSITIVE="$LAB/muse-positive.json"
+AGY_EXHAUSTED="$LAB/agy-exhausted.json"
+AGY_POSITIVE="$LAB/agy-positive.json"
 TOON="$LAB/quota.toon"
 RENDERER_TOON="$LAB/renderer-quota.toon"
 EMPTY_TOON="$LAB/empty-quota.toon"
@@ -556,6 +558,20 @@ if err=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:default 2>&
 fi
 [ "$err" = "error: unknown harness: agy" ] || fail "unsupported harness returned: $err"
 ok "unsupported harness is rejected"
+
+jq '.providers += [{"provider":"agy","windows":[],"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":40,"runway":{"status":"through_reset"}}]}}]' \
+  "$LAB/captured.json" > "$AGY_POSITIVE"
+out=$(call_choose --snapshot "$AGY_POSITIVE" --candidate antigravity:default)
+[ "$out" = "antigravity default" ] || fail "supported Antigravity candidate returned: $out"
+ok "Antigravity candidate is accepted"
+
+jq '.providers += [{"provider":"agy","windows":[],"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}}]' \
+  "$LAB/captured.json" > "$AGY_EXHAUSTED"
+if out=$(call_choose --snapshot "$AGY_EXHAUSTED" --candidate antigravity:default 2>/dev/null); then
+  fail "Antigravity candidate dispatched with exhausted agy quota"
+fi
+[ "$out" = "none" ] || fail "exhausted agy quota returned: $out"
+ok "Antigravity uses the agy quota row"
 
 jq '.providers += [.providers[] | select(.provider == "claude")]' "$LAB/captured.json" > "$DUPLICATE"
 if err=$(call_choose --snapshot "$DUPLICATE" --candidate claude:default 2>&1); then

@@ -139,6 +139,33 @@ No models matching "gpt-9.9-nonexistent"
 
 A listing that reaches the account and returns no row is the authoritative negative that does block a candidate.
 
+## Antigravity's provider row is named agy
+
+Verified 2026-09-10 against quota-axi 0.1.41, schema 5.
+
+```sh
+quota-axi --json --no-credential-refresh | jq -r '.providers[].provider'
+```
+
+```text
+claude
+codex
+cursor
+copilot
+grok
+kimi
+zai
+agy
+alibaba
+opencode-go
+```
+
+The default snapshot carries one row per provider family the producer knows, and Antigravity's is named `agy`, the same token `quota-axi --provider` accepts.
+That is the name `provider_for_harness` in `bin/fm-quota-choose.sh` resolves `harness=antigravity` onto, so a quota-balanced array holding an antigravity profile reads a row that exists instead of refusing the whole array as an unknown harness.
+
+With Antigravity not running, the row reports `state.status` `unavailable` and `quotaSemantics.status` `unknown` with no availability scopes, the same shape `cursor` and `copilot` take when their vendor exposes no window.
+Unknown is not headroom, so the helper leaves such a candidate unselected rather than dispatching on absent evidence; measured availability requires a running Antigravity.
+
 ## Credential sources are independent per provider
 
 Verified 2026-07-30 against quota-axi 0.1.16.

@@ -1134,6 +1134,9 @@ unsupported muse ultra effort is flagged^{"rules":[{"when":"muse ultra","use":{"
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
 kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
+antigravity crew profile is accepted^{"rules":[{"when":"antigravity work","use":{"harness":"antigravity","model":"gemini-3-pro","effort":"high"}}]}^empty^
+unsupported antigravity max effort is flagged^{"rules":[{"when":"antigravity work","use":{"harness":"antigravity","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: antigravity:max
+uncredentialed hermes dispatch harness is flagged^{"rules":[{"when":"hermes work","use":{"harness":"hermes"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: hermes
 cursor model profile is accepted^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high"}}]}^empty^
 unsupported cursor effort is flagged^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor:high
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^

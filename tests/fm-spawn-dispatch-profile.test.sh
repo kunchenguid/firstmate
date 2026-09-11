@@ -1203,6 +1203,129 @@ SH
   pass "fm-spawn: actual ship/scout launch commands deliver the worker role contract"
 }
 
+test_worker_bridge_spawn_delivers_native_profile() {
+  local harness kind rec id out launch native envelope_kind
+  for harness in hermes antigravity; do
+    for kind in ship scout; do
+      id="bridge-$harness-$kind"
+      rec=$(make_spawn_case "$id" "$harness" "$id")
+      read_case_record "$rec"
+      native=hermes
+      [ "$harness" != antigravity ] || native=agy
+      cat > "$FAKEBIN_DIR/$native" <<'PY'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+pathlib.Path(os.environ['FM_BRIDGE_ARGV']).write_text(json.dumps(args))
+prompt = sys.stdin.read() if 'chat' in args else args[args.index('--print') + 1]
+pathlib.Path(os.environ['FM_BRIDGE_PROMPT']).write_text(prompt)
+if 'chat' in args:
+    print('session_id: fixture-session', file=sys.stderr)
+    print('BRIDGE_SPAWN_OK')
+else:
+    print(json.dumps({'status': 'SUCCESS', 'conversation_id': 'fixture-conversation', 'response': 'BRIDGE_SPAWN_OK'}))
+PY
+      chmod +x "$FAKEBIN_DIR/$native"
+      if [ "$kind" = scout ]; then
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+          "$id" "$PROJ_DIR" --harness "$harness" --model fixture-model --effort high --scout)
+      else
+        out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+          "$id" "$PROJ_DIR" --harness "$harness" --model fixture-model --effort high)
+      fi
+      expect_code 0 "$?" "$harness $kind spawn failed: $out"
+      assert_meta_profile "$HOME_DIR/state/$id.meta" "$harness" fixture-model high
+      launch=$(cat "$LAUNCH_LOG")
+      assert_not_contains "$launch" '__BRIDGE' "$harness launch retained a bridge placeholder"
+      assert_contains "$launch" "--gen '$(cat "$HOME_DIR/state/$id.busy-gen")'" \
+        "$harness launch lost its armed generation"
+      out=$(printf '/exit\n' | FM_BRIDGE_ARGV="$CASE_DIR/native-argv.json" \
+        FM_BRIDGE_PROMPT="$CASE_DIR/native-prompt" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" 2>&1)
+      expect_code 0 "$?" "$harness emitted $kind launch failed: $out"
+      assert_contains "$out" BRIDGE_SPAWN_OK "$harness did not execute its native CLI"
+      python3 - "$CASE_DIR/native-argv.json" "$harness" <<'PY'
+import json, pathlib, sys
+args = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert args[args.index('--model') + 1] == 'fixture-model', args
+effort_flag = '--reasoning' if sys.argv[2] == 'hermes' else '--effort'
+assert args[args.index(effort_flag) + 1] == 'high', args
+PY
+      expect_code 0 "$?" "$harness did not receive its native model and effort flags"
+      assert_grep 'follow this brief instead of that supervisor contract' "$CASE_DIR/native-prompt" \
+        "$harness $kind lost the worker role contract"
+      assert_grep "brief for $id" "$CASE_DIR/native-prompt" "$harness $kind lost the task brief"
+      envelope_kind=$("$ROOT/bin/fm-operational-input.sh" kind < "$CASE_DIR/native-prompt") \
+        || fail "$harness $kind delivered a brief the operational-input owner cannot type"
+      [ "$envelope_kind" = launch-brief ] \
+        || fail "$harness $kind delivered kind '$envelope_kind' instead of the canonical launch-brief envelope"
+      assert_grep 'state=idle' "$HOME_DIR/state/$id.busy-state" "$harness $kind did not publish idle"
+      assert_present "$HOME_DIR/state/$id.turn-ended" "$harness $kind did not publish its completion wake"
+      pass "$harness $kind emitted launch delivers native model, effort, role, and generation-bound completion"
+    done
+  done
+}
+
+test_worker_bridge_effort_vocabulary() {
+  local rec id out launch
+  id=bridge-hermes-max
+  rec=$(make_spawn_case "$id" hermes "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/hermes" <<'PY'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+pathlib.Path(os.environ['FM_BRIDGE_ARGV']).write_text(json.dumps(sys.argv[1:]))
+sys.stdin.read()
+print('session_id: fixture-session', file=sys.stderr)
+print('BRIDGE_SPAWN_OK')
+PY
+  chmod +x "$FAKEBIN_DIR/hermes"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness hermes --effort max --scout)
+  expect_code 0 "$?" "hermes max spawn failed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  out=$(printf '/exit\n' | FM_BRIDGE_ARGV="$CASE_DIR/hermes-max-argv.json" \
+    PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" 2>&1)
+  expect_code 0 "$?" "hermes max launch failed: $out"
+  python3 - "$CASE_DIR/hermes-max-argv.json" <<'PY'
+import json, pathlib, sys
+args = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert args[args.index('--reasoning') + 1] == 'max', args
+PY
+  expect_code 0 "$?" 'hermes did not receive the max reasoning level its CLI documents'
+  pass 'hermes propagates the max reasoning level its CLI documents'
+  id=bridge-antigravity-max
+  rec=$(make_spawn_case "$id" antigravity "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness antigravity --effort max --scout 2>&1)
+  expect_code 1 "$?" "antigravity max must refuse: $out"
+  assert_contains "$out" 'antigravity supports only low, medium, and high effort' \
+    'antigravity refusal did not name its supported levels'
+  [ ! -s "$LAUNCH_LOG" ] || fail 'antigravity max refusal delivered a launch command'
+  pass 'antigravity refuses an effort level agy does not accept'
+}
+
+test_worker_bridge_refuses_secondmate() {
+  local harness rec id sm out
+  for harness in hermes antigravity; do
+    id="bridge-$harness-secondmate"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    sm="$CASE_DIR/secondmate-home"
+    make_seeded_secondmate_home "$sm" "$id"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$sm" --secondmate --harness "$harness" 2>&1)
+    expect_code 1 "$?" "$harness secondmate must refuse: $out"
+    assert_contains "$out" 'cannot run a secondmate' "$harness refusal did not explain its unsupported role"
+    assert_absent "$HOME_DIR/state/$id.meta" "$harness secondmate refusal published metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$harness secondmate refusal delivered a launch command"
+    pass "$harness secondmate refuses before launch and task publication"
+  done
+}
+
+test_worker_bridge_spawn_delivers_native_profile
+test_worker_bridge_effort_vocabulary
+test_worker_bridge_refuses_secondmate
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
