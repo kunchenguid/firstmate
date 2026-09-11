@@ -25,8 +25,11 @@
 #   structured task copies agree; a charter (no # Task section) is a no-op.
 #   On success it also prints the brief's position against the per-spawn start
 #   budget as `start_budget_target=<n> status=within|over over_by=<m>`, where <n>
-#   defaults to 1500 estimated tokens and FM_BRIEF_START_BUDGET overrides it.
-#   That line is a signal for the dispatcher, never a refusal.
+#   defaults to 1500 estimated tokens and FM_BRIEF_START_BUDGET overrides it,
+#   and whether the filled task text names its own check as
+#   `acceptance_oracle=present|absent`, matching oracle, acceptance, fails
+#   before, passes after, or test command case-insensitively.
+#   Both lines are signals for the dispatcher, never a refusal.
 #   bin/fm-spawn.sh calls
 #   this before creating any endpoint or task state, so a half-filled or
 #   divergent brief is refused before mutation.
@@ -366,6 +369,12 @@ if [ "$VALIDATE_BOOKENDS" -eq 1 ]; then
   VB_STATUS=within
   [ "$VB_OVER" -eq 0 ] || VB_STATUS=over
   printf 'start_budget_target=%s status=%s over_by=%s\n' "$VB_TARGET" "$VB_STATUS" "$VB_OVER"
+  if printf '%s' "$VB_OPEN" | grep -E -i -q 'oracle|acceptance|fails before|passes after|test command'; then
+    VB_ORACLE=present
+  else
+    VB_ORACLE=absent
+  fi
+  printf 'acceptance_oracle=%s\n' "$VB_ORACLE"
   VB_RESOURCES=$(awk '
     /^Read `\/[^`]+`\.$/ {
       path=$0
@@ -794,6 +803,7 @@ $INBOX_SECTION
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+Open the report with three lines: the outcome, the main risk or caveat, and how it was checked; everything else goes below.
 When the investigation follows diagnostic-reasoning, include the bounded two-row table contract from \`$FM_ROOT/.agents/skills/diagnostic-reasoning/SKILL.md\`.
 Firstmate may verify that table with \`bin/fm-diagnostic-report.sh evaluate <report>\`.
 Every cited number must be recomputed in this session with its command shown; any instrument-derived count must also state its coverage and age.
@@ -967,7 +977,6 @@ $READER_RULE_2
 $SCOUT_RULES_3_TO_7
 $HEAVY_SUITE_RULE
 
-# Definition of done
 $SCOUT_READER_DOD
 If your findings reveal work that should ship (e.g. you identified the fix), say so in the report; firstmate will dispatch it as a separate implementation task with a full working copy.
 EOF
@@ -1006,7 +1015,6 @@ $SCOUT_RULE_1
 $SCOUT_RULES_3_TO_7
 $HEAVY_SUITE_RULE
 
-# Definition of done
 $SCOUT_DOD_COMMON
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF

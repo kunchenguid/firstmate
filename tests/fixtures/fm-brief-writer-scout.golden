@@ -60,7 +60,6 @@ Write every external wait as `paused [key=<slug>]: <why>` and add the machine-re
 8. Start every full frontend or browser test suite with `{{FM_ROOT}}/bin/fm-heavy-suite.sh -- <suite command and arguments>`.
    The wrapper serializes heavy suites across worktrees; if it reports another suite is running, it is waiting by design, not failing, so do not bypass it or start a duplicate.
 
-# Definition of done
 # Firstmate instruction inbox
 Firstmate steers you through durable message files in '{{FM_HOME}}/state/access-writer-w1.inbox'.
 When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list '{{FM_HOME}}/state/access-writer-w1.inbox'/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: `mv '{{FM_HOME}}/state/access-writer-w1.inbox'/NNN.msg '{{FM_HOME}}/state/access-writer-w1.inbox'/handled/`.
@@ -69,6 +68,7 @@ The move IS the acknowledgement: without it firstmate rings again and eventually
 # Definition of done
 Write your findings to `{{FM_HOME}}/data/access-writer-w1/report.md`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+Open the report with three lines: the outcome, the main risk or caveat, and how it was checked; everything else goes below.
 When the investigation follows diagnostic-reasoning, include the bounded two-row table contract from `{{FM_ROOT}}/.agents/skills/diagnostic-reasoning/SKILL.md`.
 Firstmate may verify that table with `bin/fm-diagnostic-report.sh evaluate <report>`.
 Every cited number must be recomputed in this session with its command shown; any instrument-derived count must also state its coverage and age.

@@ -385,6 +385,41 @@ test_validate_bookends_reports_byte_and_resource_costs() {
   pass "fm-brief.sh: --validate-bookends reports brief bytes, labelled bytes/3 estimate, selected-resource costs, and the start-budget target"
 }
 
+# The signal is a heuristic over the filled task text, never a gate: an
+# economical executor's precondition is that a dispatcher can see the absence.
+test_validate_bookends_reports_acceptance_oracle_presence() {
+  local home="$TMP_ROOT/oracle-signal-home" id brief intent spec out
+  mkdir -p "$home/data"
+  id=oracle-signal-present
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to generate the oracle-present fixture brief"
+  brief="$home/data/$id/brief.md"
+  intent="$home/$id-intent.txt"
+  spec="$home/$id-spec.txt"
+  printf 'Fix the widget renderer.\n' > "$intent"
+  printf 'Oracle: bash tests/x.test.sh\n' > "$spec"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$intent" "$spec" >/dev/null 2>&1 \
+    || fail "--fill failed for the oracle-present fixture"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$brief")
+  assert_contains "$out" "acceptance_oracle=present" \
+    "bookend validation did not report an acceptance oracle the task text names"
+
+  id=oracle-signal-absent
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh failed to generate the oracle-absent fixture brief"
+  brief="$home/data/$id/brief.md"
+  intent="$home/$id-intent.txt"
+  spec="$home/$id-spec.txt"
+  printf 'Tidy the widget renderer.\n' > "$intent"
+  printf 'Keep the diff small and the prose unchanged.\n' > "$spec"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --fill "$intent" "$spec" >/dev/null 2>&1 \
+    || fail "--fill failed for the oracle-absent fixture"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --validate-bookends "$brief")
+  assert_contains "$out" "acceptance_oracle=absent" \
+    "bookend validation reported an acceptance oracle the task text never names"
+  pass "fm-brief.sh: --validate-bookends signals whether the filled task text carries an acceptance oracle"
+}
+
 test_fill_refuses_non_ordinary_or_already_filled_brief() {
   local home text_file out status
   home="$TMP_ROOT/fill-refuse-home"
@@ -865,6 +900,60 @@ test_no_mistakes_dod_wording() {
   assert_no_grep "no-mistakes refuses" "$brief" \
     "no-mistakes DOD must not claim the tool itself refuses --yes"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
+}
+
+# The shared scout definition of done opens with the inbox section and carries
+# its own header, so the scaffold must not add a second one in front of it.
+test_scout_scaffolds_carry_one_definition_of_done_header() {
+  local home="$TMP_ROOT/scout-dod-header-home" variant id brief header_count inbox_line dod_line
+  mkdir -p "$home/data"
+  for variant in writer reader; do
+    id="brief-scout-dod-header-$variant"
+    if [ "$variant" = reader ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout --access reader >/dev/null 2>&1 \
+        || fail "fm-brief.sh failed to generate the reader scout brief"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 \
+        || fail "fm-brief.sh failed to generate the writer scout brief"
+    fi
+    brief="$home/data/$id/brief.md"
+    header_count=$(grep -c '^# Definition of done$' "$brief" || true)
+    [ "$header_count" -eq 1 ] \
+      || fail "$variant scout brief carries $header_count '# Definition of done' headers instead of one"
+    inbox_line=$(grep -n '^# Firstmate instruction inbox$' "$brief" | head -1 | cut -d: -f1)
+    dod_line=$(grep -n '^# Definition of done$' "$brief" | head -1 | cut -d: -f1)
+    [ -n "$inbox_line" ] && [ -n "$dod_line" ] \
+      || fail "$variant scout brief lost a structural boundary needed to order the inbox and its definition of done"
+    [ "$inbox_line" -lt "$dod_line" ] \
+      || fail "$variant scout brief no longer puts the instruction inbox before its definition of done"
+  done
+  pass "fm-brief: both scout scaffolds carry exactly one definition-of-done header, after the instruction inbox"
+}
+
+# The shared report contract already asks for a report that stands alone; this
+# pins the short verdict head a dispatcher reads before the detail.
+test_scout_definition_of_done_asks_for_a_verdict_head() {
+  local home="$TMP_ROOT/scout-verdict-head-home" variant id brief sentence dod_line sentence_line
+  sentence="Open the report with three lines: the outcome, the main risk or caveat, and how it was checked; everything else goes below."
+  mkdir -p "$home/data"
+  for variant in writer reader; do
+    id="brief-scout-verdict-head-$variant"
+    if [ "$variant" = reader ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout --access reader >/dev/null 2>&1 \
+        || fail "fm-brief.sh failed to generate the reader scout brief"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 \
+        || fail "fm-brief.sh failed to generate the writer scout brief"
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "$sentence" "$brief" \
+      "$variant scout brief never asks the report to open with a verdict head"
+    dod_line=$(grep -n '^# Definition of done$' "$brief" | head -1 | cut -d: -f1)
+    sentence_line=$(grep -Fn "$sentence" "$brief" | head -1 | cut -d: -f1)
+    [ -n "$dod_line" ] && [ -n "$sentence_line" ] && [ "$sentence_line" -gt "$dod_line" ] \
+      || fail "$variant scout brief carries the verdict-head sentence outside its definition of done"
+  done
+  pass "fm-brief: both scout scaffolds ask for a three-line verdict head inside the definition of done"
 }
 
 test_direct_pr_dod_requires_review_ready_pr() {
@@ -2049,6 +2138,7 @@ test_validate_bookends_reports_byte_and_resource_costs
 test_fill_refuses_non_ordinary_or_already_filled_brief
 test_validate_bookends_refuses_half_filled_and_divergent
 test_validate_bookends_is_no_op_for_secondmate_charter
+test_validate_bookends_reports_acceptance_oracle_presence
 test_herdr_omission_keeps_inserted_after_scaffolding_wording
 test_ordinary_brief_echoes_describe_structured_slots
 test_no_heredoc_in_command_substitution
@@ -2059,6 +2149,8 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_scout_scaffolds_carry_one_definition_of_done_header
+test_scout_definition_of_done_asks_for_a_verdict_head
 test_direct_pr_dod_requires_review_ready_pr
 test_direct_pr_template_inspection_fails_closed
 test_ship_project_memory_wording

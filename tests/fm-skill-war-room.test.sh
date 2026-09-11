@@ -42,9 +42,11 @@ test_slice1_canonical_contract() {
   brief="$BRIEF_HOME/data/slice1-rules-baseline/brief.md"
   rules="$TMP_ROOT/generated-rules"
   expected="$TMP_ROOT/golden-rules"
-  awk '/^# Rules$/ {capture=1} capture {print} capture && /^# Definition of done$/ {exit}' \
+  # Capture exactly the Rules section: from its own heading up to, but not
+  # including, the next section heading, whichever section that turns out to be.
+  awk '/^# Rules$/ {capture=1; print; next} capture && /^# / {exit} capture {print}' \
     "$brief" | sed 's|slice1-rules-baseline.status|access-writer-w1.status|g' > "$rules"
-  awk '/^# Rules$/ {capture=1} capture {print} capture && /^# Definition of done$/ {exit}' \
+  awk '/^# Rules$/ {capture=1; print; next} capture && /^# / {exit} capture {print}' \
     "$ROOT/tests/fixtures/fm-brief-writer-scout.golden" | \
     sed "s|{{FM_HOME}}|$BRIEF_HOME|g; s|{{FM_ROOT}}|$ROOT|g" > "$expected"
   cmp -s "$expected" "$rules" || fail "generated fm-brief.sh Rules section changed from its baseline"
