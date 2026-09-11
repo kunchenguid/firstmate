@@ -1541,13 +1541,14 @@ launch_template() {
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
-    # session. --always-approve auto-approves every tool execution (verified: the
-    # crewmate runs fully autonomously, no permission gate), which an unattended
-    # crewmate needs; it is the targeted equivalent of claude's
+    # session. --trust suppresses the project-content trust dialog on a fresh
+    # worktree (harness-adapters grok reference owns the prompt); --always-approve
+    # auto-approves every tool execution and does not cover that dialog, which an
+    # unattended crewmate still needs as the targeted equivalent of claude's
     # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    grok) printf '%s' 'grok --trust --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
     # --yolo does NOT cover and which would otherwise block every spawn, since
     # each task gets a fresh worktree path cursor has never seen. --yolo is the
@@ -3534,19 +3535,19 @@ EOF
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
-      # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
+      # clean equivalent of codex's notify= and pi's turn_end. grok only loads
       # PROJECT hooks (<worktree>/.grok/hooks/, <worktree>/.claude/settings.local.json)
-      # after the folder is granted hook-trust, which is not automatic and which
-      # firstmate cannot establish at launch without editing grok's own managed
-      # trust store (a high-blast-radius write). GLOBAL hooks in ~/.grok/hooks/ are
-      # always trusted and load on first launch with no gate. So the turn-end hook
-      # lives OUTSIDE the worktree as a single firstmate-owned global hook that is a
+      # after folder trust. Launch-time --trust is the vendor grant that also
+      # suppresses the project-content dialog; firstmate still does not hand-edit
+      # grok's managed trust store. GLOBAL hooks in ~/.grok/hooks/ are always
+      # trusted and load on first launch with no gate. So the turn-end hook lives
+      # OUTSIDE the worktree as a single firstmate-owned global hook that is a
       # guarded no-op for every non-firstmate grok session: it fires only when the
       # current workspace holds a .fm-grok-turnend token pointer that matches the
       # firstmate-owned hook registry. firstmate then drops that per-task pointer
       # (gitignored, like the other harnesses' worktree hook files).
-      # Result: the hook is outside the worktree, needs no trust grant, and never
-      # touches grok's managed config - only firstmate-owned files.
+      # Result: the hook is outside the worktree, does not depend on project-hook
+      # load, and never touches grok's managed config - only firstmate-owned files.
       GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
       GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
       mkdir -p "$GROK_AUTH_DIR"

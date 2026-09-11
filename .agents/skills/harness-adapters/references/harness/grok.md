@@ -2,7 +2,7 @@
 
 The xAI `grok` TUI is Claude-Code-compatible.
 Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, and exit on 2026-07-19 with 0.2.103.
-Launch shape: `grok --always-approve "$(cat <brief>)"`.
+Launch shape: `grok --trust --always-approve "$(cat <brief>)"`.
 
 ## Operating facts
 
@@ -13,6 +13,7 @@ Launch shape: `grok --always-approve "$(cat <brief>)"`.
 | Interrupt | Single `Ctrl+C`; Escape only focuses scrollback. |
 | Skill | `/<skill>`, for example `/no-mistakes`, with end-to-end user-skill discovery, invocation, and real `no-mistakes axi run` evidence; the popup may consume Enter and fill an argument placeholder, requiring a real second Enter. |
 | Autonomy | `--always-approve`, footer `· always-approve`, verified unattended; `--permission-mode bypassPermissions` is stronger equivalent. |
+| Trust | `--trust` suppresses the project-content dialog; `--always-approve` does not. |
 | Marker | `GROK_AGENT=1` on child or tool processes in 0.2.73 and no `CLAUDECODE`; a 1.0.0 hook instead had `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`, and `GROK_WORKSPACE_ROOT` without `GROK_AGENT`, so ancestry guarantees identity. |
 | Resume | `grok --resume <session-id>`, or `grok -c` / `--continue` for cwd latest; `--fork-session` creates a new id. |
 | Model | `--model <model>`; discover current account models with `grok models`. |
@@ -31,9 +32,11 @@ Old Herdr logic treated any pane delta as submission, including popup closure an
 Tmux and Herdr now route captures through `../../../bin/fm-composer-lib.sh`, which classifies real text on every proven content row.
 `../../../docs/herdr-backend.md` owns the boundary and `../../../tests/fm-backend-herdr.test.sh` covers it.
 
-The "Run Grok Build in a project directory?" picker appears only outside a project, such as home, Desktop, Downloads, or `/tmp`.
-The spawn starts in the isolated git root, so Grok trusts it and needs no key.
-For unavoidable non-project launch, `[hints] project_picker_disabled = true` in `~/.grok/config.toml` suppresses the picker.
+A project-content trust dialog can appear on a fresh git project that has project instructions or hooks: `Do you trust the contents of this directory?`, with `Yes, proceed` / `y` and `No, quit` / `n`.
+`--always-approve` does not suppress it; `--trust` does, and remains accepted at launch even when `grok --help` omits the flag.
+The spawn therefore passes `--trust` on the grok template used by every spawn-capable backend, so a worker does not wait on `y`.
+This is not the older non-project directory picker; that prompt was not observed on grok 1.0.25 in git or non-git paths including `/tmp`.
+`../../../docs/verification/runtime-backends.md` owns the dated probe.
 
 ## Composer
 
