@@ -72,10 +72,11 @@ The captain's request to create that local project authorizes this local initial
 
 ## Initialize
 
-Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only` projects:
+Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only` projects.
+Use a subshell so the primary session directory never changes, satisfying the cd guard (`docs/cd-guard.md`):
 
 ```sh
-cd projects/<name> && no-mistakes init && no-mistakes doctor
+(cd projects/<name> && no-mistakes init && no-mistakes doctor)
 ```
 
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
