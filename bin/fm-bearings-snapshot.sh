@@ -75,6 +75,9 @@
 #
 # Output contract: `fm-bearings.v1`. No locks or reports; the underlying snapshot's
 # parent-side remote-ledger cache refresh is the only default fleet-state mutation.
+# Note: within `fm-bearings.v1` the candidate_prs rows carry a `branch` field (the
+# PR head ref name); it was named `task` while crew branches were fm/<id>, but the
+# value is the head branch, not a task id, now that branch names are convention-based.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -263,7 +266,7 @@ EOF
         [ .[] | {
           num:(.number|tostring),
           repo:$repo,
-          task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
+          branch:(.headRefName // "-"),
           url:(.url // "-"),
           review:(.reviewDecision // "none"),
           mergeable:(.mergeable // "UNKNOWN"),

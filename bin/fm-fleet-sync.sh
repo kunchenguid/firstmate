@@ -324,7 +324,14 @@ sync_project() {
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0
   fi
-  mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
+  # Fail closed: an unresolvable posture must not resolve to a mode this sync
+  # will push. Defaulting the failure to "no-mistakes off" made a project the
+  # captain may have registered local-only fetchable and pushable on the strength
+  # of a registry read that did not succeed.
+  if ! mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null); then
+    echo "$label: skipped: could not resolve the registered delivery posture"
+    return 0
+  fi
   mode=${mode_line%% *}
   if [ "$mode" = "local-only" ]; then
     echo "$label: skipped: local-only project"

@@ -321,7 +321,8 @@ STUB
   for mode in no-mistakes direct-PR local-only; do
     id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     meta="$home/state/$id.meta"
-    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s/fixture-project\n' \
+      "$id" "$TMP_ROOT" > "$meta"
     FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
       || fail "$mode: scout brief generation should succeed"
     fill_brief_subsections "$home/data/$id/brief.md" \
@@ -348,8 +349,13 @@ STUB
       "$mode: promoted worker was not told to verify its repository root"
     assert_grep "If either does not resolve to the worktree you were launched in, stop and escalate to firstmate" "$payload" \
       "$mode: promoted worker was not told to stop for any wrong worktree"
-    assert_grep "git checkout -b fm/$id" "$payload" \
+    # The ship branch follows the convention bin/fm-brief.sh owns, keyed off the
+    # project's +ticket:<prefix> flag; this fixture project is ticketless.
+    # shellcheck disable=SC2016  # literal backticks and <placeholders> must match verbatim
+    assert_grep 'create the ship branch `<type>/<short-slug>`' "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
+    assert_grep 'prefix names your work window' "$payload" \
+      "$mode: promoted worker was not told the fm/ prefix is the window, not the branch"
     assert_grep "## Captain's intent" "$payload" \
       "$mode: promoted worker did not receive the Captain's intent subsection"
     assert_grep "## Firstmate spec" "$payload" \
@@ -395,6 +401,53 @@ STUB
   assert_no_grep "no-mistakes axi respond" "$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr" \
     "promoted direct-PR worker received the pipeline gate contract"
   pass "fm-promote: a promoted worker receives the same mode-specific delivery contract a briefed one does"
+}
+
+# A promoted scout on a ticket-mandated project must be told to link its tracker
+# ticket before branching, or the branch name loses the auto-link the project's
+# tracker depends on. The rule comes from the project's +ticket:<prefix> flag, so
+# it must be resolved at promotion rather than left to the worker to guess.
+test_promotion_relays_the_ticketed_branch_rule() {
+  local home meta id out sendroot payload
+  home="$TMP_ROOT/promote-ticket/home"
+  sendroot="$TMP_ROOT/promote-ticket/sendroot"
+  id=promote-ticketed
+  mkdir -p "$home/state" "$home/data" "$sendroot/bin"
+  cat > "$home/data/projects.md" <<'EOF'
+- ticketed-proj [direct-PR +ticket:sc] - fixture for a ticket-mandated repo (added 2026-07-01)
+EOF
+  cat > "$sendroot/bin/fm-send.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s' "$2" > "$FM_TEST_CAPTURE"
+STUB
+  chmod +x "$sendroot/bin/fm-send.sh"
+
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s/ticketed-proj\n' \
+    "$id" "$TMP_ROOT" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" ticketed-proj --scout >/dev/null 2>&1 \
+    || fail "ticketed: scout brief generation should succeed"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Ship the ticketed change." "Preserve the ticket mandate."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1) \
+    || fail "ticketed: promotion should succeed"
+
+  payload="$TMP_ROOT/promote-ticket/payload"
+  ( cd "$sendroot" \
+    && FM_TEST_CAPTURE="$payload" \
+       eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
+    || fail "ticketed: promotion's delivery command did not run"
+  assert_present "$payload" "ticketed: promotion delivered no message to the worker"
+
+  assert_grep "create or link the tracker ticket FIRST" "$payload" \
+    "ticketed: promoted worker was not told to link its tracker ticket first"
+  # shellcheck disable=SC2016  # literal backticks and <placeholders> must match verbatim
+  assert_grep 'create the ship branch `sc-<ticket-id>-<short-slug>`' "$payload" \
+    "ticketed: promoted worker did not receive the ticketed branch shape"
+  # shellcheck disable=SC2016  # literal backticks and <placeholders> must match verbatim
+  assert_no_grep 'create the ship branch `<type>/<short-slug>`' "$payload" \
+    "ticketed: promoted worker also received the ticketless branch rule"
+  pass "fm-promote: a ticket-mandated project's promoted worker receives the ticketed branch rule"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the
@@ -799,6 +852,7 @@ test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
+test_promotion_relays_the_ticketed_branch_rule
 test_project_mode_maps_the_conditional_policy
 test_spawn_and_promote_require_filled_task_subsections
 echo "# all fm-task-delivery tests passed"

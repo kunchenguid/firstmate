@@ -11,6 +11,8 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#   (f) detached worktree HEAD -> refuse, then recover with --branch; a readable
+#       HEAD still outranks a disagreeing --branch
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -148,6 +150,43 @@ test_no_pr_meta_uses_local_branch() {
   pass "fm-review-diff without pr= keeps the worktree-branch diff"
 }
 
+# A detached worktree used to be a dead end here, while the sibling merge path
+# could still recover; --branch closes that gap on the same terms.
+test_detached_head_recovers_with_branch_override() {
+  local case_dir out err rc branch
+  case_dir=$(make_case detached-override)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir"
+  branch=$(git -C "$case_dir/wt" symbolic-ref --short HEAD)
+  git -C "$case_dir/wt" checkout -q --detach
+
+  # Without the override the detached worktree still refuses, but now it says how.
+  set +e
+  run_review_diff "$case_dir" task-x1 > /dev/null 2> "$case_dir/stderr"; rc=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+  [ "$rc" -ne 0 ] || fail "detached-override: a detached worktree with no override must still refuse"
+  assert_contains "$err" "pass --branch <name>" "detached-override: refusal must name the recovery"
+
+  out=$(run_review_diff "$case_dir" task-x1 --branch "$branch" 2> "$case_dir/stderr")
+  assert_contains "$out" '+stale-local' "detached-override: --branch must diff the named branch"
+
+  # A readable HEAD stays authoritative, so a disagreeing --branch is refused.
+  case_dir=$(make_case attached-override-mismatch)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir"
+  git -C "$case_dir/project" branch feat/unrelated main
+  set +e
+  run_review_diff "$case_dir" task-x1 --branch feat/unrelated > /dev/null 2> "$case_dir/stderr"; rc=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+  [ "$rc" -ne 0 ] || fail "attached-override-mismatch: must refuse a --branch that is not the checked-out branch"
+  assert_contains "$err" "disagrees with the branch task task-x1 has checked out" \
+    "attached-override-mismatch: must explain the mismatch"
+
+  pass "fm-review-diff --branch recovers a detached worktree and defers to a readable HEAD"
+}
+
 test_unreachable_pr_head_falls_back_with_warning() {
   local case_dir out err
   case_dir=$(make_case fetch-fallback)
@@ -173,4 +212,5 @@ test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
+test_detached_head_recovers_with_branch_override
 test_unreachable_pr_head_falls_back_with_warning

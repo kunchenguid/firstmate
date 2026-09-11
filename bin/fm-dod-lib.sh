@@ -191,7 +191,10 @@ EOF
 }
 
 fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+  # The task id stays in the call shape, but no block interpolates it now that a
+  # crewmate's branch name follows the convention in bin/fm-brief.sh instead of
+  # being fm/<task-id>.
+  local mode=$1
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -208,9 +211,9 @@ EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
+The task is complete only when committed on your feature branch. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
+When it is implemented and committed, append \`done: ready in branch <your-branch-name>\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;

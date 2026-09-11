@@ -123,7 +123,7 @@ test_bootstrap_line() {
 # --- GUARD 1a: brief isolation assertion ------------------------------------
 
 # The generated ship brief must carry the isolation assertion AHEAD of the
-# `git checkout -b` step, so the crewmate verifies its worktree before branching.
+# branch-creation step, so the crewmate verifies its worktree before branching.
 test_brief_assertion_precedes_branch() {
   local home brief iso br
   home="$TMP_ROOT/brief-home"
@@ -140,7 +140,7 @@ test_brief_assertion_precedes_branch() {
   assert_no_grep "they are identical in the primary checkout" "$brief" \
     "brief must not claim the primary checkout has identical git dirs"
   iso=$(grep -n 'launched in primary checkout, not an isolated worktree' "$brief" | head -1 | cut -d: -f1)
-  br=$(grep -n 'git checkout -b fm/' "$brief" | head -1 | cut -d: -f1)
+  br=$(grep -n 'First action - create your branch' "$brief" | head -1 | cut -d: -f1)
   if [ -z "$iso" ] || [ -z "$br" ]; then
     fail "brief missing assertion ($iso) or branch step ($br)"
   fi

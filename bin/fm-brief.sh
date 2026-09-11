@@ -36,7 +36,7 @@
 #   omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never reads it:
+# captain's standing posture as context, and this script never reads it for the mode:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
@@ -48,6 +48,13 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# This scaffold owns the crew branch convention, keyed off the project's
+# +ticket:<prefix> registry flag (bin/fm-project-mode.sh), the one registry field
+# this script does read: a ticket-mandated project branches
+# <prefix>-<ticket-id>-<short-slug> (the crewmate links the ticket first, and the
+# tracker auto-links from that branch name); a ticketless project branches
+# <type>/<short-slug> with a conventional-commit type.
+# The fm/ prefix names the work window, not a branch.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -418,6 +425,29 @@ echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
 fi
 
+# The branch step is keyed off the project's +ticket:<prefix> flag, so the brief
+# states exactly one rule instead of asking the crewmate to guess which applies.
+# A ticket-mandated branch carries the ticket id in its NAME, which is what the
+# tracker's GitHub integration auto-links against - no PR-title prefix is needed.
+# This is the only registry lookup the scaffold makes; the delivery mode arrives
+# as an explicit flag. An unresolvable bracket aborts rather than silently
+# scaffolding a ticket-mandated project with a ticketless branch rule.
+if ! MODE_LINE=$("$FM_ROOT/bin/fm-project-mode.sh" "$REPO"); then
+  echo "error: cannot resolve the registry entry for $REPO; fix the registry bracket" >&2
+  exit 1
+fi
+read -r _ _ TICKET <<EOF
+$MODE_LINE
+EOF
+
+if [ -n "$TICKET" ]; then
+  BRANCH_RULE="1. First action - create your branch. This repository mandates a tracker ticket, so create or link the ticket FIRST in the project's own ticket tracker - for a Shortcut project, the Shortcut MCP tools - then branch \`$TICKET-<ticket-id>-<short-slug>\` (e.g. \`git checkout -b $TICKET-4821-fix-login-redirect\`). The tracker auto-links the ticket from this branch name."
+else
+  # Single-quoted: the backticks and <type> placeholders are literal brief text.
+  # shellcheck disable=SC2016
+  BRANCH_RULE='1. First action - create your branch `<type>/<short-slug>`, where `<type>` is a conventional-commit type - `feat`, `fix`, `chore`, or `docs` (e.g. `git checkout -b feat/crew-branch-convention`).'
+fi
+
 # Ship task: shape Setup / Rule 1 by this task's explicit delivery mode, validated
 # above, and render the Definition of done from its single owner, bin/fm-dod-lib.sh,
 # which bin/fm-promote.sh renders too so a promoted scout receives the same contract.
@@ -426,11 +456,11 @@ fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE1='1. Never push to the default branch (push only your own feature branch). Never merge a PR.'
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE1="1. Never push to any remote and never open a PR. Work only on your own feature branch; firstmate handles the merge into local \`main\`."
     ;;
   *)  # no-mistakes
     SETUP2="
@@ -454,7 +484,9 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$BRANCH_RULE
+   (The \`fm/\` prefix names the work window; branch names use the rule above.)
+   Concurrent tasks share one branch namespace, so if \`git checkout -b\` reports the name already exists, pick a distinct slug or append a short unique suffix and continue.$SETUP2
 
 # Rules
 $RULE1

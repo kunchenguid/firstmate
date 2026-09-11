@@ -8,7 +8,7 @@
 # on a real branch - normally the default branch, main. The "worktree tangle"
 # failure mode is a crewmate spawned to work on firstmate ITSELF branching and
 # committing in the primary checkout instead of its own disposable worktree,
-# stranding the primary on a feature branch (e.g. fm/readme-restructure-d3).
+# stranding the primary on a feature branch (e.g. docs/readme-restructure).
 #
 # fm_primary_tangle_branch detects exactly that and nothing else: a NAMED,
 # non-default branch checked out in the given root. It is deliberately silent for

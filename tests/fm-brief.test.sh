@@ -250,7 +250,9 @@ ROWS
 
 # The registry is the captain's standing posture, not this task's answer: the
 # scaffold must follow the explicit flag even when the project is registered
-# with a different mode, and must not consult the registry at all.
+# with a different mode. The registry is still read for the +ticket:<prefix> flag
+# that keys the branch rule (test_ticketed_branch_naming_convention), but never
+# for the mode.
 test_ship_mode_is_explicit_not_registry() {
   local home brief
   home="$TMP_ROOT/explicit-over-registry-home"
@@ -422,6 +424,133 @@ test_ask_user_escalation_format() {
   done
 
   pass "fm-brief.sh: no-mistakes ask-user findings use one event plus a verbatim snapshot"
+}
+
+# The scaffold owns the crew branch-naming convention, keyed off the project's
+# +ticket:<prefix> registry flag (bin/fm-project-mode.sh). A ticketless project
+# branches <type>/<slug>; a ticket-mandated one branches <prefix>-<ticket-id>-<slug>
+# and the tracker auto-links from the branch name, so NO PR-title prefix machinery
+# is emitted. The brief states exactly ONE rule so the crewmate never has to guess,
+# and never fm/<id> - that prefix stays reserved for the work window.
+test_ticketless_branch_naming_convention() {
+  local home id proj mode brief
+  home="$TMP_ROOT/branch-convention-home"
+  write_registry "$home"
+
+  # Shared branch step: present in every ship mode, and never fm/<id>.
+  for row in "conv-nm:no-registry-proj:no-mistakes" "conv-dp:direct-proj:direct-PR" "conv-lo:local-proj:local-only"; do
+    id=${row%%:*}
+    proj=${row#*:}; proj=${proj%%:*}
+    mode=${row##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    # shellcheck disable=SC2016  # literal backticks must render in the brief
+    assert_grep 'create your branch `<type>/<short-slug>`' "$brief" \
+      "$id: brief missing the ticketless conventional-commit branch rule"
+    assert_grep "conventional-commit type" "$brief" \
+      "$id: brief missing the conventional-commit type list"
+    assert_no_grep "<ticket-id>" "$brief" \
+      "$id: ticketless brief must not emit the ticket-mandated rule"
+    assert_no_grep "Shortcut MCP" "$brief" \
+      "$id: ticketless brief must not tell the crewmate to create a ticket"
+    assert_grep 'prefix names the work window' "$brief" \
+      "$id: brief lost the fm/-is-the-window note"
+    # shellcheck disable=SC2016  # literal command text must render verbatim
+    assert_no_grep 'git checkout -b fm/' "$brief" \
+      "$id: brief still tells the crewmate to create an fm/ branch"
+    assert_no_grep "create your branch: " "$brief" \
+      "$id: brief kept the old single-line fm/<id> branch step"
+    # Crewmate-chosen names share one namespace, so a collision must not stall the task.
+    assert_grep "if \`git checkout -b\` reports the name already exists" "$brief" \
+      "$id: brief missing the branch-name collision guidance"
+  done
+
+  pass "fm-brief.sh: a ticketless project gets only the <type>/<slug> branch rule"
+}
+
+# A project registered with +ticket:<prefix> gets the ticketed branch rule only,
+# and the brief names the concrete mechanism for obtaining the ticket id. The
+# branch name itself carries the ticket id (that is what the tracker auto-links),
+# so no PR-title-prefix machinery is emitted.
+test_ticketed_branch_naming_convention() {
+  local home id proj mode brief
+  home="$TMP_ROOT/ticket-convention-home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- ticket-nm-proj [no-mistakes +ticket:sc] - fixture for a ticket-mandated no-mistakes repo (added 2026-07-01)
+- ticket-dp-proj [direct-PR +yolo +ticket:sc] - fixture for a ticket-mandated direct-PR repo (added 2026-07-01)
+EOF
+
+  for row in "tkt-nm:ticket-nm-proj:no-mistakes" "tkt-dp:ticket-dp-proj:direct-PR"; do
+    id=${row%%:*}
+    proj=${row#*:}; proj=${proj%%:*}
+    mode=${row##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" "$proj" --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    # shellcheck disable=SC2016  # literal backticks must render in the brief
+    assert_grep 'branch `sc-<ticket-id>-<short-slug>`' "$brief" \
+      "$id: brief missing the ticket-mandated branch rule"
+    assert_grep "in the project's own ticket tracker" "$brief" \
+      "$id: ticketed brief must name where the crewmate creates or links the ticket"
+    assert_grep "for a Shortcut project, the Shortcut MCP tools" "$brief" \
+      "$id: ticketed brief must keep Shortcut as the worked example, not the only tracker"
+    assert_grep "auto-links the ticket from this branch name" "$brief" \
+      "$id: ticketed brief must state the tracker links from the branch name"
+    assert_grep "if \`git checkout -b\` reports the name already exists" "$brief" \
+      "$id: brief missing the branch-name collision guidance"
+    # shellcheck disable=SC2016  # literal backticks must render in the brief
+    assert_no_grep 'create your branch `<type>/<short-slug>`' "$brief" \
+      "$id: ticketed brief must not also emit the ticketless branch rule"
+    assert_no_grep "conventional-commit type" "$brief" \
+      "$id: ticketed brief must not offer the conventional-commit alternative"
+    assert_grep 'prefix names the work window' "$brief" \
+      "$id: brief lost the fm/-is-the-window note"
+  done
+
+  # The private fleet's own repo names must never leak into this shared template.
+  assert_no_grep "apply_pass_backend" "$ROOT/bin/fm-brief.sh" \
+    "fm-brief.sh hardcodes a captain-private project name"
+
+  pass "fm-brief.sh: a +ticket project gets only the ticketed branch rule"
+}
+
+# The +ticket:<prefix> flag accepts any bare token, so the brief must not claim
+# one specific tracker owns a prefix it knows nothing about.
+test_non_shortcut_ticket_prefix_keeps_tracker_generic() {
+  local home brief
+  home="$TMP_ROOT/eng-ticket-home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- eng-proj [direct-PR +ticket:ENG] - fixture for a non-Shortcut ticket-mandated repo (added 2026-07-01)
+EOF
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tkt-eng eng-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/tkt-eng/brief.md"
+  assert_present "$brief" "tkt-eng: brief was not scaffolded"
+  # shellcheck disable=SC2016  # literal backticks must render in the brief
+  assert_grep 'branch `ENG-<ticket-id>-<short-slug>`' "$brief" \
+    "tkt-eng: brief missing the derived ENG branch rule"
+  assert_grep "in the project's own ticket tracker" "$brief" \
+    "tkt-eng: brief must point at the project's own tracker"
+  assert_no_grep "create or link the ticket FIRST with the Shortcut" "$brief" \
+    "tkt-eng: brief names Shortcut as the tracker for a non-Shortcut prefix"
+
+  pass "fm-brief.sh: a non-Shortcut ticket prefix does not claim Shortcut as its tracker"
+}
+
+# bin/fm-merge-local.sh, bin/fm-review-diff.sh, and bin/fm-promote.sh all point
+# readers at this script as the owner of the branch convention, so --help must
+# state it.
+test_help_states_branch_convention() {
+  local help
+  help=$("$ROOT/bin/fm-brief.sh" --help)
+  assert_contains "$help" "+ticket:<prefix>" "fm-brief.sh --help omitted the ticket flag that keys the convention"
+  assert_contains "$help" "<prefix>-<ticket-id>-<short-slug>" "fm-brief.sh --help omitted the ticketed branch shape"
+  assert_contains "$help" "<type>/<short-slug>" "fm-brief.sh --help omitted the ticketless branch shape"
+  assert_contains "$help" "names the work window" "fm-brief.sh --help omitted the fm/-window note"
+  pass "fm-brief.sh: --help owns the branch convention it is cited for"
 }
 
 test_ship_project_memory_wording() {
@@ -873,6 +1002,10 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ticketless_branch_naming_convention
+test_ticketed_branch_naming_convention
+test_non_shortcut_ticket_prefix_keeps_tracker_generic
+test_help_states_branch_convention
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

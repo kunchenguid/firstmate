@@ -5,7 +5,8 @@
 # again. Promotion also writes the crewmate's ship instructions to
 # data/<task-id>/ship-instructions.md and prints the fm-send.sh command that
 # delivers them. Those instructions carry the scratch-state inventory, the clean
-# default-branch base, the fm/<task-id> branch, and - rendered from
+# default-branch base, the ship branch named by the convention bin/fm-brief.sh owns
+# (resolved here from the project's +ticket:<prefix> registry flag), and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
@@ -19,7 +20,8 @@
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never looks it up.
+# captain's standing posture as context, and this script looks it up only for the
+# project's +ticket:<prefix> flag, which keys the ship branch rule.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
@@ -133,6 +135,27 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
+# Resolve the concrete branch rule from the project's +ticket:<prefix> flag before
+# flipping state, so an unresolvable registry bracket aborts cleanly. The scout
+# brief carried no branch rule, so the ship instructions spell it out: a
+# ticket-mandated project links its tracker ticket first, which is what gives the
+# branch name its auto-link (bin/fm-brief.sh owns the convention).
+PROJ=$(grep '^project=' "$META" | cut -d= -f2- || true)
+BRANCH_HINT="create the ship branch per the branch convention owned by \`bin/fm-brief.sh\`"
+if [ -n "$PROJ" ]; then
+  PROJ_NAME=$(basename "$PROJ")
+  if ! MODE_LINE=$("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME"); then
+    echo "error: cannot resolve the registry entry for $PROJ_NAME; fix the registry bracket before promoting" >&2
+    exit 1
+  fi
+  TICKET=$(printf '%s\n' "$MODE_LINE" | awk '{print $3}')
+  if [ -n "$TICKET" ]; then
+    BRANCH_HINT="create or link the tracker ticket FIRST in the project's own ticket tracker - for a Shortcut project, the Shortcut MCP tools - then create the ship branch \`$TICKET-<ticket-id>-<short-slug>\`, which the tracker auto-links from"
+  else
+    BRANCH_HINT="create the ship branch \`<type>/<short-slug>\` with a conventional-commit type - \`feat\`, \`fix\`, \`chore\`, or \`docs\`"
+  fi
+fi
+
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
   echo "error: $SCOUT_BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; preserve the original ask in ## Captain's intent and fill the scout-time ## Firstmate spec; promotion generates a separate ship-time spec" >&2
@@ -179,7 +202,7 @@ EOF
 ## Firstmate spec
 1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
 2. Inventory this worktree's scratch state with \`git status\` and \`git log\` before changing anything.
-3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`.
+3. Return to a clean default-branch base, then $BRANCH_HINT. The \`fm/\` prefix names your work window, not your branch.
 4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
 5. If you reproduced a bug, turn that reproduction into a regression test.
 6. These ship instructions supersede the scout delivery rules and report-based Definition of done. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule.

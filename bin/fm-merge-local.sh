@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
-# project's default branch to the crewmate's fm/<id> branch.
+# project's default branch to the crewmate's ready branch, discovered from the
+# task worktree's checked-out HEAD (any branch name, per the convention owned by
+# bin/fm-brief.sh). --branch <name> recovers the case where the worktree cannot
+# report its branch (missing worktree=, pruned, or detached HEAD); a readable HEAD
+# stays authoritative and a disagreeing --branch is refused, so only the task's own
+# work lands. Every merge guard below still applies.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -14,7 +19,7 @@
 # merge, so a captain approval must be recorded as an `answer --release` before
 # this entrypoint is invoked. The lock ends when the fast-forward returns;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
-# Usage: fm-merge-local.sh <task-id>
+# Usage: fm-merge-local.sh <task-id> [--branch <name>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,11 +30,31 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
-if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
+if [ "$#" -lt 1 ] || ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid local merge request" >&2
   exit 2
 fi
 ID=$1
+shift
+BRANCH_OVERRIDE=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --branch)
+      BRANCH_OVERRIDE=${2:-}
+      [ -n "$BRANCH_OVERRIDE" ] || { echo "error: --branch needs a branch name" >&2; exit 2; }
+      shift 2
+      ;;
+    --branch=*)
+      BRANCH_OVERRIDE=${1#--branch=}
+      [ -n "$BRANCH_OVERRIDE" ] || { echo "error: --branch needs a branch name" >&2; exit 2; }
+      shift
+      ;;
+    *)
+      echo "error: invalid local merge request" >&2
+      exit 2
+      ;;
+  esac
+done
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: local merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -71,8 +96,14 @@ if [ "$FM_BACKLOG_META_SPAWN_GEN" != "$MERGE_EXPECTED_SPAWN_GEN" ]; then
 fi
 
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
+WT=$(grep '^worktree=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
+# Validate the project before any git -C "$PROJ": an empty value would silently
+# retarget every command below at the current directory, which is firstmate's
+# own primary checkout.
+[ -n "$PROJ" ] || { echo "error: meta for task $ID is missing project=" >&2; exit 1; }
+[ -d "$PROJ" ] || { echo "error: project for task $ID is missing: $PROJ" >&2; exit 1; }
 
 default_branch() {
   local ref branch
@@ -90,10 +121,44 @@ default_branch() {
   return 1
 }
 
-BRANCH="fm/$ID"
+# The worktree HEAD is the source of truth (it ties the branch to THIS task);
+# --branch is only a fallback for when the worktree cannot answer.
+DISCOVERED=
+why=
+if [ -z "$WT" ]; then
+  why="meta for task $ID is missing worktree="
+elif [ ! -d "$WT" ]; then
+  why="worktree for task $ID is missing: $WT"
+else
+  DISCOVERED=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$DISCOVERED" ] || why="worktree $WT for task $ID is detached"
+fi
+
+if [ -n "$DISCOVERED" ]; then
+  # A readable HEAD outranks the override. Disagreement means the caller named a
+  # branch that is not this task's checked-out work, so refuse instead of landing it.
+  if [ -n "$BRANCH_OVERRIDE" ] && [ "$BRANCH_OVERRIDE" != "$DISCOVERED" ]; then
+    echo "REFUSED: --branch $BRANCH_OVERRIDE disagrees with the branch task $ID has checked out ($DISCOVERED)." >&2
+    echo "--branch only recovers a worktree that cannot report its branch; it never selects a different one." >&2
+    echo "Merge $DISCOVERED by rerunning without --branch, or resolve the mismatch in $WT first." >&2
+    exit 1
+  fi
+  BRANCH=$DISCOVERED
+else
+  BRANCH=$BRANCH_OVERRIDE
+  [ -n "$BRANCH" ] || {
+    echo "error: $why; cannot determine the ready branch" >&2
+    echo "Pass the branch the crewmate reported ready: bin/fm-merge-local.sh $ID --branch <name>" >&2
+    exit 1
+  }
+fi
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+
+# Merging the default into itself is a no-op that would report success as if work
+# landed; require a real task branch (matters most on the operator-supplied --branch).
+[ "$BRANCH" != "$DEFAULT" ] || { echo "error: ready branch is the default branch '$DEFAULT'; there is nothing to merge" >&2; exit 1; }
 
 # The project's main checkout must be on its default branch and clean, so the
 # fast-forward lands predictably (firstmate never writes here otherwise).
@@ -132,4 +197,7 @@ fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+# A no-op fast-forward (default already contained the branch) landed nothing;
+# report it as a failure rather than a successful merge.
+[ "$before" != "$after" ] || { echo "error: no-op merge of $BRANCH into $DEFAULT ($before unchanged); nothing landed" >&2; exit 1; }
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
