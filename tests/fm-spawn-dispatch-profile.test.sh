@@ -33,8 +33,12 @@ SH
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
+  # Stands in for GNU timeout in both shapes the spawn reaches through it: the
+  # cursor probe's `timeout <secs> <cmd>` and fm_run_timed's
+  # `timeout -k <grace> <secs> <cmd>` around the Treehouse lease.
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" = -k ] && shift 2
 shift
 exec "$@"
 SH
