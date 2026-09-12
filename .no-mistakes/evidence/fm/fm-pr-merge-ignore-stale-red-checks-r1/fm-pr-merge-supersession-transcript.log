@@ -1,0 +1,49 @@
+ok - fm-pr-merge merges when a failed check run was replaced by a passing re-run
+ok - fm-pr-merge never lets a check run supersede a legacy status context
+ok - fm-pr-merge still refuses when a check's current run failed after an earlier pass
+ok - fm-pr-merge uses start order when the old success finishes last
+ok - fm-pr-merge supersedes an old cancellation that finishes last
+ok - fm-pr-merge keeps a check red while its re-run is still in flight
+ok - fm-pr-merge never lets one check's pass clear another check's failure
+ok - fm-pr-merge clears a failure only on a proven later pass of the same check
+ok - fm-pr-merge keeps --allow-red scoped to its named check beside a superseded failure
+
+--- stale cancellation followed by passing rerun: forge input ---
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"cccccccccccccccccccccccccccccccccccccccc","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-01-01T00:00:01Z","completedAt":"2026-01-01T00:00:01Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-01-01T00:00:09Z","completedAt":"2026-01-01T00:00:09Z"}]}
+--- observed forge command ---
+pr merge 90 --repo example/repo --match-head-commit cccccccccccccccccccccccccccccccccccccccc --squash
+
+--- newer failure after older pass: forge input ---
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"dddddddddddddddddddddddddddddddddddddddd","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-01-01T00:00:01Z","completedAt":"2026-01-01T00:00:01Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-01-01T00:00:09Z","completedAt":"2026-01-01T00:00:09Z"}]}
+--- product refusal ---
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M29S6F4YZWZWXEBHA9MTKZSC/.pi/extensions/fm-primary-turnend-guard.ts -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M29S6F4YZWZWXEBHA9MTKZSC/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+error: refusing to merge https://github.com/example/repo/pull/91
+  - check 'ci' is not green
+error: these checks are not green: ci
+--- merge calls (expected none) ---
+(none)
+
+--- old cancellation finishing after newer pass: forge input ---
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-01-01T00:00:01Z","completedAt":"2026-01-01T00:00:10Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-01-01T00:00:09Z","completedAt":"2026-01-01T00:00:09Z"}]}
+--- observed forge command ---
+pr merge 99 --repo example/repo --match-head-commit dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf --squash
+
+--- failing status context plus same-name passing check run: product refusal ---
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M29S6F4YZWZWXEBHA9MTKZSC/.pi/extensions/fm-primary-turnend-guard.ts -e /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M29S6F4YZWZWXEBHA9MTKZSC/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+error: refusing to merge https://github.com/example/repo/pull/97
+  - check 'ci' is not green
+error: these checks are not green: ci
+--- merge calls (expected none) ---
+(none)
