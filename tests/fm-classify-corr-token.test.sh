@@ -589,10 +589,29 @@ test_optional_event_time() {
   fm_parent_channel_append_once "$dir/state/retry.status" 'done: prose [at=1]'
   fm_parent_channel_append_once "$dir/state/retry.status" 'done: prose [at=2]'
   [ "$(wc -l < "$dir/state/retry.status")" -eq 4 ] || fail "dedup stripped a time mention from prose"
-  for stamped in 'done [at=17:00]: shipped' 'done [at=bad] [at=17:00]: shipped'; do
-    printf '%s\n' "$stamped" > "$dir/state/malformed.status"
-    fm_parent_channel_append_once "$dir/state/malformed.status" 'done: shipped' || fail "malformed time retry failed"
-    [ "$(cat "$dir/state/malformed.status")" = "$stamped" ] || fail "retry duplicated or rewrote malformed time"
+  # A malformed time tag is ordinary event bytes, so it identifies the event:
+  # the unstamped line is a DIFFERENT event, while re-appending the same bytes
+  # is still a retry.
+  for line in 'done [at=17:00]: shipped' 'done [at=]: shipped' 'done [at=bad]: shipped'; do
+    printf '%s\n' "$line" > "$dir/state/malformed.status"
+    fm_parent_channel_append_once "$dir/state/malformed.status" 'done: shipped' \
+      || fail "append after a malformed time failed"
+    [ "$(wc -l < "$dir/state/malformed.status")" -eq 2 ] \
+      || fail "dedup stripped a malformed time tag: $line"
+    fm_parent_channel_append_once "$dir/state/malformed.status" "$line" \
+      || fail "malformed time retry failed"
+    [ "$(head -1 "$dir/state/malformed.status")" = "$line" ] \
+      && [ "$(wc -l < "$dir/state/malformed.status")" -eq 2 ] \
+      || fail "retry duplicated or rewrote malformed time: $line"
+  done
+  # A well-formed numeric tag still strips, in either metadata order.
+  for line in "done [at=1700000000] [corr=$CORR2]: stamped" \
+    "done [corr=$CORR2] [at=1700000000]: stamped"; do
+    printf '%s\n' "$line" > "$dir/state/timed.status"
+    fm_parent_channel_append_once "$dir/state/timed.status" "done [corr=$CORR2]: stamped" \
+      || fail "numeric time retry failed"
+    [ "$(cat "$dir/state/timed.status")" = "$line" ] \
+      || fail "dedup did not ignore a well-formed numeric time: $line"
   done
   stamped=$(status_stamp_line "needs-decision corr=$CORR [key=timed]: choose: A or B")
   printf '%s\n' "$stamped" 'working [at=1700000000]: unrelated progress' > "$dir/state/task.status"
@@ -608,9 +627,6 @@ test_captain_override_ignores_event_time() {
   dir=$(make_case captain-override-time)
   for verb in 'done' needs-decision blocked failed; do
     for line in "$verb: audit complete" "$verb [at=1700000000]: audit complete" \
-      "$verb [at=]: audit complete" "$verb [at=bad]: audit complete" \
-      "$verb [at=17:00]: audit complete" "$verb [at=bad] [at=17:00]: audit complete" \
-      "$verb [at=\$(date +%s)]: audit complete" \
       "$verb [at=1] [at=2]: audit complete"; do
       status_is_captain_relevant "$line" || fail "override missed actionable event: $line"
       printf '%s\n' "$line" > "$dir/state/task.status"
@@ -639,15 +655,43 @@ test_captain_override_ignores_event_time() {
   FM_CAPTAIN_RE="^done \\[corr=$CORR\\]: literal \\[at=1700000000\\]$"
   for line in "done [corr=$CORR]: literal [at=1700000000]" \
     "done [at=1700000000] [corr=$CORR]: literal [at=1700000000]" \
-    "done [corr=$CORR] [at=1700000000]: literal [at=1700000000]" \
-    "done [at=17:00] [corr=$CORR]: literal [at=1700000000]" \
-    "done [corr=$CORR] [at=17:00]: literal [at=1700000000]"; do
+    "done [corr=$CORR] [at=1700000000]: literal [at=1700000000]"; do
     status_is_captain_relevant "$line" || fail "normalization changed correlation metadata or note: $line"
   done
   pass "captain regex overrides preserve timed and legacy relevance and event bytes"
 }
 
+# A malformed time tag is never read as a time: relevance, verb, and note all see
+# the same ordinary bytes, so a FM_CAPTAIN_RE override matching "<verb>:" does not
+# find a separator the line does not have, while the terminal-verb default still
+# surfaces the event.
+test_malformed_event_time_is_ordinary_bytes() {
+  local dir verb line event
+  dir=$(make_case malformed-event-time)
+  for verb in 'done' needs-decision blocked failed; do
+    for line in "$verb [at=]: audit complete" "$verb [at=bad]: audit complete" \
+      "$verb [at=17:00]: audit complete" "$verb [at=bad] [at=17:00]: audit complete" \
+      "$verb [at=\$(date +%s)]: audit complete"; do
+      if status_line_at_epoch "$line" >/dev/null; then fail "invented time for $line"; fi
+      [ "$(status_line_verb "$line")" = "$verb" ] || fail "malformed time changed verb: $line"
+      status_is_captain_relevant "$line" \
+        || fail "default vocabulary lost an actionable event: $line"
+      printf '%s\n' "$line" > "$dir/state/task.status"
+      event=$(status_span_first_actionable "$dir/state/task.status" 0) \
+        || fail "default vocabulary hid actionable status span: $line"
+      [ "$event" = "$line" ] || fail "classification changed surfaced event bytes: $event"
+      (
+        FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
+        status_is_captain_relevant "$line" && exit 1
+        exit 0
+      ) || fail "override matched a malformed tag as a stripped time: $line"
+    done
+  done
+  pass "malformed event times stay ordinary line bytes for every reader"
+}
+
 test_captain_override_ignores_event_time
+test_malformed_event_time_is_ordinary_bytes
 test_optional_event_time
 test_tokened_opener_opens_and_tokened_closer_closes
 test_token_is_read_through_in_every_position_it_is_written_in

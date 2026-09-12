@@ -323,7 +323,7 @@ pr_for_task() { # <meta> [preferred-line]
   value=$(meta_field "$meta" pr)
   if [ -z "$value" ] && [ -n "$preferred" ]; then
     value=$(printf '%s\n' "$preferred" \
-      | sed -nE 's|^done( \[at=[^]]*\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
+      | sed -nE 's|^done( \[at=[0-9]+\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
       | head -1 || true)
   fi
   clean_field "$value"
