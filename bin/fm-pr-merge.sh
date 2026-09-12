@@ -445,7 +445,7 @@ FIELDS
 }
 
 # Every GitHub check that is not green in the given live pull-request JSON, one
-# name per line. A run is green when it is a status context whose state is
+# name per line. An entry is green when it is a status context whose state is
 # SUCCESS, or a check run that completed with SUCCESS, NEUTRAL, or SKIPPED (so
 # a pending check is not green either). Exits nonzero when the rollup cannot be
 # read, so a malformed answer is a failed read and never an empty red set.
