@@ -1459,6 +1459,53 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   pass "herdr's native busy verdict reads working with no record present"
 }
 
+# Codex's semantic busy sources are not verified on this branch, but Herdr's
+# own registered agent status is still a backend current-state source. The
+# process-level liveness check keeps the fallback from trusting a stale Herdr
+# registration after the worker has exited.
+test_no_run_herdr_codex_uses_agent_status_fallback() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr agent-status fallback skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-codex-status)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-codex
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-codex.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=codex"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  FM_FAKE_HERDR_PROCESS=agent
+  local out; out=$(run_crew_state "$d" feat-herdr-codex)
+  assert_contains "$out" "state: working" "codex uses Herdr's working agent status"
+  assert_contains "$out" "source: herdr-agent-status" "backend status source is named explicitly"
+  assert_contains "$out" "agent_status=working" "the backend status is preserved in the detail"
+  assert_not_contains "$out" "codex-unverified" "the backend fallback resolves the unverified Codex source"
+  pass "a live Herdr worker supplies current state when Codex telemetry is unverified"
+}
+
+# An unreadable or unexpected Herdr agent status must remain unknown, never
+# become a confident working state merely because the endpoint itself exists.
+test_no_run_herdr_unreadable_agent_status_stays_unknown() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr unreadable agent-status fallback skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-codex-status-unknown)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-codex-unknown
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-codex-unknown.meta" "window=default:w1:p2" \
+    "worktree=$d/wt" "kind=ship" "backend=herdr" "harness=codex"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT_STATUS=unknown
+  FM_FAKE_HERDR_PROCESS=agent
+  local out; out=$(run_crew_state "$d" feat-herdr-codex-unknown)
+  assert_contains "$out" "state: unknown" "an unexpected Herdr status stays unknown"
+  assert_not_contains "$out" "state: working" "an unexpected Herdr status never becomes working"
+  assert_not_contains "$out" "source: herdr-agent-status" "an unreadable status is not presented as a state source"
+  pass "an unreadable Herdr agent status remains fail-closed"
+}
+
 # Regression (2026-09 G7 stale-claim incident): a herdr CLI that errors or
 # stalls under load made pane_readable's capture fail, and the fallback read
 # that single failure as "backend target gone" - text the stale sweep matches
@@ -2528,6 +2575,8 @@ test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
+test_no_run_herdr_codex_uses_agent_status_fallback
+test_no_run_herdr_unreadable_agent_status_stays_unknown
 test_no_run_herdr_cli_failure_reads_unreachable_not_gone
 test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone

@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|herdr-agent-status|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -76,9 +76,11 @@
 #      call is not daemon death, so that claim is answered by steering the crew
 #      to reattach, not by escalating.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      recorded backend's pane busy state, then a process-verified Herdr
+#      `agent_status` when the harness-specific source has no answer, then the
+#      status log's last line only when its verb maps to a recognized run-state.
+#      Decision-only events such as `resolved` never become current state or
+#      detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -254,6 +256,28 @@ crew_busy_verdict() {  # <target>
     grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
+}
+
+# herdr_agent_status_fallback: read the existing Herdr agent-status adapter as
+# a current-state source after harness-specific busy telemetry has no answer.
+# The recovery-grade classifier must first prove the registered agent is still
+# backed by a live process, so a stale `working` registration cannot hide a
+# dead worker. Prints <state>\t<agent_status> for statuses that map to this
+# helper's state vocabulary, or nothing for an unreadable, unsupported, idle,
+# or agent-free result. The raw read is delegated to the adapter's existing
+# agent-status owner; this helper does not issue a parallel Herdr query shape.
+herdr_agent_status_fallback() {
+  local agent_state raw
+  [ "$TASK_BACKEND" = herdr ] || return 0
+  agent_state=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET")
+  [ "$agent_state" = alive ] || return 0
+  fm_backend_herdr_parse_target "$BACKEND_TARGET" || return 0
+  raw=$(fm_backend_herdr_agent_status_raw \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+  case "$raw" in
+    working|done) printf '%s\t%s' "$raw" "$raw" ;;
+    blocked) printf 'parked\t%s' "$raw" ;;
+  esac
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
@@ -837,7 +861,25 @@ if [ "$KIND" != secondmate ]; then
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    *)
+      # A missing/unverified harness source is where Herdr's backend state can
+      # answer safely; malformed or stale semantic records remain authoritative
+      # unknowns and must not be replaced by a second source.
+      case "$BUSY_VERDICT" in
+        "unknown missing"|"unknown codex-unverified")
+          HERDR_STATUS_STATE=$(herdr_agent_status_fallback)
+          if [ -n "$HERDR_STATUS_STATE" ]; then
+            HERDR_STATUS=${HERDR_STATUS_STATE#*$'\t'}
+            case "${HERDR_STATUS_STATE%%$'\t'*}" in
+              working|done|parked)
+                emit "${HERDR_STATUS_STATE%%$'\t'*}" herdr-agent-status "agent_status=$HERDR_STATUS"
+                ;;
+            esac
+          fi
+          ;;
+      esac
+      emit unknown pane "harness state unavailable ($BUSY_VERDICT)";
+      ;;
   esac
 fi
 
