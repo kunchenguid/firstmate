@@ -198,7 +198,7 @@ test_lease_cause_builder() {
 }
 
 test_lease_refusal_records_reason() {
-  local case_data id out status ledger
+  local case_data id out status ledger lifecycle
   id=lease-refusal-reason-z2
   case_data=$(make_case refusal-reason "$id")
   read_case "$case_data"
@@ -212,6 +212,12 @@ test_lease_refusal_records_reason() {
     "the treehouse stderr reason was not surfaced"
   ledger="$HOME_DIR/data/routing-outcomes.jsonl"
   assert_one_failure "$ledger" "treehouse lease: treehouse could not acquire a durable task lease: no free slot for holder $id"
+  lifecycle="$HOME_DIR/data/telemetry/lifecycle.jsonl"
+  jq -e --arg task "$id" '
+    select(.op=="wait" and .taskId==$task and .waitOwner=="lock"
+      and .waitKey=="treehouse-slot" and (.operationId|type)=="string"
+      and .homeId=="home" and (.openedAt|type)=="number" and .resumedAt==null)' \
+    "$lifecycle" >/dev/null || fail "a refused treehouse slot wrote no lock wait event"
   assert_absent "$HOME_DIR/state/$id.meta" "a refused lease must not publish task metadata"
   assert_absent "$CASE_DIR/allocated-worktree" "a refused lease must not create an allocated worktree"
   pass "a refused treehouse lease records its bounded stderr reason"

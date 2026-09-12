@@ -341,6 +341,7 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
       exit 1
     }
     fm_lock_try_acquire "$TREEHOUSE_PROJECT_LOCK" || {
+      fm_telemetry_record_wait "$ID" "$(fm_telemetry_task_attempt "$ID")" lock treehouse-project open
       echo "REFUSED: another Treehouse slot allocation or return is in progress for $TEARDOWN_LOCK_PROJECT; nothing was changed" >&2
       exit 1
     }
@@ -357,12 +358,30 @@ DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
 DESCENDANT_TREEHOUSE_LOCK_PATHS=()
+TEARDOWN_ATTEMPT_ID=
 teardown_release_locks() {
-  local status=$? i now elapsed
+  local status=$? i now elapsed process_absent=false pane_absent=false scratch_absent=false record_absent=false agent_state
   now=$(fm_telemetry_now_ms)
   elapsed=$((now - TEARDOWN_TELEMETRY_STARTED))
   [ "$elapsed" -ge 0 ] || elapsed=0
-  fm_telemetry_record lifecycle "{\"op\":\"teardown\",\"elapsedMs\":$elapsed,\"status\":$status}"
+  if [ "$status" -eq 0 ] && [ -n "${BACKEND:-}" ] && [ -n "${T:-}" ]; then
+    agent_state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null || printf unreadable)
+    case "$agent_state" in dead|missing) process_absent=true ;; esac
+    if ! fm_backend_target_exists "$BACKEND" "$T" "fm-$ID"; then pane_absent=true; fi
+  fi
+  if { [ -z "${TASK_TMP:-}" ] || [ ! -e "$TASK_TMP" ]; } \
+    && { [ "${ACCESS:-}" != reader ] || [ -z "${WT:-}" ] || [ ! -e "$WT" ]; }; then
+    scratch_absent=true
+  fi
+  [ -e "${META:-$STATE/$ID.meta}" ] || record_absent=true
+  fm_telemetry_record lifecycle "$(jq -cn --argjson elapsed "$elapsed" --argjson status "$status" \
+    --arg attempt "$TEARDOWN_ATTEMPT_ID" --argjson processAbsent "$process_absent" \
+    --argjson paneAbsent "$pane_absent" --argjson scratchAbsent "$scratch_absent" \
+    --argjson recordAbsent "$record_absent" \
+    '{op:"teardown",elapsedMs:$elapsed,status:$status,
+      attemptId:(if $attempt=="" then null else $attempt end),
+      processAbsent:$processAbsent,paneAbsent:$paneAbsent,
+      scratchAbsent:$scratchAbsent,recordAbsent:$recordAbsent}')"
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
   fi
@@ -399,6 +418,7 @@ teardown_release_locks() {
 }
 trap teardown_release_locks EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" || {
+  fm_telemetry_record_wait "$ID" "$(fm_telemetry_task_attempt "$ID")" lock lifecycle-control open
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1
 }
@@ -2642,6 +2662,7 @@ collect_descendant_task_locks() {
     return 1
   }
   if ! fm_lock_try_acquire "$task_set_lock"; then
+    fm_telemetry_record_wait "$ID" "$(fm_telemetry_task_attempt "$ID")" lock task-set open
     echo "REFUSED: secondmate home $home is publishing a task right now (task-set lock is held); forced teardown changed nothing" >&2
     return 1
   fi
@@ -2697,11 +2718,13 @@ preflight_descendant_task_locks() {
       return 1
     }
     if ! fm_lock_try_acquire "$control_lock"; then
+      fm_telemetry_record_wait "$task_id" "$(FM_STATE_OVERRIDE="$state" fm_telemetry_task_attempt "$task_id")" lock lifecycle-control open
       echo "REFUSED: descendant task $task_id has a lifecycle action in flight (control lock is held); forced teardown changed nothing" >&2
       return 1
     fi
     DESCENDANT_LOCK_PATHS+=("$control_lock")
     if ! fm_lock_try_acquire "$meta_lock"; then
+      fm_telemetry_record_wait "$task_id" "$(FM_STATE_OVERRIDE="$state" fm_telemetry_task_attempt "$task_id")" lock metadata open
       echo "REFUSED: descendant task $task_id has a metadata update in flight (metadata lock is held); forced teardown changed nothing" >&2
       return 1
     fi
@@ -2756,6 +2779,7 @@ preflight_descendant_treehouse_slots() {
     done
     if [ "$held" = 0 ]; then
       fm_lock_try_acquire "$lock_path" || {
+        fm_telemetry_record_wait "$task_id" "$(FM_STATE_OVERRIDE="$state" fm_telemetry_task_attempt "$task_id")" lock treehouse-project open
         echo "REFUSED: another Treehouse slot allocation or return is in progress for child $task_id; forced teardown changed nothing" >&2
         return 1
       }
@@ -2917,6 +2941,7 @@ $session	$lock_path"
     fi
     return 0
   fi
+  fm_telemetry_record_wait "$task_id" "$(fm_telemetry_task_attempt "$task_id")" lock herdr-presentation open
   echo "error: herdr session presentation lock is contended for $task_id; nothing was changed - rerun teardown once the contention clears" >&2
   return 1
 }
@@ -3401,6 +3426,7 @@ fi
 # gate supplies green. Missing evidence stays incomplete; explicit discard is
 # cancelled. A seal failure retains the records and local copy for retry.
 TELEMETRY_ATTEMPT=$(meta_value "$META" telemetry_attempt)
+TEARDOWN_ATTEMPT_ID=$TELEMETRY_ATTEMPT
 if [ "$KIND" != secondmate ] && [ -n "$TELEMETRY_ATTEMPT" ]; then
   TELEMETRY_RESULT=incomplete
   TELEMETRY_OUTCOME_KIND=none

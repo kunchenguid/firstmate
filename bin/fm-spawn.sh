@@ -604,14 +604,15 @@ spawn_timing_seconds() {
 }
 
 spawn_timing_emit() {
-  local status=${1:-0} total
+  local status=${1:-0} total op=spawn
   [ "$SPAWN_TIMING_READY" = 1 ] || return 0
   [ "$SPAWN_TIMING_EMITTED" = 0 ] || return 0
   SPAWN_TIMING_EMITTED=1
   total=$(( $(fm_timing_now_ms) - SPAWN_TIMING_STARTED ))
   [ "$total" -ge 0 ] || total=0
   fm_timing_record spawn summary "$SPAWN_TIMING_STARTED" "${ID:-unknown}"
-  fm_telemetry_record lifecycle "{\"op\":\"spawn\",\"elapsedMs\":$total,\"dispatchMs\":$SPAWN_TIMING_DISPATCH_MS,\"briefMs\":$SPAWN_TIMING_BRIEF_MS,\"leaseMs\":$SPAWN_TIMING_LEASE_MS,\"herdrMs\":$SPAWN_TIMING_HERDR_MS,\"launchMs\":$SPAWN_TIMING_LAUNCH_MS,\"trustMs\":$SPAWN_TIMING_TRUST_MS,\"busyMs\":$SPAWN_TIMING_BUSY_MS,\"lockWaitMs\":$SPAWN_TIMING_LOCK_WAIT_MS,\"status\":$status}"
+  [ "${RELAUNCH:-0}" -ne 1 ] || op=relaunch
+  fm_telemetry_record lifecycle "{\"op\":\"$op\",\"elapsedMs\":$total,\"dispatchMs\":$SPAWN_TIMING_DISPATCH_MS,\"briefMs\":$SPAWN_TIMING_BRIEF_MS,\"leaseMs\":$SPAWN_TIMING_LEASE_MS,\"herdrMs\":$SPAWN_TIMING_HERDR_MS,\"launchMs\":$SPAWN_TIMING_LAUNCH_MS,\"trustMs\":$SPAWN_TIMING_TRUST_MS,\"busyMs\":$SPAWN_TIMING_BUSY_MS,\"lockWaitMs\":$SPAWN_TIMING_LOCK_WAIT_MS,\"status\":$status}"
   printf 'spawn timing: total=%ss dispatch=%ss brief=%ss lease=%ss herdr=%ss launch=%ss trust=%ss busy=%ss lockwait=%ss status=%s\n' \
     "$(spawn_timing_seconds "$total")" \
     "$(spawn_timing_seconds "$SPAWN_TIMING_DISPATCH_MS")" \
@@ -707,6 +708,10 @@ fm_record_spawn_failure() {
   else
     echo "warn: spawn-failure telemetry could not be recorded (kind=$kind); the spawn refusal still stands" >&2
   fi
+  if [ "$kind" = quota ]; then
+    fm_telemetry_record_wait "$task_id" "$(fm_telemetry_task_attempt "$task_id")" provider \
+      "quota-${DISPATCH_PROVIDER:-$harness}" open
+  fi
 }
 
 spawn_lease_cause() {
@@ -722,6 +727,7 @@ spawn_lease_cause() {
 spawn_lease_refusal() {
   local message=$1
   echo "error: $message" >&2
+  fm_telemetry_record_wait "$ID" "$(fm_telemetry_task_attempt "$ID")" lock treehouse-slot open
   fm_record_spawn_failure other "treehouse lease: $message" unknown not-applicable
 }
 
@@ -1904,6 +1910,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   elif fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
     SPAWN_CONTROL_LOCK_HELD=1
   else
+    fm_telemetry_record_wait "$ID" "$(fm_telemetry_task_attempt "$ID")" lock lifecycle-control open
     echo "error: another lifecycle action is already running for task $ID" >&2
     exit 1
   fi
@@ -1937,6 +1944,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   }
   if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
+    fm_telemetry_record_wait "$ID" "$(fm_telemetry_task_attempt "$ID")" lock task-set open
     echo "error: this home's task set is locked by another operation (a forced teardown is enumerating or removing its tasks); refusing to create task $ID rather than racing it" >&2
     exit 1
   fi
@@ -3169,6 +3177,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
     exit 1
   }
   if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+    fm_telemetry_record_wait "$ID" "$(fm_telemetry_task_attempt "$ID")" lock treehouse-project open
     echo "error: another Treehouse slot allocation or return is in progress for $PROJ_ABS; refusing to race it" >&2
     exit 1
   fi

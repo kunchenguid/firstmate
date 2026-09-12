@@ -332,8 +332,10 @@ ID=$RAW_ID
 fm_lease_guard "$ID" "lifecycle control (fm-control)"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
-fm_lock_try_acquire "$CONTROL_LOCK" \
-  || die "another lifecycle action is already running for task $ID"
+fm_lock_try_acquire "$CONTROL_LOCK" || {
+  fm_telemetry_record_wait "$ID" "$(fm_telemetry_task_attempt "$ID")" lock lifecycle-control open
+  die "another lifecycle action is already running for task $ID"
+}
 CONTROL_LOCK_HELD=1
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then

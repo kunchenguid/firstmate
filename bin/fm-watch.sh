@@ -2232,6 +2232,17 @@ run_check_capture() {
   fi
 }
 
+record_status_waits_since() { # <status-file> <start-offset>
+  local file=$1 start=$2 size line
+  _fm_wake_require_telemetry || return 0
+  size=$(_fm_status_file_size "$file") || return 0
+  case "$start$size" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$start" -lt "$size" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    fm_telemetry_record_status_line "$STATE" "$file" "$line" 2>/dev/null || true
+  done < <(_fm_status_read_span "$file" "$start" "$((size - start))" 2>/dev/null)
+}
+
 # 0 when any signaled status file carries a captain-relevant event in the bytes
 # appended since this watcher last classified it. The start offset is the
 # classified-position field in that file's .seen-* marker, and fm-classify-lib.sh's
@@ -2259,6 +2270,7 @@ signal_files_actionable() {  # <status-file> ...
     [ -e "$f" ] || [ -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
     start=$(fm_wake_signal_seen_size "$STATE" "$f")
+    record_status_waits_since "$f" "$start"
     record=$(status_span_first_actionable_record "$f" "$start")
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue

@@ -180,7 +180,8 @@ restart_mate() {  # <array-index>
     [ -n "$ran_on" ] || ran_on=${HARNESS[i]}
     elapsed=$(( $(fm_telemetry_now_ms) - started ))
     [ "$elapsed" -ge 0 ] || elapsed=0
-    fm_telemetry_record lifecycle "{\"op\":\"secondmate-restart\",\"outcome\":\"restarted\",\"elapsedMs\":$elapsed}"
+    FM_TELEMETRY_TASK_ID=$id fm_telemetry_record lifecycle \
+      "{\"op\":\"secondmate-restart\",\"outcome\":\"restarted\",\"elapsedMs\":$elapsed}"
     if [ "${PLACEMENT[i]}" = remote ]; then
       printf 'restarted: %s on %s (%s)\n' "$id" "${HOST[i]}" "$ran_on"
     else
@@ -191,7 +192,8 @@ restart_mate() {  # <array-index>
 
   elapsed=$(( $(fm_telemetry_now_ms) - started ))
   [ "$elapsed" -ge 0 ] || elapsed=0
-  fm_telemetry_record lifecycle "{\"op\":\"secondmate-restart\",\"outcome\":\"unreached\",\"elapsedMs\":$elapsed}"
+  FM_TELEMETRY_TASK_ID=$id fm_telemetry_record lifecycle \
+    "{\"op\":\"secondmate-restart\",\"outcome\":\"unreached\",\"elapsedMs\":$elapsed}"
   restart_reason=$(first_reported_line "$restart_out")
   [ -n "$restart_reason" ] || restart_reason="the restart failed without a reported reason"
   report_unreached "$id" "the restart outcome is unknown: $restart_reason"

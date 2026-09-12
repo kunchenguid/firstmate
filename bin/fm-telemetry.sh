@@ -59,15 +59,56 @@ cmd_stats() {
 
 scorecard_stream() {
   case "$1" in
-    K1|K2|K3|K4|K5|K6|K12) printf lifecycle ;;
+    K1|K2|K3|K4|K5|K6|K12|K16|K17) printf lifecycle ;;
     K7|K10) printf checks ;;
     K8|K9|K13) printf liveness ;;
     *) printf lifecycle ;;
   esac
 }
 
+scorecard_wait_metric() { # <K16|K17> <lifecycle-path>
+  local key=$1 file=$2 metric candidate files=()
+  for candidate in "$file.2" "$file.1" "$file"; do
+    [ -s "$candidate" ] && [ ! -L "$candidate" ] && files+=("$candidate")
+  done
+  [ "${#files[@]}" -gt 0 ] || { printf unmeasured; return; }
+  case "$key" in
+    K16)
+      metric=$(jq -sr '
+        [.[] | select(.op=="wait" and .waitOwner=="main"
+          and (.taskId|type)=="string" and (.attemptId|type)=="string"
+          and (.openedAt|type)=="number" and (.resumedAt|type)=="number"
+          and .resumedAt>=.openedAt)
+          | {seat:[.homeId,.taskId,.attemptId],wait:(.resumedAt-.openedAt)}]
+        | group_by(.seat) | map(map(.wait)|add) | sort
+        | length as $n
+        | if $n==0 then empty else
+            {seats:$n,medianMs:(if $n%2==1 then .[($n/2)|floor]
+              else ((.[($n/2)-1]+.[($n/2)])/2) end)}
+          end' "${files[@]}" 2>/dev/null) || metric=
+      [ -n "$metric" ] || { printf unmeasured; return; }
+      printf 'measured medianMs=%s seats=%s' \
+        "$(printf '%s' "$metric" | jq -r .medianMs)" "$(printf '%s' "$metric" | jq -r .seats)"
+      ;;
+    K17)
+      metric=$(jq -sr '
+        [.[] | select((.op=="spawn" or .op=="relaunch")
+          and (.lockWaitMs|type)=="number" and .lockWaitMs>=0) | .lockWaitMs]
+        | length as $n
+        | if $n==0 then empty else {spawns:$n,totalMs:add,perSpawnMs:(add/$n)} end' \
+        "${files[@]}" 2>/dev/null) || metric=
+      [ -n "$metric" ] || { printf unmeasured; return; }
+      printf 'measured totalMs=%s spawns=%s perSpawnMs=%s' \
+        "$(printf '%s' "$metric" | jq -r .totalMs)" "$(printf '%s' "$metric" | jq -r .spawns)" \
+        "$(printf '%s' "$metric" | jq -r .perSpawnMs)"
+      ;;
+  esac
+}
+
 scorecard_status() { # <key> <stream-path>
-  if [ "$1" = K2 ]; then
+  if [ "$1" = K16 ] || [ "$1" = K17 ]; then
+    scorecard_wait_metric "$1" "$2"
+  elif [ "$1" = K2 ]; then
     jq -e 'select(.op == "wake-drain" and .actor == "present" and (.mode == "main" or .mode == "branch") and (.foldMs | type == "number" and . > 0))' "$2" >/dev/null 2>&1 \
       && printf measured || printf unmeasured
   elif [ -s "$2" ] && [ ! -L "$2" ]; then
@@ -78,18 +119,24 @@ scorecard_status() { # <key> <stream-path>
 }
 
 cmd_scorecard() {
-  local scorecard="$DATA/stability-scorecard-2026-09-11.md" line key stream file status
+  local scorecard="$DATA/stability-scorecard-2026-09-11.md" line key stream file status seen_k16=0 seen_k17=0
   if [ -f "$scorecard" ] && [ ! -L "$scorecard" ]; then
     while IFS= read -r line; do
       key=$(printf '%s\n' "$line" | sed -n 's/^\(K[0-9][0-9]*\)\([^:]*\):.*/\1/p')
-      case "$key" in K1|K2|K3|K4|K5|K6|K7|K8|K9|K10|K12|K13) ;; *) continue ;; esac
+      case "$key" in K1|K2|K3|K4|K5|K6|K7|K8|K9|K10|K12|K13|K16|K17) ;; *) continue ;; esac
+      [ "$key" != K16 ] || seen_k16=1
+      [ "$key" != K17 ] || seen_k17=1
       stream=$(scorecard_stream "$key")
       file=$(stream_path "$stream")
       status=$(scorecard_status "$key" "$file")
       printf '%s%s | telemetry=%s\n' "$key" "${line#"$key"}" "$status"
     done < "$scorecard"
+    [ "$seen_k16" = 1 ] || printf 'K16: median wait on MAIN per seat | telemetry=%s\n' \
+      "$(scorecard_wait_metric K16 "$(stream_path lifecycle)")"
+    [ "$seen_k17" = 1 ] || printf 'K17: lock wait per spawn | telemetry=%s\n' \
+      "$(scorecard_wait_metric K17 "$(stream_path lifecycle)")"
   else
-    for key in K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K12 K13; do
+    for key in K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K12 K13 K16 K17; do
       stream=$(scorecard_stream "$key")
       file=$(stream_path "$stream")
       status=$(scorecard_status "$key" "$file")

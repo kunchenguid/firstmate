@@ -787,7 +787,7 @@ test_teardown_skips_pipeline_retirement_when_nested_home_is_gone() {
 }
 
 test_teardown_retires_pipeline_records_on_normal_remove() {
-  local case_dir rc
+  local case_dir rc row
   case_dir=$(setup_allow_local_teardown pipeline-remove)
   write_pipeline_fixture "$case_dir"
   set +e
@@ -799,7 +799,14 @@ test_teardown_retires_pipeline_records_on_normal_remove() {
     "pipeline-remove: teardown left the lifecycle record"
   assert_absent "$case_dir/state/task-x1.pipeline-seen" \
     "pipeline-remove: teardown left the observation cache"
-  pass "normal teardown retires the task pipeline record and observation cache"
+  row=$(jq -c 'select(.op=="teardown")' "$case_dir/data/telemetry/lifecycle.jsonl")
+  printf '%s' "$row" | jq -e '
+    .taskId=="task-x1" and has("attemptId")
+    and (.operationId|type)=="string" and .homeId=="home"
+    and .recordAbsent==true and .scratchAbsent==true
+    and (.processAbsent|type)=="boolean" and (.paneAbsent|type)=="boolean"' >/dev/null \
+    || fail "pipeline-remove: teardown telemetry omitted identity or postconditions: $row"
+  pass "normal teardown retires the task pipeline record and records postconditions"
 }
 
 test_teardown_retires_pipeline_records_on_backlog_close() {

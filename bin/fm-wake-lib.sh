@@ -45,6 +45,12 @@ _fm_wake_require_timeout() {
   . "$FM_WAKE_LIB_DIR/fm-timeout-lib.sh"
 }
 
+_fm_wake_require_telemetry() {
+  declare -F fm_telemetry_record_status_line >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-telemetry-lib.sh
+  . "$FM_WAKE_LIB_DIR/fm-telemetry-lib.sh"
+}
+
 # Pass a variable name to capture this frame's pid without forking it in $().
 # On Bash 3.2, exec a child shell so its PPID identifies this frame, unlike $$.
 fm_current_pid() {  # [output-variable]
@@ -2233,6 +2239,9 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
   [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
   [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
   fm_wake_status_seen_commit "$state" "$file" "$post_size" "$post_ident" || return 1
+  if _fm_wake_require_telemetry; then
+    fm_telemetry_record_status_line "$state" "$file" "$line" 2>/dev/null || true
+  fi
   return 0
 }
 
