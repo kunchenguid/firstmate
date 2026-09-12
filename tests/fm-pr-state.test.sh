@@ -194,7 +194,7 @@ test_pending_approval_is_not_a_blocker() {
   local out
   out=$(FM_TEST_VIEW_REVIEW_DECISION=REVIEW_REQUIRED run_state) \
     || fail "review-required fixture was refused"
-  [ -z "$out" ] || fail "awaiting approval leaves nothing for the author, got: $out"
+  [ -z "$out" ] || fail "awaiting approval is not a blocker this command reports, got: $out"
   pass "a pending approval is not reported as a blocker"
 }
 
@@ -214,7 +214,7 @@ test_unreported_required_checks_are_unconfirmed() {
   out=$(FM_TEST_CHECKS_ERROR="no required checks reported on the 'fm/fixture' branch" run_state) \
     || fail "a head without reported required checks was refused"
   [ "$out" = 'CHECKS: no required check has reported; readiness unconfirmed' ] \
-    || fail "gh cannot tell an unconfigured required check from an unreported one, so neither may read as ready, got: $out"
+    || fail "a head where nothing required has reported must not pass silently as ready, got: $out"
 
   status=0
   FM_TEST_CHECKS_ERROR='HTTP 502: Bad Gateway' run_state >/dev/null 2>&1 || status=$?
@@ -231,12 +231,16 @@ test_no_reported_checks_is_unverified() {
   pass "a head with no reported checks is unverified rather than ready"
 }
 
-test_help_states_thread_resolution_is_out_of_scope() {
+test_help_states_what_silence_means_and_what_is_out_of_scope() {
   local out
   out=$("$SCRIPT" --help) || fail "help was refused"
+  assert_contains "$out" 'it does not mean the pull request is ready to merge' \
+    "help must not let empty output read as a verdict that the pull request can merge"
+  assert_contains "$out" 'is absent from what this command reads' \
+    "help must name the limit: a required context that never reported is absent from what is read"
   assert_contains "$out" "Unresolved review-thread state is out of this command's scope" \
     "help must state the thread-resolution boundary without inventing a reason for it"
-  pass "help states the thread-resolution boundary as scope"
+  pass "help states what empty output means and what is out of scope"
 }
 
 test_unknown_mergeability_is_a_blocker() {
@@ -294,7 +298,7 @@ test_pending_approval_is_not_a_blocker
 test_required_failure_is_a_blocker
 test_unreported_required_checks_are_unconfirmed
 test_no_reported_checks_is_unverified
-test_help_states_thread_resolution_is_out_of_scope
+test_help_states_what_silence_means_and_what_is_out_of_scope
 test_unknown_mergeability_is_a_blocker
 test_mergeability_uses_current_pr_view_value_without_retry
 test_refusals_exit_nonzero

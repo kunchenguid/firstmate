@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# Report the live blockers that keep one GitHub pull request from being ready.
+# Report the blockers this command can see on one GitHub pull request.
 #
 # This is a one-shot, read-only command. It reads the current pull request,
-# required checks, submitted reviews, and review decision from GitHub at
+# reported checks, submitted reviews, and review decision from GitHub at
 # invocation time. It never posts, requests, approves, or merges.
-# Ready means nothing is left for the author: a pull request that only awaits
-# an approval (reviewDecision REVIEW_REQUIRED) is not reported as blocked.
-# Advisory checks do not block and are omitted. A head on which no check has
-# reported yet is unverified, not ready. gh returns the same text whether a
-# repository configures no required check at all or configures one that has not
-# reported on this head, so that state is reported as unconfirmed rather than
-# guessed as ready. GitHub's reviewDecision owns whether reviews block; review
-# history is printed only to explain CHANGES_REQUESTED, naming each reviewer
-# whose latest verdict still requests changes and marking it STALE when it was
-# left at a superseded head.
+# It reports on checks that have reported. A required context that has never
+# reported on this head is absent from what this command reads and cannot be
+# enumerated here. Empty output therefore means that no reported required check
+# is failing or pending; it does not mean the pull request is ready to merge.
+# When nothing has reported, or nothing required has, that is printed rather
+# than read as ready. Advisory checks do not block and are omitted.
+# A pull request that only awaits an approval (reviewDecision REVIEW_REQUIRED)
+# is not reported as blocked. GitHub's reviewDecision owns whether reviews
+# block; review history is printed only to explain CHANGES_REQUESTED, naming
+# each reviewer whose latest verdict still requests changes and marking it
+# STALE when it was left at a superseded head.
 # The two pull-request reads are taken against one exact head, and a push that
 # lands between them invalidates the result rather than mixing two heads, so the
 # caller re-runs the command against the new head. The check and review reads
@@ -23,7 +24,7 @@
 # Unresolved review-thread state is out of this command's scope.
 #
 # Usage: fm-pr-state.sh <pr-url>
-#   Prints one line per concrete blocker and nothing when none are found.
+#   Prints one line per blocker it can see and nothing when it sees none.
 #   Blockers do not change the successful exit status; lookup or usage refusal
 #   exits non-zero.
 set -eu
