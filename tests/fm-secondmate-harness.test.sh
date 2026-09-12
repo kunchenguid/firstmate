@@ -2521,7 +2521,7 @@ test_config_reread_bootstrap_path_and_spawn_flexibility() {
   fm_config_reread_mark_pending "$stale" "$stale.pending" \
     || fail "could not create spawn stale reread marker"
   launchlog="$w/spawn-flex.launch.log"
-  spawn_secondmate_capture "$w" sm-flex "$sm" "$launchlog" --harness pi >/dev/null 2>&1
+  spawn_secondmate_capture "$w" sm-flex "$sm" "$launchlog" --harness pi --model fake/model >/dev/null 2>&1
   assert_no_reread_pending "$sm"
   assert_no_reread_instructions "$sm"
   launch=$(cat "$launchlog")
@@ -2750,7 +2750,7 @@ test_spawn_secondmate_pins_ignore_config_override() {
       FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$sm/config" \
       FM_SKIP_SECONDMATE_INHERIT=1 FM_SKIP_SECONDMATE_SYNC=1 \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
-      "$ROOT/bin/fm-spawn.sh" sm "$sm" --harness "$harness" --secondmate 2>&1); status=$?
+      "$ROOT/bin/fm-spawn.sh" sm "$sm" --harness "$harness" --model fake/model --secondmate 2>&1); status=$?
     expect_code 0 "$status" "a $harness secondmate launch with its own home as FM_CONFIG_OVERRIDE failed: $out"
     launch=$(cat "$launchlog")
     assert_contains "$launch" "$pin" \

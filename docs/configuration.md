@@ -325,13 +325,20 @@ Firstmate never falls back to `~/.claude` or `~/.pi/agent`, because a forgotten 
 A pin is one literal absolute path followed by exactly one newline, naming an existing directory that is readable and searchable.
 Firstmate never creates the account directory or reads, copies, or changes its credentials.
 
+A Pi root can hold more than one account: an extension can register a second ChatGPT login under its own provider id, so the Pi pin selects the root and the model's provider selects the account inside it.
+`config/pi-account-side` is what keeps those accounts apart, and [Pi account side](#pi-account-side-configpi-account-side) owns it.
+
 Before any endpoint exists, the spawn asks the runner's own non-interactive check whether the pinned root can authenticate the launch.
-Pi is asked `pi auth check --json --no-refresh` for the launch model, or for the root's `settings.json` `defaultProvider` when no model is given, and Claude is asked through `quota-axi auth --json --provider claude`.
+Claude is asked through `quota-axi auth --json --provider claude`.
+Pi is asked `pi auth check --provider <the launch model's provider> --json --no-refresh`, so a Pi launch must name its model as `<provider>/<id>`; a model that names no provider refuses, because one Pi root can hold several accounts and the root's `defaultProvider` must never pick which one a launch spends.
 Anything but a ready answer refuses the spawn, and so does no answer within the bound.
 This matters most for Pi: an interactive Pi with no usable login does not exit but waits behind a `/login` hint, which looks like a live worker.
 The check runs with only `HOME`, `PATH`, `TMPDIR`, and the pin in its environment, because Pi also counts provider keys such as `ANTHROPIC_API_KEY`, so a key left in the caller would otherwise vouch for an empty root.
 `--no-refresh` keeps the check from rewriting a root's tokens while other workers use them, and Claude's check passes an expired OAuth token, which Claude renews on its next use.
-A `codex-native/<id>` model is not checked: that provider comes from the `pi-codex-native` extension, which `pi auth check` does not load, and it signs in through Codex's own login, which has no pin.
+`pi auth check` loads no extensions, so a provider an extension registers is indistinguishable to it from a typo and comes back `not_ready`/`provider_not_found`.
+That one answer, and only that one, falls through to `pi --list-models <provider>`, which does load extensions; the launch passes only when a listed row's provider and model columns both match exactly.
+A logged-out built-in provider answers `not_ready`/`credentials_not_configured` instead and still refuses, so the fallback cannot vouch for a provider Pi can already see is logged out.
+A `codex-native/<id>` model is not checked: that provider comes from the `pi-codex-native` extension, and it signs in through Codex's own login, which has no pin.
 [`bin/fm-account-pin-lib.sh`](../bin/fm-account-pin-lib.sh) owns resolution, validation, and the check, and [Dispatch authentication verification](verification/dispatch-auth.md#account-pin-preflight) records the vendor answers it relies on.
 
 A pin selects a root; it does not stop a credential ranked above that root from being used.
@@ -374,7 +381,8 @@ The file is materialized by hand in each home because bootstrap cannot choose an
 
 ### Pi configuration root (config/pi-agent-dir / PI_CODING_AGENT_DIR)
 
-`config/pi-agent-dir` is local, gitignored, and deliberately **not inherited**: it names the account this home's Pi workers and scouts launch on, so configure it in every home whose workers use Pi, including a secondmate home.
+`config/pi-agent-dir` is local, gitignored, and deliberately **not inherited**: it names the Pi configuration root this home's Pi workers and scouts launch under, so configure it in every home whose workers use Pi, including a secondmate home.
+It selects the root, not the account: one root can hold several logins, and the launch model's provider is what picks which of them a worker spends.
 Paths are not shell-expanded; spaces and quotes are literal, while control bytes, empty files, extra lines, missing directories, and unreadable configuration are refused.
 
 For standard Pi and Pi-signed launches, a ship or scout reads the active home's file, while a second mate's own launch reads the launching home's file and never the second mate home's, because a second mate is a supervisor and runs on the supervisor account.
@@ -395,6 +403,44 @@ Review and validation agents started by a separate service do not pass through `
 In particular, no-mistakes owns its daemon environment, agent executable, and model/effort configuration; its agents do not inherit the submitting worker's Pi root merely because that worker started validation.
 Use the service's documented isolated configuration and verify that boundary separately before requiring account exclusivity for validation; a Firstmate pin alone cannot establish it.
 [Runtime verification](verification/runtime-backends.md#pi-account-root-selection) records the portable launch proof and the real-Pi non-inference checks.
+
+### Pi account side (config/pi-account-side)
+
+One Pi root can hold several ChatGPT logins at once, each registered under its own provider id by an extension such as `pi-codex-accounts`.
+That is convenient - one root, one set of settings and extensions - but it removes the separation two roots used to give by construction, because every account in the root is reachable from every launch under it.
+`config/pi-account-side` puts that separation back, in configuration rather than in inference from a home's name or path.
+
+The file holds exactly `work` or `personal` followed by one newline.
+It is local, gitignored, and deliberately **not inherited**, like the pins it sits beside; an absent file means `personal`, so a home that has declared nothing can never reach the work account, and the work home is the one that has to say so.
+A file that is unreadable or holds anything else refuses the launch rather than defaulting to either side.
+
+The guard runs before the authentication check above and before any endpoint or task record exists, and it holds three rules:
+
+- A `work` home may launch only on provider `openai-codex-work`.
+- A `personal` home may never launch on `openai-codex-work`.
+- A launch whose `--model` names no provider is refused on either side, because the account it would spend cannot be proved and the shared root's `defaultProvider` is a personal account.
+
+`openai-codex-work` is a fixed id rather than a per-home setting, so a home that declares nothing can still be told which provider it must not use.
+The guard covers every launch path that reaches a Pi agent: fresh spawns, `--relaunch`, second mates, and raw launch commands.
+A raw launch command is passed through verbatim and ignores `fm-spawn`'s own `--model`, so the guard judges the model embedded in that command instead.
+A Pi second mate launches on its launching home's pin, so that home's `config/secondmate-harness` must carry a model (`pi <provider>/<id>`); a bare `pi` or `pi-signed` line names no provider and is refused, including by the automatic liveness relaunch.
+A refusal names the harness, the model, the provider it resolved, the side, and this file.
+
+The guard decides which account a launch may spend; it is not a credential sandbox.
+A Pi worker that switches provider mid-session, or a Pi started outside `fm-spawn`, is outside it, exactly as the [default-root tripwire](#default-root-tripwire) is what covers a `pi` typed by hand.
+
+### Pi MCP overlay (config/pi-mcp-config)
+
+`config/pi-mcp-config` holds one absolute path to an MCP config file, and a Pi or Pi-signed launch from that home receives it as `--mcp-config <path>`.
+The flag occupies the same precedence slot a Pi root's own `mcp.json` would, so a home that names one gets exactly those servers and a home that names none gets Pi's ordinary discovery.
+That is what lets one shared Pi root serve both sides: the servers a launch may reach travel with the account it spends, not with the root.
+
+It is resolved from the same config directory as the account pin and the side, is local, gitignored, and **not inherited**, for the reason the pins are not: it selects the scope its own home works in, and convergence must never overwrite a lane's setting.
+
+A named file that is missing or unreadable **refuses the launch**.
+Dropping the overlay quietly would not mean "no servers"; it would re-enable whatever the project's own configuration discovers, which is the opposite of what naming the file asked for.
+The file's syntax is the pins' syntax: one literal absolute path followed by exactly one newline, with control bytes, empty files, extra lines, and unreadable configuration refused.
+Firstmate never creates or edits the MCP config file itself.
 
 ## Harness support
 

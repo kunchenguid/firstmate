@@ -83,7 +83,9 @@ test_pi_extension_semantic_lifecycle() {
   local rec id=busy-pi-1 out state ext
   rec=$(make_spawn_case pi-lifecycle pi "$id")
   read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  # A Pi launch names its account through the model's provider, so an
+  # unqualified model is refused before launch (bin/fm-account-pin-lib.sh).
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --model fake/model)
   expect_code 0 $? "pi spawn should succeed: $out"
   state="$HOME_DIR/state"
   ext="$state/$id.pi-ext.ts"
@@ -125,7 +127,9 @@ test_pi_extension_serializes_settle_before_next_start() {
   local rec id=busy-pi-order out state ext
   rec=$(make_spawn_case pi-order pi "$id")
   read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  # A Pi launch names its account through the model's provider, so an
+  # unqualified model is refused before launch (bin/fm-account-pin-lib.sh).
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --model fake/model)
   expect_code 0 $? "pi spawn should succeed: $out"
   state="$HOME_DIR/state"
   ext="$state/$id.pi-ext.ts"
@@ -140,7 +144,9 @@ test_pi_extension_stale_incarnation_rejected() {
   local rec id=busy-pi-2 out state ext
   rec=$(make_spawn_case pi-stale pi "$id")
   read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  # A Pi launch names its account through the model's provider, so an
+  # unqualified model is refused before launch (bin/fm-account-pin-lib.sh).
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --model fake/model)
   expect_code 0 $? "pi spawn should succeed: $out"
   state="$HOME_DIR/state"
   ext="$state/$id.pi-ext.ts"

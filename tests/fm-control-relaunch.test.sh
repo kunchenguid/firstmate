@@ -146,9 +146,14 @@ new_case() {
   printf '%s\n' "$dir"
 }
 
-# add_ship_task <case-dir> <id> [harness]
+# add_ship_task <case-dir> <id> [harness] [model]
+# A Pi task's recorded model must name its provider, because a relaunch is a
+# Pi launch and one Pi root can hold several accounts (fm-account-pin-lib.sh).
 add_ship_task() {
-  local dir=$1 id=$2 harness=${3:-claude}
+  local dir=$1 id=$2 harness=${3:-claude} model=${4:-}
+  if [ -z "$model" ]; then
+    case "$harness" in pi|pi-signed) model=fake/model ;; *) model=default ;; esac
+  fi
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
@@ -170,7 +175,7 @@ EOF
     echo "mode=no-mistakes"
     echo "yolo=off"
     echo "tasktmp=/tmp/fm-$id"
-    echo "model=default"
+    echo "model=$model"
     echo "effort=default"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
@@ -350,6 +355,51 @@ SH
       pass "$harness $kind relaunch reads the launching home's pin despite caller, destination, and secondmate-home roots"
     done
   done
+}
+
+# A relaunch is a Pi launch, so it meets the same account rules. A task recorded
+# without a provider, or one whose provider the home's side forbids, must not
+# quietly come back on whichever account the shared root defaults to.
+test_pi_relaunch_holds_the_account_side() {
+  local case_name model side expect dir pin out rc n=0
+  for spec in \
+    'unqualified|default|-|no' \
+    'work-on-undeclared|openai-codex-work/gpt-6-astra|-|no' \
+    'work-on-work|openai-codex-work/gpt-6-astra|work|yes' \
+    'personal-on-work|fake/model|work|no' \
+    'personal-on-personal|fake/model|personal|yes' \
+  ; do
+    IFS='|' read -r case_name model side expect <<EOF
+$spec
+EOF
+    n=$((n + 1))
+    dir=$(new_case "side-relaunch-$n" "side$n")
+    add_ship_task "$dir" "side$n" pi "$model"
+    mkdir -p "$dir/home/config" "$dir/work root"
+    pin="$dir/work root"
+    printf '%s\n' "$pin" > "$dir/home/config/pi-agent-dir"
+    [ "$side" = - ] || printf '%s\n' "$side" > "$dir/home/config/pi-account-side"
+    printf '{"defaultProvider":"fake"}\n' > "$pin/settings.json"
+    printf 'openai-codex-work gpt-6-astra\nfake model\n' > "$pin/.fake-models"
+    cat > "$dir/fakebin/pi" <<'SH'
+#!/bin/sh
+[ "${1:-} ${2:-}" != "auth check" ] || exec fm-fake-pi-auth "$@"
+[ "${1:-}" != --list-models ] || exec fm-fake-pi-list-models "${2:-}"
+[ "${1:-}" != --help ] || { printf '%s\n' '--tui-mode'; exit; }
+printf 'launched\n'
+SH
+    chmod +x "$dir/fakebin/pi"
+    printf 'pi' > "$dir/fake/command"
+    printf 'pi' > "$dir/fake/becomes"
+    out=$(run_control "$dir" "side$n" relaunch --note "account side check"); rc=$?
+    if [ "$expect" = yes ]; then
+      expect_code 0 "$rc" "$case_name relaunch must succeed: $out"
+      continue
+    fi
+    expect_code 1 "$rc" "$case_name relaunch must refuse: $out"
+    assert_contains "$out" "config/pi-account-side" "$case_name refusal must name the file that declares the side"
+  done
+  pass "a Pi relaunch is held to the home's declared account side and refuses a task recorded with no provider"
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
@@ -727,7 +777,7 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   local dir out rc id=rl-ultra
   dir=$(new_case native-ultra "$id")
-  add_ship_task "$dir" "$id" pi
+  add_ship_task "$dir" "$id" pi codex-native/gpt-6-astra
   printf pi > "$dir/fake/command"
   printf pi > "$dir/fake/becomes"
   cat > "$dir/fakebin/pi" <<'SH'
@@ -736,7 +786,7 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
 printf "Options: --tui-mode\n"
 SH
   chmod +x "$dir/fakebin/pi"
-  sed 's|^model=default$|model=codex-native/gpt-6-astra|; s/^effort=default$/effort=ultra/' \
+  sed 's/^effort=default$/effort=ultra/' \
     "$dir/home/state/$id.meta" > "$dir/home/state/$id.meta.tmp"
   mv "$dir/home/state/$id.meta.tmp" "$dir/home/state/$id.meta"
   out=$(run_control "$dir" "$id" relaunch --model openai-codex/gpt-6-astra --note "invalid native effort transfer"); rc=$?
@@ -1731,6 +1781,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_pi_relaunch_keeps_home_account
+test_pi_relaunch_holds_the_account_side
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven

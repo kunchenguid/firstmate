@@ -563,7 +563,9 @@ EOF
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
   fm_test_account_pins "$home"
-  printf '%s\n' pi > "$home/config/secondmate-harness"
+  # A Pi second mate launches on the home's own account pin, so the pin needs
+  # a model whose provider names the account (bin/fm-account-pin-lib.sh).
+  printf '%s\n' 'pi fake/model' > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
   touch "$home/state/.last-watcher-beat"
   {
@@ -606,7 +608,7 @@ EOF
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
   fm_test_account_pins "$home"
   printf '%s\n' herdr > "$home/config/backend"
-  printf '%s\n' pi > "$home/config/secondmate-harness"
+  printf '%s\n' 'pi fake/model' > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
   touch "$home/state/.last-watcher-beat"
   {

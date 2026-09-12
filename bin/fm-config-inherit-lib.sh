@@ -43,10 +43,11 @@
 # convergence point inherits it - no other change needed. config/secondmate-harness
 # is deliberately NOT in the list: it is the primary's own setting for launching
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
-# downstream. The account pins config/claude-config-dir and config/pi-agent-dir
-# are not in it either: each selects the account its own home launches on
-# (bin/fm-account-pin-lib.sh), so convergence never overwrites a lane's pin and
-# a home keeps whatever pin file it already has.
+# downstream. The per-home account settings config/claude-config-dir,
+# config/pi-agent-dir, config/pi-account-side, and config/pi-mcp-config are not
+# in it either: each selects the account, side, or server scope its own home
+# launches in (bin/fm-account-pin-lib.sh, bin/fm-spawn.sh), so convergence never
+# overwrites a lane's own setting and a home keeps whatever files it already has.
 #
 # That single declaration is also the ONE owner of the inherited-material
 # allowlist for remote routes: bin/fm-remote-inherit-push.sh (sender) and

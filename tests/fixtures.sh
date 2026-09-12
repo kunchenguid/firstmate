@@ -248,10 +248,12 @@ fm_test_spawn_home() {
 # Pins Claude and Pi launches from <home> to throwaway account roots under it,
 # because bin/fm-spawn.sh refuses a claude, pi, or pi-signed launch without a
 # pin (bin/fm-account-pin-lib.sh). Pins are home-local: a worker reads its own
-# home's, and a secondmate launch reads the launching home's. The Pi root names
-# a default provider so a launch without --model has something to preflight. A
+# home's, and a secondmate launch reads the launching home's. The Pi root's
+# defaultProvider is deliberately never read by a launch: one root can hold
+# several accounts, so every Pi spawn must name --model as <provider>/<id>. A
 # test that exercises a missing or invalid pin removes or rewrites the file
-# afterwards.
+# afterwards, and one that exercises the work/personal side writes
+# config/pi-account-side itself.
 fm_test_account_pins() {
   local home=$1
   mkdir -p "$home/config" "$home/accounts/claude" "$home/accounts/pi"
@@ -286,16 +288,43 @@ fm_test_fake_pi_runner() {
   shift
   cat > "$fakebin/fm-fake-pi-auth" <<'SH'
 #!/bin/sh
-status=$(cat "${PI_CODING_AGENT_DIR:-/nonexistent}/.fake-auth" 2>/dev/null) || status=ready
+# Real `pi auth check` answers not_ready/provider_not_found for a provider only
+# an extension registers, which is the one answer that falls through to
+# --list-models. .fake-auth-unloaded lists those providers, one per line.
+provider=
+while [ $# -gt 0 ]; do
+  case "$1" in --provider) provider=${2:-} ;; esac
+  shift
+done
+root=${PI_CODING_AGENT_DIR:-/nonexistent}
+if [ -n "$provider" ] && grep -qxF "$provider" "$root/.fake-auth-unloaded" 2>/dev/null; then
+  printf '{"status":"not_ready","provider":"%s","reason":"provider_not_found"}\n' "$provider"
+  exit 1
+fi
+status=$(cat "$root/.fake-auth" 2>/dev/null) || status=ready
 [ -z "${ANTHROPIC_API_KEY:-}" ] || status=ready
-printf '{"status":"%s","provider":"fake"}\n' "$status"
+printf '{"status":"%s","provider":"%s"}\n' "$status" "${provider:-fake}"
 [ "$status" = ready ]
 SH
   chmod +x "$fakebin/fm-fake-pi-auth"
+  cat > "$fakebin/fm-fake-pi-list-models" <<'SH'
+#!/bin/sh
+# Real `pi --list-models <search>` prints a header plus one row per fuzzily
+# matched model and exits 0 even when nothing matches. .fake-models lists the
+# "<provider> <model>" rows this root serves.
+printf 'provider  model  context  max-out  thinking  images\n'
+while read -r p m _rest; do
+  [ -n "$p" ] || continue
+  case "$p$m" in *"${1:-}"*) printf '%s  %s  1K  1K  yes  yes\n' "$p" "$m" ;; esac
+done < "${PI_CODING_AGENT_DIR:-/nonexistent}/.fake-models" 2>/dev/null
+exit 0
+SH
+  chmod +x "$fakebin/fm-fake-pi-list-models"
   for runner in "$@"; do
     cat > "$fakebin/$runner" <<'SH'
 #!/bin/sh
 [ "${1:-} ${2:-}" != "auth check" ] || exec fm-fake-pi-auth "$@"
+[ "${1:-}" != "--list-models" ] || exec fm-fake-pi-list-models "${2:-}"
 SH
     chmod +x "$fakebin/$runner"
   done

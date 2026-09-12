@@ -221,6 +221,77 @@ The third answer is why the check runs with a scrubbed environment: Pi counts `A
 Against real logged-in roots, each check answered in under one second.
 `tests/fm-account-pin-preflight-live-e2e.test.sh` re-runs these checks through the library on any host with pi, quota-axi, and jq, and fails naming the version whose answer changed.
 
+### quota-axi keychain reporting on 0.1.41
+
+Observed on 2026-09-11 with quota-axi 0.1.41 on macOS.
+The `keychain` answers recorded above were taken on 0.1.30 and no longer hold, so the Claude half of the live guard fails on this version.
+A root with a real login still answers determinately: one account root reports `{"source":"keychain","status":"available"}` and another `{"source":"keychain","status":"expired"}`.
+Two other roots answer `{"source":"keychain","status":"skipped","error":"keychain_prompt_required","credentialPresent":true}` and `{"source":"keychain","status":"skipped","error":"keychain_presence_check_failed","credentialPresent":true}`.
+A throwaway root holding nothing at all gets that same `keychain_presence_check_failed` answer, so on this version `credentialPresent` is not evidence when the presence check did not complete, and an empty Claude root passes the preflight.
+The library's Claude branch is deliberately unchanged: the two cases are indistinguishable in this output, so tightening the rule would also refuse a root whose only credential lives in the keychain.
+What should count as ready when the presence check cannot run is its own call.
+
+### Extension-registered Pi providers
+
+Verified on 2026-09-11 with Pi 0.85.1 on macOS.
+An extension can register a second ChatGPT login under its own provider id; `pi-codex-accounts` 0.1.1 does it from `<root>/codex-accounts.json`.
+`pi auth check` loads no extensions, so it cannot answer for such a provider at all, which is why the preflight needs a second reading for exactly one answer.
+Every command below ran under `env -i HOME=... PATH=... TMPDIR=... PI_CODING_AGENT_DIR=...`, the same scrubbed environment the preflight uses.
+
+```sh
+pi auth check --provider openai-codex-work --json --no-refresh   # root registering that provider, logged in
+pi auth check --provider openai-codex      --json --no-refresh   # built-in provider, logged in
+pi auth check --provider openai-codex      --json --no-refresh   # same root minus auth.json
+pi auth check --model    openai-codex-work/gpt-6-astra --json --no-refresh
+pi auth check --model    openai-codex/nonexistent-model --json --no-refresh
+```
+
+```text
+{"status":"not_ready","provider":"openai-codex-work","reason":"provider_not_found"}
+{"status":"ready","provider":"openai-codex","authType":"oauth"}
+{"status":"not_ready","provider":"openai-codex","reason":"credentials_not_configured"}
+{"status":"invalid","provider":"openai-codex-work/gpt-6-astra","reason":"invalid_state"}
+{"status":"ready","provider":"openai-codex","authType":"oauth"}
+```
+
+Three facts the preflight rests on, in order.
+A logged-out provider Pi does know answers `credentials_not_configured`, not `provider_not_found`, so only a provider Pi cannot see at all reaches the second reading.
+The `--model` form is no stronger than the `--provider` form - it answered `ready` for a model id that does not exist - and it rejects an extension provider's model outright, so the preflight resolves the provider itself and asks with `--provider`.
+
+`pi --list-models` does load extensions, and it is the second reading:
+
+```sh
+pi --list-models openai-codex-work            # root registering that provider, logged in
+pi --list-models openai-codex-work            # same root minus auth.json
+pi --list-models definitely-not-a-provider
+pi --list-models openai-codex                 # logged in
+```
+
+```text
+provider           model                context  max-out  thinking  images
+openai-codex-work  gpt-5.3-codex-spark  128K     128K     yes       no
+... 8 rows, all with provider column "openai-codex-work"
+
+No models matching "openai-codex-work"
+
+No models matching "definitely-not-a-provider"
+
+provider           model                context  max-out  thinking  images
+openai-codex       gpt-5.3-codex-spark  128K     128K     yes       no
+... 16 rows: 8 for "openai-codex" and 8 for "openai-codex-work"
+```
+
+All four exited 0, so the exit status carries no verdict and the rows are the answer.
+Removing the root's `auth.json` is what makes the provider's rows disappear, which is why a listing is read as evidence of a usable login rather than of a registered provider.
+The search is fuzzy and matches across providers - `openai-codex` returned `openai-codex-work` rows too - so the preflight compares the provider and model columns exactly and skips the header row.
+`pi --list-models <provider>/<id>` also works and returns that single row, but the preflight searches by provider so a `:<thinking>` suffix on a model pattern cannot change what is searched.
+Under a directory it cannot write, `pi` exits 1 with an `EACCES` trace rather than an empty listing, and the preflight's bound and non-zero handling both refuse.
+
+The limit worth stating: this reading proves the provider is registered and can serve the model in this root, not that a credential sits in the root's `auth.json`.
+`pi-cursor-sdk`'s `cursor` provider lists its models with no entry in the root's `auth.json` at all, because it bridges a login the Cursor CLI holds elsewhere.
+That is still a usable login, and no stronger check exists for a provider `pi auth check` cannot see, but an extension that registered a static catalog with no credential behind it would list models the launch could not use.
+The work/personal side guard, not this reading, is what decides which account a launch may spend.
+
 ## Regression coverage
 
 `tests/fm-vendor-auth-probe.test.sh` drives the real script against a fake vendor CLI that records every invocation's argv and anything readable on stdin.

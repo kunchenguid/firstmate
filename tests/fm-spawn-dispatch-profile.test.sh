@@ -20,6 +20,7 @@ make_spawn_pi_probe() {
 #!/usr/bin/env bash
 set -u
 [ "${1:-} ${2:-}" != "auth check" ] || exec fm-fake-pi-auth "$@"
+[ "${1:-}" != "--list-models" ] || exec fm-fake-pi-list-models "${2:-}"
 if [ "${1:-}" = --help ]; then
   if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
     printf '%s\n' 'Pi 0.82.0' 'Options: --help'
@@ -175,7 +176,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --model fake/model 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with relative home overrides should succeed"
@@ -204,7 +205,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME=home/grok-home PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$relative_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$relative_id" "$PROJ_DIR" --mode no-mistakes --yolo off --model fake/model 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with relative FM_HOME defaults should succeed"
@@ -227,7 +228,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off --model fake/model 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with absolute symlink-spelled FM_HOME defaults should succeed"
@@ -255,7 +256,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --model fake/model 2>&1
   )
   status=$?
   expect_code 0 "$status" "spawn with absolute symlink-spelled overrides should succeed"
@@ -783,7 +784,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
 
       out=$(FM_TEST_PI_VERSION="$version" \
         run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-        "$id" "$PROJ_DIR")
+        "$id" "$PROJ_DIR" --model fake/model)
       status=$?
       expect_code 0 "$status" "$harness $version spawn should succeed"
       launch=$(cat "$LAUNCH_LOG")
@@ -838,18 +839,19 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   cp "$ROOT/AGENTS.md" "$sm/AGENTS.md"
   cp "$sm/data/charter.md" "$CASE_DIR/charter-before"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate \
+    --model fake/model)
   status=$?
   expect_code 0 "$status" "pi-signed persistent secondmate spawn should succeed"
   assert_contains "$out" "spawned $id harness=pi-signed kind=secondmate" \
     "pi-signed secondmate spawn did not preserve its runtime identity"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed fake/model default
   cmp -s "$ROOT/AGENTS.md" "$sm/AGENTS.md" || fail "secondmate launch rewrote the supervisor contract"
   cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
   assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'fake/model' -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# evidence begin: persistent secondmate\n%s\n' "$out"
@@ -1362,10 +1364,10 @@ test_pi_home_account_invalid_refuses() {
       esac
       if [ "$kind" = secondmate ]; then
         out=$(PI_CODING_AGENT_DIR="$HOME_DIR" run_spawn "$HOME_DIR" "$CASE_DIR/sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-          "$id" "$CASE_DIR/sm" --secondmate --harness pi); status=$?
+          "$id" "$CASE_DIR/sm" --secondmate --harness pi --model fake/model); status=$?
       else
         out=$(PI_CODING_AGENT_DIR="$HOME_DIR" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-          "$id" "$PROJ_DIR" --scout --harness pi); status=$?
+          "$id" "$PROJ_DIR" --scout --harness pi --model fake/model); status=$?
       fi
       chmod 700 "$pin" 2>/dev/null || true
       [ "$bad" != unreadable-config ] || chmod 600 "$cfg"
@@ -1415,6 +1417,7 @@ test_account_pin_missing_refuses() {
 # proves the caller's key cannot vouch for an unauthenticated root.
 test_account_pin_preflight_refuses() {
   local harness rec id out status
+  local -a model
   for harness in claude pi pi-signed; do
     id="pin-unauth-$harness"
     rec=$(make_spawn_case "$id" "$harness" "$id")
@@ -1423,8 +1426,10 @@ test_account_pin_preflight_refuses() {
       claude) printf 'missing\n' > "$HOME_DIR/accounts/claude/.fake-auth" ;;
       *) printf 'not_ready\n' > "$HOME_DIR/accounts/pi/.fake-auth" ;;
     esac
+    model=()
+    [ "$harness" = claude ] || model=(--model fake/model)
     out=$(ANTHROPIC_API_KEY=caller-key run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$PROJ_DIR" --scout --harness "$harness"); status=$?
+      "$id" "$PROJ_DIR" --scout --harness "$harness" "${model[@]}"); status=$?
     expect_code 1 "$status" "$harness spawn under an unauthenticated pin must refuse: $out"
     case "$harness" in
       claude) assert_contains "$out" "the Claude account pin $HOME_DIR/accounts/claude holds no usable login (quota-axi auth: keychain=missing)" \
@@ -1447,14 +1452,16 @@ test_account_pin_preflight_refuses() {
   expect_code 0 "$status" "a codex-native launch must not be gated by the Pi root's own check: $out"
   assert_contains "$(cat "$LAUNCH_LOG")" "PI_CODING_AGENT_DIR='$HOME_DIR/accounts/pi'" "a codex-native launch lost its Pi pin"
 
+  # A Pi root's defaultProvider is never consulted, so removing it changes
+  # nothing: the launch is refused for naming no provider either way.
   id="pin-noprovider-pi"
   rec=$(make_spawn_case "$id" pi "$id")
   read_case_record "$rec"
   rm "$HOME_DIR/accounts/pi/settings.json"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --harness pi); status=$?
-  expect_code 1 "$status" "a Pi spawn with no model and no default provider must refuse: $out"
-  assert_contains "$out" "pass --model <provider>/<id>, or set defaultProvider in $HOME_DIR/accounts/pi/settings.json" \
-    "an unconfirmable Pi pin must say how to make it confirmable"
+  expect_code 1 "$status" "a Pi spawn with no model must refuse: $out"
+  assert_contains "$out" "names no provider" "an unprovable Pi launch must say the provider could not be read off the model"
+  assert_not_contains "$out" "defaultProvider in" "the refusal must not offer defaultProvider as a way to make the launch confirmable"
   [ ! -s "$LAUNCH_LOG" ] || fail "an unconfirmable Pi pin delivered a launch"
   pass "a pin that cannot authenticate refuses before launch, a caller's key cannot vouch for it, and codex-native is not gated by it"
 }
@@ -1477,7 +1484,7 @@ SH
   # The pin follows the resolved harness, and a raw command's harness is its
   # executable basename, so a raw `pi ...` launch is pinned like any other.
   out=$(PI_CODING_AGENT_DIR="$CASE_DIR/parent" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --scout "pi --print"); status=$?
+    "$id" "$PROJ_DIR" --scout "pi --model fake/model --print"); status=$?
   expect_code 0 "$status" "raw Pi launch failed: $out"
   launch=$(cat "$LAUNCH_LOG")
   result=$(env -i HOME="$CASE_DIR" PATH="$FAKEBIN_DIR:$PATH" \
@@ -1674,6 +1681,282 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+# One Pi root can hold several accounts, so config/pi-account-side is what keeps
+# work and personal apart. Every case here drives the real spawn to a refusal or
+# a launch, so the invariants are pinned at the boundary an operator meets.
+test_pi_account_side_guard() {
+  local harness spec side decl model expect rec id out status n=0
+  # <side>|<config bytes, "-" for absent>|<model>|<allowed?>
+  for harness in pi pi-signed; do
+    for spec in \
+      'undeclared|-|other/m|yes' \
+      'undeclared|-|openai-codex-work/gpt-6-astra|no' \
+      'personal|personal|other/m|yes' \
+      'personal|personal|openai-codex-work/gpt-6-astra|no' \
+      'work|work|openai-codex-work/gpt-6-astra|yes' \
+      'work|work|other/m|no' \
+      'work|work|codex-native/gpt-6-astra|no' \
+      'undeclared|-||no' \
+      'undeclared|-|bare-model|no' \
+      'work|work||no' \
+      'garbage|Work|other/m|no' \
+      'trailing|personal extra|other/m|no' \
+    ; do
+      IFS='|' read -r side decl model expect <<EOF
+$spec
+EOF
+      n=$((n + 1))
+      id="side-$harness-$n"
+      rec=$(make_spawn_case "$id" "$harness" "$id")
+      read_case_record "$rec"
+      [ "$decl" = - ] || printf '%s\n' "$decl" > "$HOME_DIR/config/pi-account-side"
+      printf 'openai-codex-work gpt-6-astra\nother m\n' > "$HOME_DIR/accounts/pi/.fake-models"
+      if [ -n "$model" ]; then
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+          "$id" "$PROJ_DIR" --scout --harness "$harness" --model "$model"); status=$?
+      else
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+          "$id" "$PROJ_DIR" --scout --harness "$harness"); status=$?
+      fi
+      if [ "$expect" = yes ]; then
+        expect_code 0 "$status" "$harness $side + model '$model' must launch: $out"
+        continue
+      fi
+      expect_code 1 "$status" "$harness $side + model '${model:-none}' must refuse: $out"
+      [ ! -s "$LAUNCH_LOG" ] || fail "$harness $side + model '${model:-none}' delivered a launch"
+      assert_absent "$HOME_DIR/state/$id.meta" "$harness $side + model '${model:-none}' published a task"
+      assert_contains "$out" "config/pi-account-side" "refusal ($side, '$model') must name the file that declares the side"
+      case "$side" in
+        garbage|trailing) assert_contains "$out" "must contain exactly 'work' or 'personal'" "malformed side ($decl) must say what the file may hold" ;;
+        *)
+          assert_contains "$out" "$harness" "refusal ($side, '$model') must name the harness"
+          if [ -n "$model" ] && [ "$model" != bare-model ]; then
+            assert_contains "$out" "${model%%/*}" "refusal ($side, '$model') must name the provider it resolved"
+          else
+            assert_contains "$out" "names no provider" "refusal ($side, '${model:-none}') must say the provider could not be proved"
+          fi
+          ;;
+      esac
+    done
+  done
+  pass "config/pi-account-side keeps work and personal apart on every Pi launch, and an unqualified model is a refusal"
+}
+
+# A secondmate is a supervisor launched on the launching home's own pin, so it
+# spends that home's account and is held to the same side as any worker.
+test_pi_account_side_guard_covers_secondmate_launches() {
+  local spec decl model expect rec id out status n=0
+  # <config bytes, "-" for absent>|<model>|<allowed?>
+  for spec in \
+    'work|openai-codex-work/gpt-6-astra|yes' \
+    'work|other/m|no' \
+    '-|openai-codex-work/gpt-6-astra|no' \
+    '-||no' \
+  ; do
+    IFS='|' read -r decl model expect <<EOF
+$spec
+EOF
+    n=$((n + 1))
+    id="side-sm-$n"
+    rec=$(make_spawn_case "$id" pi "$id")
+    read_case_record "$rec"
+    [ "$decl" = - ] || printf '%s\n' "$decl" > "$HOME_DIR/config/pi-account-side"
+    printf 'openai-codex-work gpt-6-astra\nother m\n' > "$HOME_DIR/accounts/pi/.fake-models"
+    make_seeded_secondmate_home "$CASE_DIR/sm" "$id"
+    if [ -n "$model" ]; then
+      out=$(run_spawn "$HOME_DIR" "$CASE_DIR/sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id" "$CASE_DIR/sm" --secondmate --harness pi --model "$model"); status=$?
+    else
+      out=$(run_spawn "$HOME_DIR" "$CASE_DIR/sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id" "$CASE_DIR/sm" --secondmate --harness pi); status=$?
+    fi
+    if [ "$expect" = yes ]; then
+      expect_code 0 "$status" "a secondmate launch on '$model' must succeed under declaration '$decl': $out"
+      continue
+    fi
+    expect_code 1 "$status" "a secondmate launch on '${model:-none}' must refuse under declaration '$decl': $out"
+    [ ! -s "$LAUNCH_LOG" ] || fail "a refused secondmate launch ('${model:-none}') was still delivered"
+    assert_absent "$HOME_DIR/state/$id.meta" "a refused secondmate launch ('${model:-none}') published a task"
+    assert_contains "$out" "config/pi-account-side" \
+      "a refused secondmate launch ('${model:-none}') must name the file that declares the side"
+  done
+  pass "a Pi secondmate launch is held to the launching home's declared account side"
+}
+
+# A raw launch command is passed through verbatim, so fm-spawn's own --model
+# never reaches the agent. The guard must judge the model inside that command,
+# or a raw `pi --model openai-codex-work/...` would walk past a personal home.
+test_pi_account_side_guard_reads_raw_launch_command() {
+  local rec id out status
+  id="side-raw-work-on-personal"
+  rec=$(make_spawn_case "$id" pi "$id")
+  read_case_record "$rec"
+  printf 'openai-codex-work gpt-6-astra\nother m\n' > "$HOME_DIR/accounts/pi/.fake-models"
+  # The home is personal (no declaration), and the harmless-looking --model flag
+  # is not what the agent would receive.
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --scout --model other/m "pi --model openai-codex-work/gpt-6-astra --print"); status=$?
+  expect_code 1 "$status" "a raw Pi launch naming the work provider must refuse on a personal home: $out"
+  assert_contains "$out" "openai-codex-work" "raw-launch refusal must name the provider it read from the command"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a raw work-provider launch was delivered from a personal home"
+
+  id="side-raw-unqualified"
+  rec=$(make_spawn_case "$id" pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --scout --model other/m "pi --print"); status=$?
+  expect_code 1 "$status" "a raw Pi launch with no embedded model must refuse: $out"
+  assert_contains "$out" "names no provider" "raw-launch refusal must say the provider could not be proved"
+  pass "a raw Pi launch is judged by the model embedded in the command, not by fm-spawn's --model"
+}
+
+# `pi auth check` loads no extensions, so a provider an extension registers
+# comes back provider_not_found. That one answer falls through to
+# `pi --list-models`; a logged-out provider Pi does know must not.
+test_pi_preflight_confirms_extension_provider() {
+  local spec name unloaded models model expect rec id out status n=0
+  for spec in \
+    'listed|openai-codex-work|openai-codex-work gpt-6-astra|openai-codex-work/gpt-6-astra|yes' \
+    'not-listed|openai-codex-work||openai-codex-work/gpt-6-astra|no' \
+    'other-provider-listed|openai-codex-work|other gpt-6-astra|openai-codex-work/gpt-6-astra|no' \
+    'other-model-listed|openai-codex-work|openai-codex-work gpt-5.4|openai-codex-work/gpt-6-astra|no' \
+    'fuzzy-neighbour|openai-codex-work|openai-codex-work gpt-6-astra-preview|openai-codex-work/gpt-6-astra|no' \
+    'thinking-suffix|openai-codex-work|openai-codex-work gpt-6-astra|openai-codex-work/gpt-6-astra:high|yes' \
+    'known-provider-logged-out||other gpt-6-astra|other/gpt-6-astra|no' \
+  ; do
+    IFS='|' read -r name unloaded models model expect <<EOF
+$spec
+EOF
+    n=$((n + 1))
+    id="ext-provider-$n"
+    rec=$(make_spawn_case "$id" pi "$id")
+    read_case_record "$rec"
+    printf 'work\n' > "$HOME_DIR/config/pi-account-side"
+    case "$model" in openai-codex-work/*) ;; *) printf 'personal\n' > "$HOME_DIR/config/pi-account-side" ;; esac
+    [ -z "$unloaded" ] || printf '%s\n' "$unloaded" > "$HOME_DIR/accounts/pi/.fake-auth-unloaded"
+    [ -z "$models" ] || printf '%s\n' "$models" > "$HOME_DIR/accounts/pi/.fake-models"
+    # The logged-out case is the one pi auth check can answer for itself.
+    [ "$name" != known-provider-logged-out ] || printf 'not_ready\n' > "$HOME_DIR/accounts/pi/.fake-auth"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --scout --harness pi --model "$model"); status=$?
+    if [ "$expect" = yes ]; then
+      expect_code 0 "$status" "$name must launch: $out"
+      continue
+    fi
+    expect_code 1 "$status" "$name must refuse: $out"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$name delivered a launch"
+    if [ "$name" = known-provider-logged-out ]; then
+      assert_contains "$out" "cannot authenticate --provider other" "a logged-out known provider must refuse on pi auth check's own answer, not on the listing"
+    else
+      assert_contains "$out" "offers no model '$model'" "$name must refuse naming the model the root does not serve"
+    fi
+  done
+  pass "the Pi preflight confirms an extension-registered provider through --list-models and still refuses a logged-out one"
+}
+
+# config/pi-mcp-config overlays a Pi launch's MCP servers with --mcp-config, so
+# the servers a worker can reach travel with the account it spends rather than
+# with the shared root. A named file that is missing must refuse: dropping the
+# overlay would silently restore the project's own default servers.
+test_pi_mcp_config_overlay() {
+  local kind rec id out status launch cfg overlay
+  for kind in ship scout secondmate; do
+    id="mcp-$kind"
+    rec=$(make_spawn_case "$id" pi "$id")
+    read_case_record "$rec"
+    overlay="$CASE_DIR/mcp work.json"
+    printf '{"mcpServers":{}}\n' > "$overlay"
+    printf '%s\n' "$overlay" > "$HOME_DIR/config/pi-mcp-config"
+    case "$kind" in
+      secondmate)
+        make_seeded_secondmate_home "$CASE_DIR/sm" "$id"
+        mkdir -p "$CASE_DIR/sm/config" "$CASE_DIR/sm/state"
+        # The secondmate home's own overlay is for its workers; the supervisor
+        # launch must take the launching home's, beside the pin it runs on.
+        printf '%s\n' "$CASE_DIR/unused.json" > "$CASE_DIR/sm/config/pi-mcp-config"
+        out=$(run_spawn "$HOME_DIR" "$CASE_DIR/sm" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+          "$id" "$CASE_DIR/sm" --secondmate --harness pi --model fake/model); status=$?
+        ;;
+      scout)
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+          "$id" "$PROJ_DIR" --scout --harness pi --model fake/model); status=$?
+        ;;
+      *)
+        out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+          "$id" "$PROJ_DIR" --harness pi --model fake/model); status=$?
+        ;;
+    esac
+    expect_code 0 "$status" "a $kind Pi spawn with an MCP overlay must launch: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "--mcp-config '$overlay' -e " \
+      "a $kind Pi launch must carry --mcp-config ahead of its extension flag"
+    assert_not_contains "$launch" "$CASE_DIR/unused.json" \
+      "a $kind Pi launch took an overlay from the wrong home"
+  done
+
+  # No file at all: Pi keeps its own discovery and no flag appears.
+  id=mcp-absent
+  rec=$(make_spawn_case "$id" pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --scout --harness pi --model fake/model); status=$?
+  expect_code 0 "$status" "a Pi spawn without an MCP overlay must launch: $out"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "--mcp-config" \
+    "an absent config/pi-mcp-config still produced a --mcp-config flag"
+
+  # A non-Pi harness is unaffected by the file.
+  id=mcp-nonpi
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CASE_DIR/absent.json" > "$HOME_DIR/config/pi-mcp-config"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --scout --harness codex); status=$?
+  expect_code 0 "$status" "a codex spawn must ignore config/pi-mcp-config entirely: $out"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "--mcp-config" "a codex launch received a Pi MCP overlay"
+  pass "config/pi-mcp-config overlays Pi launches from the launching home and leaves other harnesses alone"
+}
+
+test_pi_mcp_config_invalid_refuses() {
+  local bad rec id out status cfg overlay reason n=0
+  for bad in missing-file unreadable-file directory-target empty relative no-newline extra-line nul unreadable-config directory-config; do
+    n=$((n + 1))
+    id="mcp-invalid-$n"
+    rec=$(make_spawn_case "$id" pi "$id")
+    read_case_record "$rec"
+    cfg="$HOME_DIR/config/pi-mcp-config"
+    overlay="$CASE_DIR/mcp.json"
+    printf '{"mcpServers":{}}\n' > "$overlay"
+    printf '%s\n' "$overlay" > "$cfg"
+    case "$bad" in
+      missing-file) rm "$overlay" ;;
+      unreadable-file) chmod 000 "$overlay"; [ ! -r "$overlay" ] || { chmod 600 "$overlay"; continue; } ;;
+      directory-target) rm "$overlay"; mkdir "$overlay" ;;
+      empty) : > "$cfg" ;;
+      relative) printf 'mcp.json\n' > "$cfg" ;;
+      no-newline) printf '%s' "$overlay" > "$cfg" ;;
+      extra-line) printf '%s\n\n' "$overlay" > "$cfg" ;;
+      nul) printf '%s\0\n' "$overlay" > "$cfg" ;;
+      unreadable-config) chmod 000 "$cfg"; [ ! -r "$cfg" ] || { chmod 600 "$cfg"; continue; } ;;
+      directory-config) rm "$cfg"; mkdir "$cfg" ;;
+    esac
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --scout --harness pi --model fake/model); status=$?
+    chmod 600 "$overlay" 2>/dev/null || true
+    [ "$bad" != unreadable-config ] || chmod 600 "$cfg"
+    expect_code 1 "$status" "an invalid MCP overlay ($bad) must refuse: $out"
+    [ ! -s "$LAUNCH_LOG" ] || fail "an invalid MCP overlay ($bad) delivered a launch"
+    assert_absent "$HOME_DIR/state/$id.meta" "an invalid MCP overlay ($bad) published a task"
+    case "$bad" in
+      missing-file|unreadable-file|directory-target) reason="names an MCP config file that is missing or unreadable" ;;
+      unreadable-config|directory-config) reason="must be a readable regular file" ;;
+      *) reason="must contain one absolute path followed by one newline" ;;
+    esac
+    assert_contains "$out" "config/pi-mcp-config $reason" \
+      "the MCP overlay refusal ($bad) must name its owner and its reason"
+  done
+  pass "a named MCP overlay that cannot be used refuses the spawn instead of falling back to the project's own servers"
+}
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
@@ -1721,5 +2004,11 @@ test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_pi_account_side_guard
+test_pi_account_side_guard_covers_secondmate_launches
+test_pi_account_side_guard_reads_raw_launch_command
+test_pi_preflight_confirms_extension_provider
+test_pi_mcp_config_overlay
+test_pi_mcp_config_invalid_refuses
 
 echo "# all fm-spawn-dispatch-profile tests passed"

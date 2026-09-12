@@ -1863,7 +1863,7 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 ## Pi account-root selection
 
 The real-runtime evidence below was verified on 2026-09-08 with Pi 0.85.1 and its installed SDK.
-The configuration contract is owned by [Pi configuration root](../configuration.md#pi-configuration-root-configpi-agent-dir--pi_coding_agent_dir), and `bin/fm-spawn.sh` owns the launch implementation.
+The configuration contract is owned by [Pi configuration root](../configuration.md#pi-configuration-root-configpi-agent-dir--pi_coding_agent_dir), the account inside that root is chosen by the launch model's provider under [Pi account side](../configuration.md#pi-account-side-configpi-account-side), and `bin/fm-spawn.sh` owns the launch implementation.
 No real credentials were inspected or copied and no paid inference was performed.
 
 Portable verification:
