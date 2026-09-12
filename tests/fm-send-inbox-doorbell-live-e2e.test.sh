@@ -228,6 +228,10 @@ run_agy_canonical_lifecycle() (
   status="$home/state/$task.status"
   mkdir -p "$home/state" "$home/config" "$home/data/$task" "$lab/tmux"
   git clone -q "$ROOT" "$project" || die "agy ($version): could not create the isolated lifecycle project"
+  if ! git -C "$project" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    git -C "$project" switch -c main >/dev/null 2>&1 \
+      || die "agy ($version): could not attach the isolated lifecycle project to a branch"
+  fi
   git -C "$project" config user.email 'agy-lifecycle-test@example.invalid'
   git -C "$project" config user.name 'agy lifecycle test'
   printf 'tmux\n' > "$home/config/backend"

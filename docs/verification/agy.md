@@ -254,7 +254,7 @@ Output:
 ok - harness liveness: agy 1.2.2 classifies alive
 ok - harness marker: agy 1.2.2 exports ANTIGRAVITY_AGENT=1 and detects as agy from a tool process
 # checked 3 installed harness(es)
-FM_TEST_END 2026-09-12T08:51:36Z tests/fm-harness-liveness-drift-live-e2e.test.sh exit=0 duration_ms=17608 gate_skip=false
+FM_TEST_END 2026-09-12T09:25:13Z tests/fm-harness-liveness-drift-live-e2e.test.sh exit=0 duration_ms=21117 gate_skip=false
 ```
 
 Composer-matrix command:
@@ -272,7 +272,7 @@ ok - strict posture live: a blank shell row classifies unknown and injection def
 not ok - claude (2.1.269 (Claude Code)): idle composer never classified empty (last verdict: pending)
 not ok - codex (codex-cli 0.153.4): idle composer never classified empty (last verdict: unknown)
 not ok - live composer-matrix guard observed failures above
-FM_TEST_END 2026-09-12T08:50:55Z tests/fm-composer-matrix-live-e2e.test.sh exit=1 duration_ms=110849 gate_skip=false
+FM_TEST_END 2026-09-12T09:27:03Z tests/fm-composer-matrix-live-e2e.test.sh exit=1 duration_ms=106186 gate_skip=false
 ```
 
 Inbox doorbell command, restricted to the AGY worker:
@@ -298,7 +298,7 @@ Output:
 
 ```text
 not ok - agy (1.2.2): exit command failed
-FM_TEST_END 2026-09-12T08:59:53Z tests/fm-send-inbox-doorbell-live-e2e.test.sh exit=1 duration_ms=222299 gate_skip=false
+FM_TEST_END 2026-09-12T09:24:46Z tests/fm-send-inbox-doorbell-live-e2e.test.sh exit=1 duration_ms=218247 gate_skip=false
 ```
 
 ## Repository gates
