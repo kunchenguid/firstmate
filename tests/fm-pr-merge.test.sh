@@ -77,16 +77,22 @@ write_github_red_json() {
 JSON
 }
 
-# One CheckRun rollup entry the way GitHub reports it. A conclusion of "-" and a
-# completedAt of "-" are emitted as JSON null, which is what GitHub sends for a
-# run that has not finished. Args: name status conclusion [completedAt]
+# One CheckRun rollup entry the way GitHub reports it. A conclusion or timestamp
+# of "-" is emitted as JSON null. Args: name status conclusion [startedAt]
+# [completedAt]
 check_run() {
-  local name=$1 status=$2 conclusion=$3 at=${4:--}
-  local conclusion_json='null' at_json='null'
+  local name=$1 status=$2 conclusion=$3 started=${4:--} completed=${5:-${4:--}}
+  local conclusion_json='null' started_json='null' completed_json='null'
   [ "$conclusion" = - ] || conclusion_json="\"$conclusion\""
-  [ "$at" = - ] || at_json="\"$at\""
-  printf '{"__typename":"CheckRun","name":"%s","status":"%s","conclusion":%s,"completedAt":%s}' \
-    "$name" "$status" "$conclusion_json" "$at_json"
+  [ "$started" = - ] || started_json="\"$started\""
+  [ "$completed" = - ] || completed_json="\"$completed\""
+  printf '{"__typename":"CheckRun","name":"%s","status":"%s","conclusion":%s,"startedAt":%s,"completedAt":%s}' \
+    "$name" "$status" "$conclusion_json" "$started_json" "$completed_json"
+}
+
+status_context() {
+  local name=$1 state=$2
+  printf '{"__typename":"StatusContext","context":"%s","state":"%s"}' "$name" "$state"
 }
 
 # Live GitHub JSON whose rollup holds the given entries verbatim, so a test can
@@ -2334,6 +2340,31 @@ test_superseded_failed_check_run_no_longer_refuses() {
   pass "fm-pr-merge merges when a failed check run was replaced by a passing re-run"
 }
 
+# Legacy status contexts remain independent from check runs, even when their
+# reported names match.
+test_check_runs_never_supersede_status_contexts() {
+  local case_dir rc head
+  head=cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
+  case_dir=$(make_case github-cross-check-kind)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(status_context ci FAILURE)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/97 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-cross-check-kind: a failing status context must refuse"
+  assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+    "github-cross-check-kind: the status context was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-cross-check-kind: a passing check run hid a failing status context"
+  pass "fm-pr-merge never lets a check run supersede a legacy status context"
+}
+
 # The inverse, and the one that matters most: a check whose current run failed is
 # still red however many earlier runs of it passed.
 test_current_failed_check_run_still_refuses() {
@@ -2357,6 +2388,48 @@ test_current_failed_check_run_still_refuses() {
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "github-current-red: gh pr merge ran on a currently failing check"
   pass "fm-pr-merge still refuses when a check's current run failed after an earlier pass"
+}
+
+# Run generation follows startedAt rather than the order overlapping runs finish.
+test_late_finishing_old_success_does_not_hide_current_failure() {
+  local case_dir rc head
+  head=dededededededededededededededededededede
+  case_dir=$(make_case github-old-success-finishes-last)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:01Z 2026-01-01T00:00:10Z)" \
+    "$(check_run ci COMPLETED FAILURE 2026-01-01T00:00:09Z 2026-01-01T00:00:09Z)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/98 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-old-success-finishes-last: the later-started failure must refuse"
+  assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+    "github-old-success-finishes-last: the current failure was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-old-success-finishes-last: completion order hid the current failure"
+  pass "fm-pr-merge uses start order when the old success finishes last"
+}
+
+# A cancelled old run may settle after the passing re-run that superseded it.
+test_late_finishing_old_cancellation_is_superseded() {
+  local case_dir head
+  head=dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf
+  case_dir=$(make_case github-old-cancellation-finishes-last)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED CANCELLED 2026-01-01T00:00:01Z 2026-01-01T00:00:10Z)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z 2026-01-01T00:00:09Z)"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/99 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-old-cancellation-finishes-last: the passing re-run must merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 99 example/repo --squash
+  pass "fm-pr-merge supersedes an old cancellation that finishes last"
 }
 
 # A re-run that has not finished proves nothing, so it can neither be superseded
@@ -2411,7 +2484,7 @@ test_supersession_never_crosses_check_names() {
   pass "fm-pr-merge never lets one check's pass clear another check's failure"
 }
 
-# Supersession has to be proven from the forge's own settled timestamps, so a run
+# Supersession has to be proven from the forge's own start timestamps, so a run
 # GitHub dated in any other way is treated as undated and clears nothing.
 test_undated_runs_never_supersede() {
   local case_dir rc spec label older newer
@@ -2702,7 +2775,10 @@ test_absent_user_backend_config_directory_and_backlog_still_merge
 test_backend_override_bypasses_unreadable_user_config
 test_github_red_checks_refuse_and_allow_red_waives_named
 test_superseded_failed_check_run_no_longer_refuses
+test_check_runs_never_supersede_status_contexts
 test_current_failed_check_run_still_refuses
+test_late_finishing_old_success_does_not_hide_current_failure
+test_late_finishing_old_cancellation_is_superseded
 test_unfinished_rerun_keeps_a_check_red
 test_supersession_never_crosses_check_names
 test_undated_runs_never_supersede

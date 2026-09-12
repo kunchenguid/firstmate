@@ -458,24 +458,17 @@ FIELDS
 # CLEAN mergeStateStatus instead of refusing a pull request GitHub considers
 # mergeable.
 #
-# Supersession must be proven, never assumed, so a name is dropped from the red
-# set only when every one of its non-green runs is strictly older than one of
-# its green runs. Age comes from the forge's own settled timestamp: a check
-# run's completedAt, read only once its status is COMPLETED, or a status
-# context's createdAt. Only a whole-second UTC timestamp counts, because that is
-# the form GitHub emits and the one form that orders correctly as plain text;
-# any other spelling is treated as no timestamp at all. A run with no such
-# timestamp is never superseded, so a still-running, queued, or undated run
-# keeps its check red. A name whose runs are all green stays green with no
-# timestamp needed, and a name with no green run at all stays red. Every
-# comparison is therefore one-directional: it can only clear a failure that a
-# later success provably replaced, and never clears a check whose current run
-# failed, is pending, or is missing.
+# Supersession applies only among check runs with the same reported name. A
+# name is dropped from the red set only when every non-green run is COMPLETED,
+# has a whole-second UTC startedAt, and started strictly before a green run.
+# Status contexts are never grouped or superseded, and every non-green one is
+# reported independently. A still-running, queued, undated, or tied check run
+# stays red. A name whose runs are all green needs no timestamp, while a name
+# with no green run stays red.
 #
-# Grouping is by the reported name, which is also what --allow-red matches, so
-# a waiver still covers exactly the name the captain passed. An entry with no
-# name is grouped alone and can neither supersede nor be superseded, because
-# two unrelated unnamed checks would otherwise be treated as one.
+# The reported name is also what --allow-red matches. An unnamed check run is
+# grouped alone and can neither supersede nor be superseded, because unrelated
+# unnamed checks must not be treated as one.
 github_checks_not_green() {
   local json=$1
   printf '%s' "$json" | jq -r '
@@ -489,30 +482,43 @@ github_checks_not_green() {
         | .value
         | if .__typename == "CheckRun" then
             {
+              kind: "check_run",
               name: (.name // ""),
+              completed: (.status == "COMPLETED"),
               ok: (.status == "COMPLETED" and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED")),
-              at: (if .status == "COMPLETED" then (.completedAt | settled_at) else null end)
+              at: (.startedAt | settled_at)
             }
+            | . + {group: (if .name == "" then ["", $i] else [.name, -1] end)}
           else
-            {name: (.context // ""), ok: (.state == "SUCCESS"), at: (.createdAt | settled_at)}
+            {kind: "status_context", name: (.context // ""), ok: (.state == "SUCCESS")}
           end
-        | . + {group: (if .name == "" then ["", $i] else [.name, -1] end)}
       ]
-    | group_by(.group)[]
-    | {
-        name: .[0].name,
-        reds: [.[] | select(.ok | not)],
-        newest_green: ([.[] | select(.ok) | .at | select(. != null)] | max)
-      }
-    | select(
-        (.reds | length) > 0
-        and (
-          .newest_green == null
-          or any(.reds[]; .at == null)
-          or ([.reds[] | .at] | max) >= .newest_green
+    | . as $entries
+    | (
+        ($entries[]
+          | select(.kind == "status_context" and (.ok | not))
+          | .name
+        ),
+        ($entries
+          | [.[] | select(.kind == "check_run")]
+          | group_by(.group)[]
+          | {
+              name: .[0].name,
+              reds: [.[] | select(.ok | not)],
+              newest_green: ([.[] | select(.ok) | .at | select(. != null)] | max)
+            }
+          | select(
+              (.reds | length) > 0
+              and (
+                .newest_green == null
+                or any(.reds[]; (.completed | not) or .at == null)
+                or ([.reds[] | .at] | max) >= .newest_green
+              )
+            )
+          | .name
         )
       )
-    | if .name == "" then "(unnamed check)" else .name end
+    | if . == "" then "(unnamed check)" else . end
   ' 2>/dev/null || return 1
 }
 
