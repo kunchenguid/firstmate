@@ -22,6 +22,13 @@
 # restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
+# The no-mistakes block interpolates $FM_ROOT so the generated brief carries an
+# absolute path to bin/fm-diff-size-check.sh. bin/fm-brief.sh and
+# bin/fm-promote.sh both already set FM_ROOT before calling fm_dod_block; this
+# default keeps the library self-sufficient under `set -u` for anything else
+# that sources it directly, such as tests/fm-dod-round-cap.test.sh.
+FM_ROOT="${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
 # emitter, supplying it to every ship/scout launch brief and never to a
 # secondmate charter. Like fm_brief_intent_overlay it is a distinctly titled
@@ -222,6 +229,12 @@ The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
+Before your FIRST \`no-mistakes axi run\`, measure this lane:
+\`bash $FM_ROOT/bin/fm-diff-size-check.sh .\`
+It prints the changed-line count and one verdict. \`ok\` and \`over-target\` both proceed: note the number in your status line and start the run.
+\`over-cap\` (more than 800 changed lines) means STOP before starting the pipeline: append \`needs-decision: lane is <N> changed lines, over the 800 cap - split into <your proposed split> or proceed as one lane?\` and stop. Firstmate answers; it may well say proceed. Do NOT refuse the work and do NOT split it yourself.
+The check is advice with a stopping point, not a gate: it exists because a lane's size is what drives its review round count, and it is cheapest to notice before the first round rather than during the sixth.
+
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
@@ -238,12 +251,19 @@ Where a harness's own command limit is not established, assume it bounds command
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 
-Two firstmate-specific rules layer on top of that guidance:
+Four firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
+- Round cap, with a severity escape. Rounds 1 to 3 run normally: fix everything the gate selects.
+  Severity alone decides what the cap covers after round 3 - category never overrides it. After round 3, the run STILL fixes every \`warning\`-severity, \`error\`-severity, and \`ask-user\` finding, with no ceiling, regardless of category. Those are never deferred, at any round number, for any reason.
+  What the cap covers after round 3 is ordinary work only: findings at \`info\` severity, and only \`info\`-severity findings. Style, naming, docs and test-hygiene findings are typical examples of what shows up at \`info\` severity, not a separate category rule - a style or naming finding raised at \`warning\` or \`error\` severity is still fixed, never deferred. Defer \`info\`-severity findings instead of fixing them, and land the run.
+  A run whose round 4 or later produces no \`warning\`, \`error\` or \`ask-user\` finding is converged: land it.
+- Deferred findings go to ONE rolling issue per project, titled exactly \`Deferred pipeline findings\`, as one checklist entry each. Create it with \`gh-axi\` if it does not exist; never open a second one.
+  Each entry carries, in this order: the run id and round number; the PR or branch it was found against; \`file:line\` and the finding's own id slug; the severity and action exactly as the gate assigned them, not re-triaged; the full finding description verbatim, never summarized, because these findings trace through the code and a paraphrase costs more round-trips later than the paste costs now; and \`still-true-as-of-HEAD: unknown\`, because the code will have moved by the time anyone triages it.
+  Do not close that issue and do not fix its entries in this run. A weekly small-batch lane clears it.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF

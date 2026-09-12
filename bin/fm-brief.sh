@@ -171,6 +171,18 @@ elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
+
+# Unit 4: a brief with many acceptance items is a lane that will not fit one
+# surface. Warn at scaffold time, when splitting is still cheap; never refuse,
+# because firstmate may have a good reason and this is a heuristic.
+if [ "$KIND" = ship ] && [ -n "${FM_BRIEF_ACCEPTANCE_ITEMS:-}" ]; then
+    if [ "$FM_BRIEF_ACCEPTANCE_ITEMS" -gt 5 ] 2>/dev/null; then
+        echo "warning: $FM_BRIEF_ACCEPTANCE_ITEMS acceptance items in one lane." >&2
+        echo "         Target is one surface per lane, under 400 changed lines." >&2
+        echo "         Consider splitting before dispatch; a lane's size drives its review round count." >&2
+    fi
+fi
+
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -434,15 +446,18 @@ case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE8_MEASURE="Before you push and open the PR, measure your own diff: \`bash $FM_ROOT/bin/fm-diff-size-check.sh .\`."
     ;;
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE8_MEASURE="Before you report the branch ready, measure your own diff: \`bash $FM_ROOT/bin/fm-diff-size-check.sh .\`."
     ;;
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
+    RULE8_MEASURE="Before your first \`no-mistakes axi run\`, measure your own diff (Definition of done says how)."
     ;;
 esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
@@ -501,6 +516,7 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. One surface per lane, target under 400 changed lines. $RULE8_MEASURE Over 800 lines, stop and ask firstmate to split the task rather than pushing on: a lane's size is what drives its review round count, and portfolio-tracker's median merged PR of 1,026 lines cost 9.6 review rounds per run against 6.7 for a project whose median was 491.
 
 $INBOX_SECTION
 

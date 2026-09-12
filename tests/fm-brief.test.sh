@@ -441,6 +441,47 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The no-mistakes DOD's round cap (severity decides what a run may defer past
+# round 3, never category) must be stated in a ship brief, and only there: a
+# direct-PR/local-only brief never runs no-mistakes, and a scout brief
+# carries no delivery contract at all.
+test_no_mistakes_dod_states_round_cap() {
+  local home id brief
+  home="$TMP_ROOT/round-cap-home"
+  mkdir -p "$home/data"
+  id="brief-round-cap-1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  assert_grep "Round cap, with a severity escape" "$brief" \
+    "no-mistakes DOD must state the round-cap rule (D4)"
+  assert_grep "After round 3" "$brief" \
+    "no-mistakes DOD must state where the cap takes effect (D4)"
+  assert_grep "Those are never deferred, at any round number, for any reason" "$brief" \
+    "no-mistakes DOD must state the severity escape has no ceiling (D4)"
+  assert_grep "Deferred pipeline findings" "$brief" \
+    "no-mistakes DOD must name the rolling deferred-findings issue (D4)"
+
+  for id_mode in "brief-round-cap-dp1:direct-PR" "brief-round-cap-lo1:local-only"; do
+    id=${id_mode%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "${id_mode##*:}" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_no_grep "Round cap, with a severity escape" "$brief" \
+      "$id: the round-cap rule is no-mistakes-only"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-round-cap-scout1 some-proj --scout >/dev/null 2>&1
+  brief="$home/data/brief-round-cap-scout1/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_no_grep "Round cap, with a severity escape" "$brief" \
+    "scout brief must not carry the ship-only round-cap rule"
+
+  pass "fm-brief.sh: no-mistakes DOD states the round-cap rule (D4), absent from direct-PR/local-only/scout"
+}
+
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -913,6 +954,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_no_mistakes_dod_states_round_cap
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

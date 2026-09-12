@@ -130,6 +130,11 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
+# Unit 4: record this lane's size in the telemetry store, joined to rounds and
+# tokens by project and task id. Best-effort and always exit 0.
+"$FM_ROOT/bin/fm-lane-size-record.sh" "$ID" "$WT" "origin/HEAD" "$URL" \
+    >/dev/null 2>&1 || true
+
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1

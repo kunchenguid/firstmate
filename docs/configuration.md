@@ -222,6 +222,26 @@ The [`firstmate-coding-guidelines` skill](../.agents/skills/firstmate-coding-gui
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
+### Review round cap and the deferred-findings issue
+
+`bin/fm-dod-lib.sh` is the one owner of what a no-mistakes worker does about round count, and it states a soft cap at 3 with a severity escape.
+Rounds 1 to 3 run normally. After round 3, every `warning`, `error` and `ask-user` finding is still fixed with no ceiling; `info`-severity findings and style, naming, docs and test-hygiene findings are deferred and the run lands.
+
+The escape is not a hedge. Measured over 2026-08-29 to 09-05 across firstmate, mise and portfolio-tracker, rounds 4 and up produced class-a and class-b findings (data correctness, security, data loss, real functional bugs) at 6.2% against 4.9% for rounds 1 to 3, and 33.3% in mise.
+Four of the round-4-plus portfolio-tracker fixes are merged to production, including a management command with no dev-settings guard that overwrote the live check-in row and a teardown command that cascade-deleted linked financial records.
+A hard stop at 3 would have converted "caught before merge" into "shipped".
+
+Deferred findings go to one rolling `Deferred pipeline findings` issue per project, one checklist entry each, carrying run id, round, PR or branch, `file:line`, the finding id slug, the gate's own severity and action, the description verbatim, and a `still-true-as-of-HEAD: unknown` flag.
+A weekly small-batch lane clears it. The telemetry store's `v_late_rounds` detector fires for any run that passes round 3, so the cap's effect is visible in the review page rather than asserted.
+
+### Lane size: target, cap, and telemetry
+
+`bin/fm-diff-size-lib.sh` is the one owner of the lane-size thresholds, so the brief scaffold, the worker's own pre-run check, and the telemetry row cannot drift apart: 400 changed lines is the target a lane is shaped toward, and 800 is where a worker stops and asks firstmate to split rather than pushing on. Its header owns the measured rationale (portfolio-tracker's median merged PR was 1,026 changed lines against 9.6 review rounds per run, versus 491 lines and 6.7 rounds for a project shaped toward the target).
+
+`bin/fm-brief.sh` warns at scaffold time, when splitting is still cheap, whenever a `ship`-kind brief carries more than 5 acceptance items (`FM_BRIEF_ACCEPTANCE_ITEMS`); it never refuses, because firstmate may have a good reason. Item 8 of the ship brief's Rules also tells the worker to run `bin/fm-diff-size-check.sh .`, timed per the task's delivery mode: before its first `no-mistakes axi run` for mode=no-mistakes (the Definition-of-done block says how), before pushing and opening the PR for mode=direct-PR, and before reporting the branch ready for mode=local-only. The check always exits 0 and prints one of `ok`, `over-target`, or `over-cap`. `over-cap` (over 800 changed lines) is a stop-and-ask-firstmate point, not a refusal or a gate — the worker notes the size and lets firstmate decide whether to split.
+
+`bin/fm-lane-size-record.sh`, called best-effort from `bin/fm-pr-check.sh` at PR open, records the lane's changed-line and file counts into the telemetry store's `lanes` table, joined to rounds and tokens by project and task id, so the size-drives-rounds effect above is measured rather than asserted.
+
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
 Domain-local preferences for one captain's fleet live locally in each home's `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
