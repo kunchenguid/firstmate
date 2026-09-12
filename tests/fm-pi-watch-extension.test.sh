@@ -614,6 +614,168 @@ EOF
   pass "Pi joins the latest overlapping restoration and delivers three wakes exactly once"
 }
 
+test_pi_manual_repair_supersedes_failed_actionable_restoration() {
+  local repo home plugin log trigger allow stop live out status
+  repo="$TMP_ROOT/pi-manual-actionable-repair-root"
+  home="$TMP_ROOT/pi-manual-actionable-repair-home"
+  log="$TMP_ROOT/pi-manual-actionable-repair.log"
+  trigger="$TMP_ROOT/pi-manual-actionable-repair.trigger"
+  allow="$TMP_ROOT/pi-manual-actionable-repair.allow"
+  stop="$TMP_ROOT/pi-manual-actionable-repair.stop"
+  live="$TMP_ROOT/pi-manual-actionable-repair.live"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -le 2 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=manual-%s\n' "$$" "$count"
+  while [ ! -e "$FM_TRIGGER_FILE.$count" ]; do sleep 0.02; done
+  if [ "$count" -eq 1 ]; then label=A; else label=B; fi
+  printf 'signal: manual repair wake %s\n' "$label"
+  exit 0
+fi
+if [ ! -e "$FM_ALLOW_REPAIR_FILE" ]; then
+  printf 'failed=%s count=%s\n' "$$" "$count" >> "$FM_ARM_LOG"
+  exit 1
+fi
+printf '%s\n' "$$" > "${FM_LIVE_FILE:?}"
+cleanup() { rm -f "$FM_LIVE_FILE"; }
+trap 'cleanup; exit 0' TERM INT
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=manual-repair\n' "$$"
+printf 'ready=%s\n' "$$" >> "$FM_ARM_LOG"
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+cleanup
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+    FM_TRIGGER_FILE="$trigger" FM_ALLOW_REPAIR_FILE="$allow" FM_STOP_FILE="$stop" FM_LIVE_FILE="$live" \
+    FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=5 FM_WATCH_REARM_RETRY_LIMIT=1 \
+    node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const offers = [];
+const prompts = [];
+const settlements = {};
+for (const label of ["A", "B"]) {
+  let resolve;
+  const promise = new Promise((settled) => { resolve = settled; });
+  settlements[label] = { promise, resolve };
+}
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, offer) {
+    for (const handler of handlers.get(channel) ?? []) handler(offer);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  const label = offer.message.includes("wake A") ? "A" : offer.message.includes("wake B") ? "B" : "";
+  if (!label) throw new Error(`unexpected branch offer: ${offer.message}`);
+  offers.push(label);
+  offer.accept(settlements[label].promise);
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter(Boolean)
+  : [];
+const armRows = () => rows().filter((row) => row.startsWith("arm="));
+const confirmRows = () => rows().filter((row) => row.startsWith("confirmed "));
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/manual.meta`, "project=/projects/manual\nwindow=fm-manual\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tmanual.status\tsignal: manual repair wake\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const initial = await tool.execute("initial-arm", {}, undefined, undefined, {});
+if (!initial.details?.message.includes("spawned Pi extension arm child")) {
+  throw new Error(`initial arm failed: ${JSON.stringify(initial.details)}`);
+}
+await waitFor(() => armRows().length === 1, "watcher A");
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.1`, "close A\n");
+await waitFor(() => offers.join("") === "A", "wake A branch offer");
+await waitFor(() => armRows().length === 2, "successor B");
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close B\n");
+await waitFor(() => rows().filter((row) => row.startsWith("failed=")).length === 2, "exhausted B restoration");
+const failedPids = rows()
+  .filter((row) => row.startsWith("failed="))
+  .map((row) => row.match(/^failed=([0-9]+)/)?.[1] ?? "");
+await waitFor(() => failedPids.every((pid) => pid && !pidAlive(pid)), "failed restoration exits");
+await new Promise((resolve) => setTimeout(resolve, 20));
+writeFileSync(process.env.FM_ALLOW_REPAIR_FILE, "repair\n");
+const repaired = await tool.execute("manual-repair", {}, undefined, undefined, {});
+if (!repaired.details?.message.includes("spawned Pi extension arm child")) {
+  throw new Error(`authorized repair did not start a successor: ${JSON.stringify(repaired.details)}`);
+}
+await waitFor(() => armRows().length === 5 && existsSync(process.env.FM_LIVE_FILE), "manual successor C");
+const livePid = readFileSync(process.env.FM_LIVE_FILE, "utf8").trim();
+await waitFor(() => rows().includes(`ready=${livePid}`), "manual successor readiness");
+const health = await tool.execute("manual-repair-health", {}, undefined, undefined, {});
+if (!health.details?.message.includes("verified-ready watcher")) {
+  throw new Error(`manual successor was not verified ready: ${JSON.stringify(health.details)}`);
+}
+if (offers.join("") !== "A") throw new Error(`wake B escaped serialization: ${offers.join(",")}`);
+settlements.A.resolve();
+await waitFor(() => offers.join("") === "AB", "wake B branch offer after manual repair");
+settlements.B.resolve();
+await waitFor(() => confirmRows().length === 2, "handling confirmations");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (offers.join("") !== "AB") throw new Error(`actionable wakes were not delivered exactly once: ${offers.join(",")}`);
+if (confirmRows().length !== 2) throw new Error(`handling confirmation duplicated: ${confirmRows().join(" | ")}`);
+if (prompts.length !== 0) throw new Error(`stale failure routed a repaired wake to main: ${prompts.join(" | ")}`);
+if (armRows().length !== 5) throw new Error(`manual repair created extra arm work: ${armRows().join(" | ")}`);
+const liveArmPids = armRows()
+  .map((row) => row.match(/^arm=([0-9]+)/)?.[1] ?? "")
+  .filter((pid) => pid && pidAlive(pid));
+if (liveArmPids.length !== 1 || liveArmPids[0] !== livePid) {
+  throw new Error(`manual successor was not the singleton owner: ${liveArmPids.join(",")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await waitFor(() => !existsSync(process.env.FM_LIVE_FILE), "manual successor shutdown");
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi manual repair must supersede failed actionable restoration: $out"
+  [ -z "$out" ] || fail "Pi manual actionable-repair test printed output: $out"
+  pass "Pi manual repair supersedes failed actionable restoration evidence"
+}
+
 test_pi_branch_offer_owns_actionable_wake() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-branch-offer-root"
@@ -4169,6 +4331,7 @@ test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_three_overlapping_actionable_closes_restore_latest_liveness
+test_pi_manual_repair_supersedes_failed_actionable_restoration
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
