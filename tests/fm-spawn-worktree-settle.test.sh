@@ -436,7 +436,7 @@ test_unreadable_foreground_gives_up_at_the_settle_bound() {
     "spawn did not give up at the settle bound"
   assert_contains "$out" "could not read the pane's foreground process" \
     "spawn did not say the foreground was unreadable"
-  assert_contains "$out" "neither treehouse's 'Entered worktree' line nor an error" \
+  assert_contains "$out" "no 'Entered worktree' line was seen in the pane, and no refusal was confirmed on two consecutive reads" \
     "spawn did not say the pane text showed no verdict"
   assert_contains "$out" "foreground now: unreadable on backend 'tmux'" \
     "spawn did not report the unreadable foreground"
@@ -683,8 +683,8 @@ test_first_refused_read_on_the_bound_poll_still_reports_the_refusal() {
     "spawn did not report the refusal line its last two reads showed"
   assert_contains "$out" "| Error: all 16 worktrees are in use or dirty (max_trees = 16)" \
     "spawn did not relay treehouse's own refusal line from the pane"
-  assert_not_contains "$out" "nor an error" \
-    "spawn claimed the pane printed no error while relaying the error line below it"
+  assert_not_contains "$out" "no refusal was confirmed" \
+    "spawn used the unconfirmed-refusal wording while relaying the refusal line its last two reads confirmed"
   reads=$(cat "$COUNTFILE")
   [ "$reads" -eq 62 ] || fail "the bound must hold for exactly one more poll so the second read can confirm the refusal, but the spawn polled $reads times"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
@@ -713,7 +713,7 @@ test_refused_read_cleared_on_the_next_poll_ends_at_the_bound() {
   out=$(run_settle_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a pane that never reported a worktree"$'\n'"$out"
-  assert_contains "$out" "neither treehouse's 'Entered worktree' line nor an error" \
+  assert_contains "$out" "no 'Entered worktree' line was seen in the pane, and no refusal was confirmed on two consecutive reads" \
     "spawn did not give up at the bound once the refused read was cleared"
   assert_not_contains "$out" "reported an error in the pane" \
     "spawn treated a single refused read that the next read cleared as a refusal"
