@@ -1,0 +1,29 @@
+$ bash tests/fm-ci-workflow.test.sh
+ok - a newer push to one PR supersedes that PR's in-flight CI
+ok - distinct PRs get distinct concurrency groups
+ok - every main push keeps its own group and is never cancelled
+ok - every ci.yml job carries a finite timeout
+ok - the incident's unbounded jobs keep their recommended caps
+ok - the already-measured lane bounds are unchanged
+
+$ semantic baseline/target comparison via Ruby YAML consumer
+base.concurrency=nil
+base.timeout.lint=nil
+base.timeout.test-coverage=nil
+base.timeout.tests-timing-aggregate=nil
+base.timeout.invariants=nil
+base.timeout.tests-portable-parallel-1=10
+base.timeout.tests-portable-parallel-2=10
+base.timeout.tests-portable-serial=30
+base.timeout.tests-herdr=75
+base.timeout.macos-stock-bash=10
+target.concurrency={"group"=>"ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}", "cancel-in-progress"=>"${{ github.event_name == 'pull_request' }}"}
+target.timeout.lint=25
+target.timeout.test-coverage=5
+target.timeout.tests-timing-aggregate=5
+target.timeout.invariants=5
+target.timeout.tests-portable-parallel-1=10
+target.timeout.tests-portable-parallel-2=10
+target.timeout.tests-portable-serial=30
+target.timeout.tests-herdr=75
+target.timeout.macos-stock-bash=10
