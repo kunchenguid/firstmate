@@ -541,6 +541,32 @@ SH
   pass "agy preparation failure rolls back the generated hook root"
 }
 
+test_agy_marker_failure_removes_partial_hook_root() {
+  local rec id=busy-agy-marker-failure out status state root
+  rec=$(make_spawn_case agy-marker-failure agy "$id")
+  read_case_record "$rec"
+  state="$HOME_DIR/state"
+  root="$state/$id.agy-hooks"
+  cat > "$FAKEBIN_DIR/mkdir" <<'SH'
+#!/usr/bin/env bash
+/bin/mkdir "$@"
+status=$?
+if [ "$status" -eq 0 ] && [ "$#" -eq 1 ] \
+   && [ "${1:-}" = "${FM_TEST_AGY_MARKER_FAIL_ROOT:-}" ]; then
+  /bin/chmod 500 -- "$1"
+fi
+exit "$status"
+SH
+  chmod +x "$FAKEBIN_DIR/mkdir"
+  out=$(FM_TEST_AGY_MARKER_FAIL_ROOT="$root" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "agy marker failure must abort the spawn: $out"
+  assert_absent "$root" \
+    "agy marker failure must remove the partial generated hook root"
+  pass "agy marker failure rolls back the partial generated hook root"
+}
+
 test_agy_hooks_stale_incarnation_harmless() {
   local rec id=busy-agy-2 out state settings
   rec=$(make_spawn_case agy-stale agy "$id")
@@ -688,6 +714,7 @@ test_agy_hooks_refuse_symlinked_root
 test_agy_hooks_refuse_preexisting_root_types
 test_agy_hooks_refuse_symlinked_file
 test_agy_prepare_failure_removes_hook_root
+test_agy_marker_failure_removes_partial_hook_root
 test_agy_hooks_stale_incarnation_harmless
 test_agy_hooks_are_removed_by_teardown
 test_non_agy_hooks_are_preserved_by_teardown

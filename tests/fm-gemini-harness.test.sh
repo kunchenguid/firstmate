@@ -272,7 +272,7 @@ test_agy_marker_outranks_inherited_claudecode() {
   pass "fm-harness.sh: agy's verified child marker outranks an inherited Claude marker"
 }
 
-test_agy_ancestry_matches_only_exact_command_name() {
+test_agy_identity_requires_marker() {
   local fakebin out
   fakebin=$(fm_fakebin "$TMP_ROOT/agy-ancestry")
   cat > "$fakebin/ps" <<'SH'
@@ -287,7 +287,7 @@ SH
   out=$(env -u ANTIGRAVITY_AGENT -u CLAUDECODE -u GEMINI_CLI \
         -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u GROK_AGENT \
         PATH="$fakebin:$PATH" "$HARNESS")
-  [ "$out" = agy ] || fail "an exact agy ancestry command must detect agy, got '$out'"
+  [ "$out" != agy ] || fail "an agy ancestry command must not detect verified agy, got '$out'"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
@@ -301,7 +301,7 @@ SH
         -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u GROK_AGENT \
         PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" != agy ] || fail "agy-helper must not be misread as agy"
-  pass "fm-harness.sh: agy ancestry is anchored to the exact launcher name"
+  pass "fm-harness.sh: agy identity requires the verified child marker"
 }
 
 test_agy_control_and_kind_contract() {
@@ -334,5 +334,5 @@ test_gemini_control_mechanics_are_the_verified_ones
 test_gemini_is_crewmate_and_scout_only
 test_gemini_wiring_stays_outside_the_worktree
 test_agy_marker_outranks_inherited_claudecode
-test_agy_ancestry_matches_only_exact_command_name
+test_agy_identity_requires_marker
 test_agy_control_and_kind_contract

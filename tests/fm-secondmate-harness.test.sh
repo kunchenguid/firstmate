@@ -127,7 +127,7 @@ SH
   pass "fm-harness detects only Cursor Agent CLI's exact invocation marker"
 }
 
-test_agy_marker_precedes_gemini_and_ancestry_fallback() {
+test_agy_marker_precedes_gemini_and_ignores_ancestry_fallback() {
   local dir fakebin got
   dir="$TMP_ROOT/agy-marker"
   fakebin=$(fm_fakebin "$dir")
@@ -180,8 +180,8 @@ SH
   got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT \
     -u CURSOR_INVOKED_AS -u GEMINI_CLI -u ANTIGRAVITY_AGENT \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
-  [ "$got" = agy ] || fail "AGY ancestry resolved '$got', expected agy"
-  pass "fm-harness gives AGY marker precedence and retains ancestry detection"
+  [ "$got" != agy ] || fail "AGY ancestry resolved verified agy without its marker"
+  pass "fm-harness gives AGY marker precedence and ignores ancestry-only identity"
 }
 
 # ===========================================================================
@@ -2680,7 +2680,7 @@ SH
 
 test_harness_resolution
 test_cursor_marker_detection
-test_agy_marker_precedes_gemini_and_ancestry_fallback
+test_agy_marker_precedes_gemini_and_ignores_ancestry_fallback
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands

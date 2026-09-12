@@ -98,6 +98,9 @@ case "${1:-}" in
     payload=${1:-}
     if [ "$literal" = 1 ]; then
       printf '%s\n' "$payload" >> "$D/literal"
+      if [ "$payload" = /quit ] && [ -n "${FM_FAKE_AGY_LIVE_COMPOSER:-}" ]; then
+        printf '────────────────\n> /quit\n────────────────\n? for shortcuts\n' > "$D/pane"
+      fi
       if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
         printf 'zsh' > "$D/command"
@@ -231,7 +234,12 @@ test_exit_types_each_harness_verified_command() {
     else
       alive_as "$dir" "$harness"
     fi
-    out=$(run_control "$dir" t1 exit); rc=$?
+    if [ "$harness" = agy ]; then
+      printf '────────────────\n>\n────────────────\n? for shortcuts\n' > "$dir/fake/pane"
+      out=$(FM_FAKE_AGY_LIVE_COMPOSER=1 run_control "$dir" t1 exit); rc=$?
+    else
+      out=$(run_control "$dir" t1 exit); rc=$?
+    fi
     expect_code 0 "$rc" "exit on $harness should succeed"$'\n'"$out"
     IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
     [ "$(literals "$dir")" = "$expected" ] \
@@ -831,6 +839,25 @@ test_agent_that_does_not_stop_fails_closed() {
   pass "fm-control exit: a stubborn agent reports delivered input and an unconfirmed exit"
 }
 
+test_agy_exit_refuses_pending_composer() {
+  local dir out rc
+  dir=$(new_case agy-pending-exit)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  printf '────────────────\n> draft\n────────────────\n? for shortcuts\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit should refuse an AGY pending composer"
+  assert_contains "$out" "exit-command=refused" \
+    "pending AGY exit should report refusal"
+  assert_contains "$out" "agy-preflight:pending" \
+    "pending AGY exit should report the preflight verdict"
+  [ -z "$(literals "$dir")" ] \
+    || fail "pending AGY exit must not type the lifecycle command"
+  [ -z "$(keys_sent "$dir")" ] \
+    || fail "pending AGY exit must not send lifecycle keys"
+  pass "fm-control exit: pending AGY composers refuse before typing"
+}
+
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {
   local dir out rc
   dir=$(new_case nosettle)
@@ -936,6 +963,7 @@ test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
+test_agy_exit_refuses_pending_composer
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker

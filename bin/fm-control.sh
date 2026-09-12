@@ -498,6 +498,14 @@ do_exit() {
   # swallows the first Enter.
   verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL" "$HARNESS") \
     || die "the exit command could not be sent to task $ID on $BACKEND"
+  case "$verdict" in
+    agy-preflight:*)
+      die "exit-command=refused $ID harness=$HARNESS verdict=$verdict; no exit input was sent"
+      ;;
+    agy-draft-conflict)
+      die "exit-command=refused $ID harness=$HARNESS verdict=$verdict; Enter was withheld"
+      ;;
+  esac
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {

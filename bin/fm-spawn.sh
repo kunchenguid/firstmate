@@ -1203,7 +1203,7 @@ agy_hook_root_matches_owner() {
     }
   fi
   [ -n "$owner_gen" ] || return 1
-  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  agy_hook_root_path_is_safe "$root" "$state_root" || return 1
   state_real=$(cd -P -- "$state_root" && pwd -P) || return 1
   root_real=$(cd -P -- "$root" && pwd -P) || return 1
   case "$root_real/" in
@@ -1214,6 +1214,17 @@ agy_hook_root_matches_owner() {
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   marker_gen=$(cat "$marker") || return 1
   [ "$marker_gen" = "$owner_gen" ] || return 1
+}
+
+agy_hook_root_path_is_safe() {
+  local root=$1 state_root=$2 root_real state_real
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  state_real=$(cd -P -- "$state_root" && pwd -P) || return 1
+  root_real=$(cd -P -- "$root" && pwd -P) || return 1
+  case "$root_real/" in
+    "$state_real/"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 agy_clear_hook_ownership_meta() {
@@ -1238,8 +1249,13 @@ agy_remove_owned_hook_root() {
     fi
     return 0
   fi
-  if ! agy_hook_root_matches_owner "$root" "$state_root" "$meta" \
-      "$([ "$current_owned" = 1 ] && printf '%s' "$expected_gen")" "$current_owned"; then
+  if [ "$current_owned" = 1 ]; then
+    if ! agy_hook_root_path_is_safe "$root" "$state_root"; then
+      echo "warning: retaining agy hook path $root; current-spawn ownership path is unsafe" >&2
+      return 1
+    fi
+  elif ! agy_hook_root_matches_owner "$root" "$state_root" "$meta" \
+      "$expected_gen" 0; then
     echo "warning: retaining agy hook path $root; ownership could not be proven" >&2
     return 1
   fi
