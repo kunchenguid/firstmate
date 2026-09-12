@@ -67,13 +67,11 @@
 #                          a churning pane whose worker is looping on one
 #                          out-of-contract Definition-of-done attempt: the same
 #                          normalized failure line twice in the pane/status tail
-#                          (repeated-failure), or FM_SOFT_LOCK_TURNEND_MAX
-#                          turn-ends with no new status line
-#                          (turnend-no-status-verb). One recovery per episode,
-#                          claimed before any external call: an fm-control
-#                          interrupt, one fm-send steer to file the DoD blocker
-#                          with the exact output, this check wake, and one
-#                          liveness telemetry row.
+#                          (repeated-failure). One recovery per episode, claimed
+#                          before any external call: an fm-control interrupt,
+#                          one fm-send steer to file the DoD blocker with the
+#                          exact output, this check wake, and one liveness
+#                          telemetry row.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -1359,14 +1357,11 @@ busy_silent_check() {  # <window> <task> <hash> <busy-flag>
 
 # Soft-lock guard: a pane can keep churning - never stale, never silent - while
 # the worker loops on one Definition-of-done item it cannot tick, so every other
-# guard absorbs it as healthy. Two signals class that loop as a soft-lock:
-#   repeated-failure: the same failure line (normalized: lowercased, digits and
-#     punctuation folded) appears twice or more in the worker's recent pane
-#     output or status tail - the DoD contract (bin/fm-dod-lib.sh) caps any item
-#     at two attempts, so a second showing IS the out-of-contract loop;
-#   turnend-no-status-verb: SOFT_LOCK_TURNEND_MAX consecutive turn-end markers
-#     land with no new status line, so turns complete without the worker ever
-#     reporting a new verb.
+# guard absorbs it as healthy. The same failure line (normalized: lowercased,
+# digits and punctuation folded) appearing twice or more in the worker's recent
+# pane output or status tail classes that loop as a soft-lock. The DoD contract
+# (bin/fm-dod-lib.sh) caps any item at two attempts, so a second showing IS the
+# out-of-contract loop.
 # One classification fires one recovery: the claim marker is written before any
 # external call (the busy-silent precedent, so a watcher restart can never send
 # a second interrupt), then an interrupt through fm-control, one steer through
@@ -1376,8 +1371,6 @@ busy_silent_check() {  # <window> <task> <hash> <busy-flag>
 # that ignores the steer and loops on a DIFFERENT item without ever writing
 # status is not re-interrupted (one recovery per episode; the wedge paths remain
 # the backstop behind that deliberate ceiling).
-SOFT_LOCK_TURNEND_MAX=${FM_SOFT_LOCK_TURNEND_MAX:-3}
-case "$SOFT_LOCK_TURNEND_MAX" in ''|*[!0-9]*|0) SOFT_LOCK_TURNEND_MAX=3 ;; esac
 SOFT_LOCK_SEND_BIN=${FM_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}
 
 soft_lock_repeated_failure() {  # <tail40> <status-file>: print the normalized failure line seen 2+ times
@@ -1397,32 +1390,6 @@ soft_lock_repeated_failure() {  # <tail40> <status-file>: print the normalized f
       seen[norm] = 1
     }
   '
-}
-
-soft_lock_turnend_signal() {  # <window-key> <task>: 0 once the no-new-verb turn-end count crosses
-  # ponytail: the local is named turnf, never turn - shellcheck then reparses
-  # the pre-existing ${base%.turn-ended} suffix trim above as arithmetic (SC2100).
-  local key=$1 task=$2 turnf marker cur_turn cur_verb m_turn m_verb m_count count
-  turnf="$STATE/$task.turn-ended"
-  marker="$STATE/.softlock-turn-$key"
-  [ -f "$turnf" ] || { rm -f "$marker"; return 1; }
-  cur_turn=$(stat_mtime "$turnf") || { rm -f "$marker"; return 1; }
-  cur_verb=$(last_status_line "$STATE/$task.status" 2>/dev/null | tr '\t' ' ')
-  m_turn=''; m_verb=''; m_count=0
-  if [ -f "$marker" ]; then
-    m_turn=$(cut -f1 "$marker")
-    m_verb=$(cut -f2 "$marker")
-    m_count=$(cut -f3 "$marker")
-  fi
-  case "$m_count" in ''|*[!0-9]*) m_count=0 ;; esac
-  [ "$cur_turn" != "$m_turn" ] || return 1
-  if [ -f "$marker" ] && [ "$cur_verb" = "$m_verb" ]; then
-    count=$((m_count + 1))
-  else
-    count=0
-  fi
-  printf '%s\t%s\t%s\n' "$cur_turn" "$cur_verb" "$count" > "$marker"
-  [ "$count" -ge "$SOFT_LOCK_TURNEND_MAX" ]
 }
 
 soft_lock_fire() {  # <window> <task> <hash> <signal> <item>
@@ -1455,9 +1422,9 @@ soft_lock_fire() {  # <window> <task> <hash> <signal> <item>
 # One recovery per soft-lock episode: while the claim marker stands and the
 # worker has not moved its status, the episode is already owned and the poll
 # returns 0 without re-detecting. A moved status (the blocker filing or any new
-# verb) or a task change clears the claim and the turn-end counter.
+# verb) or a task change clears the claim.
 soft_lock_check() {  # <window> <task> <hash> <tail40>
-  local win=$1 task=$2 hash=$3 tail40=$4 key marker status item verb sig
+  local win=$1 task=$2 hash=$3 tail40=$4 key marker status item sig
   [ -n "$task" ] || return 1
   key=$(window_key "$win")
   marker="$STATE/.softlock-$key"
@@ -1468,12 +1435,12 @@ soft_lock_check() {  # <window> <task> <hash> <tail40>
   fi
   if [ -f "$marker" ]; then
     if [ "$(busy_silent_marker_value "$marker" task)" != "$task" ]; then
-      rm -f "$marker" "$STATE/.softlock-turn-$key"
+      rm -f "$marker"
       return 1
     fi
     sig="$(stat_mtime "$status" 2>/dev/null || echo 0):$(busy_silent_status_size "$status" 2>/dev/null || echo 0)"
     if [ "$sig" != "$(busy_silent_marker_value "$marker" status_sig)" ]; then
-      rm -f "$marker" "$STATE/.softlock-turn-$key"
+      rm -f "$marker"
       return 1
     fi
     return 0
@@ -1481,11 +1448,6 @@ soft_lock_check() {  # <window> <task> <hash> <tail40>
   item=$(soft_lock_repeated_failure "$tail40" "$status")
   if [ -n "$item" ]; then
     soft_lock_fire "$win" "$task" "$hash" repeated-failure "$item"
-    return 0
-  fi
-  if soft_lock_turnend_signal "$key" "$task"; then
-    verb=$(last_status_line "$status" 2>/dev/null)
-    soft_lock_fire "$win" "$task" "$hash" turnend-no-status-verb "$verb"
     return 0
   fi
   return 1
