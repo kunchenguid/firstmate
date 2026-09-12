@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=<floor>; install: <command>) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish",
+#                 "VALIDATION_UNAVAILABLE: no-mistakes (kernel <release> cannot share a SQLite WAL database across processes: <probe detail>) - the no-mistakes delivery mode is unavailable on this host; ship affected work direct-PR until the host is repaired",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
@@ -181,6 +182,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-sqlite-wal-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-sqlite-wal-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
@@ -1414,6 +1417,25 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
   fi
 fi
 
+# no-mistakes keeps its pipeline state in a SQLite WAL database its daemon holds
+# open, so a host that cannot share a WAL database across processes has no
+# working no-mistakes delivery mode at all - every CLI call made while the
+# daemon is up fails with SQLITE_PROTOCOL. The verdict comes from the real
+# two-process probe owned by bin/fm-sqlite-wal-lib.sh; the host gate there keeps
+# a normal host from paying for a check it cannot fail. Detect-only: the repair
+# is a host change, which is the captain's call and never bootstrap's.
+detect_validation_wal_locking() {
+  command -v no-mistakes >/dev/null 2>&1 || return 0
+  [ "${FM_SKIP_WAL_LOCK_PROBE:-0}" = 1 ] && return 0
+  fm_sqlite_wal_host_suspect || return 0
+  local rc=0
+  fm_sqlite_wal_probe || rc=$?
+  # 0 is a working host and 2 means the probe could not run, so nothing was
+  # observed; only an observed failure is reported.
+  [ "$rc" -eq 1 ] || return 0
+  echo "VALIDATION_UNAVAILABLE: no-mistakes (kernel $(fm_sqlite_wal_kernel) cannot share a SQLite WAL database across processes: $(fm_sqlite_wal_probe_detail)) - the no-mistakes delivery mode is unavailable on this host; ship affected work direct-PR until the host is repaired"
+}
+
 # Local detection: presence, version floors, and configuration. Nothing here
 # leaves this machine, so it stays on the session-start critical path.
 detect_local_tools() {
@@ -1437,6 +1459,7 @@ detect_local_tools() {
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
     echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
   fi
+  detect_validation_wal_locking
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
   fi
