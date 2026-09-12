@@ -9,10 +9,26 @@ on:
 permissions:
   contents: read
 
+# Per-PR supersession: a new push to the same PR replaces that PR's in-flight
+# CI instead of letting superseded heads keep 13 jobs of hosted-runner work.
+# The group uses the PR number for pull_request events, so every run of one PR
+# shares a group, and falls back to the unique run id for push events, so each
+# main push gets its own group and is never cancelled. Cancellation is likewise
+# limited to pull_request events. Evidence and rationale: the September 12
+# Actions starvation report, section 3 "Workflow mechanics to ship first".
+# The compliance workflow deliberately keeps its own event-specific groups; do
+# not collapse it onto this simpler shape.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    # Hang tripwire only: lint executions measured at 14-16 minutes in the
+    # September 12 starvation report, so this leaves deliberate margin.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned ShellCheck
@@ -37,6 +53,8 @@ jobs:
   test-coverage:
     name: Test coverage guard
     runs-on: ubuntu-latest
+    # Hang tripwire: the coverage guard is a seconds-long local computation.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
       - name: Prove complete regression partition
@@ -335,6 +353,8 @@ jobs:
   tests-timing-aggregate:
     name: Behavior timing aggregate
     runs-on: ubuntu-latest
+    # Hang tripwire: aggregation is seconds of work over lane artifacts.
+    timeout-minutes: 5
     needs:
       - tests-portable-parallel-1
       - tests-portable-parallel-2
@@ -433,6 +453,8 @@ jobs:
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
+    # Hang tripwire: the invariant checks are seconds-long file comparisons.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
       - name: Compatibility pointers must stay intact
