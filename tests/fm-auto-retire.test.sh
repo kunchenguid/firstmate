@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Automatic retirement selects finished merged ships and done scouts, then
-# calls ordinary teardown without --force. Refusals stay refusals and are
-# not retried. Unclassifiable records are reported and left untouched.
+# calls ordinary teardown without --force. Transient teardown refusals retry
+# with a bounded attempt count; permanent refusals stay sticky.
+# Unclassifiable records are reported and left untouched.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -65,6 +66,18 @@ if [ -f "$dir/refuse/\$id" ]; then
   echo "REFUSED: worktree has uncommitted changes." >&2
   exit 1
 fi
+if [ -f "$dir/transient/\$id" ]; then
+  attempt=0
+  [ ! -f "$dir/transient-attempts/\$id" ] || attempt=\$(cat "$dir/transient-attempts/\$id")
+  attempt=\$((attempt + 1))
+  mkdir -p "$dir/transient-attempts"
+  printf '%s\n' "\$attempt" > "$dir/transient-attempts/\$id"
+  limit=\$(cat "$dir/transient/\$id")
+  if [ "\$limit" = always ] || [ "\$attempt" -le "\$limit" ]; then
+    cat "$dir/transient-text/\$id" >&2
+    exit 1
+  fi
+fi
 rm -f "$dir/home/state/\$id.meta" "$dir/home/state/\$id.status"
 exit 0
 SH
@@ -103,9 +116,8 @@ test_merged_done_ship_is_retired() {
   [ -s "$dir/home/data/merged-ship/debrief.md" ] || fail "home debrief copy missing after retirement"
   grep -qx 'debrief body' "$dir/home/data/merged-ship/debrief.md" \
     || fail "home debrief copy did not match the worktree file"
-  grep -q 'slack message retired merged-ship (merged PR)' "$dir/slack.log" \
-    || fail "slack line missing: $(cat "$dir/slack.log" 2>/dev/null)"
-  pass "a done ship with a merged PR is retired through ordinary teardown"
+  [ ! -e "$dir/slack.log" ] || fail "automatic retirement posted to Slack"
+  pass "a done ship with a merged PR is retired through ordinary teardown without a Slack post"
 }
 
 test_done_scout_with_report_is_retired() {
@@ -182,6 +194,117 @@ test_teardown_refusal_never_claims_retirement_or_a_decision() {
   pass "a teardown refusal is noted once without claiming retirement or opening a decision"
 }
 
+test_transient_refusal_retries_until_teardown_succeeds() {
+  local dir out
+  dir="$TMP_ROOT/transient-twice"
+  seed_home "$dir"
+  install_fakes "$dir"
+  mkdir -p "$dir/transient" "$dir/transient-text"
+  printf '2\n' > "$dir/transient/retry-ship"
+  printf 'REFUSED: another Treehouse slot allocation or return is in progress; nothing was changed\n' \
+    > "$dir/transient-text/retry-ship"
+  write_meta "$dir" retry-ship ship 'https://github.com/example/repo/pull/1'
+  plant_ship_debrief "$dir" retry-ship
+  printf 'done: PR merged\n' > "$dir/home/state/retry-ship.status"
+
+  out=$(run_retire "$dir") || fail "first transient pass failed: $out"
+  assert_contains "$out" "refused: retry-ship (transient slot-allocation-or-return-in-progress attempt 1/5)" \
+    "first transient refusal was not recorded as retryable"
+  [ "$(cat "$dir/home/state/retry-ship.auto-retire")" = \
+    $'retry\t1\tslot-allocation-or-return-in-progress' ] \
+    || fail "first transient attempt was not recorded"
+
+  out=$(run_retire "$dir") || fail "second transient pass failed: $out"
+  assert_contains "$out" "refused: retry-ship (transient slot-allocation-or-return-in-progress attempt 2/5)" \
+    "second transient refusal was not retried"
+  [ "$(cat "$dir/home/state/retry-ship.auto-retire")" = \
+    $'retry\t2\tslot-allocation-or-return-in-progress' ] \
+    || fail "second transient attempt was not recorded"
+
+  out=$(run_retire "$dir") || fail "third transient pass failed: $out"
+  assert_contains "$out" "retired: retry-ship (merged PR)" \
+    "later cycle did not retire after transient contention cleared"
+  [ ! -e "$dir/home/state/retry-ship.meta" ] || fail "retry ship meta survived successful teardown"
+  [ ! -e "$dir/home/state/retry-ship.auto-retire" ] \
+    || fail "successful retry left its attempt sidecar behind"
+  [ "$(cat "$dir/transient-attempts/retry-ship")" = 3 ] \
+    || fail "teardown did not run exactly three times"
+  pass "transient teardown refusals retry across cycles until teardown succeeds"
+}
+
+test_permanent_transient_refusal_parks_after_five_attempts() {
+  local dir out i
+  dir="$TMP_ROOT/transient-permanent"
+  seed_home "$dir"
+  install_fakes "$dir"
+  mkdir -p "$dir/transient" "$dir/transient-text"
+  printf 'always\n' > "$dir/transient/stuck-ship"
+  printf 'error: endpoint is busy for stuck-ship; nothing was changed\n' \
+    > "$dir/transient-text/stuck-ship"
+  write_meta "$dir" stuck-ship ship 'https://github.com/example/repo/pull/1'
+  plant_ship_debrief "$dir" stuck-ship
+  printf 'done: PR merged\n' > "$dir/home/state/stuck-ship.status"
+
+  i=1
+  while [ "$i" -le 5 ]; do
+    out=$(run_retire "$dir") || fail "permanent transient pass $i failed: $out"
+    assert_contains "$out" "refused: stuck-ship" "transient pass $i was not attempted"
+    i=$((i + 1))
+  done
+  assert_contains "$out" "refused: stuck-ship (transient endpoint-busy exhausted after 5 attempts)" \
+    "permanent transient refusal did not name exhausted retry state"
+  assert_contains "$(cat "$dir/home/state/stuck-ship.auto-retire")" \
+    $'refused\ttransient-exhausted reason=endpoint-busy attempts=5:' \
+    "sticky refusal did not retain its class and attempt count"
+  : > "$dir/teardown.log"
+  out=$(run_retire "$dir") || fail "parked transient pass failed: $out"
+  [ -z "$out" ] || fail "exhausted transient refusal was retried: $out"
+  [ ! -s "$dir/teardown.log" ] || fail "teardown ran after transient attempts were exhausted"
+  pass "a permanent transient refusal parks after five recorded attempts"
+}
+
+test_presentation_lock_refusal_is_transient() {
+  local dir out
+  dir="$TMP_ROOT/transient-presentation-lock"
+  seed_home "$dir"
+  install_fakes "$dir"
+  mkdir -p "$dir/transient" "$dir/transient-text"
+  printf 'always\n' > "$dir/transient/lock-ship"
+  printf 'error: herdr session presentation lock is contended for lock-ship; nothing was changed\n' \
+    > "$dir/transient-text/lock-ship"
+  write_meta "$dir" lock-ship ship 'https://github.com/example/repo/pull/1'
+  plant_ship_debrief "$dir" lock-ship
+  printf 'done: PR merged\n' > "$dir/home/state/lock-ship.status"
+  out=$(run_retire "$dir") || fail "presentation lock pass failed: $out"
+  assert_contains "$out" "refused: lock-ship (transient presentation-lock-held attempt 1/5)" \
+    "presentation lock refusal was not classified as transient"
+  pass "presentation lock refusal remains eligible for a later retry"
+}
+
+test_permanent_refusal_replaces_an_existing_retry_mark() {
+  local dir out
+  dir="$TMP_ROOT/transient-then-permanent"
+  seed_home "$dir"
+  install_fakes "$dir"
+  mkdir -p "$dir/transient" "$dir/transient-text"
+  printf '1\n' > "$dir/transient/change-task"
+  printf 'error: endpoint is busy for change-task; nothing was changed\n' \
+    > "$dir/transient-text/change-task"
+  write_meta "$dir" change-task ship 'https://github.com/example/repo/pull/1'
+  plant_ship_debrief "$dir" change-task
+  printf 'done: PR merged\n' > "$dir/home/state/change-task.status"
+  out=$(run_retire "$dir") || fail "initial transient pass failed: $out"
+  assert_contains "$out" "transient endpoint-busy attempt 1/5" \
+    "initial retryable refusal did not create the setup state"
+
+  mkdir -p "$dir/refuse"
+  : > "$dir/refuse/change-task"
+  out=$(run_retire "$dir") || fail "permanent refusal pass failed: $out"
+  assert_contains "$(cat "$dir/home/state/change-task.auto-retire")" $'refused\t' \
+    "permanent refusal did not replace the non-sticky retry mark"
+  pass "a permanent refusal after transient contention becomes sticky immediately"
+}
+
 test_secondmate_and_reportless_scout_are_left_alone() {
   local dir out
   dir="$TMP_ROOT/leave"
@@ -249,7 +372,7 @@ test_watcher_surfaces_one_retirement() {
 }
 
 test_merged_done_ship_without_debrief_is_refused() {
-  local dir out
+  local dir out i
   dir="$TMP_ROOT/debrief-missing"
   seed_home "$dir"
   install_fakes "$dir"
@@ -261,29 +384,45 @@ test_merged_done_ship_without_debrief_is_refused() {
   plant_ship_debrief "$dir" empty-ship ""
   printf 'done: PR merged\n' > "$dir/home/state/empty-ship.status"
   out=$(run_retire "$dir") || fail "missing debrief pass failed: $out"
-  assert_contains "$out" "refused: missing-ship (debrief-missing)" \
-    "absent debrief was not refused with the named reason"
-  assert_contains "$out" "refused: empty-ship (debrief-missing)" \
-    "empty debrief was not refused with the named reason"
+  assert_contains "$out" "refused: missing-ship (transient debrief-missing attempt 1/5)" \
+    "absent debrief was not recorded as retryable"
+  assert_contains "$out" "refused: empty-ship (transient debrief-missing attempt 1/5)" \
+    "empty debrief was not recorded as retryable"
   assert_not_contains "$out" "retired:" "a ship without a debrief was retired"
   [ -f "$dir/home/state/missing-ship.meta" ] || fail "missing-debrief record was removed"
   [ -f "$dir/home/state/empty-ship.meta" ] || fail "empty-debrief record was removed"
   [ ! -e "$dir/teardown.log" ] || fail "teardown ran without a debrief"
-  [ ! -e "$dir/home/state/missing-ship.auto-retire" ] \
-    || fail "absent debrief was marked as a permanent refusal"
+  [ "$(cat "$dir/home/state/missing-ship.auto-retire")" = $'retry\t1\tdebrief-missing' ] \
+    || fail "absent debrief did not record its first retry"
+  [ "$(cat "$dir/home/state/empty-ship.auto-retire")" = $'retry\t1\tdebrief-missing' ] \
+    || fail "empty debrief did not record its first retry"
   [ ! -e "$dir/home/data/missing-ship/debrief.md" ] \
     || fail "absent debrief still produced a home copy"
   plant_ship_debrief "$dir" missing-ship
   out=$(run_retire "$dir") || fail "debrief retry pass failed: $out"
   assert_contains "$out" "retired: missing-ship (merged PR)" \
     "a later cycle did not retire once the debrief appeared"
-  assert_contains "$out" "refused: empty-ship (debrief-missing)" \
-    "empty debrief was retired on the retry cycle"
+  assert_contains "$out" "refused: empty-ship (transient debrief-missing attempt 2/5)" \
+    "empty debrief did not retain its retry count"
   grep -qx 'debrief-present-at-teardown missing-ship' "$dir/teardown.log" \
     || fail "retry teardown ran before the home debrief copy landed"
   [ -s "$dir/home/data/missing-ship/debrief.md" ] || fail "retry did not copy the debrief home"
+  [ ! -e "$dir/home/state/missing-ship.auto-retire" ] \
+    || fail "successful debrief retry left its attempt sidecar behind"
+  i=3
+  while [ "$i" -le 5 ]; do
+    out=$(run_retire "$dir") || fail "empty debrief pass $i failed: $out"
+    i=$((i + 1))
+  done
+  assert_contains "$out" "refused: empty-ship (transient debrief-missing exhausted after 5 attempts)" \
+    "permanently empty debrief did not exhaust its retries"
+  assert_contains "$(cat "$dir/home/state/empty-ship.auto-retire")" \
+    $'refused\ttransient-exhausted reason=debrief-missing attempts=5:' \
+    "empty debrief sticky refusal did not retain its class and attempt count"
+  out=$(run_retire "$dir") || fail "parked empty debrief pass failed: $out"
+  [ -z "$out" ] || fail "empty debrief was retried after its attempt limit: $out"
   [ -f "$dir/home/state/empty-ship.meta" ] || fail "empty-debrief record was removed on retry"
-  pass "a done ship without a debrief is refused as debrief-missing and left for a later cycle"
+  pass "a missing debrief retries until available and parks after five failed attempts"
 }
 
 test_merged_done_ship_is_retired
@@ -291,6 +430,10 @@ test_done_scout_with_report_is_retired
 test_open_pr_and_working_ship_are_left_alone
 test_gh_fail_is_unclassified_and_untouched
 test_teardown_refusal_never_claims_retirement_or_a_decision
+test_transient_refusal_retries_until_teardown_succeeds
+test_permanent_transient_refusal_parks_after_five_attempts
+test_presentation_lock_refusal_is_transient
+test_permanent_refusal_replaces_an_existing_retry_mark
 test_secondmate_and_reportless_scout_are_left_alone
 test_working_appended_during_forge_lookup_is_refused
 test_watcher_surfaces_one_retirement

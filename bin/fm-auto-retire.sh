@@ -14,10 +14,10 @@
 # The done check snapshots the status file's byte length and mtime; if either
 # changed before retirement, the record is refused as status-moved and left
 # for a later cycle.
-# Every landed-work refusal still comes from teardown. One status line and one
-# Slack line are emitted per successful retirement. A refused retirement is
-# recorded once on the task status and is not retried. Unclassifiable records
-# are reported once and left untouched.
+# Every landed-work refusal still comes from teardown. One status line is
+# emitted per successful retirement; teardown retains its telemetry record.
+# Transient teardown and debrief-missing refusals retry for five cycles before becoming sticky;
+# other refusals are recorded once. Unclassifiable records stay untouched.
 set -u
 umask 077
 
@@ -27,7 +27,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 TEARDOWN_BIN="${FM_TEARDOWN_BIN:-$SCRIPT_DIR/fm-teardown.sh}"
-SLACK_BIN="${FM_SLACK_POST_BIN:-$SCRIPT_DIR/fm-slack-post.sh}"
+MAX_TRANSIENT_ATTEMPTS=5
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
@@ -61,16 +61,63 @@ append_status() {  # <id> <line>
 }
 
 mark_once() {  # <id> <kind> <detail>
-  local path
+  local path existing_kind
   path=$(sidecar "$1")
-  [ -e "$path" ] && return 0
+  if [ -e "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] || return 0
+    IFS=$'\t' read -r existing_kind _ < "$path" || return 0
+    [ "$existing_kind" = retry ] || return 0
+  fi
   printf '%s\t%s\n' "$2" "$3" > "$path"
 }
 
 already_marked() {  # <id>
-  local path
+  local path kind
   path=$(sidecar "$1")
-  [ -f "$path" ] && [ ! -L "$path" ]
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  IFS=$'\t' read -r kind _ < "$path" || return 0
+  [ "$kind" != retry ]
+}
+
+clear_retry_mark() {  # <id>
+  local path kind
+  path=$(sidecar "$1")
+  [ -f "$path" ] && [ ! -L "$path" ] || return 0
+  IFS=$'\t' read -r kind _ < "$path" || return 0
+  [ "$kind" != retry ] || rm -f "$path"
+}
+
+retry_or_park() {  # <id> <reason> <detail>
+  local id=$1 reason=$2 detail=$3 path kind='' count=0
+  path=$(sidecar "$id")
+  if [ -f "$path" ] && [ ! -L "$path" ]; then
+    IFS=$'\t' read -r kind count _ < "$path" || true
+    [ "$kind" = retry ] || count=0
+    case "$count" in ''|*[!0-9]*) count=$((MAX_TRANSIENT_ATTEMPTS - 1)) ;; esac
+  fi
+  count=$((count + 1))
+  if [ "$count" -ge "$MAX_TRANSIENT_ATTEMPTS" ]; then
+    printf 'refused\ttransient-exhausted reason=%s attempts=%s: %s\n' \
+      "$reason" "$count" "$detail" > "$path"
+    append_status "$id" \
+      "note: automatic retirement refused: $reason exhausted after $count attempts: $detail"
+    printf 'refused: %s (transient %s exhausted after %s attempts)\n' "$id" "$reason" "$count"
+  else
+    printf 'retry\t%s\t%s\n' "$count" "$reason" > "$path"
+    printf 'refused: %s (transient %s attempt %s/%s)\n' \
+      "$id" "$reason" "$count" "$MAX_TRANSIENT_ATTEMPTS"
+  fi
+}
+
+transient_refusal_reason() {  # <teardown-output>
+  case "$1" in
+    *"slot allocation or return is in progress"*) printf 'slot-allocation-or-return-in-progress\n' ;;
+    *"presentation lock is held"*|*"presentation lock held"*|*"presentation lock is contended"*)
+      printf 'presentation-lock-held\n'
+      ;;
+    *"endpoint is busy"*|*"endpoint busy"*) printf 'endpoint-busy\n' ;;
+    *) return 1 ;;
+  esac
 }
 
 # ponytail: size+mtime, content hash if same-second same-size rewrite matters
@@ -149,18 +196,21 @@ preserve_ship_debrief() {  # <id> <meta>
 }
 
 retire_one() {  # <id> <reason>
-  local id=$1 reason=$2 out rc
+  local id=$1 reason=$2 out transient_reason
   if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_TEARDOWN_GUARD_DONE=1 "$TEARDOWN_BIN" "$id" 2>&1); then
-    "$SLACK_BIN" message "retired $id ($reason)" >/dev/null 2>&1 || true
+    clear_retry_mark "$id"
     printf 'retired: %s (%s)\n' "$id" "$reason"
     return 0
   fi
-  rc=$?
   out=$(printf '%s\n' "$out" | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g;s/^ //;s/ $//' | cut -c1-240)
-  append_status "$id" "note: automatic retirement refused: $out"
-  mark_once "$id" refused "$out"
-  printf 'refused: %s\n' "$id"
+  if transient_reason=$(transient_refusal_reason "$out"); then
+    retry_or_park "$id" "$transient_reason" "$out"
+  else
+    append_status "$id" "note: automatic retirement refused: $out"
+    mark_once "$id" refused "$out"
+    printf 'refused: %s\n' "$id"
+  fi
   return 0
 }
 
@@ -179,7 +229,8 @@ for meta in "$STATE"/*.meta; do
       if preserve_ship_debrief "$id" "$meta"; then
         retire_one "$id" "merged PR"
       else
-        printf 'refused: %s (debrief-missing)\n' "$id"
+        retry_or_park "$id" debrief-missing \
+          "worktree debrief is absent, empty, or unreadable"
       fi
       ;;
     scout) retire_one "$id" "done scout with report" ;;
