@@ -201,6 +201,7 @@ const armClose = new WeakMap<ChildProcess, Promise<void>>();
 // of the successor and never earns a deferred retry while delivery is active.
 const armRetired = new WeakSet<ChildProcess>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
+const armWatcherPid = new WeakMap<ChildProcess, string>();
 const armPendingActionable = new WeakMap<ChildProcess, PendingActionableClose>();
 const armVerified = new WeakSet<ChildProcess>();
 
@@ -652,12 +653,15 @@ export default function (pi: ExtensionAPI) {
     if (!generationIsLive(owner)) return false;
     const restorationChild = restoration.armChild;
     const restorationChildPid = String(restorationChild?.pid ?? "");
+    const restorationWatcherPid = restorationChild ? armWatcherPid.get(restorationChild) : undefined;
     if (
       !repairFailed &&
       (!restorationChild ||
         owner.child !== restorationChild ||
         !restorationChildPid ||
-        !pidAlive(restorationChildPid))
+        !pidAlive(restorationChildPid) ||
+        !restorationWatcherPid ||
+        !pidAlive(restorationWatcherPid))
     ) {
       return await sendWake(
         owner,
@@ -1097,6 +1101,9 @@ export default function (pi: ExtensionAPI) {
     };
     const observeEstablishedArm = (): void => {
       const combined = `${stdout}\n${stderr}`;
+      for (const established of combined.matchAll(/^watcher: (?:started|attached) pid=([0-9]+)\b.*$/gm)) {
+        armWatcherPid.set(armChild, established[1]);
+      }
       const recovery = combined.match(/^watcher: started pid=([0-9]+).* recovery-generation=([A-Za-z0-9._-]+)$/m);
       if (recovery) armRecovery.set(armChild, { watcherPid: recovery[1], generation: recovery[2] });
       if (/^watcher: (?:started|attached)\b/m.test(combined)) {

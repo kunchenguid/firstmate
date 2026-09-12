@@ -697,7 +697,7 @@ fi
 printf '%s\n' "$$" > "${FM_LIVE_FILE:?}"
 cleanup() { rm -f "$FM_LIVE_FILE"; }
 trap 'cleanup; exit 0' TERM INT
-printf 'watcher: started pid=%s (beacon fresh) recovery-generation=manual-repair\n' "$$"
+printf 'watcher: attached pid=%s (beacon 0s)\n' "$$"
 printf 'ready=%s\n' "$$" >> "$FM_ARM_LOG"
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 cleanup
@@ -803,10 +803,10 @@ if (offers.join("") !== "A") throw new Error(`wake B escaped serialization: ${of
 settlements.A.resolve();
 await waitFor(() => offers.join("") === "AB", "wake B branch offer after manual repair");
 settlements.B.resolve();
-await waitFor(() => confirmRows().length === 2, "handling confirmations");
+await waitFor(() => confirmRows().length === 1, "handling confirmation");
 await new Promise((resolve) => setTimeout(resolve, 100));
 if (offers.join("") !== "AB") throw new Error(`actionable wakes were not delivered exactly once: ${offers.join(",")}`);
-if (confirmRows().length !== 2) throw new Error(`handling confirmation duplicated: ${confirmRows().join(" | ")}`);
+if (confirmRows().length !== 1) throw new Error(`handling confirmation duplicated: ${confirmRows().join(" | ")}`);
 if (prompts.length !== 0) throw new Error(`stale failure routed a repaired wake to main: ${prompts.join(" | ")}`);
 if (armRows().length !== 5) throw new Error(`manual repair created extra arm work: ${armRows().join(" | ")}`);
 const liveArmPids = armRows()
@@ -2915,11 +2915,13 @@ EOF
 # the end of that delivery rather than skipped, or the live generation is left
 # with no watcher and no retry.
 test_pi_successor_failure_during_delivery_is_retried_after_delivery() {
-  local repo home plugin log trigger stop live out status
+  local repo home plugin log trigger dead_window wrapper_release stop live out status
   repo="$TMP_ROOT/pi-successor-dies-mid-delivery-root"
   home="$TMP_ROOT/pi-successor-dies-mid-delivery-home"
   log="$TMP_ROOT/pi-successor-dies-mid-delivery.log"
   trigger="$TMP_ROOT/pi-successor-dies-mid-delivery.trigger"
+  dead_window="$TMP_ROOT/pi-successor-dies-mid-delivery.dead-window"
+  wrapper_release="$TMP_ROOT/pi-successor-dies-mid-delivery.wrapper-release"
   stop="$TMP_ROOT/pi-successor-dies-mid-delivery.stop"
   live="$TMP_ROOT/pi-successor-dies-mid-delivery.live"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
@@ -2933,21 +2935,28 @@ if [ "${1:-}" = --handling-delivered ]; then
 fi
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
-printf 'watcher: started pid=%s (beacon fresh) recovery-generation=shared-generation\n' "$$"
 if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=shared-generation\n' "$$"
   printf 'signal: wake A before the successor dies\n'
   exit 0
 fi
 if [ "$count" -eq 2 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=shared-generation\n' "$$"
   while [ ! -e "$FM_TRIGGER_FILE" ]; do sleep 0.02; done
   printf 'signal: wake B behind the dying successor\n'
   exit 0
 fi
 if [ "$count" -eq 3 ]; then
-  sleep 0.1
+  sleep 0.1 &
+  watcher=$!
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=shared-generation\n' "$watcher"
+  wait "$watcher"
+  printf 'wrapper=%s watcher=%s\n' "$$" "$watcher" > "$FM_DEAD_WINDOW_FILE"
+  while [ ! -e "$FM_WRAPPER_RELEASE_FILE" ]; do sleep 0.02; done
   printf 'watcher: FAILED - successor lost its beacon\n'
   exit 3
 fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=shared-generation\n' "$$"
 printf '%s\n' "$$" > "$FM_LIVE_FILE"
 cleanup() { rm -f "$FM_LIVE_FILE"; }
 trap cleanup EXIT
@@ -2956,7 +2965,8 @@ while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
-    FM_TRIGGER_FILE="$trigger" FM_STOP_FILE="$stop" FM_LIVE_FILE="$live" \
+    FM_TRIGGER_FILE="$trigger" FM_DEAD_WINDOW_FILE="$dead_window" FM_WRAPPER_RELEASE_FILE="$wrapper_release" \
+    FM_STOP_FILE="$stop" FM_LIVE_FILE="$live" \
     FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 \
     node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -3021,11 +3031,18 @@ await waitFor(() => offers.length === 1, "branch accepted wake A behind a verifi
 if (arms() !== 2) throw new Error(`expected the verified successor before delivery, got ${arms()} arms`);
 writeFileSync(process.env.FM_TRIGGER_FILE, "close B\n");
 await waitFor(() => arms() === 3, "successor C behind wake B");
-await new Promise((resolve) => setTimeout(resolve, 250));
+await waitFor(() => existsSync(process.env.FM_DEAD_WINDOW_FILE), "live wrapper after successor C watcher exit");
+const deadWindow = readFileSync(process.env.FM_DEAD_WINDOW_FILE, "utf8").trim();
+const wrapperPid = deadWindow.match(/wrapper=([0-9]+)/)?.[1] ?? "";
+const deadWatcherPid = deadWindow.match(/watcher=([0-9]+)/)?.[1] ?? "";
+if (!wrapperPid || !pidAlive(wrapperPid)) throw new Error(`arm wrapper did not remain live: ${deadWindow}`);
+if (!deadWatcherPid || pidAlive(deadWatcherPid)) throw new Error(`watcher did not exit beneath its live wrapper: ${deadWindow}`);
 if (arms() !== 3) throw new Error(`a retry launched while wake A delivery was still in flight: ${arms()} arms`);
 if (offers.length !== 1) throw new Error(`wake B escaped serialization before wake A settled: ${offers.length} offers`);
 releaseBranch();
 await waitFor(() => prompts.length === 1, "wake B main fallback after successor C died");
+if (!pidAlive(wrapperPid)) throw new Error("arm wrapper exited before the dead-watcher fallback");
+writeFileSync(process.env.FM_WRAPPER_RELEASE_FILE, "release wrapper\n");
 await waitFor(() => arms() === 4 && existsSync(process.env.FM_LIVE_FILE), "a retry watcher after the delivery settled");
 await new Promise((resolve) => setTimeout(resolve, 150));
 if (offers.length !== 1) throw new Error(`dead successor reused generation confirmation for wake B: ${offers.length} offers`);
