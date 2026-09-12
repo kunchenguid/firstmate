@@ -22,7 +22,8 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "PRIMARY_RESOURCE: not armed - <concrete reason>".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
 #          a purely local fast-forward with no origin fetch; a remote route hands
@@ -1614,6 +1615,17 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
+  # Primary-resource protection: arm the standing check in the locked main-home
+  # path only. Secondmate homes and detect-only sessions never arm it. Arm
+  # failures stay non-fatal for bootstrap exit but emit one actionable line.
+  if local_phase \
+    && [ ! -e "$FM_HOME/.fm-secondmate-home" ] \
+    && [ ! -L "$FM_HOME/.fm-secondmate-home" ] \
+    && [ -x "$SCRIPT_DIR/fm-primary-resource.sh" ]; then
+    if ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-primary-resource.sh" arm >/dev/null; then
+      echo "PRIMARY_RESOURCE: not armed - arm failed (python3/check-register/state path); automatic main-session resource protection is off"
+    fi
+  fi
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"

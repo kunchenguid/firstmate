@@ -164,6 +164,14 @@ fi
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# Best-effort primary-resource binding observe. Must never change this guard's
+# exit status or output: failures are swallowed, and the already-read PAYLOAD is
+# reused so observe does not re-read stdin.
+# shellcheck disable=SC2091
+if [ -x "$SCRIPT_DIR/fm-primary-resource.sh" ]; then
+  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-primary-resource.sh" observe >/dev/null 2>&1 || true
+fi
+
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
