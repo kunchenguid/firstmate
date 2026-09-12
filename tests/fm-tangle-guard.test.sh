@@ -217,15 +217,15 @@ SH
   assert_absent "$home/state/abort-project-gg7.meta" "aborted spawn must not record meta"
   assert_absent "$sent" "a refused spawning-project lease must send nothing to the pane"
 
-  # Proceed: the pane resolves to a genuine, isolated worktree, and the cd into
-  # it is the first thing the pane is told.
+  # Proceed: the pane resolves to a genuine, isolated worktree, and opening
+  # the nested shell in it is the first thing the pane is told.
   out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
   expect_code 0 "$status" "spawn into a genuine isolated worktree should succeed"
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "isolated worktree" "isolated spawn wrongly tripped the guard"
   assert_present "$sent" "the isolated spawn sent nothing to the pane"
-  [ "$(head -1 "$sent")" = "tmux send-keys -t firstmate:fm-ok-isolated-ff6 cd -- '$TMP_ROOT/spawn-wt' Enter" ] \
-    || fail "the cd into the leased slot was not the first line sent to the pane: $(head -1 "$sent")"
+  [ "$(head -1 "$sent")" = "tmux send-keys -t firstmate:fm-ok-isolated-ff6 ( cd -- '$TMP_ROOT/spawn-wt' && exec \"\${SHELL:-bash}\" ) Enter" ] \
+    || fail "the nested shell in the leased slot was not the first line sent to the pane: $(head -1 "$sent")"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
@@ -302,10 +302,14 @@ test_spawn_tmux_window_construction() {
   assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
-  # Bug 2 fix (b): the cd into the leased slot and the pane-arrival wait loop
-  # target the stable id.
-  assert_grep "send-keys -t @spawnwid cd -- '$wt' Enter" "$rec" \
-    "the cd into the leased slot must be sent to the stable window id"
+  # Bug 2 fix (b): the nested shell opened in the leased slot and the
+  # pane-arrival wait loop target the stable id. The nesting keeps the pane's
+  # top shell out of the slot, so teardown's slot cleanup never kills the
+  # pane's only process before the endpoint's own close.
+  assert_grep "send-keys -t @spawnwid ( cd -- '$wt' && exec \"\${SHELL:-bash}\" ) Enter" "$rec" \
+    "the nested shell in the leased slot must be sent to the stable window id"
+  assert_no_grep "send-keys -t @spawnwid cd -- '$wt' Enter" "$rec" \
+    "the pane's top shell must not be moved into the slot"
   assert_no_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
     "the pane-driven treehouse get must no longer be sent"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \

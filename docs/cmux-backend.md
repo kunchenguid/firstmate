@@ -87,7 +87,7 @@ A genuinely fresh surface returns an internal error from `read-screen` until som
 Target readiness therefore uses the structural `list-panes` response instead of a content read.
 Capture remains bounded and locally trimmed after `read-screen` becomes available.
 
-`current_directory` follows a top-level shell `cd`, which is how a spawn enters its leased Treehouse slot, but not a nested foreground subshell such as the one an interactive `treehouse get` or `treehouse enter` opens.
+`current_directory` follows a top-level shell `cd` but not a nested foreground subshell, which is how a spawn enters its leased Treehouse slot and what an interactive `treehouse get` or `treehouse enter` opens.
 Spawn-time pane-arrival detection sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
 
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through cmux's submit machinery.

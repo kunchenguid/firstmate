@@ -117,7 +117,7 @@
 #   returning a slot, so allocation cannot reuse a slot before its owner record
 #   is published. Under that lock firstmate itself leases the slot durably with
 #   `treehouse get --lease --lease-holder <task-id>`, run from the project, and
-#   only then tells the task pane to `cd` into it; Treehouse's own persistent
+#   only then has the task pane open a nested shell in it; Treehouse's own persistent
 #   state is the one record of which task holds a slot, and bin/fm-wake-lib.sh
 #   owns that lease contract while bin/fm-teardown.sh owns the holder-checked
 #   return. A slot that cannot be leased, or whose leased path fails the
@@ -1088,8 +1088,9 @@ spawn_abort_cleanup() {
   # several slots under this holder) is reported with the hand-release
   # command rather than treated as "nothing leased". `treehouse return
   # --force` terminates any process still sitting in the slot, including the
-  # task pane's own shell when it had already entered the slot, so the window
-  # named by the refusal above may be gone by the time it is inspected.
+  # nested shell the task pane had already opened there; the pane's top shell
+  # stays in the project, so the window named by the refusal above survives
+  # for inspection.
   if [ "$SPAWN_LEASE_ATTEMPTED" = 1 ] \
      && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     spawn_leased_slot=${WT:-}
@@ -1105,7 +1106,7 @@ spawn_abort_cleanup() {
       SPAWN_SLOT_LEASED=0
       spawn_release_err=""
       if spawn_release_err=$(fm_treehouse_lease_release "$PROJ_ABS" "$spawn_leased_slot" "$ID" 2>&1 >/dev/null); then
-        echo "note: returned task $ID's leased Treehouse slot $spawn_leased_slot after the aborted spawn; any shell that had already entered it was terminated with it, so window $T may be gone" >&2
+        echo "note: returned task $ID's leased Treehouse slot $spawn_leased_slot after the aborted spawn; the nested shell the pane had opened there, if any, was terminated with it" >&2
       else
         spawn_release_err=${spawn_release_err//$'\n'/ }
         echo "warning: task $ID's Treehouse slot $spawn_leased_slot may still be leased to it with no task record (treehouse return refused: ${spawn_release_err:-no output}); release it by hand with: (cd '$PROJ_ABS' && treehouse return --force --if-lease-holder '$ID' '$spawn_leased_slot')" >&2
@@ -3229,8 +3230,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_SLOT_LEASED=1
   validate_spawn_worktree "treehouse get --lease" "$T"
 
-  # Move the task pane into the leased slot and wait for it to arrive: the
-  # pane's cwd read is what proves the launch below starts where the work is.
+  # Enter the leased slot in a NESTED interactive shell, the shape the
+  # pane-driven `treehouse get` gave the pane, and wait for the pane to arrive:
+  # the pane's cwd read is what proves the launch below starts where the work
+  # is. The nesting is load-bearing, not cosmetic: bin/fm-teardown.sh reaps
+  # every process still sitting in the slot and the holder-checked return
+  # terminates the rest BEFORE the endpoint's own focus-preserving close runs,
+  # so a pane whose top shell had `cd`'d into the slot lost its only process
+  # there and Herdr's last-pane cleanup moved the captain's focus (measured on
+  # CI: tests/fm-backend-herdr-presentation-e2e.test.sh's projected teardown).
+  # With the top shell left in the project, only the nested shell and the
+  # harness die in the slot, exactly as the treehouse subshell did.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -3254,7 +3264,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # why it was rejected, since telling a transient apart from a terminal
   # misconfiguration would need machinery this path does not want.
   spawn_cd_path=${WT//\'/\'\\\'\'}
-  spawn_send_text_line "$WT_TARGET" "cd -- '$spawn_cd_path'" || {
+  spawn_send_text_line "$WT_TARGET" "( cd -- '$spawn_cd_path' && exec \"\${SHELL:-bash}\" )" || {
     echo "error: could not tell task $ID's pane to enter its leased worktree '$WT'; inspect window $T" >&2
     exit 1
   }

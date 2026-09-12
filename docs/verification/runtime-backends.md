@@ -1171,7 +1171,7 @@ The Herdr refusal when a shell accepts the command but does not move is not exer
 
 Measured 2026-09-10 on macOS aarch64 against Herdr 0.9.0 (protocol 22) and Pi 0.85.1 in an isolated `fm-lab-` session (upstream issue #4115, duplicates #3639, #3487, #2908, #3545).
 
-Herdr keeps a Pi registration after the Pi process has exited to a shell when a nested interactive shell sits under the pane's top shell, the shape an interactive `treehouse get` leaves behind (and the crew shape at the time of this measurement, before spawns moved to a leased slot entered with a top-shell `cd`); a plain `/quit` directly under the top shell, and a `kill -9` of Pi, both released it on this version.
+Herdr keeps a Pi registration after the Pi process has exited to a shell when a nested interactive shell sits under the pane's top shell, the crew shape (a spawn opens a nested shell in its leased Treehouse slot, as the interactive `treehouse get` did before it); a plain `/quit` directly under the top shell, and a `kill -9` of Pi, both released it on this version.
 Reproduced in the lab with a nested `zsh` under the pane shell, then `pi` with no prompt, then `/quit`:
 
 ```sh

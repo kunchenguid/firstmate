@@ -11,10 +11,10 @@
 # Worktree acquisition is unchanged by this extraction: P1 scopes only the
 # session provider, not the worktree provider. fm-spawn.sh leases the slot
 # itself (`treehouse get --lease --lease-holder <task-id>`, run from the
-# project), sends the pane a top-shell `cd` into the leased path with the
-# send primitive here, and polls the current-path primitive until two
-# consecutive reads agree the pane has arrived; bin/fm-wake-lib.sh owns the
-# lease contract.
+# project), has the pane open a nested interactive shell in the leased path
+# with the send primitive here, and polls the current-path primitive until
+# two consecutive reads agree the pane has arrived; bin/fm-wake-lib.sh owns
+# the lease contract.
 #
 # The verified composer/busy-detection and verify-and-retry-submit primitives
 # already live in bin/fm-tmux-lib.sh, shared with the away-mode daemon

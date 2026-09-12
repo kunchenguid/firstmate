@@ -25,10 +25,11 @@
 #      interactive pane-driven `treehouse get` reads available the moment its
 #      process is gone, so the next lease is handed that same slot.
 #   3. A real spawn leases its slot under the task id and lands the pane in
-#      that slot and not in the project; a relaunch reuses that same leased
+#      that slot and not in the project, through a nested shell that leaves
+#      the pane's top shell in the project; a relaunch reuses that same leased
 #      slot; a second spawn while the first task's window is already gone gets
 #      a different slot; and a real teardown returns the slot with the holder
-#      check.
+#      check, reaping only the nested shell and never the pane's top shell.
 #   4. The reassigned record: a task whose recorded slot is now leased to
 #      another task cannot relaunch into it, and its teardown finishes only its
 #      own cleanup, leaving the other task's lease, copy, and worker untouched.
@@ -122,6 +123,18 @@ run_teardown() {  # <lab> <id> [--force]
 meta_worktree() { grep '^worktree=' "$1/home/state/$2.meta" | cut -d= -f2-; }
 pane_path() { "$REAL_TMUX" -L "$SOCKET" display-message -p -t "firstmate:fm-$1" '#{pane_current_path}' 2>/dev/null || true; }
 window_exists() { "$REAL_TMUX" -L "$SOCKET" list-windows -t firstmate -F '#{window_name}' 2>/dev/null | grep -Fqx "fm-$1"; }
+pane_harness_pid() {  # <task> ; the codex stand-in under the pane's nested shell
+  local top nested pid
+  top=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "firstmate:fm-$1" '#{pane_pid}' 2>/dev/null) || return 1
+  for nested in $(pgrep -P "$top" 2>/dev/null); do
+    for pid in $(pgrep -P "$nested" 2>/dev/null); do
+      [ "$(ps -o comm= -p "$pid" 2>/dev/null | sed 's#.*/##')" = codex ] || continue
+      printf '%s\n' "$pid"
+      return 0
+    done
+  done
+  return 1
+}
 lease_holder_of() {  # <lab> <slot> ; Treehouse's own holder label, or empty
   ( cd "$1/project" && "$REAL_TREEHOUSE" status --json 2>/dev/null ) \
     | node -e '
@@ -249,7 +262,7 @@ SH
 
 # --- 3. Real spawn and teardown honour the lease -----------------------------
 test_spawn_leases_and_teardown_returns_with_holder_check() {
-  local lab wt1 wt2 out agent_pid
+  local lab wt1 wt2 out agent_pid top_pid top_cwd
   lab=$(make_lab spawn-teardown 3)
   brief_for "$lab" t1
   brief_for "$lab" t2
@@ -272,8 +285,13 @@ test_spawn_leases_and_teardown_returns_with_holder_check() {
 
   # The agent exits and is relaunched: the relaunch reads the slot's lease,
   # finds it t1's own, and puts the replacement agent back into that slot.
-  agent_pid=$("$REAL_TMUX" -L "$SOCKET" list-panes -t firstmate:fm-t1 -F '#{pane_pid}')
-  pkill -TERM -P "$agent_pid" 2>/dev/null || true
+  # The harness runs under the nested shell the spawn opened in the slot, so
+  # it is the pane top shell's grandchild; the nested shell itself is an
+  # interactive shell that ignores TERM, which is the point of stopping the
+  # harness rather than the shell.
+  agent_pid=$(pane_harness_pid t1)
+  [ -n "$agent_pid" ] || fail "could not find t1's harness process under its pane"
+  kill -TERM "$agent_pid" 2>/dev/null || true
   wait_for_state "firstmate:fm-t1" dead
   : > "$TREEHOUSE_LOG"
   out=$(run_relaunch "$lab" t1) || fail "relaunch of t1 into its own leased slot failed: $out"
@@ -297,6 +315,20 @@ test_spawn_leases_and_teardown_returns_with_holder_check() {
   [ -n "$wt2" ] && [ "$wt2" != "$wt1" ] || fail "t2 was handed t1's leased slot $wt1"
   [ "$(lease_holder_of "$lab" "$wt2")" = t2 ] || fail "Treehouse does not record t2 as the holder of $wt2"
 
+  # t2's pane has the shape every spawned pane has: a top shell still in the
+  # project with a nested shell in the slot. Teardown's slot cleanup (the
+  # process reap and the holder-checked return) must only ever take the nested
+  # shell and the harness, never the pane's top shell - a pane that loses its
+  # only process closes on its own before the endpoint's focus-preserving
+  # close runs, which is the Herdr focus drift measured on CI.
+  top_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t firstmate:fm-t2 '#{pane_pid}')
+  [ "$(cd "$(pane_path t2)" && pwd -P)" = "$(cd "$wt2" && pwd -P)" ] \
+    || fail "t2's pane foreground is not in its leased slot"
+  top_cwd=$(lsof -a -p "$top_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+  [ -n "$top_cwd" ] || fail "could not read t2's top shell cwd (pid $top_pid)"
+  [ "$(cd "$top_cwd" && pwd -P)" = "$(cd "$lab/project" && pwd -P)" ] \
+    || fail "t2's top shell left the project for '$top_cwd'; the slot must be entered by a nested shell"
+
   # t1's teardown returns its own slot with the holder check; t2 is untouched.
   : > "$TREEHOUSE_LOG"
   out=$(run_teardown "$lab" t1 --force) || fail "teardown of t1 failed: $out"
@@ -309,6 +341,9 @@ test_spawn_leases_and_teardown_returns_with_holder_check() {
 
   out=$(run_teardown "$lab" t2 --force) || fail "teardown of t2 failed: $out"
   [ "$(slot_status_of "$lab" "$wt2")" = available ] || fail "t2's slot is not available after teardown"
+  case " $(printf '%s\n' "$out" | sed -n 's/^teardown: reaping leaked worktree process(es) for t2: //p' | tr '\n' ' ') " in
+    *" $top_pid "*) fail "teardown's slot reap killed t2's top shell (pid $top_pid): $out" ;;
+  esac
   stop_session
   pass "a real spawn leases its slot under the task id and lands there, a dead worker keeps its slot, and teardown returns with the holder check"
 }
