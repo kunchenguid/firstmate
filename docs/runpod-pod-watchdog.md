@@ -47,6 +47,12 @@ The anchor a watch observes is stored beside the pod id it belongs to, at `state
 That is what makes the guarantee hold even when the pod's runtime restarts: a restarted pod reports fresh `uptimeInSeconds`, so a re-derived anchor would hand the run its whole ceiling again on top of everything already burned.
 Arming a **different** pod discards the stored anchor and takes a fresh one, which is the only thing it could take.
 
+A carried anchor is refused when it is **stale** - when the ceiling derived from it already fell due before this watch even began.
+That is what a stop-and-resume looks like from outside: RunPod keeps the id and the volume, releases the GPU, and the meter is off for the gap, so an anchor from before the stop describes hours the pod was not billing for.
+`uptimeInSeconds` cannot tell that apart from a container restart after the fact, so the watchdog does not guess.
+It reports the anchor as `stale`, alarms that the ceiling is not in force, and keeps polling against the declared deadline alone - it never terminates on its first poll because of an anchor it carried in.
+The run is still bounded, by the weaker guard rather than by the wrong one: under-enforcement costs money, while over-enforcement destroys the work **and** the money already spent on it.
+
 ## Checking and retiring
 
 ```
@@ -54,12 +60,13 @@ bin/fm-runpod-watchdog.sh status [--task <id>]
 bin/fm-runpod-watchdog.sh disarm --task <id>
 ```
 
-`status` prints the instant actually in force, whether it came from the declared deadline or the ceiling, and the **anchor** that instant rests on: `pod-start` once the running loop has read the pod's start instant, `unknown` when the pod is there but its start instant is not readable, `none` when no ceiling was declared, and `unresolved` when no loop has reported yet.
+`status` prints the instant actually in force, whether it came from the declared deadline or the ceiling, and the **anchor** that instant rests on: `pod-start` once the running loop has read the pod's start instant, `unknown` when the pod is there but its start instant is not readable, `stale` when a carried anchor was refused because its ceiling had already fallen due, `none` when no ceiling was declared, and `unresolved` when no loop has reported yet.
+Only the **running** watch's own figures are ever printed: a re-arm keeps the stored anchor but not the instant, source, or anchor state the previous watch was enforcing, so `status` says `unresolved` until this watch has reported rather than quoting a bound nobody is applying.
 The declared deadline is always printed alongside it, so a ceiling the watchdog is not enforcing can never be mistaken for one it is.
 A record it cannot read is reported as unreadable rather than summarised, because such a watchdog will not terminate anything.
 
 `disarm` stops the process and removes the record.
-It keeps the stored pod-start anchor, because that is a fact about the pod's uptime rather than about this watch; arming a different pod is what discards it.
+It keeps the stored pod-start anchor, because that is a fact about the pod's uptime rather than about this watch; arming a different pod is what discards it, and arming the same pod again keeps only the anchor, not what the retired watch was enforcing.
 Disarm when the run has ended and the pod is already gone; there is no need to disarm a watchdog that has already finished, since it exits on its own once a pod it has seen leaves the account's pod list.
 
 ## What it will do
@@ -81,6 +88,7 @@ Everything this watchdog appends to `state/<task-id>.status` - the channel that 
 | --- | --- | --- |
 | A condition the watchdog cannot act through (API unreachable, record unreadable, credential unreadable, clock unreadable, pod never seen, ceiling unanchorable, termination unverified) | `blocked [key=runpod-watch-<task>-<condition>]: …` | opens that condition's decision |
 | That same condition clearing | `resolved [key=runpod-watch-<task>-<condition>]: …` | closes it, and lets it open again if it recurs |
+| One pod clearing a condition another pod still holds open | `blocked [key=…]: …` restating the note of a pod still affected | stays open, now describing a pod that is genuinely still affected |
 | The watch retiring - the pod leaving, a verified stop, `disarm`, a re-arm | `resolved […]` for every condition still open **except `pod-never-seen`** | closes them all but that one |
 | A verified stop | `note: … has been stopped; absence confirmed by listing the account's pods` | none; the wake drain surfaces `note:` lines without opening a decision |
 
@@ -89,6 +97,7 @@ A completed stop is reported as an event rather than a blocker on purpose: the w
 `pod-never-seen` is the one alarm retiring does not close, including on `disarm`.
 It says a rented pod may be billing under an id this watchdog was never given, and retiring the watch does not make that untrue; only an actual sighting of **that** pod closes it.
 Every alarm the watchdog records carries the pod it is about, so re-arming the task on a corrected pod id and sighting that one cannot answer for the warning raised about the first: news of one pod never closes a decision opened about another.
+Because one decision key covers the whole condition and the fold keeps only its newest note, the watchdog restates the surviving pod's own note when one of several unseen pods turns up, so the open decision always names a pod that is still genuinely missing rather than the one that has since appeared.
 If you retire such a watch after checking the account yourself, close it yourself with `resolved [key=runpod-watch-<task>-pod-never-seen]: …`.
 
 The full trail, including every termination attempt and verification result, is `state/<task-id>.runpod-watch.log`.

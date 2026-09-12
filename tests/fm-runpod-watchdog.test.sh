@@ -39,6 +39,7 @@ new_home() {
 #   api/uptime         runtime.uptimeInSeconds reported for every listed pod
 #   api/uptime.null    present => pods report no runtime at all
 #   api/vanish-after   drop api/vanish-pod from the list after this many reads
+#   api/appear-after   add api/appear-pod to the list after this many reads
 #   api/terminate.out  raw response body for podTerminate
 #   api/terminate.keep present => podTerminate does NOT remove the pod from
 #                      api/pods, simulating an accepted call that did not land
@@ -85,6 +86,10 @@ case "$query" in
     if [ -e "$API/vanish-after" ] && [ "$reads" -gt "$(cat "$API/vanish-after")" ]; then
       grep -vxF -- "$(cat "$API/vanish-pod")" "$API/pods" > "$API/pods.tmp" 2>/dev/null || :
       mv -f "$API/pods.tmp" "$API/pods"
+    fi
+    if [ -e "$API/appear-after" ] && [ "$reads" -gt "$(cat "$API/appear-after")" ]; then
+      appear=$(cat "$API/appear-pod")
+      grep -qxF -- "$appear" "$API/pods" 2>/dev/null || printf '%s\n' "$appear" >> "$API/pods"
     fi
     uptime=$(cat "$API/uptime" 2>/dev/null || echo 3600)
     {
@@ -181,6 +186,22 @@ write_record() {
 
 calls() {
   cat "$1/api/calls.log" 2>/dev/null || true
+}
+
+# Seeds the watchdog's own derived-state file - the persisted contract `status`
+# reads and `arm` carries forward - so a case can place an anchor at an instant
+# no test could reach by waiting.
+write_observed() {
+  local home=$1 task=$2 pod=$3 start=$4
+  {
+    printf 'fm-runpod-watch-observed-v1\n'
+    printf 'pod=%s\n' "$pod"
+    printf 'pod_start_epoch=%s\n' "$start"
+    printf 'anchor=pod-start\n'
+    printf 'effective_deadline_epoch=%s\n' "$(( start + 20630 ))"
+    printf 'effective_source=ceiling\n'
+    printf 'updated_epoch=%s\n' "$start"
+  } > "$home/state/$task.runpod-watch.observed"
 }
 
 open_decisions() {
@@ -347,6 +368,32 @@ OPEN=$(open_decisions "$H/state/t1.status")
 assert_contains "$OPEN" 'never seen pod pod-typo' \
   'cross-pod clear: sighting pod-beta closed the warning that a GPU may be billing under pod-typo'
 pass 'a never-sighted warning about one pod is not closed by sighting another'
+
+# --- and when one of two unseen pods turns up, the open decision names the
+# --- one that is still missing, not the one that is now fine
+H=$TMP_ROOT/never-seen-partial
+FB=$(new_home "$H")
+printf 'pod-other\n' > "$H/api/pods"
+write_record "$H" t1 "pod=pod-typo" "deadline_epoch=$(( $(date +%s) + 3600 ))"
+run_loop "$H" t1 4 "$FB" >/dev/null
+FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
+# The operator re-arms on the pod they actually requested, before RunPod lists
+# it, so a second subject opens the same condition and overwrites the note.
+printf '0\n' > "$H/api/list-reads"
+printf '2\n' > "$H/api/appear-after"
+printf 'pod-beta\n' > "$H/api/appear-pod"
+write_record "$H" t1 "pod=pod-beta" "deadline_epoch=$(( $(date +%s) + 3600 ))"
+run_loop "$H" t1 6 "$FB" >/dev/null
+assert_grep 'pod pod-beta started at' "$H/state/t1.runpod-watch.log" \
+  'partial clear: pod-beta never turned up, so this case would pass vacuously'
+assert_grep 'never seen pod pod-beta' "$H/state/t1.status" \
+  'partial clear: pod-beta never raised its own alarm, so this case would pass vacuously'
+OPEN=$(open_decisions "$H/state/t1.status")
+assert_contains "$OPEN" 'never seen pod pod-typo' \
+  'partial clear: the open decision no longer names the pod that is still unaccounted for'
+assert_not_contains "$OPEN" 'never seen pod pod-beta' \
+  'partial clear: the open decision still warns about the pod that has since turned up'
+pass 'when one unseen pod turns up, the surviving decision names the one still missing'
 
 # --- alarms carry their own decision key and cannot clobber a crewmate's
 H=$TMP_ROOT/decision-key
@@ -557,6 +604,70 @@ EFF3=$(status_deadline_epoch "$OUT")
   || fail "anchor: a different pod inherited the previous pod's anchor ($EFF3 vs $EFF)"
 FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
 pass 'a pod-start anchor survives a re-arm for the same pod and is not inherited by another'
+
+# --- a carried anchor that is already spent does NOT terminate on first sight
+H=$TMP_ROOT/anchor-stale
+FB=$(new_home "$H")
+printf 'pod-alpha\n' > "$H/api/pods"
+printf '60\n' > "$H/api/uptime"
+NOW=$(date -u +%s)
+# The pod was watched yesterday, then STOPPED on RunPod - id and volume kept,
+# GPU released, meter off - and resumed this morning. Its stored anchor is now
+# 28 hours old, so a 20 USD / 3.49 USD-hr ceiling derived from it fell due long
+# before this watch began. Enforcing it would destroy a healthy run on poll one.
+write_observed "$H" t1 pod-alpha "$(( NOW - 100000 ))"
+arm_watchdog "$H" "$FB" --task t1 --pod pod-alpha --deadline "$(( NOW + 21600 ))" \
+  --ceiling-usd 20 --rate-usd-hr 3.49 > "$H/arm.out" 2>&1 \
+  || fail "stale anchor: arm failed: $(cat "$H/arm.out" 2>/dev/null)"
+OUT=$(wait_for_anchor "$H" t1 stale) \
+  || fail "stale anchor: the watchdog never reported the anchor as stale: $OUT"
+assert_contains "$OUT" 'source=declared' \
+  'stale anchor: a ceiling derived from a spent anchor was reported as in force'
+assert_not_contains "$(calls "$H")" terminate \
+  'stale anchor: a healthy running pod was terminated on the first poll by a spent anchor'
+assert_grep 'pod-alpha' "$H/api/pods" 'stale anchor: the pod was terminated'
+assert_grep 'pod=pod-alpha' "$H/state/t1.runpod-watch" 'stale anchor: the watch retired itself'
+assert_grep 'NOT being enforced' "$H/state/t1.status" \
+  'stale anchor: firstmate was not told the ceiling is not in force'
+assert_no_grep 'has been stopped' "$H/state/t1.status" \
+  'stale anchor: a stop was reported'
+EFF=$(status_deadline_epoch "$OUT")
+[ -n "$EFF" ] || fail "stale anchor: status did not print a readable deadline: $OUT"
+[ "$EFF" -ge "$NOW" ] \
+  || fail "stale anchor: status reports an effective deadline already in the past ($EFF)"
+FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
+pass 'a carried anchor whose ceiling already fell due is refused, alarmed, and terminates nothing'
+
+# --- status never quotes the previous arm's figures
+H=$TMP_ROOT/status-rearm
+FB=$(new_home "$H")
+printf 'pod-alpha\n' > "$H/api/pods"
+printf '7200\n' > "$H/api/uptime"
+NOW=$(date -u +%s)
+arm_watchdog "$H" "$FB" --task t1 --pod pod-alpha --deadline "$(( NOW + 21600 ))" \
+  --ceiling-usd 20 --rate-usd-hr 3.49 > "$H/arm.out" 2>&1 \
+  || fail "status re-arm: arm failed: $(cat "$H/arm.out" 2>/dev/null)"
+OUT=$(wait_for_anchor "$H" t1 pod-start) \
+  || fail "status re-arm: the first watch never resolved its anchor: $OUT"
+assert_contains "$OUT" 'source=ceiling' 'status re-arm: the first watch was not enforcing its ceiling'
+OLD_EFF=$(status_deadline_epoch "$OUT")
+FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
+# The pod is no longer listed, so the re-armed watch never sights it and never
+# republishes - the case where an operator most needs `status` to be honest.
+: > "$H/api/pods"
+NEW_DEADLINE=$(( NOW + 43200 ))
+arm_watchdog "$H" "$FB" --task t1 --pod pod-alpha --deadline "$NEW_DEADLINE" \
+  > "$H/arm2.out" 2>&1 || fail "status re-arm: re-arm failed: $(cat "$H/arm2.out" 2>/dev/null)"
+OUT=$(watchdog_status "$H" --task t1)
+assert_contains "$OUT" 'source=declared' \
+  "status re-arm: status quoted the previous arm's ceiling as the source in force"
+assert_contains "$OUT" 'anchor=unresolved' \
+  "status re-arm: status quoted the previous arm's anchor"
+EFF=$(status_deadline_epoch "$OUT")
+[ "$EFF" = "$NEW_DEADLINE" ] \
+  || fail "status re-arm: status reports $EFF, not this arm's declared deadline $NEW_DEADLINE (previous arm's was $OLD_EFF)"
+FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
+pass "status never reports an instant, source, or anchor from a previous arm"
 
 # --- a ceiling whose anchor cannot be read is NOT enforced, and says so
 H=$TMP_ROOT/ceiling-unanchored

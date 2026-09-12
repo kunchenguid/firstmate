@@ -46,7 +46,11 @@
 # take a fresh anchor, which is the only thing it could take. When the start
 # instant cannot be read the ceiling is not enforced at all and says so: the
 # declared deadline still is, and an unreadable anchor alarms rather than being
-# guessed from a local clock.
+# guessed from a local clock. A CARRIED anchor that would put the ceiling behind
+# the moment this watch began is refused for the same reason and reported as
+# stale: the pod is running now, so that anchor describes a stopped interval it
+# was not billing for, and enforcing it would terminate a healthy run on the
+# first poll.
 #
 # FAIL TOWARD NOT KILLING.
 # Terminating a healthy run destroys work and money already spent, so every
@@ -342,16 +346,42 @@ notify() {
 }
 
 # The alarm ledger. One row per open condition, as
-# "<condition>\t<epoch>\t<subject>", where the subject names the thing the alarm
-# is ABOUT - the pod id, for a condition that is about a pod. Binding the row to
-# its subject is what stops a later sighting of a DIFFERENT pod from answering
-# for it: a warning raised about pod A must outlive any amount of news about
-# pod B. Conditions that are about the task rather than a pod carry no subject.
+# "<condition>\t<epoch>\t<subject>\t<note>", where the subject names the thing
+# the alarm is ABOUT - the pod id, for a condition that is about a pod. Binding
+# the row to its subject is what stops a later sighting of a DIFFERENT pod from
+# answering for it: a warning raised about pod A must outlive any amount of news
+# about pod B. Conditions that are about the task rather than a pod carry no
+# subject. The note is the line that was published, kept so a row that is still
+# true can be restated verbatim.
+#
+# Rows are split on tabs by hand rather than by `read`, because tab is IFS
+# whitespace: `read` would collapse the two tabs around an empty subject into
+# one and shift every later field.
+LEDGER_C='' LEDGER_T='' LEDGER_S='' LEDGER_N=''
+ledger_parse() {  # <row> -> LEDGER_C/T/S/N
+  local row=$1 tab rest
+  tab=$(printf '\t')
+  LEDGER_C=${row%%"$tab"*} LEDGER_T='' LEDGER_S='' LEDGER_N=''
+  rest=${row#*"$tab"}
+  [ "$rest" != "$row" ] || return 0
+  LEDGER_T=${rest%%"$tab"*} row=$rest rest=${rest#*"$tab"}
+  [ "$rest" != "$row" ] || return 0
+  LEDGER_S=${rest%%"$tab"*} row=$rest rest=${rest#*"$tab"}
+  [ "$rest" != "$row" ] || return 0
+  LEDGER_N=$rest
+}
+
+ledger_row() {  # <condition> <epoch> <subject> <note>
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"
+}
+
 ledger_last() {  # <ledger> <condition> <subject> -> newest matching epoch
-  local ledger=$1 condition=$2 subject=$3 c t s last=''
+  local ledger=$1 condition=$2 subject=$3 row last=''
   [ -f "$ledger" ] || return 1
-  while IFS="$(printf '\t')" read -r c t s || [ -n "$c" ]; do
-    if [ "$c" = "$condition" ] && [ "${s:-}" = "$subject" ]; then last=${t:-}; fi
+  while IFS= read -r row || [ -n "$row" ]; do
+    [ -n "$row" ] || continue
+    ledger_parse "$row"
+    if [ "$LEDGER_C" = "$condition" ] && [ "$LEDGER_S" = "$subject" ]; then last=$LEDGER_T; fi
   done < "$ledger"
   printf '%s' "$last"
 }
@@ -378,28 +408,31 @@ alarm() {
     text=${text//"$KEY_SCRUB"/[redacted]}
   fi
   status_append "$task" "blocked [key=$(decision_key "$task" "$condition")]: $text"
-  printf '%s\t%s\t%s\n' "$condition" "$now" "$subject" >> "$ledger" 2>/dev/null || true
+  ledger_row "$condition" "$now" "$subject" "$text" >> "$ledger" 2>/dev/null || true
 }
 
 # An alarm this watchdog raised is an alarm this watchdog closes - but only the
 # rows for the subject that actually cleared. One decision key covers the whole
-# condition, so it closes when the LAST subject holding it open clears; while
-# another still holds it, the row goes but the decision stays open.
+# condition and the fold keeps only its newest note, so the decision closes when
+# the LAST subject holding it open clears; while another still holds it, that
+# subject's own note is restated so the open decision never describes the
+# subject that is now fine.
 clear_alarm() {
-  local task=$1 condition=$2 text=$3 subject=${4:-} ledger tmp c t s dropped=0 remaining=0
+  local task=$1 condition=$2 text=$3 subject=${4:-} ledger tmp row dropped=0 standing=''
   ledger=$(alarm_path "$task")
   [ -f "$ledger" ] || return 0
   tmp=$(mktemp "$STATE/.fm-runpod-alarms.XXXXXX" 2>/dev/null) || return 0
-  while IFS="$(printf '\t')" read -r c t s || [ -n "$c" ]; do
-    [ -n "$c" ] || continue
-    if [ "$c" = "$condition" ]; then
-      if [ "${s:-}" = "$subject" ]; then
+  while IFS= read -r row || [ -n "$row" ]; do
+    [ -n "$row" ] || continue
+    ledger_parse "$row"
+    if [ "$LEDGER_C" = "$condition" ]; then
+      if [ "$LEDGER_S" = "$subject" ]; then
         dropped=1
         continue
       fi
-      remaining=1
+      standing=$LEDGER_N
     fi
-    printf '%s\t%s\t%s\n' "$c" "${t:-}" "${s:-}" >> "$tmp" 2>/dev/null || true
+    ledger_row "$LEDGER_C" "$LEDGER_T" "$LEDGER_S" "$LEDGER_N" >> "$tmp" 2>/dev/null || true
   done < "$ledger"
   if [ "$dropped" -eq 0 ]; then
     rm -f -- "$tmp" 2>/dev/null || true
@@ -408,7 +441,11 @@ clear_alarm() {
   chmod 0600 "$tmp" 2>/dev/null || true
   mv -f -- "$tmp" "$ledger" 2>/dev/null || { rm -f -- "$tmp" 2>/dev/null || true; return 0; }
   [ -s "$ledger" ] || rm -f -- "$ledger" 2>/dev/null || true
-  [ "$remaining" -eq 0 ] || return 0
+  if [ -n "$standing" ]; then
+    log_line "$task" "cleared[$condition] $text (still open: $standing)"
+    status_append "$task" "blocked [key=$(decision_key "$task" "$condition")]: $standing"
+    return 0
+  fi
   log_line "$task" "cleared[$condition] $text"
   if [ -n "$KEY_SCRUB" ]; then
     text=${text//"$KEY_SCRUB"/[redacted]}
@@ -421,23 +458,24 @@ clear_alarm() {
 # a human could close. Closes whatever conditions are still open and drops the
 # ledger with them.
 retire_alarms() {
-  local task=$1 text=$2 ledger tmp c t s seen=''
+  local task=$1 text=$2 ledger tmp row seen=''
   ledger=$(alarm_path "$task")
   [ -f "$ledger" ] || return 0
   tmp=$(mktemp "$STATE/.fm-runpod-alarms.XXXXXX" 2>/dev/null) || return 0
-  while IFS="$(printf '\t')" read -r c t s || [ -n "$c" ]; do
-    [ -n "$c" ] || continue
+  while IFS= read -r row || [ -n "$row" ]; do
+    [ -n "$row" ] || continue
+    ledger_parse "$row"
     # The one alarm retiring never closes. It says a rented pod may be billing
     # under an id this watchdog was never given, and retiring the watch does not
     # make that untrue - only sighting THAT pod does.
-    if [ "$c" = pod-never-seen ]; then
-      printf '%s\t%s\t%s\n' "$c" "${t:-}" "${s:-}" >> "$tmp" 2>/dev/null || true
+    if [ "$LEDGER_C" = pod-never-seen ]; then
+      ledger_row "$LEDGER_C" "$LEDGER_T" "$LEDGER_S" "$LEDGER_N" >> "$tmp" 2>/dev/null || true
       continue
     fi
-    case " $seen " in *" $c "*) continue ;; esac
-    seen="$seen $c"
-    log_line "$task" "cleared[$c] $text"
-    status_append "$task" "resolved [key=$(decision_key "$task" "$c")]: $text"
+    case " $seen " in *" $LEDGER_C "*) continue ;; esac
+    seen="$seen $LEDGER_C"
+    log_line "$task" "cleared[$LEDGER_C] $text"
+    status_append "$task" "resolved [key=$(decision_key "$task" "$LEDGER_C")]: $text"
   done < "$ledger"
   chmod 0600 "$tmp" 2>/dev/null || true
   mv -f -- "$tmp" "$ledger" 2>/dev/null || { rm -f -- "$tmp" 2>/dev/null || true; return 0; }
@@ -547,7 +585,7 @@ terminate_call() {
 
 cmd_arm() {
   local task='' pod='' deadline_raw='' ceiling='' rate='' \
-    declared now record tmp seconds log_mark ceiling_note
+    declared now record tmp seconds log_mark ceiling_note carried
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --task) need_value "$#" "$1"; task=$2; shift 2 ;;
@@ -606,9 +644,16 @@ cmd_arm() {
   stop_existing "$task"
   retire_alarms "$task" "the pod watchdog for $task was re-armed; its earlier alarms are superseded"
   # Re-arming the SAME pod must not hand it a fresh anchor, or a re-arm after a
-  # runtime restart would silently buy more ceiling than the run declared.
-  observed_anchor "$task" "$pod" >/dev/null \
-    || rm -f -- "$(observed_path "$task")" 2>/dev/null || true
+  # runtime restart would silently buy more ceiling than the run declared. Only
+  # the anchor carries over: the instant, source and anchor state the LAST watch
+  # was enforcing belong to that watch, and `status` must say `unresolved` until
+  # this one has reported rather than quoting a figure nobody is enforcing.
+  carried=$(observed_anchor "$task" "$pod") || carried=''
+  if [ -n "$carried" ]; then
+    observed_write "$task" "$pod" "$carried" unresolved '' declared "$now"
+  else
+    rm -f -- "$(observed_path "$task")" 2>/dev/null || true
+  fi
   log_line "$task" "armed pod=$pod deadline=$declared ceiling_seconds=${seconds:-none}"
 
   # Own session, no controlling terminal, no shared descriptors: this is what
@@ -786,7 +831,7 @@ terminate_and_verify() {
 
 cmd_run() {
   local task='' record now present_rc effective source anchor ceiling_deadline \
-    watched_pod='' pod_start='' ever_seen=0
+    watched_pod='' pod_start='' pod_start_carried=0 ever_seen=0 loop_start
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --task) need_value "$#" "$1"; task=$2; shift 2 ;;
@@ -803,6 +848,7 @@ cmd_run() {
   # pid file honest if something signals the loop directly.
 
   record=$(record_path "$task")
+  loop_start=0
   printf '%s\n' "$$" > "$(pid_path "$task")" 2>/dev/null || true
   log_line "$task" "watchdog running pid=$$"
 
@@ -835,15 +881,19 @@ cmd_run() {
     fi
     clear_alarm "$task" clock-unreadable \
       "the pod watchdog for $task can read the clock again"
+    [ "$loop_start" -gt 0 ] || loop_start=$now
 
     # Sightings and the anchor belong to one pod id. A record that names a
     # different pod is a different watch and starts from nothing observed.
     if [ "$REC_POD" != "$watched_pod" ]; then
       watched_pod=$REC_POD
       ever_seen=0
+      pod_start_carried=0
       pod_start=$(observed_anchor "$task" "$REC_POD") || pod_start=''
-      [ -z "$pod_start" ] \
-        || log_line "$task" "pod $REC_POD anchor carried over from $(iso_utc "$pod_start")"
+      if [ -n "$pod_start" ]; then
+        pod_start_carried=1
+        log_line "$task" "pod $REC_POD anchor carried over from $(iso_utc "$pod_start")"
+      fi
     fi
 
     pod_present "$REC_POD"
@@ -904,13 +954,29 @@ cmd_run() {
     anchor=none
     if [ -n "$REC_CEILING_SECONDS" ]; then
       if [ -n "$pod_start" ]; then
-        anchor='pod-start'
-        clear_alarm "$task" ceiling-anchor-unknown \
-          "the pod watchdog for $task can read when pod $REC_POD started, so the ceiling is in force again"
         ceiling_deadline=$((pod_start + REC_CEILING_SECONDS))
-        if [ "$ceiling_deadline" -lt "$effective" ]; then
-          effective=$ceiling_deadline
-          source=ceiling
+        # A carried-over anchor cannot tell a container restart, where the pod
+        # kept billing and reuse is right, from a stop-and-resume, where it did
+        # not bill and reuse is wrong. When it would put the ceiling behind the
+        # moment this watch started, it is the second case: the pod is running
+        # now, so a deadline already in the past would terminate a healthy run
+        # on the first poll. Uptime cannot settle which happened, so this falls
+        # to the safe side - under-enforcement costs money, over-enforcement
+        # destroys the work AND the money already spent on it. The declared
+        # deadline still bounds the run; it is bounded by the weaker guard
+        # rather than by the wrong one.
+        if [ "$pod_start_carried" -eq 1 ] && [ "$ceiling_deadline" -lt "$loop_start" ]; then
+          anchor=stale
+          alarm "$task" ceiling-anchor-unknown \
+            "the pod watchdog for $task is carrying a start instant of $(iso_utc "$pod_start") for pod $REC_POD, which puts the ${REC_CEILING_USD:-declared} USD ceiling at $(iso_utc "$ceiling_deadline") - already past when this watch began, so the pod was almost certainly stopped and resumed and the anchor no longer describes what it is billing; the ceiling is NOT being enforced and only the declared deadline is"
+        else
+          anchor='pod-start'
+          clear_alarm "$task" ceiling-anchor-unknown \
+            "the pod watchdog for $task can read when pod $REC_POD started, so the ceiling is in force again"
+          if [ "$ceiling_deadline" -lt "$effective" ]; then
+            effective=$ceiling_deadline
+            source=ceiling
+          fi
         fi
       else
         anchor=unknown
