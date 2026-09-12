@@ -441,6 +441,41 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_project_instruction_reading_contract() {
+  local home id mode brief scout instruction_files
+  instruction_files="Look for \`CLAUDE.md\` and \`AGENTS.md\` at the repo root; read every one that exists."
+  home="$TMP_ROOT/project-instructions-home"
+  mkdir -p "$home/data"
+  for id_mode in "brief-instructions-no-mistakes:no-mistakes" "brief-instructions-direct-pr:direct-PR" "brief-instructions-local-only:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "**After completing only the isolation preflight above, read the project's own instructions in full and follow them before your first project command or edit.**" "$brief" \
+      "$mode brief must require reading project instructions after isolation and before commands or edits"
+    assert_grep "$instruction_files" "$brief" \
+      "$mode brief must name and require all root instruction files"
+    assert_grep "The commands needed to read those instruction files are the only commands allowed between the isolation preflight and completing this read." "$brief" \
+      "$mode brief must forbid project commands between isolation and reading instructions"
+    assert_grep "This applies to every task, including one-line fixes and comment-only changes; you are never too small a task to read them." "$brief" \
+      "$mode brief must cover trivial tasks"
+    assert_grep "append a status event describing the conflict rather than silently choosing one" "$brief" \
+      "$mode brief must route instruction conflicts to a status event"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-instructions-scout some-proj --scout >/dev/null 2>&1
+  scout="$home/data/brief-instructions-scout/brief.md"
+  assert_grep "**Before your first edit or command, read the project's own instructions in full and follow them.**" "$scout" \
+    "scout brief must require reading project instructions before editing or running commands"
+  assert_grep "$instruction_files" "$scout" \
+    "scout brief must name and require all root instruction files"
+  assert_grep "This applies to every task, including one-line fixes and comment-only changes; you are never too small a task to read them." "$scout" \
+    "scout brief must cover trivial tasks"
+  assert_grep "record the conflict in your report rather than silently choosing one" "$scout" \
+    "scout brief must route instruction conflicts into its report"
+  pass "fm-brief.sh: ship and scout briefs require reading project instructions first"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -913,6 +948,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_project_instruction_reading_contract
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

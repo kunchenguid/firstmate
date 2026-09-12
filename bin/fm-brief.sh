@@ -50,6 +50,11 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Every ship scaffold requires the worker to read each repo-root CLAUDE.md and
+# AGENTS.md immediately after its isolation preflight, before any other command
+# or edit; scouts must do so before any command or edit.
+# Instruction conflicts go to the task status for ship work or the report for a
+# scout instead of being resolved silently.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -374,6 +379,12 @@ This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
 
+**Before your first edit or command, read the project's own instructions in full and follow them.**
+Look for \`CLAUDE.md\` and \`AGENTS.md\` at the repo root; read every one that exists.
+They carry conventions no diff will teach you - required tooling, logging and redaction rules, banned commands - and violating them is how work gets sent back in review.
+This applies to every task, including one-line fixes and comment-only changes; you are never too small a task to read them.
+If the project's instructions conflict with anything below, record the conflict in your report rather than silently choosing one.
+
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
@@ -460,6 +471,13 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+
+**After completing only the isolation preflight above, read the project's own instructions in full and follow them before your first project command or edit.**
+Look for \`CLAUDE.md\` and \`AGENTS.md\` at the repo root; read every one that exists.
+The commands needed to read those instruction files are the only commands allowed between the isolation preflight and completing this read.
+They carry conventions no diff will teach you - required tooling, logging and redaction rules, banned commands - and violating them is how work gets sent back in review.
+This applies to every task, including one-line fixes and comment-only changes; you are never too small a task to read them.
+If the project's instructions conflict with anything below, append a status event describing the conflict rather than silently choosing one.
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
