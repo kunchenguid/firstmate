@@ -653,6 +653,20 @@ fm_afk_launch_start_native() {
   return "$result"
 }
 
+fm_afk_launch_continuous_owns_pid() {  # <pid>
+  local config record session pane_pid
+  config="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+  record="$FM_AFK_LAUNCH_STATE/.continuous-supervision-terminal"
+  [ -f "$config/continuous-supervision" ] && [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  IFS=$(printf '\t') read -r session _ < "$record" || return 1
+  case "$session" in ''|*[!A-Za-z0-9_.:%+-]*) return 1 ;; esac
+  command -v tmux >/dev/null 2>&1 || return 1
+  for pane_pid in $(tmux list-panes -s -t "=$session" -F '#{pane_pid}' 2>/dev/null); do
+    [ "$pane_pid" = "$1" ] && return 0
+  done
+  return 1
+}
+
 fm_afk_launch_stop() {
   local pid pid_identity current_identity result=0 read_result archived
   fm_afk_launch_record_read
@@ -669,6 +683,11 @@ fm_afk_launch_stop() {
   if daemon_lock_held_by_live_daemon; then
     pid=$(daemon_lock_pid 2>/dev/null) || return 1
     pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+    if fm_afk_launch_continuous_owns_pid "$pid"; then
+      fm_afk_launch_log "daemon pid=$pid belongs to continuous supervision; leaving it running"
+      pid=""
+      pid_identity=""
+    fi
   fi
   if [ -n "$pid" ]; then
     if ! kill -TERM "$pid" 2>/dev/null; then

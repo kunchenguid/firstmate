@@ -23,6 +23,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -758,6 +760,11 @@ if [ -n "$ACK_THROUGH" ]; then
       "$ACK_THROUGH" "$ACK_REMOVED" >&2
   fi
   exit 0
+fi
+
+if [ "$ACTOR" = main ] && PARENT_INSTRUCTION=$(fm_parent_channel_pending_instruction "$FM_HOME"); then
+  printf 'PARENT INSTRUCTION WAITING: handle it before routine wakes or refill: read %s and every later .msg in %s in numeric order, act on each, then mv each handled file to %s/handled/.\n' \
+    "$PARENT_INSTRUCTION" "${PARENT_INSTRUCTION%/*}" "${PARENT_INSTRUCTION%/*}"
 fi
 
 if [ ! -s "$FM_WAKE_QUEUE" ]; then

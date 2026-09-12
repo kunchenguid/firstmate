@@ -300,7 +300,8 @@ _event_cap_fails=0
 # away mode or continuous supervision owns this watcher, which must then behave
 # one-shot so the daemon receives every durable wake.
 afk_present() {
-  [ -e "$STATE/.afk" ] || [ -f "$CONFIG/continuous-supervision" ]
+  [ -e "$STATE/.afk" ] && return 0
+  [ -f "$CONFIG/continuous-supervision" ] && fm_afk_daemon_owns_supervision "$STATE" "$CONFIG"
 }
 
 # afk_record_present: 0 while the away-posture record exists (the captain is

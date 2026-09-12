@@ -78,8 +78,12 @@ fm_supervision_status() {
     FM_SUP_CHECKS=$((FM_SUP_CHECKS + 1))
   done
   [ -n "$config" ] || config=$(dirname "$state")/config
-  if [ -f "$config/desired-concurrency" ] && [ ! -L "$config/desired-concurrency" ]; then
-    FM_SUP_REFILL=true
+  if [ -f "$config/desired-concurrency" ] && [ ! -L "$config/desired-concurrency" ] \
+    && IFS= read -r m < "$config/desired-concurrency"; then
+    case "$m" in
+      ''|*[!0-9]*|0) ;;
+      *) [ "$m" -le 64 ] 2>/dev/null && FM_SUP_REFILL=true ;;
+    esac
   fi
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
     || [ -f "$state/x-watch.check.sh" ] \

@@ -325,6 +325,53 @@ unit_stop_ordering() {
   rm -rf "$st"
 }
 
+unit_stop_preserves_continuous_supervision_daemon() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (continuous stop)"; return 0; }
+  local st session daemon pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-continuous.XXXXXX")
+  mkdir -p "$st/state" "$st/config"
+  : > "$st/config/continuous-supervision"
+  date '+%s' > "$st/state/.afk"
+  daemon="$st/fake-daemon.sh"
+  cat > "$daemon" <<SH
+#!/usr/bin/env bash
+. "$ROOT/bin/fm-wake-lib.sh"
+lock="$st/state/.supervise-daemon.lock"
+fm_lock_try_acquire "\$lock" || exit 1
+fm_pid_identity "\$\$" > "\$lock/pid-identity"
+trap 'fm_lock_release "\$lock"; exit 0' TERM
+while :; do sleep 0.2; done
+SH
+  chmod +x "$daemon"
+  session="fm-afk-continuous-$$"
+  TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $session"
+  tmux new-session -d -s "$session" "$daemon" || { fail "continuous stop: could not start fake daemon"; rm -rf "$st"; return; }
+  printf '%s\tcap:0\n' "$session" > "$st/state/.continuous-supervision-terminal"
+  for _ in $(seq 1 40); do
+    pid=$(cat "$st/state/.supervise-daemon.lock/pid-identity" >/dev/null 2>&1 && cat "$st/state/.supervise-daemon.lock/pid" 2>/dev/null) && break
+    sleep 0.1
+  done
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null && [ ! -e "$st/state/.afk" ] \
+    && ( . "$ROOT/bin/fm-wake-lib.sh"; fm_afk_daemon_owns_supervision "$st/state" "$st/config" ); then
+    pass "stop: returning from away mode leaves the continuous-supervision daemon owning supervision"
+  else
+    fail "stop: away-mode return killed or orphaned the continuous-supervision daemon"
+  fi
+  rm -f "$st/config/continuous-supervision"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  # shellcheck disable=SC2031 # pid and session are assigned in this shell before the subshell probe.
+  if [ -n "${pid:-}" ] && ! kill -0 "$pid" 2>/dev/null; then
+    pass "stop: without the continuous opt-in the same lock holder is still stopped"
+  else
+    fail "stop: a disabled continuous opt-in still shielded the daemon"
+  fi
+  # shellcheck disable=SC2031 # session is assigned in this shell before the subshell probe.
+  tmux kill-session -t "$session" 2>/dev/null || true
+  rm -rf "$st"
+}
+
 unit_stop_rejects_reused_pid() {
   local st lock sleeper_pid
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pid-reuse.XXXXXX")
@@ -1088,6 +1135,7 @@ unit_stop_archives_the_record_last
 unit_relative_paths_are_absolute_before_daemon_launch
 unit_fresh_vs_refresh
 unit_stop_ordering
+unit_stop_preserves_continuous_supervision_daemon
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized

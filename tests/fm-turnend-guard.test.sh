@@ -177,6 +177,21 @@ test_predicate_refill_target_needs_supervision() {
   pass "fm_supervision_needed: desired concurrency stays supervised with no current workers"
 }
 
+test_predicate_invalid_refill_target_needs_nothing() {
+  local home="$TMP_ROOT/pred-refill-invalid" state="$TMP_ROOT/pred-refill-invalid/state" value
+  mkdir -p "$state" "$home/config"
+  for value in 0 65 abc '' 99999999999999999999; do
+    printf '%s\n' "$value" > "$home/config/desired-concurrency"
+    if fm_supervision_needed "$state" 300; then
+      fail "an invalid desired-concurrency target '$value' demanded supervision"
+    fi
+    [ "$FM_SUP_REFILL" = false ] || fail "an invalid target '$value' set FM_SUP_REFILL"
+  done
+  printf '64\n' > "$home/config/desired-concurrency"
+  fm_supervision_needed "$state" 300 || fail "the maximum valid target did not need supervision"
+  pass "fm_supervision_needed: an invalid desired-concurrency target the detector rejects needs no watcher"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -2266,6 +2281,7 @@ test_predicate_unregistered_check_needs_nothing
 test_predicate_task_pr_poll_is_not_a_custom_check
 test_predicate_relay_shim_is_not_a_custom_check
 test_predicate_refill_target_needs_supervision
+test_predicate_invalid_refill_target_needs_nothing
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home

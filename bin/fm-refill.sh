@@ -24,6 +24,11 @@
 # blocked records are reported but do not count as productive and cannot hide a
 # clean slot in another pool or project.
 #
+# In a secondmate home, an unacknowledged parent instruction preempts `check`:
+# it stays silent without snapshotting or advancing the dedup record, so the
+# parent inbox is handled before any refill wake and the deficit surfaces on
+# the first poll after acknowledgement.
+#
 # This command never merges, tears down, spawns, edits the backlog, or guesses a
 # task choice. The `refill-continuity` agent skill owns that guarded procedure.
 set -u
@@ -49,8 +54,10 @@ STATE_TIMEOUT="${FM_REFILL_STATE_TIMEOUT:-10}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
 
 valid_count() { case "$1" in ''|*[!0-9]*|0) return 1 ;; *) [ "$1" -le 64 ] ;; esac; }
 valid_positive() { case "$1" in ''|*[!0-9]*|0) return 1 ;; *) return 0 ;; esac; }
@@ -160,6 +167,7 @@ run_check() {
   valid_positive "$RESURFACE" || { echo 'fm-refill: invalid resurface interval' >&2; return 1; }
   valid_positive "$STATE_TIMEOUT" || { echo 'fm-refill: invalid state timeout' >&2; return 1; }
   valid_positive "$CHECK_SECS" || { echo 'fm-refill: invalid check interval' >&2; return 1; }
+  fm_parent_channel_pending_instruction "$FM_HOME" >/dev/null && return 0
   observation_fresh && return 0
   mkdir -p "$STATE" || return 1
   # Watcher checks are opportunistic. If a direct status/check already owns the
