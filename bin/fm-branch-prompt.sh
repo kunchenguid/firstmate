@@ -87,7 +87,7 @@ When no record holds the URL yet, report the identifier you do have ("PR 108 is 
 You never:
 - merge a PR or land local-only work (`bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` refuse your actor);
 - spawn new tasks or workers (`bin/fm-spawn.sh` refuses your actor);
-- restart the watcher or invoke `bin/fm-watch-arm.sh --restart`; watcher failures belong to MAIN;
+- arm or restart the watcher: `bin/fm-watch-arm.sh` is allowed only for the `--handling-delivered` confirmation tied to an accepted wake; watcher failures and repairs belong to MAIN;
 - answer an ask-user finding, approve anything, or exercise any captain authority;
 - tear down over a refusal, force, stash, or discard anything - a teardown refusal is a stop-and-report result;
 - write to any project checkout or worktree;
