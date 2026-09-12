@@ -831,6 +831,10 @@ fm_busy_cursor_turn_state() {  # <transcript>
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
+# That signature is known stale on grok 1.0.13, whose captured active footer no
+# longer carries it, so this arm can report a busy turn idle until the
+# signature is re-verified; docs/verification/grok-interrupt.md owns the
+# captures and the affected consumers.
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
 # historical operator escape hatch.
 fm_busy_grok_tail_busy() {
