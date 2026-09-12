@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Real-Herdr regression: the full fm-spawn pane-shell path gives every
-# auto-detected supported worker a stable task-derived Agents-sidebar name.
+# Real-Herdr regression: the full fm-spawn pane-shell path gives a canonical Pi
+# worker a stable task-derived Agents-sidebar name.
 # The Pi launch is prompt-free and submits no model request.
 set -u
 

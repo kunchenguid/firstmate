@@ -4073,10 +4073,10 @@ fi
 # Herdr's pane-shell launch path auto-detects supported harnesses but leaves
 # their custom agent names empty. Its Agents sidebar then substitutes a generic
 # cwd/title fragment such as "firstmate" or "new crew", making an ordinary
-# worker look like another primary or an unnamed role. Every Herdr-detected
-# harness converges here after launch, so one verified rename covers ship,
-# scout, secondmate, and relaunch paths
-# without changing the genuine primary agent outside fm-spawn.
+# worker look like another primary or an unnamed role. Only canonical non-raw
+# harnesses with verified Herdr registration enter this naming path. The shared
+# rename covers ship, scout, secondmate, and relaunch paths without changing the
+# genuine primary agent outside fm-spawn.
 if [ "$BACKEND" = herdr ] && [ "$RAW_LAUNCH" = 0 ]; then
   case "$HARNESS" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp)
