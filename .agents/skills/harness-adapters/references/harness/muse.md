@@ -1,6 +1,6 @@
 # Muse Code
 
-Verified 2026-08-05 on Muse Code 0.1.0-R708.1, build sha 427a430436.
+Unless noted otherwise, observations below were verified 2026-08-05 on Muse Code 0.1.0-R708.1, build sha 427a430436.
 The router owns Muse's task-kind boundary.
 
 ## Operating facts
@@ -26,7 +26,7 @@ The router owns Muse's task-kind boundary.
 Muse reads winning `META_API_KEY` or `${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json` written by OIDC device-code `muse login` or `muse auth set --api-key-stdin`.
 The spawn accepts the environment key only if the backend worker already has it: caller-only variables do not cross a long-lived daemon, and secrets never enter argv.
 Stored credentials are the supported fleet path.
-A Muse Code subscription attaches to the credential muse stores on `muse login`, not to a separately created API key, so a `META_API_KEY` export bills pay-as-you-go and makes muse refuse `max`.
+For `max`, use a subscription-backed stored credential; a winning non-subscription `META_API_KEY` overrides it and causes Muse to refuse the requested effort.
 It resolves non-secret `XDG_CONFIG_HOME` and `XDG_DATA_HOME` absolutely before preflight and forwarding, keeping auth and logs aligned.
 
 With neither worker-reachable credential, spawn refuses.
@@ -65,7 +65,7 @@ Inspect, never force past, that refusal.
 
 ## Maturity and primary limit
 
-Muse 0.1.0 is day-zero beta; its hourly channel poll can replace the binary and process name.
+The hourly channel poll observed on Muse 0.1.0 can replace the binary and process name.
 The captain accepted this, so Firstmate does not set `MUSE_NO_AUTO_UPDATE=1`; a fleet may set it without adapter change.
 Plugins report unavailable unless `MUSE_EXPERIMENTAL_PLUGINS=on`, so busy state uses logs.
 The compatibility dialect explicitly lacks `asyncRewake` and model reawakening; the router owns the resulting primary boundary.
