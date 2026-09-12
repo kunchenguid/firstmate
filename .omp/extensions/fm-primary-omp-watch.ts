@@ -237,8 +237,8 @@ function lockOwnership(): LockOwnership {
 }
 
 function markLoaded(): void {
-  const sessionPid = lockPid();
-  if (!sessionPid) return;
+  if (lockOwnership() === "other") return;
+  const sessionPid = lockPid() || String(process.pid);
   mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${sessionPid}\n`);
 }
@@ -511,7 +511,7 @@ export default function (pi: ExtensionAPI) {
     if (!generationIsLive(owner)) return false;
     const content = encodeFirstmateOperationalInput(
       "watcher",
-      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
+      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. After handling the drain output, proactively summarize to the captain any decision, blocker, failure, terminal outcome, or review-ready result before running the printed acknowledgement. Watcher continuity is extension-owned.`,
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {

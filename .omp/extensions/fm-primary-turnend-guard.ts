@@ -104,8 +104,8 @@ function lockOwnership(): LockOwnership {
 }
 
 function markLoaded(): void {
-  const sessionPid = sessionLockPid();
-  if (!sessionPid) return;
+  if (!existsSync(state) || lockOwnership() === "other") return;
+  const sessionPid = sessionLockPid() || String(process.pid);
   writeFileSync(marker, `${extensionVersion}\n${sessionPid}\n`);
 }
 

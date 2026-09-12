@@ -651,6 +651,24 @@ REBUILDING_SESSION_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
 print_agents_refresh_if_required "$REBUILDING_SESSION_PID"
 
 if [ "$READ_ONLY" -eq 0 ]; then
+  if [ "$PRIMARY_HARNESS" = omp ]; then
+    OMP_SESSION_PID=$(cat "$STATE/.lock")
+    for OMP_PAIR in "fm-primary-omp-watch.ts:.omp-watch-extension-loaded" "fm-primary-turnend-guard.ts:.omp-turnend-extension-loaded"; do
+      OMP_MARKER="$STATE/${OMP_PAIR#*:}"
+      [ -f "$OMP_MARKER" ] && [ ! -L "$OMP_MARKER" ] || continue
+      OMP_VERSION=$(fm_pi_extension_version "$FM_ROOT/.omp/extensions/${OMP_PAIR%%:*}") || continue
+      [ "$(sed -n '1p' "$OMP_MARKER")" = "$OMP_VERSION" ] || continue
+      OMP_LOADER_PID=$(sed -n '2p' "$OMP_MARKER")
+      for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+        case "$OMP_LOADER_PID" in ''|*[!0-9]*|0|1) break ;; esac
+        if [ "$OMP_LOADER_PID" = "$OMP_SESSION_PID" ]; then
+          printf '%s\n%s\n' "$OMP_VERSION" "$OMP_SESSION_PID" > "$OMP_MARKER"
+          break
+        fi
+        OMP_LOADER_PID=$(ps -o ppid= -p "$OMP_LOADER_PID" 2>/dev/null | tr -d '[:space:]')
+      done
+    done
+  fi
   if [ "$REEMIT" -eq 0 ]; then
     rm -f "$COMPLETION_FILE" 2>/dev/null || true
   fi
