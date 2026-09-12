@@ -424,7 +424,7 @@ Treat any `UNREAD STATUS` section as newly surfaced status that must be read thi
 Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
 After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
-A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
+A declared `paused:` event means a bounded wait expected to clear on its own, whether on an external dependency or on a long job the worker launched itself, while `blocked:` means firstmate action is needed.
 
 Handle actionable wakes as follows:
 

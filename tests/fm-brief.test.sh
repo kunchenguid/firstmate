@@ -640,8 +640,8 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost terse result reporting"
   assert_grep 'append a status line that points to that doc' "$brief" \
     "secondmate charter lost detailed document pointers"
-  assert_grep 'Report only true captain-relevant outcomes or a declared external wait' "$brief" \
-    "secondmate charter lost declared external waits"
+  assert_grep 'Report only true captain-relevant outcomes or a declared wait by appending one line' "$brief" \
+    "secondmate charter lost declared waits"
   assert_grep 'a captain decision, a real blocker, a failure, work ready for review, or work you landed' "$brief" \
     "secondmate charter lost decisions, blockers, failures, ready outcomes, or landed work"
   # Under standing merge authority nothing is ever "ready for review", so the
@@ -785,10 +785,10 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_grep 'Use `awaiting: {why}`' "$brief" \
+    assert_grep 'Use `awaiting: {what you are waiting on, rough duration}`' "$brief" \
       "$kind brief did not instruct the configured pause status"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_no_grep '`paused: {why}`' "$brief" \
+    assert_no_grep '`paused: {what you are waiting on, rough duration}`' "$brief" \
       "$kind brief still instructs the default paused status"
     assert_grep 'a blocker or wait clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"
@@ -796,6 +796,50 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
       "$kind brief did not warn that an answer-started done/working never closes a decision"
   done
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
+}
+
+# Workers must declare a pause before parking on a job they launched themselves,
+# and must bound that wait, so an idle pane behind a healthy build is not read
+# as a possible wedge and a dead job surfaces in minutes. Asserted through the
+# generated ship, scout, and charter output only.
+test_pause_covers_own_background_jobs_in_every_scaffold() {
+  local home kind id brief first
+  home="$TMP_ROOT/pause-own-jobs-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout secondmate; do
+    id="brief-pause-own-$kind"
+    case "$kind" in
+      ship) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1 ;;
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 ;;
+      secondmate) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep 'long job you launched yourself' "$brief" \
+      "$kind brief does not extend the pause verb to the worker's own background jobs"
+    assert_grep 'known external wait you expect to clear on its own' "$brief" \
+      "$kind brief dropped the external-wait case"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    case "$kind" in
+      secondmate) first='`paused:` line first' ;;
+      *) first='`paused:` line FIRST' ;;
+    esac
+    assert_grep "$first" "$brief" \
+      "$kind brief does not order the pause line before parking"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep '`working:` when you pick back up' "$brief" \
+      "$kind brief does not tell the worker to resume with working:"
+    assert_grep 'within minutes rather than parking on it indefinitely' "$brief" \
+      "$kind brief does not bound the wait"
+    assert_no_grep 'ONLY when you are deliberately idling on a' "$brief" \
+      "$kind brief still restricts the pause verb to external waits"
+  done
+
+  brief="$home/data/brief-pause-own-ship/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep 'unless a `paused:` line declares the wait' "$brief" \
+    "ship brief's nonterminal working: rule still forbids parking behind a declared pause"
+  pass "fm-brief.sh: every scaffold lets a declared, bounded pause cover the worker's own background jobs"
 }
 
 test_scout_and_secondmate_load_decision_hold_policy() {
@@ -922,6 +966,7 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_pause_covers_own_background_jobs_in_every_scaffold
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor

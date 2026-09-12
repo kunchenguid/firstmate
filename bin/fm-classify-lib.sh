@@ -77,10 +77,12 @@ unset _fm_classify_nounset
 # "working: rebased onto merged #76").
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
-# The deliberate-external-wait verb. A crew (or firstmate steering it) appends
+# The declared-wait verb. A crew (or firstmate steering it) appends
 #   paused: <reason>
-# to declare it is intentionally idling on a KNOWN external dependency - an
-# upstream release, a vendor rate-limit reset, a scheduled window. Unlike
+# to declare it is intentionally idling on a bounded wait expected to clear on
+# its own: a KNOWN external dependency (an upstream release, a vendor rate-limit
+# reset, a scheduled window) or a long job it launched itself; bin/fm-brief.sh
+# owns the crew-facing rule for declaring and bounding that wait. Unlike
 # `blocked:` (stuck, firstmate must help) an idle `paused:` pane is EXPECTED, so
 # the stale path absorbs it instead of escalating a possible wedge. It is
 # deliberately NOT in the captain-relevant set above: a pause is a "stop

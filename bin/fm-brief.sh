@@ -55,9 +55,11 @@
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
-# declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
-# "blocked:": pause for a known external wait expected to clear on its own,
-# blocked when firstmate must act.
+# declared-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
+# "blocked:": pause for a known external wait expected to clear on its own OR
+# for a long job the worker launched itself and parks on, bounded and
+# re-verified; blocked when firstmate must act. Ship and scout share the
+# PAUSED_RULE fragment; the charter states the same rule in its own prose.
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
@@ -214,6 +216,24 @@ The move IS the acknowledgement: without it firstmate rings again and eventually
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
+# The declared-wait rule shared by the ship and scout status protocols (rule 4).
+# A wait covers both an external dependency and a long job the worker started
+# itself: an undeclared idle pane reads as a possible wedge, and an unbounded
+# wait hides a job that died.
+IFS= read -r -d '' PAUSED_RULE <<EOF || true
+   Use \`$PAUSED_VERB: {what you are waiting on, rough duration}\` - distinct from \`blocked:\` - whenever
+   you deliberately idle, on a known external wait you expect to clear on its own (an upstream
+   release, a rate-limit reset, a scheduled window) OR on a long job you launched yourself (a build,
+   an embed, a validation run, a test suite, a long poll): firstmate then leaves your idle pane alone
+   and rechecks it on a long cadence instead of treating it as a possible wedge. When you know when
+   the wait clears, say so in the line with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks
+   at that time instead. If you end a turn while a job you started is still running, append the
+   \`$PAUSED_VERB:\` line FIRST and append \`working:\` when you pick back up. Bound every wait: re-verify
+   the job is still alive within minutes rather than parking on it indefinitely, so a dead job
+   surfaces fast. Use \`blocked:\` when you are stuck and need help.
+EOF
+PAUSED_RULE=${PAUSED_RULE%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -280,10 +300,11 @@ $INBOX_SECTION
 
 # Escalation to main firstmate
 Handle routine work yourself.
-Report only true captain-relevant outcomes or a declared external wait by appending one line:
+Report only true captain-relevant outcomes or a declared wait by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own, naming when it clears with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know; use \`blocked:\` when you are stuck and need firstmate to act.
+Use \`$PAUSED_VERB: {what you are waiting on, rough duration}\` (distinct from \`blocked:\`) whenever your domain deliberately idles, on a known external wait you expect to clear on its own or on a long job you launched yourself, naming when it clears with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know; use \`blocked:\` when you are stuck and need firstmate to act.
+If you end a turn while a job you started is still running, append the \`$PAUSED_VERB:\` line first and \`working:\` when you pick back up, and bound the wait by re-verifying the job is alive within minutes rather than parking on it indefinitely.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
 Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
 This is also how you return the answer to a marked from-firstmate request above.
@@ -387,12 +408,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
-   firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
-   treating it as a possible wedge. When you know when the wait clears, say so in the line with
-   \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks at that time instead.
-   Use \`blocked:\` when you are stuck and need help.
+$PAUSED_RULE
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -477,12 +493,10 @@ $RULE1
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
-   A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
-   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
-   a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
-   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the turn
+   after it unless a \`$PAUSED_VERB:\` line declares the wait; otherwise continue the same stage until
+   a defined \`done:\` gate under Definition of done.
+$PAUSED_RULE
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
