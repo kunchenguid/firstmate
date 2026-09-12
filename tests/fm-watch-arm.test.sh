@@ -19,6 +19,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+LIB="$ROOT/bin/fm-wake-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-arm-tests)
 
@@ -607,6 +608,118 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
   pass "watch-arm: restart publishes recovery before clearing a reused-pid watcher lock"
 }
 
+test_restart_clears_reused_pid_lock_recorded_under_an_equivalent_home() {
+  local dir home state fakebin armout unrelated owner alias_home
+  dir=$(make_case restart-equivalent-home-recovery)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  owner="$state/.watch.lock.owner.fixture"
+  alias_home="$dir/home-alias"
+  mkdir -p "$home/data" "$owner"
+  ln -s "$home" "$alias_home"
+
+  sleep 300 &
+  unrelated=$!
+  printf '%s\n' "$unrelated" > "$owner/pid"
+  printf '%s\n' "$alias_home" > "$owner/fm-home"
+  printf '%s\n' "$WATCH" > "$owner/watcher-path"
+  printf '%s\n' 'reused-pid-does-not-match' > "$owner/pid-identity"
+  ln -s "$owner" "$state/.watch.lock"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$armout"
+  wait_for_exit "$ARM_PID" 80 \
+    || fail "restart did not surface recovery for an equivalently spelled recorded home"
+  grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+    || fail "restart left a reused-pid lock recorded under an equivalent home spelling: $(cat "$armout")"
+  is_live_non_zombie "$unrelated" || fail "restart signaled the unrelated process whose pid was reused"
+  kill "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  pass "watch-arm: restart clears a reused-pid lock recorded under an equivalent home spelling"
+}
+
+test_restart_leaves_a_distinct_home_lock_untouched() {
+  local dir home state fakebin armout unrelated owner other_home status
+  dir=$(make_case restart-distinct-home-recovery)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  owner="$state/.watch.lock.owner.fixture"
+  other_home="$dir/other-home"
+  mkdir -p "$home/data" "$owner" "$other_home"
+
+  sleep 300 &
+  unrelated=$!
+  printf '%s\n' "$unrelated" > "$owner/pid"
+  printf '%s\n' "$other_home" > "$owner/fm-home"
+  printf '%s\n' "$WATCH" > "$owner/watcher-path"
+  printf '%s\n' 'reused-pid-does-not-match' > "$owner/pid-identity"
+  ln -s "$owner" "$state/.watch.lock"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$armout"
+  wait_for_exit "$ARM_PID" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  [ "$status" -ne 124 ] || fail "restart stayed live against a foreign home's lock"
+  [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$unrelated" ] \
+    || fail "restart cleared a watcher lock recorded for a genuinely different home"
+  [ ! -e "$state/.watcher-down" ] \
+    || fail "restart published downtime for a watcher lock it does not own"
+  is_live_non_zombie "$unrelated" || fail "restart signaled the unrelated process whose pid was reused"
+  kill "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  pass "watch-arm: restart leaves a watcher lock recorded for a distinct home untouched"
+}
+
+# A partially applied install: bin/fm-watch-arm.sh is present at its recorded
+# spelling while bin/fm-watch.sh is momentarily not. The lock still names a live
+# holder recorded under this exact home and script spelling, so restart recovery
+# must not declare it stale, remove it, or publish downtime for it.
+test_restart_leaves_a_lock_untouched_when_the_watcher_script_is_absent() {
+  local dir home state fakebin armout unrelated owner bin entry identity status
+  dir=$(make_case restart-absent-watcher-script)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  owner="$state/.watch.lock.owner.fixture"
+  bin="$dir/bin"
+  mkdir -p "$home/data" "$owner" "$bin"
+  for entry in "$ROOT"/bin/*; do
+    case "${entry##*/}" in fm-watch.sh) continue ;; esac
+    ln -s "$entry" "$bin/${entry##*/}"
+  done
+  [ -x "$bin/fm-watch-arm.sh" ] || fail "fixture install is missing the arm script"
+  [ ! -e "$bin/fm-watch.sh" ] || fail "fixture install unexpectedly provides fm-watch.sh"
+
+  sleep 300 &
+  unrelated=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$unrelated") \
+    || fail "could not identify the staged lock holder"
+  printf '%s\n' "$unrelated" > "$owner/pid"
+  printf '%s\n' "$home" > "$owner/fm-home"
+  printf '%s\n' "$bin/fm-watch.sh" > "$owner/watcher-path"
+  printf '%s\n' "$identity" > "$owner/pid-identity"
+  ln -s "$owner" "$state/.watch.lock"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$bin/fm-watch-arm.sh" --restart > "$armout" 2> "$dir/arm.err" &
+  ARM_PID=$!
+  wait_for_exit "$ARM_PID" 80
+  status=$?
+  [ "$status" -ne 124 ] || fail "restart stayed live with no watcher script to launch"
+  [ "$(cat "$owner/pid" 2>/dev/null || true)" = "$unrelated" ] \
+    || fail "restart cleared a live watcher lock because the recorded script was absent"
+  [ ! -e "$state/.watcher-down" ] \
+    || fail "restart published downtime for a lock it never proved stale"
+  is_live_non_zombie "$unrelated" || fail "restart signaled the live lock holder"
+  kill "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  pass "watch-arm: restart leaves a live lock untouched when the watcher script is absent"
+}
+
 test_markerless_legacy_queue_is_recovered_on_arm() {
   local dir home state fakebin row
   dir=$(make_case markerless-legacy-arm)
@@ -852,6 +965,9 @@ test_interrupted_handling_is_redrained_on_rearm
 test_malformed_marker_is_quarantined_once
 test_recovery_consumption_serializes_queue_publication
 test_restart_preserves_recovery_across_reused_pid_lock
+test_restart_clears_reused_pid_lock_recorded_under_an_equivalent_home
+test_restart_leaves_a_distinct_home_lock_untouched
+test_restart_leaves_a_lock_untouched_when_the_watcher_script_is_absent
 test_markerless_legacy_queue_is_recovered_on_arm
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing

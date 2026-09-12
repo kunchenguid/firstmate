@@ -13,13 +13,6 @@ WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 
-# An arm only reports its typed failure after wait_for_healthy_successor has
-# spent the whole confirmation budget, so cases that wait for that failure must
-# outlast the largest production default (30s on MSYS, 10s elsewhere - see
-# ARM_CONFIRM_DEFAULT in bin/fm-watch-arm.sh). This is a ceiling spent only when
-# an arm genuinely fails to exit; a passing case returns as soon as it does.
-ARM_FAIL_EXIT_POLLS=400
-
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
 drain_and_ack() {  # <state>
@@ -186,6 +179,230 @@ test_guard_warnings() {
   wait "$pid" 2>/dev/null || true
   [ ! -s "$err" ] || fail "guard warned with a live watcher and fresh beacon: $(cat "$err")"
   pass "guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh"
+}
+
+case_variant_path() {
+  local path=$1 parent base variant
+  parent=${path%/*}
+  base=${path##*/}
+  variant=$(printf '%s' "$base" | tr '[:lower:]' '[:upper:]')
+  [ "$variant" != "$base" ] || variant=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+  printf '%s/%s\n' "$parent" "$variant"
+}
+
+record_guard_watcher_lock() {
+  local state=$1 home=$2 watch=$3 pid=$4 identity=$5
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$watch" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+}
+
+test_guard_accepts_equivalent_home_and_script_identity() {
+  local dir state err pid identity home_case altbin output
+  dir=$(make_case equivalent-paths)
+  state="$dir/state"
+  err="$dir/guard.err"
+  home_case=$(case_variant_path "$dir")
+  if [ ! -d "$home_case" ]; then
+    pass "equivalent path identity case coverage skipped on a case-sensitive filesystem"
+  else
+    printf 'project=x\n' > "$state/task.meta"
+    touch "$state/.last-watcher-beat"
+    sleep 60 &
+    pid=$!
+    identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+      || fail "could not identify equivalent-path guard watcher"
+    record_guard_watcher_lock "$state" "$dir" "$WATCH" "$pid" "$identity"
+    FM_HOME="$home_case" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+      2> "$err" >/dev/null || fail "guard rejected an equivalent home spelling"
+    [ ! -s "$err" ] || fail "guard warned for an equivalent home spelling: $(cat "$err")"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+
+  altbin="$dir/alternate-bin"
+  mkdir "$altbin"
+  for file in "$ROOT"/bin/*.sh; do
+    ln -s "$file" "$altbin/$(basename "$file")"
+  done
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not identify equivalent-script guard watcher"
+  record_guard_watcher_lock "$state" "$dir" "$WATCH" "$pid" "$identity"
+  output=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$altbin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard rejected an equivalent watcher-script spelling"
+  [ -z "$output" ] || fail "guard warned for an equivalent watcher-script spelling: $output"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "guard accepts equivalent home and watcher-script filesystem identities independently"
+}
+
+test_guard_rejects_distinct_or_replaced_path_identity() {
+  local dir state other altbin pid identity output distinct_watch case_dir case_state case_home
+  dir=$(make_case distinct-paths)
+  state="$dir/state"
+  other=$(make_case other-home)
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+
+  sleep 10 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not identify distinct-home guard watcher"
+  record_guard_watcher_lock "$state" "$dir" "$WATCH" "$pid" "$identity"
+  output=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed on the valid home control"
+  [ -z "$output" ] || fail "guard rejected the valid home control: $output"
+  rm -f "$state/.guard-watcher-stale-banner"
+  output=$(FM_HOME="$other" FM_ROOT_OVERRIDE="$other" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed while rejecting a distinct home"
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' <<< "$output" >/dev/null \
+    || fail "guard accepted a distinct home object"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  altbin="$dir/alternate-bin"
+  mkdir "$altbin"
+  for file in "$ROOT"/bin/*.sh; do
+    ln -s "$file" "$altbin/$(basename "$file")"
+  done
+  sleep 10 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not identify distinct-script guard watcher"
+  record_guard_watcher_lock "$state" "$dir" "$WATCH" "$pid" "$identity"
+  output=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$altbin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed on the valid watcher-script control"
+  [ -z "$output" ] || fail "guard rejected the valid watcher-script control: $output"
+  distinct_watch="$dir/distinct-watch.sh"
+  cp "$WATCH" "$distinct_watch"
+  rm "$altbin/fm-watch.sh"
+  ln -s "$distinct_watch" "$altbin/fm-watch.sh"
+  rm -f "$state/.guard-watcher-stale-banner"
+  output=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$altbin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed while checking an alias repointed to another script"
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' <<< "$output" >/dev/null \
+    || fail "guard accepted an alias repointed to a distinct watcher script"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  dir=$(make_case missing-path)
+  state="$dir/state"
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  sleep 10 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not identify missing-path guard watcher"
+  record_guard_watcher_lock "$state" "$dir" "$WATCH" "$pid" "$identity"
+  output=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed on the valid missing-path control"
+  [ -z "$output" ] || fail "guard rejected the valid missing-path control: $output"
+  printf '%s\n' "$dir/missing-home" > "$state/.watch.lock/fm-home"
+  rm -f "$state/.guard-watcher-stale-banner"
+  output=$(FM_HOME="$dir/missing-home" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed while rejecting a missing home target"
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' <<< "$output" >/dev/null \
+    || fail "guard accepted a missing home target"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  case_dir=$(make_case case-distinct)
+  case_state="$case_dir/state"
+  case_home=$(case_variant_path "$case_dir")
+  if [ ! -e "$case_home" ]; then
+    mkdir "$case_home"
+    printf 'project=x\n' > "$case_state/task.meta"
+    touch "$case_state/.last-watcher-beat"
+    sleep 10 &
+    pid=$!
+    identity=$(FM_STATE_OVERRIDE="$case_state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+      || fail "could not identify case-distinct guard watcher"
+    record_guard_watcher_lock "$case_state" "$case_dir" "$WATCH" "$pid" "$identity"
+    output=$(FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$case_dir" FM_STATE_OVERRIDE="$case_state" \
+      FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+      2>&1 >/dev/null) || fail "guard failed on a case-distinct home control"
+    [ -z "$output" ] || fail "guard rejected the case-distinct home control: $output"
+    rm -f "$case_state/.guard-watcher-stale-banner"
+    output=$(FM_HOME="$case_home" FM_ROOT_OVERRIDE="$case_dir" FM_STATE_OVERRIDE="$case_state" \
+      FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+      2>&1 >/dev/null) || fail "guard failed on a case-distinct home object"
+    grep -F 'WATCHER DOWN - SUPERVISION IS OFF' <<< "$output" >/dev/null \
+      || fail "guard accepted case-distinct real home objects"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  else
+    pass "case-distinct real-object rejection skipped on a case-insensitive filesystem"
+  fi
+  pass "guard rejects distinct homes, alias repoints, and missing targets"
+}
+
+# Recorded relative spellings carry no cwd of their own: they are resolved by
+# ordinary filesystem lookup in the CHECKING process, against a fixed expected
+# target. From the cwd where they name the watcher's real home and real script
+# the lock is this watcher's; from a cwd where the same spelling names another
+# real object it is not, and each side is judged independently.
+test_guard_relative_spellings_resolve_in_the_checking_cwd() {
+  local dir state home decoy_home_cwd decoy_script_cwd pid identity output
+  dir=$(make_case relative-paths)
+  state="$dir/state"
+  home="$dir/home"
+  decoy_home_cwd="$dir/decoy-home-cwd"
+  decoy_script_cwd="$dir/decoy-script-cwd"
+  mkdir "$home" "$decoy_home_cwd" "$decoy_script_cwd"
+  # From $dir, "home" and "watcher.sh" resolve to the real home and the real
+  # watcher script. Each decoy cwd repoints exactly one of those two spellings
+  # at a different real object of the required type and leaves the other one
+  # resolving to the genuine target.
+  ln -s "$WATCH" "$dir/watcher.sh"
+  mkdir "$decoy_home_cwd/home"
+  ln -s "$WATCH" "$decoy_home_cwd/watcher.sh"
+  ln -s "$home" "$decoy_script_cwd/home"
+  cp "$WATCH" "$decoy_script_cwd/watcher.sh"
+
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not identify relative-path guard watcher"
+  record_guard_watcher_lock "$state" home watcher.sh "$pid" "$identity"
+
+  output=$(cd "$dir" && FM_HOME="$home" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed on equivalent relative spellings"
+  [ -z "$output" ] || fail "guard rejected equivalent relative spellings: $output"
+
+  rm -f "$state/.guard-watcher-stale-banner"
+  output=$(cd "$decoy_home_cwd" && FM_HOME="$home" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed while rejecting a relative home resolved elsewhere"
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' <<< "$output" >/dev/null \
+    || fail "guard accepted a relative home spelling resolving to another object"
+
+  rm -f "$state/.guard-watcher-stale-banner"
+  output=$(cd "$decoy_script_cwd" && FM_HOME="$home" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_MODEL=persistent FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" \
+    2>&1 >/dev/null) || fail "guard failed while rejecting a relative script resolved elsewhere"
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' <<< "$output" >/dev/null \
+    || fail "guard accepted a relative watcher-script spelling resolving to another object"
+
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "guard resolves relative home and watcher-script spellings in the checking cwd"
 }
 
 test_lock_single_winner_under_concurrency() {
@@ -1110,6 +1327,9 @@ test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
+test_guard_accepts_equivalent_home_and_script_identity
+test_guard_rejects_distinct_or_replaced_path_identity
+test_guard_relative_spellings_resolve_in_the_checking_cwd
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
