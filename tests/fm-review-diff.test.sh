@@ -128,7 +128,7 @@ test_local_default_ahead_of_origin_is_the_review_base() {
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
-  assert_contains "$out" 'diff base: main' \
+  assert_contains "$out" 'diff base: refs/heads/main' \
     "local-default-ahead: the local default branch should be the review base"
   assert_contains "$out" '+branch work' "local-default-ahead: the branch's own change should still show"
   assert_not_contains "$out" 'landed-locally.txt' \

@@ -2517,6 +2517,15 @@ spawn_worktree_has_origin_config() {  # <worktree>
 # A worktree with no origin configured is the one shape that rule does not
 # decide: there is no origin to be authoritative, so refs/heads/<default> is the
 # only base there, whatever this task's delivery mode.
+#
+# default_branch in bin/fm-ff-lib.sh is the single owner of which branch that is,
+# as it is for every other consumer. KNOWN LIMIT: it answers from origin/HEAD,
+# main, or master only, so an origin-less repository whose default branch carries
+# any other name is not supported by this path and the spawn refuses rather than
+# guessing. bin/fm-merge-local.sh refuses such a project at approval for the same
+# reason, so accepting one here would only launch a task that can never land. If
+# that support is ever wanted, it belongs in default_branch, where every consumer
+# gains it at once, and not here.
 freshen_spawn_worktree_base() {  # <worktree> <task-mode>
   local worktree=$1 mode=$2 default target expected status local_ref local_commit
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
@@ -2532,7 +2541,7 @@ freshen_spawn_worktree_base() {  # <worktree> <task-mode>
     return 1
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
-    default=$(default_branch "$worktree") || default=$(spawn_repository_head_branch "$worktree") || {
+    default=$(default_branch "$worktree") || {
       echo "error: could not determine the default branch for pooled worktree '$worktree', which has no origin; refusing to launch from an unverified base" >&2
       return 1
     }
@@ -2572,19 +2581,6 @@ freshen_spawn_worktree_base() {  # <worktree> <task-mode>
     expected=$local_commit
   fi
   reset_spawn_worktree_base "$worktree" "$target" "$expected"
-}
-
-# An origin-less repository's own HEAD names the branch it treats as default, and
-# it is the only authority left once the conventional main/master names are
-# absent. Read it from the COMMON git dir, so a pooled worktree's own detached
-# HEAD never answers for the repository. Tried only after default_branch, which
-# prefers the conventional names and therefore cannot be misled by a primary
-# checkout stranded on a feature branch.
-spawn_repository_head_branch() {  # <worktree>
-  local worktree=$1 common
-  common=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-  [ -n "$common" ] || return 1
-  git -C "$worktree" --git-dir="$common" symbolic-ref --quiet --short HEAD 2>/dev/null
 }
 
 # HEAD is DETACHED onto the base rather than reset in place. treehouse is an

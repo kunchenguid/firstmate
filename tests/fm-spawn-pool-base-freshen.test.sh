@@ -277,36 +277,14 @@ test_originless_pool_refreshes_to_the_local_default_branch() {
   pass "an origin-less pooled worktree refreshes to the local default branch in every delivery mode"
 }
 
-# An origin-less repository whose default branch is named something other than
-# main or master is still perfectly knowable: its own HEAD says so.
-test_originless_pool_with_an_unconventional_default_branch_refreshes() {
-  local rec id out status landed
-  id='pool-originless-unconventional-r1'
-  rec=$(make_originless_case originless-unconventional "$id")
-  read_case_record "$rec"
-  git -C "$PROJECT_DIR" branch -m main trunk
-  DEFAULT_BRANCH=trunk
-  landed=$(land_locally landed-locally.txt 'approved work that was never pushed')
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
-  status=$?
-  expect_code 0 "$status" "spawn should launch an origin-less pool whose default branch is named trunk"$'\n'"$out"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$landed" ] \
-    || fail "spawn did not refresh onto an unconventionally named default branch"
-  assert_grep 'approved work that was never pushed' "$POOL_DIR/landed-locally.txt" \
-    "the pooled worktree does not carry work landed on the unconventionally named default branch"
-  pass "an origin-less pool resolves an unconventionally named default branch from the repository's HEAD"
-}
-
 test_originless_pool_with_no_determinable_default_branch_refuses() {
   local rec id out status before
   id='pool-originless-no-default-r1'
   rec=$(make_originless_case originless-no-default "$id")
   read_case_record "$rec"
-  # No conventional name AND no symbolic HEAD to fall back on: nothing names a
-  # default branch, so the base genuinely cannot be verified.
+  # No origin and no conventional name: nothing default_branch can answer from,
+  # so the base genuinely cannot be verified.
   git -C "$PROJECT_DIR" branch -m main not-a-default
-  git -C "$PROJECT_DIR" checkout --quiet --detach
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
@@ -1052,7 +1030,6 @@ test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_originless_pool_refreshes_to_the_local_default_branch
-test_originless_pool_with_an_unconventional_default_branch_refreshes
 test_originless_pool_with_no_determinable_default_branch_refuses
 test_pool_on_a_branch_is_refreshed_without_moving_that_branch
 test_originless_dirty_pool_refuses_without_discarding_work
