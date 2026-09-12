@@ -351,6 +351,51 @@ test_matrix_omp_status_row_bounds_bare_composer() {
   pass "matrix: omp's status row bounds the bare composer's wrap region"
 }
 
+test_pi_vimmode_status_row_is_furniture() {
+  # issue #3819, reproduced: pi 0.84.4 with `pi-vimmode` loaded draws
+  # `─ INSERT 1:1 ─` inside its separated region. The pane was idle and the
+  # composer empty, yet the row scan read `pending`, so fm-send skipped the
+  # doorbell and the re-ring ladder retired the record unrung.
+  local screen typed
+  screen=$'transcript\n────────────────────────\n─ INSERT 1:1 ─\n────────────────────────\n vim footer'
+  assert_screen "pi idle behind the vimmode row" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tidle')"
+  assert_screen "pi done behind the vimmode row" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tdone')"
+  assert_screen "pi idle behind the vimmode row on tmux" empty "$CAPS_TMUX" "$screen" 2 "$(printf 'pi\tidle')"
+  # Furniture removes the row; it does not grant a LIVE pi an empty verdict.
+  assert_screen "working pi behind the vimmode row" unknown "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tworking')"
+  assert_screen "blocked pi behind the vimmode row" unknown "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tblocked')"
+  # The caret cell is only furniture parked at the origin. Anywhere else it is
+  # positive evidence the composer holds text, and it is the LAST such evidence
+  # when the draft itself is de-emphasised: ghost stripping empties the draft
+  # row, so `1:14` is all that remains to prove 13 unsent characters. Reading
+  # that `empty` would hand consumers the one verdict they overwrite input on.
+  typed=$'transcript\n────────────────────────\n'"${ESC}[2mretry the deploy${ESC}[0m"$'\n─ INSERT 1:14 ─\n────────────────────────'
+  assert_screen "pi ghosted draft betrayed by its caret" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  typed=$'transcript\n────────────────────────\n─ INSERT 12:340 ─\n────────────────────────'
+  assert_screen "pi row with a moved caret" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  # Pi's region treats every other surviving byte as input. A draft that merely
+  # OPENS and CLOSES with the rule glyph is user text, and reading it `empty`
+  # would let the doorbell overwrite an unsent steer.
+  typed=$'transcript\n────────────────────────\n─ retry the deploy ─\n────────────────────────'
+  assert_screen "rule-framed pi draft" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  typed=$'transcript\n────────────────────────\n─ INSERT the migration guard ─\n────────────────────────'
+  assert_screen "pi draft quoting a mode token" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  typed=$'────────────────────────\nfix the flaky test\n────────────────────────'
+  assert_screen "plain pi draft" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  # Only the ONE verified render is furniture. These two rows are plausible
+  # vim-status shapes that pi 0.84.4 was never observed drawing, so they stay
+  # input: a row nobody has captured is not proof of an empty composer, and
+  # deferring a ring is recoverable where overwriting a draft is not. Both
+  # assertions also pin the locale invariance - a rule glyph quantified as `─+`
+  # matches a widened rule under UTF-8 and not under LC_ALL=C (issue #1988), so
+  # the verdict would split between a UTF-8 shell and a daemon.
+  typed=$'transcript\n────────────────────────\n── INSERT 1:1 ──\n────────────────────────'
+  assert_screen "pi row with a widened rule" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  typed=$'transcript\n────────────────────────\n─ NORMAL ─\n────────────────────────'
+  assert_screen "pi row with an unobserved mode label" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  pass "pi-vimmode's verified mode row is furniture in pi's verdict; every other byte stays input"
+}
+
 test_matrix_pi_separated_needs_identity() {
   # Real idle pi: a blank row between two solid rules. The blank row alone is
   # exactly what the strict rule refuses; only structure PLUS a live
@@ -679,6 +724,7 @@ test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
+test_pi_vimmode_status_row_is_furniture
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_pi_separated_needs_identity

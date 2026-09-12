@@ -413,6 +413,34 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # never on the composer row itself.
 FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
 
+# The `pi-vimmode` extension draws a mode row INSIDE pi's separated composer
+# region. ONE render is verified: pi 0.84.4 through Herdr, composer empty and
+# pane idle, showing exactly `─ INSERT 1:1 ─` - a single rule glyph, the mode,
+# the caret parked at the origin cell, a single rule glyph. That is the row that
+# made an idle pi read `pending` and skipped its doorbell (issue #3819). It is
+# terminal furniture, not typed text, so pi's row scan skips it.
+# The pattern accepts that shape and nothing wider, because pi's row scan treats
+# EVERY other surviving byte in the region as input (even a lone prompt glyph is
+# a draft there): a wider rule-framed match would read a draft that merely opens
+# and closes with `─` as an EMPTY composer and let a doorbell overwrite unsent
+# text. Unmatched furniture only defers a ring, which the watcher retries, so
+# narrow is the fail-safe direction and other mode labels, other rule widths,
+# and a missing cursor cell stay deliberately unaccepted;
+# FM_COMPOSER_PI_STATUS_RE overrides for a pane that renders differently.
+# The caret cell is matched LITERALLY at `1:1` rather than as any `line:column`,
+# because a caret anywhere else is positive evidence the composer holds text.
+# The row scan needs no help reading a visible draft - the draft's own row
+# returns `pending` - so accepting a moved caret buys nothing and costs the one
+# case where it is the LAST evidence left: a de-emphasised draft that
+# fm_composer_strip_ghost removes leaves `─ INSERT 1:14 ─` as the only surviving
+# row, and reading that `empty` would type a doorbell over 13 unsent characters.
+# The rule glyph is matched literally and never quantified, for the same reason
+# FM_COMPOSER_OMP_STATUS_RE_DEFAULT and FM_OMP_SPINNER_FRAMES_RE use literal
+# alternation: `grep -E` compiles a quantified multibyte glyph byte-wise under a
+# non-UTF-8 locale, which is how a verdict starts differing between a UTF-8
+# shell and a LC_ALL=C daemon (issue #1988).
+FM_COMPOSER_PI_STATUS_RE_DEFAULT='^─[[:space:]]+INSERT[[:space:]]+1:1[[:space:]]+─$'
+
 # The bounded row window adapters should capture for a composer read. One
 # shared policy (previously three per-backend variables that had drifted to
 # 20/20/200): the composer is bottom-anchored, so a small tail window is
@@ -972,6 +1000,15 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_row_is_pi_status: 0 when the row is pi-vimmode's mode row
+# (FM_COMPOSER_PI_STATUS_RE_DEFAULT above) - furniture inside pi's separated
+# region. The caller passes the row's CLASSIFICATION content, never the plain
+# row, so ghost stripping has already had its say and bytes that survive styling
+# are judged as the input they are.
+_fm_composer_row_is_pi_status() {  # <row-content>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_PI_STATUS_RE:-$FM_COMPOSER_PI_STATUS_RE_DEFAULT}" sensitive
+}
+
 # _fm_composer_wrap_region_ok: 0 when every row STRICTLY BELOW <glyph-row>
 # through <cursor-row> is non-blank and carries no structural edge - the
 # contiguity proof that those rows are the bare composer's wrapped input
@@ -1383,6 +1420,12 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   fi
 }
 
+# _fm_composer_classify_pi_rows: pi's separated-region row scan. Pi's region is
+# identity-proven rather than border-proven, so unlike the box shape EVERY
+# surviving byte there is input - including a lone prompt glyph, which is a
+# real pi draft. The one exception is pi-vimmode's own mode row, which the
+# harness draws into that region and which must not defeat an idle/done
+# identity floor (issue #3819).
 _fm_composer_classify_pi_rows() {  # <screen> <styled>
   local screen=$1 styled=$2 row raw content
   row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
@@ -1390,7 +1433,7 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled>
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     fm_composer_normalize_trim_var content
-    if [ -n "$content" ]; then
+    if [ -n "$content" ] && ! _fm_composer_row_is_pi_status "$content"; then
       printf 'pending'
       return 0
     fi
