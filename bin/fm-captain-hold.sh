@@ -18,8 +18,9 @@
 # All backlog reads and mutations address the active home's configured data
 # directory the way bin/fm-backlog-transition-lib.sh does, which keeps main-home
 # and secondmate-home ownership aligned with the work that discovered the call.
-# Scalar fields quoted by `tasks-axi show` are decoded as JSON strings through
-# JSON::PP's public non-reference API; unquoted fields remain verbatim.
+# Scalar fields quoted by `tasks-axi show` are decoded through that library's
+# fm_backlog_decode_shown_scalar, which owns the rule for every backlog reader;
+# unquoted fields remain verbatim.
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
@@ -363,26 +364,10 @@ show_field() {  # <show-output> <field>
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
 }
 
-decode_shown_value() {  # <shown-field>
-  local value=$1
-  case "$value" in
-    \"*\")
-      printf '%s' "$value" | perl -MJSON::PP -e '
-        local $/;
-        my $value = JSON::PP->new->utf8->allow_nonref->decode(<STDIN>);
-        binmode STDOUT, ":raw";
-        utf8::encode($value) if utf8::is_utf8($value);
-        print $value;
-      '
-      ;;
-    *) printf '%s' "$value" ;;
-  esac
-}
-
 # Decode show-encoded scalar fields and normalize the empty marker.
 show_field_value() {  # <show-output> <field>
   local value
-  value=$(decode_shown_value "$(show_field "$1" "$2")")
+  value=$(fm_backlog_decode_shown_scalar "$(show_field "$1" "$2")")
   [ "$value" != '-' ] || value=''
   printf '%s' "$value"
 }
@@ -457,7 +442,7 @@ recorded_decision_digest() {  # <task-body>
 # How many resolution records the shown body carries, in either record format.
 resolution_record_count() {  # <task-body>
   local body
-  body=$(decode_shown_value "$1") || return 1
+  body=$(fm_backlog_decode_shown_scalar "$1") || return 1
   printf '%s\n' "$body" \
     | grep -Ec '^Resolution recorded by fm-(captain|decision)-hold\.$' || true
 }
@@ -735,7 +720,7 @@ body_hold_set_timestamp() {  # <decoded-task-body>
 
 write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existing-0-or-1>
   local id=$1 body=$2 hold_set=$3 preserve=$4 existing new_body tmp
-  body=$(decode_shown_value "$body") \
+  body=$(fm_backlog_decode_shown_scalar "$body") \
     || fail "could not decode the existing body for $id"
   existing=$(body_hold_set_timestamp "$body")
   if [ "$preserve" = 1 ] && [ -n "$existing" ]; then
@@ -863,7 +848,7 @@ command_hold() {
 write_resolution_record() {  # <task-id> <mode> <shown-body>
   local id=$1 mode=$2 body=$3 new_body tmp hold_set
   new_body=$(resolution_block "$mode")
-  body=$(decode_shown_value "$body") \
+  body=$(fm_backlog_decode_shown_scalar "$body") \
     || fail "could not decode the existing body for $id"
   hold_set=$(body_hold_set_timestamp "$body")
   if [ -n "$hold_set" ]; then
@@ -925,7 +910,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 remove_interrupted_answer_stamp() {  # <task-id>
   local id=$1 show body existing tmp
   show=$(task_show "$id") || fail "task $id disappeared after closing"
-  body=$(decode_shown_value "$(show_field "$show" body)") \
+  body=$(fm_backlog_decode_shown_scalar "$(show_field "$show" body)") \
     || fail "could not decode the closed body for $id"
   existing=$(body_hold_set_timestamp "$body")
   [ -n "$existing" ] || return 0
@@ -1522,7 +1507,7 @@ reconcile_note() {
   command_open "$id" \
     || fail "task $id is not an open captain call; a note cannot keep a closed call open"
   show=$(task_show "$id") || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
-  body=$(decode_shown_value "$(show_field "$show" body)") \
+  body=$(fm_backlog_decode_shown_scalar "$(show_field "$show" body)") \
     || fail "could not decode the existing body for $id"
   note_digest=$(sha256_text "$note")
   marker="Reconcile request: $RECONCILE_REQUESTED | $RECONCILE_SOURCE | note digest: $note_digest"
@@ -1846,7 +1831,7 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
         }
         shown_body=$(show_field "$show" body)
         printf '%s#%s\n' \
-          "$(body_hold_set_timestamp "$(decode_shown_value "$shown_body")")" \
+          "$(body_hold_set_timestamp "$(fm_backlog_decode_shown_scalar "$shown_body")")" \
           "$(resolution_record_count "$shown_body")"
       fi
       return 0

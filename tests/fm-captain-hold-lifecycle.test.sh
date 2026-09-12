@@ -591,15 +591,11 @@ case "${1:-}" in
     printf '  id: %s\n' "@ID@"
     printf '%s\n' '  state: queued' '  held: yes' '  blocked: no' \
       '  hold_kind: captain'
-    if [ -f "@HOME@/last-body" ]; then
-      printf '%s' '  body: '
-      perl -MJSON::PP -e 'local $/; print JSON::PP->new->utf8->allow_nonref->encode(<STDIN>)' < "@HOME@/last-body"
-      printf '\n'
-    else
-      printf '%s' '  body: '
-      perl -MJSON::PP -e 'local $/; print JSON::PP->new->utf8->allow_nonref->encode(<STDIN>)' < "@HOME@/initial-body"
-      printf '\n'
-    fi
+    stub_body="@HOME@/last-body"
+    [ -f "$stub_body" ] || stub_body="@HOME@/initial-body"
+    printf '%s' '  body: '
+    perl -MJSON::PP -e 'local $/; print JSON::PP->new->utf8->allow_nonref->encode(<STDIN>)' < "$stub_body"
+    printf '\n'
     ;;
   *) exit 1 ;;
 esac
@@ -611,14 +607,15 @@ SH
   PATH="$fb:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CAPTAIN_HOLD_NOW=2026-09-12T00:00:00Z \
     "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason "captain must decide" >/dev/null \
     || fail "holding on a beads-configured home failed without a markdown backlog"
   assert_grep "hold $id" "$log" \
     "the captain-hold mutation never reached the configured backend"
-  assert_grep 'First line with a quoted "route" and a literal backslash: \ before the end.' "$home/last-body" \
-    "the captain hold corrupted JSON escapes in a quoted tasks-axi scalar"
-  assert_grep 'Second line after the encoded newline.' "$home/last-body" \
-    "the captain hold corrupted a multiline quoted tasks-axi scalar"
+  assert_equals \
+    "$(printf 'Captain hold set: 2026-09-12T00:00:00Z\n\n%s' "$(cat "$home/initial-body")")" \
+    "$(cat "$home/last-body")" \
+    "the captain hold did not round-trip the escapes and line structure of a quoted tasks-axi scalar"
 
   decision="$home/captain-decision.txt"
   printf 'Ship the gold-only plan.\n' > "$decision"

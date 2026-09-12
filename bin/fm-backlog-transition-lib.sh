@@ -400,6 +400,28 @@ fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
   fi
 }
 
+# The one owner of the show-encoding rule for every backlog reader: `tasks-axi
+# show` prints a scalar field as a JSON string when it needs escaping and
+# verbatim otherwise, so decode the quoted form through JSON::PP's public
+# non-reference entry point. Bare decode_json refuses a top-level scalar on the
+# JSON::PP versions that ship with older perls. Sentinel handling belongs to the
+# caller, whose empty-value convention differs per field.
+fm_backlog_decode_shown_scalar() {  # <shown-field>
+  local value=$1
+  case "$value" in
+    \"*\")
+      printf '%s' "$value" | perl -MJSON::PP -e '
+        local $/;
+        my $value = JSON::PP->new->utf8->allow_nonref->decode(<STDIN>);
+        binmode STDOUT, ":raw";
+        utf8::encode($value) if utf8::is_utf8($value);
+        print $value;
+      '
+      ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
 fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
   local data=$1 addressing_status
   shift
@@ -532,7 +554,7 @@ fm_backlog_row_artifact_supported() {
 # fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 out command_status previous_arg=''
-  local arg deliverable='' line body new_body tmp
+  local arg deliverable='' line shown body new_body tmp
   local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
@@ -565,18 +587,12 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
       return "$command_status"
     fi
-    body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
-      | LC_ALL=C perl -MJSON::PP -e '
-        local $/;
-        my $shown = <STDIN>;
-        $shown =~ s/\s+\z//;
-        exit 0 if $shown eq "" || $shown eq "-";
-        my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
-        print $value unless $value eq "-";
-      ') || {
+    shown=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1)
+    body=$(fm_backlog_decode_shown_scalar "$shown") || {
       FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
       return 1
     }
+    [ "$body" != '-' ] || body=''
     line="Deliverable of the finished work: $deliverable"
     case $'\n'"$body"$'\n' in
       *$'\n'"$line"$'\n'*) ;;
