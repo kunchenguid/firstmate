@@ -41,3 +41,22 @@ On native Windows, the operational-input adapter runs its Bash helper through `b
 
 The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it with `client.session.promptAsync`, and coordinates with the guard before a blind-turn follow-up.
 The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing from `tool.execute.before`.
+
+## Session parentage, verified 2026-09-11 with OpenCode 1.18.30
+
+`session.idle` carries only `{ sessionID }`, so the wake router cannot tell a captain's session from a delegated subagent session off the event alone.
+`client.session.get({ path: { id } })` supplies the missing field, and `.opencode/plugins/fm-primary-watch-arm.js` walks `parentID` to the top-level ancestor before it records a wake target.
+
+Probed live against `opencode serve` in a scratch git project:
+
+| Probe | Result |
+|---|---|
+| `POST /session` | `parentID` key absent |
+| `POST /session` with `{"parentID": "<id>"}` | `parentID` returned as sent |
+| `GET /session/{id}` on a top-level session | `parentID` key absent |
+| `GET /session/{id}` on a parented session | `parentID` present |
+| `POST /session/{id}/fork` | `parentID` key **absent** - a fork is top-level, not a child |
+
+The fork row is the one that matters for wake routing: `parentID` marks delegation only, so walking it never retargets a wake away from a session the captain works in.
+Real usage on the verification host agreed - of 56 stored sessions, 4 carried a parent and 3 of those ran as the `explore` subagent; observed nesting never exceeded one level.
+A harness that omits the lookup degrades to plain most-recently-idle routing, which is the behavior the walk refines rather than replaces.
