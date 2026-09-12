@@ -81,12 +81,11 @@
 # queued paths are refused while away. Two confused-agent-grade limitations are
 # accepted rather than hidden: queue or base changes after GitHub's preflight can
 # still enqueue, and killing this shell can orphan a forge child after stale-lock
-# recovery. docs/captain-hold-lifecycle.md owns those limits and the accepted
-# merge-to-cleanup residual.
+# recovery. docs/architecture.md owns those away-merge limits, while
+# docs/captain-hold-lifecycle.md owns the separate merge-to-cleanup residual.
 # A failed forge command releases the lock after it returns. A successful one
 # retains the lock until the accepted merge authority is persisted against the
-# still-matching task metadata; docs/captain-hold-lifecycle.md owns the accepted
-# asynchronous-landing and merge-to-cleanup residuals.
+# still-matching task metadata.
 #
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
