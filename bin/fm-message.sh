@@ -37,6 +37,7 @@ help() {
     'FM_HOME selects the operational home; tasks inherit FM_TASK_ID; services use their registered FM_SERVICE_ID.' \
     'Service hints are bound to the registered live process ancestry, never accepted as a free sender label.' \
     'Send/receive/ack bind a task or registered service; only the supervisor requires cwd=FM_HOME.' \
+    'Persistent homes use their parent FM_HOME and own FM_TASK_ID from the recorded home; home/parent identity is verified.' \
     'The underlying fm-send.sh retains supervisor-only --key KEY, --resolve-key KEY, and --fire-and-forget ID:' \
     '  --key KEY                  Send a runtime key. Example: fm-send.sh peer-a --key Enter' \
     '  --resolve-key KEY          Answer an open approval key. Example: fm-send.sh peer-a --resolve-key choice "use option A"' \

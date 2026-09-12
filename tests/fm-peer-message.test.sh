@@ -188,3 +188,49 @@ if grep -R -E 'scope needs approval|private-value-not-an-id' "$FM_HOME/state/fm-
 [ ! -e "$TMP_ROOT/other-state/fm-message" ] || fail 'state override redirected telemetry writes'
 jq -se 'all(.[]; .schema=="fm-message-telemetry.v1" and .tokens==null and .cost==null)' "$FM_HOME/state/fm-message/telemetry/"*.jsonl >/dev/null || fail 'telemetry shape differs'
 pass 'daily structured telemetry counts outcomes without logging message text'
+
+# Persistent homes participate in their parent's shared transport under their
+# own ids, not the parent's supervisor identity. Endpoints remain explicit fakes.
+for task in c d; do
+  mkdir -p "$TMP_ROOT/wt-$task/state"
+  printf '%s\n' "$task" > "$TMP_ROOT/wt-$task/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$FM_HOME" > "$TMP_ROOT/wt-$task/.fm-secondmate-parent"
+  fm_write_meta "$FM_HOME/state/$task.meta" "window=sess:fm-$task" "endpoint_task_id=$task" \
+    "project=$TMP_ROOT/proj-$task" "worktree=$TMP_ROOT/wt-$task" "home=$TMP_ROOT/wt-$task" 'kind=secondmate' 'harness=claude'
+done
+receive() { (cd "$TMP_ROOT/wt-$1"; FM_TASK_ID="$1" "$ROOT/bin/fm-message.sh" receive); }
+send c d --thread home-exchange --kind request 'QA findings' > "$TMP_ROOT/home-request"
+home_ref=$(sed -n 's/^message=\([^ ]*\).*/\1/p' "$TMP_ROOT/home-request")
+receive d > "$TMP_ROOT/home-received"
+jq -se --arg ref "$home_ref" 'any(.[]; .message.id==$ref and .message.from=="c" and .message.to==["d"])' "$TMP_ROOT/home-received" >/dev/null || fail 'home recipient did not receive under its own identity'
+send d --reply "$home_ref" 'review findings received' >/dev/null
+receive c | jq -se --arg ref "$home_ref" 'any(.[]; .message.ref==$ref and .message.from=="d" and .message.to==["c"])' >/dev/null || fail 'home-to-home reply did not return'
+name=$(jq -r --arg ref "$home_ref" 'select(.message.id==$ref)|.name' "$TMP_ROOT/home-received")
+(cd "$TMP_ROOT/wt-d"; FM_TASK_ID=d "$ROOT/bin/fm-message.sh" ack "$name")
+receive d | jq -se --arg ref "$home_ref" 'all(.[]; .message.id!=$ref)' >/dev/null || fail 'home acknowledgement lost identity'
+pass 'recorded persistent homes exchange requests and replies and acknowledge under their own ids'
+
+send a d --thread worker-home --kind request 'worker evidence' > "$TMP_ROOT/worker-home"
+worker_ref=$(sed -n 's/^message=\([^ ]*\).*/\1/p' "$TMP_ROOT/worker-home")
+receive d | jq -se --arg ref "$worker_ref" 'any(.[]; .message.id==$ref and .message.from=="a")' >/dev/null || fail 'worker-to-home request missing'
+send d --reply "$worker_ref" 'home result' >/dev/null
+receive a | jq -se --arg ref "$worker_ref" 'any(.[]; .message.ref==$ref and .message.from=="d" and .message.to==["a"])' >/dev/null || fail 'home-to-worker reply missing'
+pass 'worker and persistent home communicate in both directions through the existing inbox'
+
+# shellcheck disable=SC2016 # Positional arguments expand in the child shell.
+refuse 'home cannot borrow peer identity' bash -c 'cd "$1/wt-c"; FM_TASK_ID=d "$2/bin/fm-message.sh" send a nope' _ "$TMP_ROOT" "$ROOT"
+# shellcheck disable=SC2016
+refuse 'home cannot borrow supervisor identity' bash -c 'cd "$1/wt-c"; FM_TASK_ID=supervisor "$2/bin/fm-message.sh" send a nope' _ "$TMP_ROOT" "$ROOT"
+# shellcheck disable=SC2016
+refuse 'unmarked home cannot use parent supervisor' bash -c 'cd "$1/wt-c"; unset FM_TASK_ID; "$2/bin/fm-message.sh" send a --kind note nope' _ "$TMP_ROOT" "$ROOT"
+refuse 'home cannot send lifecycle keys' send c d --key Enter
+refuse 'home cannot resolve approvals' send c d --resolve-key approval yes
+printf 'wrong-id\n' > "$TMP_ROOT/wt-d/.fm-secondmate-home"
+refuse 'mismatched home marker sender' send d a nope
+refuse 'mismatched home marker receiver' send a d nope
+printf 'd\n' > "$TMP_ROOT/wt-d/.fm-secondmate-home"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$TMP_ROOT/wt-c" > "$TMP_ROOT/wt-d/.fm-secondmate-parent"
+refuse 'foreign parent binding' send a d nope
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$FM_HOME" > "$TMP_ROOT/wt-d/.fm-secondmate-parent"
+printf 'home=%s\n' "$TMP_ROOT/wt-c" >> "$FM_HOME/state/d.meta"
+refuse 'ambiguous home field' send a d nope

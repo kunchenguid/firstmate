@@ -7,6 +7,8 @@
 #        fm_peer_send --retry <message-id> --thread <name>
 # Identity: FM_SERVICE_ID uses fm-service-message-lib.sh's process binding;
 # otherwise FM_TASK_ID is checked against exact live metadata and physical cwd.
+# Persistent home participants additionally bind their seeded id and local parent;
+# select the parent FM_HOME explicitly, never infer a different transport home.
 # Without either hint, structured supervisory sends require cwd=FM_HOME. This guards operator mistakes, not hostile same-UID code
 # able to edit metadata or write directly to another participant's files.
 # Existing thread members may add live recipients. Every copy shares one id,
@@ -24,15 +26,32 @@
 
 # shellcheck source=bin/fm-service-message-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fm-service-message-lib.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-parent-channel-lib.sh"
 
 fm_peer_live_task() {  # <state> <id>
-  local id=$2 meta="$1/$2.meta" kind
+  local id=$2 meta="$1/$2.meta" kind home worktree parent
   case "$id" in ''|*[!A-Za-z0-9._-]*|.|..|supervisor) return 1 ;; esac
   [ ! -L "$1/services" ] && [ ! -e "$1/services/$id.json" ] && [ ! -L "$1/services/$id.json" ] || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ -z "$(fm_meta_get "$meta" remote_host)" ] || return 1
   kind=$(fm_backend_meta_exact_value "$meta" kind) || return 1
-  case "$kind" in ship|scout) ;; *) return 1 ;; esac
+  case "$kind" in
+    ship|scout) ;;
+    secondmate)
+      home=$(fm_backend_meta_exact_value "$meta" home) || return 1
+      case "$home" in /*) ;; *) return 1 ;; esac
+      home=$(cd "$home" && pwd -P) || return 1
+      worktree=$(fm_backend_meta_exact_value "$meta" worktree) || return 1
+      [ "$home" = "$(cd "$worktree" && pwd -P)" ] || return 1
+      [ "$(fm_parent_channel_home_id "$home")" = "$id" ] || return 1
+      fm_secondmate_parent_record_parse "$home/.fm-secondmate-parent" || return 1
+      [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || return 1
+      parent=$(cd "$FM_SECONDMATE_PARENT_HOME" && pwd -P) || return 1
+      [ "$parent" != "$home" ] && [ "$parent" = "$(cd "$FM_HOME" && pwd -P)" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
   fm_backend_validate_task_endpoint "$meta" "$id" || return 1
   [ "$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")" = alive ]
 }

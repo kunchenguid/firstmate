@@ -32,6 +32,10 @@ FM_HOME=/path/to/home bin/fm-message.sh ack 001.msg
 
 Run from the launched task's working directory with its inherited `FM_TASK_ID`, or from the supervisor's own home without that task marker.
 No caller-supplied `from` label is supported.
+For communication between locally registered persistent homes or their parent's workers, run from the sender's own home with `FM_HOME` set to the common parent and `FM_TASK_ID` set to the sender's recorded id.
+For example: `FM_HOME=/parent/home FM_TASK_ID=qa bin/fm-message.sh send reviews --kind request --thread qa-review "QA findings ready"`.
+Use the same environment for receive, reply and acknowledgement; the parent keeps the shared inboxes and thread ledger.
+The recorded home must match the worktree, its seeded identity marker, and its local parent binding; this does not grant the parent's supervisor identity, key/approval authority or cross-host routing.
 The [message owner](../../bin/fm-task-inbox-lib.sh) defines `fm-message.v1`; [current message behavior](../../docs/agent-control.md#shared-messages-and-threads) covers thread membership, authority, and retry guarantees.
 The library and one-shot commands have no idle scene or timer; animation belongs to applications following [the module template](../TEMPLATE.md).
 
@@ -135,7 +139,7 @@ Follow the [module template](../TEMPLATE.md): pure record parsing in `src/core`,
 Tests distinguish plain core assertions, use cases using [fake files](tests/fake-files.mjs) and [fake messages](tests/fake-messages.mjs), and real filesystem/CLI/process-event composition.
 The message fake includes `close()` for service use cases; real service acceptance tests exercise separate Node processes, registration, both reply directions, guarded refusal, normal shutdown and abrupt-death recovery.
 [Telemetry acceptance tests](tests/telemetry.test.mjs) exercise actual CLI retention, bounded stats, incomplete counters and preserved unrelated evidence.
-Ordinary task records retain verified tmux or Herdr liveness; standalone service admission uses native process identity independently of those backends.
+Ordinary task and persistent-home records retain verified tmux or Herdr liveness; standalone service admission uses native process identity independently of those backends.
 
 ### Supported limits
 
