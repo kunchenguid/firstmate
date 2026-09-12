@@ -718,6 +718,55 @@ test_treehouse_lease_check_follows_resolved_backend() {
   pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
 }
 
+test_paseo_backend_requires_treehouse_only() {
+  local case_dir fakebin bash_env out
+  # paseo is registered as a known backend name before its lifecycle adapter
+  # exists, and its CLI shim is never on PATH (it lives inside the desktop app
+  # bundle, reached through $PASEO_CLI). Its whole tool delta is therefore
+  # treehouse, so a paseo home must never be told tmux, jq, or a `paseo` binary
+  # is missing. jq is masked rather than merely absent because it lives in a
+  # system BASE_PATH dir on many hosts (the technique the JSON-backend case
+  # already uses), keeping the assertion host-independent.
+  case_dir="$TMP_ROOT/paseo-tool-delta"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' paseo > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
+  rm -f "$fakebin/jq"
+  bash_env="$case_dir/no-jq.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = jq ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+jq() {
+  return 127
+}
+SH
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] \
+    || fail "backend=paseo with treehouse present should be silent without tmux, jq, or a paseo CLI, got: $out"
+
+  # treehouse IS a genuine paseo dependency: paseo is session-provider-only, so
+  # the task worktree still comes from treehouse. With it gone bootstrap must
+  # fail closed on treehouse and on nothing else.
+  rm -f "$fakebin/treehouse"
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: treehouse" \
+    "backend=paseo must fail closed on its genuine treehouse dependency"
+  assert_not_contains "$out" "MISSING: tmux" "backend=paseo must never demand tmux"
+  assert_not_contains "$out" "MISSING: jq" "backend=paseo must never demand jq"
+  assert_not_contains "$out" "MISSING: paseo" \
+    "backend=paseo must not demand a PATH-resolved Paseo CLI"
+  assert_not_contains "$out" "BACKEND_INVALID" \
+    "paseo is a known backend and must not be reported as an invalid configuration"
+  pass "bootstrap: a paseo home requires treehouse alone - never tmux, jq, or a PATH paseo CLI"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -1173,6 +1222,7 @@ test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
+test_paseo_backend_requires_treehouse_only
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
