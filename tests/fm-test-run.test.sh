@@ -133,6 +133,17 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-quota-axi-lib.sh"
   : >"$repo/bin/fm-quota-choose.sh"
   : >"$repo/bin/unmapped-source.sh"
+  # A shared top-level test fixture read by two suites in different families,
+  # beside a tests/ file nothing reads at all.
+  : >"$repo/tests/shared-probe-fixture.sh"
+  : >"$repo/tests/unread-thing.sh"
+  printf '# shared-probe-fixture.sh\n' >>"$repo/tests/fm-pr-merge.test.sh"
+  printf '# shared-probe-fixture.sh\n' >>"$repo/tests/fm-secondmate-safety.test.sh"
+  # A nested fixture whose consuming suite names only the fixture directory,
+  # the shape the tests/fixtures/<dir>/ arm is keyed for.
+  mkdir -p "$repo/tests/fixtures/demo"
+  : >"$repo/tests/fixtures/demo/demo-fixture.sh"
+  printf '# tests/fixtures/demo\n' >>"$repo/tests/fm-backend-orca.test.sh"
   # A shared helper with no curated family of its own, named by exactly ONE
   # script of the expensive real-Herdr family and consumed by one curated
   # watcher script. This is the shape that made a one-line helper change select
@@ -1326,6 +1337,46 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   pass "an unclassified new test stays serial while the proven residual family runs concurrently"
 }
 
+test_changed_shared_fixture_selects_its_readers() {
+  local tmp repo listed rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fixture.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+
+  printf '\n' >>"$repo/tests/shared-probe-fixture.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" \
+    "shared test fixture selects its pr-forge reader"
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" \
+    "shared test fixture selects its secondmate reader"
+  case "$listed" in
+    *fm-backend-orca.test.sh*)
+      fail "shared test fixture selection widened past its readers: $listed" ;;
+  esac
+  git -C "$repo" add tests/shared-probe-fixture.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm fixture-change
+
+  printf '\n' >>"$repo/tests/unread-thing.sh"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "an unread tests/ path must still fail with exit 2, got $rc"
+  grep -Fq 'no changed-test mapping for source path: tests/unread-thing.sh' "$tmp/err" \
+    || fail "the refusal did not name the unread tests/ path: $(cat "$tmp/err")"
+  git -C "$repo" checkout -q -- tests/unread-thing.sh
+
+  # A nested tests/fixtures/<dir>/<name>-fixture.sh still reaches the
+  # directory-scan arm rather than the top-level fixture arm's basename scan.
+  printf '\n' >>"$repo/tests/fixtures/demo/demo-fixture.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend-orca.test.sh" \
+    "a nested fixture selects the suite that reads its directory"
+
+  rm -rf "$tmp"
+  pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
+}
+
 # Workers are handed scripts in order, so the slowest script must start first or
 # it runs alone at the tail and throws away most of the concurrency.
 test_concurrent_runs_are_ordered_longest_first() {
@@ -1717,6 +1768,7 @@ test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_unmapped_new_test_never_inherits_family_concurrency
+test_changed_shared_fixture_selects_its_readers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
