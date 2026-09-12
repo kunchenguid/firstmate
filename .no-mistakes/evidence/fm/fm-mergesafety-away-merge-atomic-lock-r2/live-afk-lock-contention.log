@@ -1,0 +1,7 @@
+SCENARIO: an operator returns while the away-authority lock is held
+lock-holder-pid=40102
+contended-archive-exit=1
+contended-archive-output=fm-afk-contract: the away-posture record is locked by live process 40102 (an in-flight merge, or another change to this record); nothing was changed
+live-grants-after-refusal=task-x1
+archive-after-release=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-afk-live.4E6Y0A/state/afk-contracts/1789201362.afk-contract
+final-state=archived-after-lock-release

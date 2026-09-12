@@ -1,0 +1,8 @@
+SCENARIO: an operator revokes a grant while the away-authority lock is held
+lock-holder-pid=60064
+contended-confirm-exit=1
+contended-confirm-output=fm-afk-contract: the away-posture record is locked by live process 60064 (an in-flight merge, or another change to this record); nothing was changed
+live-grants-after-refusal=task-x1
+fm-afk-contract: replaced the earlier away posture; its record is archived at /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-afk-live.cFEG1B/state/afk-contracts/1789201375-superseded-1789201377.afk-contract
+live-grants-after-release=task-other
+final-state=grant-replaced-after-lock-release
