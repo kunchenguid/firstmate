@@ -391,10 +391,10 @@ Commit `7e10435` touched `bin/fm-backend.sh`, `bin/fm-composer-lib.sh`, `bin/fm-
 Commit `26ab875` touched `.agents/skills/harness-adapters/references/harness/agy.md`, `bin/fm-backend.sh`, `bin/fm-tmux-lib.sh`, and `docs/verification/agy.md`; its unused-helper removal leaves the composer and control paths covered by `fm-composer-lib` and `fm-control`, while its code-site race text is documentation-only.
 Commit `d4f081c` touched `bin/backends/zellij.sh` and `tests/fm-backend-zellij.test.sh`; the plain-capture fallback is covered by the `fm-backend-zellij` regression.
 The multiline status-note serialization in this round is covered by the multiline AGY exit case in `tests/fm-control.test.sh`.
-Final-tip live evidence is from firstmate's real-environment run on 2026-09-12 against gate tip `451cce13`, Antigravity CLI 1.2.2.
-Lifecycle guard (`FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 80 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` (`FM_TEST_END 2026-09-12T18:39:52Z exit=0 duration_ms=55394`).
-Lifecycle guard (`FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 120 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` (exit=0, run at 18:42Z).
-Lifecycle guard (`FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 220 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` (`FM_TEST_END 2026-09-12T18:45:00Z exit=0 duration_ms=53097`).
+The following evidence is from firstmate's real-environment runs on 2026-09-12 against gate tip `13ad48dc`, Antigravity CLI 1.2.2, before the deterministic lifecycle-guard ordering change in this review.
+Lifecycle guard (`FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 120 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` (`FM_TEST_END 2026-09-12T19:09:35Z exit=0 duration_ms=89740`).
+Lifecycle guard (`FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 80 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` (`FM_TEST_END 2026-09-12T19:10:33Z exit=0 duration_ms=57864`).
+Lifecycle guard (`FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 220 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` on the 19:13Z run; an earlier 220 attempt at 19:03Z timed out at the doorbell wait while the pane showed the worker mid-way through acting - model latency, not delivery.
 Composer-matrix guard exited 0 with all six ok lines:
 
 ```text
@@ -408,7 +408,8 @@ ok - live composer-matrix guard verified 4 live surface(s)
 
 Liveness/marker guard: `ok - harness liveness: agy 1.2.2 classifies alive`.
 Two initial attempts at 120 and 220 failed `doorbell instruction was not acted on` while the pane showed the doorbell delivered and the worker mid-way through acting on it; agy 1.2.2 keeps the brief's `sleep 60` running as a background task and the low-effort model needs three tool calls to act, which occasionally exceeds the test's 120-second wait; identical re-runs passed.
-The lifecycle guard now waits for the initial `1 task(s)` status to clear before sending the doorbell and allows 240 seconds for the acted-and-acknowledged result.
+The lifecycle guard was then restructured to send a `READY` brief, wait for idle, send the doorbell before steering any long-running task, and retain a 240-second acted-and-acknowledged ceiling.
+The evidence above predates that ordering-only guard hardening; firstmate will run the restructured guard once more on the final tip.
 
 ## Repository gates
 

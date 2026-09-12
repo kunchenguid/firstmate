@@ -1743,9 +1743,7 @@ case "$ARG3" in
         *) HARNESS=$(basename "$word"); break ;;
       esac
     done
-    if [ "$HARNESS" = agy ]; then
-      HARNESS=raw-agy
-    fi
+    if [ "$HARNESS" = agy ]; then HARNESS=raw-agy; fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the

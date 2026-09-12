@@ -222,9 +222,9 @@ if [ "${FM_AGY_LIFECYCLE_LIVE_E2E:-}" != 1 ]; then
 fi
 
 run_agy_canonical_lifecycle() (
-  local task="live-agy-lifecycle-$$" lab project home status target version stable_verdict stable_count draft_landed content note_line initial_task_done
+  local task="live-agy-lifecycle-$$" lab project home status target version stable_verdict stable_count draft_landed content note_line
   local doorbell_inbox doorbell_acted doorbell_marker doorbell_brief ring_count record
-  local spawned=0 state capture busy=0 turn_end=0 verdict=unknown trust_seen=0
+  local spawned=0 state capture busy=0 ready=0 tool_started=0 turn_end=0 verdict=unknown trust_seen=0
   [ "${FM_AGY_LIFECYCLE_LIVE_E2E:-}" = 1 ] || return 0
   die() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
   cleanup_lifecycle() {
@@ -255,8 +255,7 @@ run_agy_canonical_lifecycle() (
   cat > "$home/data/$task/brief.md" <<'EOF'
 # Task
 
-Run the exact shell command `sleep 60` and wait for it to finish.
-Do not run any other command.
+Reply with only READY and wait for further instructions.
 EOF
   TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-spawn.sh" "$task" "$project" --scout --harness agy --effort low --backend tmux \
@@ -276,39 +275,20 @@ EOF
       sleep 1
       continue
     fi
-    if printf '%s\n' "$capture" | grep -Eq 'esc to cancel|Working|Generating'; then
+    if grep -Fq 'state=busy' "$state/$task.busy-state" 2>/dev/null; then
       busy=1
-      break
+    fi
+    if [ "$busy" -eq 1 ] && grep -Fq 'state=idle' "$state/$task.busy-state" 2>/dev/null; then
+      verdict=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+        bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state "$2" agy' _ "$ROOT" "$target" 2>/dev/null || true)
+      if [ "$verdict" = empty ]; then
+        ready=1
+        break
+      fi
     fi
     sleep 1
   done
-  [ "$busy" -eq 1 ] || die "agy ($version): initial brief never reached a real running tool"
-  grep -Fq 'state=busy' "$state/$task.busy-state" \
-    || die "agy ($version): canonical spawn did not seed semantic busy state"
-  TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-control.sh" "$task" interrupt > "$lab/control.out" 2>&1 \
-    || die "agy ($version): control-plane interrupt failed"
-  grep -Fq 'cancel=unconfirmed' "$lab/control.out" \
-    || die "agy ($version): control-plane interrupt did not report unconfirmed cancellation"
-  grep -Fq 'state=unknown' "$state/$task.busy-state" \
-    || die "agy ($version): control-plane interrupt did not preserve unknown semantic state"
-  for _ in $(seq 1 60); do
-    verdict=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state "$2" agy' _ "$ROOT" "$target" 2>/dev/null || true)
-    [ "$verdict" = empty ] && break
-    sleep 1
-  done
-  [ "$verdict" = empty ] || die "agy ($version): control interrupt did not return to a proven empty composer"
-  initial_task_done=0
-  for _ in $(seq 1 240); do
-    capture=$(TMUX_TMPDIR="$lab/tmux" tmux capture-pane -p -t "$target" 2>/dev/null || true)
-    if ! printf '%s\n' "$capture" | grep -Fq '1 task(s)' 2>/dev/null; then
-      initial_task_done=1
-      break
-    fi
-    sleep 1
-  done
-  [ "$initial_task_done" -eq 1 ] || die "agy ($version): initial brief did not finish before the doorbell"
+  [ "$ready" -eq 1 ] || die "agy ($version): initial READY brief did not return to an idle empty composer"
   doorbell_inbox="$state/$task.inbox"
   doorbell_acted="$lab/AGY_DOORBELL_RESULT"
   doorbell_marker="AGY_DOORBELL_$(date +%s)-$$"
@@ -339,6 +319,35 @@ EOF
   fi
   [ -f "$doorbell_inbox/handled/001.msg" ] \
     || die "agy ($version): doorbell instruction was not acknowledged"
+  lifecycle_tool_brief="Run the exact shell command \`sleep 60\` and wait for it to finish. Do not run any other command."
+  FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-send.sh" "$task" \
+    "$lifecycle_tool_brief" \
+    >/dev/null 2>&1 || die "agy ($version): control-plane tool turn could not be submitted"
+  tool_started=0
+  for _ in $(seq 1 120); do
+    if grep -Fq 'state=busy' "$state/$task.busy-state" 2>/dev/null; then
+      tool_started=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$tool_started" -eq 1 ] || die "agy ($version): control-plane tool turn did not start"
+  TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-control.sh" "$task" interrupt > "$lab/control.out" 2>&1 \
+    || die "agy ($version): control-plane interrupt failed"
+  grep -Fq 'cancel=unconfirmed' "$lab/control.out" \
+    || die "agy ($version): control-plane interrupt did not report unconfirmed cancellation"
+  grep -Fq 'state=unknown' "$state/$task.busy-state" \
+    || die "agy ($version): control-plane interrupt did not preserve unknown semantic state"
+  verdict=unknown
+  for _ in $(seq 1 60); do
+    verdict=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state "$2" agy' _ "$ROOT" "$target" 2>/dev/null || true)
+    [ "$verdict" = empty ] && break
+    sleep 1
+  done
+  [ "$verdict" = empty ] || die "agy ($version): control interrupt did not return to a proven empty composer"
   rm -f "$state/$task.progress"
   lifecycle_progress_brief='Run the exact shell command "printf AGY_TOOL_PROGRESS" once, then stop.'
   FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
