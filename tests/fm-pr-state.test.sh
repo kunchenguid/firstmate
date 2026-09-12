@@ -17,8 +17,9 @@ OLD_HEAD_2=4dc2291e6969de1bf204fbdb53c9e57a8353d4e2
 
 # The fake gh answers every query with the JSON shape GitHub returns and runs
 # the --jq program it received with the real jq, so field selection is what is
-# under test. The REST pull-request object always carries the stale
-# `mergeable: null` GitHub reports right after a push.
+# under test. The pull-request object speaks GitHub's own vocabulary: an
+# uppercase state with MERGED as its own value, and a null mergeable while
+# GitHub is still computing one.
 # It evaluates with the local jq, while gh itself embeds gojq; the live guard in
 # tests/fm-pr-state-live-e2e.test.sh runs the real engine.
 cat > "$FAKEBIN/gh" <<'SH'
@@ -27,20 +28,16 @@ set -o pipefail
 head=c2eac54c17a1ddc2633ad51b83e21e5fe888142e
 serve() {
   case "$*" in
-    "pr view "*" --json mergeable,headRefOid,reviewDecision --jq "*)
-      jq -n --arg mergeable "${FM_TEST_VIEW_MERGEABLE-MERGEABLE}" \
-        --arg head "${FM_TEST_VIEW_HEAD-$head}" \
-        --arg decision "${FM_TEST_VIEW_REVIEW_DECISION-APPROVED}" \
-        '{mergeable: (if $mergeable == "null" then null else $mergeable end),
-          headRefOid: $head, reviewDecision: $decision}'
-      ;;
-    "api /repos/o/r/pulls/7 --jq "*)
-      jq -n --arg head "$head" --arg state "${FM_TEST_STATE-open}" \
+    "pr view "*" --json state,mergedAt,isDraft,headRefOid,author,mergeable,reviewDecision --jq "*)
+      jq -n --arg head "$head" --arg state "${FM_TEST_STATE-OPEN}" \
         --arg merged "${FM_TEST_MERGED_AT-}" --arg draft "${FM_TEST_DRAFT-false}" \
-        '{state: $state, merged_at: (if $merged == "" then null else $merged end),
-          draft: ($draft == "true"), mergeable: null,
-          head: {sha: $head, ref: "fm/fixture"}, base: {ref: "dev"},
-          title: "fix: fixture", body: "", user: {login: "prauthor"}}'
+        --arg mergeable "${FM_TEST_VIEW_MERGEABLE-MERGEABLE}" \
+        --arg decision "${FM_TEST_VIEW_REVIEW_DECISION-APPROVED}" \
+        '{state: $state, mergedAt: (if $merged == "" then null else $merged end),
+          isDraft: ($draft == "true"), headRefOid: $head,
+          author: {login: "prauthor", is_bot: false},
+          mergeable: (if $mergeable == "null" then null else $mergeable end),
+          reviewDecision: $decision}'
       ;;
     "api /repos/o/r/pulls/7/reviews?per_page=100 --paginate --jq "*)
       printf '%s\n' "${FM_TEST_REVIEWS:-[]}"
@@ -89,12 +86,12 @@ test_clean_pr_is_silent_and_ignores_skipped_checks() {
 
 test_terminal_state_is_the_whole_report() {
   local out
-  out=$(FM_TEST_STATE=closed FM_TEST_VIEW_MERGEABLE=null run_state) \
+  out=$(FM_TEST_STATE=CLOSED FM_TEST_VIEW_MERGEABLE=null run_state) \
     || fail "closed fixture was refused"
   [ "$out" = 'STATE: closed' ] \
     || fail "a closed pull request leaves the author nothing else to read, got: $out"
 
-  out=$(FM_TEST_STATE=closed FM_TEST_MERGED_AT=2019-10-04T16:01:04Z \
+  out=$(FM_TEST_STATE=MERGED FM_TEST_MERGED_AT=2019-10-04T16:01:04Z \
     FM_TEST_VIEW_MERGEABLE=null FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED run_state) \
     || fail "merged fixture was refused"
   [ "$out" = 'STATE: merged at 2019-10-04T16:01:04Z' ] \
@@ -108,16 +105,6 @@ test_draft_is_a_blocker() {
   assert_contains "$out" 'DRAFT: pull request is not ready for review' \
     "a draft pull request leaves the author something to do"
   pass "draft state blocks readiness"
-}
-
-test_head_moving_mid_read_invalidates_the_result() {
-  local status=0 out
-  out=$(FM_TEST_VIEW_HEAD=$OLD_HEAD_1 run_state 2>&1) || status=$?
-  [ "$status" -ne 0 ] \
-    || fail "a head that moved between readings must invalidate the result, got: $out"
-  assert_contains "$out" 'head changed' \
-    "the refusal must name the moved head so the caller knows to re-run"
-  pass "a head that moves mid-read invalidates rather than mixes two snapshots"
 }
 
 test_stale_blocking_reviews_explain_a_blocking_decision() {
@@ -257,15 +244,6 @@ test_unknown_mergeability_is_a_blocker() {
   pass "unknown and conflicting mergeability block readiness"
 }
 
-test_mergeability_uses_current_pr_view_value_without_retry() {
-  local out
-  out=$(FM_TEST_VIEW_MERGEABLE=MERGEABLE run_state) \
-    || fail "current-mergeability fixture was refused"
-  assert_not_contains "$out" 'MERGEABILITY: unknown' \
-    "a current MERGEABLE view must win over the REST object's stale null"
-  pass "mergeability uses the current pull-request view value"
-}
-
 test_refusals_exit_nonzero() {
   local status=0
   PATH="$FAKEBIN:$PATH" "$SCRIPT" >/dev/null 2>&1 || status=$?
@@ -288,7 +266,6 @@ test_refusals_exit_nonzero() {
 test_clean_pr_is_silent_and_ignores_skipped_checks
 test_terminal_state_is_the_whole_report
 test_draft_is_a_blocker
-test_head_moving_mid_read_invalidates_the_result
 test_stale_blocking_reviews_explain_a_blocking_decision
 test_approved_pr_with_only_stale_changes_requested_is_silent
 test_current_changes_requested_review_is_a_blocker
@@ -300,5 +277,4 @@ test_unreported_required_checks_are_unconfirmed
 test_no_reported_checks_is_unverified
 test_help_states_what_silence_means_and_what_is_out_of_scope
 test_unknown_mergeability_is_a_blocker
-test_mergeability_uses_current_pr_view_value_without_retry
 test_refusals_exit_nonzero

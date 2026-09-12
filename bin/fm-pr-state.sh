@@ -15,11 +15,6 @@
 # block; review history is printed only to explain CHANGES_REQUESTED, naming
 # each reviewer whose latest verdict still requests changes and marking it
 # STALE when it was left at a superseded head.
-# The two pull-request reads are taken against one exact head, and a push that
-# lands between them invalidates the result rather than mixing two heads, so the
-# caller re-runs the command against the new head. The check and review reads
-# that follow are not re-verified against that head, so no line reports which
-# head it was read against.
 # A closed or merged pull request reports that terminal state and nothing else.
 # Unresolved review-thread state is out of this command's scope.
 #
@@ -59,12 +54,15 @@ PATH_PART=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
 ENDPOINT="/repos/$PATH_PART/pulls/$NUMBER"
 
-CORE=$(gh api "$ENDPOINT" --jq '
-  "state=\(.state)",
-  "merged_at=\(.merged_at // "")",
-  "draft=\(.draft)",
-  "head=\(.head.sha)",
-  "author=\(.user.login)"') || die "could not read $URL"
+CORE=$(gh pr view "$URL" \
+  --json state,mergedAt,isDraft,headRefOid,author,mergeable,reviewDecision --jq '
+  "state=\(.state | ascii_downcase)",
+  "merged_at=\(.mergedAt // "")",
+  "draft=\(.isDraft)",
+  "head=\(.headRefOid)",
+  "author=\(.author.login)",
+  "mergeability=\(if .mergeable == null or .mergeable == "UNKNOWN" then "unknown" else (.mergeable | ascii_downcase) end)",
+  "review_decision=\(.reviewDecision // "")"') || die "could not read $URL"
 
 STATE=
 MERGED_AT=
@@ -72,6 +70,7 @@ DRAFT=
 MERGEABILITY=
 HEAD=
 AUTHOR=
+REVIEW_DECISION=
 while IFS= read -r row; do
   case "$row" in
     state=*) STATE=${row#state=} ;;
@@ -79,32 +78,15 @@ while IFS= read -r row; do
     draft=*) DRAFT=${row#draft=} ;;
     head=*) HEAD=${row#head=} ;;
     author=*) AUTHOR=${row#author=} ;;
+    mergeability=*) MERGEABILITY=${row#mergeability=} ;;
+    review_decision=*) REVIEW_DECISION=${row#review_decision=} ;;
   esac
 done <<EOF_CORE
 $CORE
 EOF_CORE
 [ -n "$STATE" ] && [ -n "$DRAFT" ] && [ -n "$HEAD" ] && [ -n "$AUTHOR" ] \
+  && [ -n "$MERGEABILITY" ] \
   || die "GitHub returned incomplete pull-request state for $URL"
-
-MERGE_VIEW=$(gh pr view "$URL" --json mergeable,headRefOid,reviewDecision --jq '
-  "mergeability=\(if .mergeable == null or .mergeable == "UNKNOWN" then "unknown" else (.mergeable | ascii_downcase) end)",
-  "head=\(.headRefOid)",
-  "review_decision=\(.reviewDecision // "")"') || die "could not read mergeability and review decision for $URL"
-MERGE_HEAD=
-REVIEW_DECISION=
-while IFS= read -r row; do
-  case "$row" in
-    mergeability=*) MERGEABILITY=${row#mergeability=} ;;
-    head=*) MERGE_HEAD=${row#head=} ;;
-    review_decision=*) REVIEW_DECISION=${row#review_decision=} ;;
-  esac
-done <<EOF_VIEW
-$MERGE_VIEW
-EOF_VIEW
-[ -n "$MERGEABILITY" ] && [ -n "$MERGE_HEAD" ] \
-  || die "GitHub returned incomplete mergeability for $URL"
-[ "$MERGE_HEAD" = "$HEAD" ] \
-  || die "pull-request head changed while reading $URL"
 
 if [ -n "$MERGED_AT" ]; then
   printf 'STATE: merged at %s\n' "$MERGED_AT"

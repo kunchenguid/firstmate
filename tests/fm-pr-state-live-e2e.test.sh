@@ -6,8 +6,8 @@
 # they compile and produce the shape the script parses where they are actually
 # executed. cli/cli#1 is a merged 2019 pull request, so its verdict is stable.
 # That stability costs reach: a terminal pull request reports its state and
-# stops, so this guard covers the two pull-request reads taken before that
-# verdict. The required-check and review-history programs stay hermetic-only,
+# stops, so this guard covers the pull-request read taken before that verdict.
+# The required-check and review-history programs stay hermetic-only,
 # the latter because it runs only behind a CHANGES_REQUESTED decision, which no
 # public pull request holds stably.
 set -u
@@ -32,7 +32,7 @@ test_pull_request_read_jq_programs_run_under_gh_engine() {
   [ "$status" -eq 0 ] \
     || fail "fm-pr-state.sh refused a readable public pull request (exit $status): $out"
   assert_contains "$out" 'STATE: merged at 2019-10-04T16:01:04Z' \
-    "the merged verdict must come from the live REST object"
+    "the merged verdict must come from the live pull-request read"
   pass "fm-pr-state.sh's pull-request read programs are accepted by gh's jq engine"
 }
 
