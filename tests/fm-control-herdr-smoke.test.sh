@@ -103,7 +103,7 @@ EOF
 
 run_control() {
   env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
-    FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=2 \
+    FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=2 FM_CONTROL_EXIT_CONFIRM_WAIT=0.5 \
     "$ROOT/bin/fm-control.sh" "$@" 2>&1
 }
 
@@ -313,18 +313,25 @@ pass "real herdr: a stale registration no longer blocks relaunch, and the endpoi
 # Last, because it deliberately types a harness command into a foreground
 # process that ignores it: the registered agent cannot actually be stopped
 # that way, and the control plane must say so rather than report a stop it
-# did not achieve.
+# did not achieve. Both bounded waits expire without ever observing the
+# positive stop state, so the verdict is unconfirmed rather than a definite
+# "the agent kept running" claim - expiry is the absence of evidence, not
+# evidence of absence - and the command still exits non-zero.
 start_agent_process
 herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
   --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not re-register the live agent on the task pane"
 if OUT=$(run_control hsmoke exit 2>&1); then
-  fail "exit should fail closed when the agent does not stop: $OUT"
+  fail "exit should not report success when the agent does not stop: $OUT"
 fi
 case "$OUT" in
-  *"did not stop"*) : ;;
-  *) fail "the exit failure should say the agent did not stop, got: $OUT" ;;
+  *"exit=unconfirmed"*) : ;;
+  *) fail "the exit verdict should be unconfirmed, got: $OUT" ;;
 esac
-pass "real herdr: an agent that does not stop fails closed instead of being reported as stopped"
+case "$OUT" in
+  *"did not stop"*) fail "expiry must not claim the agent kept running, got: $OUT" ;;
+  *) : ;;
+esac
+pass "real herdr: an agent that does not stop reports exit=unconfirmed and never a stop it did not achieve"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true
