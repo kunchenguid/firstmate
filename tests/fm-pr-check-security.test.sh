@@ -2868,6 +2868,110 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+# --- modeless-fs-scope: signature fallback on a mode-incapable device -------
+# Captain decision (modeless-fs-scope, option C): a state directory whose
+# filesystem cannot hold restricted modes (a Windows/OneDrive path bind-mounted
+# into WSL2 is the measured case) gets integrity verification by signature
+# instead of losing every private artifact it guards. fm_pr_secure_file and
+# fm_pr_private_file_valid in bin/fm-pr-lib.sh are the single owner every
+# private-artifact call site in the tree routes through.
+
+fm_test_probe_file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
+# Mirrors the probe in tests/fm-claude-stop-autoarm.test.sh: only a directory
+# PROVEN to revert chmod on a real file is usable here, so this reproduces the
+# original failure condition rather than assuming it. Skips (never fails) when
+# the host offers no such mount, exactly as that suite does.
+mode_incapable_dir() {
+  local candidate root probe
+  for candidate in "${FM_TEST_MODE_INCAPABLE_PARENT:-}" /mnt/*/ /Volumes/*/; do
+    [ -n "$candidate" ] && [ -d "$candidate" ] && [ -w "$candidate" ] || continue
+    fm_test_reap_stale_fixtures "${candidate%/}"/fm-pr-lib-modeless.*/.fm-test-fixture
+    root=$(mktemp -d "${candidate%/}/fm-pr-lib-modeless.XXXXXX" 2>/dev/null) || continue
+    if ! fm_test_track_dir "$root"; then
+      rm -rf "$root"
+      continue
+    fi
+    probe="$root/.mode-probe"
+    : > "$probe" 2>/dev/null
+    chmod 600 "$probe" 2>/dev/null
+    if [ -f "$probe" ] && [ "$(fm_test_probe_file_mode "$probe")" != 600 ]; then
+      rm -f "$probe"
+      printf '%s\n' "$root"
+      return 0
+    fi
+    rm -rf "$root"
+  done
+  return 1
+}
+
+test_mode_incapable_device_seals_and_verifies_by_signature() {
+  local root state device path
+  if ! root=$(mode_incapable_dir); then
+    printf 'skip: no filesystem on this host reverts chmod; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
+    return 0
+  fi
+  state="$root/state"
+  mkdir -p "$state" || fail "could not create $state"
+  device=$(fm_pr_file_device "$state") || fail "could not read state device"
+  path="$state/artifact"
+  printf 'original content\n' > "$path" || fail "could not write $path"
+
+  # Reproduce the original failure first: a bare chmod 600 does not stick here,
+  # so the pre-Option-C check (mode == 600) would refuse this artifact forever.
+  chmod 600 "$path" 2>/dev/null
+  [ "$(fm_pr_file_mode "$path")" != 600 ] \
+    || fail "$root stopped reverting file modes; this host no longer reproduces the condition"
+
+  fm_pr_secure_file "$path" 600 "$state" "$device" \
+    || fail "fm_pr_secure_file refused to secure an artifact on a mode-incapable device"
+  fm_pr_private_file_valid "$path" 600 "$state" "$device" \
+    || fail "a freshly secured artifact on a mode-incapable device failed validation - Defect B is not fixed"
+  [ -f "$path.fm-sig" ] || fail "no signature sidecar was written on the mode-incapable device"
+
+  # Tampering after the seal must still be caught: the security property the
+  # mode check existed for is preserved, not silently dropped.
+  printf 'tampered content\n' >> "$path"
+  fm_pr_private_file_valid "$path" 600 "$state" "$device" \
+    && fail "tampered content on a mode-incapable device validated anyway"
+
+  pass "a mode-incapable device seals a fresh artifact by signature and still catches tampering"
+}
+
+test_mode_capable_device_behavior_is_unchanged() {
+  local state device path
+  state="$TMP_ROOT/mode-capable/state"
+  mkdir -p "$state" || fail "could not create $state"
+  device=$(fm_pr_file_device "$state") || fail "could not read state device"
+  path="$state/artifact"
+  printf 'content\n' > "$path" || fail "could not write $path"
+  chmod 644 "$path" || fail "could not chmod $path"
+  if [ "$(fm_pr_file_mode "$path")" != 644 ]; then
+    printf 'skip: TMPDIR on this host does not hold restricted modes, so this control proves nothing\n'
+    return 0
+  fi
+
+  fm_pr_private_file_valid "$path" 600 "$state" "$device" \
+    && fail "a mode-capable device accepted a wrong mode instead of enforcing it"
+
+  fm_pr_secure_file "$path" 600 "$state" "$device" \
+    || fail "fm_pr_secure_file could not chmod on a mode-capable device"
+  [ "$(fm_pr_file_mode "$path")" = 600 ] \
+    || fail "fm_pr_secure_file did not chmod the artifact on a mode-capable device"
+  [ ! -e "$path.fm-sig" ] \
+    || fail "a mode-capable device got a signature sidecar it never needed"
+  fm_pr_private_file_valid "$path" 600 "$state" "$device" \
+    || fail "a correctly-moded artifact on a mode-capable device failed validation"
+
+  pass "a mode-capable device keeps its exact mode-only behavior, with no signature sidecar"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -2908,3 +3012,5 @@ test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_mode_incapable_device_seals_and_verifies_by_signature
+test_mode_capable_device_behavior_is_unchanged

@@ -771,20 +771,21 @@ shim_write() {
   tmp=$(umask 077; mktemp "$STATE/.fm-tool-updates-check.XXXXXX" 2>/dev/null) || return 1
   SHIM_WRITE_TMP=$tmp
   if ! printf '%s\n' "$want" > "$tmp" \
-    || ! chmod 0700 "$tmp" \
-    || ! fm_pr_private_file_valid "$tmp" 700 "$device"; then
-    rm -f -- "$tmp"
+    || ! fm_pr_secure_file "$tmp" 700 "$STATE" "$device" \
+    || ! fm_pr_private_file_valid "$tmp" 700 "$STATE" "$device"; then
+    rm -f -- "$tmp" "$tmp.fm-sig"
     SHIM_WRITE_TMP=
     return 1
   fi
   if ! fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" \
     || ! mv -f -- "$tmp" "$CHECK_SHIM"; then
-    rm -f -- "$tmp"
+    rm -f -- "$tmp" "$tmp.fm-sig"
     SHIM_WRITE_TMP=
     return 1
   fi
+  mv -f -- "$tmp.fm-sig" "$CHECK_SHIM.fm-sig" 2>/dev/null || true
   SHIM_WRITE_TMP=
-  fm_pr_private_file_valid "$CHECK_SHIM" 700 "$device"
+  fm_pr_private_file_valid "$CHECK_SHIM" 700 "$STATE" "$device"
 }
 
 # Keep a byte copy of a shim that is already in place, so a failed arm can put
@@ -797,9 +798,9 @@ shim_backup() {
   [ -n "$device" ] || return 1
   tmp=$(umask 077; mktemp "$STATE/.fm-tool-updates-check.XXXXXX" 2>/dev/null) || return 1
   if ! cat "$CHECK_SHIM" > "$tmp" 2>/dev/null \
-    || ! chmod 0700 "$tmp" \
-    || ! fm_pr_private_file_valid "$tmp" 700 "$device"; then
-    rm -f -- "$tmp"
+    || ! fm_pr_secure_file "$tmp" 700 "$STATE" "$device" \
+    || ! fm_pr_private_file_valid "$tmp" 700 "$STATE" "$device"; then
+    rm -f -- "$tmp" "$tmp.fm-sig"
     return 1
   fi
   printf '%s\n' "$tmp"
@@ -814,16 +815,20 @@ ARM_BACKUP=
 # when it is still bound; otherwise the shim goes, so the home is plainly not
 # armed and the failure is the only thing the operator has to act on.
 arm_rollback() {
-  [ -z "$SHIM_WRITE_TMP" ] || rm -f -- "$SHIM_WRITE_TMP"
+  [ -z "$SHIM_WRITE_TMP" ] || rm -f -- "$SHIM_WRITE_TMP" "$SHIM_WRITE_TMP.fm-sig"
   SHIM_WRITE_TMP=
   if [ -n "$ARM_BACKUP" ]; then
-    mv -f -- "$ARM_BACKUP" "$CHECK_SHIM" 2>/dev/null || rm -f -- "$ARM_BACKUP"
+    if mv -f -- "$ARM_BACKUP" "$CHECK_SHIM" 2>/dev/null; then
+      mv -f -- "$ARM_BACKUP.fm-sig" "$CHECK_SHIM.fm-sig" 2>/dev/null || true
+    else
+      rm -f -- "$ARM_BACKUP" "$ARM_BACKUP.fm-sig"
+    fi
     ARM_BACKUP=
     if fm_custom_check_registered "$STATE" "$CHECK_ID"; then
       return 0
     fi
   fi
-  rm -f -- "$CHECK_SHIM"
+  rm -f -- "$CHECK_SHIM" "$CHECK_SHIM.fm-sig"
 }
 
 # shellcheck disable=SC2329  # Registered by action_arm's signal trap.
@@ -877,14 +882,14 @@ action_arm() {
     return 1
   fi
   trap - HUP INT TERM
-  [ -z "$ARM_BACKUP" ] || rm -f -- "$ARM_BACKUP"
+  [ -z "$ARM_BACKUP" ] || rm -f -- "$ARM_BACKUP" "$ARM_BACKUP.fm-sig"
   ARM_BACKUP=
   printf 'armed: state/%s.check.sh\n' "$CHECK_ID"
   return 0
 }
 
 action_disarm() {
-  rm -f -- "$CHECK_SHIM" "$CHECK_TRUST" "$RECORD"
+  rm -f -- "$CHECK_SHIM" "$CHECK_SHIM.fm-sig" "$CHECK_TRUST" "$CHECK_TRUST.fm-sig" "$RECORD"
   printf 'disarmed: state/%s.check.sh\n' "$CHECK_ID"
   return 0
 }

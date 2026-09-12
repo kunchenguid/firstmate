@@ -543,7 +543,30 @@ Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQ
 ```
 
 The healthy close stays byte-for-byte silent and the actionable rewake banner is unchanged, so a home whose state directory can hold restricted modes sees no behaviour change.
-Strict mode enforcement itself is untouched here; the arm still refuses to publish an artifact that cannot hold `600`, and only the diagnosability of the resulting block changed.
+At the time of this pass, strict mode enforcement was untouched: the arm still refused to publish an artifact that could not hold `600`, and only the diagnosability of the resulting block changed.
+The modeless-fs-scope decision below replaced that refusal with a signature fallback, so a mode-incapable device no longer loses the artifact outright; see that entry for the current behaviour.
+
+### modeless-fs-scope: signature fallback on a mode-incapable device, 2026-09-12
+
+The captain decided modeless-fs-scope option C: replace the permission-mode protection above with integrity verification by signature on a filesystem that cannot hold restricted modes, without moving artifacts and without a per-home opt-out.
+`fm_pr_private_file_valid` and its write-side counterpart `fm_pr_secure_file`, both in `bin/fm-pr-lib.sh`, are the single owner every private-artifact call site in the tree routes through (PR-poll artifacts, registered custom checks, condition->action watch specs, and the tool-update and mail-check shims).
+A directory is probed for mode capability with a throwaway file before either function decides which path to take, so a filesystem is only ever treated as incapable on positive proof, never by assumption; a capable directory keeps the exact `chmod`-and-compare behaviour it always had.
+On a proven-incapable directory, `fm_pr_secure_file` writes a keyed sha256 signature sidecar (`<artifact>.fm-sig`) instead of relying on the mode, and `fm_pr_private_file_valid` verifies the artifact's current bytes against that sidecar instead of its mode.
+The key is a per-state-directory secret established on first use; the signature is content-only (not path-bound), so a sidecar travels correctly with the same atomic mktemp-then-rename pattern every call site already used for its mode-capable path.
+This defends against corruption, partial writes, and a writer that does not hold the key; it does not defend against a co-resident actor who can already read every byte in a directory the filesystem cannot restrict; file-mode enforcement could not defend against that actor there either.
+
+Verified with `tests/fm-pr-lib-mode-signature.test.sh` cases folded into `tests/fm-pr-check-security.test.sh` (`test_mode_incapable_device_seals_and_verifies_by_signature`, `test_mode_capable_device_behavior_is_unchanged`), on the same class of real mode-reverting mount as the entry above, reproducing the revert before trusting it:
+
+```sh
+bin/fm-test-run.sh tests/fm-pr-check-security.test.sh
+```
+
+Observed output (relevant lines):
+
+```text
+ok - a mode-incapable device seals a fresh artifact by signature and still catches tampering
+ok - a mode-capable device keeps its exact mode-only behavior, with no signature sidecar
+```
 
 ## Watcher continuity
 

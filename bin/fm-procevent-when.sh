@@ -223,22 +223,28 @@ cmd_arm() {
     printf '%s\n' "${cond[@]}"
     printf '%s\n' "${act[@]}"
   } > "$tmp" || { rm -f -- "$tmp"; die "cannot write the spec"; }
-  chmod 0600 "$tmp" || { rm -f -- "$tmp"; die "cannot secure the spec"; }
-  hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp"; die "cannot hash the spec"; }
-  trust_tmp=$(umask 077; mktemp "$WHEN_DIR/.trust.XXXXXX") || { rm -f -- "$tmp"; die "cannot stage the trust record"; }
-  printf 'fm-when-trust-v1\n%s\n' "$hash" > "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; die "cannot write the trust record"; }
-  chmod 0600 "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; die "cannot secure the trust record"; }
-  mv -f -- "$tmp" "$(spec_file "$sid")" || { rm -f -- "$tmp" "$trust_tmp"; die "cannot publish the spec"; }
-  mv -f -- "$trust_tmp" "$(trust_file "$sid")" || { rm -f -- "$(spec_file "$sid")" "$trust_tmp"; die "cannot publish the trust record"; }
-  if ! fm_pr_private_file_valid "$(spec_file "$sid")" 600 "$device" \
-    || ! fm_pr_private_file_valid "$(trust_file "$sid")" 600 "$device"; then
-    rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")"
+  fm_pr_secure_file "$tmp" 600 "$STATE" "$device" || { rm -f -- "$tmp"; die "cannot secure the spec"; }
+  hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp" "$tmp.fm-sig"; die "cannot hash the spec"; }
+  trust_tmp=$(umask 077; mktemp "$WHEN_DIR/.trust.XXXXXX") || { rm -f -- "$tmp" "$tmp.fm-sig"; die "cannot stage the trust record"; }
+  printf 'fm-when-trust-v1\n%s\n' "$hash" > "$trust_tmp" || { rm -f -- "$tmp" "$tmp.fm-sig" "$trust_tmp"; die "cannot write the trust record"; }
+  fm_pr_secure_file "$trust_tmp" 600 "$STATE" "$device" \
+    || { rm -f -- "$tmp" "$tmp.fm-sig" "$trust_tmp"; die "cannot secure the trust record"; }
+  mv -f -- "$tmp" "$(spec_file "$sid")" \
+    || { rm -f -- "$tmp" "$tmp.fm-sig" "$trust_tmp" "$trust_tmp.fm-sig"; die "cannot publish the spec"; }
+  mv -f -- "$tmp.fm-sig" "$(spec_file "$sid").fm-sig" 2>/dev/null || true
+  mv -f -- "$trust_tmp" "$(trust_file "$sid")" \
+    || { rm -f -- "$(spec_file "$sid")" "$(spec_file "$sid").fm-sig" "$trust_tmp.fm-sig"; die "cannot publish the trust record"; }
+  mv -f -- "$trust_tmp.fm-sig" "$(trust_file "$sid").fm-sig" 2>/dev/null || true
+  if ! fm_pr_private_file_valid "$(spec_file "$sid")" 600 "$STATE" "$device" \
+    || ! fm_pr_private_file_valid "$(trust_file "$sid")" 600 "$STATE" "$device"; then
+    rm -f -- "$(spec_file "$sid")" "$(spec_file "$sid").fm-sig" "$(trust_file "$sid")" "$(trust_file "$sid").fm-sig"
     die "published spec failed validation"
   fi
 
   if ! fm_procevent_registration_publish_locked "$STATE" when "$sid" \
     "$SCRIPT_DIR/fm-procevent-when.sh" run "$sid"; then
-    rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")"
+    rm -f -- "$(spec_file "$sid")" "$(spec_file "$sid").fm-sig" \
+      "$(trust_file "$sid")" "$(trust_file "$sid").fm-sig"
     die "cannot register the watch source"
   fi
   fm_procevent_source_lock_release "$sid"
@@ -262,8 +268,8 @@ spec_load() {
   trust=$(trust_file "$sid")
   [ -d "$WHEN_DIR" ] && [ ! -L "$WHEN_DIR" ] || { SPEC_ERROR="watch directory is unavailable"; return 1; }
   device=$(fm_pr_file_device "$WHEN_DIR") || { SPEC_ERROR="cannot inspect the watch directory"; return 1; }
-  fm_pr_private_file_valid "$spec" 600 "$device" || { SPEC_ERROR="spec is missing or not private"; return 1; }
-  fm_pr_private_file_valid "$trust" 600 "$device" || { SPEC_ERROR="trust record is missing or not private"; return 1; }
+  fm_pr_private_file_valid "$spec" 600 "$STATE" "$device" || { SPEC_ERROR="spec is missing or not private"; return 1; }
+  fm_pr_private_file_valid "$trust" 600 "$STATE" "$device" || { SPEC_ERROR="trust record is missing or not private"; return 1; }
   {
     IFS= read -r version && IFS= read -r want && ! IFS= read -r extra
   } < "$trust" || { SPEC_ERROR="trust record is malformed"; return 1; }
@@ -527,16 +533,21 @@ publish_spec() {
     printf '%s\n' "${COND_ARGV[@]}"
     printf '%s\n' "${ACT_ARGV[@]}"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp"; return 1; }
-  trust_tmp=$(umask 077; mktemp "$WHEN_DIR/.trust.XXXXXX") || { rm -f -- "$tmp"; return 1; }
-  printf 'fm-when-trust-v1\n%s\n' "$hash" > "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; return 1; }
-  chmod 0600 "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; return 1; }
-  mv -f -- "$tmp" "$(spec_file "$sid")" || { rm -f -- "$tmp" "$trust_tmp"; return 1; }
-  mv -f -- "$trust_tmp" "$(trust_file "$sid")" || { rm -f -- "$(spec_file "$sid")" "$trust_tmp"; return 1; }
-  if ! fm_pr_private_file_valid "$(spec_file "$sid")" 600 "$device" \
-    || ! fm_pr_private_file_valid "$(trust_file "$sid")" 600 "$device"; then
-    rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")"
+  fm_pr_secure_file "$tmp" 600 "$STATE" "$device" || { rm -f -- "$tmp" "$tmp.fm-sig"; return 1; }
+  hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp" "$tmp.fm-sig"; return 1; }
+  trust_tmp=$(umask 077; mktemp "$WHEN_DIR/.trust.XXXXXX") || { rm -f -- "$tmp" "$tmp.fm-sig"; return 1; }
+  printf 'fm-when-trust-v1\n%s\n' "$hash" > "$trust_tmp" || { rm -f -- "$tmp" "$tmp.fm-sig" "$trust_tmp"; return 1; }
+  fm_pr_secure_file "$trust_tmp" 600 "$STATE" "$device" \
+    || { rm -f -- "$tmp" "$tmp.fm-sig" "$trust_tmp" "$trust_tmp.fm-sig"; return 1; }
+  mv -f -- "$tmp" "$(spec_file "$sid")" \
+    || { rm -f -- "$tmp" "$tmp.fm-sig" "$trust_tmp" "$trust_tmp.fm-sig"; return 1; }
+  mv -f -- "$tmp.fm-sig" "$(spec_file "$sid").fm-sig" 2>/dev/null || true
+  mv -f -- "$trust_tmp" "$(trust_file "$sid")" \
+    || { rm -f -- "$(spec_file "$sid")" "$(spec_file "$sid").fm-sig" "$trust_tmp" "$trust_tmp.fm-sig"; return 1; }
+  mv -f -- "$trust_tmp.fm-sig" "$(trust_file "$sid").fm-sig" 2>/dev/null || true
+  if ! fm_pr_private_file_valid "$(spec_file "$sid")" 600 "$STATE" "$device" \
+    || ! fm_pr_private_file_valid "$(trust_file "$sid")" 600 "$STATE" "$device"; then
+    rm -f -- "$(spec_file "$sid")" "$(spec_file "$sid").fm-sig" "$(trust_file "$sid")" "$(trust_file "$sid").fm-sig"
     return 1
   fi
 }
@@ -621,7 +632,8 @@ cmd_retire() {
     fi
   fi
   "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" || die "cannot retire the watch source: $sid"
-  rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")"
+  rm -f -- "$(spec_file "$sid")" "$(spec_file "$sid").fm-sig" \
+    "$(trust_file "$sid")" "$(trust_file "$sid").fm-sig" "$(fired_file "$sid")"
   printf 'retired: %s\n' "$sid"
 }
 

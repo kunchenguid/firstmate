@@ -1345,7 +1345,7 @@ validate_pr_poll_cleanup() {
       || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
       || [ "$(fm_pr_file_link_count "$artifact")" != 1 ] \
       || { [ "$artifact" = "$state_dir/$id.merge-authority" ] \
-        && [ "$(fm_pr_file_mode "$artifact")" != 600 ]; }; then
+        && ! fm_pr_private_file_valid "$artifact" 600 "$state_dir" "$state_device"; }; then
       echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
       return 1
     fi
@@ -1367,6 +1367,13 @@ remove_pr_poll_artifacts() {
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
+  # A signature sidecar only exists on a mode-incapable device
+  # (fm_pr_secure_file in bin/fm-pr-lib.sh); harmless to remove when absent.
+  rm -f "$state_dir/$id.check.sh.fm-sig" "$state_dir/$id.pr-poll.fm-sig" \
+    "$state_dir/$id.pr-poll-registration.fm-sig" \
+    "$state_dir/$id.pr-poll-retirement.fm-sig" \
+    "$state_dir/$id.merge-authority.fm-sig" \
+    "$state_dir/$id.check-trust.fm-sig" 2>/dev/null
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a

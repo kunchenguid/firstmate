@@ -49,4 +49,7 @@ rm -f -- "$CHECK" "$TRUST" || {
   echo "error: custom check could not be removed" >&2
   exit 1
 }
+# A signature sidecar only exists on a mode-incapable device; leaving one
+# behind is harmless, but removing it keeps state/ from accumulating debris.
+rm -f -- "$CHECK.fm-sig" "$TRUST.fm-sig" 2>/dev/null
 printf 'unregistered: state/%s.check.sh\n' "$ID"
