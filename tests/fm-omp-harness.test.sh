@@ -627,6 +627,7 @@ EOF
   bin=$(make_named_shells "$TMP_ROOT/nested/bin")
   for mode in owned fresh; do
     rm -f "$home/state/.lock" "$home/state/.omp-watch-extension-loaded" "$home/state/.omp-turnend-extension-loaded"
+    # shellcheck disable=SC2016 # the quoted body expands inside the named shell
     out=$(MODE="$mode" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" WATCH_EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" GUARD_EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" \
       "$bin/omp" -c 'export FM_TEST_SESSION_PID=$$; if [ "$MODE" = owned ]; then printf "%s\n" "$$" > "$1/state/.lock"; fi; node "$2"; result=$?; exit "$result"' _ "$home" "$driver" 2>&1)
     status=$?
