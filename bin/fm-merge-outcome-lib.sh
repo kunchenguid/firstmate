@@ -96,7 +96,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   fi
 
   if [ -n "$destination" ]; then
-    fm_parent_channel_append_once "$destination" "$line" || status=1
+    fm_parent_channel_append_once "$destination" "$(status_stamp_line "$line")" || status=1
   fi
   if [ "$status" -eq 0 ] && { [ "$origin" = poll ] || [ -z "$destination" ]; }; then
     fm_wake_append check "merged-$id-$FM_PR_URL" \

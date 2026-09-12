@@ -1297,6 +1297,9 @@ test_same_basename_self_home_corr_resolves_on_tick() {
     || fail "resolved_epoch must be set after the restatement copy"
   grep -Fq "corr=$corr" "$parent_status" \
     || fail "parent channel must receive the restated corr= line"
+  if status_line_at_epoch "$(tail -1 "$parent_status")" >/dev/null; then
+    fail "a relayed copy must not acquire an emission time: $(cat "$parent_status")"
+  fi
   if grep -Fq pending-reply-missed "$parent_status"; then
     fail "same-basename self-home corr must not escalate as pending-reply-missed"
   fi
