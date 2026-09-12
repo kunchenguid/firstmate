@@ -53,9 +53,6 @@ serve() {
       checks='[{"name":"lint","state":"SUCCESS","bucket":"pass","workflow":"ci"},{"name":"optional","state":"SKIPPED","bucket":"skipping","workflow":"ci"}]'
       printf '%s\n' "${FM_TEST_REQUIRED_CHECKS:-$checks}"
       ;;
-    "pr checks "*)
-      printf '%s\n' '[{"name":"browser shard","state":"FAILURE","bucket":"fail","workflow":"ci"}]'
-      ;;
     *)
       printf 'unexpected gh call: %s\n' "$*" >&2
       exit 91
@@ -83,11 +80,11 @@ reviews() {
     | {user: {login: .[0], type: .[1]}, state: .[2], commit_id: .[3], submitted_at: .[4]})'
 }
 
-test_clean_pr_is_silent_and_ignores_advisory_failures() {
+test_clean_pr_is_silent_and_ignores_skipped_checks() {
   local out
   out=$(run_state) || fail "clean fixture was refused"
   [ -z "$out" ] || fail "clean fixture should be silent, got: $out"
-  pass "clean PR is silent and advisory failures do not block"
+  pass "a passing required check and a skipped one leave nothing to report"
 }
 
 test_terminal_state_is_the_whole_report() {
@@ -213,16 +210,17 @@ test_required_failure_is_a_blocker() {
   pass "required failure blocks readiness"
 }
 
-test_no_required_checks_is_silent() {
+test_unreported_required_checks_are_unconfirmed() {
   local out status
   out=$(FM_TEST_CHECKS_ERROR="no required checks reported on the 'fm/fixture' branch" run_state) \
-    || fail "a base without required checks was refused"
-  [ -z "$out" ] || fail "a base without required checks has no check blocker, got: $out"
+    || fail "a head without reported required checks was refused"
+  [ "$out" = "CHECKS: no required check has reported on ${HEAD:0:7}; readiness unconfirmed" ] \
+    || fail "gh cannot tell an unconfigured required check from an unreported one, so neither may read as ready, got: $out"
 
   status=0
   FM_TEST_CHECKS_ERROR='HTTP 502: Bad Gateway' run_state >/dev/null 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "a real check lookup failure must still refuse"
-  pass "a base without required checks is silent, other check lookup failures refuse"
+  pass "an unreported required check is unconfirmed, other check lookup failures refuse"
 }
 
 test_no_reported_checks_is_unverified() {
@@ -274,14 +272,17 @@ test_refusals_exit_nonzero() {
   PATH="$FAKEBIN:$PATH" "$SCRIPT" not-a-pr >/dev/null 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "lookup refusal exited zero"
 
+  local out
   status=0
-  PATH="$FAKEBIN:$PATH" "$SCRIPT" 7 >/dev/null 2>&1 || status=$?
+  out=$(PATH="$FAKEBIN:$PATH" "$SCRIPT" 7 2>&1) || status=$?
   [ "$status" -ne 0 ] \
     || fail "a bare number resolves against the ambient repository and is not an address"
+  assert_contains "$out" 'expected a GitHub pull-request URL' \
+    "a bare number must be refused as an address, not attempted as a lookup"
   pass "argument and lookup refusals exit nonzero"
 }
 
-test_clean_pr_is_silent_and_ignores_advisory_failures
+test_clean_pr_is_silent_and_ignores_skipped_checks
 test_terminal_state_is_the_whole_report
 test_draft_is_a_blocker
 test_head_moving_mid_read_invalidates_the_result
@@ -292,7 +293,7 @@ test_changes_requested_decision_is_never_silent
 test_authors_own_changes_requested_review_is_not_a_blocker
 test_pending_approval_is_not_a_blocker
 test_required_failure_is_a_blocker
-test_no_required_checks_is_silent
+test_unreported_required_checks_are_unconfirmed
 test_no_reported_checks_is_unverified
 test_help_states_thread_resolution_is_out_of_scope
 test_unknown_mergeability_is_a_blocker

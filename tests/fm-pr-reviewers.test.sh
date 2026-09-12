@@ -101,10 +101,13 @@ test_refusals_exit_nonzero() {
   PATH="$FAKEBIN:$PATH" "$SCRIPT" not-a-pr >/dev/null 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "lookup refusal exited zero"
 
+  local out
   status=0
-  PATH="$FAKEBIN:$PATH" "$SCRIPT" 7 >/dev/null 2>&1 || status=$?
+  out=$(PATH="$FAKEBIN:$PATH" "$SCRIPT" 7 2>&1) || status=$?
   [ "$status" -ne 0 ] \
     || fail "a bare number resolves against the ambient repository and is not an address"
+  assert_contains "$out" 'expected a GitHub pull-request URL' \
+    "a bare number must be refused as an address, not attempted as a lookup"
   pass "argument and lookup refusals exit nonzero"
 }
 

@@ -7,10 +7,13 @@
 # Ready means nothing is left for the author: a pull request that only awaits
 # an approval (reviewDecision REVIEW_REQUIRED) is not reported as blocked.
 # Advisory checks do not block and are omitted. A head on which no check has
-# reported yet is unverified, not ready. GitHub's reviewDecision owns
-# whether reviews block; review history is printed only to explain
-# CHANGES_REQUESTED, naming each reviewer whose latest verdict still requests
-# changes and marking it STALE when it was left at a superseded head.
+# reported yet is unverified, not ready. gh returns the same text whether a
+# repository configures no required check at all or configures one that has not
+# reported on this head, so that state is reported as unconfirmed rather than
+# guessed as ready. GitHub's reviewDecision owns whether reviews block; review
+# history is printed only to explain CHANGES_REQUESTED, naming each reviewer
+# whose latest verdict still requests changes and marking it STALE when it was
+# left at a superseded head.
 # Every reading is taken against one exact head. A push that lands mid-read
 # invalidates the whole result rather than mixing two heads, so the caller
 # re-runs the command against the new head.
@@ -125,7 +128,7 @@ if ! REQUIRED=$(gh pr checks "$URL" --required --json name,state,bucket,workflow
   if grep -q "^no checks reported on the '" "$GH_STDERR"; then
     REQUIRED="CHECKS: none reported yet on ${HEAD:0:7}"
   elif grep -q "^no required checks reported on the '" "$GH_STDERR"; then
-    REQUIRED=
+    REQUIRED="CHECKS: no required check has reported on ${HEAD:0:7}; readiness unconfirmed"
   else
     cat "$GH_STDERR" >&2
     die "could not read required checks for $URL"
