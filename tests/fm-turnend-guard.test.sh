@@ -184,6 +184,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -1734,6 +1736,95 @@ test_hook_claude_mode_frozen_epoch_without_verified_failure_spends_budget_and_ke
   pass "fm-turnend-guard --claude: a frozen unverified epoch spends the budget yet still blocks"
 }
 
+# The one frozen-epoch shape #4221 leaves unbounded: the lock is held by
+# ANOTHER live harness session and no failure episode is verified. Such a
+# session is read-only by contract and cannot arm or repair, so after the
+# budget the guard must release the turn with an ownership-unresolved
+# escalation that is explicitly not a completion attestation - while a dead
+# owner or a missing lock keeps upstream's keep-blocking contract, and a
+# healthy watcher still allows silently and resets the episode.
+test_hook_claude_mode_lock_refused_unverified_escalates_after_budget() {
+  local dir out status i holder count pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-lock-refused")
+  : > "$dir/state/task1.meta"
+  ln -s /bin/bash "$dir/fake-claude"
+  printf 'epoch=7 owner_pid=999 outcome=clean updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  hold_session_lock_from_foreign_harness "$dir"
+  holder=$FOREIGN_LOCK_HOLDER
+  for i in 1 2 3; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+    expect_code 2 "$status" "lock-refused stop $i must still re-block within the budget"
+    assert_contains "$out" "TURN WOULD END BLIND" "lock-refused re-block $i lost the blind-turn banner"
+    assert_contains "$out" "harness pid $holder" "lock-refused re-block $i must name the live lock owner"
+    assert_contains "$out" "this session is read-only" "lock-refused re-block $i must tell the model it cannot repair"
+    assert_contains "$out" "report this to the captain" "lock-refused re-block $i must route the model to the captain"
+    assert_not_contains "$out" 'systemMessage' "lock-refused re-block $i must not release early"
+  done
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "with the budget spent under a live foreign owner the turn must be released"
+  assert_contains "$out" 'FIRSTMATE CANNOT ESTABLISH SUPERVISION OWNERSHIP' "the release must be the ownership-unresolved escalation"
+  assert_contains "$out" 'NOT a completion attestation' "the release must not attest completion"
+  assert_contains "$out" "harness pid $holder" "the release must name the live lock owner"
+  assert_contains "$out" "1 task(s) in flight" "the release must name the unverified supervision need"
+  assert_not_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the release must not impersonate the verified-failure fail-open"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "the release must not consume the verified-failure attended alarm"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "the release must not fabricate a failure notice"
+  [ "$(sed -n '1p' "$dir/state/.claude-autoarm-epoch")" = 'epoch=7 owner_pid=999 outcome=clean updated_at=1' ] \
+    || fail "the release rewrote the frozen ledger"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "every later stop under the same live owner is released the same way"
+  assert_contains "$out" 'FIRSTMATE CANNOT ESTABLISH SUPERVISION OWNERSHIP' "later releases must stay loud"
+  count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+  [ "$count" -gt 3 ] 2>/dev/null || fail "the budget must have been spent before any release, got count ${count:-absent}"
+
+  # The owner dies: the lock is stale, not refused, so the session could take
+  # it and upstream's keep-blocking contract applies again.
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a dead lock owner is stale, not refused: the guard must block again"
+  assert_not_contains "$out" 'systemMessage' "a stale owner must never release the turn"
+  assert_not_contains "$out" "this session is read-only" "a stale owner must not be reported as a live foreign owner"
+
+  # Positive recovery still allows silently and clears the whole episode.
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify the recovery watcher"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_claude "$dir" true); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$dir/state/.watch.lock"
+  expect_code 0 "$status" "a healthy watcher must allow after a lock-refused release"
+  [ -z "$out" ] || fail "healthy allow after a lock-refused release produced output: $out"
+  assert_absent "$dir/state/.turnend-claude-blocks" "positive recovery left the block budget"
+  pass "fm-turnend-guard --claude: a live foreign lock owner spends the budget, then releases with an ownership-unresolved escalation; dead owners keep blocking"
+}
+
+test_hook_claude_mode_lock_refused_release_never_fires_in_away_mode() {
+  local dir out status i holder
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-lock-refused-afk")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  ln -s /bin/bash "$dir/fake-claude"
+  hold_session_lock_from_foreign_harness "$dir"
+  holder=$FOREIGN_LOCK_HOLDER
+  for i in 1 2 3 4 5; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+    expect_code 2 "$status" "away mode must keep blocking a lock-refused stop $i"
+    assert_not_contains "$out" 'systemMessage' "away mode must never release a lock-refused stop"
+  done
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "fm-turnend-guard --claude: away mode excludes the ownership-unresolved release"
+}
+
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   local dir pid identity holder out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-recovery-contention")
@@ -2259,6 +2350,8 @@ test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open
 test_hook_claude_mode_frozen_epoch_without_verified_failure_spends_budget_and_keeps_blocking
+test_hook_claude_mode_lock_refused_unverified_escalates_after_budget
+test_hook_claude_mode_lock_refused_release_never_fires_in_away_mode
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
