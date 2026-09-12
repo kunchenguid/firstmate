@@ -542,6 +542,19 @@ SH
   chmod +x "$case_dir/fakebin/rm"
 }
 
+break_agy_hook_removal() {  # <case-dir> <hook-root>
+  local case_dir=$1 hook_root=$2 real
+  real=$(command -v rm)
+  cat > "$case_dir/fakebin/rm" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" != "$hook_root" ] || exit 1
+done
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/rm"
+}
+
 remove_data_during_startup_budget_check() {  # <case-dir>
   local case_dir=$1 real data saved budget
   real=$(command -v stat)
@@ -1343,6 +1356,29 @@ test_dispatch_leaves_no_record_when_the_transition_fails() {
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "a failed dispatch left the backlog item in $(row_state "$case_dir" "$id")"
   pass "a failed backlog transition fails the dispatch loudly and leaves no record"
+}
+
+test_agy_hook_cleanup_failure_still_rolls_back_dispatch_state() {
+  local case_dir id meta hook out rc=0
+  id=atomic-dispatch-agy-hook-cleanup-fails
+  case_dir=$(make_home dispatch-agy-hook-cleanup-fails "$id")
+  add_item "$case_dir" "$id"
+  meta="$(home_of "$case_dir")/state/$id.meta"
+  hook="$(home_of "$case_dir")/state/$id.agy-hooks"
+  break_verb "$case_dir" start
+  break_agy_hook_removal "$case_dir" "$hook"
+
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --harness agy --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn succeeded though AGY dispatch and hook cleanup failed"
+  assert_present "$hook" "the forced AGY hook cleanup failure was not retained"
+  assert_absent "$meta" "AGY hook cleanup failure skipped provisional metadata rollback"
+  assert_absent "$(home_of "$case_dir")/state/$id.busy-state" \
+    "AGY hook cleanup failure skipped busy-state rollback"
+  assert_absent "$(home_of "$case_dir")/state/$id.busy-gen" \
+    "AGY hook cleanup failure skipped busy-generation rollback"
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "AGY hook cleanup failure changed the backlog row"
+  pass "AGY hook cleanup failure still rolls back provisional metadata and busy state"
 }
 
 test_dispatch_reports_an_incomplete_record_rollback() {
@@ -3019,6 +3055,7 @@ test_dispatch_reports_a_backlog_read_failure
 test_dispatch_refuses_a_closed_item
 test_dispatch_refuses_to_commit_without_a_published_record
 test_dispatch_leaves_no_record_when_the_transition_fails
+test_agy_hook_cleanup_failure_still_rolls_back_dispatch_state
 test_dispatch_reports_an_incomplete_record_rollback
 test_dispatch_reports_an_incomplete_busy_rollback
 test_dispatch_rolls_back_before_a_failed_launch_delivery

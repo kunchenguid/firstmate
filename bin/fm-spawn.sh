@@ -955,7 +955,8 @@ spawn_fresh_commit_rollback() {
   local status=0
   if ! spawn_fresh_wiring_rollback; then
     status=1
-  elif fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
+  fi
+  if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
       "$FM_ROOT/bin/fm-busy-event.sh" "$STATE" "$ID" "${BUSY_GEN:-}"; then
     SPAWN_FRESH_COMMIT_PENDING=0
   else

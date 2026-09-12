@@ -13,6 +13,7 @@ Antigravity CLI `agy` is a verified worker adapter for CREWMATE and SCOUT tasks 
 - Firstmate-owned `PreInvocation` and `Stop` hooks provide the semantic busy source, while `PostToolUse` refreshes the shared progress marker; all are retired with the task.
 - An agy Escape interruption has no verified cancellation acknowledgement, so control and data interruption paths preserve an unconfirmed semantic state.
 - The shared composer classifier owns agy prompt recognition, draft preservation, multiline extraction, and cursor or cursorless capability handling.
+- AGY composer recognition requires exactly two full-width U+2500 boundary rows; narrower rules never pair and never count toward ambiguity, while three or more full-width rows are ambiguous.
 - Non-tmux composer reads use a bounded 200-row tail for agy so both measured boundaries survive long drafts; other harnesses retain the normal 20-row tail.
 - The inbox doorbell defers both pending and unknown agy composer verdicts and rings only after a proven empty result; the watcher records the deferral and retries.
 - Typed AGY steering compares the extracted composer with the literal text before Enter; a mismatch withholds Enter, records the steer in the inbox, and reports that stray text may remain unsent in the pane.

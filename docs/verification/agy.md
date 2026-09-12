@@ -19,7 +19,7 @@ The delivery fallback matches this anchored cancel-plus-effort row, not the bare
 The measured composer boundary is a 72-character row of U+2500 BOX DRAWINGS LIGHT HORIZONTAL.
 The adapter accepts only that byte-exact glyph after trimming, with a minimum width of 16 characters.
 Other box-drawing glyphs, ASCII rule characters, and shorter rows fail closed to `unknown`; a future AGY boundary change is caught by the composer-matrix live guard.
-A capture with three or more measured boundary rows is ambiguous by design and defers steering without selecting or extracting any AGY draft content.
+AGY boundary recognition requires exactly two full-width U+2500 boundary rows; narrower rules never pair and never count toward ambiguity, while three or more full-width rows are ambiguous by design and defer steering without selecting or extracting any AGY draft content.
 Non-tmux AGY composer reads use a bounded 200-row tail while other harnesses retain the 20-row default, so long drafts preserve both measured boundaries.
 The AGY inbox doorbell defers both `pending` and `unknown` composer verdicts and rings only after a proven `empty`; the watcher records the deferral and retries.
 Typed AGY steering performs a final composer comparison after literal typing and before Enter; a mismatch withholds Enter, records the steer in the inbox, and reports that stray text may remain unsent in the pane.

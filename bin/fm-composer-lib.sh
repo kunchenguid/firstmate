@@ -744,6 +744,9 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
         ;;
       *) leftbar_start=-1 ;;
     esac
+    # AGY boundaries require exactly two full-width U+2500 rows. Narrower rules
+    # are transcript content and never pair or count toward ambiguity; three or
+    # more full-width rows are ambiguous.
     if [ "$harness" = agy ] && boundary_width=$(_fm_composer_agy_boundary_width "$trimmed"); then
       if [ "$agy_boundary_count" -eq 0 ] || [ "$boundary_width" -gt "$FM_COMPOSER_SCAN_AGY_WIDTH" ]; then
         agy_boundary_count=1
