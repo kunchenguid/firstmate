@@ -1145,7 +1145,7 @@ _fm_composer_agy_busy_scope() {  # <plain-screen>
 }
 
 fm_composer_agy_wait_stable() {  # <content-function> <target> [expected-label]
-  local content_fn=$1 target=$2 expected_label=${3:-} previous= current have_previous=0 i=0
+  local content_fn=$1 target=$2 expected_label=${3:-} previous='' current have_previous=0 i=0
   while [ "$i" -le 16 ]; do
     if current=$("$content_fn" "$target" "$expected_label" 2>/dev/null); then
       if [ "$have_previous" -eq 1 ] && [ -n "$current" ] && [ "$current" = "$previous" ]; then
@@ -1155,7 +1155,7 @@ fm_composer_agy_wait_stable() {  # <content-function> <target> [expected-label]
       previous=$current
       have_previous=1
     else
-      previous=
+      previous=''
       have_previous=0
     fi
     i=$((i + 1))

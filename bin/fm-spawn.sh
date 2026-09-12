@@ -942,7 +942,7 @@ spawn_fresh_wiring_rollback() {
   [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] || return 0
   if [ -n "${AGY_HOOK_ROOT_PATH:-}" ] \
       && { [ -e "$AGY_HOOK_ROOT_PATH" ] || [ -L "$AGY_HOOK_ROOT_PATH" ]; }; then
-    if ! agy_remove_owned_hook_root "$AGY_HOOK_ROOT_PATH" "$STATE_REAL" "$meta" "$ID" \
+    if ! fm_agy_remove_owned_hook_root "$AGY_HOOK_ROOT_PATH" "$STATE_REAL" "$meta" "$ID" \
         "${AGY_HOOK_ROOT_CREATED:-0}"; then
       status=1
     fi
@@ -1165,7 +1165,7 @@ clear_relaunch_harness_wiring() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     if [ "$harness" = agy ] && [ "$path" = "$state/$id.agy-hooks" ]; then
-      if ! agy_remove_owned_hook_root "$path" "$state" "$state/$id.meta" "$id" \
+      if ! fm_agy_remove_owned_hook_root "$path" "$state" "$state/$id.meta" "$id" \
           "$agy_root_owned"; then
         return 1
       fi
@@ -1187,71 +1187,6 @@ spawn_herdr_presentation_order_lock_release() {
   [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ] || return 0
   HERDR_PRESENTATION_ORDER_LOCK_HELD=0
   fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
-}
-
-agy_hook_root_matches_owner() {
-  local root=$1 state_root=$2 meta=$3
-  local root_real marker marker_gen owner_gen
-  [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ] || return 1
-  owner_gen=$(fm_meta_get "$meta" spawn_gen)
-  [ -n "$owner_gen" ] || return 1
-  agy_hook_root_path_is_safe "$root" "$state_root" || return 1
-  root_real=$(cd -P -- "$root" && pwd -P) || return 1
-  marker="$root_real/.firstmate-spawn-gen"
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  marker_gen=$(cat "$marker") || return 1
-  [ "$marker_gen" = "$owner_gen" ] || return 1
-}
-
-agy_hook_root_path_is_safe() {
-  local root=$1 state_root=$2 root_real state_real
-  [ -d "$root" ] && [ ! -L "$root" ] || return 1
-  state_real=$(cd -P -- "$state_root" && pwd -P) || return 1
-  root_real=$(cd -P -- "$root" && pwd -P) || return 1
-  case "$root_real/" in
-    "$state_real/"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-agy_clear_hook_ownership_meta() {
-  local meta=$1 state_root=$2 id=$3 tmp
-  [ -f "$meta" ] || return 0
-  tmp="$state_root/.$id.meta.agy-unowned.${BASHPID:-$$}"
-  awk -F= '$1 != "agy_hooks_owned"' "$meta" > "$tmp" || {
-    rm -f -- "$tmp"
-    return 1
-  }
-  if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$state_root"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-}
-
-agy_remove_owned_hook_root() {
-  local root=$1 state_root=$2 meta=$3 id=$4 current_owned=${5:-0}
-  if [ ! -e "$root" ] && [ ! -L "$root" ]; then
-    if [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ]; then
-      agy_clear_hook_ownership_meta "$meta" "$state_root" "$id" || return 1
-    fi
-    return 0
-  fi
-  if [ "$current_owned" = 1 ]; then
-    if ! agy_hook_root_path_is_safe "$root" "$state_root"; then
-      echo "warning: retaining agy hook path $root; current-spawn ownership path is unsafe" >&2
-      return 1
-    fi
-  elif ! agy_hook_root_matches_owner "$root" "$state_root" "$meta"; then
-    echo "warning: retaining agy hook path $root; ownership could not be proven" >&2
-    return 1
-  fi
-  if ! rm -rf -- "$root" || [ -e "$root" ] || [ -L "$root" ]; then
-    echo "error: agy hook root $root could not be removed; retaining task $id" >&2
-    return 1
-  fi
-  if [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ]; then
-    agy_clear_hook_ownership_meta "$meta" "$state_root" "$id" || return 1
-  fi
 }
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
@@ -1808,7 +1743,9 @@ case "$ARG3" in
         *) HARNESS=$(basename "$word"); break ;;
       esac
     done
-    [ "$HARNESS" != agy ] || HARNESS=raw-agy
+    if [ "$HARNESS" = agy ]; then
+      HARNESS=raw-agy
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the

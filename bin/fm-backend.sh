@@ -346,6 +346,72 @@ fm_meta_get() {  # <meta-file> <key>
   printf '%s' "$value"
 }
 
+fm_agy_hook_root_matches_owner() {
+  local root=$1 state_root=$2 meta=$3
+  local root_real marker marker_gen owner_gen
+  [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ] || return 1
+  owner_gen=$(fm_meta_get "$meta" spawn_gen)
+  [ -n "$owner_gen" ] || return 1
+  fm_agy_hook_root_path_is_safe "$root" "$state_root" || return 1
+  root_real=$(cd -P -- "$root" && pwd -P) || return 1
+  marker="$root_real/.firstmate-spawn-gen"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  marker_gen=$(cat "$marker") || return 1
+  [ "$marker_gen" = "$owner_gen" ]
+}
+
+fm_agy_hook_root_path_is_safe() {
+  local root=$1 state_root=$2 root_real state_real
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  state_real=$(cd -P -- "$state_root" && pwd -P) || return 1
+  root_real=$(cd -P -- "$root" && pwd -P) || return 1
+  case "$root_real/" in
+    "$state_real/"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_agy_clear_hook_ownership_meta() {
+  local meta=$1 state_root=$2 id=$3 tmp
+  [ -f "$meta" ] || return 0
+  tmp="$state_root/.$id.meta.agy-unowned.${BASHPID:-$$}"
+  awk -F= '$1 != "agy_hooks_owned"' "$meta" > "$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$state_root"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_agy_remove_owned_hook_root() {
+  local root=$1 state_root=$2 meta=$3 id=$4 current_owned=${5:-0}
+  local record_label=${6:-$id}
+  if [ ! -e "$root" ] && [ ! -L "$root" ]; then
+    if [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ]; then
+      fm_agy_clear_hook_ownership_meta "$meta" "$state_root" "$id" || return 1
+    fi
+    return 0
+  fi
+  if [ "$current_owned" = 1 ]; then
+    if ! fm_agy_hook_root_path_is_safe "$root" "$state_root"; then
+      echo "warning: retaining agy hook path $root; current-spawn ownership path is unsafe" >&2
+      return 1
+    fi
+  elif ! fm_agy_hook_root_matches_owner "$root" "$state_root" "$meta"; then
+    echo "error: retaining agy hook path $root; ownership could not be proven for $record_label" >&2
+    return 1
+  fi
+  if ! rm -rf -- "$root" || [ -e "$root" ] || [ -L "$root" ]; then
+    echo "error: agy hook root $root could not be removed; retaining $record_label" >&2
+    return 1
+  fi
+  if [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ]; then
+    fm_agy_clear_hook_ownership_meta "$meta" "$state_root" "$id" || return 1
+  fi
+}
+
 # fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
 # `tmux` when the field is absent - the P1 compatibility contract.
 fm_backend_of_meta() {  # <meta-file>

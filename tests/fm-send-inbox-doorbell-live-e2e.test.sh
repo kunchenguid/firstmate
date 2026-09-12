@@ -324,8 +324,9 @@ EOF
     fi
     sleep 1
   done
-  [ -f "$doorbell_acted" ] && grep -Fqx "$doorbell_marker" "$doorbell_acted" \
-    || die "agy ($version): doorbell instruction was not acted on"
+  if [ ! -f "$doorbell_acted" ] || ! grep -Fqx "$doorbell_marker" "$doorbell_acted"; then
+    die "agy ($version): doorbell instruction was not acted on"
+  fi
   [ -f "$doorbell_inbox/handled/001.msg" ] \
     || die "agy ($version): doorbell instruction was not acknowledged"
   rm -f "$state/$task.progress"

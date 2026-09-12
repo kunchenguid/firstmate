@@ -293,32 +293,39 @@ Width-120 lifecycle command:
 env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 FM_AGY_LIFECYCLE_TMUX_WIDTH=120 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
 
-The no-mistakes pipeline sandbox cannot execute these credentialed post-fix lifecycle runs because it has no worktree pool or signed-in AGY session; the doorbell assertions remain in the executable guard for firstmate to run at both widths.
+The no-mistakes pipeline sandbox cannot execute these credentialed post-fix lifecycle runs because it has no worktree pool or signed-in AGY session.
+The following is the firstmate run, 2026-09-12, real environment, gate tip 30f3d426, Antigravity CLI 1.2.2.
+The expected-guided submit comparison matches each extracted row in order, permits zero or more ASCII spaces only between rows, and preserves interior row spaces exactly.
 
-No post-fix live output is recorded here; the placeholder below remains intentionally unfilled until firstmate runs the real-binary guard at both widths.
-
-Firstmate's 2026-09-12 AGY 1.2.2 run against gate tip 930d28d passed the lifecycle guard at width 120 with spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown.
-The same run at widths 220 and 80 reached the pre-exit settle with an idle screen classified as `unknown`.
-That evidence predates the widest-boundary filtering correction below.
-The submit comparison now uses the typed text as its guide: each extracted row must match in order, with zero or more ASCII spaces permitted only between rows, while interior row spaces remain exact.
-
-Post-fix output placeholder for firstmate's credentialed runs:
+Lifecycle guard (`tests/fm-send-inbox-doorbell-live-e2e.test.sh` with `FM_AGY_LIFECYCLE_LIVE_E2E=1`):
 
 ```text
-<replace with the exact FM_AGY_LIFECYCLE_TMUX_WIDTH=220, 120, and 80 outputs>
+ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed
+FM_TEST_END 2026-09-12T17:05:52Z exit=0 duration_ms=90716
+ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed
+FM_TEST_END 2026-09-12T17:07:40Z exit=0 duration_ms=108511
+ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed
+FM_TEST_END 2026-09-12T17:11:09Z exit=0 duration_ms=208349
 ```
 
-Output from firstmate's 2026-09-12 pre-doorbell-assertion lifecycle run:
+Composer-matrix guard (`FM_COMPOSER_MATRIX_LIVE=1`):
 
 ```text
-ok - agy (1.2.2): canonical spawn, hooks, control/data interrupts, Stop, exit, and teardown passed
-FM_TEST_END 2026-09-12T12:12:24Z tests/fm-send-inbox-doorbell-live-e2e.test.sh exit=0 duration_ms=209834 gate_skip=false
-FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=209886
-FM_TEST_SUMMARY_FAMILY family=live-harness-optin count=1 duration_ms=209834 failed=0
-FM_TEST_SLOWEST rank=1 script=tests/fm-send-inbox-doorbell-live-e2e.test.sh duration_ms=209834
+ok - claude (2.1.269 (Claude Code)): real idle composer classifies empty
+ok - codex (codex-cli 0.153.4): real idle composer classifies empty
+ok - agy (1.2.2): real idle > composer plus shortcuts footer classifies empty
+ok - agy (1.2.2): real unsent draft stays pending with styled and cursorless signals
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+ok - live composer-matrix guard verified 4 live surface(s)
 ```
 
-The recorded lifecycle line covers spawn, hooks, both interrupts, exit after clearing the pending composer, and teardown; the post-fix run must additionally prove doorbell acted-and-acknowledged behavior.
+Liveness/marker guard (`FM_HARNESS_LIVENESS_DRIFT=1`):
+
+```text
+ok - harness liveness: agy 1.2.2 classifies alive
+```
+
+Portable suites passed: `fm-composer-lib`, `fm-busy-adapter-wiring`, `fm-control`, `fm-gemini-harness`, and `fm-tmux-agent-liveness`.
 
 Real-binary composer-clear measurement, run on 2026-09-12 against AGY 1.2.2.
 The trust dialog was accepted before the composer probes.
