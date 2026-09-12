@@ -545,7 +545,7 @@ fm_send_hold_resolved_id() {  # <task-id> <decision-key>
   local show id state hold_kind
   command -v tasks-axi >/dev/null 2>&1 || return 1
   for id in "$2" "$1-decision-$2"; do
-    show=$( (cd "$FM_HOME" && tasks-axi show "$id" --full) 2>/dev/null ) || continue
+    show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null) || continue
     state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
     hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)
     [ "$state" != "done" ] || continue

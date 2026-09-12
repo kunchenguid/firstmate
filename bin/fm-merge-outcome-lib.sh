@@ -35,27 +35,37 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 
-# fm_merge_outcome_report <home> <state> <task-id> <pr-url> <origin>
+# fm_merge_outcome_report <home> <state> <task-id> <pr-url> <origin> [authority]
 #
 # <origin> says who observed the merge, because that decides whether the
 # existing poll path also needs a local wake:
 #   self - this home performed the merge.
 #   poll - this home's merge poll detected the merge, so the canonical outcome
 #          also wakes this home after any upward hop needed by a secondmate.
+# Optional <authority> is yolo or away-grant when the merge ran while the
+# away-posture record existed; it is appended to the ledger line. Known audit
+# gap: queued merges and a poll that wins direct-merge deduplication publish an
+# untagged row because the poll path does not persist merge authority.
 #
 # Returns 0 when the outcome is recorded (or already was), 2 on an invalid
 # request, 3 when this home's own role or parent binding cannot be read well
 # enough to say where the outcome belongs, and 1 on any other failure to
 # record. A caller that has already merged must report a non-zero return rather
 # than treat it as success: the merge landed and the record did not.
-fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
+fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [authority]
   local home=$1 state=$2 id=$3 url=$4 origin=$5
+  local authority=${6-} suffix=
   local self_rc=0 destination='' line lock status=0
   local provider host path number
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
   case "$origin" in self|poll) ;; *) return 2 ;; esac
+  case "$authority" in
+    yolo|away-grant) suffix=" $authority" ;;
+    '') ;;
+    *) return 2 ;;
+  esac
   fm_pr_task_id_valid "$id" || return 2
   fm_pr_url_parse "$url" || return 2
   provider=$FM_PR_PROVIDER
@@ -65,7 +75,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
 
   if destination=$(fm_parent_channel_destination "$home" "$state"); then
-    line="done [key=merged-$id]: merged $id $FM_PR_URL"
+    line="done [key=merged-$id]: merged $id $FM_PR_URL$suffix"
   else
     self_rc=$?
     [ "$self_rc" -eq 1 ] || return 3
@@ -90,7 +100,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   fi
   if [ "$status" -eq 0 ] && { [ "$origin" = poll ] || [ -z "$destination" ]; }; then
     fm_wake_append check "merged-$id-$FM_PR_URL" \
-      "check: merge landed: $id $FM_PR_URL" || status=1
+      "check: merge landed: $id $FM_PR_URL$suffix" || status=1
   fi
   if [ "$status" -eq 0 ]; then
     fm_pr_poll_merge_mark_notified "$state" "$id" \

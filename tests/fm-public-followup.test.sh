@@ -268,6 +268,55 @@ expect_failure() {
   fi
 }
 
+# --- 0. the suite's seeding never reaches a real backlog ------------------------
+
+# An operator shell exports TASKS_AXI_FILE at its live home's backlog, and
+# tasks-axi resolves that env ahead of the fixture's .tasks.toml. This suite
+# seeds obligations with bare `tasks-axi` from the fixture home, so before
+# tests/lib.sh cleared the ambient overrides, every seed landed in the operator's
+# real backlog while the consumer read the empty fixture. Re-enter the suite's
+# seeding exactly as a test process begins (source tests/lib.sh, then seed from
+# the fixture) under a decoy "live" backlog and a backend tasks-axi refuses: the
+# decoy must stay byte-identical and the fixture must hold the obligation.
+test_ambient_tasks_axi_env_never_reaches_a_real_backlog() {
+  local home decoy_dir decoy fixture_state
+  home=$(make_home ambient-env)
+  decoy_dir="$TMP_ROOT/ambient-live/data"
+  decoy="$decoy_dir/backlog.md"
+  mkdir -p "$decoy_dir"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$decoy"
+  cp "$decoy" "$decoy.expected"
+  jq -n '{request_id:"req-amb", platform:"discord",
+          context_binding:{version:"ctx1", value:"ctx1_req-amb"},
+          public_safe_summary:"seeded under an ambient tasks-axi override",
+          received_at:"2026-07-30T10:00:00Z",
+          followup_expires_at:"2026-08-06T10:00:00Z",
+          reservation_expires_at:"2026-08-06T10:00:00Z"}' > "$home/request.json"
+  jq -n '{type:"pr-merged", project:"firstmate",
+          required_deliverables:["pr_url"], completion_policy:"all-required"}' \
+    > "$home/expected.json"
+
+  TASKS_AXI_FILE="$decoy" TASKS_AXI_BACKEND=no-such-backend bash -c '
+    set -u
+    . "$1/tests/lib.sh"
+    [ -z "${TASKS_AXI_FILE+x}" ] || { echo "TASKS_AXI_FILE survived tests/lib.sh"; exit 1; }
+    [ -z "${TASKS_AXI_BACKEND+x}" ] || { echo "TASKS_AXI_BACKEND survived tests/lib.sh"; exit 1; }
+    cd "$2" && tasks-axi public-followup add pf-ambient \
+      --request-context-file "$2/request.json" --purpose promised-final \
+      --expected-final-file "$2/expected.json" --expires-at 2026-10-01T00:00:00Z >/dev/null
+  ' _ "$ROOT" "$home" \
+    || fail "seeding under an ambient tasks-axi override did not reach the fixture backlog"
+
+  cmp -s "$decoy" "$decoy.expected" \
+    || fail "the suite's seeding wrote the ambient TASKS_AXI_FILE backlog instead of the fixture"
+  [ "$(find "$decoy_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ')" = "backlog.md backlog.md.expected " ] \
+    || fail "the suite's seeding left an artifact beside the ambient TASKS_AXI_FILE backlog: $(find "$decoy_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ')"
+  fixture_state=$(task_state "$home" pf-ambient)
+  [ "$fixture_state" != absent ] \
+    || fail "the fixture backlog does not hold the obligation seeded under the ambient override"
+  pass "the suite's seeding never reaches a backlog named by ambient TASKS_AXI_FILE/BACKEND"
+}
+
 # --- 0. bounded, single-line, character-safe outcome text -----------------------
 
 # The outcome sentence becomes a public reply, so bounding it must not mangle
@@ -3095,6 +3144,7 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
   exit 0
 fi
 
+test_ambient_tasks_axi_env_never_reaches_a_real_backlog
 test_outcome_text_is_bounded_without_corrupting_characters
 test_restart_e2e_delivers_exactly_once
 test_duplicate_event_and_replay_are_noops

@@ -106,7 +106,7 @@ The gate does not apply to persistent secondmates, manual-backend homes, or mark
 Migrated-hold resolution on a beads home reads its graph path, binary, and prefix from the root `.tasks.toml` `[beads]` section only, and refuses (rc=2) when the beads backend is selected elsewhere (a `TASKS_AXI_BACKEND` override or user-level config) with no root-level `[beads]` section.
 On an automatic-backend home, missing or incompatible `tasks-axi`, an unresolvable configured data directory, or one containing a control byte fails lifecycle work before mutation.
 An unreadable backend configuration can refuse lifecycle work before the no-backlog exemption applies; repair the configuration named in the diagnostic ([backend resolution contract](../bin/fm-tasks-axi-lib.sh)).
-Secondmate handoffs bypass that routine-backend choice: `fm-backlog-handoff.sh` keeps only its own fleet-level validation, delegates the item move to `tasks-axi mv`, and requires a verified receiver wake after a new move becomes durable.
+Secondmate handoffs bypass that routine-backend choice: `fm-backlog-handoff.sh` keeps only its own fleet-level validation and delegates the item move to `tasks-axi mv`; its [script header](../bin/fm-backlog-handoff.sh) owns route-specific wake outcomes and remote outbox release.
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.
 Handoff item bodies must use at least two leading spaces, and the helper refuses a selected item with a single-space or tab-indented continuation rather than risk orphaning it.
 Because bootstrap requires `tasks-axi` on `PATH` on every profile, that delegation works fleet-wide, and the `config/backlog-backend=manual` knob governs firstmate's own hand-editing of its backlog, not this validated helper.
@@ -116,6 +116,10 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 A `manual` home owns its backlog file outright: the lifecycle transitions above are skipped there, dispatch and completion never fail over the file's contents, and a completed teardown prints the hand edit that is owed instead.
 Absent or `tasks-axi` selects the tasks-axi path.
 On the default markdown adapter, tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
+
+The tracked `.tasks.toml` paths resolve against the directory tasks-axi runs in, not `FM_HOME`, so a bare `tasks-axi` run from the code root addresses the code root's `data/` whenever the home lives elsewhere.
+tasks-axi writes by renaming a temp file over its target, which replaces a symlink with a regular file, so linking the code-root copy into the home forks the queue on the first such write rather than keeping the two in step.
+Every routine firstmate backlog command therefore runs through [`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh), which addresses this home's backlog and archive from any working directory exactly as lifecycle transitions do, and bootstrap reports a code-root `data/backlog.md` or `data/done-archive.md` that is not this home's own file as a `BACKLOG_RECONCILE: code-root ...` line even in a read-only session.
 
 ## Runtime backend (config/backend / FM_BACKEND)
 
@@ -273,8 +277,7 @@ The lease is held under the secondmate id until explicit retirement or seed roll
 Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
 Secondmate routes cover `no-mistakes` and `direct-PR` projects; `local-only` projects remain main-firstmate work.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
-After creating a secondmate, move existing main-backlog queued items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it refuses In flight, Done, or non-secondmate homes, and a new move succeeds only after waking the recorded receiver.
-If the wake is known to have failed, the moved item remains durable and rerunning the same handoff retries it idempotently; an unresolved delivery is reported and never blindly resent.
+After creating a secondmate, move existing main-backlog queued items that you have judged in-scope with `fm-backlog-handoff.sh <secondmate-id> <item-key>...`; it refuses In flight, Done, or non-secondmate homes, and its [script header](../bin/fm-backlog-handoff.sh) owns route-specific wake outcomes and retries.
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 The seeded home's `data/charter.md` owns the standard secondmate lifecycle and escalation contract; the route file points to it through the existing `home:` field instead of adding another pointer.
 Each seed writes an `.fm-secondmate-home` identity marker at the home root, alongside a durable `.fm-secondmate-parent` record of the home's route to its parent (see "Provision a route" in [`docs/remote-secondmates.md`](remote-secondmates.md)).
@@ -344,6 +347,17 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
+
+## Claude permission mode (config/claude-permission-mode)
+
+The optional local, gitignored `config/claude-permission-mode` holds one token selecting the permission flag every Claude worker launch carries: crewmates, scouts, Claude secondmates, and control-plane relaunches alike.
+The token is the file's whitespace-trimmed content.
+`bypass` keeps today's launch, `claude --dangerously-skip-permissions`, and is also the default when the file is absent, so an unconfigured home launches byte-for-byte as before.
+`auto` replaces that flag with `--permission-mode auto`, Claude Code's classifier-reviewed permission mode, for a captain who refuses to run workers in bypass mode; every other part of the Claude launch, including its environment prefix, inline settings, model, and effort flags, is unchanged.
+Any other value, or an unreadable file, refuses every spawn from that home, whichever harness it would launch, before any endpoint, worktree, or task record exists, and names the accepted values; Firstmate never falls back to a permission posture the captain did not choose.
+`bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
+The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
+The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
 ## Worker launch environment (config/launch-env-allowlist)
 
@@ -442,10 +456,11 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.46.0 or newer, compatible gh-axi, chrome-devtools-axi, compatible lavish-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
+The essential universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.46.0 or newer, compatible gh-axi, chrome-devtools-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
-In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
+In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
+Lavish is a presentation-only dependency for visual decisions and reports; nonvisual work can proceed with plain text when it is unavailable.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
 That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
@@ -454,10 +469,10 @@ Orca provides both the task worktree and terminal endpoint (see "Runtime backend
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
-`tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
+`tasks-axi` and `quota-axi` are essential bootstrap tools in every profile.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual`, a home with a configured non-markdown adapter or a markdown backlog refuses lifecycle mutation until compatible `tasks-axi` is on `PATH`, while a manual-backend home keeps its backlog hand-edited.
 An absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
-An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: npm install -g lavish-axi && lavish-axi setup hooks)`.
+An absent or incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with its required floor, install command, and explicit text fallback; [`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns the response and compatibility check before visual use.
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
@@ -834,11 +849,19 @@ A live identity-matched owner is never displaced, and release removes only the e
 Every stop proves ownership before its first signal: the live runner's recorded process identity must match and it must still lead its process group.
 Once that stop has proved ownership and sent TERM, its own escalation to KILL checks only whether the proved group still has members; it does not re-read the leader's identity or group membership, which can change or become unreadable as TERM ends the leader.
 This proof belongs only to that stop's own escalation and cannot authorize another caller that encounters an unproved group.
-A claim counts as reclaimable only when its owner is stale and an independent process-group check finds no members; a crashed leader or reused pid whose process group still has members cannot relax ownership cleanup, so reconcile preserves the claim without signalling the ambiguous group or starting a replacement.
-If the leader dies to anything other than the stop's own signal, `retire`, `reconcile`, `sweep-home`, and the guard all refuse its surviving group permanently, and the source silently stops listening.
-Whether that group may ever be signalled remains an open decision; the repaired guard does not close this gap.
-Reclaiming a generation that IS gone is not gated on tidying its capture-reservation records.
-Those records are keyed by claim token and every replacement claims a fresh one, so a leftover that can no longer be located - a state-root identity a claim recorded before its home was re-created, for example - is stale bytes rather than an ownership hazard.
+A stale claim whose process group still has members is one `reconcile` never displaces, and the two shapes it comes in recover differently.
+`reconcile` preserves such a claim without signalling the ambiguous group or starting a replacement: the group check probes the runner's own process group, which contains its polling source child, so surviving members can mean that child is still attached to the session the source collects from, and a replacement would put a second destructive poller on it.
+`list` reports both shapes as `orphaned`.
+When the recorded pid is alive under a different identity while the group still has members, the claim boundary itself does not consult the process group, so `bin/fm-procevent.sh start <source-id>` reclaims that claim provided the dead generation's reservation records can still be tidied, and otherwise refuses with `cannot claim source`; that tidy-up is waived only for a generation proven gone, which this one is not.
+That hand-run command is the recovery path, taken by someone who has checked that nothing is still polling the source.
+That asymmetry between the automatic path and the deliberate one is the design rather than an inconsistency, and it is not a claim-level invariant: nothing below `reconcile` enforces it.
+When the leader itself is gone and its group still has members - the leader died to anything other than the stop's own signal - `start` does not reclaim the claim either: it reports `already owned` and changes nothing, and `retire`, `reconcile`, `sweep-home`, and the guard all refuse the surviving group permanently, so the source stops listening.
+Recovery there is a human verifying whether the dead runner's polling child is still attached to the source; once that process group is empty the generation reads as gone and the next `reconcile` reclaims the source on its own.
+Nothing automatic signals that group, and whether it may ever be signalled remains an open decision; the repaired guard does not close this gap.
+Neither shape stops listening quietly: the first `reconcile` that strands a claim generation publishes a durable `check` wake naming the source and what clears it - the `start` command for the reused pid, the check to make for the leaderless group - and later cycles stay silent for that same generation while a genuinely new stranded claim announces again.
+Reclaiming a generation that IS gone is not gated on tidying anything that generation left behind: its capture-reservation records, its staging file, or the registry directory a claim recorded for them.
+Every one of those is keyed by claim token and every replacement claims a fresh one, so a leftover that can no longer be located or removed - a state-root identity a claim recorded before its home was re-created, or a recorded registry directory that no longer resolves to a directory - is stale bytes rather than an ownership hazard.
+Making any of them a precondition is what leaves a provably dead runner owning its source permanently, because none of those conditions clears on its own.
 Ordinary release and reclamation still attempt reservation cleanup and require it unless both owner staleness and whole-group absence prove the generation gone.
 The narrow live-owner terminal-self-retirement path also attempts cleanup but tolerates its own still-in-flight reservation, which the runner removes on the normal end-of-capture path; exact home, PID, and claim-token ownership remains mandatory before the claim is released.
 If identity cannot be established before the first signal, or a surviving owned group cannot be proved stopped, the operation preserves the registration and claim for safe retry rather than adding a second owner.
@@ -876,6 +899,26 @@ Scope is the owning state root and one runner generation, never a script or proc
 `FM_PROCEVENT_OWNER_LEASE_SECONDS` (default 600, range 1..86400) is how long a runner keeps going with no sign of activity in its owning home, and `FM_PROCEVENT_OWNER_CHECK_SECONDS` (default 15, range 1..3600) is the guard's detection interval: it re-reads the lease and the recorded state-root identity twice within each interval, half an interval apart, so the two reads its debounce needs fit inside one interval rather than costing two.
 `FM_PROCEVENT_LAUNCH_FLOOR_SECONDS` (default 1, range 1..3600) is the minimum time between consecutive launches of one registration generation's stored command, bounding the launch rate of an immediately returning source during that lease window.
 The generation's first launch is immediate, later launches share its monotonic pacing timestamp, a timestamp from before a reboot is treated as expired, and replacing the registration starts a fresh pacing generation.
+
+`FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS` (default 3, range 1..600) bounds how long `reconcile` waits for the runners it just started to prove they are running: never less than the configured value, and at most one second more, because the wait is measured on a whole-second clock.
+Starting a runner is detached and its errors are not visible to the caller, so `reconcile` reports a start only after the source is observed owned or its launch-pacing stamp has advanced or appeared, and reports every unconfirmed launch as `failed=` and a non-zero exit instead.
+Both signals are durable evidence a runner claimed: ownership is the only evidence a runner still blocked on its source ever shows, and the stamp - written after the claim and before the source command runs, and removed only by registration replacement - covers a runner that claimed, ran and exited between two polls.
+A healthy launch therefore confirms on the first poll and the window only bounds a launch that has not yet proved itself - one that died before claiming, or one merely too slow to claim inside the window; confirmation cannot tell those apart, and a launch that proves itself on a later cycle closes its failure episode without a retraction wake.
+All of a cycle's launches share one window, so a home full of sources that cannot start costs the same bounded wait as one.
+
+Keep this window well below `FM_POLL`.
+`bin/fm-watch.sh` runs `reconcile` once per supervision cycle, so a source that cannot start makes every cycle wait up to the confirm window before the rest of that cycle runs.
+Raising the confirm window lengthens every supervision cycle and delays wake delivery by up to that much.
+
+A source that can never start is reported as `failed=` with a non-zero exit on every `reconcile`, rather than counted as `started` and retried silently as though it were healthy, so a wedged source stays visible instead of presenting as armed.
+That count reaches only whoever runs the command, because `bin/fm-watch.sh` discards `reconcile`'s output and exit status, so an unconfirmed launch is also announced through the wake queue: `reconcile` publishes a durable `check` wake (`procevent:<id>:launch-failed:<registration-identity>-<episode-nonce>`) once per failure episode, and later cycles stay silent for that episode until a launch of that source confirms, after which a fresh failure announces again under a fresh key, because the watcher never re-surfaces a key it has already surfaced.
+The announcement changes nothing about the launch: `reconcile` keeps relaunching the source every cycle exactly as before, and nothing is retried differently, throttled, or recovered from that signal.
+The wake says only what was observed for that shape - the launch did not prove it took the claim within the window - and, if it stays that way, names the source command and adapter binary the registration names as what to check and the attached `bin/fm-procevent.sh start <source-id>` as what reproduces a refusal on stderr, where the detached launch discards it; a later cycle that finds the source owned ends the episode on its own, so a runner that was merely slow to claim needs nothing from the operator.
+A source stranded on a claim nothing may automatically displace is announced the same way, once per stranded claim generation, as described above.
+`bin/fm-watch.sh` surfaces both under their own headlines - `process-event source stranded` and `process-event source failed to start` - rather than as a captured result.
+
+A value this command cannot use is refused by name before anything is launched, the same way `FM_PROCEVENT_LAUNCH_FLOOR_SECONDS` and `FM_PROCEVENT_MAX_OUTPUT_BYTES` are refused, so a mistyped window can never present as a fleet of sources that cannot start.
+`bin/fm-watch.sh` validates the same value when it arms and refuses to arm on an unusable one, naming the variable and the range: under a running watcher that refusal would otherwise repeat on every cycle into a discarded stdout and leave the whole home disarmed while presenting as supervised, whereas a watcher that will not arm is loud through the liveness guard.
 
 `FM_PROCEVENT_MAX_OUTPUT_BYTES` (default 1048576) bounds a single captured result while the source runs; oversized output is drained but truncated with a stderr notice rather than staged or published whole or dropped.
 
@@ -970,6 +1013,7 @@ FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; defaul
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no activity in its owning home; 1..86400
 FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # a runner guard's detection interval, read twice per interval; 1..3600
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of one registration generation's source command; 1..3600
+FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=3   # how long reconcile waits for the runners it started to prove they are running; 1..600, keep well below FM_POLL
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
@@ -994,7 +1038,7 @@ FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion f
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on Relay completion follow-ups per linked mention
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs have no age grace
-FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
+FM_GUARD_GRACE=300      # beacon freshness threshold for guard verdicts, arm health checks, and the primary turn-end guard; see docs/turnend-guard.md for model-aware exceptions
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for watcher health, an open Stop auto-arm generation claim, or a fresh epoch before deciding recovery ownership or failure progression
 FM_CLAUDE_AUTOARM_EPOCH_FRESH=15   # seconds a recorded auto-arm outcome remains eligible for the current event epoch's recovery or failure decision

@@ -40,11 +40,14 @@
 #   fm-afk-launch.sh propose [--words-file <path> | --words <text>]
 #                            [--action <verb> --object <text> --when <text> [--stop <text>]]...
 #                            [--expected-return <UTC ISO 8601>] [--spend <n>]
+#                            [--grant <task-id>]...
 #                              Record the captain's away words and mandate
 #                              clause fields into a proposal and print the
 #                              read-back. Exit 3 when a clause was refused (its
 #                              missing part is named in the read-back); the
 #                              proposal still records it as refused.
+#                              Repeatable --grant records captain-named task
+#                              ids that may merge-when-green while away.
 #   fm-afk-launch.sh confirm   Promote the required proposal and print the entry
 #                              announcement. On Pi this is the whole entry.
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon

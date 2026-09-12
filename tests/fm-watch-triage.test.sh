@@ -4022,6 +4022,19 @@ seed_captured_procevent_result() {  # <dir>
     sleep 0.1
     i=$((i + 1))
   done
+  # The runner publishes that wake BEFORE it releases its claim and exits, so a
+  # retire that lands in that gap reads the exiting runner's ownership as
+  # uncertain and refuses with "cannot confirm runner identity" - the pipeline
+  # saw exactly that under load. Wait, bounded, for the release the publish
+  # promises, so retire meets a source nothing owns instead of racing the
+  # runner's last milliseconds. The bound keeps a runner that never releases a
+  # real failure at retire rather than a hang here.
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -e "$dir/claims/delivery-src.claim" ] || break
+    sleep 0.1
+    i=$((i + 1))
+  done
   pe_case "$dir" retire delivery-src >/dev/null || return 1
   [ -s "$dir/state/.wake-queue" ]
 }
@@ -4123,6 +4136,108 @@ test_procevent_marker_keys_are_injective() {
   [ "$marker_count" = 2 ] || fail "distinct queue keys produced $marker_count seen markers"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "marker identity fixture drain failed"
   pass "complete process-event queue keys map to distinct seen markers"
+}
+
+# The reason line is the headline firstmate reads before the payload. Every
+# procevent:* key used to surface as "process-event result captured", which
+# presents a source that is collecting NOTHING as a healthy capture - the exact
+# shape of the incident these wakes exist to expose. These assertions read the
+# reason the watcher actually printed, so a typo in either classifying glob
+# fails here instead of silently falling back to the healthy-looking headline.
+surface_once() {  # <dir> <out> [limit-ticks]: run one watcher to its wake, return its status
+  local dir=$1 out=$2 limit=${3:-100} pid
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" "$limit"
+}
+
+test_procevent_headlines_classify_queue_keys() {
+  local dir state out
+  dir=$(make_case procevent-headline-captured); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:cap-src:1" "check: procevent lavish cap-src 1"
+  surface_once "$dir" "$out" || fail "a captured-result key was not surfaced: $(cat "$out")"
+  grep -F "check: process-event result captured: procevent:cap-src:1" "$out" >/dev/null \
+    || fail "a captured result did not surface under its own headline: $(cat "$out")"
+  ! grep -F "source stranded" "$out" >/dev/null \
+    || fail "a captured result was headlined as a strand: $(cat "$out")"
+  ! grep -F "failed to start" "$out" >/dev/null \
+    || fail "a captured result was headlined as a failed start: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "captured headline fixture drain failed"
+
+  dir=$(make_case procevent-headline-stranded); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:str-src:stranded:tok-1" "check: process-event source str-src is registered but nothing can arm it"
+  surface_once "$dir" "$out" || fail "a stranded key was not surfaced: $(cat "$out")"
+  grep -F "check: process-event source stranded: procevent:str-src:stranded:tok-1" "$out" >/dev/null \
+    || fail "a stranded source did not surface under its own headline: $(cat "$out")"
+  ! grep -F "result captured" "$out" >/dev/null \
+    || fail "a stranded source was headlined as a captured result: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "stranded headline fixture drain failed"
+
+  dir=$(make_case procevent-headline-joined); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:cap2-src:1" "check: procevent lavish cap2-src 1"
+  append_wake "$state" check "procevent:str2-src:stranded:tok-2" "check: process-event source str2-src is registered but nothing can arm it"
+  surface_once "$dir" "$out" || fail "a mixed cycle was not surfaced: $(cat "$out")"
+  grep -F "check: process-event result captured: procevent:cap2-src:1; process-event source stranded: procevent:str2-src:stranded:tok-2" "$out" >/dev/null \
+    || fail "a cycle with a capture and a strand did not carry both headlines joined: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "joined headline fixture drain failed"
+  pass "process-event queue keys surface under their own headlines"
+}
+
+# Delivery, not queue rows, is what proves a launch-failure episode reaches
+# firstmate. The watcher remembers every procevent key it has surfaced for
+# good, so reconcile keys each episode with a fresh suffix beyond the
+# registration identity: this test would fail if a second episode reused the
+# first one's key, because the watcher would keep polling and never wake.
+test_procevent_launch_failed_episodes_are_each_delivered() {
+  local dir state out status
+  dir=$(make_case procevent-launch-failed-episodes); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:lf-src:launch-failed:1-2-100-7" \
+    "check: process-event source lf-src is registered but its launch did not prove it took the claim"
+  surface_once "$dir" "$out" || fail "a launch-failed key was not surfaced: $(cat "$out")"
+  grep -F "check: process-event source failed to start: procevent:lf-src:launch-failed:1-2-100-7" "$out" >/dev/null \
+    || fail "a failed launch did not surface under its own headline: $(cat "$out")"
+  ! grep -F "result captured" "$out" >/dev/null \
+    || fail "a failed launch was headlined as a captured result: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null || fail "launch-failed fixture could not be handled and acknowledged"
+
+  # The same key again is what a registration-identity-only key would produce
+  # for the next episode: already surfaced, so the process-event surface never
+  # delivers it under its headline again. A fresh watcher still recovers the
+  # unacknowledged queue row through the generic `check: rearm-resurface`
+  # path (the contract test_procevent_unacknowledged_result_redrains_until_handled
+  # proves), so what this asserts is the headline, not silence.
+  append_wake "$state" check "procevent:lf-src:launch-failed:1-2-100-7" \
+    "check: process-event source lf-src is registered but its launch did not prove it took the claim"
+  : > "$out"
+  status=0
+  surface_once "$dir" "$out" 30 || status=$?
+  case "$status" in
+    124) ;;
+    0)
+      # The one wake this tolerates is the recovery path named above, by its
+      # exact reason line. A wake for any other reason would mean either that
+      # the ordinary surface delivered the repeated key after all, or that
+      # something unrelated fired inside the window - and both are failures of
+      # exactly what this test guards, so neither may pass as "recovery".
+      grep -F 'check: rearm-resurface' "$out" >/dev/null \
+        || fail "an already-surfaced launch-failed key woke the watcher, and the reason was not the one tolerated recovery path (expected the exact line 'check: rearm-resurface'; if that path was reworded, update this expectation, do not restore the strict silence check): $(cat "$out")"
+      ;;
+    *) fail "the watcher failed on an already-surfaced launch-failed key (status $status): $(cat "$out")" ;;
+  esac
+  ! grep -F "failed to start: procevent:lf-src:launch-failed:1-2-100-7" "$out" >/dev/null \
+    || fail "an already-surfaced launch-failed key was delivered again under its headline: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null || fail "repeated-key fixture could not be handled and acknowledged"
+
+  # A later episode of the same registration carries the same identity under a
+  # fresh suffix, and that one must be delivered.
+  append_wake "$state" check "procevent:lf-src:launch-failed:1-2-160-9" \
+    "check: process-event source lf-src is registered but its launch did not prove it took the claim"
+  : > "$out"
+  surface_once "$dir" "$out" || fail "a second launch-failure episode was not surfaced: $(cat "$out")"
+  grep -F "check: process-event source failed to start: procevent:lf-src:launch-failed:1-2-160-9" "$out" >/dev/null \
+    || fail "a second launch-failure episode did not surface under its own headline: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null || fail "second episode fixture could not be handled and acknowledged"
+  pass "every launch-failure episode is delivered under the failed-to-start headline"
 }
 
 install_marker_mv_fault() {  # <dir>
@@ -4768,6 +4883,8 @@ test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
 test_procevent_marker_keys_are_injective
+test_procevent_headlines_classify_queue_keys
+test_procevent_launch_failed_episodes_are_each_delivered
 test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays

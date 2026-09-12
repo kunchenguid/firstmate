@@ -8,6 +8,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/git-config-helpers.sh
+. "$ROOT/tests/git-config-helpers.sh"
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2

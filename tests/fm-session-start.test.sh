@@ -1753,7 +1753,7 @@ EOF
   assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi compact digest listed a done row at startup"
   assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
   assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
-  assert_contains "$out" "Full task bodies remain available on demand: tasks-axi show <id> --full" \
+  assert_contains "$out" "Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full" \
     "compact digest omitted the full-body lookup pointer"
   assert_contains "$out" "ready_public_followups: 0 delivery-ready obligations" \
     "the composed listing dropped a real signal from the dispatchable set"
@@ -1797,7 +1797,7 @@ EOF
   assert_not_contains "$out" "ready-4,queued" "the queued bound did not actually bound the ready listing"
   assert_contains "$out" "(shown 3 of 7 ready queued item(s))" \
     "the bounded queued listing did not report what it showed"
-  assert_contains "$out" "(4 more queued - tasks-axi ready --file $home/data/backlog.md)" \
+  assert_contains "$out" "(4 more queued - bin/fm-tasks-axi.sh ready)" \
     "the bounded queued listing did not disclose an exact remainder and how to see it"
 
   # The bound is for dispatchable work only: held and blocked rows stay whole.

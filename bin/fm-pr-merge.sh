@@ -2,23 +2,34 @@
 # Merge a task's PR or MR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
-# addressed through gh-axi by the derived owner and repository; a GitLab merge
+# addressed through gh by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
-# The gh-axi merge abstraction always performs the merge; the outcome read that
-# follows it never becomes a prerequisite for reaching that abstraction. After
-# gh-axi returns success, GitHub's live state is read back and accepted only
-# when the pull request is merged or in the merge queue. gh's GraphQL API
-# supplies that queue-aware read when gh is on PATH; when gh is absent or its
-# read fails, gh-axi's own view still proves a landed merge, and every outcome
-# it cannot prove refuses, reporting the single failed read when gh is absent
-# and naming both failed reads when gh is present and its own read failed.
+# A GitHub merge is refused unless every pre-merge condition holds, each read
+# live at merge time rather than taken from recorded metadata: the pull request
+# is open, not a draft, mergeable, free of conflicts, and every unwaived check
+# is green at the exact current head commit. Every failing condition is reported, not
+# just the first. The verified head is then passed to gh as
+# --match-head-commit, so a push that lands between that read and the merge
+# fails the merge instead of landing commits nothing verified. Reading that
+# state needs gh and jq, and either one absent stops the merge before any
+# state is recorded. An attended --allow-red <check-name> may be passed once,
+# with the name as a separate argument; it waives only checks with that exact
+# name, still requires every other check green, and still binds the head. It is
+# refused while the away-posture record exists, and it never
+# applies on GitLab, where a merge already requires the head pipeline to have
+# succeeded. After gh returns success, GitHub's live state is read back and
+# accepted only when the pull request is merged or in the merge queue. gh's
+# GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
+# own view still proves a landed merge, and every outcome it cannot prove
+# refuses, reporting the failed gh read and naming both failed reads when the
+# gh-axi view could not prove the outcome either.
 # If the pull request remains open and the base branch has an effective
 # merge_queue rule, the refusal names the queue's configured merge method and
-# the exact -- --auto --<method> retry flags, unless the caller already passed
+# the exact --attended-override -- --auto --<method> retry flags, unless the caller already passed
 # that method with --auto to a merge command that returned success, in which
 # case it reports instead that the accepted request has not entered the queue
 # and the queue state has to be re-checked.
@@ -30,9 +41,7 @@
 # queued is refused the same way and says auto-merge was armed with nothing
 # landed or queued yet, or, when the merge command itself failed, that auto-merge
 # was only requested; both are read from the caller's own arguments rather than
-# from the forge's prose. The observed state is judged the same way whichever
-# read produced it, and a refusal built on the gh-axi view says the merge queue
-# could not be observed at all rather than implying an unqueued pull request.
+# from the forge's prose.
 # Every refusal that follows a merge command which returned success quotes that
 # command's own output, marked as the forge's text and kept apart from this
 # script's verdict, including the refusal for an outcome that cannot be read;
@@ -56,13 +65,28 @@
 # Before either forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
-# recorded as an `answer --release` before this entrypoint is invoked. The lock
-# ends when the local forge command returns; docs/captain-hold-lifecycle.md owns
+# recorded as an `answer --release` before this entrypoint is invoked. While
+# state/.afk-contract exists, a merge for this task also proceeds only if its
+# meta yolo=on or its id is in that record's merge-grant list; otherwise it is
+# held for the captain return. An unreadable record refuses rather than being
+# skipped. Neither posture releases a captain hold, and the grant lapses when
+# the record is archived.
+# The lock ends when the local forge command returns; docs/captain-hold-lifecycle.md owns
 # the accepted asynchronous-landing and merge-to-cleanup residuals.
 #
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
-# URL, nor --sha on GitLab because the head comes only from the live read.
+# URL, nor --sha or --match-head-commit because the head comes only from the
+# live read. An existing task-meta pr= must equal the requested canonical URL;
+# a task cannot be rebound here. Auto-merge (--auto), a protection bypass
+# (--admin), and branch
+# deletion (--delete-branch, -d and short-flag clusters, and GitLab's
+# --remove-source-branch) are refused by default; --attended-override, parsed
+# before the optional -- separator, re-enables those forge flags for an
+# explicit captain instruction and never skips the live green check, the
+# away-grant check, or a captain hold.
+#
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -70,7 +94,6 @@
 # destination, normal-case deduplication, and at-least-once recovery.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,6 +107,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
+# shellcheck source=bin/fm-afk-contract.sh
+. "$SCRIPT_DIR/fm-afk-contract.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -104,7 +129,36 @@ PR_NUMBER=$FM_PR_NUMBER
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
-[ "${1:-}" = "--" ] && shift
+ATTENDED_OVERRIDE=false
+ALLOW_RED=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --attended-override)
+      ATTENDED_OVERRIDE=true
+      shift
+      ;;
+    --attended-override=*)
+      echo "error: --attended-override takes no value" >&2
+      exit 2
+      ;;
+    --allow-red)
+      [ -n "${2:-}" ] || { echo "error: --allow-red requires a check name" >&2; exit 2; }
+      [ "${#ALLOW_RED[@]}" -eq 0 ] || { echo "error: --allow-red may be specified only once" >&2; exit 2; }
+      ALLOW_RED+=("$2")
+      shift 2
+      ;;
+    --allow-red=*)
+      echo "error: --allow-red requires a separate check name argument" >&2
+      exit 2
+      ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
+  echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+  exit 2
+fi
 
 caller_has_merge_method() {
   local arg
@@ -180,7 +234,7 @@ reject_head_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --sha|--sha=*)
+      --sha|--sha=*|--match-head-commit|--match-head-commit=*)
         echo "error: extra merge arguments must not override the head commit" >&2
         return 1
         ;;
@@ -188,8 +242,29 @@ reject_head_overrides() {
   done
 }
 
+reject_protected_forge_args() {
+  local arg
+  [ "$ATTENDED_OVERRIDE" = true ] && return 0
+  for arg in "$@"; do
+    case "$arg" in
+      --auto|--auto=*|--admin|--admin=*|--delete-branch|--delete-branch=*|--remove-source-branch|--remove-source-branch=*)
+        echo "error: extra merge arguments must not request auto-merge, a protection bypass, or branch deletion; pass --attended-override only for an explicit captain instruction" >&2
+        return 1
+        ;;
+      --*) ;;
+      # A single-dash argument is a short-option cluster. -d is gh's
+      # --delete-branch, and -yd carries it the same way -yR carries --repo.
+      -*d*)
+        echo "error: extra merge arguments must not request auto-merge, a protection bypass, or branch deletion; pass --attended-override only for an explicit captain instruction" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
 reject_repo_overrides "$@" || exit 1
-[ "$PROVIDER" != gitlab ] || reject_head_overrides "$@" || exit 1
+reject_head_overrides "$@" || exit 1
+reject_protected_forge_args "$@" || exit 1
 
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: PR merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -244,6 +319,17 @@ if [ "$PROVIDER" = gitlab ]; then
   fi
   if [ -n "$GITLAB_MISSING" ]; then
     echo "error: merging a GitLab merge request requires $GITLAB_MISSING on PATH" >&2
+    exit 1
+  fi
+fi
+GITHUB_MISSING=
+if [ "$PROVIDER" = github ]; then
+  command -v gh >/dev/null 2>&1 || GITHUB_MISSING="gh"
+  if ! command -v jq >/dev/null 2>&1; then
+    GITHUB_MISSING="${GITHUB_MISSING:+$GITHUB_MISSING and }jq"
+  fi
+  if [ -n "$GITHUB_MISSING" ]; then
+    echo "error: merging a GitHub pull request requires $GITHUB_MISSING on PATH" >&2
     exit 1
   fi
 fi
@@ -356,11 +442,130 @@ FIELDS
   FM_PR_MERGE_HEAD=$live_head
 }
 
-# Read one live GitHub pull request view after gh-axi returns. The selected
+# Every GitHub check that is not green in the given live pull-request JSON, one
+# name per line: a status context whose state is not SUCCESS, or a check run
+# that has not completed with SUCCESS, NEUTRAL, or SKIPPED (so a pending
+# check is not green either). Exits nonzero when the rollup cannot be read, so
+# a malformed answer is a failed read and never an empty red set.
+github_checks_not_green() {
+  local json=$1
+  printf '%s' "$json" | jq -r '
+    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
+    | .statusCheckRollup[]
+    | if .__typename == "CheckRun" then
+        {name: (.name // ""), ok: (.status == "COMPLETED" and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED"))}
+      else
+        {name: (.context // ""), ok: (.state == "SUCCESS")}
+      end
+    | select(.ok | not)
+    | if .name == "" then "(unnamed check)" else .name end
+  ' 2>/dev/null || return 1
+}
+
+# Pre-merge conditions for a GitHub pull request, read from one live view.
+# Sets FM_PR_MERGE_HEAD to the verified head on success.
+github_verify_mergeable() {
+  local json fields line red name covered
+  local total=0 named=0 refusals=''
+  local state='' draft='' mergeable='' merge_state='' live_head=''
+
+  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,statusCheckRollup 2>/dev/null) \
+    || [ -z "$json" ]; then
+    echo "error: could not read the GitHub pull request state before merging" >&2
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" then
+        "state=" + ((.state // "") | tostring),
+        "draft=" + (if (.isDraft | type) == "boolean" then (.isDraft | tostring) else "" end),
+        "mergeable=" + ((.mergeable // "") | tostring),
+        "merge_state=" + ((.mergeStateStatus // "") | tostring),
+        "head=" + ((.headRefOid // "") | tostring)
+      else
+        error("pull request payload is not an object")
+      end' 2>/dev/null); then
+    echo "error: could not read the GitHub pull request state before merging" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      draft=*) draft=${line#draft=} ;;
+      mergeable=*) mergeable=${line#mergeable=} ;;
+      merge_state=*) merge_state=${line#merge_state=} ;;
+      head=*) live_head=${line#head=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 5 ] || [ "$total" -ne 5 ]; then
+    echo "error: could not read the GitHub pull request state before merging" >&2
+    return 1
+  fi
+
+  if ! fm_pr_head_valid "$live_head"; then
+    echo "error: could not read the GitHub pull request head commit before merging" >&2
+    return 1
+  fi
+  if ! red=$(github_checks_not_green "$json"); then
+    echo "error: could not read the GitHub pull request state before merging" >&2
+    return 1
+  fi
+
+  case "$state" in
+    [oO][pP][eE][nN]) ;;
+    *)
+      refusals="$refusals  - state is \"${state:-unreadable}\", not open
+"
+      ;;
+  esac
+  [ "$draft" = false ] \
+    || refusals="$refusals  - the pull request is a draft
+"
+  [ "$mergeable" = MERGEABLE ] \
+    || refusals="$refusals  - mergeable is \"${mergeable:-unreadable}\", not MERGEABLE
+"
+  [ "$merge_state" != DIRTY ] \
+    || refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
+"
+
+  uncovered=''
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    covered=0
+    if [ "${#ALLOW_RED[@]}" -gt 0 ]; then
+      for check in "${ALLOW_RED[@]}"; do
+        [ "$check" = "$name" ] && covered=1
+      done
+    fi
+    [ "$covered" -eq 1 ] || {
+      refusals="$refusals  - check '$name' is not green
+"
+      uncovered="${uncovered:+$uncovered, }$name"
+    }
+  done <<EOF
+$red
+EOF
+
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to merge %s\n' "$URL" >&2
+    printf '%s' "$refusals" >&2
+    [ -z "$uncovered" ] || printf 'error: these checks are not green: %s\n' "$uncovered" >&2
+    return 1
+  fi
+  printf 'verified: %s is open and mergeable, with every required check green at head %s\n' \
+    "$URL" "$live_head" >&2
+  FM_PR_MERGE_HEAD=$live_head
+}
+
+# Read one live GitHub pull request view after gh returns. The selected
 # fields distinguish a landed pull request from a merge-queue entry and retain
 # the concrete state needed for a refusal. gh supplies the complete queue-aware
-# view when available; gh-axi remains the degradation path that can prove a
-# landed merge without making gh a prerequisite for the merge abstraction.
+# view; if that post-merge read becomes unavailable, gh-axi is the degradation
+# path that can prove only a landed merge. gh remains a pre-merge prerequisite.
 FM_PR_GITHUB_STATE=
 FM_PR_GITHUB_MERGED=
 FM_PR_GITHUB_QUEUED=
@@ -435,7 +640,9 @@ github_read_outcome_with_gh_axi() {
 
 github_read_outcome() {
   if ! command -v gh >/dev/null 2>&1; then
-    github_read_outcome_with_gh_axi && return 0
+    if github_read_outcome_with_gh_axi && [ "$FM_PR_GITHUB_MERGED" = true ]; then
+      return 0
+    fi
     echo "error: could not read the GitHub pull request outcome after the merge attempt; PR metadata and merge poll remain recorded" >&2
     return 1
   fi
@@ -557,6 +764,54 @@ require_released_captain_hold() {
   esac
 }
 
+FM_PR_MERGE_AUTHORITY=
+require_away_merge_grant() {
+  local yolo grants grant
+  FM_PR_MERGE_AUTHORITY=
+  fm_afk_contract_present "$STATE" || return 0
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1; then
+    echo "error: PR merge refused - the away-posture record could not be read; nothing was merged" >&2
+    return 1
+  fi
+  yolo=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ "$yolo" = on ]; then
+    FM_PR_MERGE_AUTHORITY=yolo
+    return 0
+  fi
+  grants=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-afk-contract.sh" grants 2>/dev/null) || {
+    echo "error: PR merge refused - the away-posture record's grants could not be read; nothing was merged" >&2
+    return 1
+  }
+  while IFS= read -r grant; do
+    [ "$grant" = "$ID" ] || continue
+    FM_PR_MERGE_AUTHORITY=away-grant
+    return 0
+  done <<EOF
+$grants
+EOF
+  echo "error: task $ID is held for the captain return" >&2
+  return 1
+}
+
+require_current_away_authority() {
+  require_away_merge_grant || return 1
+  if fm_afk_contract_present "$STATE" && [ "${#ALLOW_RED[@]}" -gt 0 ]; then
+    echo "error: --allow-red is attended-only; while the away-posture record exists the green check is absolute" >&2
+    return 2
+  fi
+}
+
+require_recorded_pr_identity() {
+  local existing
+  existing=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -n "$existing" ] || return 0
+  [ "$existing" = "$URL" ] && return 0
+  echo "error: task $ID is bound to $existing, not $URL" >&2
+  return 1
+}
+
 FM_PR_GITHUB_AUTO_REQUESTED=false
 FM_PR_GITHUB_MERGE_ACCEPTED=false
 FM_PR_GITHUB_CALLER_METHOD=
@@ -615,7 +870,7 @@ github_report_queue_rules() {
         printf 'error: this run refuses even though the request for %s was accepted with the exact flags base branch %s requires (--auto --%s): the pull request has still not entered the merge queue, so no landed or queued outcome is proven; re-check the pull request'"'"'s merge queue state before retrying\n' \
           "$URL" "$FM_PR_GITHUB_BASE" "$queue_method" >&2
       else
-        printf 'error: base branch %s requires the merge queue; retry with: %s %s %s -- --auto --%s\n' \
+        printf 'error: base branch %s requires the merge queue; retry with: %s %s %s --attended-override -- --auto --%s\n' \
           "$FM_PR_GITHUB_BASE" "$0" "$ID" "$URL" "$queue_method" >&2
       fi
       ;;
@@ -681,7 +936,12 @@ gitlab_confirm_merged() {
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
+away_status=0
+require_current_away_authority || away_status=$?
+[ "$away_status" -eq 0 ] || exit "$away_status"
+require_recorded_pr_identity || exit 1
 record_pr_metadata || exit 1
+require_released_captain_hold || exit 1
 
 case "$PROVIDER" in
   github)
@@ -694,9 +954,15 @@ case "$PROVIDER" in
       FM_PR_GITHUB_AUTO_REQUESTED=true
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
-    require_released_captain_hold || exit 1
+    github_verify_mergeable || exit 1
+    # This last presence and authority read narrows the publication race to the
+    # forge handoff; without a shared lock, a residual sub-second race remains.
+    away_status=0
+    require_current_away_authority || away_status=$?
+    [ "$away_status" -eq 0 ] || exit "$away_status"
     merge_status=0
-    merge_output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+      --match-head-commit "$FM_PR_MERGE_HEAD" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
     fm_lock_release "$MERGE_CONTROL_LOCK" || true
     MERGE_CONTROL_LOCK=
@@ -737,7 +1003,11 @@ case "$PROVIDER" in
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;
     # the conditions above are what authorize the merge.
-    require_released_captain_hold || exit 1
+    # This last presence and authority read narrows the publication race to the
+    # forge handoff; without a shared lock, a residual sub-second race remains.
+    away_status=0
+    require_current_away_authority || away_status=$?
+    [ "$away_status" -eq 0 ] || exit "$away_status"
     merge_status=0
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" || merge_status=$?
@@ -758,7 +1028,8 @@ esac
 # refused or failed merge above, and a queued forge merge exits without an
 # outcome while its existing poll remains armed.
 outcome_rc=0
-fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self || outcome_rc=$?
+fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self \
+  "${FM_PR_MERGE_AUTHORITY:-}" || outcome_rc=$?
 case "$outcome_rc" in
   0) ;;
   3)

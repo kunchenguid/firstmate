@@ -525,6 +525,98 @@ test_inputs_are_validated() {
   pass "malformed inputs and foreign record versions are refused rather than guessed"
 }
 
+test_merge_grants_round_trip_and_read_back() {
+  local home out
+  home=$(make_home grants-roundtrip)
+  out=$(contract "$home" propose --grant task-x1 --grant task-y2 --words 'merge those two when green') || fail "grant proposal failed: $out"
+  assert_contains "$out" 'merge when green (task ids): task-x1, task-y2' 'read-back did not list the granted ids'
+  [ "$(contract "$home" grants --proposal)" = "$(printf 'task-x1\ntask-y2')" ] \
+    || fail "proposal grants subcommand: $(contract "$home" grants --proposal)"
+  contract "$home" confirm >/dev/null || fail "grant confirm failed"
+  [ "$(contract "$home" grants)" = "$(printf 'task-x1\ntask-y2')" ] \
+    || fail "confirmed grants subcommand: $(contract "$home" grants)"
+  grep -q '^merge_grants:$' "$home/state/.afk-contract" || fail "confirmed record lacks merge_grants list"
+  grep -q '  - task-x1' "$home/state/.afk-contract" || fail "confirmed record dropped task-x1"
+  pass "merge grants round-trip through propose, confirm, read-back, and grants"
+}
+
+test_merge_grants_empty_form_and_usage_errors() {
+  local home out rc
+  home=$(make_home grants-empty)
+  contract "$home" propose >/dev/null || fail "empty grant proposal failed"
+  grep -qxF 'merge_grants: -' "$home/state/.afk-contract.proposed" \
+    || fail "empty grants did not write merge_grants: -"
+  [ -z "$(contract "$home" grants --proposal)" ] || fail "empty grants subcommand was not empty"
+  set +e
+  out=$(contract "$home" propose --grant 'bad id' 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "invalid grant id should be usage error (rc=$rc): $out"
+  set +e
+  out=$(contract "$home" propose --grant task-x1 --grant task-x1 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "duplicate grant id should be usage error (rc=$rc): $out"
+  pass "empty grants write the scalar form, and invalid or duplicate ids are usage errors"
+}
+
+test_legacy_record_without_merge_grants_reads_empty() {
+  local home record
+  home=$(make_home grants-legacy)
+  contract "$home" propose >/dev/null || fail "legacy proposal failed"
+  contract "$home" confirm >/dev/null || fail "legacy confirm failed"
+  record="$home/state/.afk-contract"
+  awk '!/^merge_grants/' "$record" > "$home/legacy" || fail "could not strip merge_grants"
+  mv "$home/legacy" "$record"
+  contract "$home" validate >/dev/null || fail "a pre-field v1 record must still validate"
+  [ -z "$(contract "$home" grants)" ] || fail "a missing merge_grants field must read as an empty list"
+  pass "a pre-field v1 record reads as empty grants rather than skipping the field"
+}
+
+test_malformed_merge_grants_refuse_validation() {
+  local home record out rc
+  home=$(make_home grants-malformed-scalar)
+  contract "$home" propose >/dev/null || fail "malformed scalar proposal failed"
+  contract "$home" confirm >/dev/null || fail "malformed scalar confirm failed"
+  record="$home/state/.afk-contract"
+  awk '{ print; if ($0 == "merge_grants: -") print "  - task-x1" }' "$record" > "$home/malformed"
+  mv "$home/malformed" "$record"
+  set +e
+  out=$(contract "$home" validate 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "indented data attached to scalar merge_grants validated"
+  assert_contains "$out" 'invalid merge_grants field' 'attached scalar data refusal wording'
+
+  home=$(make_home grants-malformed-duplicate)
+  contract "$home" propose --grant task-x1 >/dev/null || fail "duplicate field proposal failed"
+  contract "$home" confirm >/dev/null || fail "duplicate field confirm failed"
+  record="$home/state/.afk-contract"
+  printf 'merge_grants: -\n' >> "$record"
+  set +e
+  out=$(contract "$home" validate 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "duplicate merge_grants fields validated"
+  assert_contains "$out" 'invalid merge_grants field' 'duplicate field refusal wording'
+  pass "malformed and duplicate merge-grant fields fail record validation"
+}
+
+test_archive_drops_live_grants() {
+  local home rc
+  home=$(make_home grants-archive)
+  contract "$home" propose --grant task-x1 >/dev/null || fail "archive grant proposal failed"
+  contract "$home" confirm >/dev/null || fail "archive grant confirm failed"
+  contract "$home" archive >/dev/null || fail "archive failed"
+  [ ! -f "$home/state/.afk-contract" ] || fail "archive left the live record"
+  set +e
+  contract "$home" grants >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "grants on the live path succeeded after archive"
+  pass "archive removes live grants so archived copies are not consulted"
+}
+
 test_fields_refuse_each_missing_part_by_name
 test_omitted_stop_confirms_as_no_stop
 test_never_set_flags_without_refusing_and_never_over_matches
@@ -544,3 +636,9 @@ test_validation_rejects_blank_stop_and_refused_text
 test_validation_rejects_damaged_words_blocks
 test_archive_moves_the_record_aside_and_is_idempotent
 test_inputs_are_validated
+test_merge_grants_round_trip_and_read_back
+test_merge_grants_empty_form_and_usage_errors
+test_legacy_record_without_merge_grants_reads_empty
+test_malformed_merge_grants_refuse_validation
+test_archive_drops_live_grants
+

@@ -33,6 +33,11 @@ FM_TEST_LIB_SOURCED=1
 # suite's fixtures were written against.
 umask 022
 
+# Fixture Git isolation for every suite that reaches this library; the helper's
+# header owns the invariant and the layers it deliberately leaves in force.
+# shellcheck source=tests/git-config-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
@@ -47,6 +52,16 @@ export FM_GATE_REFUSE_BYPASS=1
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
 # under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
 unset FM_TASK_ID
+
+# Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
+# (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
+# resolves that env AHEAD of the .tasks.toml a fixture copies, so a suite that
+# seeds a temp home with bare `tasks-axi` would silently write the operator's
+# live backlog instead - tests/fm-public-followup.test.sh did exactly that. Every
+# fixture addresses its own data/backlog.md through its copied .tasks.toml, an
+# explicit --file, or bin/fm-tasks-axi.sh; a case that verifies the wrapper
+# against an ambient override sets TASKS_AXI_FILE itself.
+unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.

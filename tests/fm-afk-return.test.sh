@@ -4,8 +4,10 @@
 # Covers the second half of the 2026-07-14 incident: an away-mode blocked event
 # survived in durable state, but the ordinary return request could proceed to
 # Bearings before Firstmate owned remediation. The shared script now stops,
-# drains, preserves evidence, and refuses ordinary work until every live open
-# `blocked:` event is resolved or durably reclassified.
+# drains, preserves evidence, and holds ordinary WORK until every live open
+# `blocked:` event is resolved or durably reclassified. Reporting is not work:
+# Bearings renders behind the catch-up gate and surfaces the catch-up posture
+# as content, so a returning captain still gets the picture.
 # The brief cases pin the away-posture redesign's return: the brief is composed
 # from the archived posture record, the outcome store, the held set, and the
 # status logs, health first, and the gate shrinks to what the away session could
@@ -94,11 +96,21 @@ EOF
   printf 'blocked [key=%s]: firstmate can refresh the synthetic token\n' "$key" > "$dir/home/state/repair-task.status"
 }
 
-test_return_gate_orders_catchup_before_bearings() {
-  local dir out rc gate wake_count
+test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
+  local dir out rc gate wake_count i toon gate_header
   dir="$TMP_ROOT/ordering"
   install_runner "$dir"
   seed_live_blocker "$dir" herdr synthetic-dependency
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=1
+    while [ "$i" -le 20 ]; do
+      printf -- '- [ ] queued-%02d - Queued gate %02d (repo: sample) (kind: ship) (since 2026-06-%02d)\n' \
+        "$i" "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$dir/home/data/backlog.md"
   date +%s > "$dir/home/state/.afk"
   printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations"
   printf 'fm away-mode inject WEDGED: 4555s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
@@ -124,14 +136,40 @@ test_return_gate_orders_catchup_before_bearings() {
   [ -s "$dir/home/state/.fake-drain" ] || fail "blocked return acknowledged its emitted wake before handling completed"
   [ ! -e "$dir/home/state/.fake-drain-acks" ] || fail "blocked return crossed the post-handling acknowledgement boundary"
 
-  # The exact incident regression: Bearings is an ordinary request and must
-  # refuse before reading/rendering while this shared gate remains open.
+  # The captain is back and asking for the picture: Bearings reports the
+  # catch-up posture as content rather than refusing. The blocked worker still
+  # projects as its own Underway row, and the catch-up posture is a separate
+  # action-free Charted Next gate row that never becomes a Captain's Call entry.
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1) \
+    || fail "Bearings should render behind the return catch-up gate: $out"
+  # The live projected state of the blocked worker follows its endpoint, which
+  # this fixture deliberately does not stand up; what the gate must no longer
+  # do is stop the fleet read, so the worker has to reach Underway at all.
+  printf '%s' "$out" | jq -e '
+    (.in_flight | any(.id == "repair-task"))
+    and (.gates[0].id == "(return-catchup)" and .gates[0].filed == null)
+    and (.gates | length == 21)
+    and ([.gates[] | select(.id | startswith("queued-"))] | length == 20)
+    and (.gates | any(.id == "(return-catchup)"
+                      and .owner == "(main)"
+                      and .reason == "away-return catch-up"
+                      and (.title | test("^1 blocker"))))
+    and ([.decisions_open[].id] | index("(return-catchup)") | not)' >/dev/null \
+    || fail "Bearings did not reserve the catch-up posture outside bounded action-free gate rows: $out"
+  toon=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" 2>&1) \
+    || fail "default Bearings should render behind the return catch-up gate: $toon"
+  gate_header=$(printf '%s\n' "$toon" | awk '/^gates\[[0-9]+\]\{/ { print; exit }')
+  assert_contains "$gate_header" '{id,title,blocked_by,reason,owner,filed}' "catch-up removed filed from the TOON gate schema"
+  assert_contains "$toon" '2026-06-20' "catch-up removed durable gate dates from default Bearings output"
+
+  # The guard itself still separates its two branches by exit status, so an
+  # active away window keeps refusing while catch-up reports.
   set +e
-  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1)
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" guard 2>&1)
   rc=$?
   set -e
-  [ "$rc" -eq 3 ] || fail "Bearings should refuse behind the return gate (rc=$rc): $out"
-  assert_contains "$out" 'return catch-up is pending' "Bearings refusal did not point to the shared return owner"
+  [ "$rc" -eq 4 ] || fail "the catch-up branch should be distinguishable by exit status (rc=$rc): $out"
+  assert_contains "$out" 'return catch-up is pending' "the catch-up refusal did not point to the shared return owner"
 
   # Restart/re-entry is idempotent: no second stop, no duplicate catch-up line,
   # and the same unresolved blocker remains authoritative.
@@ -148,6 +186,9 @@ test_return_gate_orders_catchup_before_bearings() {
 
   printf 'resolved [key=synthetic-dependency]: refreshed the synthetic token and resumed the task\n' >> "$dir/home/state/repair-task.status"
   out=$(run_return "$dir" check) || fail "resolved blocker did not clear return catch-up: $out"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" --json \
+    | jq -e '[.gates[].id] | index("(return-catchup)") | not' >/dev/null \
+    || fail "the cleared gate left the catch-up posture row in Bearings"
   assert_contains "$out" 'catch-up clear' "successful check did not announce that ordinary work may proceed"
   [ ! -e "$gate" ] || fail "successful check left the return gate behind"
   [ ! -e "$dir/home/state/.subsuper-escalations" ] || fail "successful check left delivered escalation state behind"
@@ -162,7 +203,7 @@ test_return_gate_orders_catchup_before_bearings() {
 
   out=$(run_return "$dir" check) || fail "an already-clear repeated check should be idempotent: $out"
   [ ! -e "$gate" ] || fail "idempotent clear check recreated a gate"
-  pass "return catch-up precedes Bearings, owns live blocker remediation, preserves evidence once, and clears idempotently"
+  pass "return catch-up owns live blocker remediation, reports itself to Bearings as content, preserves evidence once, and clears idempotently"
 }
 
 test_explicit_reclassification_requires_durable_reason() {
@@ -508,7 +549,7 @@ test_unreadable_outcome_store_keeps_catchup_gated() {
 }
 
 test_failed_held_listing_keeps_catchup_gated() {
-  local dir out waiting rc gate
+  local dir out waiting rc gate guard_out guard_rc
   dir="$TMP_ROOT/held-list-failure"
   install_runner "$dir"
   mkdir -p "$dir/fakebin"
@@ -528,6 +569,21 @@ SH
   set -e
   [ "$rc" -eq 3 ] || fail "a failed held-set read should keep catch-up gated (rc=$rc): $out"
   [ -f "$gate" ] || fail "a failed held-set read did not retain the return gate"
+
+  # A gate retained for a lifecycle reason lists no blocker at all, so the
+  # refusal must name what actually holds it instead of promising a blocker
+  # list it cannot produce, and Bearings must carry that same reason.
+  set +e
+  guard_out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" guard 2>&1)
+  guard_rc=$?
+  set -e
+  [ "$guard_rc" -eq 4 ] || fail "a blockerless catch-up gate should use the catch-up branch (rc=$guard_rc): $guard_out"
+  assert_contains "$guard_out" 'no open blocker' "the blockerless refusal did not say the gate lists no blocker"
+  assert_contains "$guard_out" 'catch-up retained: held set unreadable' "the blockerless refusal did not name the retention reason"
+  assert_not_contains "$guard_out" 'every listed blocker' "the blockerless refusal still demanded an empty blocker list"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" --json \
+    | jq -e '.gates | any(.id == "(return-catchup)" and (.title | startswith("catch-up retained:")))' >/dev/null \
+    || fail "Bearings did not carry the blockerless catch-up retention reason"
   waiting=$(printf '%s\n' "$out" | awk '/^Waiting on you:/{show=1} /^Tried and failed, or could not be fixed:/{show=0} show')
   assert_contains "$waiting" "held listing unavailable: $dir/home/data/backlog.md: synthetic held backlog failure; catch-up stays gated" "the failed held listing was not disclosed"
   assert_not_contains "$waiting" '(nothing)' "an unavailable held set was also reported as empty"
@@ -693,7 +749,7 @@ test_missing_final_archive_keeps_retained_contract_gated() {
   pass "the retained contract epoch requires its final archive on every check"
 }
 
-test_return_gate_orders_catchup_before_bearings
+test_return_gate_owns_remediation_and_reports_catchup_to_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain
