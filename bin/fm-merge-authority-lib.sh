@@ -81,6 +81,7 @@ fm_merge_authority_resolve() {  # <home> <state> <meta> <task-id>
   done <<EOF
 $grants
 EOF
+  # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
   FM_MERGE_AUTHORITY_REASON='not-granted'
   return 1
 }
@@ -163,6 +164,7 @@ fm_merge_authority_read() {  # <state> <task-id> <provider> <host> <path> <numbe
   fm_lock_acquire_wait "$lock" || return 1
   if fm_merge_authority_record_matches "$record" "$state_device" \
       "$provider" "$host" "$path" "$number"; then
+    # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
     FM_MERGE_AUTHORITY_RECORD_IDENTITY=$(fm_pr_file_identity "$record") || status=1
   else
     FM_MERGE_AUTHORITY='external'
