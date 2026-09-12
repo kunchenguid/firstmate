@@ -1383,11 +1383,22 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   fi
 }
 
+# Pi's vim-mode extension can render a status/footer row inside the separated
+# region (for example `─ INSERT 1:1 ─`). It is terminal furniture, not user
+# input, and must not defeat an idle/done identity floor.
 _fm_composer_classify_pi_rows() {  # <screen> <styled>
-  local screen=$1 styled=$2 row raw content
+  local screen=$1 styled=$2 row raw content trimmed
   row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
   while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
+    trimmed=$(printf '%s' "$raw" | fm_composer_strip_ansi)
+    fm_composer_normalize_trim_var trimmed
+    # The pi-vimmode footer is framed by the same rule glyph on both sides.
+    # Require both edges so real input that merely contains or ends with a
+    # separator glyph is not discarded as furniture.
+    case "$trimmed" in
+      '─'*'─') row=$((row + 1)); continue ;;
+    esac
     content=$(_fm_composer_row_content "$raw" "$styled")
     fm_composer_normalize_trim_var content
     if [ -n "$content" ]; then
