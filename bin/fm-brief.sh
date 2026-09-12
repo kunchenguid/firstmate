@@ -49,6 +49,15 @@
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
+# The `tools:` line inside `## Firstmate spec` declares this task's tool
+# surface widening (spec decision D6). `none` is the default and the right
+# answer for most tasks: a crewmate launches with no MCP servers and no plugin
+# skills, because that surface is most of a 140k-token cold prefix that gets
+# re-read on every turn. Recognized values: browser, context7, mockup, lavish,
+# none. bin/fm-dod-lib.sh's fm_brief_tools owns the parsing and drops anything
+# else with a warning. Of the recognized extras, only context7 currently
+# widens the surface at spawn time; browser, mockup, and lavish are accepted
+# but get a not-yet-implemented warning from bin/fm-spawn.sh instead.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
@@ -352,6 +361,7 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 
 ## Firstmate spec
 {FIRSTMATE_SPEC}
+tools: none
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 

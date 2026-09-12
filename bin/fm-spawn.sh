@@ -1503,7 +1503,33 @@ launch_template() {
     # __CLAUDEPERMFLAG__ is the permission flag config/claude-permission-mode
     # selects (header above): --dangerously-skip-permissions by default, or
     # --permission-mode auto for a captain who refuses bypass mode.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # D6 (spec Unit 3): a crewmate or scout launches with the MINIMAL tool
+    # surface. --strict-mcp-config plus a per-task --mcp-config makes the MCP
+    # set exactly what fm-spawn wrote for this task's declared extras (empty by
+    # default), and --setting-sources project,local drops the user settings
+    # layer that enables the plugin skill catalog. Measured cost of the old
+    # surface: a 135k-145k token cold prefix re-read across ~280 turns per
+    # crewmate seat, of which the global rules layer was only 23k-27k.
+    # A task that genuinely needs an extra names it on the brief's `tools:`
+    # line; fm_brief_tools reads it and fm-spawn writes the matching MCP entry.
+    # A secondmate is exempt from the minimal surface (kept on the full,
+    # pre-D6 surface below): its charter has no `## Firstmate spec` `tools:`
+    # line to widen from, so a minimal secondmate would be permanently locked
+    # out of every extra with no opt-in, and it is a long-lived home rather
+    # than a single narrow task, so the cold-prefix saving does not apply the
+    # same way. Its settings.local.json also never receives the mirrored
+    # user-scope hooks below, because it keeps the full `user` settings scope
+    # natively (docs/configuration.md documents this exemption).
+    # __CLAUDEPERMFLAG__ is the permission flag config/claude-permission-mode
+    # selects (header above): --dangerously-skip-permissions by default, or
+    # --permission-mode auto for a captain who refuses bypass mode.
+    claude)
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' --setting-sources project,local --strict-mcp-config --mcp-config __MCPCONFIG__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -3349,9 +3375,38 @@ if [ "$KIND" != secondmate ]; then
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
-      cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
-EOF
+      BUSY_HOOKS_JSON=$(printf '{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"%s"}]}],"Stop":[{"hooks":[{"type":"command","command":"%s"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"%s"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"%s"}]}]}' \
+        "$j_submit" "$j_stop" "$j_stopfail" "$j_sessionend")
+      # This launch dropped the `user` settings scope (--setting-sources
+      # project,local, above) to skip the plugin skill catalog it also
+      # carries. That scope is also where the captain's own PreToolUse /
+      # PostToolUse safety hooks live (compound-cd guard, headless-model-pin
+      # guard, etc.) - mirror every hook the captain's user-scope settings
+      # register into this task's local settings so they still fire, merged
+      # with the busy-state hooks above rather than replacing either side.
+      # docs/configuration.md documents this mirroring and the secondmate
+      # exemption (a secondmate never reaches this branch: launch_template
+      # keeps it on the full settings-sources surface instead).
+      CLAUDE_USER_SETTINGS=
+      if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+        CLAUDE_USER_SETTINGS="$CLAUDE_CONFIG_DIR/settings.json"
+      elif [ -n "${HOME:-}" ]; then
+        CLAUDE_USER_SETTINGS="$HOME/.claude/settings.json"
+      fi
+      command -v jq >/dev/null 2>&1 || {
+        echo "error: jq is required to write this task's minimal settings.local.json" >&2
+        exit 1
+      }
+      USER_HOOKS_JSON='{}'
+      if [ -n "$CLAUDE_USER_SETTINGS" ] && [ -f "$CLAUDE_USER_SETTINGS" ]; then
+        USER_HOOKS_JSON=$(jq -c '.hooks // {}' "$CLAUDE_USER_SETTINGS" 2>/dev/null) || {
+          echo "error: could not parse $CLAUDE_USER_SETTINGS as JSON to mirror its user-scope hooks" >&2
+          exit 1
+        }
+      fi
+      jq -c -n --argjson user "$USER_HOOKS_JSON" --argjson busy "$BUSY_HOOKS_JSON" \
+        '{hooks: ((($user | to_entries) + ($busy | to_entries)) | group_by(.key) | map({key: .[0].key, value: (map(.value) | add)}) | from_entries)}' \
+        > "$WT/.claude/settings.local.json"
       exclude_path '.claude/settings.local.json'
       ;;
     gemini)
@@ -3857,6 +3912,46 @@ fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+# D6: build this task's MCP config from the brief's declared extras. Default
+# is the empty set; an unknown extra was already dropped by fm_brief_tools.
+# Scoped to non-secondmate claude launches, the only ones whose launch
+# template references __MCPCONFIG__ or --strict-mcp-config: a secondmate
+# keeps the full pre-D6 surface (comment above launch_template's claude case)
+# and a non-claude harness has no MCP-config flag at all, so parsing tools:
+# and reporting a "tool surface: minimal" verdict for either would describe a
+# capability set that launch never actually applies.
+# `context7` is the only extra with a real MCP server wired below; `browser`,
+# `mockup`, and `lavish` are accepted by fm_brief_tools so a brief can name
+# them without narrowing the surface as a typo would, but nothing here grants
+# them yet, so each gets its own not-yet-implemented warning rather than
+# being folded into the reported "tool surface: minimal + ..." verdict.
+MCP_CONFIG="$TASK_TMP/mcp.json"
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+  TOOLS_EXTRAS=$(fm_brief_tools "$BRIEF")
+  WIDENED_EXTRAS=''
+  {
+      printf '{"mcpServers":{'
+      sep=''
+      for extra in $TOOLS_EXTRAS; do
+          case "$extra" in
+              context7)
+                  printf '%s"context7":{"command":"npx","args":["-y","@upstash/context7-mcp"]}' "$sep"
+                  sep=','
+                  WIDENED_EXTRAS="$WIDENED_EXTRAS${WIDENED_EXTRAS:+ }context7" ;;
+              *)
+                  echo "warning: tools: '$extra' is accepted but not yet implemented; it does not widen the tool surface" >&2 ;;
+          esac
+      done
+      printf '}}'
+  } > "$MCP_CONFIG"
+  chmod 0600 "$MCP_CONFIG"
+  if [ -n "$WIDENED_EXTRAS" ]; then
+      echo "tool surface: minimal + $WIDENED_EXTRAS"
+  else
+      echo "tool surface: minimal (no MCP servers, no plugin skills)"
+  fi
+fi
+
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
@@ -3866,8 +3961,10 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+sq_mcpconfig=$(shell_quote "$MCP_CONFIG")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+LAUNCH=${LAUNCH//__MCPCONFIG__/$sq_mcpconfig}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
