@@ -631,6 +631,34 @@ SH
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 
+test_relaunch_metadata_keeps_registered_poll_authenticated() {
+  local dir state url registration_tmp
+  dir=$(make_case relaunch-metadata-poll)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/1
+  fm_write_meta "$state/task-a.meta" \
+    "window=fm-task-a" \
+    "pr=$url" \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' \
+    'control_relaunch_tx=tx-1'
+  fm_pr_poll_prepare "$state" task-a github "$url" github.com o/r 1 "$POLL" \
+    || fail "could not prepare a poll beside relaunch metadata"
+  fm_pr_poll_publish_prepared || fail "could not publish a poll beside relaunch metadata"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "valid registration was rejected when control metadata followed pr"
+
+  registration_tmp="$dir/tampered-registration"
+  awk 'NR == 8 { $0 = "0000000000000000000000000000000000000000000000000000000000000000" } { print }' \
+    "$state/task-a.pr-poll-registration" > "$registration_tmp" \
+    || fail "could not stage a tampered registration"
+  mv "$registration_tmp" "$state/task-a.pr-poll-registration" \
+    || fail "could not replace the registration in the tamper fixture"
+  chmod 0600 "$state/task-a.pr-poll-registration"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "tampered registration data hash remained authenticated"
+  pass "relaunch metadata preserves valid poll registration and tampering is rejected"
+}
+
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
   local check_timeout=${FM_TEST_CHECK_TIMEOUT:-1}
@@ -2439,6 +2467,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_relaunch_metadata_keeps_registered_poll_authenticated
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
