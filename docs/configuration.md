@@ -1132,3 +1132,9 @@ Only after those retries exhaust does it remove the lock, and only when it is pr
 A live lock, a missing `lsof`, any failed check, or any other fetch failure keeps today's behavior.
 Every wait, retry, and removal is printed to stderr, and a successful recovery also prints one `recovered:` summary line to stdout so a session-start refresh - which discards fleet-sync stderr and relays only stdout - still surfaces it.
 The shared staleness proof lives in `bin/fm-lock-lib.sh`, which both `fm-teardown.sh` and `fm-fleet-sync.sh` use.
+
+## Required project context
+
+An optional per-project context manifest supplies required development instructions to every worker runtime through the common launch text.
+See `bin/fm-project-context.sh --help` for its file format, checkout resolution, source hashes and missing-file behavior.
+The same command reloads the sources after compaction; the generated instructions require that reload before further project work.
