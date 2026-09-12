@@ -28,15 +28,13 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
 ack_stopped_cycle() {  # <state>
-  local state=$1 err sequence generation
+  local state=$1 err receipt
   err="$state/.test-cycle-drain.err"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || return 1
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
   rm -f "$err"
-  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation"
+  [ -n "$receipt" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt"
 }
 
 # Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a
@@ -4076,7 +4074,7 @@ test_procevent_captured_result_surfaces_proactively() {
 }
 
 test_procevent_unacknowledged_result_redrains_until_handled() {
-  local dir state out replay_out replay_err pid before after sequence generation
+  local dir state out replay_out replay_err pid before after receipt
   dir=$(make_case procevent-redrain); state="$dir/state"
   out="$dir/watch.out"; replay_out="$dir/replay.out"; replay_err="$dir/replay.err"
   seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
@@ -4101,11 +4099,10 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
     || fail "the successor drain did not re-print the durable process-event row"
 
   pe_case "$dir" handled delivery-src 1 >/dev/null || fail "could not acknowledge the captured result"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
-  [ -n "$sequence" ] && [ -n "$generation" ] \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err" | tail -1)
+  [ -n "$receipt" ] \
     || fail "the replay drain omitted its post-handling acknowledgement boundary"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "completed process-event handling could not acknowledge the replay"
   [ ! -s "$state/.wake-queue" ] || fail "acknowledged process-event replay remained durable"
 
@@ -4288,7 +4285,7 @@ test_procevent_surface_serializes_with_drain() {
 }
 
 test_procevent_surface_crash_boundaries() {
-  local dir state out fifo pid reader marker exit_status replay_err sequence generation
+  local dir state out fifo pid reader marker exit_status replay_err receipt
   dir=$(make_case procevent-output-fail); state="$dir/state"; out="$dir/watch.out"; fifo="$dir/output.fifo"
   append_wake "$state" check "procevent:output-fail:1" "check: procevent fixture output-fail 1"
   mkfifo "$fifo"
@@ -4342,11 +4339,10 @@ test_procevent_surface_crash_boundaries() {
     || fail "post-marker successor drain failed"
   grep "$(printf '\tcheck\t')" "$out.replay.drain" | grep -F 'procevent fixture after-marker 1' >/dev/null \
     || fail "post-marker successor did not re-drain the durable record"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
-  [ -n "$sequence" ] && [ -n "$generation" ] \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err" | tail -1)
+  [ -n "$receipt" ] \
     || fail "post-marker replay omitted its post-handling acknowledgement boundary"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "post-marker replay acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "post-marker acknowledgement left the durable record queued"
   pass "surfacing failures replay until post-handling acknowledgement"

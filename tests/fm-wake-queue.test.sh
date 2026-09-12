@@ -20,7 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
 
 test_concurrent_append_and_drain() {
-  local dir state out1 out2 pids i pid count unique malformed sequence generation
+  local dir state out1 out2 pids i pid count unique malformed receipt
   dir=$(make_case concurrent)
   state="$dir/state"
   out1="$dir/drain-one.out"
@@ -45,17 +45,16 @@ test_concurrent_append_and_drain() {
   unique=$(awk -F '\t' 'NF == 5 { keys[$4] = 1 } END { for (k in keys) count++; print count + 0 }' "$out2")
   [ "$unique" -eq 40 ] || fail "expected 40 unique keys, got $unique"
   [ -s "$state/.wake-queue" ] || fail "concurrent drain consumed records before handling acknowledgement"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain-two.err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain-two.err")
-  [ -n "$sequence" ] && [ -n "$generation" ] || fail "final replay omitted its acknowledgement boundary"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain-two.err" | tail -1)
+  [ -n "$receipt" ] || fail "final replay omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "concurrent records could not be acknowledged"
   [ ! -s "$state/.wake-queue" ] || fail "acknowledged concurrent records remained queued"
   pass "concurrent append plus drain preserves durable records through acknowledgement"
 }
 
 test_signal_catchup_without_running_watcher() {
-  local dir state fakebin out drain_out drain_err status_file sequence generation
+  local dir state fakebin out drain_out drain_err status_file receipt
   dir=$(make_case signal)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -73,9 +72,8 @@ test_signal_catchup_without_running_watcher() {
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print first signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" || fail "drain after first signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "first signal was not queued"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err" | tail -1)
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "first signal handling acknowledgement failed"
 
   printf 'done: second\n' >> "$status_file"
@@ -179,7 +177,7 @@ SH
 }
 
 test_atomic_double_drain() {
-  local dir state out1 out2 count1 count2 sequence generation leftover
+  local dir state out1 out2 count1 count2 receipt leftover
   dir=$(make_case double-drain)
   state="$dir/state"
   out1="$dir/drain-one.out"
@@ -199,10 +197,9 @@ test_atomic_double_drain() {
     || fail "unacknowledged concurrent drains did not replay all three records"
   cmp -s "$out1" "$out2" || fail "concurrent pre-ack replays were not deterministic"
   [ -s "$state/.wake-queue" ] || fail "concurrent drains consumed records before acknowledgement"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain-two.err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain-two.err")
-  [ -n "$sequence" ] && [ -n "$generation" ] || fail "concurrent replay omitted its acknowledgement boundary"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain-two.err" | tail -1)
+  [ -n "$receipt" ] || fail "concurrent replay omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "concurrent replay acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "acknowledgement did not consume replayed records"
   leftover=$(FM_STATE_OVERRIDE="$state" "$DRAIN" | awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }')
@@ -220,8 +217,8 @@ test_drain_dedupes_obvious_duplicates() {
   append_wake "$state" heartbeat heartbeat heartbeat || fail "second heartbeat append failed"
   append_wake "$state" signal task.status "signal: $state/task.status $state/task.turn-ended" || fail "second signal append failed"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "dedupe drain failed"
-  count=$(awk 'NF { count++ } END { print count + 0 }' "$out")
-  [ "$count" -eq 2 ] || fail "expected 2 deduped records, got $count"
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
+  [ "$count" -eq 2 ] || fail "expected 2 deduped records, got $count: $(cat "$out")"
   grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null || fail "heartbeat was not preserved"
   grep "$(printf '\tsignal\ttask.status\t')" "$out" | grep -F "$state/task.turn-ended" >/dev/null || fail "latest signal payload was not preserved"
   pass "drain collapses obvious duplicate heartbeat and signal records"
@@ -788,7 +785,7 @@ test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
 # own eligible snapshot, no matter that row's sequence number relative to
 # what the actor presents or acks itself. Do not regress it.
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
-  local dir state out err sequence generation count
+  local dir state out err receipt count
   dir=$(make_case actor-scope)
   state="$dir/state"
 
@@ -811,12 +808,11 @@ test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
   grep -Fq "$(printf '\tstale\tfm-window\t')" "$out" || fail "branch drain omitted its eligible stale row"
   grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" && fail "branch drain presented the main-owned row"
 
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  [ -n "$sequence" ] && [ -n "$generation" ] || fail "branch drain omitted its acknowledgement boundary"
-  [ "$sequence" -eq 3 ] || fail "branch ack cutoff must be the max ELIGIBLE seq (3), got $sequence"
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  [ -n "$receipt" ] || fail "branch drain omitted its acknowledgement boundary"
+  [ "$(receipt_sequence "$receipt")" -eq 3 ] || fail "branch ack cutoff must be the max ELIGIBLE seq (3), got $(receipt_sequence "$receipt")"
 
-  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack "$receipt" \
     || fail "branch-scoped ack failed"
 
   # The core no-swallow property: the main-only row - seq 1, BELOW the
@@ -835,10 +831,9 @@ test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$count" -eq 1 ] || fail "main's later drain should see exactly the one remaining main-owned row: $(cat "$out")"
   grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" || fail "main's later drain lost the main-owned row"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  [ -n "$sequence" ] && [ -n "$generation" ] || fail "main's drain omitted its acknowledgement boundary"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  [ -n "$receipt" ] || fail "main's drain omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "main's ack failed"
   [ ! -s "$state/.wake-queue" ] || fail "the main-owned row survived main's own ack"
 
@@ -846,7 +841,7 @@ test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
 }
 
 test_main_drain_excludes_rows_already_granted_to_branch() {
-  local dir state out err sequence generation
+  local dir state out err receipt
   dir=$(make_case main-excludes-branch-grant)
   state="$dir/state"
 
@@ -861,10 +856,9 @@ test_main_drain_excludes_rows_already_granted_to_branch() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "main drain failed: $(cat "$err")"
   grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" || fail "main drain omitted its main-owned row"
   ! grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "main drain presented a branch-granted row"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  [ "$sequence" = 1 ] && [ -n "$generation" ] || fail "main acknowledgement did not bind only its presented row"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  [ "$(receipt_sequence "$receipt")" = 1 ] && [ -n "$(receipt_generation "$receipt")" ] || fail "main acknowledgement did not bind only its presented row"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "main acknowledgement failed"
   grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$state/.wake-queue" \
     || fail "main acknowledgement consumed the branch-granted row"
@@ -874,9 +868,8 @@ test_main_drain_excludes_rows_already_granted_to_branch() {
   FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$out" 2> "$err" \
     || fail "branch drain failed: $(cat "$err")"
   grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "branch lost its granted row"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack "$receipt" \
     || fail "branch acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "branch acknowledgement left its handled row queued"
   [ ! -e "$state/.branch-eligible-rows" ] || fail "branch acknowledgement retained its completed grant"
@@ -890,7 +883,7 @@ test_main_drain_excludes_rows_already_granted_to_branch() {
 # that could only print nothing - no row, no acknowledgement command - on every
 # guarded command, for as long as the branch held the grant.
 test_main_is_never_told_to_drain_rows_only_the_branch_owns() {
-  local dir state out err sequence generation
+  local dir state out err receipt
   dir=$(make_case main-not-told-to-drain-branch-rows)
   state="$dir/state"
   printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
@@ -929,13 +922,12 @@ test_main_is_never_told_to_drain_rows_only_the_branch_owns() {
   grep -Fq "$(printf '\tstale\tfleet:w2:p3\t')" "$out" || fail "main drain omitted the released row"
   ! grep -Fq 'WAKE ROWS HELD BY SUPERVISION BRANCH' "$out" \
     || fail "main drain reported a hold that no longer exists"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  [ -n "$sequence" ] && [ -n "$generation" ] || fail "the released row was presented without an acknowledgement command"
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  [ -n "$receipt" ] || fail "the released row was presented without an acknowledgement command"
   grep -Fq 'queued wakes pending' "$err" || fail "guard stopped warning about a row main can actually drain"
   ! grep -Fq 'wake rows held by the live supervision branch' "$err" \
     || fail "guard kept advising about a hold that was already released"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "acknowledgement of the released row failed"
   [ ! -s "$state/.wake-queue" ] || fail "the acknowledged row stayed queued"
 
@@ -995,7 +987,7 @@ SH
 # --ack-through cutoff, while it still counts as queued: without retirement it
 # wedges the queue permanently and keeps waking supervision.
 test_unconsumable_rows_are_retired_instead_of_wedging_the_queue() {
-  local dir state out err sequence generation
+  local dir state out err receipt
   dir=$(make_case unconsumable-row-retirement)
   state="$dir/state"
   printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
@@ -1030,10 +1022,9 @@ test_unconsumable_rows_are_retired_instead_of_wedging_the_queue() {
     || fail "the second retired row's content was discarded instead of reported"
   grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "retirement dropped a usable row"
   [ "$(awk 'END { print NR }' "$state/.wake-queue")" -eq 1 ] || fail "unusable rows survived the drain"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  [ -n "$sequence" ] && [ -n "$generation" ] || fail "the usable row was presented without an acknowledgement command"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  [ -n "$receipt" ] || fail "the usable row was presented without an acknowledgement command"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "the queue stayed wedged after acknowledgement"
   FM_STATE_OVERRIDE="$state" "$GUARD" 2> "$dir/guard-after.err" || fail "guard failed after the queue drained"
@@ -1062,7 +1053,7 @@ test_branch_grant_refuses_rows_already_claimed_by_main() {
 }
 
 test_actor_filter_precedes_same_key_deduplication() {
-  local dir state main_sequence main_generation branch_sequence branch_generation
+  local dir state main_receipt branch_receipt
   dir=$(make_case actor-dedup-order)
   state="$dir/state"
 
@@ -1079,13 +1070,11 @@ test_actor_filter_precedes_same_key_deduplication() {
   [ "$(awk -F '\t' '$3 == "signal" { print $2 }' "$dir/branch.out")" = 1 ] \
     || fail "global deduplication hid the branch's older same-key row"
 
-  main_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/main.err")
-  main_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/main.err")
-  branch_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/branch.err")
-  branch_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/branch.err")
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$main_sequence" --recovery-generation "$main_generation" \
+  main_receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/main.err" | tail -1)
+  branch_receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/branch.err" | tail -1)
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$main_receipt" \
     || fail "main same-key acknowledgement failed"
-  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$branch_sequence" --recovery-generation "$branch_generation" \
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack "$branch_receipt" \
     || fail "branch same-key acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "same-key actor rows remained stranded"
 
@@ -1093,7 +1082,7 @@ test_actor_filter_precedes_same_key_deduplication() {
 }
 
 test_main_reclaims_a_grant_whose_branch_owner_exited() {
-  local dir state owner sequence generation
+  local dir state owner receipt
   dir=$(make_case stale-branch-owner)
   state="$dir/state"
 
@@ -1116,9 +1105,8 @@ test_main_reclaims_a_grant_whose_branch_owner_exited() {
     || fail "main did not reclaim the dead branch owner's row"
   [ ! -e "$state/.branch-eligible-rows" ] && [ ! -e "$state/.branch-eligible-owner" ] \
     || fail "dead branch ownership evidence survived reclaim"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/main.err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/main.err")
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/main.err" | tail -1)
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "reclaimed row acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "reclaimed branch row remained queued"
 
@@ -1181,7 +1169,7 @@ SH
 }
 
 test_legacy_generationless_wake_is_adopted() {
-  local dir state row sequence generation
+  local dir state row receipt
   dir=$(make_case legacy-generationless-wake)
   state="$dir/state"
   row=$(printf '1700000000\t7\tcheck\tlegacy-process-event\tcheck: legacy process-event')
@@ -1191,19 +1179,17 @@ test_legacy_generationless_wake_is_adopted() {
     || fail "generation-less legacy wake could not be adopted"
   grep -F "$row" "$dir/first.out" >/dev/null \
     || fail "adopted legacy wake was not presented"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/first.err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
-  [ "$sequence" = 7 ] && [ -n "$generation" ] \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err" | tail -1)
+  [ "$(receipt_sequence "$receipt")" = 7 ] && [ -n "$(receipt_generation "$receipt")" ] \
     || fail "legacy wake adoption omitted its generation-bound acknowledgement"
-  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:handling:$generation" ] \
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:handling:$(receipt_generation "$receipt")" ] \
     || fail "legacy wake was not adopted into durable handling recovery"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
     || fail "unacknowledged adopted wake could not be re-drained"
   grep -F "$row" "$dir/replay.out" >/dev/null \
     || fail "unacknowledged adopted wake was lost"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation" \
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "adopted legacy wake could not be acknowledged"
   [ ! -s "$state/.wake-queue" ] || fail "acknowledged legacy wake remained queued"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/after-ack.out" 2> "$dir/after-ack.err" \
@@ -1216,8 +1202,8 @@ test_legacy_generationless_wake_is_adopted() {
 # Pin the recovery acknowledgement contract from docs/watcher-continuity.md at
 # the queue-library boundary.
 test_stale_recovery_generation_cannot_touch_a_newer_episode() {
-  local dir state first_err replay_err sequence generation handling_marker
-  local newer_marker newer_sequence newer_generation rc
+  local dir state first_err replay_err receipt handling_marker
+  local newer_marker newer_receipt rc
   dir=$(make_case stale-recovery-generation)
   state="$dir/state"
 
@@ -1226,9 +1212,8 @@ test_stale_recovery_generation_cannot_touch_a_newer_episode() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" \
     || fail "first generation drain failed"
   first_err="$dir/first.err"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$first_err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$first_err")
-  [ -n "$sequence" ] && [ -n "$generation" ] \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$first_err" | tail -1)
+  [ -n "$receipt" ] \
     || fail "first drain did not emit a generation-bound acknowledgement"
 
   append_wake "$state" check second 'check: same episode' \
@@ -1236,11 +1221,10 @@ test_stale_recovery_generation_cannot_touch_a_newer_episode() {
   append_wake "$state" check third 'check: same episode again' \
     || fail "second same-episode wake append failed"
   handling_marker=$(cat "$state/.watcher-down")
-  [ "${handling_marker##*:}" = "$generation" ] \
+  [ "${handling_marker##*:}" = "$(receipt_generation "$receipt")" ] \
     || fail "repeated publications replaced the outstanding recovery generation"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation" > "$dir/handled-ack.out" 2> "$dir/handled-ack.err" \
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" > "$dir/handled-ack.out" 2> "$dir/handled-ack.err" \
     || fail "a publication during handling invalidated the printed acknowledgement"
   ! grep "$(printf '\tcheck\tfirst\t')" "$state/.wake-queue" >/dev/null \
     || fail "the handled row was not consumed"
@@ -1261,22 +1245,19 @@ test_stale_recovery_generation_cannot_touch_a_newer_episode() {
     || fail "remaining wake did not re-surface"
   grep "$(printf '\tcheck\tthird\t')" "$dir/replay.out" >/dev/null \
     || fail "second remaining wake did not re-surface"
-  newer_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
-  newer_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$newer_sequence" \
-    --recovery-generation "$newer_generation" \
+  newer_receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err" | tail -1)
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$newer_receipt" \
     || fail "the handled episode could not be acknowledged"
   [ ! -s "$state/.wake-queue" ] || fail "acknowledgement left durable wakes queued"
 
   append_wake "$state" check fourth 'check: newer recovery generation' \
     || fail "newer generation wake append failed"
   newer_marker=$(cat "$state/.watcher-down")
-  [ "${newer_marker##*:}" != "$generation" ] \
+  [ "${newer_marker##*:}" != "$(receipt_generation "$receipt")" ] \
     || fail "a retired episode did not open a new recovery generation"
 
   rc=0
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation" > "$dir/stale-ack.out" 2> "$dir/stale-ack.err" || rc=$?
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" > "$dir/stale-ack.out" 2> "$dir/stale-ack.err" || rc=$?
   [ "$rc" -eq 0 ] \
     || fail "a stale acknowledgement failed instead of degrading safely: $(cat "$dir/stale-ack.err")"
   if ! grep -F 'WAKE_ACK_REQUIRED' "$dir/stale-ack.err" >/dev/null \
@@ -1294,56 +1275,53 @@ test_stale_recovery_generation_cannot_touch_a_newer_episode() {
 # presented consumes nothing. That must be said plainly, with the exact command
 # for the current wake, because "re-run the drain" re-presents the same row and
 # invites the same stale acknowledgement again (the refused-ack loop).
-stale_ack_remedy() {  # <stderr-file> -> "<seq>\t<generation>"
-  local seq generation
-  seq=$(sed -n 's/^wake drain: nothing was acknowledged through [0-9][0-9]*.*run bin\/fm-wake-drain.sh --ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]* after handling it$/\1/p' "$1")
-  generation=$(sed -n 's/^wake drain: nothing was acknowledged through [0-9][0-9]*.*run bin\/fm-wake-drain.sh --ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\) after handling it$/\1/p' "$1")
-  [ -n "$seq" ] && [ -n "$generation" ] || return 1
-  printf '%s\t%s\n' "$seq" "$generation"
+stale_ack_remedy() {  # <stderr-file> -> the receipt the remedy named
+  local receipt
+  receipt=$(sed -n 's/^wake drain: that receipt acknowledged nothing .*run bin\/fm-wake-drain.sh --ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\) after handling it$/\1/p' "$1")
+  [ -n "$receipt" ] || return 1
+  printf '%s\n' "$receipt"
 }
 
 test_stale_ack_that_consumes_nothing_names_the_current_wake() {
-  local dir state first_seq first_gen second_seq second_gen remedy rc
+  local dir state first_receipt second_receipt remedy rc
   dir=$(make_case stale-ack-current-wake)
   state="$dir/state"
 
   append_wake "$state" check first 'check: first wake' || fail "first append failed"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" || fail "first drain failed"
-  first_seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/first.err")
-  first_gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
-  [ -n "$first_seq" ] && [ -n "$first_gen" ] || fail "first drain printed no acknowledgement command"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$first_seq" --recovery-generation "$first_gen" \
+  first_receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err" | tail -1)
+  [ -n "$first_receipt" ] || fail "first drain printed no acknowledgement command"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$first_receipt" \
     || fail "first acknowledgement failed"
 
   append_wake "$state" check second 'check: second wake' || fail "second append failed"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/second.out" 2> "$dir/second.err" || fail "second drain failed"
-  second_seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/second.err")
-  second_gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/second.err")
-  [ "$second_seq" -gt "$first_seq" ] || fail "second drain did not present a newer row"
+  second_receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/second.err" | tail -1)
+  [ "$(receipt_sequence "$second_receipt")" -gt "$(receipt_sequence "$first_receipt")" ] || fail "second drain did not present a newer row"
 
   # The stale acknowledgement: the previous wake's command, re-run from memory.
   rc=0
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$first_seq" --recovery-generation "$first_gen" \
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$first_receipt" \
     > "$dir/stale.out" 2> "$dir/stale.err" || rc=$?
   [ "$rc" -eq 0 ] || fail "a stale acknowledgement failed instead of degrading safely: $(cat "$dir/stale.err")"
-  grep -F "nothing was acknowledged through $first_seq" "$dir/stale.err" >/dev/null \
+  grep -F "acknowledged nothing (none of your presented wake rows is at or below sequence $(receipt_sequence "$first_receipt"))" "$dir/stale.err" >/dev/null \
     || fail "a no-op acknowledgement was not reported as acknowledging nothing: $(cat "$dir/stale.err")"
-  grep -F "the current wake is row $second_seq" "$dir/stale.err" >/dev/null \
+  grep -F "the current wake is row $(receipt_sequence "$second_receipt")" "$dir/stale.err" >/dev/null \
     || fail "a no-op acknowledgement did not name the current wake: $(cat "$dir/stale.err")"
   ! grep -F 're-run' "$dir/stale.err" >/dev/null \
     || fail "a no-op acknowledgement told the caller to drain again instead of naming the exact command: $(cat "$dir/stale.err")"
   remedy=$(stale_ack_remedy "$dir/stale.err") \
     || fail "a no-op acknowledgement did not print the exact current command: $(cat "$dir/stale.err")"
-  [ "${remedy%%$'\t'*}" = "$second_seq" ] && [ "${remedy##*$'\t'}" = "$second_gen" ] \
-    || fail "the printed remedy differs from the drain's own WAKE_ACK_REQUIRED command: $remedy vs $second_seq/$second_gen"
+  [ "$remedy" = "$second_receipt" ] \
+    || fail "the printed remedy differs from the drain's own WAKE_ACK_REQUIRED receipt: $remedy vs $second_receipt"
   grep "$(printf '\tcheck\tsecond\t')" "$state/.wake-queue" >/dev/null \
     || fail "a stale acknowledgement consumed the current wake"
 
   # Following the printed command, verbatim, closes the wake and the episode.
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "${remedy%%$'\t'*}" --recovery-generation "${remedy##*$'\t'}" \
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$remedy" \
     2> "$dir/remedy.err" || fail "the printed remedy failed: $(cat "$dir/remedy.err")"
   [ ! -s "$state/.wake-queue" ] || fail "the printed remedy left the current wake queued"
-  ! grep -F 'nothing was acknowledged' "$dir/remedy.err" >/dev/null \
+  ! grep -F 'acknowledged nothing' "$dir/remedy.err" >/dev/null \
     || fail "a real acknowledgement was reported as acknowledging nothing: $(cat "$dir/remedy.err")"
   case "$(cat "$state/.watcher-down")" in
     acked:*) ;;
@@ -1353,7 +1331,7 @@ test_stale_ack_that_consumes_nothing_names_the_current_wake() {
 }
 
 test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake() {
-  local dir state first_seq first_gen second_seq second_gen remedy
+  local dir state first_receipt second_receipt remedy
   dir=$(make_case branch-stale-ack-current-wake)
   state="$dir/state"
   append_wake "$state" signal "task-a.status" "signal: task-a first" || fail "first signal append failed"
@@ -1361,9 +1339,8 @@ test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake() {
   FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-stale 1 || fail "first grant publication failed"
   FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" \
     || fail "first branch drain failed: $(cat "$dir/first.err")"
-  first_seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/first.err")
-  first_gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
-  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$first_seq" --recovery-generation "$first_gen" \
+  first_receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err" | tail -1)
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack "$first_receipt" \
     || fail "first branch acknowledgement failed"
   FM_STATE_OVERRIDE="$state" "$GRANT" release branch-stale || fail "first grant release failed"
 
@@ -1372,22 +1349,21 @@ test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake() {
   FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-stale 2 || fail "second grant publication failed"
   FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/second.out" 2> "$dir/second.err" \
     || fail "second branch drain failed: $(cat "$dir/second.err")"
-  second_seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$dir/second.err")
-  second_gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/second.err")
-  [ "$second_seq" -eq 2 ] || fail "second branch drain did not present the granted stale row: $(cat "$dir/second.out")"
+  second_receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/second.err" | tail -1)
+  [ "$(receipt_sequence "$second_receipt")" -eq 2 ] || fail "second branch drain did not present the granted stale row: $(cat "$dir/second.out")"
 
   # The refused-ack loop's first step: the PREVIOUS wake's command.
-  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$first_seq" --recovery-generation "$first_gen" \
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack "$first_receipt" \
     > "$dir/stale.out" 2> "$dir/stale.err" || fail "a stale branch acknowledgement failed instead of degrading safely: $(cat "$dir/stale.err")"
-  grep -F "nothing was acknowledged through $first_seq" "$dir/stale.err" >/dev/null \
+  grep -F "acknowledged nothing (none of your presented wake rows is at or below sequence $(receipt_sequence "$first_receipt"))" "$dir/stale.err" >/dev/null \
     || fail "the branch's no-op acknowledgement was not reported as acknowledging nothing: $(cat "$dir/stale.err")"
   remedy=$(stale_ack_remedy "$dir/stale.err") \
     || fail "the branch's no-op acknowledgement did not print the exact current command: $(cat "$dir/stale.err")"
-  [ "${remedy%%$'\t'*}" = "$second_seq" ] && [ "${remedy##*$'\t'}" = "$second_gen" ] \
-    || fail "the branch remedy differs from its drain's WAKE_ACK_REQUIRED command: $remedy vs $second_seq/$second_gen"
+  [ "$remedy" = "$second_receipt" ] \
+    || fail "the branch remedy differs from its drain's WAKE_ACK_REQUIRED receipt: $remedy vs $second_receipt"
   grep "$(printf '\tstale\tfm-window-b\t')" "$state/.wake-queue" >/dev/null \
     || fail "a stale branch acknowledgement consumed the granted wake"
-  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "${remedy%%$'\t'*}" --recovery-generation "${remedy##*$'\t'}" \
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack "$remedy" \
     || fail "the branch's printed remedy failed"
   [ ! -s "$state/.wake-queue" ] || fail "the branch's printed remedy left its wake queued"
   FM_STATE_OVERRIDE="$state" "$GRANT" deactivate "$$" branch-stale || fail "branch owner deactivation failed"
@@ -1395,7 +1371,7 @@ test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake() {
 }
 
 test_recovery_ack_failure_is_reported() {
-  local dir state fakebin real_mv rc generation
+  local dir state fakebin real_mv rc
   dir=$(make_case recovery-ack-failure)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1403,8 +1379,8 @@ test_recovery_ack_failure_is_reported() {
   printf 'pending:handling:fixture\n' > "$state/.watcher-down"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/initial.out" 2> "$dir/initial.err" \
     || fail "initial recovery drain failed"
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through 0 --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/initial.err")
-  [ -n "$generation" ] || fail "initial recovery drain omitted its generation"
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/initial.err" | tail -1)
+  [ -n "$receipt" ] || fail "initial recovery drain omitted its acknowledgement receipt"
   cat > "$fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 last=${!#}
@@ -1417,7 +1393,7 @@ SH
 
   set +e
   PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_ACK_MARKER="$state/.watcher-down" \
-    FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 0 --recovery-generation "$generation" \
+    FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
       > "$dir/drain.out" 2> "$dir/drain.err"
   rc=$?
   set -e
@@ -1426,19 +1402,19 @@ SH
     || fail "recovery acknowledgement failure had no explicit diagnostic"
   grep -F 'WAKE_ACK_REQUIRED' "$dir/drain.err" >/dev/null \
     || fail "recovery acknowledgement failure did not name its own remedy"
-  [ "$(cat "$state/.watcher-down")" = "pending:handling:$generation" ] \
+  [ "$(cat "$state/.watcher-down")" = "pending:handling:$(receipt_generation "$receipt")" ] \
     || fail "failed acknowledgement corrupted the pending recovery marker"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 0 --recovery-generation "$generation" \
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     > "$dir/retry.out" 2> "$dir/retry.err" \
     || fail "recovery acknowledgement did not succeed on retry"
-  [ "$(cat "$state/.watcher-down")" = "acked:handling:$generation" ] \
+  [ "$(cat "$state/.watcher-down")" = "acked:handling:$(receipt_generation "$receipt")" ] \
     || fail "successful retry did not acknowledge pending recovery state"
   pass "wake drain: recovery acknowledgement failures are explicit and retryable"
 }
 
 test_interruption_before_and_after_raw_commit() {
-  local dir state before_out after_out replay_out empty_out pid rc count i sequence generation
+  local dir state before_out after_out replay_out empty_out pid rc count i receipt
   dir=$(make_case interruption)
   state="$dir/state"
   before_out="$dir/before.out"
@@ -1465,9 +1441,8 @@ test_interruption_before_and_after_raw_commit() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$dir/replay.err" || fail "restored pre-commit wake did not drain"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$replay_out")
   [ "$count" -eq 1 ] || fail "pre-commit interruption lost or duplicated the durable row"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/replay.err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/replay.err")
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/replay.err" | tail -1)
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "pre-commit replay acknowledgement failed"
 
   append_wake "$state" signal task.status "signal: task after commit" || fail "post-commit interruption wake append failed"
@@ -1485,9 +1460,8 @@ test_interruption_before_and_after_raw_commit() {
     || fail "drain after post-presentation interruption failed"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$empty_out")
   [ "$count" -eq 1 ] || fail "interrupted handling did not replay its durable row exactly once"
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/after-replay.err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/after-replay.err")
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/after-replay.err" | tail -1)
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt" \
     || fail "post-interruption replay acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "acknowledged interrupted wake remained durable"
   pass "interruptions preserve durable rows until post-handling acknowledgement"
@@ -1815,8 +1789,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     shift
     fm_run_timed 1 "$@"
   ' _ "$ROOT/bin/fm-timeout-lib.sh" "$DRAIN" \
-    --ack-through "$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$second_err")" \
-    --recovery-generation "$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$second_err")" \
+    --ack "$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$second_err" | tail -1)" \
     > "$dir/ack-held.out" 2> "$dir/ack-held.err" || rc=$?
   [ "$rc" -eq 124 ] \
     || { kill "$ack_holder" 2>/dev/null || true; fail "held acknowledgement lock did not retain blocking semantics (rc=$rc)"; }

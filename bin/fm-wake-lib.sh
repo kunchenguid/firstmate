@@ -1961,6 +1961,118 @@ fm_wake_print_deduped() {
   ' "$file"
 }
 
+# --- acknowledgement receipts ------------------------------------------------
+#
+# One opaque token carrying the three facts an acknowledgement needs: the actor
+# that was presented to, the through-sequence it may consume, and the recovery
+# generation it may retire. docs/watcher-continuity.md owns what those three
+# facts mean; this is the single owner of how they are packed.
+#
+# WHY OPAQUE. The facts themselves have not changed and the queue format has
+# not changed - only the operator interface has. Handing back two transcribed
+# arguments made the supervisor retype a sequence and a generation from a
+# printed line, and a stale or wrong pair is exactly the kind of thing that
+# reads as a successful acknowledgement. A receipt is copied whole or not at
+# all, its checksum makes a mangled copy a refusal rather than a wrong
+# acknowledgement, and the drain still refuses a receipt whose facts no longer
+# fit the queue (a moved generation, a cutoff below the presented row, another
+# actor's grant) exactly as it refused the equivalent argument pair.
+#
+# This is an operator-error boundary, not a security boundary: the checksum
+# detects mangling and staleness, and never a determined forger, who could
+# already pass the argument pair.
+FM_WAKE_RECEIPT_PREFIX=fmw1
+FM_WAKE_RECEIPT_ACTOR=
+FM_WAKE_RECEIPT_SEQUENCE=
+FM_WAKE_RECEIPT_GENERATION=
+
+_fm_wake_receipt_digest() {  # <payload> -> short checksum
+  local payload=$1
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$payload" | shasum -a 256 | LC_ALL=C cut -c1-16
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$payload" | sha256sum | LC_ALL=C cut -c1-16
+  else
+    # No SHA-256 on this host. cksum still turns a mangled copy into a
+    # mismatch, which is the whole job here; it is deliberately not a
+    # cryptographic claim.
+    printf '%s' "$payload" | cksum | LC_ALL=C awk '{ printf "c%s%s", $1, $2 }'
+  fi
+}
+
+# Pack an acknowledgement receipt. Returns 1 rather than emitting a token for
+# any field the drain could not act on, so a malformed receipt can never be
+# produced and then refused later as if the queue were at fault.
+fm_wake_receipt_encode() {  # <actor> <through-sequence> <recovery-generation>
+  local actor=$1 sequence=$2 generation=$3 payload body
+  case "$actor" in main|branch) ;; *) return 1 ;; esac
+  case "$sequence" in ''|*[!0-9]*) return 1 ;; esac
+  case "$generation" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  payload="$actor:$sequence:$generation"
+  body=$(printf '%s' "$payload" | base64 2>/dev/null | LC_ALL=C tr -d '\n\r' \
+    | LC_ALL=C tr '+/' '-_' | LC_ALL=C tr -d '=') || return 1
+  [ -n "$body" ] || return 1
+  printf '%s.%s.%s\n' "$FM_WAKE_RECEIPT_PREFIX" "$body" "$(_fm_wake_receipt_digest "$payload")"
+}
+
+# Unpack a receipt into FM_WAKE_RECEIPT_ACTOR/SEQUENCE/GENERATION. Returns 1 for
+# anything that is not a receipt this build produced and whose checksum still
+# matches its own body: a truncated copy, a mangled character, a token from a
+# different format version. The caller reports that as a refusal and leaves the
+# queue untouched, which keeps the wake durable for a correct acknowledgement.
+fm_wake_receipt_decode() {  # <receipt>
+  local receipt=$1 prefix body checksum padded payload actor sequence generation extra
+  FM_WAKE_RECEIPT_ACTOR=
+  FM_WAKE_RECEIPT_SEQUENCE=
+  FM_WAKE_RECEIPT_GENERATION=
+  case "$receipt" in
+    *[!A-Za-z0-9._-]*|'') return 1 ;;
+  esac
+  prefix=${receipt%%.*}
+  [ "$prefix" = "$FM_WAKE_RECEIPT_PREFIX" ] || return 1
+  receipt=${receipt#*.}
+  case "$receipt" in *.*) ;; *) return 1 ;; esac
+  body=${receipt%.*}
+  checksum=${receipt##*.}
+  [ -n "$body" ] && [ -n "$checksum" ] || return 1
+  case "$body" in *.*) return 1 ;; esac
+  padded=$(printf '%s' "$body" | LC_ALL=C tr -- '-_' '+/')
+  while [ $(( ${#padded} % 4 )) -ne 0 ]; do padded="$padded="; done
+  payload=$(printf '%s\n' "$padded" | base64 -d 2>/dev/null) \
+    || payload=$(printf '%s\n' "$padded" | base64 -D 2>/dev/null) \
+    || return 1
+  [ -n "$payload" ] || return 1
+  # One line only: the field read below sees the first line, while the checksum
+  # covers every byte, so a multi-line payload must be refused outright rather
+  # than silently acknowledged from its first line.
+  [ "$(printf '%s' "$payload" | LC_ALL=C command wc -l | tr -d '[:space:]')" = 0 ] || return 1
+  [ "$(_fm_wake_receipt_digest "$payload")" = "$checksum" ] || return 1
+  IFS=: read -r actor sequence generation extra <<EOF
+$payload
+EOF
+  [ -z "$extra" ] || return 1
+  case "$actor" in main|branch) ;; *) return 1 ;; esac
+  case "$sequence" in ''|*[!0-9]*) return 1 ;; esac
+  case "$generation" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  FM_WAKE_RECEIPT_ACTOR=$actor
+  FM_WAKE_RECEIPT_SEQUENCE=$sequence
+  FM_WAKE_RECEIPT_GENERATION=$generation
+}
+
+# Read the receipt out of a captured drain stderr. The single owner of that
+# parse, so a machine consumer of the drain (the away-mode daemon, the return
+# brief, the test helper) never re-spells the printed line. Prints nothing and
+# returns 1 when the drain issued no usable receipt, which every caller must
+# treat as "retain the durable wakes", never as "nothing to acknowledge".
+fm_wake_ack_receipt_from_drain() {  # <captured-stderr-path>
+  local receipt
+  [ -r "$1" ] || return 1
+  receipt=$(LC_ALL=C sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$1" | tail -1)
+  [ -n "$receipt" ] || return 1
+  fm_wake_receipt_decode "$receipt" || return 1
+  printf '%s\n' "$receipt"
+}
+
 # --- branch grant evidence and per-actor pending rows ------------------------
 #
 # docs/watcher-continuity.md "Per-actor acknowledgement" owns the contract these
@@ -2330,7 +2442,17 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     if [ "$mode" = historical ] && fm_wake_signal_seen_current "$STATE" "$path"; then
       continue
     fi
-    offset=$(fm_wake_status_cursor_offset "$path") || return 1
+    if ! offset=$(fm_wake_status_cursor_offset "$path"); then
+      # No readable presentation cursor for this file, so its unread span
+      # cannot be computed. Report this one file and keep annotating the rest:
+      # aborting the whole phase would drop every other event too, and leave
+      # this one indistinguishable from "nothing new".
+      if [ "$mode" != historical ]; then
+        printf 'wake annotation unavailable: %s could not be read at drain - read %s directly for this event\n' \
+          "$status_key" "$path" || return 1
+      fi
+      continue
+    fi
     endpoint=
     if [ -n "$snapshot" ]; then
       task=${status_key%.status}
@@ -2339,7 +2461,17 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
       done <<EOF
 $snapshot
 EOF
-      [ -n "$endpoint" ] || continue
+      if [ -z "$endpoint" ]; then
+        # The status file this signal names is not representable in the
+        # presentation snapshot at all (missing, replaced, or not a safe
+        # regular file). Same rule as the unreadable case below: a drain that
+        # cannot deliver the event says so, so silence never has two meanings.
+        if [ "$mode" != historical ]; then
+          printf 'wake annotation unavailable: %s could not be read at drain - read %s directly for this event\n' \
+            "$status_key" "$path" || return 1
+        fi
+        continue
+      fi
     fi
     if [ -n "$endpoint" ] && [ "$offset" -ge "$endpoint" ]; then continue; fi
     if ! fm_wake_unread_events "$path" 0 "$offset" "$endpoint"; then
@@ -2347,6 +2479,15 @@ EOF
       # wake rows. A file that disappears, rotates, or becomes unreadable after
       # the snapshot must not suppress annotations for other status files; the
       # presentation commit will reject a changed snapshot identity.
+      #
+      # Say so rather than skipping in silence. A drain is supposed to deliver
+      # the whole event, so the handling turn needs no separate status read; the
+      # one case where that does not hold has to be visible, or the supervisor
+      # cannot tell "nothing new to show" from "this event could not be read".
+      if [ "$mode" != historical ]; then
+        printf 'wake annotation unavailable: %s could not be read at drain - read %s directly for this event\n' \
+          "$status_key" "$path" || return 1
+      fi
       continue
     fi
     last_event=$FM_WAKE_EVENT_LINE

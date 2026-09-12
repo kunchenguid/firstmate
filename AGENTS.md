@@ -109,8 +109,7 @@ Account for every candidate with the catalog evidence, provider relationship, ap
 Missing model-level quota, a missing authentication source, unmeasurable headroom, or unmodeled authentication is disclosed uncertainty that keeps a candidate eligible, never a credential or login escalation.
 Preserve malformed profile configuration as an actionable error rather than selecting around it.
 When every candidate is tight, preserve the captain's strongest-reasoning class rather than silently downgrading it solely to conserve quota; stop and report the tight choice if that class cannot proceed, and break genuine evidence ties without array-order or harness bias.
-The generic effort fallback and its precedence are owned by `harness-adapters`: explicit captain and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit captain preference.
-Do not add model-specific versions of that policy.
+`harness-adapters` owns the generic effort fallback and its precedence, and never `max` without an explicit captain preference; do not add a model-specific version of that policy.
 
 `secondmate-provisioning` owns secondmate harness pins and inherited local material, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable; pass an explicit per-spawn `--backend` only under that exact task's own authority, never as later-task precedent (selection contract: [`docs/configuration.md`](docs/configuration.md) "Runtime backend").
@@ -249,7 +248,7 @@ When the captain adds or changes an ask mid-task, append the captain's words to 
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
 
 Only a current, explicit captain instruction that completely invalidates the work being validated keeps the task with the same worker instead of routing it to follow-up work or handing it to a replacement.
-That worker cancels the active run through no-mistakes axi's supported abort command, confirms through structured axi status that the run has stopped, and settles branch ownership by following that status's own next action before changing any code.
+That worker cancels the active run through no-mistakes axi's supported abort command, confirms through structured axi status that the run has stopped, then follows that status's own next action: use axi sync's guarded recovery only when the status asks for it, and otherwise proceed only once it confirms ownership is already returned.
 Custody recovery settles ownership, not content: the worker replaces the obsolete work from the correct pre-invalidation base rather than building on the recovered-but-obsolete head, keeping the obsolete run's pipeline-fix commits out of what ships.
 Apart from that single supported abort, do not hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
 Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
@@ -304,7 +303,8 @@ Session start is the only exception, because its one-shot digest already drained
 Treat any `OPEN DECISIONS` section from the drain as actionable reconciliation input even when no wake record was queued.
 Treat any `UNREAD STATUS` section as newly surfaced status that must be read this turn; those lines are not re-printed after this presentation.
 Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
-After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
+The drain delivers the whole event, so handling needs no separate status read; where it could not, a `wake annotation unavailable` line names the file to read.
+After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact `--ack` command printed as `WAKE_ACK_REQUIRED`, copying its receipt whole and never editing or reassembling it; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
 A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
 

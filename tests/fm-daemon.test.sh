@@ -320,9 +320,9 @@ test_escalation_buffer_failure_retains_wake_and_position() {
   mkdir -p "$fakebin" "$buffer"
   cat > "$fakebin/fm-wake-drain.sh" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+if [ "\${1:-}" = --ack ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
 printf '1\t1\tsignal\twrite-r1.status\tsignal: $state/write-r1.status\n'
-printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+printf 'WAKE_ACK_REQUIRED: retry --ack %s\n' "$(make_receipt main 1 gen)" >&2
 EOF
   chmod +x "$fakebin/fm-wake-drain.sh"
 
@@ -375,9 +375,9 @@ test_durable_wake_failure_retains_entire_batch() {
   mkdir -p "$fakebin"
   cat > "$fakebin/fm-wake-drain.sh" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --ack-through ]; then printf ack > "$dir/acked"; exit 0; fi
+if [ "\${1:-}" = --ack ]; then printf ack > "$dir/acked"; exit 0; fi
 printf '1\t1\tsignal\ttask.status\tsignal: first\n1\t2\theartbeat\theartbeat\theartbeat\n'
-printf 'WAKE_ACK_REQUIRED: retry --ack-through 2 --recovery-generation gen\n' >&2
+printf 'WAKE_ACK_REQUIRED: retry --ack %s\n' "$(make_receipt main 2 gen)" >&2
 EOF
   chmod +x "$fakebin/fm-wake-drain.sh"
   (
@@ -397,9 +397,9 @@ test_missing_status_stale_is_acknowledged_without_diagnostic() {
   mkdir -p "$fakebin"
   cat > "$fakebin/fm-wake-drain.sh" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+if [ "\${1:-}" = --ack ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
 printf '1\t1\tstale\tmissing-r8\tstale: sess:fm-missing-r8\n'
-printf 'WAKE_ACK_REQUIRED: ordinary --ack-through 1 --recovery-generation gen\n' >&2
+printf 'WAKE_ACK_REQUIRED: ordinary --ack %s\n' "$(make_receipt main 1 gen)" >&2
 EOF
   chmod +x "$fakebin/fm-wake-drain.sh"
   FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
@@ -420,9 +420,9 @@ test_transient_unreadable_signal_recovers_without_advancing() {
   mkdir -p "$fakebin"
   cat > "$fakebin/fm-wake-drain.sh" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+if [ "\${1:-}" = --ack ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
 printf '1\t1\tsignal\tunreadable-r7.status\tsignal: $state/unreadable-r7.status\n'
-printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+printf 'WAKE_ACK_REQUIRED: retry --ack %s\n' "$(make_receipt main 1 gen)" >&2
 EOF
   chmod +x "$fakebin/fm-wake-drain.sh"
   (
@@ -497,9 +497,9 @@ test_permanent_classification_failure_is_reported_and_acknowledged() {
   mkdir -p "$fakebin"
   cat > "$fakebin/fm-wake-drain.sh" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+if [ "\${1:-}" = --ack ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
 printf '1\t1\tsignal\tsymlink-r9.status\tsignal: $state/symlink-r9.status\n'
-printf 'WAKE_ACK_REQUIRED: bounded --ack-through 1 --recovery-generation gen\n' >&2
+printf 'WAKE_ACK_REQUIRED: bounded --ack %s\n' "$(make_receipt main 1 gen)" >&2
 EOF
   chmod +x "$fakebin/fm-wake-drain.sh"
 
@@ -1497,9 +1497,9 @@ test_needs_decision_queued_row_escalates_once_as_the_decision() {
   payload="needs-decision: $status_file"
   cat > "$fakebin/fm-wake-drain.sh" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+if [ "\${1:-}" = --ack ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
 printf '1\t1\tsignal\tdecision-task.status\t%s\n' "$payload"
-printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+printf 'WAKE_ACK_REQUIRED: retry --ack %s\n' "$(make_receipt main 1 gen)" >&2
 EOF
   chmod +x "$fakebin/fm-wake-drain.sh"
 
@@ -1576,9 +1576,9 @@ test_captain_held_decision_owned_row_is_self_handled() {
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$status_file"
   cat > "$fakebin/fm-wake-drain.sh" <<EOF
 #!/usr/bin/env bash
-if [ "\${1:-}" = --ack-through ]; then exit 0; fi
+if [ "\${1:-}" = --ack ]; then exit 0; fi
 printf '1\t1\tsignal\theld-task.status\t%s\n' "needs-decision: $status_file"
-printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+printf 'WAKE_ACK_REQUIRED: retry --ack %s\n' "$(make_receipt main 1 gen)" >&2
 EOF
   chmod +x "$fakebin/fm-wake-drain.sh"
 

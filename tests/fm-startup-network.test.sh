@@ -346,7 +346,7 @@ EOF
 }
 
 test_deferred_invalid_secondmate_markers_queue_durable_findings() {
-  local kind rec home root log target report err seq generation
+  local kind rec home root log target report err receipt
   for kind in malformed symlink; do
     rec=$(new_world "deferred-invalid-marker-$kind")
     IFS='|' read -r home root log <<EOF
@@ -370,12 +370,11 @@ EOF
 
     err="$home/drain.err"
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$DRAIN" >/dev/null 2> "$err"
-    seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
-    generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-    [ -n "$seq" ] && [ -n "$generation" ] \
+    receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+    [ -n "$receipt" ] \
       || fail "$kind marker wake did not issue a durable acknowledgement"
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$DRAIN" \
-      --ack-through "$seq" --recovery-generation "$generation" >/dev/null
+      --ack "$receipt" >/dev/null
     assert_no_grep 'inactive-reconcile-diagnostic:invalid-secondmate-home' "$home/state/.wake-queue" \
       "$kind marker wake could not be acknowledged"
   done

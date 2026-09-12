@@ -34,6 +34,8 @@ RECOVERY_ACK_REQUIRED=false
 RECOVERY_ACK_MOVED=false
 ACK_THROUGH=
 ACK_GENERATION=
+ACK_RECEIPT=
+CURRENT_RECEIPT=
 ACK_REMOVED=0
 PRESENTED_MAX=0
 ACK_FINGERPRINTS=
@@ -80,7 +82,7 @@ reclaim_stale_branch_grant_locked() {
 # Retire rows no actor can ever consume. A claim, a presentation, and an
 # acknowledgement all require the five appended fields and a numeric sequence,
 # so a truncated or corrupted row is counted as queued while it can never be
-# presented and can never be named by an --ack-through cutoff: left alone it
+# presented and can never be named by an acknowledgement cutoff: left alone it
 # wedges the queue for good. Main owns that repair - a branch grant can only
 # name sequences that were structurally valid when it was published - and it
 # runs under the queue lock, so no concurrent append is observed half-written.
@@ -193,8 +195,33 @@ presented_max_row() { # <rows-file>
   fi
 }
 
+# --ack <receipt> is the acknowledgement interface: the drain prints one opaque
+# receipt, the handling turn hands that receipt back, and nothing is retyped.
+# It carries exactly the actor, through-sequence, and recovery generation the
+# older two-argument form spelled out, so every refusal below still applies
+# unchanged - the facts moved into the token, the checks did not move at all.
+#
+# --ack-through/--recovery-generation remains accepted for the deprecation
+# window so an in-flight turn holding a previously printed command, and any
+# out-of-tree caller parsing the old line, keeps working. It prints a notice and
+# is otherwise identical. Remove it once no supported caller prints it.
 case "${1:-}" in
   '') ;;
+  --ack)
+    ACK_RECEIPT=${2:-}
+    [ "$#" -eq 2 ] || { echo "wake drain: --ack takes exactly one receipt" >&2; exit 2; }
+    if ! fm_wake_receipt_decode "$ACK_RECEIPT"; then
+      echo "wake drain: that is not a valid acknowledgement receipt; nothing was acknowledged - re-run bin/fm-wake-drain.sh and use the receipt it prints as WAKE_ACK_REQUIRED" >&2
+      exit 2
+    fi
+    if [ "$FM_WAKE_RECEIPT_ACTOR" != "$ACTOR" ]; then
+      printf 'wake drain: that receipt was issued to the %s supervisor and you are %s; nothing was acknowledged - drain again and use your own receipt\n' \
+        "$FM_WAKE_RECEIPT_ACTOR" "$ACTOR" >&2
+      exit 2
+    fi
+    ACK_THROUGH=$FM_WAKE_RECEIPT_SEQUENCE
+    ACK_GENERATION=$FM_WAKE_RECEIPT_GENERATION
+    ;;
   --ack-through)
     ACK_THROUGH=${2:-}
     case "$ACK_THROUGH" in ''|*[!0-9]*) echo "wake drain: invalid acknowledgement sequence" >&2; exit 2 ;; esac
@@ -203,8 +230,9 @@ case "${1:-}" in
     ACK_GENERATION=${4:-}
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
     [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
+    echo "wake drain: --ack-through/--recovery-generation is deprecated; acknowledge with the single --ack <receipt> the drain prints" >&2
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  *) echo "usage: fm-wake-drain.sh [--ack RECEIPT | --ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
 esac
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
@@ -222,6 +250,22 @@ esac
 # Never let a guard hiccup change the drain's exit status.
 assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
+}
+
+# The exact command the handling turn runs after handling completes. One opaque
+# receipt, copied whole: nothing here is meant to be read, edited, or
+# reassembled by hand (bin/fm-wake-lib.sh "acknowledgement receipts").
+# A receipt that cannot be packed is reported rather than replaced with a
+# half-formed command, because a command the caller cannot run must not look
+# like one it can.
+print_ack_required() {  # <through-sequence> <recovery-generation>
+  local receipt
+  if receipt=$(fm_wake_receipt_encode "$ACTOR" "$1" "$2"); then
+    printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack %s\n' "$receipt" >&2
+  else
+    printf 'WAKE_ACK_REQUIRED: acknowledgement receipt could not be issued for sequence %s generation %s; re-run bin/fm-wake-drain.sh after handling and use the receipt it prints\n' \
+      "$1" "$2" >&2
+  fi
 }
 
 # Mark presentation-stage inactive terminal outcomes only after the handling
@@ -712,7 +756,7 @@ if [ -n "$ACK_THROUGH" ]; then
       0) ;;
       3) RECOVERY_ACK_MOVED=true ;;
       *)
-        echo "wake drain: recovery episode could not be retired safely; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command" >&2
+        echo "wake drain: recovery episode could not be retired safely; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED receipt" >&2
         exit 1
         ;;
     esac
@@ -745,16 +789,22 @@ if [ -n "$ACK_THROUGH" ]; then
     # be named because the next drain opens a fresh generation for it.
     case "$RECOVERY_MARKER_TOKEN" in
       pending:*|announced:*)
-        printf 'wake drain: nothing was acknowledged through %s (none of your presented wake rows is at or below it); the current wake is row %s: run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s after handling it\n' \
-          "$ACK_THROUGH" "$PRESENTED_MAX" "$PRESENTED_MAX" "${RECOVERY_MARKER_TOKEN##*:}" >&2
+        CURRENT_RECEIPT=$(fm_wake_receipt_encode "$ACTOR" "$PRESENTED_MAX" "${RECOVERY_MARKER_TOKEN##*:}") || CURRENT_RECEIPT=
+        if [ -n "$CURRENT_RECEIPT" ]; then
+          printf 'wake drain: that receipt acknowledged nothing (none of your presented wake rows is at or below sequence %s); the current wake is row %s: run bin/fm-wake-drain.sh --ack %s after handling it\n' \
+            "$ACK_THROUGH" "$PRESENTED_MAX" "$CURRENT_RECEIPT" >&2
+        else
+          printf 'wake drain: that receipt acknowledged nothing (none of your presented wake rows is at or below sequence %s); the current wake is row %s: re-run bin/fm-wake-drain.sh and use the WAKE_ACK_REQUIRED receipt it prints\n' \
+            "$ACK_THROUGH" "$PRESENTED_MAX" >&2
+        fi
         ;;
       *)
-        printf 'wake drain: nothing was acknowledged through %s (none of your presented wake rows is at or below it); the current wake is row %s: re-run bin/fm-wake-drain.sh and use the WAKE_ACK_REQUIRED command it prints\n' \
+        printf 'wake drain: that receipt acknowledged nothing (none of your presented wake rows is at or below sequence %s); the current wake is row %s: re-run bin/fm-wake-drain.sh and use the WAKE_ACK_REQUIRED receipt it prints\n' \
           "$ACK_THROUGH" "$PRESENTED_MAX" >&2
         ;;
     esac
   elif [ "$RECOVERY_ACK_MOVED" = true ]; then
-    printf 'wake drain: acknowledged wakes through %s (%s row(s) consumed), but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
+    printf 'wake drain: acknowledged wakes through %s (%s row(s) consumed), but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED receipt\n' \
       "$ACK_THROUGH" "$ACK_REMOVED" >&2
   fi
   exit 0
@@ -779,7 +829,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   DRAIN_LOCK_HELD=false
   (print_status_presentation) || true
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
-    printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
+    print_ack_required 0 "${RECOVERY_MARKER_TOKEN##*:}"
   fi
   assert_watcher_liveness
   exit 0
@@ -857,8 +907,7 @@ case "$RECOVERY_MARKER_TOKEN" in
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
-printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
-  "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
+print_ack_required "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}"
 
 (print_status_presentation "$RAW_ROWS") || true
 assert_watcher_liveness

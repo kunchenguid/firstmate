@@ -50,19 +50,23 @@ fi
 rm -f "$FM_HOME/state/.afk-daemon-terminal"
 "$(dirname "$0")/fm-afk-contract.sh" archive >/dev/null
 SH
-  cat > "$dir/bin/fm-wake-drain.sh" <<'SH'
+  cat > "$dir/bin/fm-wake-drain.sh" <<SH
 #!/usr/bin/env bash
-file="$FM_HOME/state/.fake-drain"
-if [ "${1:-}" = --ack-through ]; then
-  [ "${3:-}" = --recovery-generation ] && [ "${4:-}" = fixture-generation ] || exit 2
-  printf '%s\n' "$2" >> "$FM_HOME/state/.fake-drain-acks"
-  : > "$file"
+# shellcheck disable=SC1090,SC1091
+. "$ROOT/bin/fm-wake-lib.sh"
+file="\$FM_HOME/state/.fake-drain"
+if [ "\${1:-}" = --ack ]; then
+  fm_wake_receipt_decode "\${2:-}" || exit 2
+  [ "\$FM_WAKE_RECEIPT_GENERATION" = fixture-generation ] || exit 2
+  printf '%s\\n' "\$FM_WAKE_RECEIPT_SEQUENCE" >> "\$FM_HOME/state/.fake-drain-acks"
+  : > "\$file"
   exit 0
 fi
-if [ -s "$file" ]; then
-  cat "$file"
-  sequence=$(awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }' "$file")
-  printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation fixture-generation\n' "$sequence" >&2
+if [ -s "\$file" ]; then
+  cat "\$file"
+  sequence=\$(awk -F '\\t' '\$2 ~ /^[0-9]+\$/ && \$2 > max { max=\$2 } END { print max + 0 }' "\$file")
+  printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack %s\\n' \\
+    "\$(fm_wake_receipt_encode main "\$sequence" fixture-generation)" >&2
 fi
 SH
   chmod +x "$dir/bin/"*.sh
@@ -74,12 +78,11 @@ run_return() {  # <case-dir> <mode>
 }
 
 ack_return() {  # <case-dir> <return-output>
-  local dir=$1 output=$2 sequence generation
-  sequence=$(printf '%s\n' "$output" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' | tail -1)
-  generation=$(printf '%s\n' "$output" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' | tail -1)
-  [ -n "$sequence" ] && [ -n "$generation" ] || fail "return output lacked a generation-bound post-handling acknowledgement: $output"
+  local dir=$1 output=$2 receipt
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' | tail -1)
+  [ -n "$receipt" ] || fail "return output lacked a generation-bound post-handling acknowledgement: $output"
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    "$dir/bin/fm-wake-drain.sh" --ack-through "$sequence" --recovery-generation "$generation"
+    "$dir/bin/fm-wake-drain.sh" --ack "$receipt"
 }
 
 seed_live_blocker() {  # <case-dir> <backend> <key>
@@ -269,7 +272,7 @@ test_evidence_publication_failure_preserves_wake_for_redrain() {
     "$dir/bin/fm-afk-return.sh" begin 3< "$dir/read-only-output" >&3 2> "$dir/failed.err"
   rc=$?
   set -e
-  [ "$rc" -eq 3 ] || fail "evidence publication failure should retain catch-up (rc=$rc)"
+  [ "$rc" -eq 3 ] || fail "evidence publication failure should retain catch-up (rc=$rc): $(cat "$dir/failed.err")"
   [ -s "$dir/home/state/.fake-drain" ] || fail "publication failure removed the unhandled durable wake"
   [ ! -e "$dir/home/state/.fake-drain-acks" ] || fail "publication failure acknowledged the wake before delivery"
   [ -s "$gate" ] || fail "publication failure did not retain the catch-up gate"

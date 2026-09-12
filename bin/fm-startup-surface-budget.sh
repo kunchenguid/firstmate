@@ -41,9 +41,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Measured ceilings. Keep them at the measured size of the surface they guard:
 # headroom here is future silent growth.
-AGENTS_BYTES_MAX=56277
-BLOCK_BYTES_MAX=6807
-COMPOSED_BYTES_MAX=63084
+AGENTS_BYTES_MAX=56175
+BLOCK_BYTES_MAX=6798
+COMPOSED_BYTES_MAX=62973
 
 REPORT_ONLY=false
 WITH_DIGEST=false

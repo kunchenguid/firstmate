@@ -1880,7 +1880,7 @@ test_secondmate_pr_registration_publishes_ready_line() {
 # every record) while the parent channel cannot be written; a rerun after the
 # repair delivers and completes.
 test_secondmate_home_teardown_delivers_final_line_or_refuses() {
-  local case_dir rc channel wt_head err seq generation
+  local case_dir rc channel wt_head err receipt
 
   case_dir=$(make_case mate-teardown-delivers)
   configure_secondmate_home "$case_dir" local "$case_dir/parent"
@@ -1931,10 +1931,9 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   rmdir "$channel"
   err=$(FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-wake-drain.sh" 2>&1 >/dev/null)
-  seq=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p')
-  generation=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p')
-  [ -z "$seq" ] || FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
-    "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$generation" >/dev/null
+  receipt=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p'  | tail -1)
+  [ -z "$receipt" ] || FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-wake-drain.sh" --ack "$receipt" >/dev/null
   set +e
   FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
   rc=$?

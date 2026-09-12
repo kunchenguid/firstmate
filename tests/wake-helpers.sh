@@ -145,14 +145,49 @@ recovery_marker_generation() {  # <marker-file>
   sed -n 's/^[^:]*:[^:]*:\(.*\)$/\1/p' "$1"
 }
 
-# Acknowledge a drain from its captured stderr (the WAKE_ACK_REQUIRED line).
+# Print the acknowledgement receipt a drain issued on its captured stderr, or
+# nothing when it issued none. bin/fm-wake-lib.sh owns the parse.
+drain_err_receipt() {  # <stderr-file>
+  bash -c '. "$1"; fm_wake_ack_receipt_from_drain "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$1"
+}
+
+# Build an acknowledgement receipt the way the drain does, for fixtures that
+# stand in for a real drain.
+make_receipt() {  # <actor> <through-sequence> <recovery-generation>
+  bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_wake_receipt_encode "$2" "$3" "$4"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2" "$3"
+}
+
+# Read one field back out of a receipt through the production decoder, so a
+# test can still assert on the sequence or generation a drain issued without
+# reaching into the token's bytes.
+receipt_field() {  # <receipt> actor|sequence|generation
+  bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_wake_receipt_decode "$2" || exit 1
+    case "$3" in
+      actor) printf "%s\n" "$FM_WAKE_RECEIPT_ACTOR" ;;
+      sequence) printf "%s\n" "$FM_WAKE_RECEIPT_SEQUENCE" ;;
+      generation) printf "%s\n" "$FM_WAKE_RECEIPT_GENERATION" ;;
+      *) exit 2 ;;
+    esac
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
+}
+
+receipt_sequence() { receipt_field "$1" sequence; }
+receipt_generation() { receipt_field "$1" generation; }
+
+# Acknowledge a drain the way a supervisor does: hand back the receipt it
+# printed, whole.
 ack_drain_err() {  # <state> <stderr-file>
-  local state=$1 err=$2 sequence generation
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
-  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" \
-    --ack-through "$sequence" --recovery-generation "$generation"
+  local state=$1 err=$2 receipt
+  receipt=$(drain_err_receipt "$err") || return 1
+  [ -n "$receipt" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" --ack "$receipt"
 }
 
 make_supercase() {

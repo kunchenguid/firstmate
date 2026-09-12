@@ -28,15 +28,13 @@ REAL_CHMOD=$(command -v chmod)
 REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 
 ack_watcher_cycle() {  # <state>
-  local state=$1 err sequence generation
+  local state=$1 err receipt
   err="$state/.test-wake-drain.err"
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$err" || return 1
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
   rm -f "$err"
-  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
-  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
-    --recovery-generation "$generation"
+  [ -n "$receipt" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" --ack "$receipt"
 }
 
 file_mode() {

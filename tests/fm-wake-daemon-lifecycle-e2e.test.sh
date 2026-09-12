@@ -49,12 +49,10 @@ run_watcher_once() {
 }
 
 ack_handled_wakes() {  # <state> <drain-stderr>
-  local state=$1 drain_err=$2 sequence generation
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
-  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation"
+  local state=$1 drain_err=$2 receipt
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err" | tail -1)
+  [ -n "$receipt" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt"
 }
 
 # --- Phase 1: routine self-handled, queued; terminal caught after restart ---

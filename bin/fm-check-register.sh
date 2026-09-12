@@ -2,6 +2,14 @@
 # Bind an intentional custom watcher check to its current bytes.
 # Usage: fm-check-register.sh <id>
 # Retire with fm-check-unregister.sh <id>; do not hand-compose an rm.
+#
+# SHAPE THE WATCHER WILL ACCEPT. state/<id>.check.sh must be an ordinary
+# single-link mode-0700 regular file on the state directory's own device; this
+# script refuses to bind anything else. It must print ONE line only when
+# firstmate should wake and print nothing otherwise, because the watcher turns
+# any output into a wake, and it must finish before FM_CHECK_TIMEOUT
+# (bin/fm-watch.sh), because the watcher kills a poll that overruns.
+# Until this registration exists the watcher will not execute the check at all.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

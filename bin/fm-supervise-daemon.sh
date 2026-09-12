@@ -154,6 +154,10 @@
 set -u
 
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The real bin/ this daemon was loaded from. FM_DAEMON_DIR above is redirected
+# per call by callers that substitute fake lifecycle scripts, so library sources
+# must resolve against this fixed value instead.
+FM_DAEMON_LIB_DIR="$FM_DAEMON_DIR"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
@@ -1478,7 +1482,11 @@ handle_wake() {  # <reason> <state>
 
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
-  local handled=0 failed=0 ack_through ack_generation
+  local handled=0 failed=0 ack_receipt
+  # bin/fm-wake-lib.sh owns the receipt parse below; fm_super_main sources it,
+  # and a caller that drives this function directly gets it here.
+  command -v fm_wake_ack_receipt_from_drain >/dev/null 2>&1 \
+    || FM_STATE_OVERRIDE="$state" . "$FM_DAEMON_LIB_DIR/fm-wake-lib.sh"
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1497,20 +1505,18 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   done < "$out"
   if [ "$handled" -eq 0 ]; then handle_wake "$fallback_reason" "$state" || failed=1; fi
 
-  ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err" | tail -1)
-  ack_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  ack_receipt=$(fm_wake_ack_receipt_from_drain "$err") || ack_receipt=
   grep -v '^WAKE_ACK_REQUIRED:' "$err" >&2 || true
   rm -f "$out" "$err"
   if [ "$failed" -ne 0 ]; then
     log "wake classification failed; retaining durable wakes"
     return 1
   fi
-  if [ -z "$ack_through" ] || [ -z "$ack_generation" ]; then
-    log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
+  if [ -z "$ack_receipt" ]; then
+    log "wake drain omitted its acknowledgement receipt; retaining durable wakes"
     return 1
   fi
-  "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
-    --recovery-generation "$ack_generation"
+  "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack "$ack_receipt"
 }
 
 # --- log --------------------------------------------------------------------

@@ -988,8 +988,8 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
     .map((op) => op.message.content);
   const directlyRequested = directlyRequestsResourceReport(mirror);
   const drained = await runFleetCommand(session, []);
-  const ack = drained.stderr.match(/--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)/);
-  if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
+  const ack = drained.stderr.match(/--ack ([A-Za-z0-9._-]+)/);
+  if (!ack) throw new Error(`drain did not return its acknowledgement receipt: ${drained.stderr}`);
   const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
   const verdictDescription = report.parameters.properties.verdict.description;
   if (!verdictDescription.includes("Verdict: routine or captain") ||
@@ -1010,7 +1010,7 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
     {},
   );
   if (result.isError) throw new Error(`branch report failed: ${JSON.stringify(result)}`);
-  await runFleetCommand(session, ["--ack-through", ack[1], "--recovery-generation", ack[2]]);
+  await runFleetCommand(session, ["--ack", ack[1]]);
 };
 
 const explicitRequest = "Please give me a fresh mini system-resource report.";

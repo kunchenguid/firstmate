@@ -23,15 +23,13 @@ ARM_FAIL_EXIT_POLLS=400
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
 drain_and_ack() {  # <state>
-  local state=$1 err sequence generation
+  local state=$1 err receipt
   err="$state/.test-drain.err"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || return 1
-  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  receipt=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
   rm -f "$err"
-  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation"
+  [ -n "$receipt" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack "$receipt"
 }
 
 test_singleton_start() {
