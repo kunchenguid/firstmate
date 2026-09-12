@@ -162,16 +162,19 @@ FM_TEST_STUB_MAX_BLOCK_SECONDS=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
 export FM_TEST_STUB_MAX_BLOCK_SECONDS
 
 fm_test_reap_network_workers() {  # <dir>
-  local d=$1 f pid
+  local d=$1 f pid own_pgid
   [ -n "$d" ] && [ -d "$d" ] || return 0
+  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]')
   find "$d" -name ".startup-network.status" -type f 2>/dev/null | while IFS= read -r f; do
     [ -f "$f" ] || continue
     pid=$(sed -n 's/^pid=//p' "$f" 2>/dev/null)
     case "$pid" in
       '' | *[!0-9]* | 0 | 1) ;;
       *)
-        kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-        kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        if [ "$pid" != "$$" ] && [ "$pid" != "$own_pgid" ]; then
+          kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+          kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        fi
         ;;
     esac
   done

@@ -78,6 +78,7 @@ if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then
     *comm=*) printf '/usr/local/bin/claude\n' ;;
     *args=*) printf 'claude\n' ;;
     *ppid=*) /bin/ps -o ppid= -p "$pid" ;;
+    *) /bin/ps "$@" ;;
   esac
 else
   /bin/ps "$@"
@@ -759,6 +760,74 @@ GITHUB_TOKEN=ghp_supersecretvalue" \
   pass "fm-startup-network: the timing artifact cannot carry a command line or forge records"
 }
 
+test_stale_worker_reaping_with_identity_verification_and_process_group_termination() {
+  local rec home root log old_pid old_pgid old_gen old_ident child_sleep_pid waited=0 output
+
+  rec=$(new_world stale-worker-reap)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+
+  # Start an initial worker with a sleep in a subshell so we have a process group
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=30 \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid $$
+  await_worker_record "$home"
+
+  old_pid=$(sed -n 's/^pid=//p' "$home/state/.startup-network.status")
+  old_pgid=$(sed -n 's/^pgid=//p' "$home/state/.startup-network.status")
+  old_gen=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
+  old_ident=$(sed -n 's/^identity=//p' "$home/state/.startup-network.status")
+
+  [ -n "$old_pid" ] && [ "$old_pid" -gt 1 ] || fail "old_pid not recorded: $old_pid"
+  [ -n "$old_ident" ] || fail "identity not recorded in status"
+  [ -n "$old_gen" ] || fail "generation not recorded in status"
+  kill -0 "$old_pid" 2>/dev/null || fail "initial worker is not running"
+
+  # A new start supersedes the old generation; start must reap the stale worker and its process group
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=1 \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+
+  # Verify the superseded worker and its process group were terminated
+  while kill -0 "$old_pid" 2>/dev/null && [ "$waited" -lt 30 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  ! kill -0 "$old_pid" 2>/dev/null || fail "superseded worker $old_pid was not reaped"
+  if [ -n "$old_pgid" ]; then
+    ! kill -0 -- "-$old_pgid" 2>/dev/null || fail "superseded worker process group $old_pgid was not terminated"
+  fi
+
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "new worker never published"
+
+  # Test PID identity verification safety: simulate PID reuse with a mismatched identity
+  # Create a running process that should NOT be killed when identity mismatches
+  sleep 15 &
+  child_sleep_pid=$!
+  cat > "$home/state/.startup-network.status" <<EOF
+state=running
+pid=$child_sleep_pid
+identity=fake-stale-identity-that-does-not-match
+pgid=$child_sleep_pid
+started=$(( $(date +%s) - 300 ))
+locked=0
+phases=probe
+generation=expired.gen
+lock_pid=
+EOF
+
+  # Running reap directly or start should refuse to kill child_sleep_pid because identity does not match
+  run_stage "$home" "$root" reap
+  kill -0 "$child_sleep_pid" 2>/dev/null \
+    || fail "process with mismatched identity was wrongly killed during reap!"
+
+  # Clean up the test sleep process
+  kill -TERM "$child_sleep_pid" 2>/dev/null || true
+  wait "$child_sleep_pid" 2>/dev/null || true
+
+  pass "fm-startup-network: stale workers are reaped with PID identity verification and process-group termination"
+}
+
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
@@ -779,4 +848,5 @@ test_records_share_one_origin_so_offsets_form_a_timeline
 test_timings_are_published_and_only_the_on_demand_report_prints_them
 test_a_bounded_run_still_publishes_the_timings_it_managed_to_record
 test_the_timing_artifact_cannot_carry_a_command_line_or_forge_records
+test_stale_worker_reaping_with_identity_verification_and_process_group_termination
 echo "# fm-startup-network.test.sh: all assertions passed"
