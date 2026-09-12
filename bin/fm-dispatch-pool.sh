@@ -3,6 +3,7 @@
 # Usage: fm-dispatch-pool.sh <validate|default|inspect|probe|reserve|verify|finish|bind>
 #          <config-file> <state-dir> [task-id|kind] [pool|receipt]
 #          [fresh|pinned|exhausted|replay|launched|failed] [terminal-evidence]
+# probe needs all four: <config-file> <state-dir> <inspection-task> <pool>.
 # validate/default/probe are read-only. reserve persists smooth weighted
 # round-robin scores and a task/generation receipt before launch. Failed launch
 # consumes its slot; replay retains the same candidate, never a second draw.

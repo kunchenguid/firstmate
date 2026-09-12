@@ -1169,6 +1169,16 @@ Other carrier tuples remain visible as rejected candidates with explicit reasons
 Claude-hosted Muse, Gemini and Luna do not fall back to Claude account quota, standalone Muse, or bare model flags.
 
 `bin/fm-dispatch-pool.sh` owns the serialized admission API, and `state/dispatch-pools.json` owns scores, receipt history and audit events in one atomic update.
+`bin/fm-dispatch-pools-install.sh` is the only supported write path for a home's `config/dispatch-pools.json`.
+It runs the pool's own admission gate before installing, probes every pool by default, and refuses a pool with zero viable candidates, so validate-clean outages (stale carriers, missing wrapper binaries) can never land silently.
+Pass `--no-probe` only when offline.
+Install while the fleet is idle: in-flight pooled tasks pin their route receipt to the config digest, so rank edits underneath them break `verify` with `route_config_changed`, and removing or renaming a candidate breaks relaunch with `pinned_candidate_not_viable`.
+The primary home is authoritative for ranks; any other home (treehouse sessions, secondmate seeds) is brought into agreement by installing the primary's file through this script, never by independent hand-edits.
+Candidate `id` values describe the model and effort (`gemini-high`), while `harness` names the PATH executable that launches it (`claude-gemini`); the `claude-`/`codex-` prefix selects the wrapped base CLI, not the model.
+Name new candidate ids harness-first (for example `claude-gpt-luna-high`) so the two axes cannot be confused again.
+Weights are round-robin shares among viable candidates, not a strict priority order: a weight-2 candidate reserves first and roughly twice as often as a weight-1 sibling, but weights change nothing when zero or one candidate is viable.
+Probe refusals are the live failure catalog, and each names its owner: `wrapper_not_installed` and `wrapper_probe_failed` mean the binary is missing or unhealthy on this host's PATH; `wrapper_model_unlisted` and `wrapper_model_pinned_use_default` mean the `model` field disagrees with the wrapper's `--list-models` surface; `quota_exhausted`, `quota_unknown_or_stale`, and `stale_or_unknown_evidence` mean the Codex quota read is spent, malformed, or older than sixty seconds; `model_or_effort_unavailable` and `quota_scope_unqualified` mean the catalog no longer carries that model or effort; `opencode_go_quota_and_upstream_max_attestation_unqualified`, `lawful_managed_routing_projection_producer_unavailable`, `claude_live_model_effort_and_account_bound_quota_unqualified`, and `unsupported_carrier_tuple` mean the carrier tuple is retired and the candidate must be rewritten onto a qualified `codex-native` or `wrapper` tuple, never worked around at the caller.
+Only `codex-native` has live quota sensing; `wrapper` candidates admit on binary plus model alias with an empty quota window, so wrapper pools never shed load on exhaustion.
 Smooth weighted round-robin adds each viable candidate's weight, chooses the largest score with config order breaking exact score ties, then subtracts the viable total from that candidate.
 An excluded candidate's score resets to zero.
 Scores are isolated by pool name and exact candidate configuration digest.
@@ -1187,4 +1197,4 @@ A completed-turn notification is not terminal-quota evidence, so controlled fail
 Do not hand-fill a missing native thread binding to enable failover.
 Unknown interruption, generic errors, stale events, or missing bindings cannot authorize migration.
 The native relaunch transaction preserves the existing worktree, task ID, brief/progress note and prior route receipt.
-Portable admission regression lives in `tests/fm-dispatch-pool.test.sh`; spawn and control integration regressions extend their existing profile/relaunch suites.
+Portable admission regression lives in `tests/fm-dispatch-pool.test.sh`, with installer regression in `tests/fm-dispatch-pools-install.test.sh`; spawn and control integration regressions extend their existing profile/relaunch suites.
