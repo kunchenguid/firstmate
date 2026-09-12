@@ -115,7 +115,7 @@ Which build "on `PATH`" means is resolved deterministically by that same library
 `bin/fm-spawn.sh` exports the same `FM_TASKS_AXI_BIN` and `PATH` prefix into each crew pane before launch, and an exported `FM_TASKS_AXI_BIN` that still exists is honored by every script the crew runs without a new probe.
 Bootstrap reports that resolution as `BOOTSTRAP_INFO: tasks-axi resolved <path> (<version>) because PATH-first <path> reports <version> below floor <floor>; ...` whenever the answer differs from `PATH` order, and names every rejected candidate as `BOOTSTRAP_INFO: tasks-axi floor <floor> unmet by every PATH candidate: <path> <version>, ...` under a `MISSING: tasks-axi` report; a home whose first `tasks-axi` already meets the floor stays silent.
 Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" below for missing-tool reporting and silent default-backend behavior.
-Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not missing-tool reporting.
+Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the verbose `BOOTSTRAP_INFO: tasks-axi available: <path> (<version>)` fact, not missing-tool reporting.
 A `manual` home owns its backlog file outright: the lifecycle transitions above are skipped there, dispatch and completion never fail over the file's contents, and a completed teardown prints the hand edit that is owed instead.
 Absent or `tasks-axi` selects the tasks-axi path.
 On the default markdown adapter, tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
