@@ -40,7 +40,19 @@
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
-#   the new incarnation. The replacement still never starts outside the copy
+#   the new incarnation. On tmux only, an endpoint that reads `missing` (the
+#   session or the exact window is authoritatively absent, never `unreadable`
+#   or `ambiguous`) is recreated before the launch: the container is ensured
+#   and the window created through bin/backends/tmux.sh's own functions,
+#   rooted in the recorded worktree, then the recorded target must read `dead`
+#   before anything is typed into it. That recreate refuses, naming the
+#   concrete gap, unless the recorded worktree exists and is a git work tree,
+#   the recorded window= is exactly `<session>:fm-<id>` for the session the
+#   container-ensure resolves to (a record in another session is never
+#   silently renamed), and no other task's record names the same worktree
+#   (both tasks are named). herdr and every other backend keep the plain
+#   refusal on `missing`; recreating their endpoints is out of scope here.
+#   The replacement still never starts outside the copy
 #   holding the work: a Herdr shell that has drifted out of the recorded
 #   worktree is told once to return, and only a shell that will not go refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
@@ -1312,6 +1324,8 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_RECREATE=0
+RELAUNCH_RECREATE_SES=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1346,10 +1360,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  RELAUNCH_RECREATE=0
+  case "$RELAUNCH_STATE" in
+    dead) ;;
+    missing)
+      # Only tmux recreates an authoritatively absent endpoint (the shared
+      # server died, or the exact window was killed). Every other backend
+      # keeps the refusal below: none of them has a verified recreate path.
+      [ "$BACKEND" = tmux ] || {
+        echo "error: task $ID's endpoint reads 'missing' on the $BACKEND backend, which has no verified endpoint-recreate path; reconcile the task before relaunching it" >&2
+        exit 1
+      }
+      RELAUNCH_RECREATE=1
+      ;;
+    *)
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+      ;;
+  esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -1360,6 +1388,39 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
   }
+  if [ "$RELAUNCH_RECREATE" -eq 1 ]; then
+    # Recreating the endpoint puts a shell back into the recorded worktree, so
+    # every fact that shell will be trusted with is proven first: the worktree
+    # is a git work tree, the recorded window is the one this home's container
+    # would create for the task, and no other task claims the same worktree
+    # (two tasks recorded on one copy is exactly the collision a recreated
+    # window must never paper over).
+    [ "$(git -C "$RELAUNCH_WT" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || {
+      echo "error: task $ID's recorded worktree '$RELAUNCH_WT' is not a git work tree; refusing to recreate its endpoint over a copy whose work cannot be accounted for" >&2
+      exit 1
+    }
+    relaunch_wt_real=$(cd "$RELAUNCH_WT" 2>/dev/null && pwd -P) || relaunch_wt_real=$RELAUNCH_WT
+    for other_meta in "$STATE"/*.meta; do
+      [ -e "$other_meta" ] || continue
+      [ "$other_meta" != "$RELAUNCH_META" ] || continue
+      other_wt=$(fm_meta_get "$other_meta" worktree)
+      [ -n "$other_wt" ] || continue
+      other_wt_real=$(cd "$other_wt" 2>/dev/null && pwd -P) || other_wt_real=$other_wt
+      if [ "$other_wt" = "$RELAUNCH_WT" ] || [ "$other_wt_real" = "$relaunch_wt_real" ]; then
+        other_id=$(basename "$other_meta" .meta)
+        echo "error: task $ID's recorded worktree '$RELAUNCH_WT' is also recorded by task $other_id; refusing to recreate an endpoint over a worktree two tasks claim - reconcile $ID and $other_id first" >&2
+        exit 1
+      fi
+    done
+    RELAUNCH_RECREATE_SES=$(fm_backend_tmux_container_ensure) || {
+      echo "error: task $ID's tmux container could not be ensured; refusing to recreate its endpoint" >&2
+      exit 1
+    }
+    [ "$RELAUNCH_TARGET" = "$RELAUNCH_RECREATE_SES:fm-$ID" ] || {
+      echo "error: task $ID records endpoint '$RELAUNCH_TARGET', but this home's tmux container resolves to session '$RELAUNCH_RECREATE_SES', so the recreated window would be '$RELAUNCH_RECREATE_SES:fm-$ID'; refusing to recreate an endpoint under a different name than the record" >&2
+      exit 1
+    }
+  fi
   if [ "$KIND" = secondmate ]; then
     FIRSTMATE_HOME=$(fm_meta_get "$RELAUNCH_META" home)
     [ -n "$FIRSTMATE_HOME" ] || FIRSTMATE_HOME=$RELAUNCH_WT
@@ -2679,6 +2740,29 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
   WT_TARGET=$T
   SES=${T%%:*}
+  if [ "$RELAUNCH_RECREATE" -eq 1 ]; then
+    # The recorded tmux endpoint is authoritatively gone and every recreate
+    # precondition passed above. Put the window back through the backend's own
+    # create path, rooted in the recorded worktree, and adopt it only once the
+    # exact recorded target reads agent-free. A refusal after this point leaves
+    # that empty window behind on purpose: it is the honest recovered state,
+    # and the next relaunch takes the ordinary `dead` path through it.
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$WT") || {
+      echo "error: task $ID's tmux window $T could not be recreated in its recorded worktree $WT" >&2
+      exit 1
+    }
+    WT_TARGET="$WID"
+    RELAUNCH_RECREATED_STATE=
+    for _ in $(seq 1 20); do
+      RELAUNCH_RECREATED_STATE=$(fm_backend_agent_state tmux "$T")
+      [ "$RELAUNCH_RECREATED_STATE" != dead ] || break
+      sleep 0.25
+    done
+    [ "$RELAUNCH_RECREATED_STATE" = dead ] || {
+      echo "error: task $ID's recreated tmux window $T reads '$RELAUNCH_RECREATED_STATE' rather than agent-free; refusing to launch into an endpoint that cannot be proven empty" >&2
+      exit 1
+    }
+  fi
 else
 case "$BACKEND" in
   tmux)
