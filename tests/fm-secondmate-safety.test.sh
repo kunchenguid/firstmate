@@ -2091,15 +2091,20 @@ SH
 # wrapper that re-leases the slot to another task on the way into `return`),
 # and Treehouse refuses its precondition. That refusal must stop the forced
 # cleanup with the slot untouched: the raw removal other return failures fall
-# through to would delete a slot Treehouse just proved is another task's.
+# through to would delete a slot Treehouse just proved is another task's. The
+# wrapper's first `return` fails with the transient index.lock signature
+# instead (the holder passed on that attempt), so the refusal is raised by the
+# RETRY - the attempt whose failure the child path once treated as "try the
+# raw removal instead".
 test_secondmate_force_teardown_preserves_child_on_holder_refusal() {
-  local home subhome childproj childwt fakebin log err leases rc
+  local home subhome childproj childwt fakebin log err leases attempts rc
   home="$TMP_ROOT/force-holder-home"
   subhome="$TMP_ROOT/force-holder-subhome"
   childproj="$subhome/projects/alpha"
   childwt="$TMP_ROOT/force-holder-child-pool/1/alpha"
   err="$TMP_ROOT/force-holder-child.err"
   leases="$TMP_ROOT/force-holder-child-pool/leases"
+  attempts="$TMP_ROOT/force-holder-child-pool/return-attempts"
   mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
   fm_git_worktree "$childproj" "$childwt" force-child-holder
   printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
@@ -2136,6 +2141,14 @@ EOF
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
 if [ "${1:-}" = return ]; then
+  n=0
+  [ -f "${FM_FAKE_RETURN_ATTEMPTS:?}" ] && n=$(cat "$FM_FAKE_RETURN_ATTEMPTS")
+  n=$((n + 1))
+  printf '%s\n' "$n" > "$FM_FAKE_RETURN_ATTEMPTS"
+  if [ "$n" -eq 1 ]; then
+    echo "fatal: Unable to create '${FM_FAKE_TREEHOUSE_SLOT_PATH:?}/.git/index.lock': File exists." >&2
+    exit 128
+  fi
   printf '%s\t%s\n' "${FM_FAKE_TREEHOUSE_SLOT_PATH:?}" other-task > "${FM_FAKE_TREEHOUSE_LEASES:?}"
 fi
 exec "$(dirname "$0")/treehouse-pool" "$@"
@@ -2145,6 +2158,7 @@ SH
   set +e
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-holder-child-fake/pane.txt" \
     FM_FAKE_TREEHOUSE_SLOT_PATH="$childwt" FM_FAKE_TREEHOUSE_LEASES="$leases" \
+    FM_FAKE_RETURN_ATTEMPTS="$attempts" FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
   rc=$?
   set -e
@@ -2152,7 +2166,9 @@ SH
   [ "$rc" -ne 0 ] || fail "force teardown succeeded after Treehouse refused the child's holder precondition"
   grep -F "treehouse return --force --if-lease-holder child $childwt" "$log" >/dev/null \
     || fail "force teardown did not return the child's slot with the holder check: $(cat "$log")"
-  [ "$(grep -c 'treehouse return' "$log")" -eq 1 ] || fail "force teardown retried a holder-refused return: $(cat "$log")"
+  [ "$(cat "$attempts")" -eq 2 ] \
+    || fail "expected one index.lock retry and then the holder refusal, saw $(cat "$attempts") return attempts: $(cat "$log")"
+  grep -F 'transient git lock' "$err" >/dev/null || fail "force teardown did not report the index.lock retry before the refusal"
   [ -d "$childwt" ] || fail "force teardown raw-removed a child slot Treehouse proved is another task's"
   [ -e "$childwt/.git" ] || fail "force teardown gutted the child slot after the holder refusal"
   [ "$(awk -F'\t' '{ print $2 }' "$leases")" = other-task ] || fail "the other task's lease did not survive: $(cat "$leases")"
@@ -2162,7 +2178,7 @@ SH
   grep -F 'lease holder does not match' "$err" >/dev/null || fail "force teardown did not surface Treehouse's precondition message"
   grep -F "child worktree return refused by Treehouse's lease precondition" "$err" >/dev/null \
     || fail "force teardown did not explain that the child's slot was left untouched"
-  pass "secondmate force teardown preserves a child slot whose lease changed hands before the holder-checked return"
+  pass "secondmate force teardown preserves a child slot whose lease changed hands during an index.lock retry of the holder-checked return"
 }
 
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home() {

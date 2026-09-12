@@ -1542,6 +1542,22 @@ treehouse_return_is_holder_refusal() {
   printf '%s\n' "$text" | grep -Fq "lease precondition failed"
 }
 
+# The one classification of a failed return attempt as Treehouse's holder
+# refusal, applied to EVERY attempt teardown_treehouse_return makes - the
+# first, each index.lock retry, and the attempt after a stale-lock cleanup -
+# because Treehouse checks the holder under its state lock before any git
+# operation, so a lease that changes hands during a retry wait is refused on
+# the attempt after it. True (with the refusal explained) when the output
+# carries that signature; the caller then returns
+# TEARDOWN_TREEHOUSE_HOLDER_REFUSED and never a code a fallback removal treats
+# as "try something else".
+teardown_treehouse_return_holder_refused() {  # <output> <label> <holder>
+  local out=$1 label=$2 holder=$3
+  treehouse_return_is_holder_refusal "$out" || return 1
+  echo "teardown: $label return refused by Treehouse's lease precondition (holder '${holder:-none}'): the slot's lease changed hands after the ownership read, so it is not this task's to return and is left untouched" >&2
+  return 0
+}
+
 # Absolute path to the git index lock for a worktree/repo dir, or empty when it
 # cannot be resolved (dir missing or not a git worktree at all).
 worktree_git_lock_path() {
@@ -1618,8 +1634,7 @@ teardown_treehouse_return() {  # <dir> <cd-dir> <label> [post-cleanup-check] [ho
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 
-  if treehouse_return_is_holder_refusal "$out"; then
-    echo "teardown: $label return refused by Treehouse's lease precondition (holder '${holder:-none}'): the slot's lease changed hands after the ownership read, so it is not this task's to return and is left untouched" >&2
+  if teardown_treehouse_return_holder_refused "$out" "$label" "$holder"; then
     return "$TEARDOWN_TREEHOUSE_HOLDER_REFUSED"
   fi
   if ! treehouse_return_is_index_lock_error "$out"; then
@@ -1648,6 +1663,9 @@ teardown_treehouse_return() {  # <dir> <cd-dir> <label> [post-cleanup-check] [ho
     fi
     [ -n "$out" ] && printf '%s\n' "$out" >&2
 
+    if teardown_treehouse_return_holder_refused "$out" "$label" "$holder"; then
+      return "$TEARDOWN_TREEHOUSE_HOLDER_REFUSED"
+    fi
     if ! treehouse_return_is_index_lock_error "$out"; then
       echo "teardown: $label return failed with a non-lock error after retry; aborting" >&2
       return 1
@@ -1674,6 +1692,9 @@ teardown_treehouse_return() {  # <dir> <cd-dir> <label> [post-cleanup-check] [ho
         return 0
       fi
       [ -n "$out" ] && printf '%s\n' "$out" >&2
+      if teardown_treehouse_return_holder_refused "$out" "$label" "$holder"; then
+        return "$TEARDOWN_TREEHOUSE_HOLDER_REFUSED"
+      fi
       echo "teardown: $label return still failing after stale-lock cleanup" >&2
       return 1
     fi
