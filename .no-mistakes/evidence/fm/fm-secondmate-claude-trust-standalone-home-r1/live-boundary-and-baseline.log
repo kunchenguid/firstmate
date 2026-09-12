@@ -1,0 +1,13 @@
+SCENARIO: baseline reproduces standalone-home trust failure
+error: refusing to pre-register Claude trust: '/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M29VP8DVACPVK3X2366BWMVM/.test-live-claude-trust/standalone-home' is a primary checkout, not an isolated worktree
+baseline_exit=1
+
+SCENARIO: marker for another secondmate is refused without state change
+error: refusing to pre-register Claude trust: '/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M29VP8DVACPVK3X2366BWMVM/.test-live-claude-trust/standalone-home' is marked for secondmate 'other-n1', not 'nomistakes-n1'
+wrong_id_exit=1
+wrong_id_trusted=false (store not created)
+
+SCENARIO: escaping projects directory is refused without state change
+error: refusing to pre-register Claude trust: '/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M29VP8DVACPVK3X2366BWMVM/.test-live-claude-trust/standalone-home/projects' resolves to '/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M29VP8DVACPVK3X2366BWMVM/.test-live-claude-trust/outside-projects', outside the home, so '/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M29VP8DVACPVK3X2366BWMVM/.test-live-claude-trust/standalone-home' is not a safe secondmate home
+escaping_dir_exit=1
+escaping_dir_trusted=false (store not created)
