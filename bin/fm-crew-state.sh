@@ -49,7 +49,9 @@
 #      outranks a terminal one, so a terminal answer here is provisional until
 #      the ledger has been asked whether a live sibling run exists.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
-#      awaiting_approval/fix_review -> parked (with gate findings), terminal
+#      awaiting_approval/fix_review -> parked (with gate findings, and with a
+#      finding that reports a configured check could not run named as the
+#      environment fault it is rather than an approvable decision), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
@@ -684,6 +686,11 @@ if [ "$HAVE_RUN" = 1 ]; then
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
       if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
         RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
+      fi
+      # fm_nm_unrunnable_check_finding is the ONE detector; decision policy is
+      # owned by .agents/skills/ask-user-authority/SKILL.md.
+      if fm_nm_unrunnable_check_finding "$RUN_OUT" >/dev/null; then
+        RUN_DETAIL="$RUN_DETAIL (environment fault: a configured check did not run - validation is incomplete; not approvable)"
       fi
     else
       case "$status" in
