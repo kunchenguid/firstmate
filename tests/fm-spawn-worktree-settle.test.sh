@@ -219,9 +219,34 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# The two-consecutive-reads rule must hold at the deadline too: a pane whose
+# 60th and final poll is the FIRST read to show the leased path has no
+# confirming read, so it is refused exactly like a pane that never arrived,
+# never accepted on that lone read.
+test_leased_path_first_seen_on_the_last_poll_is_refused() {
+  local rec id out status
+  id=settle-last-poll-z5
+  rec=$(make_settle_case settle-last-poll "$id" 59)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted the leased worktree on a single final-poll read"$'
+'"$out"
+  assert_contains "$out" "did not enter its leased worktree" \
+    "spawn did not explain that the pane never settled in the leased worktree"
+  assert_contains "$out" "no second read agreed with it" \
+    "the refusal did not say the last read lacked confirmation"
+  [ "$(cat "$COUNTFILE")" -eq 60 ] || fail "expected exactly 60 pane polls, saw $(cat "$COUNTFILE")"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a leased path first seen on the final poll is refused for lack of a confirming read"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_leased_path_first_seen_on_the_last_poll_is_refused
 
 echo "# all fm-spawn-worktree-settle tests passed"

@@ -729,6 +729,23 @@ test_pool_slot_lease_follows_the_spawn_outcome() {
   ! grep -Fq -- "treehouse return" "$POOL_LOG" \
     || fail "a successful spawn returned its own lease: $(cat "$POOL_LOG")"
 
+  # The pool never hands a leased slot on: a second task spawned against the
+  # same one-slot pool is refused while the first task's lease stands, and
+  # that lease is neither disturbed nor doubled.
+  id='pool-slot-lease-taken-r1'
+  mkdir -p "$HOME_DIR/data/$id"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_pool_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a second task on a slot leased to another task"
+  assert_contains "$out" "treehouse get --lease could not lease a worktree for task $id" \
+    "spawn against a leased slot did not name the failed lease as the reason"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for a task that leased nothing"
+  [ "$(awk -F'\t' -v p="$POOL_DIR" '$1 == p { print $2 }' "$POOL_LEASES")" = pool-slot-lease-r1 ] \
+    || fail "the first task's lease did not survive a second task's refused spawn: $(cat "$POOL_LEASES")"
+  ! grep -Fq -- "treehouse return" "$POOL_LOG" \
+    || fail "a spawn that leased nothing tried to return a slot: $(cat "$POOL_LOG")"
+
   id='pool-slot-unleasable-r1'
   rec=$(make_case slot-unleasable "$id")
   read_case_record "$rec"
@@ -763,7 +780,7 @@ test_pool_slot_lease_follows_the_spawn_outcome() {
     || fail "the aborted spawn left its slot leased to a task with no record: $(cat "$POOL_LEASES")"
   assert_contains "$out" "returned task $id's leased Treehouse slot" \
     "the aborted spawn did not report returning its lease"
-  pass "a Treehouse slot is leased under the launched task id, a failed lease refuses, and an abort returns the task's own lease"
+  pass "a Treehouse slot is leased under the launched task id, a leased slot is never handed on, a failed lease refuses, and an abort returns the task's own lease"
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool

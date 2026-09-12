@@ -875,7 +875,7 @@ assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
 }
 
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
-  local dir id=stale-task other=reassigned-task worker rc
+  local dir id=stale-task other=reassigned-task worker rc lease_state lease_reason
 
   # Dirty slot, --force, and a live worker inside it: --force authorizes
   # discarding this task's unlanded work, which is already gone with the slot,
@@ -959,6 +959,25 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
     "unreadable-lease refusal should name the missing proof"
   assert_contains "$(cat "$dir/stderr")" "treehouse status --json" \
     "unreadable-lease refusal should name the read to repair"
+  assert_contains "$(cat "$dir/stderr")" "does not list the slot '$dir/pool/1/project'" \
+    "unreadable-lease refusal should say the pool does not list the slot rather than blame a tool"
+
+  # The read depends on node as much as on treehouse. With node off PATH the
+  # lease state is unknown for a reason the refusal must name, or an operator
+  # is sent to reinstall treehouse when node is what is missing.
+  dir=$(make_case slot-lease-no-node)
+  mark_case_as_treehouse_pool "$dir"
+  lease_pool_slot "$dir" "$id"
+  read -r lease_state lease_reason < <(
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_TREEHOUSE_SLOTS="$dir/treehouse-slots" \
+    FM_FAKE_TREEHOUSE_LEASES="$dir/treehouse-leases" \
+    bash -c '. "$1/bin/fm-wake-lib.sh"; PATH="$2/fakebin"; hash -r; fm_treehouse_slot_lease_state "$2/project" "$2/worktree" "$3"; printf "%s %s\n" "$FM_TREEHOUSE_SLOT_LEASE" "$FM_TREEHOUSE_SLOT_LEASE_REASON"' \
+      _ "$ROOT" "$dir" "$id"
+  )
+  [ "$lease_state" = unknown ] || fail "lease state read without node was '$lease_state', not unknown"
+  assert_contains "$lease_reason" "node is not installed or not on PATH" \
+    "a lease read without node should name node as the missing tool"
 
   pass "fm-teardown: a pool slot leased to another task is left alone while the task's own cleanup finishes"
 }

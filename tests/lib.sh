@@ -373,7 +373,11 @@ SH
 #   FM_FAKE_TREEHOUSE_LEASES      file of "<path><TAB><holder>" lines: the
 #                                 pool's durable leases. `get --lease` appends
 #                                 one, `return` removes the target's, and
-#                                 `status --json` reports each as leased.
+#                                 `status --json` reports each as leased. Like
+#                                 the measured allocator, `get --lease` never
+#                                 hands a leased slot on: when the file already
+#                                 records the lease path under any holder it
+#                                 fails with the full-pool message below.
 #                                 Unset: leases are neither recorded nor read.
 #   FM_FAKE_TREEHOUSE_SLOTS       file of slot paths (one per line) that
 #                                 `status --json` lists as available when they
@@ -433,11 +437,11 @@ case "${1:-}" in
       shift
     done
     [ "$lease" = 1 ] || exit 0
-    if [ "${FM_FAKE_TREEHOUSE_GET_FAIL:-0}" = 1 ]; then
+    path=${FM_FAKE_TREEHOUSE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-}}
+    if [ "${FM_FAKE_TREEHOUSE_GET_FAIL:-0}" = 1 ] || { [ -n "$path" ] && lease_holder "$path" >/dev/null; }; then
       echo "all 1 worktrees are in use or dirty (max_trees = 1). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml" >&2
       exit 1
     fi
-    path=${FM_FAKE_TREEHOUSE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-}}
     [ -n "$path" ] || { echo "fake treehouse: no lease path configured" >&2; exit 1; }
     [ -z "$leases" ] || printf '%s\t%s\n' "$path" "$holder" >> "$leases"
     printf '%s\n' "$path"

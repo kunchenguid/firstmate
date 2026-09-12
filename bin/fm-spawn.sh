@@ -3140,7 +3140,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
         echo "warning: task $ID's recorded worktree '$WT' carries no durable Treehouse lease (a slot taken before spawns leased, or already returned to the pool); relaunching on the record alone" >&2
         ;;
       *)
-        echo "error: cannot read the Treehouse lease state of task $ID's recorded worktree '$WT' (treehouse status --json from '$PROJ_ABS' did not list it or could not be read); refusing to relaunch without proof the slot is still this task's" >&2
+        echo "error: cannot read the Treehouse lease state of task $ID's recorded worktree '$WT' ($FM_TREEHOUSE_SLOT_LEASE_REASON); refusing to relaunch without proof the slot is still this task's - treehouse status --json is parsed with node, so repair whichever of the two that names, then check the pool lists the slot (cd '$PROJ_ABS' && treehouse status --json)" >&2
         exit 1
         ;;
     esac
@@ -3233,6 +3233,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   }
   wt_real=$(real_path_or_raw "$WT")
   candidate=""
+  settled=0
   last_seen=""
   last_reason="the pane reported no path"
   for _ in $(seq 1 60); do
@@ -3241,6 +3242,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$wt_real" ] && spawn_worktree_isolated "$p"; then
       last_reason="it is the leased worktree, but no second read agreed with it"
       if [ -n "$candidate" ]; then
+        settled=1
         break
       fi
       candidate="$wt_real"
@@ -3256,7 +3258,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     sleep 1
   done
-  if [ -z "$candidate" ]; then
+  if [ "$settled" != 1 ]; then
     echo "error: task $ID's pane did not enter its leased worktree '$WT' within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi

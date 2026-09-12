@@ -1287,17 +1287,45 @@ fm_treehouse_lease_release() {  # <project-dir> <worktree> <task-id>
   (cd "$project" && treehouse return --force --if-lease-holder "$id" "$worktree")
 }
 
-# Read one pool entry from `treehouse status --json`. Prints
-# "<status>\t<lease_holder>\t<path>" for every entry the selector matches:
+# Read the pool's `treehouse status --json` into FM_TREEHOUSE_STATUS_JSON in
+# the calling shell. Returns 1 with FM_TREEHOUSE_STATUS_REASON naming what to
+# install or repair when nothing was read: the two tools the read depends on
+# are checked by name first, so a host missing node is never reported as a
+# treehouse failure. Runs in the caller's shell (not a $(...) capture) so the
+# reason survives for the refusal that quotes it.
+_fm_treehouse_status_read() {  # <project-dir>
+  local project=$1
+  FM_TREEHOUSE_STATUS_JSON=
+  FM_TREEHOUSE_STATUS_REASON=
+  if ! command -v treehouse >/dev/null 2>&1; then
+    FM_TREEHOUSE_STATUS_REASON="treehouse is not installed or not on PATH"
+    return 1
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    FM_TREEHOUSE_STATUS_REASON="node is not installed or not on PATH, and treehouse status --json is parsed with node"
+    return 1
+  fi
+  if ! FM_TREEHOUSE_STATUS_JSON=$( (cd "$project" && treehouse status --json) 2>/dev/null); then
+    FM_TREEHOUSE_STATUS_REASON="treehouse status --json failed from '$project'"
+    return 1
+  fi
+  if [ -z "$FM_TREEHOUSE_STATUS_JSON" ]; then
+    FM_TREEHOUSE_STATUS_REASON="treehouse status --json printed nothing from '$project'"
+    return 1
+  fi
+}
+
+# Select pool entries from the status _fm_treehouse_status_read left in
+# FM_TREEHOUSE_STATUS_JSON. Prints "<status>\t<lease_holder>\t<path>" for
+# every entry the selector matches:
 #   path <physical-path>   the entry whose path resolves to that slot
 #   holder <label>         every entry leased under that holder label
-# Returns 1 when the status could not be read or parsed, 0 otherwise, so an
-# empty successful result means "no such entry", never "unreadable".
-_fm_treehouse_status_entries() {  # <project-dir> <selector> <value>
-  local project=$1 selector=$2 value=$3 out
-  out=$( (cd "$project" && treehouse status --json) 2>/dev/null) || return 1
-  [ -n "$out" ] || return 1
-  printf '%s' "$out" | node -e '
+# Returns 1 when node could not parse the status as a pool listing, 0
+# otherwise, so an empty successful result means "no such entry", never
+# "unreadable".
+_fm_treehouse_status_entries() {  # <selector> <value>
+  local selector=$1 value=$2
+  printf '%s' "${FM_TREEHOUSE_STATUS_JSON-}" | node -e '
 const fs = require("fs");
 const [selector, value] = process.argv.slice(1);
 let entries;
@@ -1327,21 +1355,40 @@ for (const entry of entries) {
 #   unleased - no durable lease: a slot taken by the pane-driven get before
 #              spawns leased, or one already returned to the pool
 #   unknown  - Treehouse's status could not be read, or the pool does not list
-#              this slot; nothing can be proved either way
+#              this slot; nothing can be proved either way, and
+#              FM_TREEHOUSE_SLOT_LEASE_REASON names which tool or read to
+#              repair so a refusal can quote it
 # FM_TREEHOUSE_SLOT_LEASE_HOLDER carries the recorded holder as evidence.
+# shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
 fm_treehouse_slot_lease_state() {  # <project-dir> <worktree> <task-id>
   local project=$1 worktree=$2 id=$3 slot line status holder
   FM_TREEHOUSE_SLOT_LEASE=unknown
   FM_TREEHOUSE_SLOT_LEASE_HOLDER=
-  [ -n "$id" ] || return 0
-  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 0
-  line=$(_fm_treehouse_status_entries "$project" path "$slot") || return 0
+  FM_TREEHOUSE_SLOT_LEASE_REASON=
+  if [ -z "$id" ]; then
+    FM_TREEHOUSE_SLOT_LEASE_REASON="no task id to compare the lease holder against"
+    return 0
+  fi
+  if ! slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P); then
+    FM_TREEHOUSE_SLOT_LEASE_REASON="the worktree '$worktree' is not an enterable directory"
+    return 0
+  fi
+  if ! _fm_treehouse_status_read "$project"; then
+    FM_TREEHOUSE_SLOT_LEASE_REASON=$FM_TREEHOUSE_STATUS_REASON
+    return 0
+  fi
+  if ! line=$(_fm_treehouse_status_entries path "$slot"); then
+    FM_TREEHOUSE_SLOT_LEASE_REASON="node could not parse treehouse status --json from '$project' as a pool listing"
+    return 0
+  fi
   line=${line%%$'\n'*}
-  [ -n "$line" ] || return 0
+  if [ -z "$line" ]; then
+    FM_TREEHOUSE_SLOT_LEASE_REASON="treehouse status --json from '$project' does not list the slot '$slot'"
+    return 0
+  fi
   status=${line%%$'\t'*}
   holder=${line#*$'\t'}
   holder=${holder%%$'\t'*}
-  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_LEASE_HOLDER=$holder
   if [ "$status" != leased ]; then
     FM_TREEHOUSE_SLOT_LEASE=unleased
@@ -1359,7 +1406,8 @@ fm_treehouse_slot_lease_state() {  # <project-dir> <worktree> <task-id>
 fm_treehouse_lease_find() {  # <project-dir> <task-id>
   local project=$1 id=$2 lines
   [ -n "$id" ] || return 1
-  lines=$(_fm_treehouse_status_entries "$project" holder "$id") || return 1
+  _fm_treehouse_status_read "$project" || return 1
+  lines=$(_fm_treehouse_status_entries holder "$id") || return 1
   [ -n "$lines" ] || return 1
   case "$lines" in *$'\n'*) return 1 ;; esac
   printf '%s\n' "${lines##*$'\t'}"

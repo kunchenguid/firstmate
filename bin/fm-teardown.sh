@@ -2223,8 +2223,8 @@ require_owned_worktree_slot_record() {  # <task-id> <project> <worktree>
       return "$TEARDOWN_SLOT_REASSIGNED_RC"
       ;;
   esac
-  echo "REFUSED: task $record_id's recorded worktree $worktree has no readable Treehouse lease state, so the slot cannot be proved to still be this task's; nothing was changed - not even with --force." >&2
-  echo "Check that treehouse is installed and lists the slot (cd '$project' && treehouse status --json), then re-run teardown." >&2
+  echo "REFUSED: task $record_id's recorded worktree $worktree has no readable Treehouse lease state ($FM_TREEHOUSE_SLOT_LEASE_REASON), so the slot cannot be proved to still be this task's; nothing was changed - not even with --force." >&2
+  echo "Repair what that names (treehouse status --json is parsed with node, so both must be installed and on PATH) and check that the pool lists the slot (cd '$project' && treehouse status --json), then re-run teardown." >&2
   return 1
 }
 
