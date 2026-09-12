@@ -203,15 +203,17 @@ EOF
 # Both new and promoted PR deliveries persist the same context in the owning
 # home, not the disposable project checkout. The helper owns its file format.
 fm_dod_pr_context_block() {  # <task-id>
-  local id=$1 command context_home context_data
+  local id=$1 command watch_command context_home context_data
   context_home=$(CDPATH='' cd -- "$FM_HOME" && pwd -P) || return 1
   context_data=$(CDPATH='' cd -- "${DATA:?resolved data directory is required}" && pwd -P) || return 1
   printf -v command 'FM_HOME=%q FM_DATA_OVERRIDE=%q %q' "$context_home" "$context_data" "$SCRIPT_DIR/fm-pr-context.sh"
+  printf -v watch_command 'FM_DATA_OVERRIDE=%q %q install %q %q' "$context_data" "$SCRIPT_DIR/fm-pr-context-watch.sh" "$context_home" "$id"
   cat <<EOF
 Before reporting a review-ready PR, save its exact-head evidence with \`$command write $id < context.json\`, using the input contract in \`$command --help\`.
 Then run \`$command validate $id\`; a missing head, named oracle, or other required evidence is not review-ready.
-If writing or validation fails, report the blocker and stop without a PR completion signal.
-This file preserves the handoff; it does not itself install monitoring or authorize early retirement.
+Register its context monitor with \`$watch_command\`; the owning home must already have the monitor helper installed.
+If writing, validation, or registration fails, report the blocker and stop without a PR completion signal.
+After reporting completion, stop instead of waiting for review comments or merge; ordinary automatic retirement checks the surviving context monitor before removing this copy.
 EOF
 }
 
@@ -230,7 +232,7 @@ EOF
       fm_dod_pr_context_block "$id" || return 1
       fm_dod_debrief_block "$id"
       cat <<EOF
-After context validation succeeds and after the PR reaches that ready state, append \`done: PR {url}\` to the status file and stop.
+After context validation and monitor registration succeed and after the PR reaches that ready state, append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -285,7 +287,7 @@ EOF
       fm_dod_pr_context_block "$id" || return 1
       fm_dod_debrief_block "$id"
       cat <<EOF
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge) and context validation succeeds, append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge) and context validation and monitor registration succeed, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
       ;;
     *)

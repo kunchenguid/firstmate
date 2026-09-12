@@ -2737,6 +2737,16 @@ while :; do
           fi
         else
           fm_wake_append check "$c" "$reason" || exit 1
+          case "${c##*/}" in
+            pr-fix-*.check.sh)
+              context_task=${c##*/pr-fix-}; context_task=${context_task%.check.sh}
+              # The queue owns the captured generation now; failed acknowledgement
+              # leaves the monitor outbox intact for a bounded replay.
+              context_data=${FM_DATA_OVERRIDE:-$FM_HOME/data}
+              FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$context_data" \
+                "$SCRIPT_DIR/fm-pr-context-watch.sh" ack "$context_task" "$out" >/dev/null 2>&1 || true
+              ;;
+          esac
         fi
         # Queue each result immediately, but finish the due batch before waking:
         # an always-actionable early check must not starve later snapshots.

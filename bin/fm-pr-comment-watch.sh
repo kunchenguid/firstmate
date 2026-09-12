@@ -13,6 +13,7 @@
 #   fm-pr-comment-watch.sh --help
 #
 # poll stays silent on errors and prints one wake line per changed pull request.
+# Registered context monitors own their PRs exclusively; this poll covers the rest.
 # rereview-ready exits 0 only when every open thread has an owner inline reply
 # and either a GitHub resolution or a recorded defer.
 # After landing, run `bin/fm-pr-comment-watch.sh arm` in the Firstmate home that should watch these repositories; this tracked change does not alter live state.
@@ -73,6 +74,10 @@ collect_snapshot() {
       name=$(printf '%s' "$item" | jq -r '.name') || return 1
       number=$(printf '%s' "$item" | jq -r '.number') || return 1
       url=$(printf '%s' "$item" | jq -r '.url') || return 1
+      if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" \
+          "$SCRIPT_DIR/fm-pr-context-watch.sh" owns "$url" >/dev/null 2>&1; then
+        continue
+      fi
       payload=$(fm_pcw_fetch_pr_payload "$owner" "$name" "$number" "$GH_CMD") || return 1
       record=$(fm_pcw_build_pr_record "$state" "$FM_HOME" "$FM_PCW_OWNER_AUTHOR" "$owner" "$name" "$number" "$payload") \
         || return 1

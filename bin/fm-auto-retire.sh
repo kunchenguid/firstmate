@@ -10,6 +10,8 @@
 #     whose last status verb is done, and whose worktree data/<id>/debrief.md
 #     is copied to $FM_HOME/data/<id>/debrief.md before teardown; an absent or
 #     empty debrief is refused as debrief-missing and left for a later cycle
+#   - a done task with an OPEN PR passing fm-pr-context-watch.sh ready and
+#     the same debrief guard; its independent context check survives cleanup
 #   - a scout whose last status verb is done and whose report.md is present
 # The done check snapshots the status file's byte length and mtime; if either
 # changed before retirement, the record is refused as status-moved and left
@@ -35,7 +37,7 @@ MAX_TRANSIENT_ATTEMPTS=5
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -141,8 +143,8 @@ forge_state() {  # <pr-url>
   printf '%s\n' "$state"
 }
 
-classify() {  # <id> <meta> -> merged|scout|skip|unclassified|status-moved
-  local id=$1 meta=$2 kind pr last verb report state status fp
+classify() {  # <id> <meta> -> merged|context|scout|skip|unclassified|status-moved
+  local id=$1 meta=$2 kind pr last verb report state status fp head copy
   kind=$(meta_field "$meta" kind)
   [ -n "$kind" ] || kind=ship
   case "$kind" in
@@ -177,6 +179,18 @@ classify() {  # <id> <meta> -> merged|scout|skip|unclassified|status-moved
     MERGED|merged)
       status_unchanged "$fp" "$status" || { printf 'status-moved\n'; return 0; }
       printf 'merged\n'
+      ;;
+    OPEN|open)
+      head=$(meta_field "$meta" pr_head)
+      copy=$(meta_field "$meta" worktree)
+      if [ -n "$head" ] && [ -n "$copy" ] &&
+          FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+          "$SCRIPT_DIR/fm-pr-context-watch.sh" ready "$id" "$pr" "$head" "$copy" >/dev/null 2>&1; then
+        status_unchanged "$fp" "$status" || { printf 'status-moved\n'; return 0; }
+        printf 'context\n'
+      else
+        printf 'skip\n'
+      fi
       ;;
     *) printf 'skip\n' ;;
   esac
@@ -225,9 +239,11 @@ for meta in "$STATE"/*.meta; do
   already_marked "$id" && continue
   class=$(classify "$id" "$meta") || class=unclassified
   case "$class" in
-    merged)
+    merged|context)
       if preserve_ship_debrief "$id" "$meta"; then
-        retire_one "$id" "merged PR"
+        reason="merged PR"
+        [ "$class" != context ] || reason="PR context monitor ready"
+        retire_one "$id" "$reason"
       else
         retry_or_park "$id" debrief-missing \
           "worktree debrief is absent, empty, or unreadable"

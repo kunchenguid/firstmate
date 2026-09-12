@@ -843,6 +843,31 @@ test_fork_pr_invisible_before_owner_repo_extension() {
   pass "fm-pr-comment-watch: fork PR threads stay invisible before firstmate is in the owner-repo set"
 }
 
+test_context_monitor_has_exclusive_polling_ownership() {
+  local home bindir
+  home=$(make_home context-owner)
+  bindir="$home/fakebin"
+  install_fake_gh "$bindir"
+  ln -s "$ROOT/bin" "$home/bin"
+  export ARTEMIS_OPEN_PRS='[]' FIRSTMATE_OPEN_PRS="$firstmate_open_pr"
+  export FIRSTMATE_THREADS="$threads_open_unreplied"
+  PATH="$bindir:$PATH" FM_HOME="$home" FM_PCW_GH_CMD=gh "$TOOL" poll >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-pr-context.sh" write change >/dev/null <<'JSON'
+{"pr_url":"https://github.com/pedromuller-del/firstmate/pull/88",
+ "repo":"pedromuller-del/firstmate","branch":"fm/change","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+ "oracle":{"name":"acceptance","command":"bin/check"},"tests":[{"command":"bin/check","exit_code":0}],
+ "open_review_threads":[],"deferred_items":[],"pre_push_command":"bin/check","merge_authority":"human-merge"}
+JSON
+  "$ROOT/bin/fm-pr-context-watch.sh" install "$home" change >/dev/null || fail "cannot install context owner"
+  export FIRSTMATE_THREADS="$threads_open_no_reply"
+  PATH="$bindir:$PATH" FM_HOME="$home" FM_PCW_GH_CMD=gh "$TOOL" poll > "$home/covered.out"
+  [ ! -s "$home/covered.out" ] || fail "legacy and context monitors both announced the same PR"
+  FM_HOME="$home" "$ROOT/bin/fm-check-unregister.sh" pr-fix-change >/dev/null || fail "cannot remove test registration"
+  PATH="$bindir:$PATH" FM_HOME="$home" FM_PCW_GH_CMD=gh "$TOOL" poll > "$home/uncovered.out"
+  assert_grep 'owner-pr-review-thread pedromuller-del/firstmate#88' "$home/uncovered.out" "legacy coverage did not resume without the context registration"
+  pass "registered contexts have one polling owner; uncovered PRs keep legacy coverage"
+}
+
 test_script_parses() {
   local rc
   bash -n "$TOOL" >/dev/null 2>&1; rc=$?
@@ -852,6 +877,7 @@ test_script_parses() {
   pass "fm-pr-comment-watch: shell parses cleanly"
 }
 
+test_context_monitor_has_exclusive_polling_ownership
 test_lib_repo_gate
 test_script_parses
 test_fork_pr_invisible_before_owner_repo_extension

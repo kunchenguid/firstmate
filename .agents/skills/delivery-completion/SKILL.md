@@ -10,14 +10,17 @@ metadata:
 
 ## PR ready, landing, and cleanup
 
-For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
+Use the mode-specific ready signal rendered by `bin/fm-dod-lib.sh`.
 Run `bin/fm-pr-check.sh <id> <PR url>`; it records `pr=` and the forge's `pr_head=` when available and arms merge monitoring.
+The context monitor's installation and durable acknowledgement contract is owned by `bin/fm-pr-context-watch.sh`; a context left only in the disposable copy is not a surviving handoff.
+A `pr-fix` wake with reason `merged` or `closed` reports a terminal outcome, not a repair request; handle that outcome and use the monitor's guarded retirement command, retaining the context evidence.
 Tell the captain the full `https://...` PR URL, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine authority.
 For a custom `state/<id>.check.sh`, use an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, and register its current bytes with `bin/fm-check-register.sh <id>` before execution.
 A finite custom check prints a final wake line at terminal state and is retired on that wake with `bin/fm-check-unregister.sh <id>`.
 
-Clean up a ship task only after landing is confirmed.
+Clean up after confirmed landing, or let `bin/fm-auto-retire.sh` use its checked context-monitor handoff for an open PR; never replace that gate with manual early cleanup.
+Tasks without that handoff retain merge-only cleanup.
 A refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force cleanup without explicit discard authority.
 After successful cleanup, record completion, retain only configured recent Done history, and re-evaluate queued work whose blockers and time gates cleared.
