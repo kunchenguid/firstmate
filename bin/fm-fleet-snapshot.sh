@@ -145,7 +145,7 @@ esac
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=${FM_SNAPSHOT_LOCAL_READ_CONCURRENCY:-8}
-FM_SNAPSHOT_BUDGET=${FM_SNAPSHOT_BUDGET:-5}
+FM_SNAPSHOT_BUDGET=${FM_SNAPSHOT_BUDGET:-10}
 FM_SNAPSHOT_CACHE_DIR=${FM_SNAPSHOT_CACHE_DIR:-$STATE/secondmate-summary-cache}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
@@ -242,7 +242,7 @@ hold-until date has arrived, and an undated hold remains below the aging thresho
 Cross-home collection uses FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the
 count bound) and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Every sampled remote home's state/home-summary.json is fetched concurrently
-under one FM_SNAPSHOT_BUDGET (default 5 seconds), with a valid prior copy under
+under one FM_SNAPSHOT_BUDGET (default 10 seconds), with a valid prior copy under
 FM_SNAPSHOT_CACHE_DIR used when the live read fails, is invalid, or consumes the
 budget. Every ledger and cached copy must declare the current hold-classifier
 schema, even when it contains no captain holds; older summaries are rejected. A
