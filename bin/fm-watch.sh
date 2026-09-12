@@ -2048,6 +2048,26 @@ EOF
   wake "$reason"
 }
 
+# Hand finished merged ships and done scouts to ordinary teardown. Silent when
+# nothing is eligible. One wake carries the first retirement or refusal line.
+auto_retire_surface() {
+  local out reason retire_bin
+  watcher_heartbeat
+  retire_bin=${FM_AUTO_RETIRE_BIN:-$SCRIPT_DIR/fm-auto-retire.sh}
+  if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$retire_bin" 2>/dev/null); then
+    :
+  else
+    out="diagnostic: auto-retire internal evaluation failed; no lifecycle action taken"
+  fi
+  [ -n "$out" ] || return 0
+  out=$(printf '%s\n' "$out" | grep -E '^(retired|refused):' | sed -n '1{s/[[:space:]][[:space:]]*/ /g;s/^ //;s/ $//;p;}' | cut -c1-480)
+  [ -n "$out" ] || return 0
+  reason="check: auto-retire: $out"
+  fm_wake_append check auto-retire "$reason" || return 1
+  wake "$reason"
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -2372,6 +2392,7 @@ while :; do
   # Evaluate automatic quota pressure from one snapshot before any later cycle
   # path can send another supervised invocation.
   auto_quota_drain_surface
+  auto_retire_surface
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes

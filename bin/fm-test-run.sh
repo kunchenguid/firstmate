@@ -381,7 +381,7 @@ family_for_basename() {
       ;;
     fm-check-register.test.sh|fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
     fm-pr-comment-watch.test.sh|fm-pr-comment-watch-mechanism.test.sh|\
-    fm-teardown.test.sh|fm-teardown-custody.test.sh|fm-x-mode.test.sh|fm-slack-captain-channel.test.sh|fm-slack-socket.test.sh|\
+    fm-auto-retire.test.sh|fm-teardown.test.sh|fm-teardown-custody.test.sh|fm-x-mode.test.sh|fm-slack-captain-channel.test.sh|fm-slack-socket.test.sh|\
     fm-slack-captain-comms-guard.test.sh)
       printf '%s\n' pr-forge
       ;;
@@ -637,6 +637,7 @@ tests/fm-agent-coauthor.test.sh 404
 tests/fm-arm-pretool-check.test.sh 501
 tests/fm-ask-user-authority.test.sh 58
 tests/fm-auto-quota-drain.test.sh 1040
+tests/fm-auto-retire.test.sh 120000
 tests/fm-backend-autodetect-smoke.test.sh 176
 tests/fm-backend-cmux-smoke.test.sh 188
 tests/fm-backend-cmux.test.sh 1170
