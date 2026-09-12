@@ -111,6 +111,7 @@ type SessionGeneration = {
   // wake token makes every caller join the same successor attempt.
   actionableRestorations: Map<string, Promise<ActionableRestoration>>;
   actionableRestorationsInFlight: Set<string>;
+  handlingConfirmedGenerations: Set<string>;
   // A verified successor's failure close that arrived while the delivery
   // queue was active; its bounded retry runs when serialized delivery settles.
   deferredClose: { message: string; predecessorArmPid: string } | null;
@@ -435,6 +436,7 @@ function createGeneration(): SessionGeneration {
     unconsumedWakes: new Map(),
     actionableRestorations: new Map(),
     actionableRestorationsInFlight: new Set(),
+    handlingConfirmedGenerations: new Set(),
     deferredClose: null,
   };
 }
@@ -649,7 +651,7 @@ export default function (pi: ExtensionAPI) {
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
     const recovery = restoration.recovery;
-    if (recovery) {
+    if (recovery && !owner.handlingConfirmedGenerations.has(recovery.generation)) {
       const confirmed = confirmHandlingDeliveryWithRetry(recovery);
       if (!confirmed.ok) {
         const watcherPid = recovery.watcherPid;
@@ -658,6 +660,7 @@ export default function (pi: ExtensionAPI) {
         }
         return await sendWake(owner, `${message}\n\n${confirmed.detail}`, pending);
       }
+      owner.handlingConfirmedGenerations.add(recovery.generation);
     }
     if (!repairFailed) {
       const branchDelivery = offerWakeToBranch(message);

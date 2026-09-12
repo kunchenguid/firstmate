@@ -444,13 +444,33 @@ test_pi_three_overlapping_actionable_closes_restore_latest_liveness() {
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --handling-delivered ]; then
-  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
-  exit 0
+  printf 'confirm-attempt generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exec "${FM_REAL_WATCH_ARM:?}" "$@"
 fi
+state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+lock="$state/.watch.lock"
+cleanup() {
+  if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -rf "$lock"
+  fi
+  if [ "$(cat "${FM_LIVE_FILE:?}" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$FM_LIVE_FILE"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
 printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
+mkdir -p "$lock"
+. "${FM_REAL_WAKE_LIB:?}"
+identity=$(fm_pid_identity "$$") || exit 1
+printf '%s\n' "$$" > "$lock/pid"
+printf '%s\n' "$identity" > "$lock/pid-identity"
+printf '%s\n' "$FM_HOME" > "$lock/fm-home"
+printf '%s\n' "${FM_REAL_WATCH_PATH:?}" > "$lock/watcher-path"
+[ -e "$state/.watcher-down" ] || printf 'pending:downtime:overlap-generation\n' > "$state/.watcher-down"
 if [ "$count" -le 3 ]; then
-  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=overlap-%s\n' "$$" "$count"
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=overlap-generation\n' "$$"
   while [ ! -e "$FM_TRIGGER_FILE.$count" ]; do sleep 0.02; done
   case "$count" in
     1) label=A ;;
@@ -461,20 +481,20 @@ if [ "$count" -le 3 ]; then
   exit 0
 fi
 printf '%s\n' "$$" > "${FM_LIVE_FILE:?}"
-cleanup() { rm -f "$FM_LIVE_FILE"; }
-trap 'cleanup; exit 0' TERM INT
 while [ ! -e "$FM_READY_FILE" ]; do sleep 0.02; done
-printf 'watcher: started pid=%s (beacon fresh) recovery-generation=overlap-%s\n' "$$" "$count"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=overlap-generation\n' "$$"
 printf 'ready=%s\n' "$$" >> "$FM_ARM_LOG"
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
-cleanup
 SH
     chmod +x "$repo/bin/fm-watch-arm.sh"
     out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
       FM_TRIGGER_FILE="$trigger" FM_READY_FILE="$ready" FM_STOP_FILE="$stop" FM_LIVE_FILE="$live" \
+      FM_REAL_WATCH_ARM="$ROOT/bin/fm-watch-arm.sh" FM_REAL_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" \
+      FM_REAL_WATCH_PATH="$ROOT/bin/fm-watch.sh" \
       FM_SETTLE_ORDER="$order" \
       node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
@@ -520,8 +540,18 @@ const armRows = () => existsSync(process.env.FM_ARM_LOG)
   ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm="))
   : [];
 const confirmRows = () => existsSync(process.env.FM_ARM_LOG)
-  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("confirmed "))
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("confirm-attempt "))
   : [];
+function acknowledgeRecovery() {
+  const acknowledged = spawnSync(
+    "bash",
+    ["-c", '. "$1"; fm_recovery_marker_ack "$2" "$3"', "ack-recovery", process.env.FM_REAL_WAKE_LIB, `${process.env.FM_HOME}/state/.watcher-down`, "overlap-generation"],
+    { encoding: "utf8", env: process.env },
+  );
+  if (acknowledged.status !== 0) {
+    throw new Error(`recovery acknowledgement failed: ${acknowledged.stderr}`);
+  }
+}
 async function waitFor(predicate, label) {
   for (let i = 0; i < 500; i += 1) {
     if (predicate()) return;
@@ -562,6 +592,7 @@ await waitFor(() => armRows().length === 4 && existsSync(process.env.FM_LIVE_FIL
 const livePid = readFileSync(process.env.FM_LIVE_FILE, "utf8").trim();
 if (!pidAlive(livePid)) throw new Error(`successor D was not alive: ${livePid}`);
 if (offers.join("") !== "A") throw new Error(`later wake delivery escaped serialization before A settled: ${offers.join(",")}`);
+acknowledgeRecovery();
 settlements.A.resolve();
 await new Promise((resolve) => setTimeout(resolve, 80));
 if (!existsSync(process.env.FM_LIVE_FILE) || !pidAlive(livePid)) {
@@ -588,10 +619,10 @@ if (process.env.FM_SETTLE_ORDER === "a-first") {
 } else {
   await waitFor(() => offers.join("") === "ABC", "pre-settled later wakes after A settlement");
 }
-await waitFor(() => confirmRows().length === 3, "all handling confirmations");
+await waitFor(() => confirmRows().length === 1, "single generation handling confirmation");
 await new Promise((resolve) => setTimeout(resolve, 150));
 if (offers.join("") !== "ABC") throw new Error(`actionable wakes were not delivered exactly once: ${offers.join(",")}`);
-if (confirmRows().length !== 3) throw new Error(`handling confirmation duplicated: ${confirmRows().join(" | ")}`);
+if (confirmRows().length !== 1) throw new Error(`acknowledged handling generation was reconfirmed: ${confirmRows().join(" | ")}`);
 if (armRows().length !== 4) throw new Error(`settlement order created another arm chain: ${armRows().join(" | ")}`);
 if (prompts.length !== 0) throw new Error(`accepted branch wakes leaked to main: ${prompts.join(" | ")}`);
 if (!existsSync(process.env.FM_LIVE_FILE) || !pidAlive(readFileSync(process.env.FM_LIVE_FILE, "utf8").trim())) {
