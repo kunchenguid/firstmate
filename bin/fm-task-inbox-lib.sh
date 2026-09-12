@@ -274,8 +274,9 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Returns 0 rang, 1 skipped because the composer is not proven safe to ring
 # (the watcher re-rings later), 2 the backend send failed, 3 skipped because
 # the endpoint is positively dead or missing (nothing typed; recovery owns the
-# record). No return value is delivery proof; the acknowledgement move is the
-# only delivery signal.
+# record), and 4 when AGY typed the doorbell but its composer comparison
+# prevented submission. No return value is delivery proof; the acknowledgement
+# move is the only delivery signal.
 # For agy, both `pending` and `unknown` defer because its boundary contract is
 # only safe when the composer is proven empty; the watcher re-rings later.
 # Other harnesses retain the pending-only policy.
@@ -309,7 +310,12 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   fi
   case "$verdict" in
     send-failed) return 2 ;;
-    agy-preflight:*|agy-draft-conflict) return 1 ;;
+    agy-preflight:*) return 1 ;;
+    agy-draft-conflict)
+      printf 'fm-task-inbox: doorbell typed but not submitted (composer comparison mismatch) target=%s record=%s\n' \
+        "$target" "$rec" >&2
+      return 4
+      ;;
     *) return 0 ;;
   esac
 }

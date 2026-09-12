@@ -689,7 +689,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local agy_opening_row=-1 agy_closing_row=-1 agy_boundary_count=0 boundary_width
+  local agy_opening_row=-1 agy_closing_row=-1 agy_boundary_count=0 boundary_width agy_pair_width_valid=1
   local unsafe_rows='' unsafe_row
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
@@ -749,6 +749,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
         FM_COMPOSER_SCAN_AGY_WIDTH=$boundary_width
       elif [ "$agy_boundary_count" -eq 2 ]; then
         agy_closing_row=$row
+        [ "$boundary_width" = "$FM_COMPOSER_SCAN_AGY_WIDTH" ] || agy_pair_width_valid=0
       fi
     fi
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
@@ -889,7 +890,8 @@ EOF
     fm_composer_normalize_trim_var agy_first_trimmed
     agy_end_row=$((agy_closing_row - 1))
   fi
-  if [ "$agy_first_row" -ge 0 ] && [ "$agy_end_row" -ge "$agy_first_row" ] \
+  if [ "$agy_pair_width_valid" = 1 ] \
+     && [ "$agy_first_row" -ge 0 ] && [ "$agy_end_row" -ge "$agy_first_row" ] \
      && [[ "$agy_first_trimmed" == '>'* ]] \
      && { [ -z "$cy" ] || { [ "$cy" -ge "$agy_first_row" ] && [ "$cy" -le "$agy_end_row" ]; }; }; then
     FM_COMPOSER_SCAN_AGY_ROW=$agy_first_row
@@ -1344,7 +1346,7 @@ _fm_composer_select_agy_cursorless() {
 fm_composer_extract_selected_content() {  # <caps> <screen> [cursor_row] [harness] [compare]
   local caps=$1 screen=$2 cursor=${3:-} harness=${4:-} compare=${5:-} styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0
-  local agy_content_width=0 previous_full_row=0 content_length
+  local agy_content_width=0 previous_full_row=0 content_length agy_max_content_length=0 agy_row_content
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1357,7 +1359,7 @@ EOF
     return 0
   fi
   if [ "$harness" = agy ] && [ "$compare" = compare ]; then
-    agy_content_width=$((FM_COMPOSER_SCAN_AGY_WIDTH - 2))
+    agy_content_width=$((FM_COMPOSER_SCAN_AGY_WIDTH - 4))
   fi
   if [ "$harness" = agy ] && [ "$FM_COMPOSER_SCAN_AGY_ROW" -lt 0 ]; then
     return 1
@@ -1373,6 +1375,20 @@ EOF
     _fm_composer_select_agy_cursorless || return 1
   else
     _fm_composer_select_cursorless "$plain" || return 1
+  fi
+  if [ "$compare" = compare ] && [ "$harness" = agy ]; then
+    row=$FM_COMPOSER_SELECTED_FIRST
+    while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
+      raw=$(_fm_composer_screen_row "$row" "$screen")
+      agy_row_content=$(_fm_composer_row_content "$raw" "$styled")
+      if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ]; then
+        case "$agy_row_content" in '>'*) agy_row_content=${agy_row_content#>} ;; esac
+      fi
+      fm_composer_normalize_trim_var agy_row_content
+      content_length=${#agy_row_content}
+      [ "$content_length" -gt "$agy_max_content_length" ] && agy_max_content_length=$content_length
+      row=$((row + 1))
+    done
   fi
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
@@ -1446,7 +1462,10 @@ EOF
     previous_full_row=0
     if [ "$compare" = compare ] && [ "$harness" = agy ] && [ "$agy_content_width" -gt 0 ]; then
       content_length=${#content}
-      [ "$content_length" -eq "$agy_content_width" ] && previous_full_row=1
+      if [ "$content_length" -eq "$agy_content_width" ] \
+         || [ "$content_length" -eq "$agy_max_content_length" ]; then
+        previous_full_row=1
+      fi
     fi
     row=$((row + 1))
   done

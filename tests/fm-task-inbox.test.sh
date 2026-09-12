@@ -310,8 +310,9 @@ test_agy_unknown_defers_but_codex_unknown_rings() {
 }
 
 test_ring_propagates_agy_submit_deferral() {
-  local state rec rc
+  local state rec rc err
   state="$TMP_ROOT/ring-submit-deferral/state"
+  err="$TMP_ROOT/ring-submit-deferral/stderr"
   mkdir -p "$state"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "agy steer")
   rc=0
@@ -322,10 +323,12 @@ test_ring_propagates_agy_submit_deferral() {
     fm_backend_composer_state() { printf "empty\n"; }
     fm_backend_send_text_submit() { printf "agy-draft-conflict\n"; }
     fm_task_inbox_ring tmux sess:fm-t1 "$2" fm-t1
-  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec" || rc=$?
-  [ "$rc" = 1 ] || fail "an AGY submit deferral should return protected status 1, got $rc"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec" 2>"$err" || rc=$?
+  [ "$rc" = 4 ] || fail "an AGY composer mismatch should return diagnostic status 4, got $rc"
+  grep -qF 'doorbell typed but not submitted (composer comparison mismatch)' "$err" \
+    || fail "an AGY composer mismatch should surface its diagnostic on stderr"
   [ -f "$rec" ] || fail "an AGY submit deferral must retain its durable record"
-  pass "inbox: AGY submit deferrals preserve the re-ring status"
+  pass "inbox: AGY submit mismatches preserve the re-ring status and diagnostic"
 }
 
 test_idempotent_write_dedups_exact_body() {

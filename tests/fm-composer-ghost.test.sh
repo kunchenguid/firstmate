@@ -447,6 +447,21 @@ test_mismatched_box_families_are_unknown() {
   pass "fm_tmux_composer_state: inconsistent box geometry fails closed"
 }
 
+test_agy_boundary_pair_widths_must_match() {
+  local out boundary72 boundary16 capture
+  boundary72=$(printf '─%.0s' {1..72})
+  boundary16=$(printf '─%.0s' {1..16})
+  capture="$boundary72"$'\n>\n'"$boundary16"
+  out=$(fm_composer_classify_screen 'styled=0' "$capture" 1 1 agy)
+  [ "$out" = unknown ] \
+    || fail "an AGY pair with mismatched boundary widths should be unknown, got '$out'"
+  capture="$boundary72"$'\n>\n'"$boundary72"
+  out=$(fm_composer_classify_screen 'styled=0' "$capture" 1 1 agy)
+  [ "$out" = empty ] \
+    || fail "an AGY pair with equal boundary widths should remain empty, got '$out'"
+  pass "fm_composer_classify_screen: AGY boundary pairs require equal widths"
+}
+
 test_misaligned_box_is_unknown() {
   local dir fb capture out fixture
   dir="$TMP_ROOT/misaligned-box"; mkdir -p "$dir"
@@ -702,6 +717,7 @@ test_non_bordered_busy_footer_is_unknown_strict
 test_clipped_bordered_box_is_unknown
 test_asymmetric_composer_edges_are_unknown
 test_mismatched_box_families_are_unknown
+test_agy_boundary_pair_widths_must_match
 test_misaligned_box_is_unknown
 test_unproved_empty_geometry_fails_closed
 test_differing_widths_use_asymmetric_verdicts
