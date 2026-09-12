@@ -34,10 +34,6 @@ fm_command_guard_table_row() {  # <command> <guard>
   return 1
 }
 
-fm_command_guard_has() {  # <command> <guard>
-  fm_command_guard_table_row "$1" "$2" >/dev/null
-}
-
 fm_command_guard_expected_env() {  # <command> <guard>
   local row
   row=$(fm_command_guard_table_row "$1" "$2") || return 1
