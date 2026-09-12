@@ -110,6 +110,10 @@ fm_harness_process_matches() {  # <comm> <args>
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
+  # A namespace-local PID 1 may be a verified Codex sandbox for advisory
+  # harness attribution, but it must never enter the authoritative lock-owner
+  # candidate set.
+  [ "$pid" -gt 1 ] || return 1
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -148,6 +152,13 @@ EOF
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
+  # PID 1 can be a namespace-local Codex sandbox and is useful only for
+  # non-authoritative harness attribution.  It is never valid session-lock
+  # ownership, including when inspecting a lock left by an older process.
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$pid" -gt 1 ] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
