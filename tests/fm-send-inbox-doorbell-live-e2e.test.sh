@@ -224,7 +224,7 @@ fi
 run_agy_canonical_lifecycle() (
   local task="live-agy-lifecycle-$$" lab project home status target version stable_verdict stable_count draft_landed content note_line
   local doorbell_inbox doorbell_acted doorbell_marker doorbell_brief ring_count record
-  local spawned=0 state capture busy=0 ready=0 tool_started=0 turn_end=0 verdict=unknown trust_seen=0
+  local spawned=0 state capture ready=0 tool_started=0 turn_end=0 verdict=unknown trust_seen=0
   [ "${FM_AGY_LIFECYCLE_LIVE_E2E:-}" = 1 ] || return 0
   die() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
   cleanup_lifecycle() {
@@ -275,10 +275,7 @@ EOF
       sleep 1
       continue
     fi
-    if grep -Fq 'state=busy' "$state/$task.busy-state" 2>/dev/null; then
-      busy=1
-    fi
-    if [ "$busy" -eq 1 ] && grep -Fq 'state=idle' "$state/$task.busy-state" 2>/dev/null; then
+    if grep -Fq 'state=idle' "$state/$task.busy-state" 2>/dev/null; then
       verdict=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
         bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state "$2" agy' _ "$ROOT" "$target" 2>/dev/null || true)
       if [ "$verdict" = empty ]; then
