@@ -454,25 +454,39 @@ mail_heal() {
       mail_prune_journal || true
     fi
   fi
-  while IFS= read -r k; do
-    keyrest="${k#mail:}"
-    [ "$keyrest" = "$k" ] && continue
-    keygen=""
-    keyuid=""
-    case "$keyrest" in
-      */*) keygen="${keyrest%%/*}"; keyuid="${keyrest#*/}" ;;
-      *) keyuid="$keyrest" ;;
-    esac
-    [ -z "$keyuid" ] && continue
-    [ "$keygen" != "$generation" ] && continue
-    if ! mail_seen "$keyuid"; then
-      if printf '%s\n' "$keyuid" >> "$CURSOR"; then
-        :
-      else
-        heal_ok=1
+  # Read the queue into a variable rather than straight into the loop, so an
+  # unreadable queue is distinguishable from an empty one. They demand opposite
+  # conclusions here: empty means every published wake is already recorded and
+  # phase 2 is complete, while unreadable proves nothing and must leave phase 2
+  # unfinished for the next poll. Treating the second as the first would record
+  # nothing and report success, and the uids it failed to heal would surface
+  # again as duplicate mail wakes.
+  if queued_keys=$(fm_wake_queued_keys check 2>&1); then
+    while IFS= read -r k; do
+      keyrest="${k#mail:}"
+      [ "$keyrest" = "$k" ] && continue
+      keygen=""
+      keyuid=""
+      case "$keyrest" in
+        */*) keygen="${keyrest%%/*}"; keyuid="${keyrest#*/}" ;;
+        *) keyuid="$keyrest" ;;
+      esac
+      [ -z "$keyuid" ] && continue
+      [ "$keygen" != "$generation" ] && continue
+      if ! mail_seen "$keyuid"; then
+        if printf '%s\n' "$keyuid" >> "$CURSOR"; then
+          :
+        else
+          heal_ok=1
+        fi
       fi
-    fi
-  done < <(fm_wake_queued_keys check 2>/dev/null || true)
+    done <<EOF
+$queued_keys
+EOF
+  else
+    echo "fm-mail: could not read the wake queue to finish recovery; retried on next poll: $queued_keys" >&2
+    heal_ok=1
+  fi
   return "$heal_ok"
 }
 

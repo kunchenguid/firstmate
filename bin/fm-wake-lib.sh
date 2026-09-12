@@ -1915,12 +1915,28 @@ fm_wake_append_locked() {
 # durable queue stays the authority: a key appears here exactly while a record
 # for it is queued and unacknowledged, and disappears only after post-handling
 # acknowledgement consumes it.
+# fm_wake_queued_keys <kind>
+#
+# Unlike every other lock-taking helper here, this one is read from inside
+# command and process substitutions (bin/fm-mail.sh, bin/fm-watch.sh,
+# bin/fm-inactive-reconcile.sh). An `exit` in that context kills only the
+# subshell, so fm_lock_acquire_wait's fail-closed refusal would reach the
+# caller as an empty result with a successful-looking read - indistinguishable
+# from "nothing is queued", which is the answer that suppresses a duplicate
+# wake. Report an unreadable queue as status 3 instead, so a caller can tell
+# "nothing queued" from "could not look".
 fm_wake_queued_keys() {
-  local kind=$1
+  local kind=$1 lock_dir
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
+  lock_dir=$(dirname "$FM_WAKE_QUEUE_LOCK")
+  if ! fm_lock_dir_writable "$lock_dir"; then
+    printf 'fm_wake_queued_keys: cannot read the wake queue: directory not writable: %s\n' \
+      "$lock_dir" >&2
+    return 3
+  fi
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   fm_wake_queued_keys_locked "$kind"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"

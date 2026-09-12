@@ -423,6 +423,37 @@ test_lock_live_holder_is_reported_without_steal_chain() {
   pass "live-held lock reports its holder without a steal chain"
 }
 
+# Regression: fm_wake_queued_keys is read inside command and process
+# substitutions, where an exit kills only the subshell. A refusal reaching the
+# caller as an empty-but-successful read is indistinguishable from "nothing is
+# queued" - the answer that suppresses a duplicate wake - so an unreadable
+# queue has to carry its own nonzero status out of the substitution.
+test_queued_keys_reports_an_unreadable_queue_from_a_substitution() {
+  local dir state out status err
+  dir=$(make_case queued-keys-unreadable)
+  state="$dir/state"
+  err="$dir/read.err"
+  chmod 500 "$state"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    queued=$(fm_wake_queued_keys check)
+    printf "rc=%s keys=[%s]\n" "$?" "$queued"
+  ' _ "$LIB" 2> "$err")
+  status=$?
+  chmod 700 "$state"
+  [ "$status" -eq 0 ] || fail "the reading fixture itself died instead of reporting: $out $(cat "$err")"
+  case "$out" in
+    *"rc=0"*) fail "an unreadable wake queue read as an empty queue: $out" ;;
+  esac
+  case "$out" in
+    *"keys=[]"*) ;;
+    *) fail "an unreadable wake queue returned keys: $out" ;;
+  esac
+  grep -q "cannot read the wake queue" "$err" \
+    || fail "an unreadable wake queue named no cause: $(cat "$err")"
+  pass "an unreadable wake queue reports a failed read rather than an empty one"
+}
+
 test_lock_empty_pid_uses_minimum_grace() {
   local dir state lockdir out
   dir=$(make_case lock-empty-grace)
@@ -1204,6 +1235,7 @@ test_lock_does_not_steal_live_lock
 test_lock_unwritable_dir_is_classified_not_recursed
 test_lock_acquire_wait_fails_closed_on_unwritable_dir
 test_lock_live_holder_is_reported_without_steal_chain
+test_queued_keys_reports_an_unreadable_queue_from_a_substitution
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
