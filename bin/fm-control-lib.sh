@@ -111,7 +111,8 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 }
 
 # The key that cancels a running turn. Escape for every adapter except grok and
-# agy, whose Esc only moves focus to the scrollback; both cancel on Ctrl+C.
+# agy: grok's Esc only moves focus to the scrollback, and agy's Escape was never
+# observed to cancel a turn at all; both cancel on Ctrl+C.
 # gemini names its own key in the running turn's status row
 # (`(esc to cancel, <n>s)`), and a single Escape was verified to cancel it.
 # rovo cancels on a single Escape too, printing "Agent cancelled" (verified,

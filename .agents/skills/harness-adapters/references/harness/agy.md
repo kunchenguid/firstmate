@@ -32,6 +32,8 @@ The hook file uses agy's direct command-hook schema with `PreInvocation` and `St
 Each generated command is bound to the task id, state directory, and minted busy generation.
 An existing `.agents/hooks.json` is preserved and causes the canonical agy spawn to refuse rather than overwrite an unknown workspace hook.
 The generated file is left untracked rather than added to the shared repository's git info exclude, which every worktree including the primary checkout would see, and it is removed at teardown - only for a task whose recorded harness is agy - before a pooled worktree is returned.
+A fresh spawn that aborts before publishing its task record removes the file itself, because no record yet names it and a leftover untracked path would refuse the next spawn of ANY harness into that pooled worktree; once the record is published the removal belongs to teardown.
+Because the file is untracked and git-visible, every reading that means unlanded crew work exempts exactly that one path for an agy task - teardown's worktree safety check and the relaunch checkpoint's `worktree_dirty` flag - so an agy task is never reported dirty over firstmate's own wiring.
 
 ## Known gaps
 
