@@ -232,6 +232,31 @@ fm_control_agy_hooks_path() {  # <worktree>
   printf '%s\n' "$wt_real/.agents/hooks.json"
 }
 
+# A task worktree's porcelain status with the wiring firstmate itself planted
+# inside it filtered out, so a dirty reading means the crew has unlanded work.
+# agy is the one adapter whose wiring git can see - bin/fm-spawn.sh writes
+# .agents/hooks.json into the worktree because agy has no external
+# settings-path override, and nothing excludes it - so a bare status reports
+# every agy task as dirty and the flag stops carrying information. Listing
+# untracked files individually is required there: the default `normal` mode
+# collapses a newly created directory into one `?? .agents/` row that no file
+# path can match. The exempted path is the same one the spawn wrote and
+# teardown removes, so a project-planted `.agents` symlink (which yields no
+# firstmate-owned path) exempts nothing. Prints the surviving porcelain lines;
+# returns non-zero only when the worktree cannot be inspected.
+fm_control_worktree_wiring_free_status() {  # <worktree> <harness-family>
+  local wt=${1-} harness=${2-} wt_real hooks raw
+  [ -n "$wt" ] || return 1
+  if [ "$harness" = agy ] \
+     && wt_real=$(cd "$wt" 2>/dev/null && pwd -P) \
+     && hooks=$(fm_control_agy_hooks_path "$wt"); then
+    raw=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || return 1
+    printf '%s\n' "$raw" | grep -vxF "?? ${hooks#"$wt_real/"}" || true
+    return 0
+  fi
+  git -C "$wt" status --porcelain 2>/dev/null || return 1
+}
+
 # The per-task wiring artifacts a harness leaves behind, so a relaunch that
 # changes harness (or re-arms the same one with a fresh busy generation) can
 # clear the previous incarnation's wiring instead of leaving a stale hook

@@ -1172,6 +1172,31 @@ test_prepublication_abort_retires_replacement_wiring_and_busy_state() {
   pass "fm-spawn relaunch: prepublication abort removes replacement state"
 }
 
+# agy is the one adapter whose per-task wiring lives inside the worktree at a
+# path git sees, so the checkpoint's dirty flag has to keep meaning "the crew
+# has unlanded work" instead of "firstmate wrote its own hook file".
+test_agy_checkpoint_flags_only_real_unlanded_work() {
+  local dir
+  dir=$(new_case agyhooks rl36)
+  add_ship_task "$dir" rl36 agy
+  mkdir -p "$dir/wt/.agents"
+  printf '{"fm-firstmate":{}}\n' > "$dir/wt/.agents/hooks.json"
+  run_control "$dir" rl36 relaunch --harness claude --note "replacing the agy agent" >/dev/null
+  [ "$(journal_field "$dir" rl36 worktree_dirty)" = no ] \
+    || fail "firstmate's own agy hook file must not be journalled as unlanded crew work"
+
+  dir=$(new_case agyhooksdirty rl37)
+  add_ship_task "$dir" rl37 agy
+  mkdir -p "$dir/wt/.agents"
+  printf '{"fm-firstmate":{}}\n' > "$dir/wt/.agents/hooks.json"
+  printf 'crew work\n' > "$dir/wt/.agents/notes.md"
+  run_control "$dir" rl37 relaunch --harness claude --note "replacing the agy agent" >/dev/null
+  [ "$(journal_field "$dir" rl37 worktree_dirty)" = yes ] \
+    || fail "crew work beside the agy hook file must still be journalled as unlanded"
+  [ -f "$dir/wt/.agents/notes.md" ] || fail "crew work must survive an agy relaunch"
+  pass "fm-control relaunch: an agy task's checkpoint flags only real unlanded work"
+}
+
 test_journal_records_the_checkpoint_it_proved() {
   local dir head
   dir=$(new_case journal rl14)
@@ -1596,6 +1621,7 @@ test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state
 test_journal_records_the_checkpoint_it_proved
+test_agy_checkpoint_flags_only_real_unlanded_work
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home
 test_secondmate_checkpoint_refuses_unreadable_child_state
