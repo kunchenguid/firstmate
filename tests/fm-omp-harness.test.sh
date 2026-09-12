@@ -23,8 +23,8 @@
 #      state/<id>.omp-ext.ts; a secondmate launch names no -e at all.
 #   4. A <provider>/<id> model is validated only when `omp models --json` lists
 #      that provider; an unlisted provider passes through with a notice.
-#   5. Busy state: agent_start is busy, agent_end with willContinue stays busy,
-#      a plain agent_end is idle, turn_end is a notification only.
+#   5. Busy state: agent_start and turn_start are busy, agent_end with
+#      willContinue stays busy, a plain agent_end is idle, turn_end is notification only.
 #   6. The turn-end guard extension compels one continuation on exit 2 and
 #      stands down when the payload already carries stop_hook_active.
 #   7. The watch extension arms through fm_watch_arm_omp and delivers an
@@ -292,6 +292,7 @@ const ctx = { isIdle: () => false };
 switch (process.env.MODE) {
   case "handlers": console.log(Object.keys(handlers).sort().join(" ")); break;
   case "agent-start": await handlers["agent_start"]({ type: "agent_start" }, ctx); break;
+  case "turn-start": await handlers["turn_start"]({ type: "turn_start", turnIndex: 0 }, ctx); break;
   case "end-continuing": await handlers["agent_end"]({ type: "agent_end", willContinue: true }, ctx); break;
   case "end-final": await handlers["agent_end"]({ type: "agent_end" }, ctx); break;
   case "turn-end": await handlers["turn_end"]({ type: "turn_end", turnIndex: 0 }, ctx); break;
@@ -316,17 +317,12 @@ test_busy_extension_lifecycle() {
   case " $out " in
     *" agent_settled "*) fail "the omp extension must not listen for agent_settled (omp has no such event)" ;;
   esac
-  for handler in agent_start agent_end turn_end; do
+  for handler in agent_start agent_end turn_start turn_end; do
     case " $out " in
       *" $handler "*) ;;
       *) fail "the omp extension must register $handler, got '$out'" ;;
     esac
   done
-
-  rm -f "$state/$id.turn-ended"
-  out=$(drive_omp_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "turn_end no longer touches the notification marker"
-  [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy fm-spawn" ] || fail "turn_end must stay a notification, not a state edge"
 
   out=$(drive_omp_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy omp-ext" ] || fail "agent_start must classify 'busy omp-ext'"
@@ -334,13 +330,24 @@ test_busy_extension_lifecycle() {
   out=$(drive_omp_ext "$ext" end-continuing) || fail "continuing agent_end drive failed: $out"
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy omp-ext" ] || fail "agent_end with willContinue must stay busy (a session_stop continuation is coming)"
 
-  out=$(drive_omp_ext "$ext" end-final) || fail "final agent_end drive failed: $out"
+  out=$(drive_omp_ext "$ext" end-final) || fail "first final agent_end drive failed: $out"
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "idle omp-ext" ] || fail "a plain agent_end must classify 'idle omp-ext'"
+
+  out=$(drive_omp_ext "$ext" turn-start) || fail "turn_start drive failed: $out"
+  [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy omp-ext" ] || fail "turn_start must refresh an older idle record to 'busy omp-ext'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "turn_end no longer touches the notification marker"
+  [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy omp-ext" ] || fail "turn_end must stay a notification and preserve turn_start's busy state"
+
+  out=$(drive_omp_ext "$ext" end-final) || fail "terminal agent_end drive failed: $out"
+  [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "idle omp-ext" ] || fail "terminal agent_end must classify 'idle omp-ext'"
 
   # A record from another harness's writer is never trusted for omp.
   fm_busy_source_trusted omp pi-ext && fail "omp must not trust the Pi extension's records"
   fm_busy_source_trusted omp omp-ext || fail "omp must trust its own extension's records"
-  pass "omp extension: agent_start busy, willContinue stays busy, plain agent_end idle, turn_end a notification"
+  pass "omp extension: each turn refreshes busy, willContinue stays busy, terminal agent_end idles, turn_end only notifies"
 }
 
 # --- 4. Control, composer, supervision model -----------------------------------
