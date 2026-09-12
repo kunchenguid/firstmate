@@ -70,6 +70,8 @@
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless
 # placeholder instead of a real daemon. FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND
 # override the captured captain pane/backend (an isolated lab pane in tests).
+# FM_AFK_LAUNCH_GIT_BASH overrides the Git Bash a Windows pane shell wraps the
+# daemon command in (tests and nonstandard installs).
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -118,6 +120,8 @@ set +e
 # shellcheck source=bin/fm-afk-contract.sh
 . "$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-windows-process-lib.sh
+. "$FM_AFK_LAUNCH_DIR/fm-windows-process-lib.sh"
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
@@ -457,6 +461,53 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   return "$result"
 }
 
+# Resolve the Git Bash a Windows herdr pane shell (PowerShell) invokes with
+# -lc, as a Windows path. FM_AFK_LAUNCH_GIT_BASH overrides for tests and
+# nonstandard installs.
+fm_afk_launch_windows_bash() {
+  local candidate
+  if [ -n "${FM_AFK_LAUNCH_GIT_BASH:-}" ]; then
+    printf '%s' "$FM_AFK_LAUNCH_GIT_BASH"
+    return 0
+  fi
+  for candidate in "/c/Program Files/Git/bin/bash.exe" "/c/Program Files (x86)/Git/bin/bash.exe"; do
+    if [ -f "$candidate" ]; then
+      cygpath -w "$candidate" 2>/dev/null || printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  candidate=$(command -v bash 2>/dev/null) || return 1
+  cygpath -w "$candidate" 2>/dev/null
+}
+
+# Quote a string as a PowerShell single-quoted literal: the content is taken
+# literally (no $ or backtick interpolation) and an embedded single quote is
+# doubled, so an already-bash-quoted command survives the pane shell intact.
+fm_afk_launch_ps_quote() {  # <string>
+  local s=$1
+  printf "'%s'" "${s//\'/\'\'}"
+}
+
+# The command the daemon terminal's shell executes. POSIX hosts type the bare
+# command into a POSIX pane shell unchanged. A Windows host's herdr pane shell
+# is PowerShell, which rejects the POSIX line outright (verified 2026-09-12:
+# the pane printed "exec: The term 'exec' is not recognized..." and sat at the
+# prompt, so the daemon never started), so the command is wrapped in the Git
+# Bash login invocation PowerShell executes:
+#   & 'C:\Program Files\Git\bin\bash.exe' -lc '<posix command>'
+fm_afk_launch_pane_cmd() {  # <posix-command>
+  local posix_cmd=$1 bash_exe
+  if ! fm_host_is_windows; then
+    printf '%s' "$posix_cmd"
+    return 0
+  fi
+  bash_exe=$(fm_afk_launch_windows_bash) || {
+    fm_afk_launch_log "Windows pane shell needs Git Bash; none found (set FM_AFK_LAUNCH_GIT_BASH)"
+    return 1
+  }
+  printf '& %s -lc %s' "$(fm_afk_launch_ps_quote "$bash_exe")" "$(fm_afk_launch_ps_quote "$posix_cmd")"
+}
+
 # Launch the daemon in a non-visible herdr terminal in the CAPTAIN's session
 # (so the daemon can inject into the captain pane, which lives there). A
 # dedicated background workspace (--no-focus) holds exactly one tab/pane; it
@@ -496,6 +547,11 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   entry=$(fm_afk_launch_entry_cmd)
   cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
     "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  cmd=$(fm_afk_launch_pane_cmd "$cmd") || {
+    fm_afk_launch_log "cannot build the daemon command for the pane shell; closing $session:$pane"
+    fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1
+    return 1
+  }
   if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
     fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
     fm_afk_launch_close_terminal herdr "$session:$pane"

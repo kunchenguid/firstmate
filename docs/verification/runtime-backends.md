@@ -1047,6 +1047,11 @@ Observed guarantees: `fm-afk-launch.sh start` refused on the Pi primary and `con
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+The Windows herdr pane-shell wrapper was verified live on 2026-09-13 with Windows 11 Home 10.0.26200 x64, Git Bash (MSYS), a Herdr protocol-19 server, and zai as the primary harness.
+A POSIX `exec env ...` line sent into a created Herdr pane reached its PowerShell shell verbatim and was rejected with `exec: The term 'exec' is not recognized as a name of a cmdlet, function, script file, or executable program`, so the daemon never started and the launcher's readiness gate closed the pane.
+With the wrapper, the same pane shell executed `& 'C:\Program Files\Git\bin\bash.exe' -lc '<command>'`, the real `bin/fm-afk-start.sh` daemon started in that pane's foreground, the watcher beat `state/.last-watcher-beat` within one poll, the daemon logged its startup line, and `stop` terminated the daemon, closed the workspace by exact id, and archived the record.
+The portable command contract is pinned by the `tests/fm-afk-launch.test.sh` pane-command units on both host classes, and its herdr e2e asserts the daemon entry actually executes by watching a marker file the entry writes, which topology checks alone cannot see when a pane shell rejects the command.
+
 ## zai primary session identity on Windows
 
 zai is a herdr fork whose engine is the zai-cli node bundle; it publishes no harness-identity marker of its own and consumes the herdr pane environment, so its identity comes from process ancestry alone.

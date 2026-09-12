@@ -555,6 +555,75 @@ unit_herdr_run_failure_preserves_unconfirmed_record() {
   rm -rf "$st"
 }
 
+# Capture the exact command the launcher hands to `herdr pane run` for the
+# daemon terminal, with the host class and Git Bash path forced so each test
+# pins its own verdict on any host. The forcing is applied after the source
+# because fm-windows-process-lib.sh resets its memo variable when sourced.
+capture_herdr_pane_run_command() {  # <home> <capture-file>
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_AFK_LAUNCH_ENTRY=/bin/true \
+    FM_AFK_TEST_UNAME=${FM_AFK_TEST_UNAME:-} FM_AFK_TEST_GIT_BASH=${FM_AFK_TEST_GIT_BASH:-} \
+    CAPTURED="$2" bash -c '
+    . "$1"
+    FM_UNAME_S_CACHE=$FM_AFK_TEST_UNAME
+    FM_AFK_LAUNCH_GIT_BASH=$FM_AFK_TEST_GIT_BASH
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_cli() {
+      if [ "$2 $3" = "workspace create" ]; then
+        printf %s '\''{"result":{"workspace":{"workspace_id":"ws"},"root_pane":{"pane_id":"pane"}}}'\''
+      elif [ "$2 $3" = "pane run" ]; then
+        printf %s "$5" > "$CAPTURED"
+      fi
+      return 0
+    }
+    fm_afk_launch_record_write() { return 0; }
+    fm_afk_launch_commit_terminal() { return 0; }
+    fm_afk_launch_create_herdr lab:captain herdr
+  ' _ "$LAUNCH" >/dev/null 2>&1
+}
+
+unit_herdr_pane_cmd_posix_host_sends_bare_command() {
+  local st captured expected
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-posix-cmd.XXXXXX")
+  captured="$st/captured"
+  FM_AFK_TEST_UNAME=Linux FM_AFK_TEST_GIT_BASH='' capture_herdr_pane_run_command "$st/home" "$captured"
+  expected=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
+    "$st/home" lab:captain herdr /bin/true)
+  if [ "$(cat "$captured" 2>/dev/null || true)" = "$expected" ]; then
+    pass "herdr pane command: a POSIX host sends the bare exec-env command unchanged"
+  else
+    fail "herdr pane command: POSIX host command was wrapped or altered: $(cat "$captured" 2>/dev/null || true)"
+  fi
+  rm -rf "$st"
+}
+
+unit_herdr_pane_cmd_windows_wraps_in_git_bash() {
+  local st captured cmd inner expected
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-win-cmd.XXXXXX")
+  captured="$st/captured"
+  FM_AFK_TEST_UNAME=MSYS_NT-10.0-26200 FM_AFK_TEST_GIT_BASH='C:\Test\Git\bin\bash.exe' \
+    capture_herdr_pane_run_command "$st/o'brien home" "$captured"
+  cmd=$(cat "$captured" 2>/dev/null || true)
+  # The contract: & '<bash.exe>' -lc '<the unchanged POSIX command>', with the
+  # POSIX command inside a PowerShell single-quoted literal (embedded quotes
+  # doubled), so the PowerShell pane shell hands bash exactly the old line.
+  inner=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
+    "$st/o'brien home" lab:captain herdr /bin/true)
+  expected=$(printf '& %s -lc %s' "'C:\\Test\\Git\\bin\\bash.exe'" "'${inner//\'/\'\'}'")
+  if [ "$cmd" = "$expected" ]; then
+    pass "herdr pane command: a Windows host wraps the daemon command in the Git Bash -lc invocation"
+  else
+    fail "herdr pane command: Windows host did not produce the Git Bash wrapper contract"
+    printf '  got:      %s\n' "$cmd" >&2
+    printf '  expected: %s\n' "$expected" >&2
+  fi
+  case "$cmd" in
+    *"o\\''brien"*) pass "herdr pane command: an embedded quote survives as a doubled PowerShell quote" ;;
+    *) fail "herdr pane command: an embedded quote was not PowerShell-doubled: $cmd" ;;
+  esac
+  rm -rf "$st"
+}
+
 unit_record_failure_closes_terminal() {
   local st closed
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-fail.XXXXXX")
@@ -992,15 +1061,24 @@ e2e_herdr() {
 
   local SESSION home_tmp cap_ws cap_tab cap_pane target
   local before during after ws_before ws_during ws_after out dtgt dtab
+  local entry_ran_marker MARKER_ENTRY ran
   SESSION="fm-lab-afk-launch-e2e-$$"
   export HERDR_SESSION="$SESSION"
   home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-e2e-home.XXXXXX")
+  # The daemon entry writes this marker then sleeps, so the e2e proves the
+  # pane shell actually EXECUTED the command (the topology checks alone pass
+  # even when a pane shell rejects the command and the daemon never runs).
+  entry_ran_marker="$home_tmp/daemon-entry-executed"
+  MARKER_ENTRY=$(mktemp "${TMPDIR:-/tmp}/fm-afk-entry-marker.XXXXXX")
+  printf '#!/usr/bin/env bash\n: > "%s"\nexec sleep 600\n' "$entry_ran_marker" > "$MARKER_ENTRY"
+  chmod +x "$MARKER_ENTRY"
   E2E_HERDR_CLEANUP() {
     # shellcheck disable=SC2031 # Cleanup reads the caller's resolved target; it does not reassign it.
     FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
       FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr "$LAUNCH" stop >/dev/null 2>&1 || true
     herdr_safe_stop_and_delete "$SESSION" >/dev/null 2>&1 || true
     rm -rf "$home_tmp" 2>/dev/null || true
+    rm -f "$MARKER_ENTRY" 2>/dev/null || true
   }
   fm_herdr_lab_prepare "$SESSION" || { fail "herdr e2e: could not prepare isolated lab session"; return 0; }
   fm_backend_source herdr || { E2E_HERDR_CLEANUP; fail "herdr e2e: fm_backend_source herdr failed"; return 0; }
@@ -1017,7 +1095,7 @@ e2e_herdr() {
   ws_before=$(fm_backend_herdr_cli "$SESSION" workspace list 2>/dev/null | jq '[.result.workspaces[]?]|length')
 
   FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
-    FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
+    FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr FM_AFK_LAUNCH_ENTRY="$MARKER_ENTRY" \
     "$LAUNCH" start >/dev/null 2>&1
 
   during=$(fm_backend_herdr_cli "$SESSION" pane list --workspace "$cap_ws" 2>/dev/null | jq --arg t "$cap_tab" '[.result.panes[]?|select(.tab_id==$t)]|length')
@@ -1029,6 +1107,13 @@ e2e_herdr() {
   if [ "$ws_during" -gt "$ws_before" ]; then pass "herdr e2e: daemon launched in a separate non-visible workspace"; else fail "herdr e2e: no separate daemon workspace created"; fi
   if [ -n "$dtab" ] && [ "$dtab" != "$cap_tab" ]; then pass "herdr e2e: daemon pane is NOT in the captain's tab"; else fail "herdr e2e: daemon pane shares the captain tab ($dtab)"; fi
   case "$dtgt" in "$SESSION":*) pass "herdr e2e: daemon terminal scoped to the lab session" ;; *) fail "herdr e2e: daemon terminal not in the lab session ($dtgt)" ;; esac
+
+  ran=0
+  for _ in $(seq 1 60); do
+    if [ -e "$entry_ran_marker" ]; then ran=1; break; fi
+    sleep 0.5
+  done
+  if [ "$ran" = 1 ]; then pass "herdr e2e: the pane shell executed the daemon entry (Git Bash -lc wrapper included)"; else fail "herdr e2e: the daemon entry never executed in its pane"; fi
 
   FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
     FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr "$LAUNCH" stop >/dev/null 2>&1
@@ -1096,6 +1181,8 @@ unit_signal_exits_with_lock_cleanup
 unit_herdr_partial_create_recovery
 unit_herdr_error_with_exact_ids_closes_exact
 unit_herdr_run_failure_preserves_unconfirmed_record
+unit_herdr_pane_cmd_posix_host_sends_bare_command
+unit_herdr_pane_cmd_windows_wraps_in_git_bash
 unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
