@@ -280,6 +280,86 @@ test_not_open_key_refuses_before_send() {
   pass "fm-send --resolve-key: a key that is not open refuses loudly before anything is sent"
 }
 
+# Refusal diagnosis: the reported failure named in this task ("fm-send
+# --resolve-key refuses an open decision") most often happens because the
+# OPEN DECISIONS listing showed a misleading key (a note's own trailing
+# "[key=...]" text that never registered - see fm-classify-lib.sh's
+# decision-key grammar) rather than the key that actually opened. Before this
+# fix, a refusal named only the bad key the caller typed, leaving them to
+# guess. It must also name what IS actually open right now, so a mistyped or
+# misread key is a one-shot fix, not another guess.
+test_resolve_key_refusal_names_the_actually_open_keys() {
+  local dir fb log home err rc
+  dir="$TMP_ROOT/refusal-names-open"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home refusal-names-open)
+  fm_write_meta "$home/state/t10.meta" "window=sess:fm-t10" "kind=ship"
+  printf 'needs-decision [key=real-key]: choose\n' > "$home/state/t10.status"
+
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t10 --resolve-key mistyped "the answer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a not-open key should refuse"
+  assert_contains "$(cat "$err")" "real-key" \
+    "the refusal should name the key that is actually open, not just the mistyped one"
+  pass "fm-send --resolve-key: a refusal names the key(s) actually open for this task"
+}
+
+# The companion case: when NOTHING is open at all, the refusal must say so
+# plainly rather than pointing at a key list that does not exist.
+test_resolve_key_refusal_states_nothing_is_open_when_ledger_is_empty() {
+  local dir fb log home err rc
+  dir="$TMP_ROOT/refusal-nothing-open"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home refusal-nothing-open)
+  fm_write_meta "$home/state/t11.meta" "window=sess:fm-t11" "kind=ship"
+  printf 'working: nothing open here\n' > "$home/state/t11.status"
+
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t11 --resolve-key anything "the answer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a resolve-key against an empty ledger should refuse"
+  assert_contains "$(cat "$err")" "No decisions are open for this task" \
+    "the refusal should say plainly that nothing is open, not just name the bad key"
+  pass "fm-send --resolve-key: an empty decision ledger refuses with a plain 'nothing open' diagnosis"
+}
+
+# Defect B end to end: a worker-authored status line naming TWO keys on one
+# needs-decision line used to open only the first, silently dropping the
+# second. Both must be open and individually answerable through the real
+# --resolve-key path, in either order.
+test_multi_key_opening_line_is_individually_resolvable() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/multi-key-open"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home multi-key-open)
+  fm_write_meta "$home/state/t12.meta" "window=sess:fm-t12" "kind=ship"
+  printf 'needs-decision [key=alpha] [key=beta]: pick one for each\n' > "$home/state/t12.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=alpha]' >/dev/null \
+    || fail "precondition: alpha should list as open from the two-key opening line: $out"
+  printf '%s' "$out" | grep -F '[key=beta]' >/dev/null \
+    || fail "precondition: beta should list as open from the two-key opening line: $out"
+
+  run_send "$fb" "$home" "$log" t12 --resolve-key alpha "answer for alpha"; rc=$?
+  expect_code 0 "$rc" "answering alpha should succeed"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=beta]' >/dev/null \
+    || fail "beta should remain open after only alpha was answered: $out"
+  if printf '%s' "$out" | grep -F '[key=alpha]' >/dev/null; then
+    fail "alpha should no longer be open: $out"
+  fi
+
+  run_send "$fb" "$home" "$log" t12 --resolve-key beta "answer for beta"; rc=$?
+  expect_code 0 "$rc" "answering beta should succeed"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "both keys answered but a decision is still reported open: $out"
+  fi
+  pass "fm-send --resolve-key: a two-key opening line opens and closes each key independently"
+}
+
 # The close is an enqueue-time fact: the durable record IS the delivery, so a
 # failed doorbell keystroke must not reopen the split-brain where the close
 # waited on an unconfirmable submit.
@@ -725,6 +805,9 @@ test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
 test_not_open_key_refuses_before_send
+test_resolve_key_refusal_names_the_actually_open_keys
+test_resolve_key_refusal_states_nothing_is_open_when_ledger_is_empty
+test_multi_key_opening_line_is_individually_resolvable
 test_failed_ring_still_closes_at_enqueue
 test_failed_enqueue_does_not_close
 test_multiple_keys_close_together

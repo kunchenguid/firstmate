@@ -265,6 +265,23 @@ test_status_span_respects_decision_closure() {
     || fail "a still-open decision was retired by a newer closure under another key"
   [ "$event" = "needs-decision [key=api]: pick A or B" ] \
     || fail "the span reported '$event' instead of the decision still open"
+  # A multi-key opening line is retired only when EVERY one of its keys has
+  # moved on: closing one key while reopening another must not let the stale
+  # multi-key line resurface, but the fresh reopening under the live key must.
+  printf 'needs-decision [key=alpha] [key=beta]: choose an approach and a rollout window\nresolved [key=alpha]: went with blue-green\nneeds-decision [key=beta]: reconsidered the rollout window\n' \
+    > "$state/multikey-reopen.status"
+  event=$(status_span_first_actionable "$state/multikey-reopen.status" 0) \
+    || fail "a multi-key line's live reopening under one key was classified routine"
+  [ "$event" = "needs-decision [key=beta]: reconsidered the rollout window" ] \
+    || fail "the span reported '$event' instead of the fresh single-key reopening"
+  # The same multi-key opening survives when only ONE of its two keys is still
+  # open: it is still the live opening for that key.
+  printf 'needs-decision [key=gamma] [key=delta]: choose gamma and delta path\nresolved [key=gamma]: settled gamma\n' \
+    > "$state/multikey-partial-close.status"
+  event=$(status_span_first_actionable "$state/multikey-partial-close.status" 0) \
+    || fail "a multi-key line still open under one key was classified routine"
+  [ "$event" = "needs-decision [key=gamma] [key=delta]: choose gamma and delta path" ] \
+    || fail "the span reported '$event' instead of the multi-key line still open under delta"
   printf 'needs-decision [key=pending-reply-x]: unrelated request\nworking: awaiting reconciliation\n' \
     > "$state/rejected-reserved.status"
   event=$(status_span_first_actionable "$state/rejected-reserved.status" 0) \

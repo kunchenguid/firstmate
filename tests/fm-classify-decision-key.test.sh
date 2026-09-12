@@ -239,6 +239,57 @@ test_blocked_and_resolved_are_tag_order_independent() {
   pass "blocked/resolved parse their bare verb with any bracket-tag order preceding the colon"
 }
 
+# The reported failure: a line carrying more than one "[key=...]" tag before
+# the colon used to read only the FIRST, silently dropping every other stated
+# key. An OPENING line with two keys must open BOTH, not just the first.
+test_multi_key_opening_line_opens_every_key() {
+  local dir expected
+  dir=$(case_dir multi-open)
+  printf 'needs-decision [key=a] [key=b]: pick one\n' > "$dir/t.status"
+  expected=$(printf 'a\tneeds-decision\tpick one\nb\tneeds-decision\tpick one\n')
+  assert_fold "$dir/t.status" "$expected" "two before-colon keys on one opening line"
+  pass "a needs-decision line naming two keys opens both, not just the first"
+}
+
+# The observed production failure this defect describes: a CLOSING line that
+# lists its key SECOND used to leave that decision open forever, because only
+# the first "[key=...]" token was ever read. Both named keys must close.
+test_multi_key_closing_line_closes_every_key() {
+  local dir
+  dir=$(case_dir multi-close)
+  printf 'needs-decision [key=irrelevant]: unrelated question\n' > "$dir/t.status"
+  printf 'needs-decision [key=review-r5-cap-question]: cap question\n' >> "$dir/t.status"
+  # The real-world shape: the decision that actually needs closing is named
+  # SECOND on the resolving line.
+  printf 'resolved [key=irrelevant] [key=review-r5-cap-question]: both answered\n' >> "$dir/t.status"
+  assert_fold "$dir/t.status" "" \
+    "a resolved line naming two keys, the real one listed second, closes both"
+  pass "a resolved line naming two keys closes every one of them, regardless of order"
+}
+
+# A malformed slug anywhere among several stated keys rejects the WHOLE line -
+# the same rule as the single-key case - rather than opening the valid ones
+# and silently dropping the bad one.
+test_multi_key_line_with_one_malformed_slug_rejects_whole_line() {
+  local dir
+  dir=$(case_dir multi-malformed)
+  printf 'needs-decision [key=good] [key=bad key]: pick one\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" "" "a multi-key line with one malformed slug opens nothing"
+  pass "a malformed slug among several stated keys rejects the whole line, like the single-key case"
+}
+
+# _fm_decision_key is the single-value convenience wrapper other callers use
+# (e.g. fm-pending-reply-lib.sh's self-authored escalation lines, which are
+# single-key by construction). It must refuse a multi-key line rather than
+# silently returning the first - the exact bug this defect removes, at a
+# different call site.
+test_fm_decision_key_refuses_multi_key_line() {
+  if _fm_decision_key 'needs-decision [key=a] [key=b]: pick one' >/dev/null 2>&1; then
+    fail "_fm_decision_key silently returned a single key for a multi-key line"
+  fi
+  pass "_fm_decision_key refuses a multi-key line instead of silently taking the first"
+}
+
 test_incremental_agrees_with_full_fold_across_appends() {
   local dir f expected
   dir=$(case_dir incremental)
@@ -274,6 +325,10 @@ test_corr_and_key_tags_open_and_close_under_the_stated_key
 test_corr_only_tag_opens_as_default_like_a_bare_line
 test_key_only_before_colon_still_opens_no_regression
 test_blocked_and_resolved_are_tag_order_independent
+test_multi_key_opening_line_opens_every_key
+test_multi_key_closing_line_closes_every_key
+test_multi_key_line_with_one_malformed_slug_rejects_whole_line
+test_fm_decision_key_refuses_multi_key_line
 test_incremental_agrees_with_full_fold_across_appends
 
 # status_key_closing_verb reports HOW the status side currently reads one key,
