@@ -66,10 +66,13 @@
 #            stranded claim generation as a durable `check` wake, because the
 #            supervision cycle discards this command's own output and exit
 #            status. The wake names what clears that strand: the `start`
-#            command for a reused pid whose group survives, or the check a
-#            human makes for a group that lost its leader, which `start`
-#            reports as owned and which the next cycle reclaims on its own
-#            once that group is empty.
+#            command for a stale leader whose generation is not proved gone,
+#            or the check a human makes for a group that lost its leader,
+#            which `start` reports as owned and which the next cycle reclaims
+#            on its own once that group is empty; either wake says whether the
+#            recorded poll child is still alive. A pid that was provably
+#            reused after the claim was written strands nothing: the
+#            generation reads as gone and the source is relaunched.
 # handled    Durably and idempotently record that a captured result has been
 #            fully handled: <source-id> <sequence>. Prints "handled: id seq"
 #            the first time for that exact source-and-sequence generation and
@@ -193,11 +196,14 @@
 #
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
-# only a claim whose stale owner and independently absent process group prove
-# its whole generation gone is reclaimed. A crashed leader or reused pid whose
-# process group still has members cannot relax ownership cleanup. Reconcile
-# signals only a live identity-matched runner group and otherwise keeps the
-# claim without starting a replacement.
+# only a claim whose stale owner and independently gone generation is reclaimed,
+# where "gone" is fm_procevent_claim_group_state_locked's verdict: the poll
+# child the runner recorded at spawn is not running, and the process group is
+# either empty or provably a stranger's because the runner's pid was reused
+# after the claim was written. A crashed leader, or a group with members that
+# verdict cannot identify, cannot relax ownership cleanup. Reconcile signals
+# only a live identity-matched runner group and otherwise keeps the claim
+# without starting a replacement.
 #
 # Durability boundary: see bin/fm-procevent-lib.sh. This runner proves capture
 # before publication and bounded re-announcement until handled, and nothing
@@ -705,6 +711,16 @@ owner_lease_keepalive() {  # <parent-pid> <parent-identity>
   done
 }
 
+# Bind the source command this runner just spawned to its own claim, so a later
+# reader can tell that child from any process that inherits its number once it
+# exits. Called while the source lock from the claim is still held. Best effort:
+# a child that has already returned leaves no record, and the generation then
+# reads through the numeric group probe exactly as before.
+record_poll_child() {  # <source-id> <child-pid>
+  fm_procevent_claim_child_record_locked "$1" "$CLAIM_HOME" "$CLAIM_PID" "$CLAIM_TOKEN" "$2" \
+    2>/dev/null || true
+}
+
 cmd_start_public() {
   local id=${1-} identity keeper status
   [ "$#" -eq 1 ] || usage
@@ -887,6 +903,7 @@ cmd_start() {
       "$launch_ready" -- "${ARGV[@]}" > "$launch_reply" &
     launch_pid=$!
     while [ ! -s "$REG/$launch_ready" ] && kill -0 "$launch_pid" 2>/dev/null; do sleep 0.01; done
+    record_poll_child "$id" "$launch_pid"
     fm_procevent_source_lock_release "$id" \
       || die "cannot release the source launch boundary: $id"
     wait "$launch_pid" || {
@@ -942,6 +959,7 @@ EOF
     launch_pid=$!
     exec 5>&-
     rm -f -- "$launch_ready"
+    record_poll_child "$id" "$launch_pid"
     fm_procevent_source_lock_release "$id" \
       || die "cannot release the source launch boundary: $id"
     perl -e '
@@ -1295,21 +1313,60 @@ announce_source_once() {  # <marker> <generation> <key> <payload> [marker-record
   return 0
 }
 
-# The reused-pid strand: the recorded pid is alive under a different identity
-# while the runner's process group still has members. The claim path does not
-# consult the process group, so a deliberate `start` reclaims this - provided
-# the dead generation's reservation records can still be tidied, because that
-# tidy-up is only waived for a generation proven gone, and this one is not.
+# What the loaded claim's poll-child record says right now, for the strand
+# messages below: `alive` when that child is provably still the process the
+# runner spawned, `gone` when the record names a process that has exited or
+# been replaced, and `unknown` when there is no record or its identity cannot
+# be read at the moment.
+loaded_claim_child_word() {
+  fm_procevent_claim_child_alive_locked
+  case "$?" in
+    0) printf 'alive' ;;
+    1) if [ -n "${FM_PROCEVENT_CLAIM_CHILD_PID:-}" ]; then printf 'gone'; else printf 'unknown'; fi ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# The stale-leader strand: the recorded pid no longer reads as the runner that
+# claimed the source, yet the generation is not proved gone - its poll child is
+# still alive, or its process group has members nobody can identify. The claim
+# path does not consult the process group, so a deliberate `start` reclaims
+# this - provided the dead generation's reservation records can still be
+# tidied, because that tidy-up is only waived for a generation proven gone, and
+# this one is not. Three branches, one per poll-child word: the child is alive,
+# the child is gone and the surviving members are unidentified, or the child's
+# state cannot be read at all.
 stranded_reused_pid_detail() {  # <source-id>
-  printf '%s' "its claim names a dead runner whose process group still has members, so reconcile preserves that claim and starts no replacement. Check that nothing is still polling the source, then reclaim it with: bin/fm-procevent.sh start $1 - that reclaims it provided the dead generation's reservation records can still be tidied, and otherwise refuses with: cannot claim source"
+  case "$(loaded_claim_child_word)" in
+    alive)
+      printf '%s' "its runner no longer reads as the process that claimed it, but the polling child it started (pid ${FM_PROCEVENT_CLAIM_CHILD_PID:-?}) is still alive on the source's session, so reconcile preserves that claim and starts no replacement. Stop that child yourself if it should not be polling any more, then reclaim the source with: bin/fm-procevent.sh start $1 - that reclaims it provided the dead generation's reservation records can still be tidied, and otherwise refuses with: cannot claim source"
+      ;;
+    gone)
+      printf '%s' "its runner no longer reads as the process that claimed it and the polling child it started has exited, yet its process group still has members this home cannot identify - something that child spawned, or an unrelated group that took over the number - so reconcile preserves that claim and starts no replacement. Find out what is still polling the source before reclaiming it, then reclaim it with: bin/fm-procevent.sh start $1 - that reclaims it provided the dead generation's reservation records can still be tidied, and otherwise refuses with: cannot claim source"
+      ;;
+    *)
+      printf '%s' "its claim names a runner that no longer reads as the process that claimed it, while its process group still has members, so reconcile preserves that claim and starts no replacement. Check that nothing is still polling the source, then reclaim it with: bin/fm-procevent.sh start $1 - that reclaims it provided the dead generation's reservation records can still be tidied, and otherwise refuses with: cannot claim source"
+      ;;
+  esac
 }
 
 # The leaderless strand: the runner leader is gone and its group still has
 # members. `start` reports this as owned and reclaims nothing, and nothing
 # automatic signals that group, so the only honest recovery to name is the
-# check a human makes; an empty group reads as gone on the next cycle.
+# check a human makes; an empty group reads as gone on the next cycle. The
+# poll-child record says whether that check is already answered.
 stranded_leaderless_detail() {  # <source-id>
-  printf '%s' "its runner died and its polling child may still be attached to the source's session, so reconcile preserves that claim and starts no replacement, and nothing automatic will touch that group. Verify whether anything is still polling $1; once that process group is empty, the next reconcile reclaims the source on its own."
+  case "$(loaded_claim_child_word)" in
+    alive)
+      printf '%s' "its runner died and the polling child it started (pid ${FM_PROCEVENT_CLAIM_CHILD_PID:-?}) is still attached to the source's session, so reconcile preserves that claim and starts no replacement, and nothing automatic will touch that group. Stop that child yourself if it should not be polling any more; once its process group is empty, the next reconcile reclaims the source on its own."
+      ;;
+    gone)
+      printf '%s' "its runner and the polling child it started are both gone, but its process group still has members this home cannot identify - something that child spawned, or an unrelated group that took over the number - so reconcile preserves that claim and starts no replacement, and nothing automatic will touch that group. Verify whether anything is still polling $1; once that process group is empty, the next reconcile reclaims the source on its own."
+      ;;
+    *)
+      printf '%s' "its runner died and its polling child may still be attached to the source's session, so reconcile preserves that claim and starts no replacement, and nothing automatic will touch that group. Verify whether anything is still polling $1; once that process group is empty, the next reconcile reclaims the source on its own."
+      ;;
+  esac
 }
 
 cmd_reconcile() {
@@ -1562,12 +1619,25 @@ runner_group_signal() {  # <signal> <pid> <identity> [proved]
   else
     # Before the first signal, require a live identity-matched group leader:
     # absent, unreadable, reused, or nonleader PIDs cannot prove ownership.
-    # Launch pacing, leases, and reconcile cleanup remain the backstop.
+    # Launch pacing, leases, and reconcile cleanup remain the backstop. A stale
+    # leader whose generation is provably gone has nothing left to signal, while
+    # a generation that is still running or cannot be identified stays refused.
+    # That read comes from the claim the caller loaded for this exact runner;
+    # a caller holding no such claim (the owner guard) keeps the bare group probe.
     fm_procevent_pid_state "$pid" "$identity"
     state=$?
     case "$state" in
       0) ;;
-      1) fm_procevent_group_alive "$pid" && return 2; return 1 ;;
+      1)
+        if [ "${FM_PROCEVENT_CLAIM_PID:-}" = "$pid" ] \
+          && [ "${FM_PROCEVENT_CLAIM_IDENTITY:-}" = "$identity" ]; then
+          fm_procevent_claim_group_state_locked
+          [ "$?" -eq 1 ] && return 1
+          return 2
+        fi
+        fm_procevent_group_alive "$pid" && return 2
+        return 1
+        ;;
       *) return 2 ;;
     esac
     pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 2

@@ -90,6 +90,71 @@ fm_pid_identity() {
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
 
+# A process's start time alone, with no program image folded in. An "is the
+# process we started still running" check needs exactly this and nothing
+# more: a pid whose start time differs is a different process, which is the
+# pid reuse this guards against, while a live process that exec'd into another
+# program keeps both its pid and its start time and is still the one that was
+# started. fm_pid_identity deliberately folds the command in as well, so a ROLE
+# predicate can retire a process that exec'd away from the role it registered
+# for; reusing that string here would read a live exec'd process as dead.
+# Keying liveness on start time rather than the program image originates in
+# commit 9141bafc. Mirrors fm_pid_identity's source selection so both read the
+# same process facts on every platform. The ps fallback's lstart
+# rendering is pinned to one locale AND one time zone: the identity is written
+# under one environment and re-read under another, and a zone-shifted rendering
+# of the same start instant would read a live process as a stranger.
+fm_pid_start_identity() {  # <pid>
+  local pid=$1 proc_root stat_line starttime
+  local -a stat_fields
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    # After the final comm delimiter, array index 19 is proc stat field 22.
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    starttime=${stat_fields[19]}
+    case "$starttime" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    printf 'proc-starttime=%s\n' "$starttime"
+    return 0
+  fi
+  # Same LC_ALL=C pinning as fm_pid_identity, plus TZ=UTC: lstart is written
+  # under one locale and zone and re-read under the machine's ambient ones.
+  starttime=$(LC_ALL=C TZ=UTC ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  [ -n "$starttime" ] || return 1
+  printf 'lstart=%s\n' "$(printf '%s' "$starttime" | sed 's/^[[:space:]]*//')"
+}
+
+# The epoch second a live process started at, within a second, derived from
+# ps's elapsed time rather than any rendered clock. Unlike the lstart rendering
+# inside fm_pid_identity and fm_pid_start_identity, this depends on no locale
+# and no time zone, so it can bound a process's start against a file's mtime
+# taken on the same machine. Empty and nonzero when the process is gone or the
+# elapsed time cannot be read.
+fm_pid_start_epoch() {  # <pid>
+  local pid=$1 etime days=0 hours=0 minutes seconds now
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  etime=$(LC_ALL=C ps -p "$pid" -o etime= 2>/dev/null | tr -d '[:space:]') || return 1
+  [ -n "$etime" ] || return 1
+  case "$etime" in *-*) days=${etime%%-*}; etime=${etime#*-} ;; esac
+  case "$etime" in
+    *:*:*) hours=${etime%%:*}; etime=${etime#*:} ;;
+  esac
+  minutes=${etime%%:*}
+  seconds=${etime#*:}
+  case "$days$hours$minutes$seconds" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$minutes" != "$etime" ] || return 1
+  now=$(date +%s) || return 1
+  printf '%s\n' $(( now - 10#$days * 86400 - 10#$hours * 3600 - 10#$minutes * 60 - 10#$seconds ))
+}
+
 fm_path_mtime() {
   if [ "$_FM_UNAME" = Darwin ]; then
     /usr/bin/stat -f %m "$1" 2>/dev/null

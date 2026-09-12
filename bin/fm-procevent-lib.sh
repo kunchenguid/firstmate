@@ -324,11 +324,27 @@ fm_procevent_owner_alive() {  # <state-root> <lease-seconds>
 
 # --- ownership --------------------------------------------------------------
 # A claim is a private file recording the home, runner pid, claim generation,
-# and process identity. Registration and every ownership transition are
+# and process identity, with a token-bound record of the poll child the runner
+# spawned beside it. Registration and every ownership transition are
 # serialized at one source boundary.
 
 fm_procevent_claim_path() {
   printf '%s/%s.claim\n' "$(fm_procevent_claim_root)" "$1"
+}
+
+# The claim generation's poll-child record, beside its claim: the claim token
+# it belongs to, the pid the runner spawned the source command as, and that
+# pid's start identity (fm_pid_start_identity). Written by the runner under the
+# source lock right after the spawn, read back only when its token matches the
+# loaded claim, and removed with the claim, so a record from a dead generation
+# can never speak for the one that replaced it. It keys the child on its pid
+# plus its start time, not its program image, because the question is "is the
+# process we started still running" and a source command that exec's into its
+# long-lived poller keeps its pid and start time while its command line
+# changes. Keying process liveness on start time rather than the program image
+# originates in commit 9141bafc.
+fm_procevent_claim_child_path() {
+  printf '%s/%s.child\n' "$(fm_procevent_claim_root)" "$1"
 }
 
 fm_procevent_source_lock_path() {
@@ -573,6 +589,62 @@ fm_procevent_claim_load_locked() {  # <source-id>
   FM_PROCEVENT_CLAIM_STATE_INODE=$state_inode
   FM_PROCEVENT_CLAIM_STATE_OWNER=$state_owner
   FM_PROCEVENT_CLAIM_STATE_MODE=$state_mode
+  # When this claim record was last written, for bounding a live pid's start
+  # against it (fm_procevent_claim_group_state_locked). Empty when unreadable.
+  FM_PROCEVENT_CLAIM_RECORDED_AT=$(fm_path_mtime "$claim" 2>/dev/null || true)
+  case "$FM_PROCEVENT_CLAIM_RECORDED_AT" in *[!0-9]*) FM_PROCEVENT_CLAIM_RECORDED_AT= ;; esac
+  fm_procevent_claim_child_load_locked "$1"
+}
+
+# Read the loaded claim's poll-child record into FM_PROCEVENT_CLAIM_CHILD_PID
+# and FM_PROCEVENT_CLAIM_CHILD_START. Both are empty when the record is absent,
+# malformed, or belongs to another claim generation: every reader then falls
+# back to the numeric group read, which preserves rather than releases.
+fm_procevent_claim_child_load_locked() {  # <source-id>
+  local file token pid start extra
+  FM_PROCEVENT_CLAIM_CHILD_PID=
+  FM_PROCEVENT_CLAIM_CHILD_START=
+  file=$(fm_procevent_claim_child_path "$1")
+  [ -f "$file" ] && [ ! -L "$file" ] || return 0
+  {
+    IFS= read -r token \
+      && IFS= read -r pid \
+      && IFS= read -r start \
+      && ! IFS= read -r extra
+  } < "$file" || return 0
+  [ "$token" = "${FM_PROCEVENT_CLAIM_TOKEN:-}" ] || return 0
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  [ -n "$start" ] || return 0
+  FM_PROCEVENT_CLAIM_CHILD_PID=$pid
+  FM_PROCEVENT_CLAIM_CHILD_START=$start
+}
+
+# fm_procevent_claim_child_record_locked <source-id> <home> <pid> <token> <child-pid>
+# Bind the just-spawned source command to the caller's own live claim. Best
+# effort by design, like the lock's pid-start record: a child that has already
+# exited, or a start time that cannot be read right now, leaves no record, and
+# the generation then reads exactly as a pre-record build's would.
+fm_procevent_claim_child_record_locked() {
+  local id=$1 home=$2 pid=$3 token=$4 child=$5 root file tmp start
+  case "$child" in ''|*[!0-9]*) return 1 ;; esac
+  fm_procevent_claim_load_locked "$id" \
+    && [ "$FM_PROCEVENT_CLAIM_HOME" = "$home" ] \
+    && [ "$FM_PROCEVENT_CLAIM_PID" = "$pid" ] \
+    && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$token" ] || return 1
+  start=$(fm_pid_start_identity "$child" 2>/dev/null) || return 1
+  [ -n "$start" ] || return 1
+  root=$(fm_procevent_claim_root)
+  file=$(fm_procevent_claim_child_path "$id")
+  tmp=$(umask 077; mktemp "$root/.child.XXXXXX") || return 1
+  if printf '%s\n%s\n%s\n' "$token" "$child" "$start" > "$tmp" \
+    && chmod 0600 "$tmp" \
+    && mv -f -- "$tmp" "$file"; then
+    FM_PROCEVENT_CLAIM_CHILD_PID=$child
+    FM_PROCEVENT_CLAIM_CHILD_START=$start
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
 }
 
 fm_procevent_claim_state_root_field_valid() {  # <canonical-state-root>
@@ -620,16 +692,18 @@ fm_procevent_claim_capture_reservation_remove_locked() {
 }
 
 # fm_procevent_claim_generation_gone_locked
-# True only when the loaded claim's owner is stale and the process group it led
-# independently has no members left. The separate group check also covers a
-# reused live pid whose identity differs while the old generation survives.
-# A live matched owner (state 0), an unreadable identity (state 2), and a
-# crashed leader with a still-live ambiguous group (state 3) all return false.
+# True only when the loaded claim's owner is stale and the generation it led is
+# independently proved gone by fm_procevent_claim_group_state_locked: its
+# recorded poll child is not running, and its process group is either empty or
+# provably a stranger's. A live matched owner (state 0), an unreadable identity
+# (state 2), a crashed leader with a still-live group (state 3), and a group
+# whose members this home cannot identify all return false.
 fm_procevent_claim_generation_gone_locked() {
   local state=0
   fm_procevent_pid_state "${FM_PROCEVENT_CLAIM_PID:-}" "${FM_PROCEVENT_CLAIM_IDENTITY:-}" || state=$?
-  [ "$state" -eq 1 ] \
-    && ! fm_procevent_group_alive "${FM_PROCEVENT_CLAIM_PID:-}"
+  [ "$state" -eq 1 ] || return 1
+  fm_procevent_claim_group_state_locked
+  [ "$?" -eq 1 ]
 }
 
 # fm_procevent_claim_undisplaceable_locked <source-id>
@@ -642,14 +716,15 @@ fm_procevent_claim_generation_gone_locked() {
 # previous load put there, so the record check has to travel with the generation
 # check rather than being left to each caller.
 #
-# What the surviving process group means is why this refuses rather than
-# relaunches. fm_procevent_group_alive probes the runner's OWN process group,
-# and the runner leads that group with its polling source child inside it, so
-# "the group still has members" can mean that child is still attached to the
-# session the source collects from. Starting a replacement there puts a second
-# destructive poller on one session, which drains and loses what the source was
-# collecting. A source that needs a human beats a source that silently eats what
-# it was supposed to deliver.
+# What a surviving process group means is why this refuses rather than
+# relaunches. The runner leads its own process group with its polling source
+# child inside it, so "the group still has members" can mean that child, or
+# something it spawned, is still attached to the session the source collects
+# from. Starting a replacement there puts a second destructive poller on one
+# session, which drains and loses what the source was collecting. A source that
+# needs a human beats a source that silently eats what it was supposed to
+# deliver. fm_procevent_claim_group_state_locked owns which members count as
+# this generation's and when a live number is provably somebody else's.
 fm_procevent_claim_undisplaceable_locked() {  # <source-id>
   [ -e "$(fm_procevent_claim_path "$1")" ] || return 1
   ! fm_procevent_claim_generation_gone_locked
@@ -670,21 +745,104 @@ fm_procevent_claim_capture_reservation_reclaim_locked() {
 }
 
 # fm_procevent_group_alive <pid>
-# True while any process remains in the runner's numeric process group. A runner
-# starts as its own group leader, but after that leader exits a same-numbered
-# group may be reused, so group presence prevents proving the generation gone.
+# True while any process remains in the runner's numeric process group. This
+# is a bare number probe: it cannot tell the generation's own members from a
+# group that took the number after they were gone, so on its own it can only
+# prove absence. fm_procevent_claim_group_state_locked is the read that knows
+# whose the members are.
 fm_procevent_group_alive() {
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 -"$1" 2>/dev/null
 }
 
+# fm_procevent_claim_child_alive_locked
+# 0 = the loaded generation's recorded poll child is alive and still the process
+# the runner spawned (its start identity matches), 1 = no record, exited, or a
+# different process now wears that pid, 2 = alive but its start identity cannot
+# be read right now.
+fm_procevent_claim_child_alive_locked() {
+  local pid=${FM_PROCEVENT_CLAIM_CHILD_PID:-} recorded=${FM_PROCEVENT_CLAIM_CHILD_START:-} current
+  [ -n "$pid" ] && [ -n "$recorded" ] || return 1
+  fm_pid_alive "$pid" || return 1
+  if ! current=$(fm_pid_start_identity "$pid" 2>/dev/null) || [ -z "$current" ]; then
+    fm_pid_alive "$pid" || return 1
+    return 2
+  fi
+  [ "$current" = "$recorded" ]
+}
+
+# True on kernels that never hand out a pid number while a process group with
+# that number still has members: Linux frees a pid number only once no task
+# holds it under any pid type, process group included (kernel/pid.c,
+# __change_pid), and Darwin's fork skips a candidate pid that is in use as a
+# process group or session id (bsd/kern/kern_fork.c, forkproc). Under that
+# guarantee a runner pid that is alive as a DIFFERENT process proves its group
+# was empty when the number was reused, so nothing of the generation survives.
+# Any other platform keeps the conservative read: members it cannot identify
+# preserve the claim.
+fm_procevent_pgid_number_reserved_by_kernel() {
+  case "$_FM_UNAME" in Linux|Darwin) return 0 ;; *) return 1 ;; esac
+}
+
+# fm_procevent_claim_pid_reused_locked
+# True only when the live process wearing the loaded claim's runner pid provably
+# is not the runner that wrote the claim: its identity differs AND it started
+# after the claim record was written, which the claiming runner cannot have
+# done. The second bound is what keeps a rendered identity from deciding this
+# alone: fm_pid_identity's lstart form is a local-time rendering, so a live
+# runner read under a different TZ than it claimed under mismatches without any
+# reuse having happened, and calling that reuse would start a second poller
+# beside a live one. fm_pid_start_epoch depends on neither locale nor zone. The
+# two-second slack covers ps's one-second elapsed-time truncation on both
+# sides; a reuse inside that slack reads as uncertain and is preserved.
+fm_procevent_claim_pid_reused_locked() {
+  local pid=${FM_PROCEVENT_CLAIM_PID:-} recorded=${FM_PROCEVENT_CLAIM_IDENTITY:-} claimed=${FM_PROCEVENT_CLAIM_RECORDED_AT:-}
+  local current started
+  fm_pid_alive "$pid" || return 1
+  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$current" ] && [ "$current" != "$recorded" ] || return 1
+  [ -n "$claimed" ] || return 1
+  started=$(fm_pid_start_epoch "$pid" 2>/dev/null) || return 1
+  case "$started" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$started" -gt $((claimed + 2)) ]
+}
+
+# fm_procevent_claim_group_state_locked
+# Whose the loaded claim's process group is, for a claim whose leader is not a
+# live identity match. 0 = the generation is still running: its recorded poll
+# child is alive and unchanged. 1 = the generation is provably gone: the child
+# is not running and the group is empty, or the runner's pid has provably been
+# reused (fm_procevent_claim_pid_reused_locked) on a kernel that reserves group
+# numbers, which proves the group was empty when the number was handed out.
+# 2 = uncertain: the group still has members this home cannot identify -
+# something the dead child spawned, or an unrelated group that took the number
+# after a stranger leader exited - a live pid whose reuse cannot be proved, or
+# an identity that could not be read right now; the claim is preserved for
+# retry.
+fm_procevent_claim_group_state_locked() {
+  local pid=${FM_PROCEVENT_CLAIM_PID:-} child_state
+  fm_procevent_claim_child_alive_locked
+  child_state=$?
+  [ "$child_state" -ne 0 ] || return 0
+  [ "$child_state" -ne 2 ] || return 2
+  fm_procevent_group_alive "$pid" || return 1
+  if fm_procevent_pgid_number_reserved_by_kernel && fm_procevent_claim_pid_reused_locked; then
+    return 1
+  fi
+  return 2
+}
+
 # fm_procevent_pid_state <pid> <identity>
-# 0 live match, 1 stale, 2 uncertain, 3 ambiguous leaderless group.
+# 0 live match, 1 stale, 2 uncertain, 3 leaderless group.
 #
 # State 3 is the crash cut: the runner leader is gone, but a process group with
-# its numeric id still has members. That group may be the old generation or a
-# leaderless group created after PID/PGID reuse, so cleanup preserves the claim
-# without signalling the group or starting a replacement.
+# its numeric id still has members. Cleanup preserves the claim without
+# signalling the group or starting a replacement; whether those members are the
+# generation's own poll child or something this home cannot identify is what
+# fm_procevent_claim_child_alive_locked tells the caller that reports it.
+# State 1 covers both a leader that is gone with an empty group and a live pid
+# whose identity no longer matches; fm_procevent_claim_group_state_locked
+# decides which of those generations is actually gone.
 fm_procevent_pid_state() {
   local pid=$1 expected=$2 actual
   if ! fm_pid_alive "$pid"; then
@@ -776,6 +934,7 @@ fm_procevent_claim_acquire_locked() {
           # Two owners is the one outcome worse than none: never proceed on a
           # claim record that is still there.
           [ "$status" -ne 0 ] || rm -f -- "$claim" || status=1
+          [ "$status" -ne 0 ] || rm -f -- "$(fm_procevent_claim_child_path "$id")" 2>/dev/null || true
         else
           status=1
         fi
@@ -802,6 +961,8 @@ fm_procevent_claim_acquire_locked() {
     [ "$status" -ne 0 ] || mv -f -- "$tmp" "$claim" || status=1
     if [ "$status" -eq 0 ]; then
       FM_PROCEVENT_CLAIM_TOKEN=$token
+      FM_PROCEVENT_CLAIM_CHILD_PID=
+      FM_PROCEVENT_CLAIM_CHILD_START=
       FM_PROCEVENT_CLAIM_REG_IDENTITY=$reg_identity
       FM_PROCEVENT_CLAIM_STATE_ROOT=$state_root
       FM_PROCEVENT_CLAIM_STATE_DEVICE=$state_device
@@ -894,8 +1055,9 @@ fm_procevent_claim_release_mode_locked() {
         ;;
       *) return 1 ;;
     esac
-    rm -f -- "$claim"
-    return $?
+    rm -f -- "$claim" || return 1
+    rm -f -- "$(fm_procevent_claim_child_path "$id")" 2>/dev/null || true
+    return 0
   fi
   return 1
 }
