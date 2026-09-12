@@ -1159,6 +1159,12 @@ Only explicitly qualified general Codex models use the `codex` quota bucket; unq
 The chosen executable, OpenAI provider and Codex auth home are pinned into the launch command.
 Fresh evidence is checked again after allocation and before launch delivery, with account changes refused.
 No credential or email is recorded in a route receipt.
+A `carrier=wrapper` candidate names a PATH executable in `harness` instead of a verified adapter.
+Admission resolves the executable and reads its `--list-models` discovery surface.
+A nonzero exit means a pinned wrapper, which requires `model=default` and passes nothing positional.
+A successful listing requires `model=default` for a single-row wrapper or a listed alias for a multi-row one, passed as the first positional argument.
+Delivery swaps the wrapper binary into its `claude-*` or `codex-*` family template behind a `--` separator, keeping that family's autonomy flags, effort mapping, hook wiring and brief position.
+`bin/fm-spawn.sh` owns the family rule and the exact launch shape.
 Other carrier tuples remain visible as rejected candidates with explicit reasons; no candidate is substituted.
 Claude-hosted Muse, Gemini and Luna do not fall back to Claude account quota, standalone Muse, or bare model flags.
 

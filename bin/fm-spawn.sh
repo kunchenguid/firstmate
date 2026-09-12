@@ -1344,6 +1344,7 @@ PROJ=
 ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
+WRAPFAMILY=
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -1787,6 +1788,38 @@ launch_template() {
   esac
 }
 
+# wrapper_launch builds a supervised launch for a PATH wrapper executable in a
+# verified CLI family. The wrapper owns model selection: a listed alias goes
+# positionally before the separator, a pinned wrapper takes none, and -- carries
+# the family autonomy flags plus the brief through to the underlying CLI. Family
+# templates stay the single owner of flag shapes; this only swaps the binary
+# word and inserts the alias/separator. The caller re-derives the family for the
+# harness-keyed effort substitution below. HARNESS keeps the wrapper name so the
+# claude* wiring arms match it.
+wrapper_launch() {  # <wrapper> <kind> <model> -> launch on stdout
+  local name=$1 kind=$2 model=$3 family bin famlaunch aliaspart bin_q rows
+  case "$name" in
+    *'/'*) echo "error: wrapper harness must be a bare PATH executable name, not a path: $name" >&2; return 1 ;;
+    claude-*|codex-*) family=${name%%-*} ;;
+    *) echo "error: unknown harness '$name'; pass a raw launch command to use an unverified adapter" >&2; return 1 ;;
+  esac
+  bin=$(command -v "$name" 2>/dev/null || true)
+  [ -n "$bin" ] || { echo "error: wrapper harness '$name' is not installed on PATH" >&2; return 1; }
+  [ "$EFFORT" = ultra ] && { echo "error: --effort ultra requires the canonical --harness pi or pi-signed launch so its native flag cannot be omitted" >&2; return 1; }
+  famlaunch=$(launch_template "$family" "$kind") || return 1
+  aliaspart=
+  if [ -n "$model" ] && [ "$model" != default ]; then
+    rows=$("$bin" --list-models 2>/dev/null) || { echo "error: wrapper harness '$name' does not list models, so model must be default" >&2; return 1; }
+    printf '%s\n' "$rows" | awk '{print $1}' | grep -qxF -- "$model" || { echo "error: wrapper harness '$name' does not list model '$model'" >&2; return 1; }
+    aliaspart="$(shell_quote "$model") "
+  fi
+  bin_q=$(shell_quote "$bin")
+  case "$family" in
+    claude) printf '%s' "${famlaunch%% claude *} $bin_q ${aliaspart}-- ${famlaunch#* claude }" ;;
+    codex) printf '%s' "$bin_q ${aliaspart}-- ${famlaunch#codex }" ;;
+  esac
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     RAW_LAUNCH=1
@@ -1820,7 +1853,14 @@ case "$ARG3" in
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+      LAUNCH=$(wrapper_launch "$HARNESS" "$KIND" "$MODEL") || exit 1
+      # Command substitution cannot carry the family back out of
+      # wrapper_launch, so re-derive it here for the harness-keyed effort
+      # substitution below; the family rule itself stays owned by
+      # wrapper_launch, which already refused anything outside claude-*/codex-*.
+      WRAPFAMILY=${HARNESS%%-*}
+    }
     ;;
 esac
 
@@ -4118,7 +4158,7 @@ if [ -n "$POOL_RECEIPT" ]; then
   fi
 fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+EFFORTFLAG=$(effort_flag_for_harness "${WRAPFAMILY:-$HARNESS}" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
@@ -4150,6 +4190,9 @@ case "$HARNESS" in
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac
+# A wrapper launch runs its family's CLI, so it gets the same foreign-marker
+# clearing a canonical family launch gets.
+[ -n "$WRAPFAMILY" ] && LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

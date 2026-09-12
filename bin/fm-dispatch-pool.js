@@ -136,6 +136,34 @@ function codexEvidence(p, raw, now = Date.now()) {
     capability: { model: p.model, effort: p.effort }, quota: { scope: 'codex', windows },
     digest: hash({ identity: raw.identity, model: model[0], limit, checkedAt: raw.checkedAt }) };
 }
+function wrapperEvidence(p, now = Date.now()) {
+  const lookup = spawnSync('sh', ['-c', 'command -v -- "$1"', 'wrapper-lookup', p.harness], { encoding: 'utf8', timeout: 5000 });
+  const found = lookup.status === 0 ? String(lookup.stdout || '').split('\n').map(l => l.trim()).filter(Boolean)[0] : '';
+  if (!found) return reject(p, 'wrapper_not_installed');
+  let binary = found;
+  try { binary = fs.realpathSync(found); } catch { return reject(p, 'wrapper_not_installed'); }
+  const list = spawnSync(binary, ['--list-models'], { encoding: 'utf8', timeout: 10000 });
+  if (list.error || list.signal != null) return reject(p, 'wrapper_probe_failed');
+  if (list.status !== 0) {
+    if (p.model !== 'default') return reject(p, 'wrapper_model_unlisted');
+    const identity = hash({ binary, models: null });
+    return { candidate: p.id, viable: true, source: 'wrapper-pinned', checkedAt: now,
+      identity, binary, authHome: null,
+      capability: { model: p.model, effort: p.effort }, quota: { scope: 'wrapper', windows: [] },
+      digest: hash({ identity, checkedAt: now }) };
+  }
+  const aliases = String(list.stdout || '').split('\n').map(l => l.trim()).filter(Boolean)
+    .map(l => l.split(/\s+/)[0]).filter(a => token(a));
+  if (!aliases.length) return reject(p, 'wrapper_probe_failed');
+  if (aliases.length === 1) {
+    if (p.model !== 'default') return reject(p, 'wrapper_model_pinned_use_default');
+  } else if (p.model !== 'default' && !aliases.includes(p.model)) return reject(p, 'wrapper_model_unlisted');
+  const identity = hash({ binary, models: aliases });
+  return { candidate: p.id, viable: true, source: 'wrapper-list-models', checkedAt: now,
+    identity, binary, authHome: null,
+    capability: { model: p.model, effort: p.effort }, quota: { scope: 'wrapper', windows: [] },
+    digest: hash({ identity, checkedAt: now }) };
+}
 async function probe(pool) {
   let native;
   const results = [];
@@ -149,6 +177,8 @@ async function probe(pool) {
       results.push(reject(p, 'lawful_managed_routing_projection_producer_unavailable'));
     } else if (p.carrier === 'claude-native') {
       results.push(reject(p, 'claude_live_model_effort_and_account_bound_quota_unqualified'));
+    } else if (p.carrier === 'wrapper') {
+      results.push(wrapperEvidence(p));
     } else results.push(reject(p, 'unsupported_carrier_tuple'));
   }
   return results;

@@ -115,3 +115,55 @@ notice=$(jq -cn --arg cwd "$TMP_ROOT/worktree" '{type:"agent-turn-complete","thr
 if pool inspect | grep -q 'PRIVATE MUST NOT BE LOGGED'; then fail 'notification body leaked'; fi
 refused "$ROOT/bin/fm-dispatch-pool-notify.sh" "$TMP_ROOT/config.json" "$TMP_ROOT/state" notify-task "$rid" old-generation "$notice"
 pass 'native notification adapter binds exact generation and preserves signal without storing message bodies'
+
+# Wrapper carriers admit PATH executables through their own --list-models
+# discovery surface; pinned wrappers take model default and nothing positional.
+mkdir -p "$TMP_ROOT/wbin"
+cat > "$TMP_ROOT/wbin/wrap-multi" <<'SH'
+#!/usr/bin/env sh
+if [ "${1:-}" = --list-models ]; then printf '%s\n' 'alpha Alpha model' 'beta Beta model'; exit 0; fi
+exit 0
+SH
+cat > "$TMP_ROOT/wbin/wrap-pinned" <<'SH'
+#!/usr/bin/env sh
+echo "error: unknown option '--list-models'" >&2; exit 1
+SH
+cat > "$TMP_ROOT/wbin/wrap-single" <<'SH'
+#!/usr/bin/env sh
+if [ "${1:-}" = --list-models ]; then printf '%s\n' 'solo Solo model'; exit 0; fi
+exit 0
+SH
+chmod +x "$TMP_ROOT/wbin"/wrap-*
+cat > "$TMP_ROOT/wrap.json" <<'JSON'
+{"schemaVersion":1,"defaults":{},"pools":{"wrap":[
+{"id":"m","harness":"wrap-multi","model":"beta","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1},
+{"id":"p","harness":"wrap-pinned","model":"default","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1},
+{"id":"s","harness":"wrap-single","model":"default","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1},
+{"id":"gone","harness":"wrap-missing","model":"default","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1}
+]}}
+JSON
+wpool() { PATH="$TMP_ROOT/wbin:$PATH" "$ROOT/bin/fm-dispatch-pool.sh" "$1" "$TMP_ROOT/wrap.json" "$TMP_ROOT/state" "${@:2}"; }
+wpool validate >/dev/null
+probe_out=$(wpool probe inspection wrap)
+[ "$(printf '%s' "$probe_out" | jq -r '.candidates[]|select(.candidate=="m")|.viable')" = true ] || fail 'listed wrapper alias not viable'
+[ "$(printf '%s' "$probe_out" | jq -r '.candidates[]|select(.candidate=="p")|.viable')" = true ] || fail 'pinned wrapper not viable'
+[ "$(printf '%s' "$probe_out" | jq -r '.candidates[]|select(.candidate=="s")|.viable')" = true ] || fail 'single-row wrapper default not viable'
+[ "$(printf '%s' "$probe_out" | jq -r '.candidates[]|select(.candidate=="gone")|.reason')" = wrapper_not_installed ] || fail 'missing wrapper not refused'
+[ "$(wpool reserve wtask wrap | jq -r .candidate.id)" = m ] || fail 'wrapper reserve did not select listed candidate'
+wr=$(wpool reserve wverify wrap)
+wpool verify wverify "$(printf '%s' "$wr" | jq -r .id)" >/dev/null || fail 'wrapper receipt revalidation failed'
+wpool finish wverify "$(printf '%s' "$wr" | jq -r .id)" launched >/dev/null
+pass 'wrapper carriers admit listed, pinned and single-row models and refuse missing binaries'
+printf '%s' '{"schemaVersion":1,"defaults":{},"pools":{"w":[ {"id":"x","harness":"wrap-multi","model":"gamma","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1} ]}}' > "$TMP_ROOT/wbad.json"
+cp "$TMP_ROOT/wbad.json" "$TMP_ROOT/wbad-one.json"
+cat > "$TMP_ROOT/wbad-run.sh" <<SH
+#!/usr/bin/env sh
+PATH="$TMP_ROOT/wbin:\$PATH" "$ROOT/bin/fm-dispatch-pool.sh" reserve "$TMP_ROOT/wbad-one.json" "$TMP_ROOT/state" badtask w
+SH
+chmod +x "$TMP_ROOT/wbad-run.sh"
+refused "$TMP_ROOT/wbad-run.sh"
+printf '%s' '{"schemaVersion":1,"defaults":{},"pools":{"w":[ {"id":"x","harness":"wrap-single","model":"solo","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1} ]}}' > "$TMP_ROOT/wbad-one.json"
+refused "$TMP_ROOT/wbad-run.sh"
+printf '%s' '{"schemaVersion":1,"defaults":{},"pools":{"w":[ {"id":"x","harness":"wrap-pinned","model":"solo","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1} ]}}' > "$TMP_ROOT/wbad-one.json"
+refused "$TMP_ROOT/wbad-run.sh"
+pass 'unlisted alias, alias on pinned wrapper and alias on single-row wrapper refuse'
