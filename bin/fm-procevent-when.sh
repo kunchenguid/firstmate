@@ -602,8 +602,17 @@ cmd_run() {
   if [ "$SPEC_REPEAT" = 1 ]; then
     # Mark that the next run must see the condition go false before it may
     # fire again: a still-true level on the next reconcile is not a new
-    # change, and refiring on it would be a duplicate ring.
-    (umask 077; : > "$(edge_file "$sid")") 2>/dev/null || true
+    # change, and refiring on it would be a duplicate ring. A write failure
+    # here is treated the same as a failed journal write below: without the
+    # marker, a fresh run on a level that never went false would refire
+    # immediately, reproducing the exact duplicate-ring bug this file exists
+    # to prevent.
+    if ! (umask 077; : > "$(edge_file "$sid")") 2>/dev/null; then
+      emit_doc "$sid" fired \
+        "the condition held and the action exited 0, but the edge marker could not be written; the watch stops here" \
+        "$polls" "$rc" "$out"
+      exit 0
+    fi
     # Journal first, then release the claim: a crash between the two costs one
     # duplicate ring on restart, while the reverse order could lose the fire's
     # only record and reset the deadline base.
