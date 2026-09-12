@@ -185,10 +185,14 @@ fm_composer_normalize_trim_var() {  # <varname>
 #     dark-foreground run. This assumes a DARK terminal theme, the firstmate
 #     fleet reality, where real typed input is bright and only de-emphasised UI
 #     is dark; the SGR-2 signal above stays theme-independent. A 256-colour
-#     foreground (38;5;n) is NOT luminance-tested - it is palette-dependent and
-#     no fleet harness uses it for ghost text, so it is kept (real text wins:
-#     under-stripping merely defers, which the max-defer alarm surfaces, while
-#     over-stripping would inject over real input).
+#     foreground (38;5;n) is NOT luminance-tested - it is palette-dependent, so
+#     the default keeps it (real text wins: under-stripping merely defers,
+#     which the max-defer alarm surfaces, while over-stripping would inject
+#     over real input). The optional palette-index argument opts exactly one
+#     such foreground (38;5;<n>, semicolon and colon forms) in as an extra
+#     ghost class, ended by the same resets that end a dark-foreground run:
+#     agy's verdict passes 8 because agy de-emphasises its composer furniture
+#     (placeholder, hint, rules) in palette colour 8.
 # Raising FM_COMPOSER_GHOST_LUMA_MAX is not free: muse draws its `⟩` prompt glyph
 # in truecolor 38;2;90;160;255, luminance ~149.9 (verified, muse 0.1.0-R708.1),
 # the tightest margin over the 128 default in the fleet. Above ~150 that glyph is
@@ -198,8 +202,8 @@ fm_composer_normalize_trim_var() {  # <varname>
 # codes are processed left to right within a sequence, so "ESC[0;2m" reads as dim.
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
 # runs alike pass through or drop intact without locale-dependent classes.
-fm_composer_strip_ghost() {
-  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" '
+fm_composer_strip_ghost() {  # [palette-index]
+  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" -v paln="${1:-}" '
     function sgr_code(v, b) {
       b = v
       sub(/:.*/, "", b)
@@ -231,8 +235,16 @@ fm_composer_strip_ghost() {
       r = a[p + 2] + 0; g = a[p + 3] + 0; b = a[p + 4] + 0
       return ((299*r + 587*g + 114*b) / 1000 < lumamax) ? 1 : 0
     }
+    # fg38_is_palette: 1 when the SGR 38 foreground starting at param p is the
+    # opted-in 38;5 palette colour (paln, semicolon or colon form); 0 otherwise.
+    function fg38_is_palette(a, p, k, want, spec) {
+      if (want == "") return 0
+      spec = a[p]
+      if (index(spec, ":") > 0) return (spec == "38:5:" want) ? 1 : 0
+      return (p + 2 <= k && a[p + 1] == "5" && a[p + 2] == want) ? 1 : 0
+    }
     {
-      line = $0; out = ""; dim = 0; darkfg = 0; n = length(line); i = 1
+      line = $0; out = ""; dim = 0; darkfg = 0; pal8 = 0; n = length(line); i = 1
       while (i <= n) {
         c = substr(line, i, 1)
         if (c == "\033") {            # ESC: consume a CSI ... final-byte sequence
@@ -251,22 +263,23 @@ fm_composer_strip_ghost() {
                 v = a[p]; code = sgr_code(v)
                 if (code == "38") {
                   darkfg = fg38_is_dark(a, p, k, lumamax)
+                  pal8 = fg38_is_palette(a, p, k, paln)
                   p = skip_color_payload(a, p, k)
                 } else if (code == "48" || code == "58") {
                   p = skip_color_payload(a, p, k)
                 } else if (code == "2") dim = 1
-                else if (code == "0") { dim = 0; darkfg = 0 }
+                else if (code == "0") { dim = 0; darkfg = 0; pal8 = 0 }
                 else if (code == "22") dim = 0
-                else if (code == "39") darkfg = 0
-                else if (code + 0 >= 30 && code + 0 <= 37) darkfg = 0
-                else if (code + 0 >= 90 && code + 0 <= 97) darkfg = 0
+                else if (code == "39") { darkfg = 0; pal8 = 0 }
+                else if (code + 0 >= 30 && code + 0 <= 37) { darkfg = 0; pal8 = 0 }
+                else if (code + 0 >= 90 && code + 0 <= 97) { darkfg = 0; pal8 = 0 }
               }
             }
             if (j <= n) { i = j + 1; continue }
           }
           i = i + 1; continue          # lone/other ESC: drop the ESC byte only
         }
-        if (dim == 0 && darkfg == 0) out = out c   # keep only non-de-emphasised bytes
+        if (dim == 0 && darkfg == 0 && pal8 == 0) out = out c   # keep only non-de-emphasised bytes
         i++
       }
       print out
@@ -1465,78 +1478,6 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   esac
 }
 
-# agy 1.2.0 de-emphasises its own composer furniture (the mode placeholder a
-# fresh or prompt-interactive-launched session keeps in the input row, the
-# shortcuts hint, the rules) in palette colour 38;5;8 rather than a dim or dark
-# truecolor run, so the shared ghost stripper keeps it. Typed input renders
-# bold. This agy-scoped strip drops dim runs and 38;5;8-foreground runs the
-# same way fm_composer_strip_ghost drops its classes, and nothing broader: no
-# other harness's styling vocabulary is load-bearing here.
-_fm_composer_agy_strip_ghost() {
-  LC_ALL=C awk '
-    function sgr_code(v, b) {
-      b = v
-      sub(/:.*/, "", b)
-      if (b == "") b = "0"
-      return b
-    }
-    function skip_color_payload(a, p, k, mode, code) {
-      if (index(a[p], ":") > 0) return p
-      if (p >= k) return p
-      mode = a[p + 1]
-      code = sgr_code(mode)
-      if (index(mode, ":") > 0) return p + 1
-      if (code == "5") return p + 2
-      if (code == "2") return p + 4
-      return p + 1
-    }
-    function fg38_is_palette8(a, p, k, spec) {
-      spec = a[p]
-      if (index(spec, ":") > 0) return (spec == "38:5:8") ? 1 : 0
-      return (p + 2 <= k && a[p + 1] == "5" && a[p + 2] == "8") ? 1 : 0
-    }
-    {
-      line = $0; out = ""; dim = 0; pal8 = 0; n = length(line); i = 1
-      while (i <= n) {
-        c = substr(line, i, 1)
-        if (c == "\033") {
-          j = i + 1
-          if (substr(line, j, 1) == "[") {
-            j++; params = ""
-            while (j <= n) {
-              cc = substr(line, j, 1)
-              if (cc ~ /[@-~]/) break
-              params = params cc; j++
-            }
-            if (j <= n && substr(line, j, 1) == "m") {
-              if (params == "") params = "0"
-              k = split(params, a, ";")
-              for (p = 1; p <= k; p++) {
-                v = a[p]; code = sgr_code(v)
-                if (code == "38") {
-                  pal8 = fg38_is_palette8(a, p, k)
-                  p = skip_color_payload(a, p, k)
-                } else if (code == "48" || code == "58") {
-                  p = skip_color_payload(a, p, k)
-                } else if (code == "2") dim = 1
-                else if (code == "0") { dim = 0; pal8 = 0 }
-                else if (code == "22") dim = 0
-                else if (code == "39") pal8 = 0
-                else if (code + 0 >= 30 && code + 0 <= 37) pal8 = 0
-                else if (code + 0 >= 90 && code + 0 <= 97) pal8 = 0
-              }
-            }
-            if (j <= n) { i = j + 1; continue }
-          }
-          i = i + 1; continue
-        }
-        if (dim == 0 && pal8 == 0) out = out c
-        i++
-      }
-      print out
-    }
-  '
-}
 
 # agy uses a shell-like > inside solid rules. Require native identity, an
 # idle agent and the footer row directly below the close rule: 1.2.0 showed a
@@ -1545,7 +1486,8 @@ _fm_composer_agy_strip_ghost() {
 # (`user@host:pwd | ctx: <pct> ... · 7d: <pct> | <model>`) anchored on its
 # ` | ctx: ` meter; a trust or help dialog must never become an injection
 # target just because old rules remain on screen. Content is read through the
-# agy ghost strip so the palette placeholder never reads as typed input.
+# shared ghost strip with agy's palette-8 ghost class so the placeholder never
+# reads as typed input.
 _fm_composer_agy_verdict() {  # <screen> <styled> <agent-status>
   local screen=$1 styled=$2 status=$3 row raw plain content pending=0
   [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] || { printf 'unknown'; return; }
@@ -1560,7 +1502,7 @@ _fm_composer_agy_verdict() {  # <screen> <styled> <agent-status>
     plain=$(printf '%s' "$raw" | fm_composer_strip_ansi)
     fm_composer_normalize_trim_var plain
     if [ "$styled" = 1 ]; then
-      content=$(printf '%s' "$raw" | _fm_composer_agy_strip_ghost | fm_composer_strip_ansi)
+      content=$(printf '%s' "$raw" | fm_composer_strip_ghost 8 | fm_composer_strip_ansi)
     else
       content=$plain
     fi
