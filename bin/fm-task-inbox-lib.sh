@@ -270,7 +270,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     *[![:print:]]*) return 1 ;;
   esac
   quoted=$(printf '%s' "$abs" | sed "s/'/'\\\\''/g")
-  printf ": Firstmate instruction waiting: list '%s'/*.msg and read each in numeric order, then mv it to '%s'/handled/ once read - that move only confirms receipt, so track and finish any work it asks for on your own schedule." \
+  printf ": Firstmate instruction waiting: list '%s'/*.msg and read them in numeric order, moving each to '%s'/handled/ as soon as you have read it, leaving none behind - that move only confirms receipt, so track and finish any work it asks for on your own schedule." \
     "$quoted" "$quoted"
 }
 
