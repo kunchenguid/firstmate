@@ -345,6 +345,34 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Grok project-content trust
+
+Verified 2026-09-11 on grok 1.0.25 (f7e67d6988e2) [stable], tmux, Linux.
+`--trust` is omitted from `grok --help` on this build and remains accepted: `grok --trust --version` printed the same version line and exited 0.
+The grok spawn template is backend-independent, so this probe covers the launch used by every spawn-capable session provider.
+
+Isolated tmux windows launched `grok --always-approve` with no prompt in throwaway directories, then captured the pane without sending keys and without inspecting Grok's managed trust store.
+
+A fresh git project with `AGENTS.md`, and a fresh git project with `AGENTS.md` plus `.grok/hooks`, both rendered the project-content dialog:
+
+```text
+Do you trust the contents of this directory?
+<fresh-git-project>
+Grok Build may run or modify contents in this directory,
+posing security risks.
+Yes, proceed                 y
+No, quit                     n
+```
+
+A fresh git project with only a README, a non-git directory under a home-cache path, and a non-git directory under `/tmp` reached the idle composer instead.
+None of those launches rendered the older `Run Grok Build in a project directory?` picker.
+
+The same `AGENTS.md` git-project shape launched as `grok --trust --always-approve` skipped the dialog and reached the idle composer with footer `always-approve`.
+
+`bin/fm-spawn.sh` therefore passes `--trust` on the grok template.
+`tests/fm-spawn-dispatch-profile.test.sh` pins that launch command through the fake-tmux send log.
+Do not hand-edit Grok's managed trust files to refresh this record; rerun the isolated TUI probe after a Grok upgrade.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

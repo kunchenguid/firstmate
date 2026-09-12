@@ -85,7 +85,7 @@ launch_cmd() {  # <name>
     codex) printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox' ;;
     opencode) printf '%s' "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode" ;;
     pi|pi-signed) printf '%s' "$1" ;;
-    grok) printf '%s' 'grok --always-approve' ;;
+    grok) printf '%s' 'grok --trust --always-approve' ;;
     kimi) printf '%s' 'kimi --auto' ;;
     muse) printf '%s' 'MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on muse --yolo' ;;
     *) return 1 ;;
