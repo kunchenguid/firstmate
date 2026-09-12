@@ -198,7 +198,6 @@ SH
       cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$lab/.pi/extensions/"
       cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
         "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$lab/.pi/extensions/lib/"
-      cp "$ROOT/bin/fm-operational-input.sh" "$lab/bin/"
       printf '%s\n' '{"compaction":{"keepRecentTokens":200}}' > "$lab/.pi/settings.json"
       ;;
   esac
@@ -278,13 +277,33 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     || fail "$harness $version: could not start an interactive lab session"
 
   # Every run-tier TUI asks whether it trusts a folder it has not seen, and the
-  # session-open hook only fires once that is answered. Each harness's default
-  # selection IS the trusting one, so a bare Enter clears it; the loop keeps
-  # waiting for the recorded open either way, so a harness that stops prompting
-  # costs nothing. harness-adapters owns trust handling outside tests.
+  # session-open hook only fires once that is answered. Claude 2.1.269 defaults
+  # that dialog to the UNTRUSTING option ("No, exit"), so a bare Enter would
+  # quit instead of trusting; the dialog is therefore answered by moving its
+  # cursor onto the option that names the trusting word (Yes/Trust) before
+  # Enter, in either list order. The loop keeps waiting for the recorded open
+  # either way, so a harness that stops prompting costs nothing.
+  # harness-adapters owns trust handling outside tests.
   n=0
   while [ "$n" -lt 60 ] && ! grep -q . "$record" 2>/dev/null; do
-    if capture "$session" | grep -qiE 'trust (this|the|parent)?[[:space:]]*(folder|project)'; then
+    pane_now=$(capture "$session")
+    if printf '%s\n' "$pane_now" | grep -qiE 'trust (this|the|parent)?[[:space:]]*(folder|project)'; then
+      # The trusting option is a short line naming "Yes"; the explanatory
+      # prose above the options is long, and only the options are selectable.
+      trust_line=$(printf '%s\n' "$pane_now" | awk 'length($0) <= 60 && /[Yy]es/ {print NR; exit}')
+      cursor_line=$(printf '%s\n' "$pane_now" | awk 'index($0, "❯") {print NR; exit}')
+      if [ -n "$trust_line" ] && [ -n "$cursor_line" ] \
+        && [ "$trust_line" != "$cursor_line" ] \
+        && [ $(( trust_line > cursor_line ? trust_line - cursor_line : cursor_line - trust_line )) -le 5 ]; then
+        while [ "$cursor_line" -lt "$trust_line" ]; do
+          tmux -L "$SOCKET" send-keys -t "$session" Down
+          cursor_line=$(( cursor_line + 1 ))
+        done
+        while [ "$cursor_line" -gt "$trust_line" ]; do
+          tmux -L "$SOCKET" send-keys -t "$session" Up
+          cursor_line=$(( cursor_line - 1 ))
+        done
+      fi
       tmux -L "$SOCKET" send-keys -t "$session" Enter
       sleep 5
     fi
@@ -386,8 +405,8 @@ probe_compact_reopen() {  # <harness> <version> <lab> <resume-argv...>
   compact_out=$( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
     FM_PRECOMPACT_STOW_AGENT="$lab/bin/stub-stow-agent" \
     "$@" '/compact' < /dev/null 2>&1 ) || true
-  printf '%s' "$compact_out" | grep -Fq 'Context compacted' \
-    || fail "$harness $version: the second /compact did not report 'Context compacted'; refresh this guard against that harness version (output: $(printf '%s' "$compact_out" | tail -n 3 | tr '\n' ' '))"
+  printf '%s' "$compact_out" | grep -Eq 'Context compacted|Compacted\.' \
+    || fail "$harness $version: the second /compact did not report a completed compaction; refresh this guard against that harness version (output: $(printf '%s' "$compact_out" | tail -n 3 | tr '\n' ' '))"
   out=$( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
     "$@" "$ASK" < /dev/null 2>&1 )
   source=$(tail -n 1 "$record")
