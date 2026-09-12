@@ -696,7 +696,7 @@ test_delivery_confirmation_fallback_reconciles() {
 
 test_delivery_confirmation_serializes_with_reconciliation() {
   (
-    local home state corr rec calls entered release confirm_pid reconcile_pid count i
+    local home state corr rec calls entered release confirm_pid reconcile_pid count
     home=$(setup_parent delivery-confirm-reconcile-race)
     state="$home/state"
     # This fixture clock is intentionally scoped to the isolated subshell.
@@ -722,7 +722,7 @@ test_delivery_confirmation_serializes_with_reconciliation() {
     # The background PID is consumed within this isolated test subshell.
     # shellcheck disable=SC2031
     confirm_pid=$!
-    for i in $(seq 1 100); do
+    for _ in $(seq 1 100); do
       [ -e "$entered" ] && break
       /bin/sleep 0.01
     done

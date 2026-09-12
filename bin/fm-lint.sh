@@ -46,6 +46,19 @@
 # deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
 # runs the same shards serially with byte-identical diagnostics and exit selection.
 #
+# Each shard runs ShellCheck one file at a time, under a per-file wall-clock
+# timeout (FM_LINT_FILE_TIMEOUT, default 120 seconds) and a per-file memory
+# ceiling (FM_LINT_FILE_MEM_KB, default a 6 GiB target capped by this host's
+# own memory divided across concurrent shards - fm_lint_default_file_mem_kb's
+# own comment - applied by running ShellCheck in its own `systemd-run --user
+# --scope` cgroup on a host that has one, or left unenforced there otherwise).
+# A file that hits either limit retries once without `--external-sources`
+# (fm_lint_run_one_file's own comment) and, only if that also fails, is
+# reported as a named lint failure while the shard moves on to its next file,
+# so one pathological file (a huge here-doc or deep nesting defeating
+# ShellCheck's extended analysis) can never starve the host or block the rest
+# of the run.
+#
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
 #
@@ -58,6 +71,10 @@
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the file set that would be linted
 #   fm-lint.sh --help                  print this usage
+#
+# Env:
+#   FM_LINT_FILE_TIMEOUT   per-file ShellCheck wall-clock timeout in seconds (default 120)
+#   FM_LINT_FILE_MEM_KB    per-file ShellCheck memory ceiling in KiB (default: 6291456 target, capped by host memory / FM_LINT_JOBS)
 set -u
 
 REQUIRED_SHELLCHECK=0.11.0
@@ -70,6 +87,86 @@ ROOT="$(cd "$SELF_DIR/.." && pwd -P)"
 cd "$ROOT" || exit 1
 
 FM_LINT_WORKER_SHELLCHECK_PID=
+# The pseudo exit status `wait` reports for a process that a signal
+# interrupted (128 + the signal number), used to detect when the per-file
+# deadline alarm raced a file's own clean exit and masked its real status.
+FM_LINT_ALRM_WAIT_STATUS=$((128 + $(kill -l ALRM)))
+# Resolved once per process by fm_lint_resolve_mem_mechanism: "systemd" once
+# a live `systemd-run --user --scope` is confirmed available, "none" once
+# confirmed absent, empty until first resolved.
+FM_LINT_MEM_MECHANISM=
+
+# `ulimit -v` was tried first and reverted: it caps virtual address space, not
+# resident memory, and ShellCheck's GHC runtime reserves a very large virtual
+# region up front regardless of a file's real memory use, so a 1 GiB `-v`
+# ceiling killed nearly every file - including tiny ones - with "out of
+# memory" (found by CI on this same change, 2026-09-06). The GHC runtime's own
+# heap-limit flag (`+RTS -M<size> -RTS`) would measure the right thing, but
+# the pinned 0.11.0 binary is not built with `-rtsopts`, so it refuses every
+# RTS option outright rather than honoring or ignoring it. `systemd-run --user
+# --scope -p MemoryMax=<bytes>` measures cgroup v2 `memory.max`, which is
+# resident/heap memory the same way `MemoryMax` already bounds a whole
+# crewmate's process tree (docs/configuration.md "Agent memory limits"), so it
+# rejects a genuinely pathological file without touching a healthy one -
+# confirmed against both a real hostile allocation (SIGKILL, cgroup
+# Result=oom-kill) and this repo's largest real file (peak RSS well under the
+# default ceiling, ordinary ShellCheck exit code preserved). `MemorySwapMax=0`
+# is required alongside it: without it, a cgroup at `memory.max` overflows
+# into swap and keeps running (correct cgroup v2 behavior, but it defeats a
+# ceiling meant to stop a runaway file, letting it thrash instead of fail).
+# A host with no `systemd --user` manager (some CI runners, non-Linux) gets no
+# memory ceiling at all rather than a silently wrong one; the wall-clock
+# timeout still bounds every file there, and fm_lint_resolve_mem_mechanism
+# reports the gap once per process instead of claiming an enforcement that
+# is not happening. A responsive user manager is not sufficient on its own:
+# a host can have `systemd --user` running yet refuse the actual transient
+# scope (no cgroup delegation, `MemoryMax`/`MemorySwapMax` not settable), in
+# which case every per-file `systemd-run` launch would fail before ShellCheck
+# ever starts. The probe launches a real, trivial scope with the same
+# properties fm_lint_run_one_attempt uses, so a host that can respond to
+# `systemctl --user show-environment` but cannot actually honor the ceiling
+# still falls back to timeout-only linting instead of failing every file.
+fm_lint_resolve_mem_mechanism() {
+  [ -z "$FM_LINT_MEM_MECHANISM" ] || return 0
+  if [ "$(uname -s)" = Linux ] && command -v systemd-run >/dev/null 2>&1 \
+    && systemctl --user show-environment >/dev/null 2>&1 \
+    && systemd-run --user --scope --quiet -p MemoryMax=64M -p MemorySwapMax=0 \
+      -- true >/dev/null 2>&1
+  then
+    FM_LINT_MEM_MECHANISM=systemd
+  else
+    FM_LINT_MEM_MECHANISM=none
+    printf 'fm-lint.sh: no systemd --user session on this host, so FM_LINT_FILE_MEM_KB has nothing to enforce it; only FM_LINT_FILE_TIMEOUT bounds ShellCheck here.\n' >&2
+  fi
+}
+
+# The default per-file memory ceiling is capped by this host's own memory,
+# divided across the concurrent shards that can each be running one ShellCheck
+# at once (FM_LINT_JOBS), never the flat 6 GiB target alone: a CI runner with
+# a few GiB total and two parallel shards would otherwise let the ceiling
+# authorize more concurrent memory than the runner has, exactly the collateral
+# damage this whole feature exists to prevent. Only ever narrows the DEFAULT;
+# an explicit FM_LINT_FILE_MEM_KB always wins untouched (main() only calls
+# this when the env var is unset). 70% of MemTotal matches this repo's other
+# host-memory-safety convention (slice_memory_max_pct, Agent memory limits,
+# docs/configuration.md), leaving headroom for the OS and everything else
+# already running. An unreadable /proc/meminfo (non-Linux, a locked-down
+# container) keeps the flat 6 GiB target rather than blocking the run over a
+# number it cannot compute.
+fm_lint_default_file_mem_kb() {  # <jobs>
+  local jobs=$1 target=6291456 mem_total_kb cap
+  mem_total_kb=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null)
+  case "$mem_total_kb" in
+    ''|*[!0-9]*) printf '%s\n' "$target"; return ;;
+  esac
+  cap=$((mem_total_kb * 70 / 100 / jobs))
+  [ "$cap" -ge 1 ] || cap=1
+  if [ "$cap" -lt "$target" ]; then
+    printf '%s\n' "$cap"
+  else
+    printf '%s\n' "$target"
+  fi
+}
 # shellcheck disable=SC2329 # Registered by the private worker's signal traps.
 fm_lint_worker_stop() {
   [ -n "$FM_LINT_WORKER_SHELLCHECK_PID" ] || return 0
@@ -78,8 +175,247 @@ fm_lint_worker_stop() {
   FM_LINT_WORKER_SHELLCHECK_PID=
 }
 
+# fm_lint_run_one_file runs ShellCheck against exactly one file under a
+# wall-clock timeout and, on a host with a live `systemd --user` session, a
+# cgroup memory ceiling (fm_lint_resolve_mem_mechanism's own comment covers
+# why the ceiling is a systemd scope rather than `ulimit -v` or ShellCheck's
+# own runtime, and why it goes unenforced rather than substituted on a host
+# with neither). Either bound is bounded on its own rather than able to stall
+# or blow up a whole shard. A timeout or memory-ceiling hit is appended to the
+# shard output as a named lint failure instead of propagating as a
+# host-starving process; ordinary ShellCheck findings (exit 1) pass through
+# unchanged.
+#
+# The wall-clock bound is a SIGALRM deadline this function drives itself, not
+# coreutils `timeout`: `timeout` puts COMMAND in its own new process group so
+# it can reliably kill COMMAND's whole subtree, but that same isolation takes
+# ShellCheck out of the ambient process group the rest of fm-lint.sh's
+# signal-based cleanup relies on (proven by test_worker_trees_stop_on_signal -
+# an external interrupt to fm-lint.sh must still reach every running
+# ShellCheck). A fixed once-a-second poll was tried and rejected too: `wait`
+# on a specific pid only returns when THAT process exits, so polling with
+# `kill -0` between sleeps forces every file - even an instant clean one - to
+# pay up to a full poll tick, and the canonical set is hundreds of files.
+# `wait PID` DOES return immediately when a signal with a real (even no-op)
+# trap handler arrives, so a background `sleep "$timeout_s"; kill -ALRM $$`
+# lets the common case return the instant ShellCheck exits, with the alarm as
+# a deadline. Canceling that alarm early by killing its own pid only kills
+# the wrapping subshell, not the `sleep` it is blocked on - the orphaned
+# `sleep` keeps the shard's redirected stdout/stderr pipe open and hangs a
+# caller capturing that output via `$(...)`, and could later deliver its
+# ALRM into an unrelated file's wait. `pkill -P` targets the still-alive
+# subshell's child before killing the subshell itself (killing parent first
+# reparents the child to init, out of `pkill -P`'s reach) to avoid that; the
+# elapsed-time check below (SECONDS, not the alarm's mere arrival) is the
+# actual timeout verdict, so even an uncanceled stray alarm from an earlier
+# file can only cause a harmless spurious re-wait here, never a false
+# timeout. Since SECONDS only has 1-second resolution, a spurious wake can
+# also land just short of the verdict on a genuine deadline; the loop then
+# re-arms a fresh alarm for the remaining time before waiting again, so a
+# hung file is still bounded rather than falling through to an unguarded
+# `wait`. ShellCheck itself does not fork children, so a direct kill of its
+# own pid is sufficient to stop it.
+#
+# Sets FM_LINT_ATTEMPT_RC and FM_LINT_ATTEMPT_TIMED_OUT instead of relying on
+# $? alone, since a bare exit status cannot distinguish "ShellCheck exited 137
+# on its own" from "the deadline forced a 137" - fm_lint_run_one_file needs
+# that distinction to classify a failure, and calls this twice (full pass,
+# then the --external-sources fallback), so its own return value is not the
+# right channel for either attempt's result.
+fm_lint_run_one_attempt() {  # <mem-kb> <timeout-s> <output-file> <path> <shellcheck-arg>...
+  local mem_kb=$1 timeout_s=$2 output=$3 path=$4 rc=0 alarm_pid start timed_out=0 remaining
+  shift 4
+  local -a shellcheck_args=("$@")
+  if [ "$FM_LINT_MEM_MECHANISM" = systemd ]; then
+    systemd-run --user --scope --quiet -p "MemoryMax=${mem_kb}K" -p MemorySwapMax=0 \
+      -- "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "$path" >> "$output" 2>&1 &
+  else
+    "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "$path" >> "$output" 2>&1 &
+  fi
+  FM_LINT_WORKER_SHELLCHECK_PID=$!
+  ( sleep "$timeout_s"; kill -ALRM $$ 2>/dev/null ) > /dev/null 2>&1 &
+  alarm_pid=$!
+  # Disowned so bash's job control never announces "Terminated" to this
+  # shard's captured output when the deadline alarm is canceled below.
+  disown "$alarm_pid" 2>/dev/null || true
+  # A standing no-op handler, never reset back to ALRM's default (terminate):
+  # a stray alarm this function fails to cancel must only ever be able to
+  # interrupt a `wait` early, never kill fm-lint.sh outright.
+  trap : ALRM
+  start=$SECONDS
+  while :; do
+    wait "$FM_LINT_WORKER_SHELLCHECK_PID"
+    rc=$?
+    if ! kill -0 "$FM_LINT_WORKER_SHELLCHECK_PID" 2>/dev/null; then
+      if [ "$rc" -eq "$FM_LINT_ALRM_WAIT_STATUS" ]; then
+        # The deadline alarm fired within microseconds of the file's own
+        # clean exit, so `wait` reported the alarm-interrupted pseudo-status
+        # instead of ShellCheck's real one; the process is gone but its exit
+        # status is still pending for us to reap, so re-collect it.
+        wait "$FM_LINT_WORKER_SHELLCHECK_PID" 2>/dev/null
+        rc=$?
+      fi
+      break
+    fi
+    if [ $((SECONDS - start)) -ge "$timeout_s" ]; then
+      timed_out=1
+      kill -TERM "$FM_LINT_WORKER_SHELLCHECK_PID" 2>/dev/null || true
+      sleep 5
+      kill -KILL "$FM_LINT_WORKER_SHELLCHECK_PID" 2>/dev/null || true
+      wait "$FM_LINT_WORKER_SHELLCHECK_PID" 2>/dev/null
+      rc=$?
+      break
+    fi
+    # A stray alarm from an earlier, already-finished file (or this file's
+    # own alarm, whose one-shot `sleep` can race SECONDS' 1-second
+    # resolution) woke this wait early; ShellCheck is still running and its
+    # own deadline has not arrived, so re-arm a fresh alarm for the
+    # remaining time and keep waiting on it - the fired alarm is one-shot,
+    # so without this a genuinely hung file would otherwise wait unbounded.
+    remaining=$((timeout_s - (SECONDS - start)))
+    [ "$remaining" -ge 1 ] || remaining=1
+    ( sleep "$remaining"; kill -ALRM $$ 2>/dev/null ) > /dev/null 2>&1 &
+    alarm_pid=$!
+    disown "$alarm_pid" 2>/dev/null || true
+  done
+  pkill -TERM -P "$alarm_pid" 2>/dev/null || true
+  kill "$alarm_pid" 2>/dev/null || true
+  wait "$alarm_pid" 2>/dev/null || true
+  FM_LINT_WORKER_SHELLCHECK_PID=
+  FM_LINT_ATTEMPT_RC=$rc
+  FM_LINT_ATTEMPT_TIMED_OUT=$timed_out
+}
+
+# True when an attempt's (timed_out, rc, captured-output) triple is a bound
+# hit - the per-file timeout, or (only when a mechanism is actually enforcing
+# it) the memory ceiling, including ShellCheck's own "out of memory" message
+# for an rc the raw signal check does not already cover - rather than an
+# ordinary ShellCheck exit.
+fm_lint_is_ceiling_failure() {  # <timed_out> <rc> <output-file>
+  local timed_out=$1 rc=$2 outfile=$3
+  [ "$timed_out" -ne 1 ] || return 0
+  case "$rc" in
+    137|139) [ "$FM_LINT_MEM_MECHANISM" != systemd ] || return 0 ;;
+  esac
+  [ "$rc" -le 1 ] || ! grep -qi 'out of memory' "$outfile" 2>/dev/null || return 0
+  return 1
+}
+
+# fm_lint_run_one_file orchestrates one file's ShellCheck attempt(s) and
+# reports the final classification; fm_lint_run_one_attempt above owns a
+# single bounded attempt's own mechanics.
+#
+# `--external-sources` makes ShellCheck recursively analyze every file a
+# script sources, so a heavily cross-sourcing hub script can need far more
+# memory and time than its own size suggests even though it has no lint
+# defect of its own (found 2026-09-06: 27 real files in this repo exceeded
+# the per-file bounds under full analysis, and the 4 worst never stabilized
+# even at 4 GiB / 180s). Always failing those files outright would make
+# canonical lint permanently red, so a bound hit retries the SAME file once
+# without `--external-sources` before reporting a failure - a narrower, purely
+# local analysis that finishes cheaply for a file whose own body is healthy,
+# at the cost of the recursive analysis for that one file on that one run.
+# Only a fallback that ALSO hits a bound is reported as a real failure.
+# docs/fm-lint-external-sources-fallback.md tracks which tracked files are
+# currently known to need this so a newly pathological file stays visible in
+# review instead of silently blending into routine lint noise.
+#
+# The fallback also excludes SC1091 and SC2329: both are guaranteed artifacts
+# of dropping `--external-sources` rather than findings about the file's own
+# body. Every `. "$SCRIPT_DIR/..."` line SC1091-fires the instant ShellCheck
+# stops following it (confirmed 2026-09-06: bin/fm-teardown.sh's own sourced
+# libraries are already annotated with `# shellcheck source=`, and it still
+# fires without `-x`, because that directive only resolves the dynamic path,
+# not whether ShellCheck follows it), and SC2329 false-fires on any function a
+# sourced file calls back into (a test's mock override of a production
+# function, the normal shape here) since the caller is no longer in view.
+# Excluding them per-line instead would mean one `# shellcheck disable=SC1091`
+# above every source line in every file this fallback ever reaches - the exact
+# repetitive machinery this single flag replaces. SC2034 stays enforced: it
+# catches genuine unused-variable defects (a bare `for i in ...` never reading
+# `i`) as often as it catches the same cross-file blind spot, so a real
+# instance of the latter (docs/fm-lint-external-sources-fallback.md's own
+# example) is suppressed at its one call site instead.
+fm_lint_run_one_file() {  # <mem-kb> <timeout-s> <output-file> <path> -- <shellcheck-arg>...
+  local mem_kb=$1 timeout_s=$2 output=$3 path=$4 rc timed_out current arg has_external=0
+  local fallback_current fallback_rc fallback_timed_out
+  local -a shellcheck_args fallback_args
+  shift 4
+  [ "${1:-}" != -- ] || shift
+  shellcheck_args=("$@")
+  current="$output.current"
+  : > "$current"
+  fm_lint_resolve_mem_mechanism
+  fm_lint_run_one_attempt "$mem_kb" "$timeout_s" "$current" "$path" "${shellcheck_args[@]}"
+  rc=$FM_LINT_ATTEMPT_RC
+  timed_out=$FM_LINT_ATTEMPT_TIMED_OUT
+
+  for arg in "${shellcheck_args[@]}"; do
+    [ "$arg" != --external-sources ] || { has_external=1; break; }
+  done
+
+  if [ "$has_external" -eq 1 ] && fm_lint_is_ceiling_failure "$timed_out" "$rc" "$current"; then
+    fallback_args=(--exclude=SC1091 --exclude=SC2329)
+    for arg in "${shellcheck_args[@]}"; do
+      [ "$arg" = --external-sources ] || fallback_args+=("$arg")
+    done
+    fallback_current="$output.fallback"
+    : > "$fallback_current"
+    fm_lint_run_one_attempt "$mem_kb" "$timeout_s" "$fallback_current" "$path" "${fallback_args[@]}"
+    fallback_rc=$FM_LINT_ATTEMPT_RC
+    fallback_timed_out=$FM_LINT_ATTEMPT_TIMED_OUT
+    if ! fm_lint_is_ceiling_failure "$fallback_timed_out" "$fallback_rc" "$fallback_current"; then
+      printf 'fm-lint.sh: %s exceeded its bound analyzing every sourced file (--external-sources); retried without it and completed narrower analysis (see docs/fm-lint-external-sources-fallback.md).\n' \
+        "$path" >> "$output"
+      cat "$fallback_current" >> "$output"
+      rm -f "$current" "$fallback_current"
+      return "$fallback_rc"
+    fi
+    rc=$fallback_rc
+    timed_out=$fallback_timed_out
+    : > "$current"
+    cat "$fallback_current" >> "$current"
+    rm -f "$fallback_current"
+  fi
+
+  local fallback_note='' fallback_note_comma=''
+  if [ "$has_external" -eq 1 ]; then
+    fallback_note=' even after the --external-sources fallback'
+    fallback_note_comma=', even after the --external-sources fallback'
+  fi
+
+  if [ "$timed_out" -eq 1 ]; then
+    rc=124
+    printf 'fm-lint.sh: %s exceeded the %ss per-file lint timeout (FM_LINT_FILE_TIMEOUT)%s; reported as a lint failure, continuing with the next file.\n' \
+      "$path" "$timeout_s" "$fallback_note" >> "$current"
+  else
+    case "$rc" in
+      137|139)
+        # A raw SIGKILL/SIGPIPE only means the memory ceiling fired when a
+        # ceiling was actually enforced; with no systemd mechanism this file
+        # was killed by something else entirely, and mislabeling it here
+        # would blame a ceiling that never applied.
+        if [ "$FM_LINT_MEM_MECHANISM" = systemd ]; then
+          printf 'fm-lint.sh: %s hit the %s KiB per-file memory ceiling (FM_LINT_FILE_MEM_KB) and was killed%s; reported as a lint failure, continuing with the next file.\n' \
+            "$path" "$mem_kb" "$fallback_note_comma" >> "$current"
+        fi
+        ;;
+      *)
+        if [ "$rc" -gt 1 ] && grep -qi 'out of memory' "$current" 2>/dev/null; then
+          printf 'fm-lint.sh: %s hit the %s KiB per-file memory ceiling (FM_LINT_FILE_MEM_KB)%s; reported as a lint failure, continuing with the next file.\n' \
+            "$path" "$mem_kb" "$fallback_note_comma" >> "$current"
+        fi
+        ;;
+    esac
+  fi
+  cat "$current" >> "$output"
+  rm -f "$current"
+  return "$rc"
+}
+
 fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
-  local manifest=$1 output_dir=$2 shard_index=$3 tab index path output invocation_rc rc=0
+  local manifest=$1 output_dir=$2 shard_index=$3 tab index path output shard_rc=0 file_rc
+  local file_timeout=${FM_LINT_FILE_TIMEOUT:-120} file_mem_kb=${FM_LINT_FILE_MEM_KB:-6291456}
   local -a roots shellcheck_args
   roots=()
   tab=$(printf '\t')
@@ -88,6 +424,7 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
     roots+=("$path")
   done < "$manifest"
   output="$output_dir/shard.$shard_index"
+  : > "$output.out"
   if [ "${#roots[@]}" -gt 0 ]; then
     trap 'fm_lint_worker_stop; exit 129' HUP
     trap 'fm_lint_worker_stop; exit 130' INT
@@ -102,30 +439,24 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
     if [ "${FM_LINT_INTERNAL_FAST:-0}" -eq 1 ]; then
       shellcheck_args+=(--extended-analysis=false)
     fi
-    : > "$output.out"
-    if [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ]; then
-      "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "${roots[@]}" >> "$output.out" 2>&1 &
-      FM_LINT_WORKER_SHELLCHECK_PID=$!
-      wait "$FM_LINT_WORKER_SHELLCHECK_PID" || rc=$?
-      FM_LINT_WORKER_SHELLCHECK_PID=
-    else
-      for path in "${roots[@]}"; do
-        invocation_rc=0
-        "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "$path" >> "$output.out" 2>&1 &
-        FM_LINT_WORKER_SHELLCHECK_PID=$!
-        wait "$FM_LINT_WORKER_SHELLCHECK_PID" || invocation_rc=$?
-        FM_LINT_WORKER_SHELLCHECK_PID=
-        if [ "$rc" -eq 0 ] && [ "$invocation_rc" -ne 0 ]; then
-          rc=$invocation_rc
-        fi
-      done
-    fi
+    # Always one ShellCheck invocation per file, in both the combined
+    # (FOLLOW_SOURCES=1, --external-sources) and local changed-file
+    # (FOLLOW_SOURCES=0) modes: the 2026-09-05 host-starvation incident this
+    # bounds was a single --external-sources invocation, and --external-sources
+    # is exactly the combined-mode default, so combining files back into one
+    # process here would reintroduce the same unbounded-blowup shape the
+    # per-file timeout/memory ceiling below exists to prevent.
+    for path in "${roots[@]}"; do
+      file_rc=0
+      fm_lint_run_one_file "$file_mem_kb" "$file_timeout" "$output.out" "$path" -- "${shellcheck_args[@]}" || file_rc=$?
+      if [ "$shard_rc" -eq 0 ] && [ "$file_rc" -ne 0 ]; then
+        shard_rc=$file_rc
+      fi
+    done
     trap - HUP INT TERM
-  else
-    : > "$output.out"
   fi
-  printf '%s\n' "$rc" > "$output.rc"
-  return "$rc"
+  printf '%s\n' "$shard_rc" > "$output.rc"
+  return "$shard_rc"
 }
 
 # Private subprocess mode used only by the bounded parent above.
@@ -394,6 +725,17 @@ fm_lint_run_backend_purity() {
 
 JOBS=${FM_LINT_JOBS:-2}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
+FILE_TIMEOUT=${FM_LINT_FILE_TIMEOUT:-120}
+case "$FILE_TIMEOUT" in
+  ''|*[!0-9]*)
+    printf 'fm-lint.sh: FM_LINT_FILE_TIMEOUT must be a positive integer number of seconds, got %s.\n' "$FILE_TIMEOUT" >&2
+    exit 2
+    ;;
+esac
+[ "$FILE_TIMEOUT" -gt 0 ] || {
+  printf 'fm-lint.sh: FM_LINT_FILE_TIMEOUT must be greater than zero.\n' >&2
+  exit 2
+}
 FAST=0
 ANALYSIS_MODE=full
 LIST_FILES=0
@@ -442,6 +784,25 @@ case "$JOBS" in
   1|2) ;;
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
 esac
+
+# Resolved only now, after --jobs has had its final say: an explicit
+# FM_LINT_FILE_MEM_KB always wins untouched, and the computed default must
+# divide by the FINAL job count, not the pre-flag one.
+if [ -n "${FM_LINT_FILE_MEM_KB:-}" ]; then
+  FILE_MEM_KB=$FM_LINT_FILE_MEM_KB
+else
+  FILE_MEM_KB=$(fm_lint_default_file_mem_kb "$JOBS")
+fi
+case "$FILE_MEM_KB" in
+  ''|*[!0-9]*)
+    printf 'fm-lint.sh: FM_LINT_FILE_MEM_KB must be a positive integer number of KiB, got %s.\n' "$FILE_MEM_KB" >&2
+    exit 2
+    ;;
+esac
+[ "$FILE_MEM_KB" -gt 0 ] || {
+  printf 'fm-lint.sh: FM_LINT_FILE_MEM_KB must be greater than zero.\n' >&2
+  exit 2
+}
 
 if [ "$FAST" -eq 1 ] && { [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; }; then
   printf 'fm-lint.sh: --fast is local-only; CI uses full ShellCheck analysis.\n' >&2
@@ -690,14 +1051,14 @@ fm_lint_run_worker() {  # <worker-index>
         /usr/bin/time -lp -o "$timing" \
         env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
         FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
-        FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" FM_LINT_FILE_TIMEOUT="$FILE_TIMEOUT" FM_LINT_FILE_MEM_KB="$FILE_MEM_KB" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     else
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
         env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
         FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
-        FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" FM_LINT_FILE_TIMEOUT="$FILE_TIMEOUT" FM_LINT_FILE_MEM_KB="$FILE_MEM_KB" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     fi
   else
@@ -705,7 +1066,7 @@ fm_lint_run_worker() {  # <worker-index>
     exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
       env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
       FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
-      FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+      FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" FM_LINT_FILE_TIMEOUT="$FILE_TIMEOUT" FM_LINT_FILE_MEM_KB="$FILE_MEM_KB" \
       "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
   fi
 }

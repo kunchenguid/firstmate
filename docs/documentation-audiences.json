@@ -345,6 +345,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/fm-lint-external-sources-fallback.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/fm-test-isolation-proof.md",
       "audience": "maintainer-verification"
     },
