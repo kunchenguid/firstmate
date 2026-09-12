@@ -486,4 +486,78 @@ test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 
+# --- T12: untracked-only working tree advances (the defect this task fixes) --
+# An untracked-only tree (e.g. .opencode/opencode.db cache) must NOT block the
+# fast-forward.  Git itself refuses a checkout or ff-only merge that would
+# overwrite an untracked file, so that self-protection is relied on instead of
+# treating untracked-only as dirty.
+test_untracked_only_advances_fast_forward() {
+  local w out
+  w=$(new_world t12)
+  bump_origin "$w" instr
+  # Write an untracked cache file into the firstmate checkout.
+  mkdir -p "$w/main/.opencode"
+  printf 'cache data\n' > "$w/main/.opencode/opencode.db"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "untracked-only tree does not block fast-forward"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
+    || fail "expected fast-forward to origin/main"
+  pass "T12 untracked-only working tree fast-forwards successfully"
+}
+
+# --- T13: tracked-file modification still blocks (regression guard) ----------
+# This confirms the existing correct behavior is unchanged: a tracked dirty tree
+# is still skipped with "dirty working tree".
+test_tracked_file_modification_blocks_fast_forward() {
+  local w out
+  w=$(new_world t13)
+  bump_origin "$w" instr
+  printf 'local dirty line\n' >> "$w/main/README.md"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: dirty working tree" "tracked dirty tree is skipped"
+  grep -q 'local dirty line' "$w/main/README.md" \
+    || fail "tracked dirty edit was discarded"
+  pass "T13 tracked-file modification still blocks fast-forward"
+}
+
+# --- T14: genuine untracked collision surfaces git's own error ---------------
+# When origin adds a tracked file and the local tree already holds an untracked
+# file at that exact path, git's own ff-only protection must refuse the merge.
+# This real error must surface cleanly, not be silently swallowed.
+test_untracked_collision_surfaces_git_error() {
+  local w out
+  w=$(new_world t14)
+  # Advance origin to add a new file in bin/.
+  printf 'v2\n' > "$w/seed/AGENTS.md"
+  printf 'echo b\n' > "$w/seed/bin/tool.sh"
+  printf 'echo collide\n' > "$w/seed/bin/collide.txt"
+  printf 's2\n' > "$w/seed/.agents/skills/note.md"
+  printf 'r-instr\n' >> "$w/seed/README.md"
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm "bump-instr"
+  git -C "$w/seed" push -q origin main
+
+  # Local copy has an untracked file at the same path.
+  mkdir -p "$w/main/bin"
+  printf 'local-untracked-version\n' > "$w/main/bin/collide.txt"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: fast-forward failed" \
+    "untracked collision is reported as a clean skip, not swallowed"
+  grep -q 'local-untracked-version' "$w/main/bin/collide.txt" \
+    || fail "colliding untracked file content was overwritten"
+  [ "$(git -C "$w/main" rev-parse HEAD)" != "$(git -C "$w/main" rev-parse origin/main)" ] \
+    || fail "clone should not have fast-forwarded through the collision"
+  pass "T14 a fast-forward blocked by a colliding untracked file is reported cleanly, not swallowed"
+}
+
+test_untracked_only_advances_fast_forward
+test_tracked_file_modification_blocks_fast_forward
+test_untracked_collision_surfaces_git_error
+
 echo "# all fm-update tests passed"

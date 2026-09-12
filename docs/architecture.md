@@ -404,8 +404,9 @@ Invoked in a primary home, `/stow` then cascades the same sweep to every registe
 
 The locked session-start deferred network stage, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.
 Wake-time refreshes can target a single clone by project name, so the primary home also catches up when a secondmate reports a merge from its own home.
-Clean default-branch clones fast-forward to `origin/<default>`, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
-Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
+A default-branch clone with no tracked-file changes fast-forwards to `origin/<default>`, and a detached HEAD with no tracked-file changes that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
+Untracked-only working trees (for example an ignored tool cache that was never added to `.gitignore`) never block either path: Git itself refuses a checkout or fast-forward that would overwrite an existing untracked file, so that self-protection is relied on instead of treating untracked-only as dirty.
+Tracked-file dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched, as is a clone whose re-attach checkout or fast-forward Git refused (for example over a colliding untracked file), with Git's reason appended.
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; [configuration.md](configuration.md#toolchain) owns the recovery details and tuning knobs.
 Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
 The refresh also prunes local branches whose remote is gone and that no worktree still needs.
@@ -415,7 +416,7 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin` without touching project clones.
 It restarts every live second mate whose home the pass left on the target commit through a persist-gated replacement, including a home that needed no advance, because a restart is also the only thing that re-resolves launch-time harness wiring; the re-read nudge is retained only as the fallback for live agents whose runtime cannot prove a restart.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
-The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
+The update is fast-forward only: targets with tracked-file changes, and diverged, offline, or off-default targets, are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 The procedure and outcome vocabulary are owned by the [`/updatefirstmate` skill](../.agents/skills/updatefirstmate/SKILL.md); the relevant script headers own the mechanics.
 
