@@ -930,6 +930,63 @@ EOF
   pass "a captain outcome reaches main's model as one typed, sequence-keyed processing request while routine notes stay plain"
 }
 
+test_branch_bash_refuses_direct_watcher_restart() {
+  local repo home out status
+  repo="$TMP_ROOT/watcher-restart-refusal-root"
+  home="$TMP_ROOT/watcher-restart-refusal-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, defaultSessionCtx } = globalThis.__t;
+
+await fire("session_start", {}, defaultSessionCtx);
+let keepPromptOpen;
+globalThis.__fmPromptGate = new Promise((resolve) => { keepPromptOpen = resolve; });
+const offer = dispatch("signal: watcher guard fixture");
+if (!offer.accepted) throw new Error("watcher guard fixture was not accepted");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "branch session with bash tool");
+const session = globalThis.__fmSessions[0];
+globalThis.__fmExecuteBranchBash = async () => ({ content: [], details: undefined });
+const bash = session.options.customTools.find((tool) => tool.name === "bash");
+if (!bash) throw new Error("branch bash tool was not created");
+if (!session.options.systemPrompt?.includes("restart the watcher") &&
+    !globalThis.__fmLoaders[0].options.systemPrompt.includes("restart the watcher")) {
+  throw new Error("branch prompt omitted the main-owned watcher repair boundary");
+}
+for (const command of [
+  "bin/fm-watch-arm.sh --restart",
+  'bash "$FM_ROOT/bin/fm-watch-arm.sh" --restart',
+]) {
+  let refusal = null;
+  try {
+    await bash.execute("restart-refusal", { command }, undefined, undefined, {});
+  } catch (error) {
+    refusal = error;
+  }
+  if (!(refusal instanceof Error) || !refusal.message.includes("watcher restart is main-owned")) {
+    throw new Error(`direct watcher restart was not refused: command=${command} result=${String(refusal)}`);
+  }
+}
+for (const command of [
+  "bin/fm-watch-arm.sh --handling-delivered generation --watcher-pid 123",
+  "printf '%s\\n' --restart",
+]) {
+  const result = await bash.execute("narrow-negative-control", { command }, undefined, undefined, {});
+  if (result.isError) throw new Error(`narrow watcher guard rejected an unrelated command: ${command}`);
+}
+keepPromptOpen();
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the supervision branch must refuse direct watcher restart while leaving unrelated shell commands alone: $out"
+  [ -z "$out" ] || fail "branch watcher-restart guard printed output: $out"
+  pass "the supervision branch refuses direct watcher restart and leaves failure repair with main"
+}
+
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery() {
   local repo home out status
   repo="$TMP_ROOT/requested-outcome-root"
@@ -4930,6 +4987,7 @@ EOF
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
+test_branch_bash_refuses_direct_watcher_restart
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
