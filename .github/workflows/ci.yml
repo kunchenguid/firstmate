@@ -31,6 +31,18 @@ jobs:
       # fails locally before merge.
       - run: bin/fm-lint.sh
 
+  # Budget guard for the always-loaded startup surface: AGENTS.md plus the
+  # largest rendered supervision block. Every fleet session pays for those
+  # bytes on every turn, and both are tracked prose an ordinary PR can grow
+  # silently. Owner of the measurement, ceilings, and failure guidance:
+  # bin/fm-startup-surface-budget.sh.
+  startup-surface-budget:
+    name: Startup surface budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bin/fm-startup-surface-budget.sh
+
   # Deterministic proof that portable parallel shards + portable serial + Herdr
   # equal the complete tests/*.test.sh inventory with no missing or duplicates,
   # and that the portable serial CI shards partition that serial lane exactly.
