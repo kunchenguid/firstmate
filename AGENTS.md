@@ -110,7 +110,7 @@ state/               runtime records and signals; gitignored
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
-  <id>.runpod-watch  and its .pid, .log, and .alarms siblings: the deadline record a rented-pod watchdog enforces and its detached run; bin/fm-runpod-watchdog.sh owns them (docs/runpod-pod-watchdog.md)
+  <id>.runpod-watch  and its .pid, .log, .alarms, and .observed siblings: the deadline record a rented-pod watchdog enforces, the instant it derived from the pod's own start, and its detached run; bin/fm-runpod-watchdog.sh owns them (docs/runpod-pod-watchdog.md)
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire

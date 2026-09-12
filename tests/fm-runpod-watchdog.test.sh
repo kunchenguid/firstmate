@@ -5,8 +5,9 @@
 # passed deadline that MUST terminate and verify, and an unreadable run record
 # that MUST NOT terminate anything. Both are asserted here, plus the states in
 # between: a live deadline, a termination the API accepted but the pod list does
-# not confirm, a stalled progress artifact, and the credential never reaching
-# any file the script writes.
+# not confirm, a pod id that was never in the account, a ceiling anchored to the
+# pod's own start rather than to arm time, and the credential never reaching any
+# file the script writes.
 #
 # The RunPod API is faked at the process boundary with a PATH curl shim, so
 # every assertion runs through the real executable and no test ever touches a
@@ -17,6 +18,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 WATCHDOG="$ROOT/bin/fm-runpod-watchdog.sh"
+CLASSIFY="$ROOT/bin/fm-classify-lib.sh"
 FAKE_KEY='fm-test-runpod-key-must-never-be-logged'
 
 # Builds an isolated home: state dir, .env carrying the fake key, and a curl
@@ -33,6 +35,9 @@ new_home() {
 # file, records the call, and answers from files the test controls:
 #   api/pods           one pod id per line; the account's current pod list
 #   api/pods.fail      present => the list read fails (transport error)
+#   api/uptime         runtime.uptimeInSeconds reported for every listed pod
+#   api/uptime.null    present => pods report no runtime and no lastStartedAt
+#   api/vanish-after   drop api/vanish-pod from the list after this many reads
 #   api/terminate.out  raw response body for podTerminate
 #   api/terminate.keep present => podTerminate does NOT remove the pod from
 #                      api/pods, simulating an accepted call that did not land
@@ -69,12 +74,27 @@ case "$query" in
       echo 'curl: (7) simulated transport failure' >&2
       exit 7
     fi
+    if [ -e "$API/vanish-after" ]; then
+      reads=$(cat "$API/list-reads" 2>/dev/null || echo 0)
+      reads=$((reads + 1))
+      printf '%s\n' "$reads" > "$API/list-reads"
+      if [ "$reads" -gt "$(cat "$API/vanish-after")" ]; then
+        grep -vxF -- "$(cat "$API/vanish-pod")" "$API/pods" > "$API/pods.tmp" 2>/dev/null || :
+        mv -f "$API/pods.tmp" "$API/pods"
+      fi
+    fi
+    uptime=$(cat "$API/uptime" 2>/dev/null || echo 3600)
     {
       printf '{"data":{"myself":{"pods":['
       sep=
       while IFS= read -r id || [ -n "$id" ]; do
         [ -n "$id" ] || continue
-        printf '%s{"id":"%s"}' "$sep" "$id"
+        if [ -e "$API/uptime.null" ]; then
+          printf '%s{"id":"%s","lastStartedAt":null,"runtime":null}' "$sep" "$id"
+        else
+          printf '%s{"id":"%s","lastStartedAt":null,"runtime":{"uptimeInSeconds":%s}}' \
+            "$sep" "$id" "$uptime"
+        fi
         sep=,
       done < "$API/pods" 2>/dev/null
       printf ']}}}'
@@ -108,6 +128,45 @@ run_loop() {
   printf '%s\n' "$rc"
 }
 
+# `arm`, and the detached loop it starts, against the same fake API.
+arm_watchdog() {
+  local home=$1 fakebin=$2
+  shift 2
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_RUNPOD_ENV_FILE="$home/.env" \
+    FM_RUNPOD_API_URL='https://fake.invalid/graphql' FM_TEST_API_DIR="$home/api" \
+    FM_RUNPOD_POLL_SECONDS=0.5 PATH="$fakebin:$PATH" \
+    "$WATCHDOG" arm "$@"
+}
+
+watchdog_status() {
+  local home=$1
+  shift
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$WATCHDOG" status "$@"
+}
+
+# The effective deletion instant `status` reports, back as an epoch second.
+status_deadline_epoch() {
+  local line=$1 iso
+  iso=$(printf '%s' "$line" | sed -n 's/.* deadline=\([^ ]*\) .*/\1/p')
+  date -u -d "$iso" +%s 2>/dev/null
+}
+
+# Waits for the detached loop to publish the deadline it is actually enforcing,
+# so the assertions below read a resolved anchor rather than racing the launch.
+wait_for_anchor() {
+  local home=$1 task=$2 want=$3 i=0 out
+  while [ "$i" -lt 100 ]; do
+    out=$(watchdog_status "$home" --task "$task" 2>/dev/null || true)
+    case "$out" in
+      *"anchor=$want"*) printf '%s\n' "$out"; return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  printf '%s\n' "$out"
+  return 1
+}
+
 write_record() {
   local home=$1 task=$2
   shift 2
@@ -122,6 +181,10 @@ calls() {
   cat "$1/api/calls.log" 2>/dev/null || true
 }
 
+open_decisions() {
+  bash -c '. "$1"; status_open_decisions "$2"' _ "$CLASSIFY" "$1" 2>/dev/null || true
+}
+
 TMP_ROOT=$(fm_test_tmproot fm-runpod-watchdog) || fail 'could not create fixture root'
 
 # --- a passed deadline terminates, and the termination is verified by listing
@@ -129,7 +192,7 @@ H=$TMP_ROOT/deadline
 FB=$(new_home "$H")
 printf 'pod-alpha\npod-other\n' > "$H/api/pods"
 printf '{"data":{"podTerminate":null}}' > "$H/api/terminate.out"
-write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=1" "deadline_source=declared"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=1"
 RC=$(run_loop "$H" t1 20 "$FB")
 expect_code 0 "$RC" 'passed deadline: loop should finish cleanly after a verified termination'
 assert_contains "$(calls "$H")" terminate 'passed deadline: podTerminate was never called'
@@ -143,7 +206,7 @@ assert_grep 'pod-other' "$H/api/pods" 'passed deadline: another account pod was 
 pass 'a run whose deadline has passed is terminated and the termination is verified by listing'
 
 # --- an unreadable record NEVER terminates
-for CASE in absent malformed truncated; do
+for CASE in absent malformed truncated oversized-deadline; do
   H=$TMP_ROOT/unreadable-$CASE
   FB=$(new_home "$H")
   printf 'pod-alpha\n' > "$H/api/pods"
@@ -151,6 +214,11 @@ for CASE in absent malformed truncated; do
     absent) : ;;
     malformed) printf 'not-the-record-tag\npod=pod-alpha\ndeadline_epoch=1\n' > "$H/state/t1.runpod-watch" ;;
     truncated) printf 'fm-runpod-watch-v1\npod=pod-alpha\n' > "$H/state/t1.runpod-watch" ;;
+    # A digit string outside intmax makes `[ a -lt b ]` abort rather than answer
+    # false, and that abort used to land on the terminating side of the deadline
+    # comparison; such a record must be refused as untrustworthy instead.
+    oversized-deadline)
+      write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=99999999999999999999999" ;;
   esac
   RC=$(run_loop "$H" t1 4 "$FB")
   assert_not_equals 0 "$RC" "unreadable record ($CASE): the loop must keep waiting, not finish"
@@ -166,7 +234,7 @@ pass 'a run whose state cannot be read is NOT terminated, and firstmate is alarm
 H=$TMP_ROOT/live
 FB=$(new_home "$H")
 printf 'pod-alpha\n' > "$H/api/pods"
-write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( $(date +%s) + 3600 ))" "deadline_source=declared"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( $(date +%s) + 3600 ))"
 RC=$(run_loop "$H" t1 4 "$FB")
 assert_not_equals 0 "$RC" 'live deadline: the loop must keep watching'
 assert_not_contains "$(calls "$H")" terminate 'live deadline: a healthy run inside its deadline was terminated'
@@ -179,7 +247,7 @@ FB=$(new_home "$H")
 printf 'pod-alpha\n' > "$H/api/pods"
 printf '{"data":{"podTerminate":null}}' > "$H/api/terminate.out"
 : > "$H/api/terminate.keep"
-write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=1" "deadline_source=declared"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=1"
 RC=$(run_loop "$H" t1 6 "$FB")
 assert_not_equals 0 "$RC" 'unverified termination: the loop must keep retrying, never finish'
 assert_grep 'NOT verified' "$H/state/t1.status" \
@@ -193,59 +261,70 @@ H=$TMP_ROOT/apidown
 FB=$(new_home "$H")
 printf 'pod-alpha\n' > "$H/api/pods"
 : > "$H/api/pods.fail"
-write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( $(date +%s) + 3600 ))" "deadline_source=declared"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( $(date +%s) + 3600 ))"
 RC=$(run_loop "$H" t1 4 "$FB")
 assert_not_equals 0 "$RC" 'api down: a failed list read must not end the watch'
 assert_grep 'cannot reach RunPod' "$H/state/t1.status" 'api down: firstmate was not alarmed'
 pass 'a failed pod-list read keeps the watch alive instead of concluding anything'
 
-# --- a stalled progress artifact alarms but never terminates
-H=$TMP_ROOT/stalled
-FB=$(new_home "$H")
-printf 'pod-alpha\n' > "$H/api/pods"
-: > "$H/progress"
-fm_touch_epoch "$(( $(date +%s) - 7200 ))" "$H/progress"
-write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( $(date +%s) + 3600 ))" \
-  "deadline_source=declared" "progress_file=$H/progress" "progress_grace_seconds=60"
-RC=$(run_loop "$H" t1 4 "$FB")
-assert_not_equals 0 "$RC" 'stalled progress: the loop must keep watching'
-assert_not_contains "$(calls "$H")" terminate \
-  'stalled progress: a stalled progress file terminated a run that was still inside its deadline'
-assert_grep 'may be wedged' "$H/state/t1.status" 'stalled progress: firstmate was not alarmed'
-pass 'a stalled progress artifact alarms and never terminates before the deadline'
-
-# --- the pod vanishing before its deadline is the normal ending
+# --- a pod that was seen and then vanishes is the normal ending
 H=$TMP_ROOT/gone
 FB=$(new_home "$H")
-printf 'pod-other\n' > "$H/api/pods"
-write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( $(date +%s) + 3600 ))" "deadline_source=declared"
-RC=$(run_loop "$H" t1 6 "$FB")
-expect_code 0 "$RC" 'pod gone: the loop should exit cleanly when there is nothing left to guard'
+printf 'pod-alpha\npod-other\n' > "$H/api/pods"
+printf '1\n' > "$H/api/vanish-after"
+printf 'pod-alpha\n' > "$H/api/vanish-pod"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( $(date +%s) + 3600 ))"
+RC=$(run_loop "$H" t1 10 "$FB")
+expect_code 0 "$RC" 'pod gone: the loop should exit cleanly when the pod it watched has left'
 assert_not_contains "$(calls "$H")" terminate 'pod gone: podTerminate was called on an absent pod'
 assert_absent "$H/state/t1.runpod-watch" 'pod gone: the record was left behind'
-pass 'a pod that disappears before its deadline ends the watch cleanly'
+assert_absent "$H/state/t1.runpod-watch.observed" 'pod gone: the derived-state file was left behind'
+pass 'a pod that was seen and then disappears ends the watch cleanly'
 
-# --- a pod already gone at its deadline is not claimed as a watchdog stop
-H=$TMP_ROOT/deadline-already-gone
+# --- a pod id that was NEVER in the account keeps the watch alive and says so
+H=$TMP_ROOT/never-seen
 FB=$(new_home "$H")
 printf 'pod-other\n' > "$H/api/pods"
-write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=1" "deadline_source=declared"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=1"
 RC=$(run_loop "$H" t1 6 "$FB")
-expect_code 0 "$RC" 'already gone at deadline: the loop should finish cleanly'
+assert_not_equals 0 "$RC" \
+  'never seen: an id that was never in the account must not end the watch as if the run had finished'
 assert_not_contains "$(calls "$H")" terminate \
-  'already gone at deadline: podTerminate was called on a pod that was already absent'
-if [ -e "$H/state/t1.status" ]; then
-  assert_no_grep 'has been stopped' "$H/state/t1.status" \
-    'already gone at deadline: the watchdog credited itself with a stop it did not make'
-fi
-pass 'a pod already absent when its deadline passes is not reported as a watchdog termination'
+  'never seen: podTerminate was called for a pod this watchdog never saw'
+assert_grep 'never seen pod pod-alpha' "$H/state/t1.status" \
+  'never seen: firstmate was not told the pod id may be wrong while a rented pod bills on'
+assert_no_grep 'has been stopped' "$H/state/t1.status" \
+  'never seen: the watchdog credited itself with a stop it did not make'
+assert_grep 'pod=pod-alpha' "$H/state/t1.runpod-watch" \
+  'never seen: the record was deleted, retiring a watch that never guarded anything'
+pass 'a pod id that was never in the account alarms and keeps watching instead of ending silently'
+
+# --- alarms carry their own decision key and cannot clobber a crewmate's
+H=$TMP_ROOT/decision-key
+FB=$(new_home "$H")
+printf 'pod-alpha\n' > "$H/api/pods"
+: > "$H/api/pods.fail"
+printf 'needs-decision: fp8 or int4 for the C6 sweep?\n' > "$H/state/t1.status"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( $(date +%s) + 3600 ))"
+run_loop "$H" t1 4 "$FB" >/dev/null
+OPEN=$(open_decisions "$H/state/t1.status")
+assert_contains "$OPEN" 'fp8 or int4' \
+  "decision key: the watchdog alarm swallowed the crewmate's open decision"
+assert_contains "$OPEN" 'cannot reach RunPod' 'decision key: the watchdog alarm is not open at all'
+printf 'resolved: fp8 chosen\n' >> "$H/state/t1.status"
+OPEN=$(open_decisions "$H/state/t1.status")
+assert_not_contains "$OPEN" 'fp8 or int4' \
+  "decision key: the crewmate's own resolution did not close the crewmate's decision"
+assert_contains "$OPEN" 'cannot reach RunPod' \
+  "decision key: a crewmate's unrelated resolution closed the still-true watchdog alarm"
+pass 'watchdog alarms own their decision key instead of sharing the unkeyed default'
 
 # --- the credential never reaches anything the script writes
 H=$TMP_ROOT/secret
 FB=$(new_home "$H")
 printf 'pod-alpha\n' > "$H/api/pods"
 printf '{"data":{"podTerminate":null}}' > "$H/api/terminate.out"
-write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=1" "deadline_source=declared"
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=1"
 run_loop "$H" t1 20 "$FB" >/dev/null
 assert_grep "$FAKE_KEY" "$H/api/curl-stdin.log" \
   'credential: the fake API never saw the key, so this case would pass vacuously'
@@ -269,22 +348,74 @@ assert_not_equals 0 "$RC" 'arm with an already-passed deadline should refuse'
 assert_absent "$H/state/t1.runpod-watch" 'arm: a record was published for a passed deadline'
 pass 'arm refuses to guess a deadline and refuses one that has already passed'
 
-# --- the ceiling a run declared becomes the earlier wall-clock deadline
+# --- a value-taking flag with no value is refused, not spun on
+for SUB in "arm --task t1 --pod pod-alpha --deadline" "disarm --task" "status --task" "run --task"; do
+  # shellcheck disable=SC2086 # the subcommand and its flags are the fixture
+  OUT=$(FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" FM_RUNPOD_ENV_FILE="$H/.env" \
+    PATH="$FB:$PATH" timeout -s KILL 10 "$WATCHDOG" $SUB 2>&1) && RC=0 || RC=$?
+  assert_not_equals 137 "$RC" "missing value ($SUB): the option parser spun instead of refusing"
+  assert_not_equals 0 "$RC" "missing value ($SUB): a flag with no value was accepted"
+  assert_contains "$OUT" 'needs a value' "missing value ($SUB): the refusal did not say what was wrong"
+done
+pass 'a value-taking flag given as the last argument is refused instead of spun on'
+
+# --- the ceiling is anchored to the pod's own start, not to arm time
 H=$TMP_ROOT/ceiling
 FB=$(new_home "$H")
 printf 'pod-alpha\n' > "$H/api/pods"
-FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" FM_RUNPOD_ENV_FILE="$H/.env" \
-  FM_RUNPOD_API_URL='https://fake.invalid/graphql' FM_TEST_API_DIR="$H/api" \
-  FM_RUNPOD_POLL_SECONDS=600 PATH="$FB:$PATH" \
-  "$WATCHDOG" arm --task t1 --pod pod-alpha --deadline "$(( $(date +%s) + 21600 ))" \
-    --ceiling-usd 20 --rate-usd-hr 3.49 >"$H/arm.out" 2>&1 \
-    || fail "arm with a ceiling failed: $(cat "$H/arm.out" 2>/dev/null)"
-OUT=$(FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" status --task t1)
+# The pod has already been up for two hours when the watchdog is armed, which is
+# exactly the case an arm-time anchor would silently under-count.
+printf '7200\n' > "$H/api/uptime"
+ARM_EPOCH=$(date -u +%s)
+DECLARED=$(( ARM_EPOCH + 21600 ))
+arm_watchdog "$H" "$FB" --task t1 --pod pod-alpha --deadline "$DECLARED" \
+  --ceiling-usd 20 --rate-usd-hr 3.49 > "$H/arm.out" 2>&1 \
+  || fail "arm with a ceiling failed: $(cat "$H/arm.out" 2>/dev/null)"
+OUT=$(wait_for_anchor "$H" t1 pod-start) \
+  || fail "ceiling: the watchdog never resolved the pod start anchor: $OUT"
 assert_contains "$OUT" 'source=ceiling' \
   'ceiling: a 20 USD ceiling at 3.49 USD/hr is under six hours and should bind before the declared deadline'
-assert_contains "$OUT" 'ceiling=20' 'ceiling: the declared ceiling was not recorded'
+assert_contains "$OUT" 'ceiling=20usd@3.49/hr' 'ceiling: the declared ceiling was not recorded'
+EFF=$(status_deadline_epoch "$OUT")
+# 20 USD / 3.49 USD-hr = 20630s of uptime; the pod had already burned 7200 of it.
+WANT=$(( ARM_EPOCH - 7200 + 20630 ))
+ARM_ANCHORED=$(( ARM_EPOCH + 20630 ))
+[ -n "$EFF" ] || fail "ceiling: status did not print a readable deadline: $OUT"
+[ "$EFF" -ge "$(( WANT - 120 ))" ] && [ "$EFF" -le "$(( WANT + 120 ))" ] \
+  || fail "ceiling: effective deadline $EFF is not anchored to the pod start (wanted ~$WANT, arm-anchored would be $ARM_ANCHORED)"
+# Re-arming with a later declared deadline must not buy more ceiling.
+arm_watchdog "$H" "$FB" --task t1 --pod pod-alpha --deadline "$(( ARM_EPOCH + 43200 ))" \
+  --ceiling-usd 20 --rate-usd-hr 3.49 > "$H/arm2.out" 2>&1 \
+  || fail "re-arm with a ceiling failed: $(cat "$H/arm2.out" 2>/dev/null)"
+OUT=$(wait_for_anchor "$H" t1 pod-start) \
+  || fail "ceiling: the re-armed watchdog never resolved the pod start anchor: $OUT"
+EFF2=$(status_deadline_epoch "$OUT")
+[ -n "$EFF2" ] || fail "ceiling: status did not print a readable deadline after re-arming: $OUT"
+[ "$EFF2" -le "$(( EFF + 120 ))" ] \
+  || fail "ceiling: re-arming moved the ceiling deadline from $EFF to $EFF2"
+watchdog_status "$H" --task t1 >/dev/null
 FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" "$WATCHDOG" disarm --task t1 >/dev/null
-pass 'the ceiling a run declared binds when it is the earlier wall-clock instant'
+pass 'the declared ceiling is anchored to the pod start, and re-arming cannot extend it'
+
+# --- a ceiling whose anchor cannot be read is NOT enforced, and says so
+H=$TMP_ROOT/ceiling-unanchored
+FB=$(new_home "$H")
+printf 'pod-alpha\n' > "$H/api/pods"
+: > "$H/api/uptime.null"
+NOW=$(date -u +%s)
+write_record "$H" t1 "pod=pod-alpha" "deadline_epoch=$(( NOW + 21600 ))" \
+  "ceiling_seconds=20630" "ceiling_usd=20" "rate_usd_hr=3.49"
+RC=$(run_loop "$H" t1 4 "$FB")
+assert_not_equals 0 "$RC" 'unanchored ceiling: the loop must keep watching the declared deadline'
+assert_not_contains "$(calls "$H")" terminate \
+  'unanchored ceiling: a ceiling with no anchor terminated a pod inside its declared deadline'
+assert_grep 'NOT being enforced' "$H/state/t1.status" \
+  'unanchored ceiling: firstmate was not told the ceiling is not in force'
+OUT=$(watchdog_status "$H" --task t1)
+assert_contains "$OUT" 'anchor=unknown' 'unanchored ceiling: status hid the unknown anchor'
+assert_contains "$OUT" 'source=declared' \
+  'unanchored ceiling: status reported a ceiling instant nothing is enforcing'
+pass 'a ceiling whose pod-start anchor cannot be read is not enforced, and status says so'
 
 # --- the armed watchdog outlives the shell that armed it
 H=$TMP_ROOT/detach
