@@ -20,7 +20,7 @@ The trust dialog, workspace-trust record format, launch, and composer/submit pat
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; detection uses process ancestry command name `kimi`. |
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
-| Effort | No reasoning-effort flag exists, so requested effort is recorded in task metadata but omitted from launch; `../common/model-and-effort.md` owns unsupported-value handling. |
+| Effort | No reasoning-effort flag exists; `references/common/model-and-effort.md` owns unsupported-value handling. |
 
 ## Readiness-gated start
 

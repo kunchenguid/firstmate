@@ -577,21 +577,19 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_omits_invalid_max_effort() {
-  local rec id out status launch
+test_codex_refuses_invalid_max_effort() {
+  local rec id out status
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
   status=$?
-  expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
-  pass "codex omits unsupported max effort instead of passing a bad config value"
+  expect_code 1 "$status" "codex must refuse unsupported max effort"
+  assert_contains "$out" "unsupported effort 'max'" "missing effort refusal"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused effort published metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "refused effort launched an agent"
+  pass "codex refuses unsupported max effort before metadata or launch"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -611,26 +609,23 @@ test_grok_threads_model_and_reasoning_effort() {
   pass "grok receives --model and --reasoning-effort profile flags"
 }
 
-test_grok_omits_invalid_max_reasoning_effort() {
-  local rec id out status launch
+test_grok_refuses_invalid_max_reasoning_effort() {
+  local rec id out status
   id=profile-grok-max-z6
   rec=$(make_spawn_case profile-grok-max grok "$id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort max)
   status=$?
-  expect_code 0 "$status" "grok spawn with unsupported max reasoning effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
-    "grok launch did not preserve the model flag and typed brief when max effort was omitted"
-  assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
-  assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
-  pass "grok omits unsupported max reasoning effort"
+  expect_code 1 "$status" "grok must refuse unsupported max reasoning effort"
+  assert_contains "$out" "unsupported effort 'max'" "missing effort refusal"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused effort published metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "refused effort launched an agent"
+  pass "grok refuses unsupported max reasoning effort"
 }
 
-test_grok_omits_invalid_xhigh_reasoning_effort() {
-  local rec id out status launch
+test_grok_refuses_invalid_xhigh_reasoning_effort() {
+  local rec id out status
   id=profile-grok-xhigh-z6b
   rec=$(make_spawn_case profile-grok-xhigh grok "$id")
   read_case_record "$rec"
@@ -638,27 +633,24 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   # grok 0.2.99 rejects xhigh (accepted set is only low|medium|high).
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort xhigh)
   status=$?
-  expect_code 0 "$status" "grok spawn with unsupported xhigh reasoning effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 xhigh
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
-    "grok launch did not preserve the model flag and typed brief when xhigh effort was omitted"
-  assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
-  assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
-  pass "grok omits unsupported xhigh reasoning effort"
+  expect_code 1 "$status" "grok must refuse unsupported xhigh reasoning effort"
+  assert_contains "$out" "unsupported effort 'xhigh'" "missing effort refusal"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused effort published metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "refused effort launched an agent"
+  pass "grok refuses unsupported xhigh reasoning effort"
 }
 
-test_cursor_threads_model_workspace_and_omits_effort_axis() {
+test_cursor_threads_model_workspace_with_default_effort() {
   local rec id out status launch
   id=profile-cursor-z6c
   rec=$(make_spawn_case profile-cursor cursor "$id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model cursor-grok-4.5-high --effort high)
+    --model cursor-grok-4.5-high)
   status=$?
-  expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
+  expect_code 0 "$status" "cursor spawn with default effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high default
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
     "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
@@ -718,23 +710,23 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
   pass "cursor preserves the requested model when its live catalog is unreachable"
 }
 
-test_opencode_threads_model_and_ignores_effort_axis() {
+test_opencode_threads_model_with_default_effort() {
   local rec id out status launch
   id=profile-opencode-z7
   rec=$(make_spawn_case profile-opencode opencode "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5)
   status=$?
-  expect_code 0 "$status" "opencode spawn with model and ignored effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
+  expect_code 0 "$status" "opencode spawn with model and default effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch did not thread model"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
-  pass "opencode receives --model and omits the unsupported effort axis"
+  pass "opencode receives --model with an explicitly unset effort axis"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
@@ -1377,6 +1369,81 @@ SH
   done
 }
 
+test_unsupported_effort_refuses_before_attempt_or_launch() {
+  local rec id out status harness effort requested_tuple
+  for requested_tuple in codex:max cursor:high opencode:high kimi:high gemini:high rovo:xhigh; do
+    harness=${requested_tuple%:*}; effort=${requested_tuple#*:}
+    id="unsupported-effort-$harness"
+    rec=$(make_spawn_case "$id" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort "$effort")
+    status=$?
+    expect_code 1 "$status" "$requested_tuple must refuse, not silently launch with a different effective setting: $out"
+    if [ "$harness" = rovo ]; then
+      assert_contains "$out" "no launch template" "an unavailable adapter must refuse before applying axes"
+    else
+      assert_contains "$out" "unsupported effort" "effort refusal must name the requested axis"
+    fi
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unsupported effort published misleading metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "unsupported effort submitted a model launch"
+    if [ -f "$HOME_DIR/data/routing-outcomes.jsonl" ]; then
+      jq -se 'all(.[]; .intake == null)' "$HOME_DIR/data/routing-outcomes.jsonl" >/dev/null || fail "unsupported effort created an attempt"
+    fi
+  done
+  pass "unsupported effort refuses before runtime metadata, attempt intake, or launch"
+}
+
+test_raw_launch_refuses_unapplied_axes() {
+  local rec id out axis value
+  for axis in model effort; do
+    id="raw-unapplied-$axis"
+    rec=$(make_spawn_case "$id" pi "$id")
+    read_case_record "$rec"
+    value=high
+    [ "$axis" != model ] || value=openai-codex/example
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      'pi --offline' "--$axis" "$value")
+    expect_code 1 "$?" "raw launch must refuse an unapplied $axis: $out"
+    assert_contains "$out" "cannot apply the requested $axis axis" "raw launch lost the axis diagnostic"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "raw launch published metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "raw launch submitted an agent"
+    if [ -f "$HOME_DIR/data/routing-outcomes.jsonl" ]; then
+      jq -se 'all(.[]; .intake == null)' "$HOME_DIR/data/routing-outcomes.jsonl" >/dev/null || fail "raw launch created an attempt"
+    fi
+  done
+  pass "raw launch refuses model and effort settings absent from its template before intake"
+}
+
+# A focused regression entry for the launch-axis refusal; normal CI still runs
+# the complete script below. Unknown selectors refuse rather than skip tests.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  case "$FM_TEST_ONLY" in
+    test_unsupported_effort_refuses_before_attempt_or_launch|test_raw_launch_refuses_unapplied_axes|test_native_pi_ultra_is_explicit_and_model_scoped|test_pi_threads_model_and_max_effort|test_pi_signed_threads_shared_pi_profile_and_preserves_identity|test_opencode_threads_model_with_default_effort) "$FM_TEST_ONLY"; exit "$?" ;;
+    launch-axes)
+      result=0
+      for check in \
+        test_unsupported_effort_refuses_before_attempt_or_launch \
+        test_tachikoma_routes_through_real_spawn_and_telemetry \
+        test_no_profile_keeps_claude_profile_defaults \
+        test_claude_threads_model_and_effort \
+        test_codex_threads_model_and_effort \
+        test_codex_refuses_invalid_max_effort \
+        test_grok_threads_model_and_reasoning_effort \
+        test_grok_refuses_invalid_max_reasoning_effort \
+        test_grok_refuses_invalid_xhigh_reasoning_effort \
+        test_cursor_threads_model_workspace_with_default_effort \
+        test_opencode_threads_model_with_default_effort \
+        test_pi_threads_model_and_max_effort \
+        test_pi_signed_threads_shared_pi_profile_and_preserves_identity; do
+        ( "$check" ) || result=1
+      done
+      exit "$result" ;;
+    *) fail "unknown FM_TEST_ONLY selector: $FM_TEST_ONLY" ;;
+  esac
+fi
+
+test_unsupported_effort_refuses_before_attempt_or_launch
+test_raw_launch_refuses_unapplied_axes
 test_tachikoma_routes_through_real_spawn_and_telemetry
 test_launch_environment_allowlist
 test_launch_environment_invalid_config_refuses
@@ -1464,14 +1531,14 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_omits_invalid_max_effort
+test_codex_refuses_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
-test_grok_omits_invalid_max_reasoning_effort
-test_grok_omits_invalid_xhigh_reasoning_effort
-test_cursor_threads_model_workspace_and_omits_effort_axis
+test_grok_refuses_invalid_max_reasoning_effort
+test_grok_refuses_invalid_xhigh_reasoning_effort
+test_cursor_threads_model_workspace_with_default_effort
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
-test_opencode_threads_model_and_ignores_effort_axis
+test_opencode_threads_model_with_default_effort
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra

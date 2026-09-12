@@ -119,6 +119,13 @@ export function evidence({ root, home, data }) {
       assert(profiles, 'compiled rule does not exist');
       const candidates = Array.isArray(profiles) ? profiles : [profiles];
       assert(new Set(candidates.map(tupleKey)).size === candidates.length, 'duplicate concrete profiles');
+      const disabledHarnesses = [];
+      for (const harness of new Set(candidates.map(candidate => candidate.harness))) {
+        const result = spawnSync(path.join(root, 'bin/fm-harness.sh'), ['validate', harness], { env, encoding: 'utf8', timeout: 10000 });
+        assert(!result.error && [0, 1].includes(result.status), 'harness admission policy unreadable');
+        if (result.status === 1) disabledHarnesses.push(harness);
+      }
+      policy.allowedHarnesses = policy.allowedHarnesses.filter(harness => !disabledHarnesses.includes(harness));
       const bindings = new Set();
       for (const binding of policy.bindings) {
         shape(binding, schema.properties.bindings.items);
@@ -151,7 +158,7 @@ export function evidence({ root, home, data }) {
       const recordedAt = new Date().toISOString();
       fresh(snapshot, Date.parse(recordedAt));
       const recovery = poolRecovery(policy, candidates, snapshot, recoveryStore, recordedAt);
-      return { input: { policy, rule, candidates, snapshot, machine, cooldowns, repo: request.repo, seed }, stamp: { schemaVersion: 1, decisionId: crypto.randomUUID(), requestId: request.requestId, recordedAt, poolRecovery: recovery, task: request.task, taskClass: request.class, repo: request.repo, briefSha256: hash(brief), policySha256: hash(text + JSON.stringify(defaults)), quotaObservedAt: snapshot.generatedAt, machine, matchedRule: rule.matchedRule } };
+      return { input: { policy, rule, candidates, snapshot, machine, cooldowns, repo: request.repo, seed }, stamp: { schemaVersion: 1, decisionId: crypto.randomUUID(), requestId: request.requestId, recordedAt, poolRecovery: recovery, task: request.task, taskClass: request.class, repo: request.repo, briefSha256: hash(brief), policySha256: hash(text + JSON.stringify(defaults) + (disabledHarnesses.length ? JSON.stringify(disabledHarnesses.sort()) : '')), quotaObservedAt: snapshot.generatedAt, machine, matchedRule: rule.matchedRule } };
     },
     async readAttempts() { return parseJSON(owner('fm-model-telemetry.sh', ['sheet', '--format', 'json'])); },
   };

@@ -18,7 +18,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Marker | `GEMINI_CLI=1` on child and tool processes. `AI_AGENT` is NOT a Gemini identity - see Detection below. |
 | Resume | `gemini --resume <session-id>` restores full history; `--resume latest` and an index are also accepted, and `--list-sessions` enumerates them per project. |
 | Model | `-m` / `--model <model>`; discover through the interactive `/model` dialog. There is no `gemini models` subcommand, and the session's exit usage table also names the models actually used. |
-| Effort | None. `gemini --help` on 0.58.0 exposes no effort, reasoning, or thinking flag, so `references/common/model-and-effort.md`'s record-and-omit contract applies. `thinkingLevel` and `thinkingBudget` exist only as generation settings inside `settings.json` and are NOT a verified interactive axis. |
+| Effort | None. `gemini --help` on 0.58.0 exposes no effort, reasoning, or thinking flag, so `references/common/model-and-effort.md`'s unsupported-axis contract applies. `thinkingLevel` and `thinkingBudget` exist only as generation settings inside `settings.json` and are NOT a verified interactive axis. |
 
 ## Trust, and why the two documented options are not equivalent
 

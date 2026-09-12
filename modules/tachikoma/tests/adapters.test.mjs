@@ -65,6 +65,21 @@ test('CLI gates, seeded decisions, actual cooldown owner, privacy, service telem
   assert.equal(fs.statSync(path.join(f.home,'data/tachikoma/decisions.jsonl')).mode & 0o777,0o600);
 });
 
+test('home adapter exclusions override a compiled allow-list and invalidate an older request approval', () => {
+  const f = fixture('adapter-exclusions');
+  const replay = [...f.args(), '--request-id', 'adapter-admission'];
+  assert.equal(JSON.parse(f.call(replay)).harness, 'pi');
+  f.put('config/disabled-adapters', 'pi\n');
+  const result = JSON.parse(f.call(f.args(), 3));
+  assert.equal(result.model, null);
+  assert(result.alternatives.every(row => row.reasons.includes('adapter-disabled')));
+  f.call(replay, 2);
+  f.put('config/disabled-adapters', 'INVALID ENTRY\n');
+  f.call(f.args(), 2);
+  f.put('config/disabled-adapters', '');
+  assert.equal(JSON.parse(f.call(replay)).harness, 'pi');
+});
+
 test('Pi Cursor families rotate with OpenAI, Qwen and reactivated Kimi while respecting explicit pool pauses', () => {
   const f=fixture('cursor-pools');
   const models=[['cursor/grok-4.6','cursor'],['cursor/glm-5.2','cursor'],['cursor/composer','cursor'],['openai-codex/gpt-5.6-sol','codex'],['qwen-token-plan-individual/qwen3.8-max','qwen'],['kimi-coding/k3','kimi']];
@@ -83,6 +98,38 @@ test('Pi Cursor families rotate with OpenAI, Qwen and reactivated Kimi while res
   f.policy.disabledPools=[]; f.save();
   const kimi=JSON.parse(f.call(f.args())).selection.weights.find(row=>row.model==='kimi-coding/k3');
   assert(kimi.probability>0); assert.equal(kimi.runway,'proven');
+});
+
+test('another subscription stack routes from explicit input mappings without model-name inference', () => {
+  const f = fixture('bring-your-own-stack');
+  const profiles = ['provider-x/amber', 'provider-y/indigo'].map(model => ({ harness: 'pi', model, effort: 'high' }));
+  const pools = ['annual-seat', 'monthly-seat'];
+  const providers = ['account-vendor-one', 'account-vendor-two'];
+  const quotaProviders = ['meter-one', 'meter-two'];
+  const catalogModels = ['release-17', 'release-42'];
+  const scopes = ['plan-credits', 'burst-tokens'];
+  f.put('config/model-catalog.json', { pools: pools.map((pool, i) => ({ pool, provider: providers[i], plan: 'paid', harness: 'pi', account: 'fixture', models: [catalogModels[i]], quota_readable: true })) });
+  f.put('config/crew-dispatch.json', { default: profiles });
+  const sha = file => crypto.createHash('sha256').update(fs.readFileSync(path.join(f.home, file))).digest('hex');
+  Object.assign(f.policy, { enabled: true, catalogSha256: sha('config/model-catalog.json'), dispatchSha256: sha('config/crew-dispatch.json'), bindings: profiles.map((profile, i) => ({ ...profile, pool: pools[i], catalogModel: catalogModels[i], quotaProvider: quotaProviders[i], modelFamily: `family-${i}`, quotaScopes: [scopes[i]], strongest: true })) });
+  f.policy.rules.forEach(rule => { rule.selectionStrategy = 'highest-priority'; });
+  f.save();
+  const quota = remaining => f.put('data/quota.toon', `generatedAt: "${new Date().toISOString()}"\nquota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway}:\n  meter-one,plan-credits,80,4,through_reset\n  meter-two,burst-tokens,${remaining},2,through_reset\n`);
+  quota(70);
+  const route = (status = 0) => JSON.parse(f.call([...f.args(), '--require-enabled'], status));
+  const first = route();
+  assert.equal(first.model, profiles[0].model);
+  assert.equal(first.pool, pools[0]);
+  assert.equal(first.provider, providers[0]);
+  assert.equal(first.modelFamily, 'family-0');
+  assert.deepEqual(first.poolRecovery[0].quota.map(q => [q.provider, q.scope]), [[quotaProviders[0], scopes[0]]]);
+  f.policy.disabledPools = [pools[0]]; f.save();
+  assert.equal(route().model, profiles[1].model);
+  quota(0);
+  const refused = route(3);
+  assert.equal(refused.model, null);
+  assert(refused.alternatives[0].reasons.includes('pool-disabled'));
+  assert(refused.alternatives[1].reasons.includes('quota-exhausted'));
 });
 
 test('real immutable telemetry joins by decision ID and learn rebuilds cards idempotently', () => {

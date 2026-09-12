@@ -28,6 +28,20 @@ The existing spawn command's `--dispatch-tachikoma` option performs the enabled 
 
 ## How to configure
 
+### Bring your own stack
+
+Share the checkout, not another operator's private configuration, credentials, or history; different subscriptions and models need input changes, not routing-code edits.
+
+1. Fill `config/model-catalog.json` with your subscription pools, canonical model IDs and explicit account/provider relationships; keep credentials out of it.
+2. Fill `config/crew-dispatch.json` with your verified harness/model/effort profiles and project/task-class rules.
+3. Supply quota-axi evidence for your quota providers and scopes; `route --snapshot FILE` also accepts a compatible recorded TOON snapshot, not arbitrary quota formats.
+4. Compile a reviewed `config/tachikoma/policy.json` using the fields below: exact bindings, quota scopes, class-fit priors and source-file SHA256 hashes, initially with `enabled:false`.
+5. Check routes with fresh quota evidence while off, then explicitly set `enabled:true` and use `--require-enabled`; recompile whenever either source file changes.
+
+No model family, subscription relationship, price, or strength is inferred from a model name; supported harness and owner-script requirements still apply.
+
+### Policy reference
+
 `FM_HOME` selects the operational home; `FM_DATA_OVERRIDE` changes its data root, not its configuration or service telemetry root.
 The operator writes `FM_HOME/config/tachikoma/policy.json`, validated against the shape in [config.schema.json](config.schema.json) and the CLI's semantic checks.
 [config.json](config.json) supplies defaults; it is not an activated inventory.

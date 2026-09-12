@@ -57,9 +57,11 @@
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed. Both axes also accept the
+#   axes chosen by firstmate at intake. Explicit axes must have a verified flag
+#   mapping and a matching launch-template slot, or spawn refuses before intake
+#   and provisioning; it never records a requested axis while silently omitting it.
+#   Metadata records the requested setting, not a claim of observed runtime effort.
+#   Both axes also accept the
 #   literal "default", the task meta's spelling for an unset axis, and treat it
 #   as exactly that, so a recorded tuple - the escalation ladder's relaunch
 #   verdict (bin/fm-harness.sh escalate) - can be re-passed verbatim.
@@ -2301,8 +2303,8 @@ launch_template() {
     # `cursor` is not the CLI (the installed names are cursor-agent and the
     # legacy alias agent), and the foreign primary markers are cleared so an
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
-    # only reads the environment. Cursor exposes no effort flag, so the shared
-    # effort axis is deliberately omitted and stays in task metadata only.
+    # only reads the environment. Cursor exposes no effort flag; an explicit
+    # effort request is rejected by the launch-axis preflight.
     cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # gemini (Google Gemini CLI): a positional query starts the supervised
     # interactive session and auto-submits it, so the brief rides the launch
@@ -2333,9 +2335,8 @@ launch_template() {
     # The foreign primary markers are cleared for the same reason cursor
     # clears them: gemini does not clear an inherited CLAUDECODE, and
     # bin/fm-harness.sh must not read a gemini worker as its launcher.
-    # gemini exposes no reasoning-effort flag (checked against 0.58.0
-    # --help), so the shared effort axis is deliberately omitted here and
-    # stays in task metadata only, per the record-and-omit contract.
+    # Gemini exposes no reasoning-effort flag (checked against 0.58.0
+    # --help), so the launch-axis preflight rejects explicit effort requests.
     # Its turn-end and busy-state signals do NOT ride the launch command:
     # they are project hooks written into the worktree below.
     gemini) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -2762,83 +2763,61 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|cursor-agent)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|cursor-agent|omp|gemini)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
+    *) echo "error: unsupported model axis for harness '$harness'; omit it or use a verified launch adapter" >&2; return 1 ;;
   esac
 }
 
 effort_flag_for_harness() {
   local harness=$1 effort=$2 model=${3:-}
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
-  case "$harness" in
-    claude)
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-      esac
-      ;;
-    grok)
-      # grok exposes both --effort and --reasoning-effort; firstmate's profile
-      # axis is the reasoning knob. As of grok 0.2.99, --reasoning-effort accepts
-      # only low|medium|high and rejects both xhigh and max, so omit those rather
-      # than passing a known-bad value.
-      case "$effort" in
-        low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    pi|pi-signed)
-      # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
-      # its --thinking flag.
-      case "$effort" in
-        ultra)
-          "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
-          printf -- '--codex-effort %s ' "$(shell_quote ultra)"
-          ;;
-        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    omp)
-      # omp 18.1.11 --thinking accepts off|minimal|low|medium|high|xhigh|max|auto,
-      # a superset of the shared vocabulary, so every level maps straight across.
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    muse)
-      # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
-      # high|xhigh|ultra and defaults to high, so low..xhigh map straight across.
-      # ultra is muse's max-CLASS level, so firstmate's max maps onto it - but
-      # only ever as an EXPLICIT captain choice, never as a fallback, because
-      # AGENTS.md section 4 forbids selecting max without captain preference and
-      # the omitted effort here leaves muse on its own high default. muse's extra
-      # none/minimal levels sit below firstmate's shared vocabulary and are
-      # deliberately unreachable rather than remapped onto low.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-        max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
-      esac
-      ;;
-    # rovo has no --effort flag on `run`; its effort mapping rides
-    # --config-override, but that flag is single-value (see
-    # rovo_config_override_flag below) so it is built there, merged with the
-    # mandatory allowedExternalPaths grant, rather than here.
-    # opencode's interactive `opencode --prompt` launch has a verified --model
-    # flag but no verified effort flag. Its `opencode run --variant` flag belongs
-    # to a different, non-interactive launch mode, so fm-spawn does not pass it.
-    # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command. Cursor encodes effort
-    # in model ids such as cursor-grok-4.5-high, so it also receives no separate
-    # effort flag.
+  case "$harness:$effort" in
+    claude:low|claude:medium|claude:high|claude:xhigh|claude:max)
+      printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+    codex:low|codex:medium|codex:high|codex:xhigh)
+      printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+    grok:low|grok:medium|grok:high|muse:low|muse:medium|muse:high|muse:xhigh)
+      printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+    muse:max)
+      # The verified adapter maps the explicitly requested max class to ultra.
+      printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
+    pi:ultra|pi-signed:ultra)
+      "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
+      printf -- '--codex-effort %s ' "$(shell_quote ultra)" ;;
+    pi:low|pi:medium|pi:high|pi:xhigh|pi:max|pi-signed:low|pi-signed:medium|pi-signed:high|pi-signed:xhigh|pi-signed:max|omp:low|omp:medium|omp:high|omp:xhigh|omp:max)
+      printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+    rovo:low|rovo:medium|rovo:high|rovo:max)
+      # Merged with the path grant by rovo_config_override_flag below.
+      return 0 ;;
+    *)
+      echo "error: unsupported effort '$effort' for harness '$harness'; choose a supported setting or explicitly omit the axis" >&2
+      return 1 ;;
   esac
 }
+
+# Validate once before provisioning or intake, then use these exact flags at
+# launch. A requested axis must not survive only as misleading metadata.
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL") || exit 1
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+if [ -n "$MODELFLAG" ]; then
+  case "$LAUNCH" in
+    *__MODELFLAG__*) ;;
+    *) echo "error: launch command cannot apply the requested model axis" >&2; exit 1 ;;
+  esac
+fi
+if [ -n "$EFFORTFLAG" ]; then
+  case "$LAUNCH" in
+    *__EFFORTFLAG__*) ;;
+    *) echo "error: launch command cannot apply the requested effort axis" >&2; exit 1 ;;
+  esac
+elif [ "$HARNESS" = rovo ] && [ -n "$EFFORT" ] && [ "$EFFORT" != default ]; then
+  case "$LAUNCH" in
+    *__ROVOCONFIGOVERRIDE__*) ;;
+    *) echo "error: launch command cannot apply the requested effort axis" >&2; exit 1 ;;
+  esac
+fi
 
 case "$LAUNCH" in
   *__MUSEBIN__*)
@@ -5654,8 +5633,6 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 RESUMEFLAG=
 SESSIONFLAG=
 if [ "$RESUME_SESSION_SET" -eq 1 ]; then
