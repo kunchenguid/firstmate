@@ -79,6 +79,23 @@ node_free_path() {  # <case-dir> -> a bin dir holding the script's own tools but
   printf '%s\n' "$dir"
 }
 
+# <case-dir> -> a bin dir whose node resolves on PATH and dies on every call.
+# This is the shape a broken toolchain actually takes - a real one on this
+# machine aborted on a missing shared library - and it is distinct from a
+# missing node, which never resolves at all. The fake runs under /bin/sh,
+# which is dash on the Linux CI runner, so it uses the POSIX `kill -s` form
+# and disables core files so the abort leaves nothing behind in the case dir.
+broken_node_path() {
+  local dir=$1/brokennode-bin tool
+  mkdir -p "$dir"
+  for tool in bash env git mkdir; do
+    ln -sf "$(command -v "$tool")" "$dir/$tool"
+  done
+  printf '#!/bin/sh\nulimit -c 0\nkill -s ABRT $$\n' > "$dir/node"
+  chmod +x "$dir/node"
+  printf '%s\n' "$dir"
+}
+
 # --- secondmate homes -------------------------------------------------------
 
 # seed_secondmate_home <home> <id> [shape]: the on-disk shape bin/fm-home-seed.sh
@@ -387,6 +404,27 @@ test_missing_node_is_refused() {
   pass "fm-claude-trust.sh: a missing node is refused rather than degraded"
 }
 
+test_broken_node_is_refused() {
+  local rec out bindir
+  rec=$(make_case broken-node)
+  read_case "$rec"
+  bindir=$(broken_node_path "$CASE_DIR")
+  out=$(PATH="$bindir" run_trust "$CONFIG" "$WT" "$PROJ")
+  expect_code 1 $? "a node that cannot execute must refuse rather than let the spawn proceed: $out"
+  assert_contains "$out" "failed to execute" "the refusal did not name the interpreter as the failure"
+  # The refusal is the whole report: bash's own job-signal line for the
+  # aborted probe ("Abort trap" here, "Aborted" on Linux) must not reach the
+  # operator ahead of it, or the first line they read names neither node nor
+  # the trust step.
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the refusal must be the only line of output, but the probe's signal report leaked: $out"
+  assert_not_trusted "$CONFIG/.claude.json" "$WT" "a worktree was trusted although the store could not be written"
+  case "$out" in
+    *"trusted:"*) fail "a registration was claimed although none could be written: $out" ;;
+  esac
+  pass "fm-claude-trust.sh: a node that is present but cannot execute is refused"
+}
+
 # A missing interpreter must not soften the scope boundary, which
 # git and the filesystem decide on their own.
 test_scope_refusal_stays_fail_closed_without_node() {
@@ -661,6 +699,7 @@ test_symlinked_store_to_a_foreign_owned_target_is_refused
 test_symlinked_store_to_an_owned_target_is_accepted
 test_corrupt_store_fails_closed
 test_missing_node_is_refused
+test_broken_node_is_refused
 test_scope_refusal_stays_fail_closed_without_node
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
 test_refused_spawn_leaves_no_task_state
