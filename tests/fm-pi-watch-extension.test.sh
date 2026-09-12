@@ -39,6 +39,13 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/bin/fm-wake-lib.sh" <<'SH'
+fm_watcher_healthy() {
+  case "${expected_watcher_pid:-}" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$expected_watcher_pid" 2>/dev/null || return 1
+  FM_WATCHER_HEALTHY_PID=$expected_watcher_pid
+}
+SH
   chmod +x "$repo/bin/fm-operational-input.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
@@ -2909,67 +2916,117 @@ EOF
   pass "Pi streaming-time wake delivery keeps the successor chain and replays only unconsumed wakes"
 }
 
-# A verified successor can die while the wake it was started for is still
-# being delivered (a branch turn can take minutes). Its failure close arrives
+# A verified successor can become unhealthy while the wake it was started for
+# is still being delivered (a branch turn can take minutes). Its failure close arrives
 # while the pipeline is busy, so the ordinary retry path must be deferred to
 # the end of that delivery rather than skipped, or the live generation is left
 # with no watcher and no retry.
 test_pi_successor_failure_during_delivery_is_retried_after_delivery() {
-  local repo home plugin log trigger dead_window wrapper_release stop live out status
-  repo="$TMP_ROOT/pi-successor-dies-mid-delivery-root"
-  home="$TMP_ROOT/pi-successor-dies-mid-delivery-home"
-  log="$TMP_ROOT/pi-successor-dies-mid-delivery.log"
-  trigger="$TMP_ROOT/pi-successor-dies-mid-delivery.trigger"
-  dead_window="$TMP_ROOT/pi-successor-dies-mid-delivery.dead-window"
-  wrapper_release="$TMP_ROOT/pi-successor-dies-mid-delivery.wrapper-release"
-  stop="$TMP_ROOT/pi-successor-dies-mid-delivery.stop"
-  live="$TMP_ROOT/pi-successor-dies-mid-delivery.live"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
-  install_pi_watch_extension_fixture "$repo"
-  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+  local mode repo home plugin log trigger unhealthy_window wrapper_release stop live out status
+  for mode in dead stale identity; do
+    repo="$TMP_ROOT/pi-successor-unhealthy-mid-delivery-$mode-root"
+    home="$TMP_ROOT/pi-successor-unhealthy-mid-delivery-$mode-home"
+    log="$TMP_ROOT/pi-successor-unhealthy-mid-delivery-$mode.log"
+    trigger="$TMP_ROOT/pi-successor-unhealthy-mid-delivery-$mode.trigger"
+    unhealthy_window="$TMP_ROOT/pi-successor-unhealthy-mid-delivery-$mode.window"
+    wrapper_release="$TMP_ROOT/pi-successor-unhealthy-mid-delivery-$mode.wrapper-release"
+    stop="$TMP_ROOT/pi-successor-unhealthy-mid-delivery-$mode.stop"
+    live="$TMP_ROOT/pi-successor-unhealthy-mid-delivery-$mode.live"
+    mkdir -p "$repo/bin" "$home/state" "$home/config"
+    install_pi_watch_extension_fixture "$repo"
+    cp "$ROOT/bin/fm-wake-lib.sh" "$repo/bin/fm-wake-lib.sh"
+    plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --handling-delivered ]; then
   printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
   exit 0
 fi
+state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+lock="$state/.watch.lock"
+beat="$state/.last-watcher-beat"
+watch="$PWD/bin/fm-watch.sh"
+watcher=
+cleanup() {
+  if [ -n "$watcher" ] && [ "$watcher" != "$$" ] && kill -0 "$watcher" 2>/dev/null; then
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+  fi
+  if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$watcher" ]; then
+    rm -rf "$lock"
+  fi
+  if [ "$(cat "${FM_LIVE_FILE:?}" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$FM_LIVE_FILE"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+publish_health() {
+  local pid=$1 identity
+  . "$PWD/bin/fm-wake-lib.sh"
+  identity=$(fm_pid_identity "$pid") || exit 1
+  if [ "$count" -eq 3 ] && [ "$FM_HEALTH_FAILURE_MODE" = identity ]; then
+    identity="$identity recycled"
+  fi
+  rm -rf "$lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$pid" > "$lock/pid"
+  printf '%s\n' "$identity" > "$lock/pid-identity"
+  printf '%s\n' "$FM_HOME" > "$lock/fm-home"
+  printf '%s\n' "$watch" > "$lock/watcher-path"
+  : > "$beat"
+  if [ "$count" -eq 3 ] && [ "$FM_HEALTH_FAILURE_MODE" = stale ]; then
+    touch -t 200001010000 "$beat"
+  fi
+}
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
 if [ "$count" -eq 1 ]; then
+  watcher=$$
+  publish_health "$watcher"
   printf 'watcher: started pid=%s (beacon fresh) recovery-generation=shared-generation\n' "$$"
   printf 'signal: wake A before the successor dies\n'
   exit 0
 fi
 if [ "$count" -eq 2 ]; then
+  watcher=$$
+  publish_health "$watcher"
   printf 'watcher: started pid=%s (beacon fresh) recovery-generation=shared-generation\n' "$$"
   while [ ! -e "$FM_TRIGGER_FILE" ]; do sleep 0.02; done
-  printf 'signal: wake B behind the dying successor\n'
+  printf 'signal: wake B behind the unhealthy successor\n'
   exit 0
 fi
 if [ "$count" -eq 3 ]; then
-  sleep 0.1 &
+  if [ "$FM_HEALTH_FAILURE_MODE" = dead ]; then
+    sleep 0.1 &
+  else
+    sleep 30 &
+  fi
   watcher=$!
+  publish_health "$watcher"
   printf 'watcher: started pid=%s (beacon fresh) recovery-generation=shared-generation\n' "$watcher"
-  wait "$watcher"
-  printf 'wrapper=%s watcher=%s\n' "$$" "$watcher" > "$FM_DEAD_WINDOW_FILE"
+  if [ "$FM_HEALTH_FAILURE_MODE" = dead ]; then
+    wait "$watcher"
+  fi
+  printf 'wrapper=%s watcher=%s mode=%s\n' "$$" "$watcher" "$FM_HEALTH_FAILURE_MODE" > "$FM_UNHEALTHY_WINDOW_FILE"
   while [ ! -e "$FM_WRAPPER_RELEASE_FILE" ]; do sleep 0.02; done
   printf 'watcher: FAILED - successor lost its beacon\n'
   exit 3
 fi
+watcher=$$
+publish_health "$watcher"
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=shared-generation\n' "$$"
 printf '%s\n' "$$" > "$FM_LIVE_FILE"
-cleanup() { rm -f "$FM_LIVE_FILE"; }
-trap cleanup EXIT
-trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
-  chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
-    FM_TRIGGER_FILE="$trigger" FM_DEAD_WINDOW_FILE="$dead_window" FM_WRAPPER_RELEASE_FILE="$wrapper_release" \
-    FM_STOP_FILE="$stop" FM_LIVE_FILE="$live" \
-    FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 \
-    node --input-type=module 2>&1 <<'EOF'
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+      FM_TRIGGER_FILE="$trigger" FM_UNHEALTHY_WINDOW_FILE="$unhealthy_window" FM_WRAPPER_RELEASE_FILE="$wrapper_release" \
+      FM_STOP_FILE="$stop" FM_LIVE_FILE="$live" FM_HEALTH_FAILURE_MODE="$mode" \
+      FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 \
+      node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 let releaseBranch = () => {};
@@ -3031,23 +3088,65 @@ await waitFor(() => offers.length === 1, "branch accepted wake A behind a verifi
 if (arms() !== 2) throw new Error(`expected the verified successor before delivery, got ${arms()} arms`);
 writeFileSync(process.env.FM_TRIGGER_FILE, "close B\n");
 await waitFor(() => arms() === 3, "successor C behind wake B");
-await waitFor(() => existsSync(process.env.FM_DEAD_WINDOW_FILE), "live wrapper after successor C watcher exit");
-const deadWindow = readFileSync(process.env.FM_DEAD_WINDOW_FILE, "utf8").trim();
-const wrapperPid = deadWindow.match(/wrapper=([0-9]+)/)?.[1] ?? "";
-const deadWatcherPid = deadWindow.match(/watcher=([0-9]+)/)?.[1] ?? "";
-if (!wrapperPid || !pidAlive(wrapperPid)) throw new Error(`arm wrapper did not remain live: ${deadWindow}`);
-if (!deadWatcherPid || pidAlive(deadWatcherPid)) throw new Error(`watcher did not exit beneath its live wrapper: ${deadWindow}`);
+await waitFor(() => existsSync(process.env.FM_UNHEALTHY_WINDOW_FILE), "live wrapper after successor C became unhealthy");
+const unhealthyWindow = readFileSync(process.env.FM_UNHEALTHY_WINDOW_FILE, "utf8").trim();
+const wrapperPid = unhealthyWindow.match(/wrapper=([0-9]+)/)?.[1] ?? "";
+const watcherPid = unhealthyWindow.match(/watcher=([0-9]+)/)?.[1] ?? "";
+if (!wrapperPid || !pidAlive(wrapperPid)) throw new Error(`arm wrapper did not remain live: ${unhealthyWindow}`);
+if (!watcherPid) throw new Error(`successor watcher pid was not recorded: ${unhealthyWindow}`);
+if (process.env.FM_HEALTH_FAILURE_MODE === "dead") {
+  if (pidAlive(watcherPid)) throw new Error(`watcher did not exit beneath its live wrapper: ${unhealthyWindow}`);
+} else if (!pidAlive(watcherPid)) {
+  throw new Error(`live unhealthy watcher exited unexpectedly: ${unhealthyWindow}`);
+}
+const health = spawnSync(
+  "bash",
+  [
+    "-c",
+    '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"',
+    "test-successor-health",
+    `${process.env.FM_ROOT_OVERRIDE}/bin/fm-wake-lib.sh`,
+    `${process.env.FM_HOME}/state`,
+    `${process.env.FM_ROOT_OVERRIDE}/bin/fm-watch.sh`,
+    process.env.FM_HOME,
+  ],
+  { encoding: "utf8", env: process.env },
+);
+if (health.status === 0) throw new Error(`unhealthy successor passed the canonical health boundary: ${unhealthyWindow}`);
+if (process.env.FM_HEALTH_FAILURE_MODE !== "dead") {
+  const isolatedFailure = spawnSync(
+    "bash",
+    [
+      "-c",
+      process.env.FM_HEALTH_FAILURE_MODE === "stale"
+        ? '. "$1"; fm_watcher_lock_matches_pid "$2" "$3" "$5" "$4"'
+        : '. "$1"; age=$(fm_path_age "$2/.last-watcher-beat"); [ "$age" -lt 300 ] && ! fm_watcher_lock_matches_pid "$2" "$3" "$5" "$4"',
+      "test-successor-health-cause",
+      `${process.env.FM_ROOT_OVERRIDE}/bin/fm-wake-lib.sh`,
+      `${process.env.FM_HOME}/state`,
+      `${process.env.FM_ROOT_OVERRIDE}/bin/fm-watch.sh`,
+      process.env.FM_HOME,
+      watcherPid,
+    ],
+    { encoding: "utf8", env: process.env },
+  );
+  if (isolatedFailure.status !== 0) {
+    throw new Error(`successor health failure mode was not isolated: ${process.env.FM_HEALTH_FAILURE_MODE}`);
+  }
+}
 if (arms() !== 3) throw new Error(`a retry launched while wake A delivery was still in flight: ${arms()} arms`);
 if (offers.length !== 1) throw new Error(`wake B escaped serialization before wake A settled: ${offers.length} offers`);
 releaseBranch();
-await waitFor(() => prompts.length === 1, "wake B main fallback after successor C died");
-if (!pidAlive(wrapperPid)) throw new Error("arm wrapper exited before the dead-watcher fallback");
+await waitFor(() => prompts.length === 1, "wake B main fallback after successor C became unhealthy");
+if (!pidAlive(wrapperPid)) throw new Error("arm wrapper exited before the unhealthy-successor fallback");
 writeFileSync(process.env.FM_WRAPPER_RELEASE_FILE, "release wrapper\n");
 await waitFor(() => arms() === 4 && existsSync(process.env.FM_LIVE_FILE), "a retry watcher after the delivery settled");
 await new Promise((resolve) => setTimeout(resolve, 150));
-if (offers.length !== 1) throw new Error(`dead successor reused generation confirmation for wake B: ${offers.length} offers`);
-if (!prompts[0].includes("wake B behind the dying successor")) throw new Error(`wake B was lost: ${prompts[0]}`);
-if (!prompts[0].includes("successor ended before actionable wake delivery")) throw new Error(`wake B lacked the dead-successor failure: ${prompts[0]}`);
+if (offers.length !== 1) throw new Error(`unhealthy successor reused generation confirmation for wake B: ${offers.length} offers`);
+if (!prompts[0].includes("wake B behind the unhealthy successor")) throw new Error(`wake B was lost: ${prompts[0]}`);
+if (!prompts[0].includes("successor became unhealthy before actionable wake delivery")) {
+  throw new Error(`wake B lacked the unhealthy-successor failure: ${prompts[0]}`);
+}
 if (arms() !== 4) throw new Error(`the deferred retry was not single-flight: ${arms()} arms`);
 const livePid = readFileSync(process.env.FM_LIVE_FILE, "utf8").trim();
 const liveArmPids = armPids().filter(pidAlive);
@@ -3057,11 +3156,12 @@ if (liveArmPids.length !== 1 || liveArmPids[0] !== livePid) {
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
-)
-  status=$?
-  expect_code 0 "$status" "Pi must route a wake to main when its confirmed-generation successor died"
-  [ -z "$out" ] || fail "Pi successor-dies-mid-delivery test printed output: $out"
-  pass "Pi revalidates the exact successor before branch delivery and retries after fallback"
+    )
+    status=$?
+    expect_code 0 "$status" "Pi must route a wake to main when its confirmed-generation successor is unhealthy ($mode): $out"
+    [ -z "$out" ] || fail "Pi successor-unhealthy-mid-delivery test ($mode) printed output: $out"
+  done
+  pass "Pi revalidates exact successor health before branch delivery and retries after fallback"
 }
 
 test_pi_late_retiring_actionable_reaches_replacement() {

@@ -144,6 +144,8 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const wakeLib = `${fmRoot}/bin/fm-wake-lib.sh`;
+const watchScript = `${fmRoot}/bin/fm-watch.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/pi-primary-watch`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
@@ -159,6 +161,7 @@ const armReadyTimeoutMs = positiveInteger(
   process.platform === "win32" ? 35000 : 12000,
 );
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
+const watcherHealthGraceSeconds = positiveInteger("FM_GUARD_GRACE", 300);
 const repairOnlyHint = "call fm_watch_arm_pi again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
@@ -224,6 +227,35 @@ function pidAlive(pid: string): boolean {
   } catch {
     return false;
   }
+}
+
+function watcherHealthy(pid: string): boolean {
+  if (!/^[0-9]+$/.test(pid)) return false;
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      'expected_watcher_pid=$6; . "$1" && fm_watcher_healthy "$2" "$3" "$4" "$5" && [ "$FM_WATCHER_HEALTHY_PID" = "$expected_watcher_pid" ]',
+      "fm-pi-watcher-health",
+      wakeLib,
+      state,
+      watchScript,
+      String(watcherHealthGraceSeconds),
+      fmHome,
+      pid,
+    ],
+    {
+      cwd: fmRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FM_HOME: fmHome,
+        FM_STATE_OVERRIDE: state,
+        FM_ROOT_OVERRIDE: fmRoot,
+      },
+    },
+  );
+  return result.status === 0;
 }
 
 function lockOwnership(): LockOwnership {
@@ -661,11 +693,11 @@ export default function (pi: ExtensionAPI) {
         !restorationChildPid ||
         !pidAlive(restorationChildPid) ||
         !restorationWatcherPid ||
-        !pidAlive(restorationWatcherPid))
+        !watcherHealthy(restorationWatcherPid))
     ) {
       return await sendWake(
         owner,
-        `${message}\n\nwatcher: FAILED - Pi extension successor ended before actionable wake delivery`,
+        `${message}\n\nwatcher: FAILED - Pi extension successor became unhealthy before actionable wake delivery`,
         pending,
       );
     }
