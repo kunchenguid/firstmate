@@ -1261,7 +1261,11 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # with no deadline; the bound matches the pane-cwd wait that follows it. A
 # bound hit exits 124 like every fm_run_timed caller, and a get killed at the
 # bound may already have written its lease, which is why the abort path in
-# bin/fm-spawn.sh looks the task's lease up by holder when no path came back.
+# bin/fm-spawn.sh looks the task's lease up by holder after a bound hit (and
+# only then: a get that failed cleanly leased nothing) and reports the slot it
+# finds for hand release rather than returning it, since the holder label is
+# the task id and cannot tell that lease from one another spawn under the
+# same id holds live.
 FM_TREEHOUSE_LEASE_TIMEOUT="${FM_TREEHOUSE_LEASE_TIMEOUT:-60}"
 fm_treehouse_lease_timeout() {  # prints the effective bound in seconds
   case "$FM_TREEHOUSE_LEASE_TIMEOUT" in
@@ -1399,10 +1403,12 @@ fm_treehouse_slot_lease_state() {  # <project-dir> <worktree> <task-id>
   fi
 }
 
-# Print the path of the one slot leased under a task id, for a spawn that
-# leased a slot but never learned its path. Prints nothing and returns 1 when
-# no slot, more than one slot, or an unreadable status leaves the answer
-# unproven; a release must never guess between two candidates. The two
+# Print the path of the one slot leased under a task id, for a spawn that may
+# have leased a slot but never learned its path. Prints nothing and returns 1
+# when no slot, more than one slot, or an unreadable status leaves the answer
+# unproven; a caller must never guess between two candidates, and the one
+# found is reported for hand release, never returned by the caller, because
+# the label alone cannot prove which spawn under that id wrote it. The two
 # failures are not the same answer: FM_TREEHOUSE_LEASE_FIND_REASON stays empty
 # when the pool was read and records no lease under the holder, and names why
 # the answer is unproven otherwise, so a caller can tell "nothing to release"

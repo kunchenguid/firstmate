@@ -706,8 +706,11 @@ run_pool_spawn() {  # <id> [fm-spawn args...]
 # The spawn side of the durable lease that bin/fm-teardown.sh later checks: a
 # launched task's slot is leased by firstmate itself under the task id before
 # the pane is told to enter it, a slot the pool cannot lease refuses before
-# anything is published, and an abort after leasing returns the task's own
-# lease with the holder check so no slot stays leased to a task with no record.
+# anything is published, an abort after leasing returns the task's own lease
+# with the holder check so no slot stays leased to a task with no record, and
+# a get that produced no path never releases a slot on the strength of the
+# holder label alone, because the label is the task id and another spawn under
+# the same id may hold that slot live.
 test_pool_slot_lease_follows_the_spawn_outcome() {
   local rec id out status before
 
@@ -746,10 +749,16 @@ test_pool_slot_lease_follows_the_spawn_outcome() {
   ! grep -Fq -- "treehouse return" "$POOL_LOG" \
     || fail "a spawn that leased nothing tried to return a slot: $(cat "$POOL_LOG")"
 
+  # A get that fails cleanly on a full pool leased nothing, so the abort has
+  # nothing to look up: the pool here already holds a slot leased under this
+  # very task id by another spawn (another home sharing the pool, or this
+  # home's own still-recorded task being re-spawned), and a by-holder lookup
+  # would find and release that live task's slot.
   id='pool-slot-unleasable-r1'
   rec=$(make_case slot-unleasable "$id")
   read_case_record "$rec"
   lay_out_as_pool_slot
+  printf '%s\t%s\n' "$POOL_DIR" "$id" > "$POOL_LEASES"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   out=$(FM_FAKE_TREEHOUSE_GET_FAIL=1 run_pool_spawn "$id" --scout)
   status=$?
@@ -757,9 +766,14 @@ test_pool_slot_lease_follows_the_spawn_outcome() {
   assert_contains "$out" "treehouse get --lease could not lease a worktree for task $id" \
     "spawn did not name the failed lease as the reason"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record without a leased slot"
-  [ ! -s "$POOL_LEASES" ] || fail "a refused lease left a lease record behind: $(cat "$POOL_LEASES")"
   ! grep -Fq -- "treehouse return" "$POOL_LOG" \
-    || fail "a spawn that leased nothing tried to return a slot: $(cat "$POOL_LOG")"
+    || fail "a spawn whose get failed cleanly returned a slot: $(cat "$POOL_LOG")"
+  ! grep -Fq -- "treehouse status" "$POOL_LOG" \
+    || fail "a spawn whose get failed cleanly looked the holder label up anyway: $(cat "$POOL_LOG")"
+  [ "$(awk -F'\t' -v p="$POOL_DIR" '$1 == p { print $2 }' "$POOL_LEASES")" = "$id" ] \
+    || fail "the other spawn's same-label lease did not survive a clean full-pool failure: $(cat "$POOL_LEASES")"
+  assert_not_contains "$out" "may hold a Treehouse slot lease" \
+    "a get that failed cleanly was reported as a possibly orphaned lease"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved the slot's HEAD after failing to lease it"
 
@@ -782,7 +796,10 @@ test_pool_slot_lease_follows_the_spawn_outcome() {
     "the aborted spawn did not report returning its lease"
 
   # A get killed at its bound may already have written its lease without ever
-  # printing the path: the abort looks the lease up by holder and returns it.
+  # printing the path: the abort looks the lease up by holder, but the label
+  # alone cannot prove the slot it finds is this spawn's rather than another
+  # spawn's under the same id, so it names the slot and the hand-release
+  # command instead of returning it.
   id='pool-slot-lease-deadline-r1'
   rec=$(make_case slot-lease-deadline "$id")
   read_case_record "$rec"
@@ -793,12 +810,16 @@ test_pool_slot_lease_follows_the_spawn_outcome() {
   assert_contains "$out" "did not lease a worktree for task $id within 1s" \
     "the timed-out lease was not reported at its bound"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the timed-out spawn published task metadata"
-  grep -Fxq -- "treehouse return --force --if-lease-holder $id $POOL_DIR" "$POOL_LOG" \
-    || fail "the timed-out spawn did not find its lease by holder and return it: $(cat "$POOL_LOG")"
-  ! grep -Fq -- "$id" "$POOL_LEASES" \
-    || fail "a get killed at its bound left its slot leased to a task with no record: $(cat "$POOL_LEASES")"
-  assert_contains "$out" "returned task $id's leased Treehouse slot $POOL_DIR" \
-    "the timed-out spawn did not report returning the lease it found by holder"
+  grep -Fxq -- "treehouse status --json" "$POOL_LOG" \
+    || fail "the timed-out spawn did not look its lease up by holder: $(cat "$POOL_LOG")"
+  ! grep -Fq -- "treehouse return" "$POOL_LOG" \
+    || fail "the timed-out spawn returned a slot it found by holder label alone: $(cat "$POOL_LOG")"
+  grep -Fxq -- "$POOL_DIR	$id" "$POOL_LEASES" \
+    || fail "the lease the timed-out get wrote did not survive the abort: $(cat "$POOL_LEASES")"
+  assert_contains "$out" "Treehouse slot $POOL_DIR is leased to '$id' with no task record" \
+    "the timed-out spawn did not name the slot it found leased under its id"
+  assert_contains "$out" "treehouse return --force --if-lease-holder '$id' '$POOL_DIR'" \
+    "the timed-out spawn did not hand the operator the exact release command for the slot it found"
 
   # The same deadline, but the pool's lease state cannot be read afterwards:
   # the lookup is unproven rather than empty, so the abort must say a lease
@@ -823,7 +844,7 @@ test_pool_slot_lease_follows_the_spawn_outcome() {
     "the unproven-lease warning did not hand the operator the release command"
   grep -Fxq -- "$POOL_DIR	$id" "$POOL_LEASES" \
     || fail "the fixture did not leave the orphaned lease the warning is about: $(cat "$POOL_LEASES")"
-  pass "a Treehouse slot is leased under the launched task id, a leased slot is never handed on, a failed lease refuses, and an abort returns the task's own lease or names the one it could not find"
+  pass "a Treehouse slot is leased under the launched task id, a leased slot is never handed on, a failed lease refuses without looking the label up, and an abort returns only the lease its own get named and reports any it found by holder"
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool

@@ -17,6 +17,10 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. fm-spawn --relaunch reads the recorded Treehouse slot's durable lease
+#      (bin/fm-wake-lib.sh owns the states): the task's own lease proceeds,
+#      another holder's refuses naming it, no lease proceeds on the record
+#      with a warning, and an unreadable lease state refuses naming why.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -166,6 +170,35 @@ EOF
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
   TASK_TMPS+=("/tmp/fm-$id")
+}
+
+# add_pool_ship_task <case-dir> <id>: add_ship_task, but the recorded worktree
+# is a Treehouse pool slot (<pool>/1/project beside <pool>/treehouse-state.json,
+# the layout fm_treehouse_pool_slot recognises) and the case's fakebin carries
+# the shared fake pool, so a relaunch reads the slot's lease through it. Sets
+# POOL_WT, POOL_LEASES ("<path><TAB><holder>" lines) and POOL_SLOTS.
+add_pool_ship_task() {  # <case-dir> <id>
+  local dir=$1 id=$2 pool="$1/pool"
+  add_ship_task "$dir" "$id" claude
+  mkdir -p "$pool/1"
+  git -C "$dir/proj" worktree move "$dir/wt" "$pool/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$pool/1/project" > "$pool/treehouse-state.json"
+  POOL_WT="$pool/1/project"
+  POOL_LEASES="$dir/treehouse-leases"
+  POOL_SLOTS="$dir/treehouse-slots"
+  : > "$POOL_LEASES"
+  printf '%s\n' "$POOL_WT" > "$POOL_SLOTS"
+  sed -i.bak "s|^worktree=.*|worktree=$POOL_WT|" "$dir/home/state/$id.meta"
+  rm -f "$dir/home/state/$id.meta.bak"
+  printf '%s' "$POOL_WT" > "$dir/fake/cwd"
+  fm_test_fake_treehouse "$dir/fakebin"
+}
+
+run_pool_spawn() {  # <case-dir> <args...>
+  local dir=$1; shift
+  FM_FAKE_TREEHOUSE_LEASES="$POOL_LEASES" FM_FAKE_TREEHOUSE_SLOTS="$POOL_SLOTS" \
+    FM_FAKE_TREEHOUSE_LOG="$dir/treehouse-calls.log" \
+    run_spawn "$dir" "$@"
 }
 
 run_control() {  # <case-dir> <args...>
@@ -1523,6 +1556,105 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding its work"
 }
 
+# --- 7. the recorded slot's durable lease ------------------------------------
+# A slot the pool still leases to this task is the proof the record is current.
+test_spawn_relaunch_proceeds_on_the_tasks_own_lease() {
+  local dir out rc
+  dir=$(new_case lease-mine rl50)
+  add_pool_ship_task "$dir" rl50
+  printf '%s\t%s\n' "$POOL_WT" rl50 > "$POOL_LEASES"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_pool_spawn "$dir" rl50 --relaunch); rc=$?
+  expect_code 0 "$rc" "a relaunch onto the task's own leased slot should proceed"$'\n'"$out"
+  assert_contains "$out" "spawned rl50 harness=claude" "the replacement should have launched"
+  assert_not_contains "$out" "carries no durable Treehouse lease" \
+    "a slot leased to the task must not be reported as unleased"
+  [ "$(meta_field "$dir" rl50 worktree)" = "$POOL_WT" ] \
+    || fail "the relaunch must keep the leased slot as the worktree, got '$(meta_field "$dir" rl50 worktree)'"
+  grep -Fxq -- "$POOL_WT	rl50" "$POOL_LEASES" \
+    || fail "the relaunch disturbed the task's own lease: $(cat "$POOL_LEASES")"
+  ! grep -Fq -- "treehouse return" "$dir/treehouse-calls.log" \
+    || fail "a relaunch returned a slot: $(cat "$dir/treehouse-calls.log")"
+  pass "fm-spawn --relaunch: a slot leased to the task itself relaunches into it"
+}
+
+# The pool handed the recorded slot on after the record was written: another
+# task's lease names it, so the record is stale and the relaunch would put this
+# task's agent into that task's live copy.
+test_spawn_relaunch_refuses_a_slot_leased_to_another_task() {
+  local dir out rc before
+  dir=$(new_case lease-other rl51)
+  add_pool_ship_task "$dir" rl51
+  printf '%s\t%s\n' "$POOL_WT" newcomer > "$POOL_LEASES"
+  printf 'zsh' > "$dir/fake/command"
+  before=$(cat "$dir/home/state/rl51.meta")
+  out=$(run_pool_spawn "$dir" rl51 --relaunch); rc=$?
+  expect_code 1 "$rc" "a relaunch onto a slot leased to another task should refuse"$'\n'"$out"
+  assert_contains "$out" "is leased to 'newcomer'" "the refusal should name the holder"
+  assert_contains "$out" "refusing to relaunch an agent into another task's slot" \
+    "the refusal should say why the slot is off limits"
+  [ ! -s "$dir/fake/keys" ] && [ ! -s "$dir/fake/literal" ] \
+    || fail "a refused relaunch must send nothing to the pane"
+  [ "$(cat "$dir/home/state/rl51.meta")" = "$before" ] \
+    || fail "a refused relaunch must leave the record byte-identical"
+  grep -Fxq -- "$POOL_WT	newcomer" "$POOL_LEASES" \
+    || fail "the other task's lease did not survive the refusal: $(cat "$POOL_LEASES")"
+  ! grep -Fq -- "treehouse return" "$dir/treehouse-calls.log" \
+    || fail "a refused relaunch returned a slot: $(cat "$dir/treehouse-calls.log")"
+  pass "fm-spawn --relaunch: a slot leased to another task is refused, naming the holder"
+}
+
+# A slot with no durable lease was taken by the pane-driven get before spawns
+# leased, or has been returned since: it relaunches on the record alone, as it
+# did before leases, with a warning that says so.
+test_spawn_relaunch_proceeds_on_an_unleased_slot_with_a_warning() {
+  local dir out rc
+  dir=$(new_case lease-none rl52)
+  add_pool_ship_task "$dir" rl52
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_pool_spawn "$dir" rl52 --relaunch); rc=$?
+  expect_code 0 "$rc" "a relaunch onto an unleased slot should proceed on the record"$'\n'"$out"
+  assert_contains "$out" "recorded worktree '$POOL_WT' carries no durable Treehouse lease" \
+    "the relaunch should warn that the slot carries no lease"
+  assert_contains "$out" "relaunching on the record alone" \
+    "the warning should say the record alone is being trusted"
+  assert_contains "$out" "spawned rl52 harness=claude" "the replacement should have launched"
+  [ ! -s "$POOL_LEASES" ] || fail "a relaunch must lease nothing: $(cat "$POOL_LEASES")"
+  ! grep -Fq -- "treehouse get" "$dir/treehouse-calls.log" \
+    || fail "a relaunch ran a treehouse get: $(cat "$dir/treehouse-calls.log")"
+  pass "fm-spawn --relaunch: a slot with no durable lease relaunches on the record with a warning"
+}
+
+# A lease state that cannot be read proves nothing, and a relaunch on a slot
+# that may be another task's is exactly what the lease exists to prevent.
+test_spawn_relaunch_refuses_an_unreadable_lease_state() {
+  local dir out rc before
+  dir=$(new_case lease-unknown rl53)
+  add_pool_ship_task "$dir" rl53
+  printf 'zsh' > "$dir/fake/command"
+  before=$(cat "$dir/home/state/rl53.meta")
+  out=$(FM_FAKE_TREEHOUSE_STATUS_FAIL=1 run_pool_spawn "$dir" rl53 --relaunch); rc=$?
+  expect_code 1 "$rc" "a relaunch whose lease state cannot be read should refuse"$'\n'"$out"
+  assert_contains "$out" "cannot read the Treehouse lease state of task rl53's recorded worktree" \
+    "the refusal should say the lease state is unreadable"
+  assert_contains "$out" "treehouse status --json failed from" \
+    "the refusal should name why the pool could not be read"
+  [ ! -s "$dir/fake/keys" ] && [ ! -s "$dir/fake/literal" ] \
+    || fail "a refused relaunch must send nothing to the pane"
+  [ "$(cat "$dir/home/state/rl53.meta")" = "$before" ] \
+    || fail "a refused relaunch must leave the record byte-identical"
+
+  # The pool reads, but does not list the slot: equally unproven.
+  : > "$POOL_SLOTS"
+  out=$(run_pool_spawn "$dir" rl53 --relaunch); rc=$?
+  expect_code 1 "$rc" "a relaunch onto a slot the pool does not list should refuse"$'\n'"$out"
+  assert_contains "$out" "does not list the slot" \
+    "the refusal should say the pool does not list the slot"
+  [ ! -s "$dir/fake/keys" ] && [ ! -s "$dir/fake/literal" ] \
+    || fail "a refused relaunch must send nothing to the pane"
+  pass "fm-spawn --relaunch: an unreadable or unlisted lease state refuses, naming the reason"
+}
+
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
   local dir out rc=0
   command -v tasks-axi >/dev/null 2>&1 || {
@@ -1609,5 +1741,9 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_spawn_relaunch_proceeds_on_the_tasks_own_lease
+test_spawn_relaunch_refuses_a_slot_leased_to_another_task
+test_spawn_relaunch_proceeds_on_an_unleased_slot_with_a_warning
+test_spawn_relaunch_refuses_an_unreadable_lease_state
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight

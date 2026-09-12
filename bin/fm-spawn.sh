@@ -128,7 +128,15 @@
 #   record is rolled back: the project lock is already released by then, so
 #   that return relies on Treehouse's own holder check alone (its stated
 #   contract), and the operator is told the slot was returned rather than to
-#   close it by hand. An abort that leaves the record in place leaves the lease
+#   close it by hand. Only a lease whose path this spawn's own `get` printed is
+#   returned automatically: a `get` stopped at its FM_TREEHOUSE_LEASE_TIMEOUT
+#   bound may have written its lease without printing the path, and that case
+#   looks the pool up by holder and REPORTS the slot it finds with the
+#   hand-release command rather than returning it, because the holder label is
+#   the task id and the same id may already hold a live slot leased by another
+#   spawn (a still-recorded task whose id is re-spawned, or another home
+#   sharing the pool); a `get` that failed cleanly leased nothing and is not
+#   looked up at all. An abort that leaves the record in place leaves the lease
 #   to the record, which teardown returns. A spawn killed outright (SIGKILL, or
 #   the host going down) between the lease and publication runs no EXIT trap,
 #   so its slot stays leased under a task id no home's record describes and
@@ -939,6 +947,7 @@ SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_LEASED=0
 SPAWN_LEASE_ATTEMPTED=0
+SPAWN_LEASE_DEADLINE_HIT=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1073,7 +1082,8 @@ spawn_abort_cleanup() {
   # A spawn that aborts after leasing its slot but before its record survives
   # must return that lease, or the slot stays leased to a task no record
   # describes and nothing would ever reclaim it: teardown and relaunch, the two
-  # reclaim points, both start from the record. The return is holder-checked,
+  # reclaim points, both start from the record. Only a lease THIS spawn's own
+  # get handed back as a path is ever returned automatically, holder-checked,
   # so it can only ever release this task's own lease. For every abort before
   # metadata publication it runs while the project lock that allocated the
   # slot is still held; it also runs after the fresh-spawn backlog commit
@@ -1081,40 +1091,41 @@ spawn_abort_cleanup() {
   # then that lock has been released, so on that path Treehouse's own holder
   # check under its state lock is the only guard - which is all a
   # holder-checked return ever relies on. An abort that leaves the record in
-  # place leaves the lease to the record, which teardown returns. A lease
-  # attempt that produced no path may still have written its lease (a get
-  # killed at its deadline), so that case looks the lease up by holder first;
-  # a lookup that could not be proved either way (the pool unreadable, or
-  # several slots under this holder) is reported with the hand-release
-  # command rather than treated as "nothing leased". `treehouse return
-  # --force` terminates any process still sitting in the slot, including the
-  # nested shell the task pane had already opened there; the pane's top shell
-  # stays in the project, so the window named by the refusal above survives
-  # for inspection.
+  # place leaves the lease to the record, which teardown returns. A get that
+  # produced no path is looked up by holder only when it was killed at its
+  # deadline, the one outcome in which Treehouse may already have written the
+  # lease; a get that failed cleanly (a full pool) leased nothing, and looking
+  # its holder label up would find any slot another spawn leased under the same
+  # id (this home's own still-recorded task, or another home sharing the pool)
+  # rather than anything this spawn owns. For the same reason a slot the lookup
+  # finds is never returned here: the label alone cannot prove the lease is
+  # this spawn's rather than that live task's, so the found path is reported
+  # with the hand-release command, as is a lookup that could not be proved
+  # either way (the pool unreadable, or several slots under this holder).
+  # `treehouse return --force` on the path-known return terminates any process
+  # still sitting in the slot, including the nested shell the task pane had
+  # already opened there; the pane's top shell stays in the project, so the
+  # window named by the refusal above survives for inspection.
   if [ "$SPAWN_LEASE_ATTEMPTED" = 1 ] \
      && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-    spawn_leased_slot=${WT:-}
-    spawn_lease_unproven=""
-    if [ "$SPAWN_SLOT_LEASED" != 1 ] && [ -z "$spawn_leased_slot" ]; then
-      if fm_treehouse_lease_find "$PROJ_ABS" "$ID" >/dev/null 2>&1; then
-        spawn_leased_slot=$FM_TREEHOUSE_LEASE_FIND_PATH
-      else
-        spawn_lease_unproven=$FM_TREEHOUSE_LEASE_FIND_REASON
-      fi
-    fi
-    if [ -n "$spawn_leased_slot" ]; then
+    if [ "$SPAWN_SLOT_LEASED" = 1 ] && [ -n "${WT:-}" ]; then
       SPAWN_SLOT_LEASED=0
       spawn_release_err=""
-      if spawn_release_err=$(fm_treehouse_lease_release "$PROJ_ABS" "$spawn_leased_slot" "$ID" 2>&1 >/dev/null); then
-        echo "note: returned task $ID's leased Treehouse slot $spawn_leased_slot after the aborted spawn; the nested shell the pane had opened there, if any, was terminated with it" >&2
+      if spawn_release_err=$(fm_treehouse_lease_release "$PROJ_ABS" "$WT" "$ID" 2>&1 >/dev/null); then
+        echo "note: returned task $ID's leased Treehouse slot $WT after the aborted spawn; the nested shell the pane had opened there, if any, was terminated with it" >&2
       else
         spawn_release_err=${spawn_release_err//$'\n'/ }
-        echo "warning: task $ID's Treehouse slot $spawn_leased_slot may still be leased to it with no task record (treehouse return refused: ${spawn_release_err:-no output}); release it by hand with: (cd '$PROJ_ABS' && treehouse return --force --if-lease-holder '$ID' '$spawn_leased_slot')" >&2
+        echo "warning: task $ID's Treehouse slot $WT may still be leased to it with no task record (treehouse return refused: ${spawn_release_err:-no output}); release it by hand with: (cd '$PROJ_ABS' && treehouse return --force --if-lease-holder '$ID' '$WT')" >&2
       fi
-    elif [ -n "$spawn_lease_unproven" ]; then
-      echo "warning: task $ID may hold a Treehouse slot lease with no task record - the pool could not say ($spawn_lease_unproven); find any slot leased to '$ID' with (cd '$PROJ_ABS' && treehouse status --json) and release it by hand with: (cd '$PROJ_ABS' && treehouse return --force --if-lease-holder '$ID' <slot-path>)" >&2
+    elif [ "$SPAWN_LEASE_DEADLINE_HIT" = 1 ]; then
+      if fm_treehouse_lease_find "$PROJ_ABS" "$ID" >/dev/null 2>&1; then
+        echo "warning: Treehouse slot $FM_TREEHOUSE_LEASE_FIND_PATH is leased to '$ID' with no task record (treehouse get --lease was stopped at its $(fm_treehouse_lease_timeout)s bound after Treehouse may already have written the lease); this spawn cannot prove that lease is its own rather than another spawn's under the same id, so it is not returned here - once no live task is using the slot, release it by hand with: (cd '$PROJ_ABS' && treehouse return --force --if-lease-holder '$ID' '$FM_TREEHOUSE_LEASE_FIND_PATH')" >&2
+      elif [ -n "$FM_TREEHOUSE_LEASE_FIND_REASON" ]; then
+        echo "warning: task $ID may hold a Treehouse slot lease with no task record - the pool could not say ($FM_TREEHOUSE_LEASE_FIND_REASON); find any slot leased to '$ID' with (cd '$PROJ_ABS' && treehouse status --json) and release it by hand with: (cd '$PROJ_ABS' && treehouse return --force --if-lease-holder '$ID' <slot-path>)" >&2
+      fi
     fi
     SPAWN_LEASE_ATTEMPTED=0
+    SPAWN_LEASE_DEADLINE_HIT=0
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
@@ -2967,6 +2978,22 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared lease +
 # pane-arrival steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+# The one shell line that puts the task pane into a worktree: a NESTED
+# interactive shell cd'd there, never a bare `cd` of the pane's top shell.
+# bin/fm-teardown.sh reaps every process still sitting in the slot and the
+# holder-checked return terminates the rest BEFORE the endpoint's own
+# focus-preserving close runs, so a pane whose top shell had `cd`'d into the
+# slot lost its only process there and Herdr's last-pane cleanup moved the
+# captain's focus (measured on CI: tests/fm-backend-herdr-presentation-e2e.test.sh's
+# projected teardown). With the top shell left in the project, only the nested
+# shell and the harness die in the slot, exactly as the treehouse subshell the
+# pane-driven `treehouse get` opened did. The spawn and the herdr relaunch
+# fallback both send this, so the two cannot drift apart.
+spawn_enter_worktree_line() {  # <worktree>
+  local quoted=${1//\'/\'\\\'\'}
+  # shellcheck disable=SC2016 # ${SHELL:-bash} expands in the task pane, not here.
+  printf '( cd -- %s && exec "${SHELL:-bash}" )' "'$quoted'"
+}
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -3188,8 +3215,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
     fi
-    relaunch_cd_path=${WT//\'/\'\\\'\'}
-    spawn_send_text_line "$WT_TARGET" "cd -- '$relaunch_cd_path'" || {
+    # The pane's foreground has left the recorded worktree, which on a spawned
+    # pane means the nested shell the spawn opened there is gone and the
+    # foreground IS the top shell: re-enter through the same nested shell the
+    # spawn sends, so the top shell stays in the project for the next teardown.
+    spawn_send_text_line "$WT_TARGET" "$(spawn_enter_worktree_line "$WT")" || {
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and could not be told to return to its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
     }
@@ -3218,6 +3248,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   WT=$(fm_treehouse_lease_acquire "$PROJ_ABS" "$ID") || lease_rc=$?
   if [ "$lease_rc" -eq 124 ]; then
     WT=""
+    SPAWN_LEASE_DEADLINE_HIT=1
     echo "error: treehouse get --lease did not lease a worktree for task $ID within $(fm_treehouse_lease_timeout)s (spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
@@ -3230,17 +3261,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_SLOT_LEASED=1
   validate_spawn_worktree "treehouse get --lease" "$T"
 
-  # Enter the leased slot in a NESTED interactive shell, the shape the
-  # pane-driven `treehouse get` gave the pane, and wait for the pane to arrive:
-  # the pane's cwd read is what proves the launch below starts where the work
-  # is. The nesting is load-bearing, not cosmetic: bin/fm-teardown.sh reaps
-  # every process still sitting in the slot and the holder-checked return
-  # terminates the rest BEFORE the endpoint's own focus-preserving close runs,
-  # so a pane whose top shell had `cd`'d into the slot lost its only process
-  # there and Herdr's last-pane cleanup moved the captain's focus (measured on
-  # CI: tests/fm-backend-herdr-presentation-e2e.test.sh's projected teardown).
-  # With the top shell left in the project, only the nested shell and the
-  # harness die in the slot, exactly as the treehouse subshell did.
+  # Enter the leased slot through spawn_enter_worktree_line's nested shell and
+  # wait for the pane to arrive: the pane's cwd read is what proves the launch
+  # below starts where the work is.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -3263,8 +3286,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # whole window before refusing, and the refusal names the last path seen and
   # why it was rejected, since telling a transient apart from a terminal
   # misconfiguration would need machinery this path does not want.
-  spawn_cd_path=${WT//\'/\'\\\'\'}
-  spawn_send_text_line "$WT_TARGET" "( cd -- '$spawn_cd_path' && exec \"\${SHELL:-bash}\" )" || {
+  spawn_send_text_line "$WT_TARGET" "$(spawn_enter_worktree_line "$WT")" || {
     echo "error: could not tell task $ID's pane to enter its leased worktree '$WT'; inspect window $T" >&2
     exit 1
   }
