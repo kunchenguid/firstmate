@@ -11,7 +11,27 @@
     {
       "name": "herdr",
       "command": "herdr",
-      "version_args": ["--version"]
+      "version_args": ["--version"],
+      "published": {
+        "source": "github",
+        "repo": "herdrdev/herdr"
+      }
+    },
+    {
+      "name": "tasks-axi",
+      "command": "tasks-axi",
+      "published": {
+        "source": "npm",
+        "package": "tasks-axi"
+      }
+    },
+    {
+      "name": "gnhf",
+      "command": "gnhf",
+      "published": {
+        "source": "npm",
+        "package": "gnhf"
+      }
     },
     {
       "name": "no-mistakes",
