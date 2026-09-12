@@ -360,6 +360,179 @@ SH
   done
 }
 
+# fm_test_fake_treehouse <fakebin> [lease-path]
+# A fake Treehouse pool with the durable-lease behavior bin/fm-wake-lib.sh
+# relies on (measured on Treehouse v2.1.1). An explicit <lease-path> pins what
+# `get --lease` hands out for fixtures whose fake pane already bakes its own
+# path in; otherwise the env knobs below decide:
+#   FM_FAKE_TREEHOUSE_LOG         every invocation is appended as
+#                                 "treehouse <arg> <arg>..." (one line each)
+#   FM_FAKE_TREEHOUSE_LEASE_PATH  the path `get --lease` hands out; falls back
+#                                 to FM_FAKE_PANE_PATH so the spawn fixtures'
+#                                 fake pane already sits in the leased slot
+#   FM_FAKE_TREEHOUSE_LEASES      file of "<path><TAB><holder>" lines: the
+#                                 pool's durable leases. `get --lease` appends
+#                                 one, `return` removes the target's, and
+#                                 `status --json` reports each as leased. Like
+#                                 the measured allocator, `get --lease` never
+#                                 hands a leased slot on: when the file already
+#                                 records the lease path under any holder it
+#                                 fails with the full-pool message below.
+#                                 Unset: leases are neither recorded nor read.
+#   FM_FAKE_TREEHOUSE_SLOTS       file of slot paths (one per line) that
+#                                 `status --json` lists as available when they
+#                                 carry no lease; unset lists only leased slots
+#   FM_FAKE_TREEHOUSE_GET_FAIL=1  `get --lease` fails like a full pool
+#   FM_FAKE_TREEHOUSE_GET_HANG=1  `get --lease` records its lease and then
+#                                 hangs without printing the path, the shape
+#                                 of a get killed at fm_run_timed's bound
+#                                 after Treehouse already wrote the lease
+#   FM_FAKE_TREEHOUSE_STATUS_FAIL=1  `status --json` fails, so the pool's
+#                                 lease state cannot be read
+# `return --if-lease-holder <h>` refuses with Treehouse's own messages when the
+# target is unleased or leased to another holder, whatever --force says, and
+# releases the lease otherwise; a bare `return` releases any lease unchecked.
+# Lease paths are compared physically, so a fixture that reaches its slot
+# through a symlink still matches; real Treehouse (v2.1.1) refuses a symlinked
+# path as "not managed by treehouse" before any holder check.
+fm_test_fake_treehouse() {
+  local fakebin=$1 lease_path=${2-}
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+{ printf 'treehouse'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >> "${FM_FAKE_TREEHOUSE_LOG:-/dev/null}"
+leases=${FM_FAKE_TREEHOUSE_LEASES:-}
+slots=${FM_FAKE_TREEHOUSE_SLOTS:-}
+physical() { (CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"; }
+lease_holder() {  # <path> ; prints the holder, returns 1 when unleased
+  local want path holder
+  [ -n "$leases" ] && [ -f "$leases" ] || return 1
+  want=$(physical "$1")
+  while IFS=$'\t' read -r path holder || [ -n "$path" ]; do
+    [ -n "$path" ] || continue
+    [ "$(physical "$path")" = "$want" ] || continue
+    printf '%s\n' "$holder"
+    return 0
+  done < "$leases"
+  return 1
+}
+lease_drop() {  # <path>
+  local want path holder
+  [ -n "$leases" ] && [ -f "$leases" ] || return 0
+  want=$(physical "$1")
+  : > "$leases.tmp"
+  while IFS=$'\t' read -r path holder || [ -n "$path" ]; do
+    [ -n "$path" ] || continue
+    [ "$(physical "$path")" != "$want" ] || continue
+    printf '%s\t%s\n' "$path" "$holder" >> "$leases.tmp"
+  done < "$leases"
+  mv "$leases.tmp" "$leases"
+}
+json_string() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+case "${1:-}" in
+  get)
+    shift
+    lease=0
+    holder=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --lease) lease=1 ;;
+        --lease-holder) shift; holder=${1:-} ;;
+        --lease-holder=*) holder=${1#--lease-holder=} ;;
+      esac
+      shift
+    done
+    [ "$lease" = 1 ] || exit 0
+    path=${FM_FAKE_TREEHOUSE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-}}
+    if [ "${FM_FAKE_TREEHOUSE_GET_FAIL:-0}" = 1 ] || { [ -n "$path" ] && lease_holder "$path" >/dev/null; }; then
+      echo "all 1 worktrees are in use or dirty (max_trees = 1). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml" >&2
+      exit 1
+    fi
+    [ -n "$path" ] || { echo "fake treehouse: no lease path configured" >&2; exit 1; }
+    [ -z "$leases" ] || printf '%s\t%s\n' "$path" "$holder" >> "$leases"
+    if [ "${FM_FAKE_TREEHOUSE_GET_HANG:-0}" = 1 ]; then
+      sleep 600
+      exit 1
+    fi
+    printf '%s\n' "$path"
+    exit 0
+    ;;
+  status)
+    [ "${2:-}" = --json ] || exit 0
+    if [ "${FM_FAKE_TREEHOUSE_STATUS_FAIL:-0}" = 1 ]; then
+      echo "failed to read pool state: fake treehouse status unavailable" >&2
+      exit 1
+    fi
+    printf '['
+    sep=
+    n=0
+    if [ -n "$leases" ] && [ -f "$leases" ]; then
+      while IFS=$'\t' read -r path holder || [ -n "$path" ]; do
+        [ -n "$path" ] || continue
+        n=$((n + 1))
+        printf '%s{"name":"%s","path":"%s","status":"leased","lease_id":"fake-%s","lease_holder":"%s","leased_at":"2026-09-12T00:00:00Z","processes":[]}' \
+          "$sep" "$n" "$(json_string "$path")" "$n" "$(json_string "$holder")"
+        sep=,
+      done < "$leases"
+    fi
+    if [ -n "$slots" ] && [ -f "$slots" ]; then
+      while IFS= read -r path || [ -n "$path" ]; do
+        [ -n "$path" ] || continue
+        lease_holder "$path" >/dev/null && continue
+        n=$((n + 1))
+        printf '%s{"name":"%s","path":"%s","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}' \
+          "$sep" "$n" "$(json_string "$path")"
+        sep=,
+      done < "$slots"
+    fi
+    printf ']\n'
+    exit 0
+    ;;
+  return)
+    shift
+    want=
+    checked=0
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --force) ;;
+        --if-lease-holder) shift; want=${1:-}; checked=1 ;;
+        --if-lease-holder=*) want=${1#--if-lease-holder=}; checked=1 ;;
+        --if-lease-id) shift ;;
+        --if-lease-id=*) ;;
+        *) target=$1 ;;
+      esac
+      shift
+    done
+    if [ "$checked" = 1 ]; then
+      if ! have=$(lease_holder "$target"); then
+        echo "failed to return worktree: lease precondition failed: worktree $target is not leased" >&2
+        exit 1
+      fi
+      if [ "$have" != "$want" ]; then
+        echo "failed to return worktree: lease precondition failed: lease holder does not match worktree $target" >&2
+        exit 1
+      fi
+    fi
+    lease_drop "$target"
+    echo "Worktree returned to pool."
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  if [ -n "$lease_path" ]; then
+    mv "$fakebin/treehouse" "$fakebin/treehouse-pool"
+    cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+export FM_FAKE_TREEHOUSE_LEASE_PATH='$lease_path'
+exec "\$(dirname "\$0")/treehouse-pool" "\$@"
+SH
+    chmod +x "$fakebin/treehouse"
+  fi
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only

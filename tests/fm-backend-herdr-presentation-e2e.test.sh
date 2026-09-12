@@ -143,7 +143,11 @@ if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
 fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
-if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
+# stderr is held in a file and replayed verbatim below so the removal
+# confirmation of an armed abort pane can be recognized from Herdr's own
+# pane_not_found refusal, whichever stream carries it.
+err_file="$TMP_ROOT/herdr-stderr.$$.$RANDOM"
+if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@" 2> "$err_file"); then
   status=0
 else
   status=$?
@@ -184,6 +188,27 @@ if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE
     break
   done
 fi
+# An armed abort pane is a lone idle shell when its spawn aborts (nothing was
+# ever sent to it), so its cleanup removes it through Herdr's focus-preserving
+# pane-death route with no pane.close mutation at all; only the fallback plain
+# close issues one. Both routes confirm the removal with an exact `pane get`
+# that Herdr refuses with pane_not_found, so that first refusal is the one
+# observable removal event shared by both routes and is journaled once as
+# pane-gone. It is not a mutation, so both focus columns carry the focus seen
+# at confirmation.
+if [ "$status" -ne 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
+    [ -d "$task_dir" ] || continue
+    [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
+    [ ! -e "$task_dir/gone" ] || break
+    if grep -q pane_not_found "$err_file" || printf '%s' "$out" | grep -q pane_not_found; then
+      : > "$task_dir/gone"
+      gone_focus=$(focus_snapshot || printf ambiguous/ambiguous)
+      printf 'pane-gone\t%s\t%s\t%s\n' "$gone_focus" "$gone_focus" "${3:-}" >> "$FOCUS_AUDIT_LOG"
+    fi
+    break
+  done
+fi
 if [ -n "$mutation" ]; then
   after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf '%s\t%s\t%s\t%s\n' "$mutation" "$before" "$after" "$mutation_target" >> "$FOCUS_AUDIT_LOG"
@@ -192,6 +217,8 @@ if [ "$refusal_probe" -eq 1 ]; then
   refusal_after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf 'seeded-prune-refusal\t%s\t%s\t%s\n' "$refusal_before" "$refusal_after" "${3:-}" >> "$FOCUS_AUDIT_LOG"
 fi
+[ ! -s "$err_file" ] || cat "$err_file" >&2
+rm -f "$err_file"
 [ -z "$out" ] || printf '%s\n' "$out"
 exit "$status"
 SH
@@ -851,23 +878,29 @@ if wait "$ABORT_A_PID"; then ABORT_A_STATUS=0; else ABORT_A_STATUS=$?; fi
 if wait "$ABORT_B_PID"; then ABORT_B_STATUS=0; else ABORT_B_STATUS=$?; fi
 finish_concurrent_expected_abort abort-a "$ABORT_A_STATUS" "$TMP_ROOT/abort-a.out" "$TMP_ROOT/abort-a.err"
 finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.out" "$TMP_ROOT/abort-b.err"
-# The forced foreground_cwd is a plain non-git directory, which the discovery
-# poll now screens out on every read rather than adopting, so the armed failure
-# arrives as the poll's own deadline refusal naming that path.
-grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture A did not reach the armed validation failure"
-grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture B did not reach the armed validation failure"
+# The armed treehouse stub leases nothing for these tasks (it exits without
+# printing a path), so the spawn aborts at the lease step, after the workspace
+# and pane were created and before the pane is ever told to enter a slot.
+grep -F "treehouse get --lease could not lease a worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture A did not reach the armed lease failure"
+grep -F "treehouse get --lease could not lease a worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture B did not reach the armed lease failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
+# Serialization is read from each abort's projected create and the cleanup's
+# own confirmed removal of its exact task pane (the stub's pane-gone line).
+# The removal is not keyed on a pane.close call: an abort pane that was never
+# sent anything is a lone idle shell, which the cleanup removes through the
+# focus-preserving pane-death route with no explicit close, while the fallback
+# plain close still confirms with the same read.
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+  $1 == "pane-gone" && $4 == a { print "gone-a" }
+  $1 == "pane-gone" && $4 == b { print "gone-b" }
 ')
 case "$ABORT_SEQUENCE" in
-  $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
+  $'create-a\ngone-a\ncreate-b\ngone-b'|$'create-b\ngone-b\ncreate-a\ngone-a') ;;
   *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
 esac
 ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '

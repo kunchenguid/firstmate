@@ -159,7 +159,7 @@ run_spawn() {
 }
 
 test_spawn_isolation_abort() {
-  local home proj fakebin out status
+  local home proj fakebin out status sent
   home="$TMP_ROOT/spawn-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-proj")
@@ -176,31 +176,56 @@ test_spawn_isolation_abort() {
   # the ceiling is the PARENT of the path handed to the spawn (git(1),
   # "GIT_CEILING_DIRECTORIES").
   mkdir -p "$TMP_ROOT/spawn-notgit-root/plain" "$proj/sub"
+  # Every send-keys the pane receives is recorded: a refused lease must never
+  # have told the pane to enter it, and an accepted one must be entered before
+  # anything else is sent.
+  sent="$TMP_ROOT/spawn-fake.sent"
+  mv "$fakebin/tmux" "$fakebin/tmux-spawn"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" != send-keys ] || { printf 'tmux'; for a in "\$@"; do printf ' %s' "\$a"; done; printf '\\n'; } >> '$sent'
+exec "\$(dirname "\$0")/tmux-spawn" "\$@"
+SH
+  chmod +x "$fakebin/tmux"
 
-  # Abort: the pane resolves to a plain non-git directory (not a worktree at all).
-  # The discovery poll screens every candidate with the isolation conditions, so
-  # a path like this is never adopted and the refusal comes from the poll's own
-  # deadline, naming the path and why it was rejected. The assertions pin which
-  # cause fired, not the operator wording that explains it.
+  # Abort: the lease resolves to a plain non-git directory (not a worktree at
+  # all). The isolation guard screens the leased path before the pane is ever
+  # told to enter it, and the refusal names the path and why it was rejected.
+  # The assertions pin which cause fired, not the operator wording that
+  # explains it.
   out=$(GIT_CEILING_DIRECTORIES="$TMP_ROOT/spawn-notgit-root" \
     run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit-root/plain" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
-  assert_contains "$out" "did not enter an isolated worktree" "non-worktree spawn lacked the isolation error"
+  assert_contains "$out" "did not yield an isolated worktree" "non-worktree spawn lacked the isolation error"
   assert_contains "$out" "not inside a git worktree" "non-worktree spawn did not say why the path was rejected"
   assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
+  assert_absent "$sent" "a refused non-worktree lease must send nothing to the pane"
 
-  # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
+  # Abort: the lease resolves INTO the primary checkout (a subdir of PROJ_ABS).
   out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn landing inside the primary checkout should abort"
-  assert_contains "$out" "did not enter an isolated worktree" "primary-checkout spawn lacked the isolation error"
+  assert_contains "$out" "did not yield an isolated worktree" "primary-checkout spawn lacked the isolation error"
   assert_contains "$out" "not a worktree root" "primary-checkout spawn did not say why the path was rejected"
   assert_absent "$home/state/abort-primary-ee5.meta" "aborted spawn must not record meta"
+  assert_absent "$sent" "a refused primary-checkout lease must send nothing to the pane"
 
-  # Proceed: the pane resolves to a genuine, isolated worktree.
+  # Abort: the lease resolves to the spawning project itself.
+  out=$(run_spawn "$home" abort-project-gg7 "$proj" "$proj" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn landing in the spawning project should abort"
+  assert_contains "$out" "did not yield an isolated worktree" "spawning-project spawn lacked the isolation error"
+  assert_contains "$out" "the spawning project itself" "spawning-project spawn did not say why the path was rejected"
+  assert_absent "$home/state/abort-project-gg7.meta" "aborted spawn must not record meta"
+  assert_absent "$sent" "a refused spawning-project lease must send nothing to the pane"
+
+  # Proceed: the pane resolves to a genuine, isolated worktree, and opening
+  # the nested shell in it is the first thing the pane is told.
   out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
   expect_code 0 "$status" "spawn into a genuine isolated worktree should succeed"
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "isolated worktree" "isolated spawn wrongly tripped the guard"
+  assert_present "$sent" "the isolated spawn sent nothing to the pane"
+  [ "$(head -1 "$sent")" = "tmux send-keys -t firstmate:fm-ok-isolated-ff6 ( cd -- '$TMP_ROOT/spawn-wt' && exec \"\${SHELL:-bash}\" ) Enter" ] \
+    || fail "the nested shell in the leased slot was not the first line sent to the pane: $(head -1 "$sent")"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
@@ -214,9 +239,9 @@ test_spawn_isolation_abort() {
 #     tmux appends at the next free index instead of the active window index, which
 #     collides under base-index 1;
 #   - the window id is captured (-P -F #{window_id}) and automatic-rename/allow-rename
-#     are disabled so the fm-<id> name survives treehouse cd'ing into the worktree;
-#   - the treehouse-get send-keys and the worktree wait loop target that stable
-#     window id, never the (possibly-renamed) name - a lost name would let
+#     are disabled so the fm-<id> name survives the pane cd'ing into the worktree;
+#   - the cd into the leased slot and the pane-arrival wait loop target that
+#     stable window id, never the (possibly-renamed) name - a lost name would let
 #     display-message fall back to the active client's window and misread firstmate's
 #     OWN pane as the worktree, tangling a hook into the primary checkout.
 make_spawn_record_fakebin() {
@@ -238,7 +263,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_test_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -277,11 +302,18 @@ test_spawn_tmux_window_construction() {
   assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
-  # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
-    "treehouse get must be sent to the stable window id"
+  # Bug 2 fix (b): the nested shell opened in the leased slot and the
+  # pane-arrival wait loop target the stable id. The nesting keeps the pane's
+  # top shell out of the slot, so teardown's slot cleanup never kills the
+  # pane's only process before the endpoint's own close.
+  assert_grep "send-keys -t @spawnwid ( cd -- '$wt' && exec \"\${SHELL:-bash}\" ) Enter" "$rec" \
+    "the nested shell in the leased slot must be sent to the stable window id"
+  assert_no_grep "send-keys -t @spawnwid cd -- '$wt' Enter" "$rec" \
+    "the pane's top shell must not be moved into the slot"
+  assert_no_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
+    "the pane-driven treehouse get must no longer be sent"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
-    "the worktree wait loop must query the stable window id, not the name"
+    "the pane-arrival wait loop must query the stable window id, not the name"
 
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }

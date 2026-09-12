@@ -144,14 +144,17 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
         || fail "spawn did not refresh the genuine scout copy"
     else
       [ "$status" -ne 0 ] || fail "linked spawning home accepted $returned as a disposable copy"
-      # None of these is an isolated copy, so the worktree poll never adopts one
-      # and the wait runs out instead: the spawning directory fails the poll's
-      # own project comparison, and the repository primary (named directly or
-      # through a symlink) fails the isolation screen the poll shares with the
-      # guard. The refusal names the last path the pane reported.
-      assert_contains "$out" "did not enter an isolated worktree" \
+      # None of these is an isolated copy, so the isolation guard refuses the
+      # leased path before the pane is ever told to enter it: the spawning
+      # directory is the project itself, and the repository primary (named
+      # directly or through a symlink) shares the project's common git dir.
+      # The refusal names the path the lease resolved to.
+      assert_contains "$out" "did not yield an isolated worktree" \
         "spawn did not explain its isolation refusal"
-      assert_contains "$out" "last seen" "refusal did not name the path the pane reported"
+      assert_contains "$out" "refusing to launch to avoid tangling the primary checkout" \
+        "refusal did not name the primary-checkout hazard"
+      assert_contains "$out" "resolved '$POOL_DIR'" \
+        "refusal did not name the path the lease handed out"
       [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
       [ ! -e "$primary/.git/FETCH_HEAD" ] || fail "refused spawn fetched before proving isolation"
     fi
@@ -677,8 +680,9 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
 }
 
 # Re-lay a case's pooled worktree as a managed Treehouse slot: <pool>/<slot>/<repo>
-# with the pool's state file beside the slot, which is the shape fm-spawn claims
-# for its task. Rewrites POOL_DIR to the relocated checkout.
+# with the pool's state file beside the slot, which is the shape fm-spawn leases
+# for its task. Rewrites POOL_DIR to the relocated checkout and points the fake
+# Treehouse pool's durable-lease and slot records at the case.
 lay_out_as_pool_slot() {
   local slot_root="$CASE_DIR/slots"
   mkdir -p "$slot_root/1"
@@ -686,65 +690,165 @@ lay_out_as_pool_slot() {
   printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot_root/1/project" \
     > "$slot_root/treehouse-state.json"
   POOL_DIR="$slot_root/1/project"
-  SLOT_CLAIM="$slot_root/1/.fm-slot-owner"
+  POOL_LEASES="$CASE_DIR/treehouse-leases"
+  POOL_LOG="$CASE_DIR/treehouse-calls.log"
+  : > "$POOL_LEASES"
+  : > "$POOL_LOG"
+  printf '%s\n' "$POOL_DIR" > "$CASE_DIR/treehouse-slots"
 }
 
-# The spawn side of the slot-owner claim that bin/fm-teardown.sh later reads:
-# a launched task's claim names it, a slot that cannot be claimed refuses before
-# anything is published, and an abort while the allocation lock is still held
-# leaves no claim naming a task with no record.
-test_pool_slot_claim_follows_the_spawn_outcome() {
+run_pool_spawn() {  # <id> [fm-spawn args...]
+  FM_FAKE_TREEHOUSE_LEASES="$POOL_LEASES" FM_FAKE_TREEHOUSE_LOG="$POOL_LOG" \
+    FM_FAKE_TREEHOUSE_SLOTS="$CASE_DIR/treehouse-slots" \
+    run_spawn "$@"
+}
+
+# The spawn side of the durable lease that bin/fm-teardown.sh later checks: a
+# launched task's slot is leased by firstmate itself under the task id before
+# the pane is told to enter it, a slot the pool cannot lease refuses before
+# anything is published, an abort after leasing returns the task's own lease
+# with the holder check so no slot stays leased to a task with no record, and
+# a get that produced no path never releases a slot on the strength of the
+# holder label alone, because the label is the task id and another spawn under
+# the same id may hold that slot live.
+test_pool_slot_lease_follows_the_spawn_outcome() {
   local rec id out status before
 
-  id='pool-slot-claim-r1'
-  rec=$(make_case slot-claim "$id")
+  id='pool-slot-lease-r1'
+  rec=$(make_case slot-lease "$id")
   read_case_record "$rec"
   lay_out_as_pool_slot
-  out=$(run_spawn "$id" --scout)
+  out=$(run_pool_spawn "$id" --scout)
   status=$?
   expect_code 0 "$status" "spawn from a Treehouse slot should launch"$'\n'"$out"
   assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
-    "spawn did not publish the relocated slot as its worktree"
-  [ -f "$SLOT_CLAIM" ] || fail "spawn left its Treehouse slot unclaimed: $out"
-  grep -Fxq -- "task=$id" "$SLOT_CLAIM" \
-    || fail "the slot claim does not name the spawned task: $(cat "$SLOT_CLAIM")"
-  grep -Fxq -- "home=$HOME_DIR" "$SLOT_CLAIM" \
-    || fail "the slot claim does not name the spawning home: $(cat "$SLOT_CLAIM")"
+    "spawn did not publish the leased slot as its worktree"
+  grep -Fxq -- "treehouse get --lease --lease-holder $id" "$POOL_LOG" \
+    || fail "spawn did not lease its slot durably under the task id: $(cat "$POOL_LOG")"
+  ! grep -Fxq -- "treehouse get" "$POOL_LOG" \
+    || fail "spawn still ran the pane-driven treehouse get: $(cat "$POOL_LOG")"
+  grep -Fxq -- "$POOL_DIR	$id" "$POOL_LEASES" \
+    || fail "the pool does not record the slot leased to the spawned task: $(cat "$POOL_LEASES")"
+  ! grep -Fq -- "treehouse return" "$POOL_LOG" \
+    || fail "a successful spawn returned its own lease: $(cat "$POOL_LOG")"
 
-  id='pool-slot-unclaimable-r1'
-  rec=$(make_case slot-unclaimable "$id")
+  # The pool never hands a leased slot on: a second task spawned against the
+  # same one-slot pool is refused while the first task's lease stands, and
+  # that lease is neither disturbed nor doubled.
+  id='pool-slot-lease-taken-r1'
+  mkdir -p "$HOME_DIR/data/$id"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_pool_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a second task on a slot leased to another task"
+  assert_contains "$out" "treehouse get --lease could not lease a worktree for task $id" \
+    "spawn against a leased slot did not name the failed lease as the reason"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for a task that leased nothing"
+  [ "$(awk -F'\t' -v p="$POOL_DIR" '$1 == p { print $2 }' "$POOL_LEASES")" = pool-slot-lease-r1 ] \
+    || fail "the first task's lease did not survive a second task's refused spawn: $(cat "$POOL_LEASES")"
+  ! grep -Fq -- "treehouse return" "$POOL_LOG" \
+    || fail "a spawn that leased nothing tried to return a slot: $(cat "$POOL_LOG")"
+
+  # A get that fails cleanly on a full pool leased nothing, so the abort has
+  # nothing to look up: the pool here already holds a slot leased under this
+  # very task id by another spawn (another home sharing the pool, or this
+  # home's own still-recorded task being re-spawned), and a by-holder lookup
+  # would find and release that live task's slot.
+  id='pool-slot-unleasable-r1'
+  rec=$(make_case slot-unleasable "$id")
   read_case_record "$rec"
   lay_out_as_pool_slot
-  mkdir -p "$SLOT_CLAIM"
+  printf '%s\t%s\n' "$POOL_DIR" "$id" > "$POOL_LEASES"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
-  out=$(run_spawn "$id" --scout)
+  out=$(FM_FAKE_TREEHOUSE_GET_FAIL=1 run_pool_spawn "$id" --scout)
   status=$?
-  [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not claim"
-  assert_contains "$out" "could not claim Treehouse pool slot" \
-    "spawn did not name the unclaimable slot as the reason"
-  [ -d "$SLOT_CLAIM" ] || fail "spawn replaced the directory blocking its slot claim"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unclaimable slot"
+  [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot the pool could not lease"
+  assert_contains "$out" "treehouse get --lease could not lease a worktree for task $id" \
+    "spawn did not name the failed lease as the reason"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record without a leased slot"
+  ! grep -Fq -- "treehouse return" "$POOL_LOG" \
+    || fail "a spawn whose get failed cleanly returned a slot: $(cat "$POOL_LOG")"
+  ! grep -Fq -- "treehouse status" "$POOL_LOG" \
+    || fail "a spawn whose get failed cleanly looked the holder label up anyway: $(cat "$POOL_LOG")"
+  [ "$(awk -F'\t' -v p="$POOL_DIR" '$1 == p { print $2 }' "$POOL_LEASES")" = "$id" ] \
+    || fail "the other spawn's same-label lease did not survive a clean full-pool failure: $(cat "$POOL_LEASES")"
+  assert_not_contains "$out" "may hold a Treehouse slot lease" \
+    "a get that failed cleanly was reported as a possibly orphaned lease"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved the slot's HEAD after failing to claim it"
+    || fail "spawn moved the slot's HEAD after failing to lease it"
 
-  id='pool-slot-claim-aborted-r1'
-  rec=$(make_originless_case slot-claim-aborted "$id")
+  id='pool-slot-lease-aborted-r1'
+  rec=$(make_originless_case slot-lease-aborted "$id")
   read_case_record "$rec"
   lay_out_as_pool_slot
   git -C "$POOL_DIR" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_pool_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unusable origin on the slot"
   assert_contains "$out" "could not fetch origin" \
     "the aborted spawn did not refuse on its unusable origin"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted spawn published task metadata"
-  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
-    || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
-  pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
+  grep -Fxq -- "treehouse return --force --if-lease-holder $id $POOL_DIR" "$POOL_LOG" \
+    || fail "the aborted spawn did not return its lease with the holder check: $(cat "$POOL_LOG")"
+  ! grep -Fq -- "$id" "$POOL_LEASES" \
+    || fail "the aborted spawn left its slot leased to a task with no record: $(cat "$POOL_LEASES")"
+  assert_contains "$out" "returned task $id's leased Treehouse slot" \
+    "the aborted spawn did not report returning its lease"
+
+  # A get killed at its bound may already have written its lease without ever
+  # printing the path: the abort looks the lease up by holder, but the label
+  # alone cannot prove the slot it finds is this spawn's rather than another
+  # spawn's under the same id, so it names the slot and the hand-release
+  # command instead of returning it.
+  id='pool-slot-lease-deadline-r1'
+  rec=$(make_case slot-lease-deadline "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  out=$(FM_FAKE_TREEHOUSE_GET_HANG=1 FM_TREEHOUSE_LEASE_TIMEOUT=1 run_pool_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker after its lease timed out"
+  assert_contains "$out" "did not lease a worktree for task $id within 1s" \
+    "the timed-out lease was not reported at its bound"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the timed-out spawn published task metadata"
+  grep -Fxq -- "treehouse status --json" "$POOL_LOG" \
+    || fail "the timed-out spawn did not look its lease up by holder: $(cat "$POOL_LOG")"
+  ! grep -Fq -- "treehouse return" "$POOL_LOG" \
+    || fail "the timed-out spawn returned a slot it found by holder label alone: $(cat "$POOL_LOG")"
+  grep -Fxq -- "$POOL_DIR	$id" "$POOL_LEASES" \
+    || fail "the lease the timed-out get wrote did not survive the abort: $(cat "$POOL_LEASES")"
+  assert_contains "$out" "Treehouse slot $POOL_DIR is leased to '$id' with no task record" \
+    "the timed-out spawn did not name the slot it found leased under its id"
+  assert_contains "$out" "treehouse return --force --if-lease-holder '$id' '$POOL_DIR'" \
+    "the timed-out spawn did not hand the operator the exact release command for the slot it found"
+
+  # The same deadline, but the pool's lease state cannot be read afterwards:
+  # the lookup is unproven rather than empty, so the abort must say a lease
+  # may be orphaned and hand the operator the release command instead of
+  # treating "could not look" as "nothing leased".
+  id='pool-slot-lease-unproven-r1'
+  rec=$(make_case slot-lease-unproven "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  out=$(FM_FAKE_TREEHOUSE_GET_HANG=1 FM_FAKE_TREEHOUSE_STATUS_FAIL=1 FM_TREEHOUSE_LEASE_TIMEOUT=1 \
+    run_pool_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker after its lease timed out with an unreadable pool"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the unproven-lease spawn published task metadata"
+  ! grep -Fq -- "treehouse return" "$POOL_LOG" \
+    || fail "a spawn whose lease lookup was unproven guessed at a slot to return: $(cat "$POOL_LOG")"
+  assert_contains "$out" "task $id may hold a Treehouse slot lease with no task record" \
+    "an unproven lease lookup was silently treated as no lease"
+  assert_contains "$out" "treehouse status --json failed from" \
+    "the unproven-lease warning did not name why the pool could not be read"
+  assert_contains "$out" "treehouse return --force --if-lease-holder '$id'" \
+    "the unproven-lease warning did not hand the operator the release command"
+  grep -Fxq -- "$POOL_DIR	$id" "$POOL_LEASES" \
+    || fail "the fixture did not leave the orphaned lease the warning is about: $(cat "$POOL_LEASES")"
+  pass "a Treehouse slot is leased under the launched task id, a leased slot is never handed on, a failed lease refuses without looking the label up, and an abort returns only the lease its own get named and reports any it found by holder"
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool
-test_pool_slot_claim_follows_the_spawn_outcome
+test_pool_slot_lease_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching

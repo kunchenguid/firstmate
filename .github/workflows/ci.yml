@@ -260,7 +260,9 @@ jobs:
         run: |
           set -eu
           # Several real-herdr-gated E2E scripts require treehouse for spawn
-          # worktree acquisition (presentation, workspace-per-home, autodetect).
+          # worktree acquisition (presentation, workspace-per-home, autodetect),
+          # and this is the one lane that installs it, so the Treehouse lease
+          # lifecycle test (tests/fm-treehouse-lease-e2e.test.sh) runs here too.
           bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Assert Herdr pin and protocol floor

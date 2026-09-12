@@ -364,6 +364,9 @@ SH
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'Usage: treehouse get [--lease]'
 fi
+if [ "${1:-}" = return ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse return [path] [--force] [--if-lease-holder <holder>]'
+fi
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
