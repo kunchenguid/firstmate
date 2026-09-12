@@ -298,15 +298,18 @@ fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker
   fm_pid_alive "$session_pid"
 }
 
-# Away-mode supervision evidence. While state/.afk exists the away-mode daemon
+# Daemon supervision evidence. While state/.afk exists, or the home opts into
+# continuous supervision through config/continuous-supervision, the shared
+# supervise daemon owns supervision.
 # (bin/fm-supervise-daemon.sh) owns supervision: it runs bin/fm-watch.sh
 # one-shot, so the watcher exits on EVERY wake and the daemon starts its
 # replacement. Between those cycles no watcher process holds the watch lock,
 # with nothing at all wrong - the supervisor is the daemon, and the watcher is
 # its restarting child.
 #
-# fm_afk_daemon_owns_supervision <state>
-# True when away mode is active AND a live, identity-matched daemon holds this
+# fm_afk_daemon_owns_supervision <state> [config-dir]
+# Legacy name retained for callers. True when away mode or the per-home
+# continuous opt-in is active AND a live, identity-matched daemon holds this
 # home's singleton daemon lock. The identity match is the same discipline the
 # watcher lock uses (fm_watcher_lock_matches_pid): a recycled pid, a lock left
 # by a killed daemon, or a daemon that never recorded its identity all fail it,
@@ -315,8 +318,9 @@ fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker
 # a daemon that stops restarting its watcher still fails supervision once the
 # beacon passes grace.
 fm_afk_daemon_owns_supervision() {
-  local state=$1 lockdir pid recorded current
-  [ -e "$state/.afk" ] || return 1
+  local state=$1 config=${2:-} lockdir pid recorded current
+  [ -n "$config" ] || config=$(dirname "$state")/config
+  [ -e "$state/.afk" ] || [ -f "$config/continuous-supervision" ] || return 1
   lockdir="$state/.supervise-daemon.lock"
   pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
   fm_pid_alive "$pid" || return 1

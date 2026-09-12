@@ -1553,6 +1553,17 @@ detect_home_summary_publication() {
   fi
 }
 
+continuous_supervision_ensure() {
+  [ -f "$CONFIG/continuous-supervision" ] || return 0
+  local out rc=0
+  out=$("$SCRIPT_DIR/fm-continuous-supervision.sh" ensure 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "CONTINUOUS_SUPERVISION: recovery failed: $(printf '%s' "$out" | tail -1)"
+  elif [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
+    echo "BOOTSTRAP_INFO: $out"
+  fi
+}
+
 # The order below is the order the diagnostics have always printed in, so a
 # `skip` run is the same output with the network lines removed rather than a
 # reshuffle. `gh auth status` sits between the two local blocks because that is
@@ -1573,6 +1584,10 @@ if network_phase; then
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config
+
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  local_phase && continuous_supervision_ensure
+fi
 
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # secondmate_sync consumes SECONDMATE_RESPAWNED_IDS from the liveness sweep, so

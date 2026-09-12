@@ -4526,6 +4526,23 @@ test_afk_present_reverts_watcher_to_one_shot() {
   pass "with .afk present the watcher reverts to one-shot so the daemon owns triage (no double-triage)"
 }
 
+test_continuous_opt_in_without_daemon_keeps_watcher_triage() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case continuous-no-daemon); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; status_file="$state/task.status"
+  mkdir -p "$dir/config"
+  : > "$dir/config/continuous-supervision"
+  printf 'working: routine note\n' > "$status_file"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  watch_bg "$state" "$fakebin" "$out" env FM_CONFIG_OVERRIDE="$dir/config"
+  pid=$!
+  wait_live "$pid" 50 || { unset FM_FAKE_CREW_STATE; fail "continuous opt-in with no daemon made the watcher exit one-shot: $(cat "$out")"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  [ ! -s "$state/.wake-queue" ] || fail "continuous opt-in with no daemon handed a benign signal to an absent daemon"
+  pass "a continuous-supervision opt-in with no live daemon keeps the watcher's own triage"
+}
+
 # A paused pane can first appear as a changed hash. In AFK mode that initial path
 # must still hand off the plain window identity to the daemon, rather than running
 # the normal-mode pause re-surface and decorating the stale identity.
@@ -4896,6 +4913,7 @@ test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
+test_continuous_opt_in_without_daemon_keeps_watcher_triage
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_captain_held_never_rechecked_while_away_record_exists
 test_live_captain_held_first_sight_silenced_by_away_record

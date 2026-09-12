@@ -212,6 +212,34 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Continuous supervision (config/continuous-supervision)
+
+The optional local, gitignored `config/continuous-supervision` presence flag keeps the existing guarded supervisor daemon active between attended turns.
+The daemon retains the same durable wake queue, composer-empty proof, retry, singleton lock, and escalation behavior used in away mode, while remaining independent of the captain's away posture.
+Mutable session bootstrap runs `bin/fm-continuous-supervision.sh ensure`, which starts a missing service or retargets it after a Firstmate relaunch; detect-only and lock-refused bootstrap never start it.
+The supported service shape is a dedicated detached tmux session, including remote Linux secondmate homes.
+The opt-in is per-home and is not inherited; enable it explicitly in each remote secondmate home that should recover supervision after relaunch.
+Run `bin/fm-continuous-supervision.sh enable` from the home session to opt in, `status` to inspect it, and `disable` to remove the flag and stop only its exact recorded service session.
+Disabling continuous supervision does not alter tasks, worktrees, queued wakes, or away-mode state.
+
+## Desired concurrency (config/desired-concurrency)
+
+The optional local, gitignored `config/desired-concurrency` file contains one positive integer from 1 through 64.
+It records how many ordinary direct workers this home should keep productively working while dispatchable backlog exists.
+Set it with `bin/fm-refill.sh set <count>`, inspect it with `bin/fm-refill.sh status`, and remove it with `bin/fm-refill.sh disable`.
+The setting is per-home and is not inherited because each secondmate owns a different backlog and resource envelope.
+
+The watcher runs `bin/fm-refill.sh check` locally and wakes the supervisor when terminal work remains to be reconciled, or when the active count is below the target and `tasks-axi ready` reports dispatchable work.
+Working is the only productive state; parked, paused, blocked, unknown, done, and failed records remain visible but cannot hide a clean slot in another project or pool.
+In a secondmate home, an unacknowledged parent instruction suppresses the check without advancing its deduplication record, so the parent inbox is handled first and the deficit surfaces on the first poll after acknowledgement.
+The detector performs no merge, cleanup, backlog transition, or spawn.
+The `refill-continuity` agent skill owns the guarded reconcile-and-refill procedure and requires each candidate to be evaluated independently.
+
+Snapshots run at most once per `FM_REFILL_CHECK_SECS` (default 60 seconds) for an unchanged target; a changed target is checked on the next watcher poll.
+An identical deficit is suppressed until `FM_REFILL_RESURFACE_SECS` (default 900 seconds), while a changed task-state or ready-work fingerprint wakes immediately.
+Each current observation is stored atomically in `state/refill-deficit`; `FM_REFILL_STATE_TIMEOUT` (default 10 seconds per worker) bounds current-state reads.
+An absent setting preserves existing behavior exactly.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.

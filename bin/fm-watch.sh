@@ -300,11 +300,13 @@ _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
 
-# afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
-# watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
-# every wake) and let the daemon classify - never absorb here, or the daemon's
-# digest/injection layer would never see the wake.
-afk_present() { [ -e "$STATE/.afk" ]; }
+# afk_present: legacy function name for daemon-owned triage. It is true while
+# away mode or continuous supervision owns this watcher, which must then behave
+# one-shot so the daemon receives every durable wake.
+afk_present() {
+  [ -e "$STATE/.afk" ] && return 0
+  [ -f "$CONFIG/continuous-supervision" ] && fm_afk_daemon_owns_supervision "$STATE" "$CONFIG"
+}
 
 # afk_record_present: 0 while the away-posture record exists (the captain is
 # away, in either supervision shape). While it exists an item held for the
@@ -1992,6 +1994,22 @@ while :; do
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
+  fi
+
+  # An explicitly configured productive-worker target is a durable operating
+  # intent, not a reminder the model must keep in context. The detector is
+  # local, cadence-bounded, and silent when satisfied or unchanged. It only
+  # asks the supervisor to reconcile and refill; every merge, teardown, task
+  # choice, and spawn still goes through its existing guarded owner.
+  refill_out=
+  if refill_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    fm_run_timed "$CHECK_TIMEOUT" "$SCRIPT_DIR/fm-refill.sh" check 2>/dev/null); then
+    if [ -n "$refill_out" ]; then
+      fm_wake_append check refill-deficit "check: refill-deficit" || exit 1
+      wake "check: refill-deficit"
+    fi
+  else
+    triage_log "desired-concurrency reconciliation unavailable"
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).

@@ -166,6 +166,32 @@ test_predicate_relay_shim_is_not_a_custom_check() {
   pass "fm_supervision_status: the relay shim is not counted as a registered custom check"
 }
 
+test_predicate_refill_target_needs_supervision() {
+  local home="$TMP_ROOT/pred-refill" state="$TMP_ROOT/pred-refill/state"
+  mkdir -p "$state" "$home/config"
+  printf '8\n' > "$home/config/desired-concurrency"
+  fm_supervision_needed "$state" 300 || fail "a desired-concurrency target did not register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a refill target must not count as an in-flight task"
+  [ "$FM_SUP_REFILL" = true ] || fail "a refill target must set FM_SUP_REFILL"
+  fm_supervision_unhealthy "$state" 300 || fail "a refill-only home with no beacon must be unhealthy"
+  pass "fm_supervision_needed: desired concurrency stays supervised with no current workers"
+}
+
+test_predicate_invalid_refill_target_needs_nothing() {
+  local home="$TMP_ROOT/pred-refill-invalid" state="$TMP_ROOT/pred-refill-invalid/state" value
+  mkdir -p "$state" "$home/config"
+  for value in 0 65 abc '' 99999999999999999999; do
+    printf '%s\n' "$value" > "$home/config/desired-concurrency"
+    if fm_supervision_needed "$state" 300; then
+      fail "an invalid desired-concurrency target '$value' demanded supervision"
+    fi
+    [ "$FM_SUP_REFILL" = false ] || fail "an invalid target '$value' set FM_SUP_REFILL"
+  done
+  printf '64\n' > "$home/config/desired-concurrency"
+  fm_supervision_needed "$state" 300 || fail "the maximum valid target did not need supervision"
+  pass "fm_supervision_needed: an invalid desired-concurrency target the detector rejects needs no watcher"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -2008,6 +2034,57 @@ test_hook_away_daemon_allows_between_watcher_cycles() {
   pass "fm-turnend-guard: a live away-mode daemon satisfies supervision with no watcher holding the lock"
 }
 
+test_hook_continuous_daemon_allows_between_watcher_cycles() {
+  local dir pid out status boundary=0
+  dir=$(make_primary_dir "$TMP_ROOT/hook-continuous-daemon-live")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/config"
+  : > "$dir/config/continuous-supervision"
+  touch "$dir/state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  record_daemon_lock "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live continuous-supervision daemon holder"
+  }
+  while [ "$boundary" -lt 3 ]; do
+    boundary=$((boundary + 1))
+    out=$(run_hook "$dir" false); status=$?
+    expect_code 0 "$status" "continuous supervision must cover watcher hand-off $boundary at turn end"
+    [ -z "$out" ] || fail "continuous daemon ownership produced a block banner at boundary $boundary: $out"
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "continuous daemon remains valid supervision across three turn boundaries"
+}
+
+test_hook_continuous_daemon_honors_config_under_state_override() {
+  local dir home state pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-continuous-state-override")
+  home=$(cd "$dir" && pwd)
+  state="$TMP_ROOT/hook-continuous-state-override-elsewhere/state"
+  mkdir -p "$state/.supervise-daemon.lock" "$home/config"
+  : > "$state/task1.meta"
+  : > "$home/config/continuous-supervision"
+  touch "$state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  printf '%s\n' "$pid" > "$state/.supervise-daemon.lock/pid"
+  watcher_identity "$dir" "$pid" > "$state/.supervise-daemon.lock/pid-identity" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live continuous-supervision daemon holder"
+  }
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "continuous supervision must be read from the home config under a non-sibling state dir"
+  [ -z "$out" ] || fail "non-sibling state dir hid continuous daemon ownership: $out"
+  pass "continuous daemon ownership reads the home config under FM_STATE_OVERRIDE"
+}
+
 test_hook_away_daemon_allows_over_dead_watcher_lock() {
   local dir pid dead out status
   dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-daemon-dead-watcher")
@@ -2203,6 +2280,8 @@ test_predicate_registered_check_survives_rebinding_drift
 test_predicate_unregistered_check_needs_nothing
 test_predicate_task_pr_poll_is_not_a_custom_check
 test_predicate_relay_shim_is_not_a_custom_check
+test_predicate_refill_target_needs_supervision
+test_predicate_invalid_refill_target_needs_nothing
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
@@ -2270,6 +2349,8 @@ test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_away_daemon_allows_between_watcher_cycles
+test_hook_continuous_daemon_allows_between_watcher_cycles
+test_hook_continuous_daemon_honors_config_under_state_override
 test_hook_away_daemon_allows_over_dead_watcher_lock
 test_hook_away_mode_blocks_without_any_supervisor
 test_hook_away_mode_blocks_on_dead_daemon
