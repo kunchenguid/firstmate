@@ -6,6 +6,43 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Codex sandboxed launch and relaunch
+
+Attended verification on 2026-09-12 used Codex CLI 0.154.0 with real tmux ship, scout, and secondmate workers.
+The retained worker reports and terminal captures were reviewed together; the results below summarize that run, not a new execution in the restricted test runner.
+Launch-permission semantics belong to the [Codex adapter reference](../../.agents/skills/harness-adapters/references/harness/codex.md#launch-permissions).
+
+| Scenario | Observed result |
+| --- | --- |
+| Fresh ship, scout, and secondmate | All three launched through `bin/fm-spawn.sh` with `--sandbox workspace-write --ask-for-approval on-request`, without a bypass flag, and successfully wrote and read a local proof. |
+| Scout relaunch | `bin/fm-control.sh` preserved the endpoint, isolated worktree, proof, earlier reports, safe flags, and low effort; the replacement received and followed the relaunch note. |
+| Model, effort, instructions, and notification | Ship and secondmate commands and UI showed explicit `gpt-6-astra` and low effort; scout resolved the default model to `gpt-6-astra` and retained low effort after relaunch. All three acted on their assigned instructions. Ship/scout notify commands were present and turn-ended markers appeared or advanced; secondmate had no notify override and delivered parent status explicitly. |
+| Configured approval review | One standalone `require_escalated` request for `/usr/bin/printf approval-probe` returned `approval-probe` and exit 0 under `auto_review`. No pending human prompt or separate reviewer verdict was exposed. |
+
+The local proof commands and read-backs included:
+
+```sh
+printf 'sandbox-ok\n' > .firstmate-live-proof.txt
+cat .firstmate-live-proof.txt
+printf '%s\n' 'ship-sandbox-ok' > .firstmate-live-ship-proof.txt
+cat .firstmate-live-ship-proof.txt
+printf '%s\n' 'secondmate-sandbox-ok' > data/live-proof.txt
+cat data/live-proof.txt
+```
+
+Each read returned its corresponding proof string and exit 0; the relaunched scout read the existing `sandbox-ok` proof without overwriting it.
+The operator accepted configured approval review, including automatic review, as the intended guarantee; these observations satisfy that bounded launch/relaunch criterion and do not establish human interaction.
+
+Normal sandbox writes to parent-home report/status paths and the scout inbox acknowledgement were denied with `operation not permitted` and required exact escalations without reusable prefixes.
+No writable roots, policy, or reviewer settings were changed.
+The normal scout inbox doorbell was skipped because an animated empty composer was classified as pending text; a supported explicit endpoint send delivered the inbox pointer, after which the worker read and acknowledged it.
+That fallback does not verify normal unattended inbox notification or fully unattended fleet supervision, and the newly displayed untrusted hooks were not validated.
+
+Focused regression entry points remain `bash tests/fm-spawn-dispatch-profile.test.sh`, `bash tests/fm-control-relaunch.test.sh`, and `bash tests/fm-secondmate-harness.test.sh`.
+The restricted runner's earlier launch/relaunch attempts failed during fixture initialization before demonstrating product behavior; process inspection and tmux socket creation were denied.
+Those checks were not rerun during this evidence-only reassessment, and existing suite fixture/race limitations and the unresolved configuration-delivery comparison remain outside this live proof.
+No complete-suite or broad regression pass is claimed; remote CI remains required before PR readiness.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.

@@ -144,7 +144,8 @@
 #   never falls back to pi.
 #   Canonical Codex launches, including control-plane relaunches, explicitly
 #   request --sandbox workspace-write --ask-for-approval on-request. Approval
-#   requests stay in the worker terminal; a human must be able to reach it.
+#   handling follows the configured reviewer, which may approve automatically;
+#   a human prompt is not guaranteed or forwarded to the primary conversation.
 #   This does not grant extra writable roots for home-side status/report files.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness

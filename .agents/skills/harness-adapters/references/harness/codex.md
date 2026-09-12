@@ -22,8 +22,10 @@ The decision persists for the repository, so later worktrees of the same project
 ## Launch permissions
 
 `../../../bin/fm-spawn.sh` owns the sandbox and approval flags for canonical Codex launches and relaunches.
-Workers can pause for human approval in their terminal; do not assume the request is forwarded to the primary conversation.
+Approval handling follows the configured reviewer, including automatic review; a human prompt is not guaranteed.
+When human approval is requested, workers can pause in their terminal; do not assume the request is forwarded to the primary conversation.
 A sandboxed workspace write does not prove access to Firstmate's home-side status, report, or steering files; verify those paths before treating a worker as fully supervised.
+Current live evidence and supervision limitations are recorded in [`docs/verification/runtime-backends.md`](../../../../../docs/verification/runtime-backends.md#codex-sandboxed-launch-and-relaunch).
 
 ## Skill popup
 
