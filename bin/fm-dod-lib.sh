@@ -5,9 +5,10 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
-# stdout with no trailing blank line. The caller validates the mode; an unknown
-# mode is refused rather than silently rendered as the pipeline contract.
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [<existing-pr-url>] [<base-branch>]
+# prints the block on stdout with no trailing blank line. The caller validates
+# the mode and existing PR URL; an unknown mode is refused rather than silently
+# rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
@@ -48,6 +49,46 @@ fm_brief_task_placeholders_present() {  # <file>
   spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
   [ "$(printf '%s' "$intent" | tr -d '[:space:]')" = '{TASK}' ] && return 0
   [ "$(printf '%s' "$spec" | tr -d '[:space:]')" = '{FIRSTMATE_SPEC}' ] && return 0
+  return 1
+}
+
+# Return 0 when an existing-PR scaffold still lacks its head branch.
+# Match only the generated checkout target so an illustrative token in filled
+# Task prose does not cause the same false refusal this parser avoids for Task.
+fm_brief_existing_pr_branch_placeholder_present() {  # <file>
+  local file=$1
+  [ -f "$file" ] || return 1
+  grep -Fq "origin/{EXISTING_PR_BRANCH}" "$file"
+}
+
+# Return 0 when an existing-PR no-mistakes brief lacks a valid base branch.
+fm_brief_existing_pr_base_invalid() {  # <file>
+  local file=$1 setup rules dod record base tab
+  [ -f "$file" ] || return 1
+  setup=$(fm_brief_heading_body "$file" "# Setup")
+  rules=$(fm_brief_heading_body "$file" "# Rules")
+  dod=$(fm_brief_heading_body "$file" "# Definition of done")
+  case "$setup$rules$dod" in
+    *'{EXISTING_PR_BASE_BRANCH}'*) return 0 ;;
+  esac
+  tab=$(printf '\t')
+  record=$(printf '%s\n' "$dod" | awk '
+    $0 == "Delivery contract: mode=no-mistakes" {
+      if ((getline existing) <= 0 || existing !~ /^Existing PR: /) next
+      if ((getline base) <= 0 || base !~ /^Existing PR base branch: /) {
+        print existing "\t"
+        exit
+      }
+      sub(/^Existing PR base branch: /, "", base)
+      print existing "\t" base
+      exit
+    }
+  ')
+  [ -n "$record" ] || return 1
+  base=${record#*"$tab"}
+  [ -n "$base" ] && [ "$base" != '{EXISTING_PR_BASE_BRANCH}' ] || return 0
+  git check-ref-format "refs/heads/$base" >/dev/null 2>&1 || return 0
+  git check-ref-format --branch "$base" >/dev/null 2>&1 || return 0
   return 1
 }
 
@@ -190,10 +231,23 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+fm_dod_block() {  # <mode> <task-id> [<existing-pr-url>] [<base-branch>]
+  local mode=$1 id=$2 existing_pr=${3:-} base_branch=${4:-}
   case "$mode" in
     direct-PR)
+      if [ -n "$existing_pr" ]; then
+        cat <<EOF
+# Definition of done
+Delivery contract: mode=direct-PR
+Existing PR: $existing_pr
+This task ships **direct-PR** by updating the existing PR, without the no-mistakes pipeline.
+The task is complete only when committed on the existing PR branch, pushed to that same branch, and the existing PR's checks are green.
+Never open a second PR.
+When it is ready, append \`done: PR $existing_pr head <sha> checks green\` to the status file and stop, replacing \`<sha>\` with the pushed commit's full SHA.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+EOF
+        return 0
+      fi
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR
@@ -215,12 +269,28 @@ The configured merge authority approves the ready branch, then firstmate merges 
 EOF
       ;;
     no-mistakes)
+      if [ -n "$existing_pr" ]; then
+        cat <<EOF
+# Definition of done
+Delivery contract: mode=no-mistakes
+Existing PR: $existing_pr
+Existing PR base branch: $base_branch
+The task is complete only when committed on the existing PR branch.
+When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and update that existing PR.
+When starting that run, pass the existing PR base branch recorded above as \`--base-branch\` so rebase, PR lookup, and CI target the PR's actual base.
+Never open a second PR, and never allow the pipeline to replace the existing PR branch with a new branch.
+EOF
+      else
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+EOF
+      fi
+      cat <<EOF
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -245,8 +315,16 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
+EOF
+      if [ -n "$existing_pr" ]; then
+        cat <<EOF
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR $existing_pr head <sha> checks green\` and stop, replacing \`<sha>\` with the pushed commit's full SHA. You are finished.
+EOF
+      else
+        cat <<EOF
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
+      fi
       ;;
     *)
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2

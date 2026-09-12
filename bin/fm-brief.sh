@@ -12,7 +12,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--existing-pr <url>] [--branch <name>] [--base-branch <name>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -36,6 +36,16 @@
 #   after scaffolding and the caller-supplied repo string cannot reliably
 #   identify this repo. Briefs made without it carry a loud declaration so an
 #   omitted contract cannot be silent.
+#   --existing-pr scaffolds work on an existing GitHub pull request instead of
+#   a new branch and PR. It applies only to ship tasks
+#   in no-mistakes or direct-PR mode. The worker fetches and checks out the PR's
+#   origin-hosted head branch through gh-axi, verifies that branch belongs to
+#   origin, fetches it from origin, pushes only to that same branch without force,
+#   and never opens a second PR. Fork-hosted heads are intentionally unsupported
+#   because this contract never redirects a push away from origin. Optional
+#   --branch <name> adds an assertion against the forge-reported head branch.
+#   Existing-PR no-mistakes briefs also require --base-branch <name>, or retain a
+#   guarded {EXISTING_PR_BASE_BRANCH} field that bin/fm-spawn.sh refuses until filled.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -50,6 +60,9 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Every ship/scout scaffold records the absolute Firstmate home and absolute task-artifact
+# directory so home-relative data/<task-id>/ references cannot be mistaken for
+# project-worktree paths.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -123,6 +136,12 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+EXISTING_PR=
+EXISTING_PR_SET=0
+BRANCH=
+BRANCH_SET=0
+BASE_BRANCH=
+BASE_BRANCH_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -132,6 +151,9 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      existing-pr) EXISTING_PR=$a; EXISTING_PR_SET=1 ;;
+      branch) BRANCH=$a; BRANCH_SET=1 ;;
+      base-branch) BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -144,6 +166,12 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --existing-pr) want_value=existing-pr ;;
+    --existing-pr=*) EXISTING_PR=${a#--existing-pr=}; EXISTING_PR_SET=1 ;;
+    --branch) want_value=branch ;;
+    --branch=*) BRANCH=${a#--branch=}; BRANCH_SET=1 ;;
+    --base-branch) want_value=base-branch ;;
+    --base-branch=*) BASE_BRANCH=${a#--base-branch=}; BASE_BRANCH_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -170,6 +198,52 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+
+if [ "$EXISTING_PR_SET" -eq 1 ]; then
+  [ "$KIND" = ship ] || {
+    echo "error: --existing-pr applies only to ship briefs" >&2
+    exit 1
+  }
+  [ "$MODE" != local-only ] || {
+    echo "error: --existing-pr cannot be combined with local-only mode because an existing PR requires a remote branch" >&2
+    exit 1
+  }
+  # shellcheck source=bin/fm-pr-lib.sh
+  . "$SCRIPT_DIR/fm-pr-lib.sh"
+  fm_pr_url_parse "$EXISTING_PR" || {
+    echo "error: --existing-pr requires a canonical GitHub pull request URL" >&2
+    exit 1
+  }
+  [ "$FM_PR_PROVIDER" = github ] || {
+    echo "error: --existing-pr currently supports GitHub pull request URLs only" >&2
+    exit 1
+  }
+  EXISTING_PR=$FM_PR_URL
+elif [ "$BRANCH_SET" -eq 1 ]; then
+  echo "error: --branch requires --existing-pr" >&2
+  exit 1
+fi
+
+if [ "$BRANCH_SET" -eq 1 ]; then
+  if ! git check-ref-format "refs/heads/$BRANCH" >/dev/null 2>&1 \
+    || ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+    echo "error: --branch is not a valid git branch name: $BRANCH" >&2
+    exit 1
+  fi
+fi
+if [ "$BASE_BRANCH_SET" -eq 1 ]; then
+  [ "$EXISTING_PR_SET" -eq 1 ] && [ "$MODE" = no-mistakes ] || {
+    echo "error: --base-branch applies only to an existing-PR no-mistakes brief" >&2
+    exit 1
+  }
+  if ! git check-ref-format "refs/heads/$BASE_BRANCH" >/dev/null 2>&1 \
+    || ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+    echo "error: --base-branch is not a valid git branch name: $BASE_BRANCH" >&2
+    exit 1
+  fi
+elif [ "$EXISTING_PR_SET" -eq 1 ] && [ "$MODE" = no-mistakes ]; then
+  BASE_BRANCH='{EXISTING_PR_BASE_BRANCH}'
 fi
 ID=${POS[0]}
 
@@ -198,6 +272,26 @@ shell_quote() {
   printf "'"
 }
 
+if [ "$EXISTING_PR_SET" -eq 1 ]; then
+  EXPECTED_ORIGIN=$(printf 'https://github.com/%s/%s' "$FM_PR_OWNER" "$FM_PR_REPO" | tr '[:upper:]' '[:lower:]')
+  EXPECTED_ORIGIN_QUOTED=$(shell_quote "$EXPECTED_ORIGIN")
+  EXPECTED_PR_RECORD_QUOTED=$(shell_quote ",\"$EXISTING_PR\"")
+  EXISTING_PR_BRANCH_FILE=$(shell_quote "$DATA/$ID/existing-pr-branch")
+  BRANCH_ASSERT="; git check-ref-format --branch \"\$PR_BRANCH\" >/dev/null 2>&1 || { echo 'error: forge returned an invalid PR head branch' >&2; exit 1; }"
+  if [ "$BRANCH_SET" -eq 1 ]; then
+    EXPECTED_BRANCH_QUOTED=$(shell_quote "$BRANCH")
+    BRANCH_ASSERT="$BRANCH_ASSERT; [ \"\$PR_BRANCH\" = $EXPECTED_BRANCH_QUOTED ] || { echo 'error: forge-reported PR head branch does not match --branch' >&2; exit 1; }"
+  fi
+  if [ "$MODE" = no-mistakes ]; then
+    BASE_BRANCH_QUOTED=$(shell_quote "$BASE_BRANCH")
+    BASE_ASSERT="; if [ \"\$PR_PROBE_OK\" -eq 1 ] && ! (cd \"\$PR_PROBE_ROOT/repo\" && gh-axi pr list --state open --base $BASE_BRANCH_QUOTED --head \"\$PR_BRANCH\" --limit 100 --fields url | grep -Fq $EXPECTED_PR_RECORD_QUOTED); then PR_BASE_OK=0; fi"
+    BASE_FAILURE="; [ \"\$PR_BASE_OK\" -eq 1 ] || { echo 'error: --base-branch does not match the live existing PR base' >&2; exit 1; }"
+  else
+    BASE_ASSERT=
+    BASE_FAILURE=
+  fi
+fi
+
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 
@@ -213,6 +307,14 @@ When a terminal message says an instruction is waiting there - and at any natura
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
+
+IFS= read -r -d '' HOME_SECTION <<EOF || true
+# Firstmate home and task artifacts
+The absolute Firstmate home for this task is \`$FM_HOME\`.
+Firstmate-owned task artifacts live under \`$DATA/$ID/\`, not in the project worktree.
+Treat any home-relative \`data/$ID/...\` deliverable or referenced report as living under that absolute task-artifact directory unless the brief gives another absolute path.
+EOF
+HOME_SECTION=${HOME_SECTION%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -366,6 +468,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $TASK_SECTION
 
+$HOME_SECTION
+
 $HERDR_SECTION
 
 # Setup
@@ -430,27 +534,45 @@ fi
 # which bin/fm-promote.sh renders too so a promoted scout receives the same contract.
 # The block opens with the fixed "Delivery contract: mode=<mode>" line that
 # bin/fm-spawn.sh checks against its own explicit --mode before launching.
-case "$MODE" in
-  direct-PR)
-    SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    ;;
-  local-only)
-    SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
-    ;;
-  *)  # no-mistakes
+if [ "$EXISTING_PR_SET" -eq 1 ]; then
+  SETUP1="1. First action: resolve the existing PR head through gh-axi in a disposable probe clone, verify its repository and upstream are origin, reject the default branch, then fetch and check out that exact branch here: \`( fm_pr_normalize_origin() { printf '%s\\n' \"\$1\" | sed -E -e 's#^git@github\\.com:#https://github.com/#' -e 's#^ssh://git@github\\.com/#https://github.com/#' -e 's#^git://github\\.com/#https://github.com/#' -e 's#/*\$##' -e 's#\\.git\$##' | tr '[:upper:]' '[:lower:]'; }; [ \"\$(fm_pr_normalize_origin \"\$(git remote get-url origin)\")\" = $EXPECTED_ORIGIN_QUOTED ] || { echo 'error: origin fetch URL does not match the existing PR repository' >&2; exit 1; }; [ \"\$(fm_pr_normalize_origin \"\$(git remote get-url --push --all origin)\")\" = $EXPECTED_ORIGIN_QUOTED ] || { echo 'error: origin must have exactly one push URL matching the existing PR repository' >&2; exit 1; }; PR_PROBE_ROOT=\$(mktemp -d \"\${TMPDIR:-/tmp}/fm-existing-pr-probe.XXXXXX\") || exit 1; trap 'rm -rf -- \"\$PR_PROBE_ROOT\"' EXIT INT TERM HUP; PR_BRANCH=; PR_REMOTE=; PR_PROBE_OK=0; PR_OPEN_OK=1; PR_BASE_OK=1; if git clone --quiet --no-checkout --filter=blob:none \"\$(git remote get-url origin)\" \"\$PR_PROBE_ROOT/repo\" && (cd \"\$PR_PROBE_ROOT/repo\" && gh-axi pr checkout $FM_PR_NUMBER >/dev/null) && PR_BRANCH=\$(git -C \"\$PR_PROBE_ROOT/repo\" branch --show-current) && PR_REMOTE=\$(git -C \"\$PR_PROBE_ROOT/repo\" config --get \"branch.\$PR_BRANCH.remote\"); then PR_PROBE_OK=1; fi; if [ \"\$PR_PROBE_OK\" -eq 1 ] && ! (cd \"\$PR_PROBE_ROOT/repo\" && gh-axi pr list --state open --head \"\$PR_BRANCH\" --limit 100 --fields url | grep -Fq $EXPECTED_PR_RECORD_QUOTED); then PR_OPEN_OK=0; fi$BASE_ASSERT; rm -rf -- \"\$PR_PROBE_ROOT\"; trap - EXIT INT TERM HUP; [ \"\$PR_PROBE_OK\" -eq 1 ] || { echo 'error: could not resolve the existing PR head' >&2; exit 1; }; [ \"\$PR_OPEN_OK\" -eq 1 ] || { echo 'error: existing PR is not open' >&2; exit 1; }$BASE_FAILURE; git check-ref-format \"refs/heads/\$PR_BRANCH\" >/dev/null || { echo 'error: forge returned an invalid PR head branch' >&2; exit 1; }$BRANCH_ASSERT; [ \"\$PR_REMOTE\" = origin ] || { echo 'error: existing PR head is not hosted on origin' >&2; exit 1; }; DEFAULT_BRANCH=\$(git ls-remote --symref origin HEAD | awk '\$1 == \"ref:\" { sub(/^refs\\/heads\\//, \"\", \$2); print \$2; exit }'); [ -n \"\$DEFAULT_BRANCH\" ] && [ \"\$PR_BRANCH\" != \"\$DEFAULT_BRANCH\" ] || { echo 'error: existing PR head is the origin default branch' >&2; exit 1; }; git fetch origin \"+refs/heads/\$PR_BRANCH:refs/remotes/origin/\$PR_BRANCH\" || exit 1; if git show-ref --verify --quiet \"refs/heads/\$PR_BRANCH\"; then [ \"\$(git rev-parse \"refs/heads/\$PR_BRANCH\")\" = \"\$(git rev-parse \"refs/remotes/origin/\$PR_BRANCH\")\" ] || { echo 'error: existing local PR branch differs from origin' >&2; exit 1; }; git checkout \"\$PR_BRANCH\"; else git checkout -b \"\$PR_BRANCH\" \"origin/\$PR_BRANCH\"; fi && git config \"branch.\$PR_BRANCH.remote\" origin && git config \"branch.\$PR_BRANCH.merge\" \"refs/heads/\$PR_BRANCH\" && printf '%s\\n' \"\$PR_BRANCH\" > $EXISTING_PR_BRANCH_FILE )\`.
+   If the PR head is fork-hosted, origin lacks the branch, or you cannot push it, append \`blocked: existing PR head branch is not writable on origin\` and stop; never redirect the push to another remote."
+  if [ "$MODE" = no-mistakes ]; then
     SETUP2="
+2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`. If its configured push target is not this exact origin repository and recorded PR head branch, append \`blocked: no-mistakes is not configured for the existing PR head branch\` and stop."
+    RULE1="1. Commit only on the checked-out existing PR branch. Immediately before starting /no-mistakes, verify the branch, upstream, origin push URL, open PR, and live base with \`fm_pr_normalize_origin() { printf '%s\\n' \"\$1\" | sed -E -e 's#^git@github\\.com:#https://github.com/#' -e 's#^ssh://git@github\\.com/#https://github.com/#' -e 's#^git://github\\.com/#https://github.com/#' -e 's#/*\$##' -e 's#\\.git\$##' | tr '[:upper:]' '[:lower:]'; }; EXPECTED_PR_BRANCH=\$(cat $EXISTING_PR_BRANCH_FILE); [ \"\$(git branch --show-current)\" = \"\$EXPECTED_PR_BRANCH\" ] && [ \"\$(git config --get \"branch.\$EXPECTED_PR_BRANCH.remote\")\" = origin ] && [ \"\$(fm_pr_normalize_origin \"\$(git remote get-url --push --all origin)\")\" = $EXPECTED_ORIGIN_QUOTED ] && gh-axi pr list --state open --base $BASE_BRANCH_QUOTED --head \"\$EXPECTED_PR_BRANCH\" --limit 100 --fields url | grep -Fq $EXPECTED_PR_RECORD_QUOTED\`; if any check fails, stop and report the delivery mismatch. Never push directly: no-mistakes alone owns the push to that branch. Never force-push, never open a second PR, and never merge the existing PR."
+  else
+    SETUP2=""
+    RULE1="1. Commit on the checked-out existing PR branch and push only to that recorded origin branch with \`fm_pr_normalize_origin() { printf '%s\\n' \"\$1\" | sed -E -e 's#^git@github\\.com:#https://github.com/#' -e 's#^ssh://git@github\\.com/#https://github.com/#' -e 's#^git://github\\.com/#https://github.com/#' -e 's#/*\$##' -e 's#\\.git\$##' | tr '[:upper:]' '[:lower:]'; }; EXPECTED_PR_BRANCH=\$(cat $EXISTING_PR_BRANCH_FILE); [ \"\$(git branch --show-current)\" = \"\$EXPECTED_PR_BRANCH\" ] && [ \"\$(git config --get \"branch.\$EXPECTED_PR_BRANCH.remote\")\" = origin ] && [ \"\$(fm_pr_normalize_origin \"\$(git remote get-url --push --all origin)\")\" = $EXPECTED_ORIGIN_QUOTED ] && gh-axi pr list --state open --head \"\$EXPECTED_PR_BRANCH\" --limit 100 --fields url | grep -Fq $EXPECTED_PR_RECORD_QUOTED || { echo 'error: current delivery state no longer identifies the writable open existing PR head' >&2; exit 1; }; git push origin \"HEAD:\$EXPECTED_PR_BRANCH\"\`. Never force-push, never open a second PR, and never merge the existing PR."
+  fi
+  RULE2="2. Stay inside this worktree; outside it, write only the status file and the Firstmate-owned branch-identity artifact at $EXISTING_PR_BRANCH_FILE."
+else
+  SETUP1="1. First action: create your branch: \`git checkout -b fm/$ID\`"
+  case "$MODE" in
+    direct-PR)
+      SETUP2=""
+      RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+      ;;
+    local-only)
+      SETUP2=""
+      RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+      ;;
+    *)  # no-mistakes
+      SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
-    ;;
-esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+      RULE1='1. Never push to the default branch. Never merge a PR.'
+      ;;
+  esac
+  RULE2="2. Stay inside this worktree; modify nothing outside it."
+fi
+DOD=$(fm_dod_block "$MODE" "$ID" "$EXISTING_PR" "$BASE_BRANCH") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
+
+$HOME_SECTION
 
 $HERDR_SECTION
 
@@ -461,11 +583,11 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$SETUP1$SETUP2
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+$RULE2
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

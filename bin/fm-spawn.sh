@@ -2264,6 +2264,14 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
     exit 1
   fi
+  if fm_brief_existing_pr_branch_placeholder_present "$BRIEF"; then
+    echo "error: $BRIEF still contains {EXISTING_PR_BRANCH}; fill the existing PR head branch before spawn" >&2
+    exit 1
+  fi
+  if fm_brief_existing_pr_base_invalid "$BRIEF"; then
+    echo "error: $BRIEF must record a valid Existing PR base branch for no-mistakes; fill {EXISTING_PR_BASE_BRANCH} from the PR before spawn" >&2
+    exit 1
+  fi
   if ! fm_brief_task_content_valid "$BRIEF"; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1

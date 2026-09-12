@@ -453,6 +453,28 @@ EOF
     "unfilled ship spawn did not name the intent subsection to fill"
   assert_absent "$home/state/$id.meta" "unfilled ship spawn wrote task metadata"
 
+  id=delivery-unfilled-existing-base
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes \
+    --existing-pr https://github.com/kunchenguid/firstmate/pull/2460 >/dev/null 2>&1 \
+    || fail "existing-PR no-mistakes brief with a base placeholder should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Update the existing pull request." \
+    "Keep the existing head branch."
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn with an unfilled existing-PR base should exit non-zero"
+  assert_contains "$out" "fill {EXISTING_PR_BASE_BRANCH}" \
+    "existing-PR spawn did not name the leftover base placeholder"
+  assert_absent "$home/state/$id.meta" "unfilled existing-PR base spawn wrote task metadata"
+  sed -i.bak 's/^Existing PR base branch: {EXISTING_PR_BASE_BRANCH}$/Existing PR base branch: main/' \
+    "$home/data/$id/brief.md"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn with operational existing-PR base placeholders should exit non-zero"
+  assert_contains "$out" "fill {EXISTING_PR_BASE_BRANCH}" \
+    "existing-PR spawn ignored base placeholders outside delivery metadata"
+  assert_absent "$home/state/$id.meta" "operational existing-PR base placeholder spawn wrote task metadata"
+
   id=delivery-filled-ship
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "filled-ship brief should scaffold"
