@@ -145,10 +145,24 @@ EOF
   printf '%s\n' "$outermost"
 }
 
-# True if $1 is a live process that looks like a verified harness.
+# Lazily source fm-wake-lib.sh for fm_pid_alive (zombie-aware liveness), only
+# when a caller has not already sourced it: no caller of this file currently
+# does, unlike fm-lease-lib.sh's callers, which all source fm-wake-lib.sh
+# first (see that file's fm_lease_lock_helpers for the identical pattern).
+_fm_session_lock_wake_helpers() {
+  command -v fm_pid_alive >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$(dirname -- "${BASH_SOURCE[0]}")/fm-wake-lib.sh"
+}
+
+# True if $1 is a live process that looks like a verified harness. Delegates
+# liveness to fm_pid_alive so a zombie session-lock holder (kill -0 alone
+# reports it alive; the kernel keeps its pid slot until the parent reaps it)
+# does not block a new session from taking over state/.lock.
 fm_harness_pid_alive() {
   local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
+  _fm_session_lock_wake_helpers
+  fm_pid_alive "$pid" || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   fm_harness_process_matches "$comm" "$args"

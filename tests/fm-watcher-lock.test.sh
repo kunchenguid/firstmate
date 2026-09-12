@@ -12,6 +12,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
+SESSION_LIB="$ROOT/bin/fm-session-lock-lib.sh"
 
 # An arm only reports its typed failure after wait_for_healthy_successor has
 # spent the whole confirmation budget, so cases that wait for that failure must
@@ -942,6 +943,142 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   pass "SIGSTOP distinguishes live PID from stale beacon and termination records the exit class"
 }
 
+# A zombie "owner" pid is exactly the lock/lease wedge this regression guards
+# against: kill -0 alone reports a zombie as alive because the kernel keeps
+# its slot reserved until the parent reaps it, and that parent here is a real
+# process (not the test runner) that deliberately never calls wait() on it.
+test_fm_pid_alive_treats_zombie_as_dead() {
+  local dir state holder_out holder_pid child_pid i state_field
+  dir=$(make_case pid-alive-zombie)
+  state="$dir/state"
+  holder_out="$dir/holder.out"
+
+  bash -c 'sleep 0.2 & child=$!; printf "%s\n" "$child"; sleep 30' > "$holder_out" &
+  holder_pid=$!
+
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_out" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  child_pid=$(head -n 1 "$holder_out" 2>/dev/null)
+  case "$child_pid" in
+    ''|*[!0-9]*)
+      kill "$holder_pid" 2>/dev/null || true
+      wait "$holder_pid" 2>/dev/null || true
+      fail "zombie fixture did not report a child pid"
+      ;;
+  esac
+
+  i=0
+  state_field=
+  while [ "$i" -lt 100 ]; do
+    state_field=$(ps -p "$child_pid" -o stat= 2>/dev/null | tr -d '[:space:]')
+    case "$state_field" in
+      Z*) break ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  case "$state_field" in
+    Z*) ;;
+    *)
+      kill "$holder_pid" 2>/dev/null || true
+      wait "$holder_pid" 2>/dev/null || true
+      fail "zombie fixture child never reached zombie state (stat='$state_field')"
+      ;;
+  esac
+
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_alive "$2"' _ "$LIB" "$child_pid"; then
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+    fail "fm_pid_alive treated a zombie process as alive"
+  fi
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_alive "$2"' _ "$LIB" "$holder_pid" \
+    || { kill "$holder_pid" 2>/dev/null || true; wait "$holder_pid" 2>/dev/null || true; \
+         fail "fm_pid_alive treated a genuinely live process as dead"; }
+
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  pass "fm_pid_alive treats a zombie process as dead and a genuinely live process as alive"
+}
+
+# fm_harness_pid_alive (bin/fm-session-lock-lib.sh) had the identical bare
+# kill -0 zombie bug for the fleet session .lock path (a regular file, outside
+# fm_lock_try_acquire's directory-lock mechanism), so a zombie session-lock
+# holder could block a new session from taking over state/.lock. It now
+# delegates liveness to fm_pid_alive; this mirrors
+# test_fm_pid_alive_treats_zombie_as_dead above but must also make the process
+# match a verified harness name (comm=claude), since fm_harness_pid_alive
+# checks that after liveness. A pure-builtin spin loop keeps a genuinely alive
+# process's comm from ever changing away from the symlink name it was invoked
+# through; the future zombie is a quick-exiting claude-named child whose comm
+# is set once at its own execve and never changes again, forked by a holder
+# that blocks on its own final external command - which bash's tail-call
+# optimization execs in place of the shell itself, so the holder structurally
+# cannot reap what it left behind.
+test_fm_harness_pid_alive_treats_zombie_as_dead() {
+  local dir state fakebin alive_pid holder_out holder_pid child_pid i state_field
+  dir=$(make_case harness-pid-alive-zombie)
+  state="$dir/state"
+  fakebin="$dir/harness-bin"
+  mkdir -p "$fakebin"
+  ln -s /bin/bash "$fakebin/claude"
+
+  "$fakebin/claude" -c 'while :; do :; done' &
+  alive_pid=$!
+
+  holder_out="$dir/holder.out"
+  bash -c '"$1" -c "exit 0" & child=$!; printf "%s\n" "$child"; sleep 30' _ "$fakebin/claude" > "$holder_out" &
+  holder_pid=$!
+
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_out" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  child_pid=$(head -n 1 "$holder_out" 2>/dev/null)
+  case "$child_pid" in
+    ''|*[!0-9]*)
+      kill "$alive_pid" "$holder_pid" 2>/dev/null || true
+      wait "$alive_pid" "$holder_pid" 2>/dev/null || true
+      fail "harness zombie fixture did not report a child pid"
+      ;;
+  esac
+
+  i=0
+  state_field=
+  while [ "$i" -lt 100 ]; do
+    state_field=$(ps -p "$child_pid" -o stat= 2>/dev/null | tr -d '[:space:]')
+    case "$state_field" in
+      Z*) break ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  case "$state_field" in
+    Z*) ;;
+    *)
+      kill "$alive_pid" "$holder_pid" 2>/dev/null || true
+      wait "$alive_pid" "$holder_pid" 2>/dev/null || true
+      fail "harness zombie fixture child never reached zombie state (stat='$state_field')"
+      ;;
+  esac
+
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_harness_pid_alive "$2"' _ "$SESSION_LIB" "$child_pid"; then
+    kill "$alive_pid" "$holder_pid" 2>/dev/null || true
+    wait "$alive_pid" "$holder_pid" 2>/dev/null || true
+    fail "fm_harness_pid_alive treated a zombie harness-named process as alive"
+  fi
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_harness_pid_alive "$2"' _ "$SESSION_LIB" "$alive_pid" \
+    || { kill "$alive_pid" "$holder_pid" 2>/dev/null || true; wait "$alive_pid" "$holder_pid" 2>/dev/null || true; \
+         fail "fm_harness_pid_alive treated a genuinely live harness-named process as dead"; }
+
+  kill "$alive_pid" "$holder_pid" 2>/dev/null || true
+  wait "$alive_pid" "$holder_pid" 2>/dev/null || true
+  pass "fm_harness_pid_alive treats a zombie harness-named process as dead and a genuinely live one as alive"
+}
+
 test_pid_identity_is_locale_invariant() {
   # The portable fallback records its process identity under one locale, then
   # arm/guard/turn-end re-read it under the machine's ambient locale. ps's lstart
@@ -1131,3 +1268,5 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_fm_pid_alive_treats_zombie_as_dead
+test_fm_harness_pid_alive_treats_zombie_as_dead
