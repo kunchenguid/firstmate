@@ -122,8 +122,8 @@ status=$?
 
 assert_contains_local "$(cat "$ERR_FILE")" "NOTICE" \
   "fm-spawn.sh did not print the auto-detect notice to stderr when selecting herdr"
-assert_contains_local "$(cat "$ERR_FILE")" "EXPERIMENTAL herdr backend" \
-  "fm-spawn.sh's auto-detect notice did not flag herdr as experimental"
+assert_contains_local "$(cat "$ERR_FILE")" "non-reference herdr backend" \
+  "fm-spawn.sh's auto-detect notice did not flag herdr as non-reference"
 pass "real herdr: fm-spawn.sh auto-detects herdr from HERDR_ENV=1 (no explicit config) and prints the loud notice"
 
 META="$STATE/$ID.meta"

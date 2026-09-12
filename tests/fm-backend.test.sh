@@ -417,7 +417,7 @@ test_backend_name_autodetect_notice() {
   : > "$errfile"
   out=$(unset TMUX CMUX_WORKSPACE_ID; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = herdr ] || fail "fm_backend_name should auto-detect herdr from HERDR_ENV=1, got '$out'"
-  assert_contains "$(cat "$errfile")" "EXPERIMENTAL herdr backend" \
+  assert_contains "$(cat "$errfile")" "non-reference herdr backend" \
     "fm_backend_name did not print a loud notice when auto-detecting herdr"
   assert_contains "$(cat "$errfile")" "config/backend" \
     "fm_backend_name's auto-detect notice did not name the opt-out"
