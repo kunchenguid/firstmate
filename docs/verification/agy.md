@@ -31,7 +31,7 @@ Raw commands whose basename is `agy` are recorded as `raw-agy`, so they remain u
 The current live measurements were taken on 2026-09-12 UTC on Linux with Antigravity CLI 1.2.2 from `~/.local/bin/agy`.
 The binary had auto-updated from 1.2.0 to 1.2.2 during the marker verification, and the 1.2.0 measurements are kept in the historical section above.
 The no-mistakes pipeline sandbox cannot execute the credentialed live guards because it has no worktree pool or signed-in sessions.
-The passing 1.2.2 live-guard lines below are from firstmate's own 2026-09-12 runs; the lifecycle guard's newly folded doorbell assertions remain in the executable guard for a credentialed rerun.
+The passing 1.2.2 live-guard lines below are from firstmate's own 2026-09-12 runs, while the final guard's post-doorbell settle assertion remains to be rerun with credentials.
 The direct AGY composer-clear measurement is reproduced here against the real binary.
 
 Command:
@@ -409,7 +409,8 @@ ok - live composer-matrix guard verified 4 live surface(s)
 Liveness/marker guard: `ok - harness liveness: agy 1.2.2 classifies alive`.
 Two initial attempts at 120 and 220 failed `doorbell instruction was not acted on` while the pane showed the doorbell delivered and the worker mid-way through acting on it; agy 1.2.2 keeps the brief's `sleep 60` running as a background task and the low-effort model needs three tool calls to act, which occasionally exceeds the test's 120-second wait; identical re-runs passed.
 The lifecycle guard was then restructured to send a `READY` brief, wait for idle, send the doorbell before steering any long-running task, and retain a 240-second acted-and-acknowledged ceiling.
-The evidence above predates that ordering-only guard hardening; firstmate will run the restructured guard once more on the final tip.
+The final guard also waits for the acknowledged doorbell turn to return to an idle state with an empty composer before steering the long-running tool turn.
+The evidence above predates that ordering and post-doorbell settle hardening; firstmate will run the restructured guard once more on the final tip.
 
 ## Repository gates
 
