@@ -480,10 +480,10 @@ if [ "$count" -le 3 ]; then
     *) label=C ;;
   esac
   printf 'signal: overlap wake %s\n' "$label"
-  if [ "$count" -eq 3 ]; then
+  if [ "$count" -ge 2 ]; then
     sleep 0.1
-    printf '%s\n' "$$" > "$FM_OUTPUT_FILE"
-    while [ ! -e "$FM_CLOSE_FILE" ]; do sleep 0.02; done
+    printf '%s\n' "$$" > "$FM_OUTPUT_FILE.$count"
+    while [ ! -e "$FM_CLOSE_FILE.$count" ]; do sleep 0.02; done
   fi
   exit 0
 fi
@@ -594,24 +594,31 @@ if (process.env.FM_SETTLE_ORDER === "b-first") {
   settlements.C.resolve();
 }
 writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close B\n");
-await waitFor(() => armRows().length === 3, "successor C");
-writeFileSync(`${process.env.FM_TRIGGER_FILE}.3`, "close C\n");
-await waitFor(() => existsSync(process.env.FM_OUTPUT_FILE), "successor C actionable output");
+await waitFor(() => existsSync(`${process.env.FM_OUTPUT_FILE}.2`), "successor B actionable output");
 settlements.A.resolve();
 await new Promise((resolve) => setTimeout(resolve, 80));
-if (offers.join("") !== "A") throw new Error(`wake B escaped before successor C closed: ${offers.join(",")}`);
+if (offers.join("") !== "A") throw new Error(`wake B escaped before successor B closed: ${offers.join(",")}`);
+if (armRows().length !== 2) throw new Error(`successor started before B closed: ${armRows().join(" | ")}`);
+writeFileSync(`${process.env.FM_CLOSE_FILE}.2`, "close B\n");
+await waitFor(() => armRows().length === 3, "successor C after B close");
+await waitFor(() => offers.join("") === "AB", "wake B branch offer behind successor C");
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.3`, "close C\n");
+await waitFor(() => existsSync(`${process.env.FM_OUTPUT_FILE}.3`), "successor C actionable output");
+if (process.env.FM_SETTLE_ORDER === "a-first") settlements.B.resolve();
+await new Promise((resolve) => setTimeout(resolve, 80));
+if (offers.join("") !== "AB") throw new Error(`wake C escaped before successor C closed: ${offers.join(",")}`);
 if (prompts.length !== 0) throw new Error(`pre-close restoration leaked to main: ${prompts.join(" | ")}`);
-writeFileSync(process.env.FM_CLOSE_FILE, "close C\n");
+writeFileSync(`${process.env.FM_CLOSE_FILE}.3`, "close C\n");
 await waitFor(() => armRows().length === 4 && existsSync(process.env.FM_LIVE_FILE), "successor D after C close");
 const livePid = readFileSync(process.env.FM_LIVE_FILE, "utf8").trim();
 if (!pidAlive(livePid)) throw new Error(`successor D was not alive: ${livePid}`);
-if (offers.join("") !== "A") throw new Error(`later wake delivery escaped before D readiness: ${offers.join(",")}`);
+if (offers.join("") !== "AB") throw new Error(`later wake delivery escaped before D readiness: ${offers.join(",")}`);
 acknowledgeRecovery();
 await new Promise((resolve) => setTimeout(resolve, 80));
 if (!existsSync(process.env.FM_LIVE_FILE) || !pidAlive(livePid)) {
   throw new Error("stale restoration retired successor D before its readiness result");
 }
-if (offers.join("") !== "A") throw new Error(`wake B did not await successor D readiness: ${offers.join(",")}`);
+if (offers.join("") !== "AB") throw new Error(`wake C did not await successor D readiness: ${offers.join(",")}`);
 if (prompts.length !== 0) throw new Error(`stale restoration leaked to main: ${prompts.join(" | ")}`);
 const whilePending = await tool.execute("overlap-pending-health", {}, undefined, undefined, {});
 if (!whilePending.details?.ok || !whilePending.details.message.includes("readiness verification pending")) {
@@ -625,8 +632,6 @@ if (!afterReady.details?.ok || !afterReady.details.message.includes("verified-re
   throw new Error(`ready successor D was not reported as verified: ${JSON.stringify(afterReady.details)}`);
 }
 if (process.env.FM_SETTLE_ORDER === "a-first") {
-  await waitFor(() => offers.join("") === "AB", "wake B offer after A settlement");
-  settlements.B.resolve();
   await waitFor(() => offers.join("") === "ABC", "wake C offer after B settlement");
   settlements.C.resolve();
 } else {
@@ -2910,33 +2915,50 @@ EOF
 # the end of that delivery rather than skipped, or the live generation is left
 # with no watcher and no retry.
 test_pi_successor_failure_during_delivery_is_retried_after_delivery() {
-  local repo home plugin log stop out status
+  local repo home plugin log trigger stop live out status
   repo="$TMP_ROOT/pi-successor-dies-mid-delivery-root"
   home="$TMP_ROOT/pi-successor-dies-mid-delivery-home"
   log="$TMP_ROOT/pi-successor-dies-mid-delivery.log"
+  trigger="$TMP_ROOT/pi-successor-dies-mid-delivery.trigger"
   stop="$TMP_ROOT/pi-successor-dies-mid-delivery.stop"
+  live="$TMP_ROOT/pi-successor-dies-mid-delivery.live"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
-printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=shared-generation\n' "$$"
 if [ "$count" -eq 1 ]; then
-  printf 'signal: wake before the successor dies\n'
+  printf 'signal: wake A before the successor dies\n'
   exit 0
 fi
 if [ "$count" -eq 2 ]; then
+  while [ ! -e "$FM_TRIGGER_FILE" ]; do sleep 0.02; done
+  printf 'signal: wake B behind the dying successor\n'
+  exit 0
+fi
+if [ "$count" -eq 3 ]; then
   sleep 0.1
   printf 'watcher: FAILED - successor lost its beacon\n'
   exit 3
 fi
+printf '%s\n' "$$" > "$FM_LIVE_FILE"
+cleanup() { rm -f "$FM_LIVE_FILE"; }
+trap cleanup EXIT
 trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+    FM_TRIGGER_FILE="$trigger" FM_STOP_FILE="$stop" FM_LIVE_FILE="$live" \
+    FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 \
+    node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -2944,8 +2966,8 @@ let releaseBranch = () => {};
 const branchSettlement = new Promise((resolve) => {
   releaseBranch = resolve;
 });
-let branchAccepted = false;
 let tool = null;
+const offers = [];
 const prompts = [];
 const pi = {
   on() {},
@@ -2960,14 +2982,27 @@ const pi = {
     on() {},
     emit(event, data) {
       if (event !== "fm-branch-supervision:dispatch") return;
-      branchAccepted = true;
-      data.accept(branchSettlement);
+      offers.push(data.message);
+      data.accept(offers.length === 1 ? branchSettlement : Promise.resolve());
     },
   },
 };
 const arms = () => existsSync(process.env.FM_ARM_LOG)
   ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm=")).length
   : 0;
+const armPids = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n")
+    .filter((row) => row.startsWith("arm="))
+    .map((row) => row.slice("arm=".length))
+  : [];
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 async function waitFor(pred, label) {
   for (let i = 0; i < 500; i += 1) {
     if (pred()) return;
@@ -2978,28 +3013,38 @@ async function waitFor(pred, label) {
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(`${process.env.FM_HOME}/state/mid-delivery.meta`, "project=/projects/mid-delivery\nwindow=fm-mid-delivery\n");
-writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tmid-delivery.status\tsignal: wake before the successor dies\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tmid-delivery.status\tsignal: successor continuity wake\n");
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("initial-arm", {}, undefined, undefined, {});
-await waitFor(() => branchAccepted, "branch accepted the wake behind a verified successor");
+await waitFor(() => offers.length === 1, "branch accepted wake A behind a verified successor");
 if (arms() !== 2) throw new Error(`expected the verified successor before delivery, got ${arms()} arms`);
-// The successor dies while the branch still holds the delivery.
-await new Promise((resolve) => setTimeout(resolve, 300));
-if (arms() !== 2) throw new Error(`a retry launched while the delivery was still in flight: ${arms()} arms`);
+writeFileSync(process.env.FM_TRIGGER_FILE, "close B\n");
+await waitFor(() => arms() === 3, "successor C behind wake B");
+await new Promise((resolve) => setTimeout(resolve, 250));
+if (arms() !== 3) throw new Error(`a retry launched while wake A delivery was still in flight: ${arms()} arms`);
+if (offers.length !== 1) throw new Error(`wake B escaped serialization before wake A settled: ${offers.length} offers`);
 releaseBranch();
-await waitFor(() => arms() === 3, "a retry watcher after the delivery settled");
+await waitFor(() => prompts.length === 1, "wake B main fallback after successor C died");
+await waitFor(() => arms() === 4 && existsSync(process.env.FM_LIVE_FILE), "a retry watcher after the delivery settled");
 await new Promise((resolve) => setTimeout(resolve, 150));
-if (arms() !== 3) throw new Error(`the deferred retry was not single-flight: ${arms()} arms`);
-if (prompts.length !== 0) throw new Error(`a bounded retry surfaced a failure prompt: ${prompts.join(" | ")}`);
+if (offers.length !== 1) throw new Error(`dead successor reused generation confirmation for wake B: ${offers.length} offers`);
+if (!prompts[0].includes("wake B behind the dying successor")) throw new Error(`wake B was lost: ${prompts[0]}`);
+if (!prompts[0].includes("successor ended before actionable wake delivery")) throw new Error(`wake B lacked the dead-successor failure: ${prompts[0]}`);
+if (arms() !== 4) throw new Error(`the deferred retry was not single-flight: ${arms()} arms`);
+const livePid = readFileSync(process.env.FM_LIVE_FILE, "utf8").trim();
+const liveArmPids = armPids().filter(pidAlive);
+if (liveArmPids.length !== 1 || liveArmPids[0] !== livePid) {
+  throw new Error(`retry watcher was not the singleton owner: ${liveArmPids.join(",")}`);
+}
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must retry a verified successor that failed during wake delivery"
+  expect_code 0 "$status" "Pi must route a wake to main when its confirmed-generation successor died"
   [ -z "$out" ] || fail "Pi successor-dies-mid-delivery test printed output: $out"
-  pass "Pi retries a verified successor that failed during wake delivery once that delivery settles"
+  pass "Pi revalidates the exact successor before branch delivery and retries after fallback"
 }
 
 test_pi_late_retiring_actionable_reaches_replacement() {

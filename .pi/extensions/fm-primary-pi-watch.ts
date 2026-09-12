@@ -650,6 +650,21 @@ export default function (pi: ExtensionAPI) {
     restoration: ActionableRestoration,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
+    const restorationChild = restoration.armChild;
+    const restorationChildPid = String(restorationChild?.pid ?? "");
+    if (
+      !repairFailed &&
+      (!restorationChild ||
+        owner.child !== restorationChild ||
+        !restorationChildPid ||
+        !pidAlive(restorationChildPid))
+    ) {
+      return await sendWake(
+        owner,
+        `${message}\n\nwatcher: FAILED - Pi extension successor ended before actionable wake delivery`,
+        pending,
+      );
+    }
     const recovery = restoration.recovery;
     if (recovery && !owner.handlingConfirmedGenerations.has(recovery.generation)) {
       const confirmed = confirmHandlingDeliveryWithRetry(recovery);
@@ -909,6 +924,15 @@ export default function (pi: ExtensionAPI) {
     owner: SessionGeneration,
     pending: PendingActionableClose,
   ): Promise<ActionableRestoration> {
+    const predecessorChild = owner.child;
+    if (
+      predecessorChild &&
+      armPendingActionable.get(predecessorChild)?.token === pending.token
+    ) {
+      const closed = armClose.get(predecessorChild);
+      if (closed) await closed;
+      if (!generationIsLive(owner)) return { failure: "" };
+    }
     let current = beginActionableRestoration(owner, pending);
     while (true) {
       const restoration = await current;
@@ -918,16 +942,15 @@ export default function (pi: ExtensionAPI) {
         current = latest;
         continue;
       }
-      const restoredChild = restoration.armChild;
-      const supersedingPending = restoredChild ? armPendingActionable.get(restoredChild) : undefined;
-      if (restoredChild && supersedingPending) {
-        const closed = armClose.get(restoredChild);
+      const repairChild = owner.child;
+      const supersedingPending = repairChild ? armPendingActionable.get(repairChild) : undefined;
+      if (repairChild && supersedingPending) {
+        const closed = armClose.get(repairChild);
         if (closed) await closed;
         if (!generationIsLive(owner)) return restoration;
         current = beginActionableRestoration(owner, supersedingPending);
         continue;
       }
-      const repairChild = owner.child;
       if (!repairChild || repairChild === restoration.armChild) return restoration;
       const ready = await waitForReadiness(repairChild);
       if (!generationIsLive(owner)) return restoration;
@@ -939,6 +962,14 @@ export default function (pi: ExtensionAPI) {
       if (owner.child !== repairChild) {
         if (owner.child) continue;
         return restoration;
+      }
+      const readyPending = armPendingActionable.get(repairChild);
+      if (readyPending) {
+        const closed = armClose.get(repairChild);
+        if (closed) await closed;
+        if (!generationIsLive(owner)) return restoration;
+        current = beginActionableRestoration(owner, readyPending);
+        continue;
       }
       if (!ready) return restoration;
       return { failure: "", armChild: repairChild, recovery: armRecovery.get(repairChild) };
