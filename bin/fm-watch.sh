@@ -204,6 +204,10 @@ case "$WATCHER_STALE_GRACE" in
     ;;
 esac
 watcher_heartbeat() {
+  local age
+  age=$(age_of "$STATE/.last-watcher-beat" 2>/dev/null || printf '0')
+  case "$age" in ''|*[!0-9]*) age=0 ;; esac
+  fm_telemetry_record liveness "{\"op\":\"watcher-heartbeat\",\"ageSeconds\":$age}"
   touch "$STATE/.last-watcher-beat"
 }
 watcher_cycle_complete() {

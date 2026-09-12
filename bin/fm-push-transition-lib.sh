@@ -15,6 +15,8 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-transition-lib.sh"
+# shellcheck source=bin/fm-telemetry-lib.sh
+. "$FM_PUSH_TRANSITION_LIB_DIR/fm-telemetry-lib.sh"
 
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
@@ -86,11 +88,15 @@ triage_log() {
 
 # Exit after reporting one actionable wake. Tests override this callback.
 wake() {
-  local output_status=0
+  local output_status=0 kind
   case "$1" in
-    heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
-    *) echo 0 > "$STATE/.heartbeat-streak" ;;
+    heartbeat*) kind=heartbeat; echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
+    signal:*) kind=signal; echo 0 > "$STATE/.heartbeat-streak" ;;
+    stale:*) kind=stale; echo 0 > "$STATE/.heartbeat-streak" ;;
+    check:*) kind=check; echo 0 > "$STATE/.heartbeat-streak" ;;
+    *) kind=unknown; echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
+  fm_telemetry_record checks "{\"op\":\"wake\",\"kind\":\"$kind\"}"
   trap '' HUP INT TERM
   [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
   if echo "$1"; then

@@ -153,6 +153,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
+# shellcheck source=bin/fm-telemetry-lib.sh
+. "$SCRIPT_DIR/fm-telemetry-lib.sh"
 
 trap fm_pr_meta_cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -162,6 +164,7 @@ if [ "$#" -lt 2 ]; then
   exit 2
 fi
 ID=$1
+PR_MERGE_TELEMETRY_STARTED=$(fm_telemetry_now_ms)
 RAW_URL=$2
 if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
   echo "error: invalid PR merge request" >&2
@@ -1566,6 +1569,13 @@ esac
 # outcome while its existing poll remains armed.
 outcome_rc=0
 fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self || outcome_rc=$?
+case "$outcome_rc" in
+  0) fm_pr_merge_telemetry_outcome=merged ;;
+  *) fm_pr_merge_telemetry_outcome=unreported ;;
+ esac
+fm_pr_merge_telemetry_elapsed=$(( $(fm_telemetry_now_ms) - PR_MERGE_TELEMETRY_STARTED ))
+[ "$fm_pr_merge_telemetry_elapsed" -ge 0 ] || fm_pr_merge_telemetry_elapsed=0
+fm_telemetry_record lifecycle "{\"op\":\"pr-merge\",\"outcome\":\"$fm_pr_merge_telemetry_outcome\",\"elapsedMs\":$fm_pr_merge_telemetry_elapsed}"
 case "$outcome_rc" in
   0) ;;
   3)

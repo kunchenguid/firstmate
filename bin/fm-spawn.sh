@@ -545,6 +545,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-telemetry-lib.sh
+. "$SCRIPT_DIR/fm-telemetry-lib.sh"
 
 SPAWN_TIMING_STARTED=$(fm_timing_now_ms)
 SPAWN_TIMING_READY=0
@@ -557,6 +559,7 @@ SPAWN_TIMING_HERDR_MS=0
 SPAWN_TIMING_LAUNCH_MS=0
 SPAWN_TIMING_TRUST_MS=0
 SPAWN_TIMING_BUSY_MS=0
+SPAWN_TIMING_LOCK_WAIT_MS=0
 SPAWN_TIMING_LEASE_START=
 SPAWN_TIMING_LEASE_ACTIVE=0
 SPAWN_TIMING_BRIEF_START=
@@ -608,7 +611,8 @@ spawn_timing_emit() {
   total=$(( $(fm_timing_now_ms) - SPAWN_TIMING_STARTED ))
   [ "$total" -ge 0 ] || total=0
   fm_timing_record spawn summary "$SPAWN_TIMING_STARTED" "${ID:-unknown}"
-  printf 'spawn timing: total=%ss dispatch=%ss brief=%ss lease=%ss herdr=%ss launch=%ss trust=%ss busy=%ss status=%s\n' \
+  fm_telemetry_record lifecycle "{\"op\":\"spawn\",\"elapsedMs\":$total,\"dispatchMs\":$SPAWN_TIMING_DISPATCH_MS,\"briefMs\":$SPAWN_TIMING_BRIEF_MS,\"leaseMs\":$SPAWN_TIMING_LEASE_MS,\"herdrMs\":$SPAWN_TIMING_HERDR_MS,\"launchMs\":$SPAWN_TIMING_LAUNCH_MS,\"trustMs\":$SPAWN_TIMING_TRUST_MS,\"busyMs\":$SPAWN_TIMING_BUSY_MS,\"lockWaitMs\":$SPAWN_TIMING_LOCK_WAIT_MS,\"status\":$status}"
+  printf 'spawn timing: total=%ss dispatch=%ss brief=%ss lease=%ss herdr=%ss launch=%ss trust=%ss busy=%ss lockwait=%ss status=%s\n' \
     "$(spawn_timing_seconds "$total")" \
     "$(spawn_timing_seconds "$SPAWN_TIMING_DISPATCH_MS")" \
     "$(spawn_timing_seconds "$SPAWN_TIMING_BRIEF_MS")" \
@@ -616,7 +620,8 @@ spawn_timing_emit() {
     "$(spawn_timing_seconds "$SPAWN_TIMING_HERDR_MS")" \
     "$(spawn_timing_seconds "$SPAWN_TIMING_LAUNCH_MS")" \
     "$(spawn_timing_seconds "$SPAWN_TIMING_TRUST_MS")" \
-    "$(spawn_timing_seconds "$SPAWN_TIMING_BUSY_MS")" "$status" >&2
+    "$(spawn_timing_seconds "$SPAWN_TIMING_BUSY_MS")" \
+    "$(spawn_timing_seconds "$SPAWN_TIMING_LOCK_WAIT_MS")" "$status" >&2
 }
 
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -5883,7 +5888,11 @@ fi
 # per-task lock as metadata publication, then and only then report success.
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  SPAWN_TIMING_LOCK_WAIT_STARTED=$(fm_timing_now_ms)
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_TIMING_LOCK_WAIT_NOW=$(fm_timing_now_ms)
+  SPAWN_TIMING_LOCK_WAIT_MS=$((SPAWN_TIMING_LOCK_WAIT_NOW - SPAWN_TIMING_LOCK_WAIT_STARTED))
+  [ "$SPAWN_TIMING_LOCK_WAIT_MS" -ge 0 ] || SPAWN_TIMING_LOCK_WAIT_MS=0
   SPAWN_META_LOCK_HELD=1
 fi
 SPAWN_DEFERRED_SIGNAL=

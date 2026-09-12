@@ -23,7 +23,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-telemetry-lib.sh
+. "$SCRIPT_DIR/fm-telemetry-lib.sh"
 
+DRAIN_TELEMETRY_STARTED=$(fm_telemetry_now_ms)
+DRAIN_TELEMETRY_FOLD_MS=0
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
 DRAIN_LOCK_HELD=false
@@ -655,7 +659,7 @@ print_status_sections() {
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
-  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
+  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0 fold_started fold_elapsed
   local lock_rc holder_pid
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
     :
@@ -681,14 +685,24 @@ print_status_presentation() {  # [<deduped-raw-rows>]
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then
+    fold_started=$(fm_telemetry_now_ms)
+    print_status_sections "$snapshot" "$fully_presented" || rc=1
+    fold_elapsed=$(( $(fm_telemetry_now_ms) - fold_started ))
+    [ "$fold_elapsed" -ge 0 ] || fold_elapsed=0
+    DRAIN_TELEMETRY_FOLD_MS=$fold_elapsed
+    fm_telemetry_record lifecycle "{\"op\":\"wake-fold\",\"elapsedMs\":$fold_elapsed}"
+  fi
   fm_lock_release "$lock"
   return "$rc"
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
-  local status=$?
+  local status=$? elapsed
+  elapsed=$(( $(fm_telemetry_now_ms) - DRAIN_TELEMETRY_STARTED ))
+  [ "$elapsed" -ge 0 ] || elapsed=0
+  fm_telemetry_record lifecycle "{\"op\":\"wake-drain\",\"elapsedMs\":$elapsed,\"foldMs\":$DRAIN_TELEMETRY_FOLD_MS,\"status\":$status}"
   [ -z "$DRAIN_TMP" ] || rm -f -- "$DRAIN_TMP" 2>/dev/null || true
   [ -z "$DRAIN_VIEW_TMP" ] || rm -f -- "$DRAIN_VIEW_TMP" 2>/dev/null || true
   if [ "$DRAIN_LOCK_HELD" = true ]; then

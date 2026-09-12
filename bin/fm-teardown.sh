@@ -257,11 +257,14 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-telemetry-lib.sh
+. "$SCRIPT_DIR/fm-telemetry-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
 fi
 ID=$1
+TEARDOWN_TELEMETRY_STARTED=$(fm_telemetry_now_ms)
 FORCE=
 LEGACY_RECORD_GIVEN=0
 shift
@@ -351,7 +354,11 @@ DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
 DESCENDANT_TREEHOUSE_LOCK_PATHS=()
 teardown_release_locks() {
-  local status=$? i
+  local status=$? i now elapsed
+  now=$(fm_telemetry_now_ms)
+  elapsed=$((now - TEARDOWN_TELEMETRY_STARTED))
+  [ "$elapsed" -ge 0 ] || elapsed=0
+  fm_telemetry_record lifecycle "{\"op\":\"teardown\",\"elapsedMs\":$elapsed,\"status\":$status}"
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
   fi

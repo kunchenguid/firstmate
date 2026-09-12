@@ -91,6 +91,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-telemetry-lib.sh
+. "$SCRIPT_DIR/fm-telemetry-lib.sh"
 
 PERSIST_WAIT=${FM_SECONDMATE_PERSIST_WAIT:-900}
 PERSIST_POLL=${FM_SECONDMATE_PERSIST_POLL:-5}
@@ -160,8 +162,9 @@ report_unreached() {  # <id> <reason>
 }
 
 restart_mate() {  # <array-index>
-  local i=$1 id restart_out restart_rc restart_reason ran_on
+  local i=$1 id restart_out restart_rc restart_reason ran_on started elapsed
   id=${IDS[$i]}
+  started=$(fm_telemetry_now_ms)
   if [ "${PLACEMENT[i]}" = remote ]; then
     restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
       fm-remote-secondmate-control.sh relaunch \
@@ -175,6 +178,9 @@ restart_mate() {  # <array-index>
   if [ "$restart_rc" -eq 0 ]; then
     ran_on=$(printf '%s\n' "$restart_out" | sed -n 's/^relaunched .* harness=\([^ ]*\).*/\1/p' | tail -1)
     [ -n "$ran_on" ] || ran_on=${HARNESS[i]}
+    elapsed=$(( $(fm_telemetry_now_ms) - started ))
+    [ "$elapsed" -ge 0 ] || elapsed=0
+    fm_telemetry_record lifecycle "{\"op\":\"secondmate-restart\",\"outcome\":\"restarted\",\"elapsedMs\":$elapsed}"
     if [ "${PLACEMENT[i]}" = remote ]; then
       printf 'restarted: %s on %s (%s)\n' "$id" "${HOST[i]}" "$ran_on"
     else
@@ -183,6 +189,9 @@ restart_mate() {  # <array-index>
     return
   fi
 
+  elapsed=$(( $(fm_telemetry_now_ms) - started ))
+  [ "$elapsed" -ge 0 ] || elapsed=0
+  fm_telemetry_record lifecycle "{\"op\":\"secondmate-restart\",\"outcome\":\"unreached\",\"elapsedMs\":$elapsed}"
   restart_reason=$(first_reported_line "$restart_out")
   [ -n "$restart_reason" ] || restart_reason="the restart failed without a reported reason"
   report_unreached "$id" "the restart outcome is unknown: $restart_reason"

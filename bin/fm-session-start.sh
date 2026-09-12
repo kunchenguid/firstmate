@@ -264,14 +264,29 @@ done
 SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
+  local name=$1 now elapsed
+  now=$(fm_telemetry_now_ms)
+  if [ -n "$SESSION_START_TELEMETRY_STAGE" ] && [ -n "$SESSION_START_TELEMETRY_STAGE_STARTED" ]; then
+    elapsed=$((now - SESSION_START_TELEMETRY_STAGE_STARTED))
+    [ "$elapsed" -ge 0 ] || elapsed=0
+    fm_telemetry_record lifecycle "{\"op\":\"session-stage\",\"stage\":\"$SESSION_START_TELEMETRY_STAGE\",\"elapsedMs\":$elapsed}"
+  fi
+  SESSION_START_TELEMETRY_STAGE=$name
+  SESSION_START_TELEMETRY_STAGE_STARTED=$now
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
-  printf '%s\n' "$1" > "$FM_SESSION_START_STAGE_FILE" 2>/dev/null || true
+  printf '%s\n' "$name" > "$FM_SESSION_START_STAGE_FILE" 2>/dev/null || true
 }
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-telemetry-lib.sh
+. "$SCRIPT_DIR/fm-telemetry-lib.sh"
+
+SESSION_START_TELEMETRY_STARTED=$(fm_telemetry_now_ms)
+SESSION_START_TELEMETRY_STAGE=
+SESSION_START_TELEMETRY_STAGE_STARTED=
 
 if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   SESSION_START_BUDGET=${FM_SESSION_START_TIMEOUT:-120}
@@ -306,6 +321,10 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   fi
   SESSION_START_RC=$?
   if [ "$SESSION_START_RC" -eq 124 ]; then
+    SESSION_START_TELEMETRY_NOW=$(fm_telemetry_now_ms)
+    SESSION_START_TELEMETRY_ELAPSED=$((SESSION_START_TELEMETRY_NOW - SESSION_START_TELEMETRY_STARTED))
+    [ "$SESSION_START_TELEMETRY_ELAPSED" -ge 0 ] || SESSION_START_TELEMETRY_ELAPSED=0
+    fm_telemetry_record lifecycle "{\"op\":\"session-start-total\",\"elapsedMs\":$SESSION_START_TELEMETRY_ELAPSED,\"status\":\"truncated\"}"
     SESSION_START_LAST_STAGE=$(cat "$SESSION_START_STAGE_FILE" 2>/dev/null) || SESSION_START_LAST_STAGE=
     [ -n "$SESSION_START_LAST_STAGE" ] || SESSION_START_LAST_STAGE=unknown
     SESSION_START_PENDING=$(
@@ -976,6 +995,17 @@ cat <<'EOF'
 The digest above is complete for this session start. The READ-ONCE CONTRACT
 section near the top of it governs what may still be read from disk.
 EOF
+
+if [ -n "$SESSION_START_TELEMETRY_STAGE" ] && [ -n "$SESSION_START_TELEMETRY_STAGE_STARTED" ]; then
+  SESSION_START_TELEMETRY_NOW=$(fm_telemetry_now_ms)
+  SESSION_START_TELEMETRY_ELAPSED=$((SESSION_START_TELEMETRY_NOW - SESSION_START_TELEMETRY_STAGE_STARTED))
+  [ "$SESSION_START_TELEMETRY_ELAPSED" -ge 0 ] || SESSION_START_TELEMETRY_ELAPSED=0
+  fm_telemetry_record lifecycle "{\"op\":\"session-stage\",\"stage\":\"$SESSION_START_TELEMETRY_STAGE\",\"elapsedMs\":$SESSION_START_TELEMETRY_ELAPSED}"
+fi
+SESSION_START_TELEMETRY_NOW=$(fm_telemetry_now_ms)
+SESSION_START_TELEMETRY_ELAPSED=$((SESSION_START_TELEMETRY_NOW - SESSION_START_TELEMETRY_STARTED))
+[ "$SESSION_START_TELEMETRY_ELAPSED" -ge 0 ] || SESSION_START_TELEMETRY_ELAPSED=0
+fm_telemetry_record lifecycle "{\"op\":\"session-start-total\",\"elapsedMs\":$SESSION_START_TELEMETRY_ELAPSED}"
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   COMPLETION_RECORDED=0
