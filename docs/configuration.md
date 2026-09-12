@@ -1146,7 +1146,7 @@ Remote secondmate pool launches are refused because local credentials cannot pro
 
 The strict schema is `{"schemaVersion":1,"defaults":{"crewmate":"workers","secondmate":"workers"},"pools":{"workers":[candidate]}}`.
 Each candidate has exactly `id`, `harness`, `model`, `effort`, `provider`, `authCarrier`, `carrier`, and `weight`.
-String fields are nonempty safe identifiers; candidate IDs and concrete carrier/profile tuples must be unique within each pool.
+String fields are nonempty safe identifiers, except `model`, which may also be `provider/id` shaped (router-style selectors; still no `..` or `//`); candidate IDs and concrete carrier/profile tuples must be unique within each pool.
 Weights are positive integers up to 10000; a pool has 1-64 candidates.
 Use weight 1 for equal shares.
 Unknown fields, empty arrays, duplicate candidates, invalid weights and unknown default pool names are refused.

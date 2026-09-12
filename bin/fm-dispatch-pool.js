@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const token = v => typeof v === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(v) && !v.includes('..');
+const modelToken = v => typeof v === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,127}$/.test(v) && !v.includes('..') && !v.includes('//');
 const object = v => v && typeof v === 'object' && !Array.isArray(v);
 function requireThat(ok, reason) { if (!ok) throw new Error(reason); }
 function read(file) {
@@ -36,7 +37,7 @@ function config(file) {
     for (const p of pool) {
       const keys = ['id', 'harness', 'model', 'effort', 'provider', 'authCarrier', 'carrier', 'weight'];
       requireThat(object(p) && Object.keys(p).length === keys.length && keys.every(k => k in p), 'invalid_candidate_fields');
-      requireThat(keys.filter(k => k !== 'weight').every(k => token(p[k])), 'invalid_candidate_identity');
+      requireThat(keys.filter(k => k !== 'weight' && k !== 'model').every(k => token(p[k])) && modelToken(p.model), 'invalid_candidate_identity');
       requireThat(Number.isSafeInteger(p.weight) && p.weight > 0 && p.weight <= 10000, 'invalid_weight');
       const tuple = hash(keys.filter(k => !['id', 'weight'].includes(k)).map(k => p[k]));
       requireThat(!ids.has(p.id) && !tuples.has(tuple), 'duplicate_candidate');

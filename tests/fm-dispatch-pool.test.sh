@@ -41,6 +41,11 @@ refused "$ROOT/bin/fm-dispatch-pool.sh" validate "$TMP_ROOT/bad.json" "$TMP_ROOT
 jq '.pools.test[0].weight="1"' "$TMP_ROOT/config.json" > "$TMP_ROOT/bad.json"
 refused "$ROOT/bin/fm-dispatch-pool.sh" validate "$TMP_ROOT/bad.json" "$TMP_ROOT/state"
 pass 'invalid weights and unusable carrier identity rejected'
+jq '.pools.test[0].model="opencode-go-responses/muse-spark-1.3-contributor"' "$TMP_ROOT/config.json" > "$TMP_ROOT/slashed.json"
+"$ROOT/bin/fm-dispatch-pool.sh" validate "$TMP_ROOT/slashed.json" "$TMP_ROOT/state" >/dev/null || fail 'provider/id model refused'
+jq '.pools.test[0].model="../escape"' "$TMP_ROOT/config.json" > "$TMP_ROOT/bad.json"
+refused "$ROOT/bin/fm-dispatch-pool.sh" validate "$TMP_ROOT/bad.json" "$TMP_ROOT/state"
+pass 'provider/id model accepted; traversal refused'
 # Concurrent reservations serialize through the existing Firstmate lock.
 for n in 1 2 3 4; do pool reserve "concurrent$n" test > "$TMP_ROOT/c$n" & done
 wait
