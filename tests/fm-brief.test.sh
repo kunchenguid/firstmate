@@ -424,13 +424,9 @@ test_ask_user_escalation_format() {
   pass "fm-brief.sh: no-mistakes ask-user findings use one event plus a verbatim snapshot"
 }
 
-# A no-mistakes ship brief must carry the worker straight from its
-# implementation commit into validation. The old scaffold told the worker to
-# report `done:` and stop there, which burned a supervision round-trip on every
-# ship task and put a nonterminal `done:` in the status log at the exact moment
-# an unvalidated commit is indistinguishable from a finished task. Every ship
-# mode is asserted here so a mid-task stop cannot reappear in any of them: each
-# generated definition of done must instruct exactly one `done:` line.
+# A no-mistakes ship brief carries the worker straight from its implementation
+# commit into validation. Each ship mode is covered so its definition of done
+# continues to instruct exactly one terminal `done:` line.
 test_ship_briefs_never_instruct_a_mid_task_stop() {
   local home id brief dod count
   home="$TMP_ROOT/mid-task-stop-home"

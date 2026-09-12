@@ -174,20 +174,9 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
-# Teardown only: a case has already run every assertion it makes about a round
-# by the time it reaps that round's watcher. TERM is therefore a request to stop
-# a watcher we are done observing, not a path under test.
-#
-# A plain `kill; wait` makes that teardown UNBOUNDED. fm-watch.sh defers its TERM
-# trap until the foreground command in flight returns, and a TERM landing inside
-# a recovery-marker or lock critical section can leave the exit path unwinding
-# for many minutes (bin/fm-wake-lib.sh documents the same class of hang for the
-# self-held reclaim case). The watcher does eventually exit, so the case still
-# PASSES - it just takes ~17 minutes, which is what blew the portable-serial
-# shard's wall-clock cap in CI while every assertion in the file still reported
-# ok. Bound the grace and escalate to KILL so teardown cost is deterministic.
-# This can only shorten teardown; it cannot mask a failed assertion, because
-# there are no assertions left to make when reap runs.
+# Teardown only: callers have finished all assertions about this watcher.
+# fm-watch.sh can defer TERM while foreground work unwinds, so bound its grace
+# period and then escalate to KILL to keep test teardown deterministic.
 reap() {
   local pid=$1 i=0
   kill "$pid" 2>/dev/null || true
