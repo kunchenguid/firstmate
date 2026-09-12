@@ -209,7 +209,9 @@
 #   spawn with the pane's last lines (one poll is not enough: the pty echoes
 #   the typed command before the shell runs its rc files, so a single read
 #   can catch the shell's startup noise after that echo until the prompt
-#   redraws the command and clears the verdict); once entry is seen the
+#   redraws the command and clears the verdict; a first such read on the
+#   poll that reaches the settle bound holds the bound for one more poll, so
+#   the second read can confirm it or clear it); once entry is seen the
 #   pane's text is not read again, so the nested shell's own startup errors
 #   never count as a refusal. A
 #   shell that is back in the project directory after treehouse was seen
@@ -3400,7 +3402,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   #              pool-cap line seen before any entry on two consecutive polls
   #              fails the spawn with the pane's last lines (a single read
   #              can catch the shell's startup noise between the pty's echo
-  #              of the command and the prompt's redraw of it). Once entry is
+  #              of the command and the prompt's redraw of it; a first such
+  #              read on the bound poll holds the bound one more poll so the
+  #              next read can confirm or clear it). Once entry is
   #              seen the pane text is not read again: the nested shell owns
   #              the pane from then on, and its own startup errors are not
   #              treehouse's verdict.
@@ -3486,7 +3490,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
           project_shell_reads=0
         fi
         settle_secs=$((settle_secs + 1))
-        if [ "$settle_secs" -gt 60 ]; then
+        if [ "$settle_secs" -gt 60 ] && [ "$refused_reads" -eq 0 ]; then
           wait_failure=settle
           [ "$foreground_read" = 1 ] || wait_failure=unknown
           break

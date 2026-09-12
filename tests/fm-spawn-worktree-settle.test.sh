@@ -29,16 +29,19 @@
 # FM_FAKE_PANE_SHELL, then nothing once the path read count passes
 # FM_FAKE_PANE_SHELL_READS) and `capture-pane` (FM_FAKE_PANE_TAIL, replaced
 # by FM_FAKE_PANE_TAIL_LATE once the path read count passes
-# FM_FAKE_PANE_TAIL_LATE_READS). The later cases pin that a fetch outlasting
+# FM_FAKE_PANE_TAIL_LATE_READS, and for any one path read count by the file
+# of that number under FM_FAKE_PANE_TAIL_DIR). The later cases pin that a fetch outlasting
 # the old 60s budget still spawns, that an acquisition past its own bound is
 # reported as still running, that a refusal fails fast with the pane's own
 # reason, and that an unreadable foreground (an empty FM_FAKE_PANE_SHELL)
 # stays on the settle bound with the pane text standing in: it gives up at
 # 60s, an "Entered worktree" line starts the settle phase, an error line
-# before any entry fails fast once two polls agree (and never on the one
-# poll that can catch startup noise after the command's echo), an error
-# line after the entry does not, and a wait that lost its foreground reader
-# only on the final poll keeps the settle refusal it earned.
+# before any entry fails fast once two CONSECUTIVE polls agree (never on
+# the one poll that can catch startup noise after the command's echo, never
+# on two reads that do not follow each other, and still when the first of
+# the two is the poll that reaches the settle bound), an error line after
+# the entry does not, and a wait that lost its foreground reader only on
+# the final poll keeps the settle refusal it earned.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -93,7 +96,9 @@ case "${1:-}" in
   capture-pane)
     n=0
     [ ! -f "${FM_FAKE_PANE_COUNTFILE:-}" ] || n=$(cat "$FM_FAKE_PANE_COUNTFILE")
-    if [ -n "${FM_FAKE_PANE_TAIL_LATE_READS:-}" ] && [ "$n" -gt "$FM_FAKE_PANE_TAIL_LATE_READS" ]; then
+    if [ -n "${FM_FAKE_PANE_TAIL_DIR:-}" ] && [ -f "$FM_FAKE_PANE_TAIL_DIR/$n" ]; then
+      cat "$FM_FAKE_PANE_TAIL_DIR/$n"
+    elif [ -n "${FM_FAKE_PANE_TAIL_LATE_READS:-}" ] && [ "$n" -gt "$FM_FAKE_PANE_TAIL_LATE_READS" ]; then
       printf '%b' "${FM_FAKE_PANE_TAIL_LATE:-}"
     else
       printf '%b' "${FM_FAKE_PANE_TAIL:-}"
@@ -160,8 +165,9 @@ EOF
 # treehouse in the foreground, which shell name follows (empty = the
 # foreground cannot be read at all), after how many path reads that shell
 # name stops being readable (empty = never), the pane's rendered tail (and
-# the tail that replaces it after a given number of path reads), and the
-# acquisition bound under test.
+# the tail that replaces it after a given number of path reads, and the
+# per-read captures settle_capture_at pins for exact path read counts),
+# and the acquisition bound under test.
 reset_settle_knobs() {
   TREEHOUSE_READS=0
   PANE_SHELL=zsh
@@ -169,9 +175,19 @@ reset_settle_knobs() {
   PANE_TAIL=
   PANE_TAIL_LATE=
   PANE_TAIL_LATE_READS=
+  PANE_TAIL_DIR=
   ACQUIRE_TIMEOUT=
 }
 reset_settle_knobs
+
+# settle_capture_at <read-number> <capture> pins the pane's rendered text for
+# exactly that path read; every other read falls back to PANE_TAIL and
+# PANE_TAIL_LATE. Call it after reset_settle_knobs and read_settle_record.
+settle_capture_at() {
+  PANE_TAIL_DIR="$(dirname "$COUNTFILE")/captures"
+  mkdir -p "$PANE_TAIL_DIR"
+  printf '%b' "$2" > "$PANE_TAIL_DIR/$1"
+}
 
 run_settle_spawn() {
   local id=$1
@@ -185,6 +201,7 @@ run_settle_spawn() {
     FM_FAKE_PANE_SHELL_READS="$PANE_SHELL_READS" \
     FM_FAKE_PANE_TAIL="$PANE_TAIL" FM_FAKE_PANE_TAIL_LATE="$PANE_TAIL_LATE" \
     FM_FAKE_PANE_TAIL_LATE_READS="$PANE_TAIL_LATE_READS" \
+    FM_FAKE_PANE_TAIL_DIR="$PANE_TAIL_DIR" \
     FM_SPAWN_ACQUIRE_TIMEOUT="$ACQUIRE_TIMEOUT" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -639,6 +656,105 @@ test_single_failed_final_read_keeps_the_settle_refusal() {
   pass "a single failed final read keeps the settle refusal a readable wait earned"
 }
 
+# The two-agreeing-reads rule meets the settle bound: treehouse fetches for
+# the whole bound and then refuses (the two incidents in the intent
+# compounded), so the poll that crosses the bound is also the first poll to
+# read the refusal line. The bound must hold for one more poll, so that the
+# second read confirms the refusal and the spawn relays treehouse's line,
+# instead of breaking at the bound under a headline that says the pane
+# printed no error above a tail that shows one.
+test_first_refused_read_on_the_bound_poll_still_reports_the_refusal() {
+  local rec id out status reads
+  id=settle-blind-refused-at-bound-z15
+  rec=$(make_settle_case settle-blind-refused-at-bound "$id" 100000 project)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  PANE_SHELL=
+  ACQUIRE_TIMEOUT=100
+  PANE_TAIL='$ treehouse get\nFetching origin...\n'
+  PANE_TAIL_LATE_READS=60
+  PANE_TAIL_LATE="\$ treehouse get\nFetching origin...\nError: all 16 worktrees are in use or dirty (max_trees = 16). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml\n\$ \n"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane whose treehouse get refused"$'\n'"$out"
+  assert_contains "$out" "treehouse get reported an error in the pane" \
+    "spawn did not report the refusal line its last two reads showed"
+  assert_contains "$out" "| Error: all 16 worktrees are in use or dirty (max_trees = 16)" \
+    "spawn did not relay treehouse's own refusal line from the pane"
+  assert_not_contains "$out" "nor an error" \
+    "spawn claimed the pane printed no error while relaying the error line below it"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -eq 62 ] || fail "the bound must hold for exactly one more poll so the second read can confirm the refusal, but the spawn polled $reads times"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a refusal first read on the bound poll is confirmed on the next poll and relayed"
+}
+
+# The other outcome of that held poll: a shell whose startup outlasts the
+# bound prints its error line right at the bound, and the next read shows
+# the prompt's redraw of the command over it. The verdict clears, so the
+# spawn gives up at the bound on that very poll with the unreadable
+# foreground refusal - one poll late, and no later.
+test_refused_read_cleared_on_the_next_poll_ends_at_the_bound() {
+  local rec id out status reads
+  id=settle-blind-cleared-at-bound-z16
+  rec=$(make_settle_case settle-blind-cleared-at-bound "$id" 100000 project)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  PANE_SHELL=
+  ACQUIRE_TIMEOUT=100
+  PANE_TAIL='treehouse get\n'
+  PANE_TAIL_LATE_READS=61
+  PANE_TAIL_LATE='treehouse get\nerror: prompt plugin failed to load\n$ treehouse get\n'
+  settle_capture_at 61 'treehouse get\nerror: prompt plugin failed to load\n'
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never reported a worktree"$'\n'"$out"
+  assert_contains "$out" "neither treehouse's 'Entered worktree' line nor an error" \
+    "spawn did not give up at the bound once the refused read was cleared"
+  assert_not_contains "$out" "reported an error in the pane" \
+    "spawn treated a single refused read that the next read cleared as a refusal"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -eq 62 ] || fail "a cleared refused read must end the wait at the bound on the very next poll, but the spawn polled $reads times"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a refused read cleared on the next poll ends the wait at the bound"
+}
+
+# The rule is two CONSECUTIVE refused reads, not two in total: any read that
+# does not say refused resets the count. Captures that alternate (refused,
+# the prompt's redraw, refused again, clear) never agree twice in a row, so
+# the spawn must go on to settle on the worktree. Two cumulative reads would
+# break on the third poll.
+test_alternating_refused_reads_never_agree() {
+  local rec id out status reads
+  id=settle-blind-alternating-z17
+  rec=$(make_settle_case settle-blind-alternating "$id" 4 project)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  PANE_SHELL=
+  ACQUIRE_TIMEOUT=100
+  PANE_TAIL='treehouse get\nerror: prompt plugin failed to load\n$ treehouse get\nerror: completion cache is stale\n$ treehouse get\nFetching origin...\n'
+  settle_capture_at 1 'treehouse get\nerror: prompt plugin failed to load\n'
+  settle_capture_at 2 'treehouse get\nerror: prompt plugin failed to load\n$ treehouse get\n'
+  settle_capture_at 3 'treehouse get\nerror: prompt plugin failed to load\n$ treehouse get\nerror: completion cache is stale\n'
+  settle_capture_at 4 'treehouse get\nerror: prompt plugin failed to load\n$ treehouse get\nerror: completion cache is stale\n$ treehouse get\n'
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should settle on the worktree when refused reads never agree twice in a row"$'\n'"$out"
+  assert_not_contains "$out" "reported an error in the pane" \
+    "spawn counted two refused reads that did not follow each other as a refusal"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the worktree the pane settled on"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -eq 6 ] || fail "expected the four project reads plus the two agreeing worktree reads, got $reads"
+  pass "refused reads that never agree twice in a row are not a refusal"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
@@ -653,5 +769,8 @@ test_error_line_after_entry_is_not_read_as_a_refusal
 test_startup_noise_after_the_kernel_echo_is_not_a_refusal
 test_refusal_line_fails_on_the_second_agreeing_poll
 test_single_failed_final_read_keeps_the_settle_refusal
+test_first_refused_read_on_the_bound_poll_still_reports_the_refusal
+test_refused_read_cleared_on_the_next_poll_ends_at_the_bound
+test_alternating_refused_reads_never_agree
 
 echo "# all fm-spawn-worktree-settle tests passed"
