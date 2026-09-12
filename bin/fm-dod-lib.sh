@@ -186,10 +186,13 @@ fm_brief_task_content_valid() {  # <file>
   [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
-# The extras a task's tool surface is widened by, read from the brief's
+# The extras a task's tool surface may declare, read from the brief's
 # `## Firstmate spec` `tools:` line. Everything not on this list is dropped
 # rather than passed through: a typo must narrow the surface, never widen it
-# in an unexpected direction.
+# in an unexpected direction. Of these, only `context7` currently widens the
+# surface at spawn time (bin/fm-spawn.sh's D6 MCP-config loop); `browser`,
+# `mockup`, and `lavish` are accepted here without warning but get their own
+# not-yet-implemented warning at spawn time instead.
 FM_TOOLS_KNOWN="browser context7 mockup lavish none"
 
 fm_brief_tools() {  # <brief-file>

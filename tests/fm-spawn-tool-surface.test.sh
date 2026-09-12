@@ -77,6 +77,21 @@ test_context7_extra_widens_the_written_mcp_config() {
   pass "tools: context7 widens the written MCP config"
 }
 
+test_not_yet_implemented_extra_warns_and_does_not_widen_surface() {
+  local id=toolsurface-browser-z1
+  run_tool_surface_spawn "$id" "tools: browser context7"
+  expect_code 0 "$SPAWN_STATUS" "claude spawn with tools: browser context7 should succeed"$'\n'"$SPAWN_OUT"
+
+  [ -f "$MCP_CONFIG_FILE" ] || fail "fm-spawn did not write the per-task MCP config"
+  assert_contains "$(cat "$MCP_CONFIG_FILE")" '"context7":{"command":"npx"' \
+    "context7 should still add its MCP server even alongside a not-yet-implemented extra"
+  assert_contains "$SPAWN_OUT" "warning: tools: 'browser' is accepted but not yet implemented; it does not widen the tool surface" \
+    "spawn did not warn that the declared 'browser' extra has no launch-time effect"
+  assert_contains "$SPAWN_OUT" "tool surface: minimal + context7" \
+    "the reported tool surface should list only the extra that actually widened it"
+  pass "a not-yet-implemented extra warns and is left out of the reported tool surface"
+}
+
 test_unrecognized_tools_extra_warns_on_spawns_own_stderr() {
   local id=toolsurface-typo-z1
   run_tool_surface_spawn "$id" "tools: browsr"
@@ -129,6 +144,7 @@ esac
 
 test_no_tools_line_pins_strict_minimal_mcp_surface
 test_context7_extra_widens_the_written_mcp_config
+test_not_yet_implemented_extra_warns_and_does_not_widen_surface
 test_unrecognized_tools_extra_warns_on_spawns_own_stderr
 
 echo "# all fm-spawn-tool-surface tests passed"

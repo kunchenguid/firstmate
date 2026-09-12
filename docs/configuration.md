@@ -412,7 +412,8 @@ Every claude launch's inline `--settings` JSON also carries `"attribution":{"com
 A crewmate or scout launches with the minimal Claude Code tool surface: `--strict-mcp-config` with a per-task `--mcp-config` (empty by default) and `--setting-sources project,local`, which drops the user settings layer that carries the plugin skill catalog.
 The brief's `## Firstmate spec` section may widen it with one `tools:` line naming the extras this task needs, from `browser`, `context7`, `mockup`, `lavish`, or `none`.
 `bin/fm-dod-lib.sh`'s `fm_brief_tools` owns the parsing and drops an unrecognized entry with a warning, so a typo narrows the surface rather than widening it unpredictably.
-`bin/fm-spawn.sh` writes the resolved MCP config into the task tmp dir at 0600 and prints one `tool surface:` line at launch.
+Of those recognized extras, only `context7` currently widens the surface at spawn time; declaring `browser`, `mockup`, or `lavish` is accepted but has no launch-time effect yet, and `bin/fm-spawn.sh` prints a not-yet-implemented warning on its own stderr for each one instead of counting it toward the reported surface.
+`bin/fm-spawn.sh` writes the resolved MCP config into the task tmp dir at 0600 and prints one `tool surface:` line at launch, naming only the extras that actually widened it.
 
 The measured reason: a crewmate's cold prefix was 135k to 145k tokens across 166 seats in the week of 2026-08-29, of which the on-disk global rules layer was only 23k to 27k, and the seat re-read that prefix across an average of 280 turns.
 Pipeline seats get the same surface through `~/.claude/templates/no-mistakes-agent-args.yaml` (`NewAiCoder/claude-portable`).

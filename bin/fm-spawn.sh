@@ -3920,9 +3920,15 @@ fi
 # and a non-claude harness has no MCP-config flag at all, so parsing tools:
 # and reporting a "tool surface: minimal" verdict for either would describe a
 # capability set that launch never actually applies.
+# `context7` is the only extra with a real MCP server wired below; `browser`,
+# `mockup`, and `lavish` are accepted by fm_brief_tools so a brief can name
+# them without narrowing the surface as a typo would, but nothing here grants
+# them yet, so each gets its own not-yet-implemented warning rather than
+# being folded into the reported "tool surface: minimal + ..." verdict.
 MCP_CONFIG="$TASK_TMP/mcp.json"
 if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
   TOOLS_EXTRAS=$(fm_brief_tools "$BRIEF")
+  WIDENED_EXTRAS=''
   {
       printf '{"mcpServers":{'
       sep=''
@@ -3930,14 +3936,17 @@ if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
           case "$extra" in
               context7)
                   printf '%s"context7":{"command":"npx","args":["-y","@upstash/context7-mcp"]}' "$sep"
-                  sep=',' ;;
+                  sep=','
+                  WIDENED_EXTRAS="$WIDENED_EXTRAS${WIDENED_EXTRAS:+ }context7" ;;
+              *)
+                  echo "warning: tools: '$extra' is accepted but not yet implemented; it does not widen the tool surface" >&2 ;;
           esac
       done
       printf '}}'
   } > "$MCP_CONFIG"
   chmod 0600 "$MCP_CONFIG"
-  if [ -n "$TOOLS_EXTRAS" ]; then
-      echo "tool surface: minimal + $TOOLS_EXTRAS"
+  if [ -n "$WIDENED_EXTRAS" ]; then
+      echo "tool surface: minimal + $WIDENED_EXTRAS"
   else
       echo "tool surface: minimal (no MCP servers, no plugin skills)"
   fi
