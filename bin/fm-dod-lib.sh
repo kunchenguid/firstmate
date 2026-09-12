@@ -211,6 +211,7 @@ fm_dod_block() {  # <mode> <task-id>
     direct-PR)
       cat <<EOF
 # Definition of done
+Every changed or new test must be shown RED before the fix, with the red output pasted into the report or PR evidence.
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when its PR is ready for review: CI is green and every review thread is resolved, never merely opened.
@@ -225,6 +226,7 @@ EOF
     local-only)
       cat <<EOF
 # Definition of done
+Every changed or new test must be shown RED before the fix, with the red output pasted into the report or PR evidence.
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
@@ -236,6 +238,7 @@ EOF
     no-mistakes)
       cat <<EOF
 # Definition of done
+Every changed or new test must be shown RED before the fix, with the red output pasted into the report or PR evidence.
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
