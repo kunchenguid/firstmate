@@ -11,7 +11,9 @@
 # A GitHub merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the pull request
 # is open, not a draft, mergeable, free of conflicts, and every unwaived check
-# is green at the exact current head commit. Every failing condition is reported, not
+# is green at the exact current head commit, where github_checks_not_green below
+# owns what makes a check green and judges each one by its current run.
+# Every failing condition is reported, not
 # just the first. The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
 # fails the merge instead of landing commits nothing verified. Reading that
@@ -443,21 +445,73 @@ FIELDS
 }
 
 # Every GitHub check that is not green in the given live pull-request JSON, one
-# name per line: a status context whose state is not SUCCESS, or a check run
-# that has not completed with SUCCESS, NEUTRAL, or SKIPPED (so a pending
-# check is not green either). Exits nonzero when the rollup cannot be read, so
-# a malformed answer is a failed read and never an empty red set.
+# name per line. A run is green when it is a status context whose state is
+# SUCCESS, or a check run that completed with SUCCESS, NEUTRAL, or SKIPPED (so
+# a pending check is not green either). Exits nonzero when the rollup cannot be
+# read, so a malformed answer is a failed read and never an empty red set.
+#
+# The rollup can hold several runs of one check name at the same head, because
+# GitHub cancels a pull request's in-flight run when the base branch advances
+# and re-triggers it; the cancelled run stays in the rollup beside the passing
+# re-run. A check is therefore judged by its current run rather than by any run
+# that a later one superseded, which is what makes this agree with GitHub's own
+# CLEAN mergeStateStatus instead of refusing a pull request GitHub considers
+# mergeable.
+#
+# Supersession must be proven, never assumed, so a name is dropped from the red
+# set only when every one of its non-green runs is strictly older than one of
+# its green runs. Age comes from the forge's own settled timestamp: a check
+# run's completedAt, read only once its status is COMPLETED, or a status
+# context's createdAt. Only a whole-second UTC timestamp counts, because that is
+# the form GitHub emits and the one form that orders correctly as plain text;
+# any other spelling is treated as no timestamp at all. A run with no such
+# timestamp is never superseded, so a still-running, queued, or undated run
+# keeps its check red. A name whose runs are all green stays green with no
+# timestamp needed, and a name with no green run at all stays red. Every
+# comparison is therefore one-directional: it can only clear a failure that a
+# later success provably replaced, and never clears a check whose current run
+# failed, is pending, or is missing.
+#
+# Grouping is by the reported name, which is also what --allow-red matches, so
+# a waiver still covers exactly the name the captain passed. An entry with no
+# name is grouped alone and can neither supersede nor be superseded, because
+# two unrelated unnamed checks would otherwise be treated as one.
 github_checks_not_green() {
   local json=$1
   printf '%s' "$json" | jq -r '
+    def settled_at:
+      if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+      then . else null end;
     if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
-    | .statusCheckRollup[]
-    | if .__typename == "CheckRun" then
-        {name: (.name // ""), ok: (.status == "COMPLETED" and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED"))}
-      else
-        {name: (.context // ""), ok: (.state == "SUCCESS")}
-      end
-    | select(.ok | not)
+    | [ .statusCheckRollup
+        | to_entries[]
+        | .key as $i
+        | .value
+        | if .__typename == "CheckRun" then
+            {
+              name: (.name // ""),
+              ok: (.status == "COMPLETED" and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED")),
+              at: (if .status == "COMPLETED" then (.completedAt | settled_at) else null end)
+            }
+          else
+            {name: (.context // ""), ok: (.state == "SUCCESS"), at: (.createdAt | settled_at)}
+          end
+        | . + {group: (if .name == "" then ["", $i] else [.name, -1] end)}
+      ]
+    | group_by(.group)[]
+    | {
+        name: .[0].name,
+        reds: [.[] | select(.ok | not)],
+        newest_green: ([.[] | select(.ok) | .at | select(. != null)] | max)
+      }
+    | select(
+        (.reds | length) > 0
+        and (
+          .newest_green == null
+          or any(.reds[]; .at == null)
+          or ([.reds[] | .at] | max) >= .newest_green
+        )
+      )
     | if .name == "" then "(unnamed check)" else .name end
   ' 2>/dev/null || return 1
 }

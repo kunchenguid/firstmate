@@ -77,6 +77,35 @@ write_github_red_json() {
 JSON
 }
 
+# One CheckRun rollup entry the way GitHub reports it. A conclusion of "-" and a
+# completedAt of "-" are emitted as JSON null, which is what GitHub sends for a
+# run that has not finished. Args: name status conclusion [completedAt]
+check_run() {
+  local name=$1 status=$2 conclusion=$3 at=${4:--}
+  local conclusion_json='null' at_json='null'
+  [ "$conclusion" = - ] || conclusion_json="\"$conclusion\""
+  [ "$at" = - ] || at_json="\"$at\""
+  printf '{"__typename":"CheckRun","name":"%s","status":"%s","conclusion":%s,"completedAt":%s}' \
+    "$name" "$status" "$conclusion_json" "$at_json"
+}
+
+# Live GitHub JSON whose rollup holds the given entries verbatim, so a test can
+# put several runs of one check name at the same head the way GitHub does after
+# it cancels a pull request's in-flight run and re-triggers it. mergeStateStatus
+# stays CLEAN because that is what GitHub reports for exactly this case.
+# Args: case_dir head_sha <rollup-entry-json>...
+write_github_rollup_json() {
+  local case_dir=$1 head=$2 entry rollup=''
+  shift 2
+  for entry in "$@"; do
+    rollup="${rollup:+$rollup,}$entry"
+  done
+  printf '%s\n' "$head" > "$case_dir/github-head"
+  cat > "$case_dir/github-view.json" <<JSON
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$head","statusCheckRollup":[$rollup]}
+JSON
+}
+
 assert_logged_gh_merge() {
   local case_dir=$1 number=$2 repo=$3 head line extra=
   shift 3
@@ -2284,6 +2313,179 @@ test_github_red_checks_refuse_and_allow_red_waives_named() {
   pass "fm-pr-merge refuses red GitHub checks and waives only a named --allow-red check"
 }
 
+# When the base branch advances, GitHub cancels a pull request's in-flight run
+# and re-triggers it, leaving the cancelled run in the rollup beside the passing
+# re-run while reporting the pull request itself CLEAN. The merge must follow the
+# current run rather than the one that re-run replaced.
+test_superseded_failed_check_run_no_longer_refuses() {
+  local case_dir head
+  head=cccccccccccccccccccccccccccccccccccccccc
+  case_dir=$(make_case github-superseded-red)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED CANCELLED 2026-01-01T00:00:01Z)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z)"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/90 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-superseded-red: a failed run replaced by a passing re-run must merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 90 example/repo --squash
+  pass "fm-pr-merge merges when a failed check run was replaced by a passing re-run"
+}
+
+# The inverse, and the one that matters most: a check whose current run failed is
+# still red however many earlier runs of it passed.
+test_current_failed_check_run_still_refuses() {
+  local case_dir rc head
+  head=dddddddddddddddddddddddddddddddddddddddd
+  case_dir=$(make_case github-current-red)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:01Z)" \
+    "$(check_run ci COMPLETED FAILURE 2026-01-01T00:00:09Z)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-current-red: a currently failing check must refuse"
+  assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+    "github-current-red: the red check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-current-red: gh pr merge ran on a currently failing check"
+  pass "fm-pr-merge still refuses when a check's current run failed after an earlier pass"
+}
+
+# A re-run that has not finished proves nothing, so it can neither be superseded
+# nor supersede: the check stays red whether the run it replaces passed or failed.
+test_unfinished_rerun_keeps_a_check_red() {
+  local case_dir rc head prior
+  head=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  for prior in FAILURE SUCCESS; do
+    case_dir=$(make_case "github-pending-rerun-$prior")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" "$head"
+    write_github_rollup_json "$case_dir" "$head" \
+      "$(check_run ci COMPLETED "$prior" 2026-01-01T00:00:01Z)" \
+      "$(check_run ci IN_PROGRESS - -)"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/92 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "github-pending-rerun-$prior: an unfinished re-run must refuse"
+    assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+      "github-pending-rerun-$prior: the pending check was not named"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "github-pending-rerun-$prior: gh pr merge ran with a re-run still in flight"
+  done
+  pass "fm-pr-merge keeps a check red while its re-run is still in flight"
+}
+
+# Supersession is scoped to one check name, which is also the name --allow-red
+# matches, so a newer passing check never clears a different check's failure.
+test_supersession_never_crosses_check_names() {
+  local case_dir rc head
+  head=ffffffffffffffffffffffffffffffffffffffff
+  case_dir=$(make_case github-cross-name)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/93 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-cross-name: another check passing must not clear this failure"
+  assert_grep "check 'lint' is not green" "$case_dir/stderr" \
+    "github-cross-name: the red check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-cross-name: gh pr merge ran on a red check of a different name"
+  pass "fm-pr-merge never lets one check's pass clear another check's failure"
+}
+
+# Supersession has to be proven from the forge's own settled timestamps, so a run
+# GitHub dated in any other way is treated as undated and clears nothing.
+test_undated_runs_never_supersede() {
+  local case_dir rc spec label older newer
+  local head=0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a
+  set -- \
+    'undated-failure|-|2026-01-01T00:00:09Z' \
+    'undated-pass|2026-01-01T00:00:01Z|-' \
+    'fractional-pass|2026-01-01T00:00:01Z|2026-01-01T00:00:09.500Z' \
+    'offset-pass|2026-01-01T00:00:01Z|2026-01-01T00:00:09+00:00'
+  for spec in "$@"; do
+    label=${spec%%|*}
+    older=${spec#*|}
+    older=${older%%|*}
+    newer=${spec##*|}
+    case_dir=$(make_case "github-undated-$label")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" "$head"
+    write_github_rollup_json "$case_dir" "$head" \
+      "$(check_run ci COMPLETED FAILURE "$older")" \
+      "$(check_run ci COMPLETED SUCCESS "$newer")"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/94 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "github-undated-$label: an unproven supersession must refuse"
+    assert_grep "check 'ci' is not green" "$case_dir/stderr" \
+      "github-undated-$label: the red check was not named"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "github-undated-$label: gh pr merge ran on an unproven supersession"
+  done
+  pass "fm-pr-merge clears a failure only on a proven later pass of the same check"
+}
+
+# A superseded failure changes nothing about the waiver: --allow-red still covers
+# exactly the named check, still needs every other check green, and the merge is
+# still bound to the verified head.
+test_allow_red_still_waives_only_the_current_failure() {
+  local case_dir rc head
+  head=0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b
+  case_dir=$(make_case github-superseded-allow-red-wrong-name)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z)" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:09Z)"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/95 \
+    --allow-red ci > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "superseded-allow-red-wrong-name: waiving the green check must not merge"
+  assert_grep "check 'lint' is not green" "$case_dir/stderr" \
+    "superseded-allow-red-wrong-name: the unwaived red check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "superseded-allow-red-wrong-name: gh pr merge ran with an unwaived red check"
+
+  case_dir=$(make_case github-superseded-allow-red-named)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:09Z)" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:09Z)"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/96 \
+    --allow-red lint > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "superseded-allow-red-named: the named waiver should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 96 example/repo --squash
+  pass "fm-pr-merge keeps --allow-red scoped to its named check beside a superseded failure"
+}
+
 test_allow_red_is_refused_while_away() {
   local case_dir rc head
   head=abababababababababababababababababababab
@@ -2499,6 +2701,12 @@ test_untraversable_user_backend_config_directory_refuses_the_merge
 test_absent_user_backend_config_directory_and_backlog_still_merge
 test_backend_override_bypasses_unreadable_user_config
 test_github_red_checks_refuse_and_allow_red_waives_named
+test_superseded_failed_check_run_no_longer_refuses
+test_current_failed_check_run_still_refuses
+test_unfinished_rerun_keeps_a_check_red
+test_supersession_never_crosses_check_names
+test_undated_runs_never_supersede
+test_allow_red_still_waives_only_the_current_failure
 test_allow_red_is_refused_while_away
 test_allow_red_requires_one_separate_name
 test_away_grant_and_yolo_and_hold_for_return
