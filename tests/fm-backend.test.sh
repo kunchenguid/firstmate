@@ -521,6 +521,29 @@ test_backend_source_shell_portable() {
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
 }
 
+test_backend_source_missing_adapter_refuses_guardably() {
+  local out rc tmpbin
+  # The teardown preflight relies on fm_backend_source returning 1 when an
+  # adapter file is absent. Under `set -e`, a failed `.` on a nonexistent file
+  # is a fatal special-builtin error on bash 3.2, even inside `||`/`if` guards,
+  # so the refusal must come from an existence precheck instead of the source
+  # itself failing - otherwise lifecycle callers silently exit as if they
+  # succeeded. This mirrors the missing-adapter teardown fixture at the
+  # library boundary for every backend and caller.
+  tmpbin="$TMP_ROOT/missing-adapter-lib/backends"
+  mkdir -p "$tmpbin"
+  rc=0
+  out=$(set -eu; cd "$ROOT" \
+    && . bin/fm-backend.sh \
+    && FM_BACKEND_LIB_DIR="$tmpbin" \
+    && if fm_backend_source herdr; then echo sourced; else echo refused; fi) || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "fm_backend_source missing adapter: the caller shell died (rc=$rc) instead of refusing"
+  [ "$out" = "refused" ] \
+    || fail "fm_backend_source missing adapter: expected 'refused', got: $out"
+  pass "fm_backend_source refuses a missing adapter guardably under set -e instead of exiting the caller"
+}
+
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
@@ -1148,6 +1171,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_backend_source_missing_adapter_refuses_guardably
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
