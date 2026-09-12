@@ -33,6 +33,11 @@ FM_TEST_LIB_SOURCED=1
 # suite's fixtures were written against.
 umask 022
 
+# Fixture Git isolation for every suite that reaches this library; the helper's
+# header owns the invariant and the layers it deliberately leaves in force.
+# shellcheck source=tests/git-config-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
@@ -434,11 +439,13 @@ fm_git_identity() {
 
 # fm_git_init_commit <dir>: create a git repo at <dir> with a README and one
 # commit. Uses an inline identity so it works whether or not fm_git_identity was
-# called.
+# called. The initial branch is pinned rather than inherited from
+# init.defaultBranch, so a fixture that names main resolves the same on a
+# developer machine and on a runner that still defaults to master.
 fm_git_init_commit() {
   local dir=$1
   mkdir -p "$dir"
-  git -C "$dir" init -q
+  git -C "$dir" init -q -b main
   printf '# %s\n' "$(basename "$dir")" > "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
@@ -497,6 +504,16 @@ fm_write_secondmate_meta() {
 }
 
 # --- common assertions ------------------------------------------------------
+
+# assert_equals <expected> <actual> <msg>
+assert_equals() {
+  [ "$1" = "$2" ] || fail "$3 (expected '$1', got '$2')"
+}
+
+# assert_not_equals <unexpected> <actual> <msg>
+assert_not_equals() {
+  [ "$1" != "$2" ] || fail "$3 (unexpectedly got '$1')"
+}
 
 # assert_contains <haystack> <needle> <msg>
 assert_contains() {

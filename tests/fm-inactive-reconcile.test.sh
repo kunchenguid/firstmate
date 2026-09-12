@@ -233,7 +233,7 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   mkdir -p "$MATE/data/scout"
   printf '# findings\n' > "$MATE/data/scout/report.md"
   write_child "$MATE" boom 'failed: build broke'
-  write_child "$MATE" replaced-pr $'working: old PR https://example.test/owner/repo/pull/11\ndone: replacement PR https://example.test/owner/repo/pull/22'
+  write_child "$MATE" replaced-pr $'working: old PR https://example.test/owner/repo/pull/11\ndone: PR https://example.test/owner/repo/pull/22'
   awk '$0 !~ /^pr=/' "$MATE/state/replaced-pr.meta" > "$MATE/state/replaced-pr.meta.tmp"
   mv "$MATE/state/replaced-pr.meta.tmp" "$MATE/state/replaced-pr.meta"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
@@ -244,8 +244,8 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
     "$MAIN/state/mate.status" || fail "scout delivery lost its report pointer: $(cat "$MAIN/state/mate.status")"
   grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
     "$MAIN/state/mate.status" || fail "failed line was not delivered under the failed verb: $(cat "$MAIN/state/mate.status")"
-  grep -Fxq "done [key=$replaced_key]: child replaced-pr done: replacement PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
-    "$MAIN/state/mate.status" || fail "ledger fallback did not prefer the terminal line PR: $(cat "$MAIN/state/mate.status")"
+  grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
+    "$MAIN/state/mate.status" || fail "ledger fallback did not prefer the terminal ready line PR: $(cat "$MAIN/state/mate.status")"
   printf 'working: retrying\ndone: fixed on retry\n' >> "$MATE/state/boom.status"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   boom_key=$(reported_outcome_key "$MATE" boom 'done') || fail "recovered receipt key missing"
@@ -254,6 +254,38 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   [ "$(grep -c 'child-outcome-boom-' "$MAIN/state/mate.status")" = 2 ] \
     || fail "recovery delivered the wrong number of lines: $(cat "$MAIN/state/mate.status")"
   pass "ledger delivery carries the report pointer, the failed verb, and each new terminal line"
+}
+
+# A PR URL a worker only ever mentioned in prose is never claimed as the
+# task's delivered PR: without a recorded PR, only a terminal line in the
+# ready-signal shape carries one, and a scout never carries one at all.
+test_pr_field_requires_recorded_pr_or_ready_signal_line() {
+  local id prose_key ready_key scout_key
+  make_world pr-provenance; bind_secondmate local
+  write_child "$MATE" prose $'working: context in https://example.test/other/repo/pull/33\ndone: cleanup finished'
+  write_child "$MATE" ready 'done: PR https://example.test/owner/repo/pull/44 checks green'
+  write_child "$MATE" lookout 'done: PR https://example.test/owner/repo/pull/55'
+  for id in prose ready; do
+    awk '$0 !~ /^pr=/' "$MATE/state/$id.meta" > "$MATE/state/$id.meta.tmp"
+    mv "$MATE/state/$id.meta.tmp" "$MATE/state/$id.meta"
+  done
+  awk '{ sub(/^kind=ship$/, "kind=scout"); print }' "$MATE/state/lookout.meta" \
+    > "$MATE/state/lookout.meta.tmp"
+  mv "$MATE/state/lookout.meta.tmp" "$MATE/state/lookout.meta"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  prose_key=$(reported_outcome_key "$MATE" prose 'done') || fail "prose receipt key missing"
+  ready_key=$(reported_outcome_key "$MATE" ready 'done') || fail "ready receipt key missing"
+  scout_key=$(reported_outcome_key "$MATE" lookout 'done') || fail "scout receipt key missing"
+  grep -Fxq "done [key=$prose_key]: child prose done: cleanup finished mode=no-mistakes yolo=off" \
+    "$MAIN/state/mate.status" \
+    || fail "a PR mentioned only in prose was claimed as the delivery: $(cat "$MAIN/state/mate.status")"
+  grep -Fxq "done [key=$ready_key]: child ready done: PR https://example.test/owner/repo/pull/44 checks green pr=https://example.test/owner/repo/pull/44 mode=no-mistakes yolo=off" \
+    "$MAIN/state/mate.status" \
+    || fail "a ready-signal terminal line did not carry its PR: $(cat "$MAIN/state/mate.status")"
+  grep -Fxq "done [key=$scout_key]: child lookout done: PR https://example.test/owner/repo/pull/55 mode=no-mistakes yolo=off" \
+    "$MAIN/state/mate.status" \
+    || fail "a scout's ready-looking line carried a PR claim: $(cat "$MAIN/state/mate.status")"
+  pass "pr= requires the recorded PR or a ready-signal terminal line, and never a scout"
 }
 
 # If a terminal ledger line lands while the authoritative state read is in
@@ -790,6 +822,7 @@ test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
+test_pr_field_requires_recorded_pr_or_ready_signal_line
 test_terminal_line_during_state_read_yields_to_ledger_delivery
 test_terminal_line_after_inactive_delivery_is_not_reported_twice
 test_progress_after_inactive_delivery_starts_a_new_event

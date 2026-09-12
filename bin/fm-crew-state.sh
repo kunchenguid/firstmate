@@ -44,6 +44,10 @@
 #      before it having ended at exactly this worktree's head - so an active fix
 #      round never reads as an older failed run (rule owned by
 #      fm_nm_runs_status_for_worktree in bin/fm-nm-run-lib.sh).
+#      More than one recorded run can bind to this worktree at once, and
+#      bin/fm-nm-run-lib.sh also owns which of them wins: a LIVE run always
+#      outranks a terminal one, so a terminal answer here is provisional until
+#      the ledger has been asked whether a live sibling run exists.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -114,10 +118,12 @@ META=${FM_CREW_STATE_META_OVERRIDE:-"$STATE/$ID.meta"}
 LOG=${FM_CREW_STATE_STATUS_OVERRIDE:-"$STATE/$ID.status"}
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
-# How many of the most recent `no-mistakes runs` rows the cross-branch fallback
-# (fm_nm_runs_status_for_worktree in bin/fm-nm-run-lib.sh) scans. Generous
-# enough to still find a branch's own run on a busy multi-crew fleet without
-# listing the entire history every call.
+# How many of the most recent `no-mistakes runs` rows each ledger read
+# (fm_nm_runs_status_for_worktree in bin/fm-nm-run-lib.sh) scans, whether it is
+# the cross-branch fallback or the live-sibling probe behind a terminal `axi
+# status` answer (docs/configuration.md owns the setting). Generous enough to
+# still find a branch's own run on a busy multi-crew fleet without listing the
+# entire history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
@@ -528,11 +534,13 @@ nm_ci_checks_state() {
 # has no runs-listing subcommand; tests/fm-crew-state.test.sh owns the
 # 2026-07-02 dead-code incident history this fallback replaced).
 # fm_nm_runs_status_for_worktree in bin/fm-nm-run-lib.sh is the ONE owner of
-# the ledger format, the newest-row-decides rule, and the anchored
-# pipeline-continuation recognition (model-routing-benchmark-hardening: an
-# active fix round whose head object the task copy never fetched used to be
-# rejected here, letting the older failed row answer as current), so both
-# attribution routes share one rule.
+# the ledger format, the newest-row-decides rule, its live-over-terminal
+# exception, and the anchored pipeline-continuation recognition
+# (model-routing-benchmark-hardening: an active fix round whose head object the
+# task copy never fetched used to be rejected here, letting the older failed row
+# answer as current), so both attribution routes share one rule.
+# The same reader is also consulted when `axi status` DID bind this branch's run
+# but that run is terminal, to find a live sibling run for this worktree.
 nm_runs_list() {
   nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT"
 }
@@ -572,6 +580,21 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
       && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
       HAVE_RUN=1
+      # Live-over-terminal (bin/fm-nm-run-lib.sh). Bare `axi status` answers
+      # with the most-recently-touched run, which after a pipeline crash is the
+      # dead run sitting at this worktree's exact commit while the live run
+      # that replaced it validates a descendant commit on the same branch. Both
+      # bind, so a terminal answer is provisional until the ledger has been
+      # asked whether this worktree also has a live run. Only a live word
+      # displaces it: a terminal run with no live sibling keeps its full
+      # `axi status` step and gate detail rather than degrading to the ledger.
+      if ! fm_nm_run_is_active "$RUN_OUT"; then
+        live_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        if [ "$(fm_nm_run_status_class "$live_status")" = live ]; then
+          COARSE_STATUS=$live_status
+          RUN_SOURCE=coarse
+        fi
+      fi
     else
       # The active-or-most-recent run is for another branch, or it names this
       # branch with a head this copy cannot verify (a pipeline-advanced fix
@@ -771,8 +794,10 @@ if ! pane_readable "$BACKEND_TARGET"; then
   #             genuine server death - a socket-connection failure is NOT
   #             covered by the unknown-never-death rule above).
   #   dead    - the endpoint exists but confidently has no agent (herdr's agent
-  #             get answered agent_not_found; tmux's readable foreground process
-  #             group is nothing but shells), still positive death evidence.
+  #             get answered agent_not_found, or its registration lingers over a
+  #             pane whose processes are nothing but shells - issue #4115;
+  #             tmux's readable foreground process group is nothing but
+  #             shells), still positive death evidence.
   #   alive   - the endpoint and its agent answered and only the heavy
   #             scrollback read failed, so the live state is classified by the
   #             normal flow below instead of being discarded.

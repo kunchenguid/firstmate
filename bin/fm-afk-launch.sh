@@ -1,9 +1,26 @@
 #!/usr/bin/env bash
-# fm-afk-launch.sh - the single owner of the away-mode daemon TERMINAL lifecycle:
-# launch it in a NON-VISIBLE tracked terminal per backend, record its exact id,
-# tear it down by that exact id, and reconcile a leaked one after a crash.
+# fm-afk-launch.sh - the single owner of away-mode ENTRY and EXIT: the
+# read-back-and-confirm entry that writes the away-posture record through
+# bin/fm-afk-contract.sh, and the away-mode daemon TERMINAL lifecycle where a
+# daemon still runs: launch it in a NON-VISIBLE tracked terminal per backend,
+# record its exact id, tear it down by that exact id, and reconcile a leaked one
+# after a crash.
 #
-# Why this exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
+# ENTRY (the posture record). `/afk [words]` is two steps so the captain hears
+# the mandate back before it binds: `propose` compiles the words and clauses
+# into a proposal and prints the read-back (bin/fm-afk-contract.sh owns the
+# clause fields, the never-set, the refusal wording, and the record schema); `confirm` promotes it
+# into state/.afk-contract and prints the entry announcement (hold-for-return
+# only: no phone channel exists). The record is the posture in every harness.
+# On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
+# on Pi, the ordinary supervision session keeps running in both postures, and
+# `start` refuses on those harnesses. Every other harness still runs the daemon
+# for now, so `start` and `start-native` require the confirmed record before they
+# launch the daemon.
+# `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
+# clears state/.afk last, and archives the record under state/afk-contracts/.
+#
+# Why the terminal lifecycle exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
 # terminal it is already in. Harnesses with a native in-pane tracked-background
 # tool (claude, grok) run it there directly and it is fine. A harness with NO
@@ -20,6 +37,19 @@
 # FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
 #
 # Usage:
+#   fm-afk-launch.sh propose [--words-file <path> | --words <text>]
+#                            [--action <verb> --object <text> --when <text> [--stop <text>]]...
+#                            [--expected-return <UTC ISO 8601>] [--spend <n>]
+#                            [--grant <task-id>]...
+#                              Record the captain's away words and mandate
+#                              clause fields into a proposal and print the
+#                              read-back. Exit 3 when a clause was refused (its
+#                              missing part is named in the read-back); the
+#                              proposal still records it as refused.
+#                              Repeatable --grant records captain-named task
+#                              ids that may merge-when-green while away.
+#   fm-afk-launch.sh confirm   Promote the required proposal and print the entry
+#                              announcement. On Pi this is the whole entry.
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
 #                              is already running) launch the daemon in a fresh
 #                              non-visible terminal for the detected backend and
@@ -32,7 +62,7 @@
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
-#                              id, then clear state/.afk last.
+#                              id, clear state/.afk, then archive the record last.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
@@ -86,6 +116,11 @@ FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 # shellcheck source=bin/fm-afk-start.sh
 . "$FM_AFK_LAUNCH_DIR/fm-afk-start.sh"
 set +e
+# The away-posture record owner; sourced for its path helpers, driven as a
+# command for every record mutation so its output reaches the captain.
+# shellcheck source=bin/fm-afk-contract.sh
+. "$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
+FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
@@ -146,7 +181,55 @@ fm_afk_launch_lock_release() {
 }
 
 fm_afk_launch_usage() {
-  sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '/^# Usage:/,/^# Supported backends:/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
+}
+
+fm_afk_launch_primary_harness() {
+  "$FM_AFK_LAUNCH_DIR/fm-harness.sh" 2>/dev/null || printf unknown
+}
+
+# The away daemon is no longer launched on Pi: the posture record is the whole
+# entry there and the ordinary supervision session runs in both postures.
+fm_afk_launch_daemon_allowed() {
+  local harness
+  harness=$(fm_afk_launch_primary_harness)
+  case "$harness" in
+    pi|pi-signed)
+      fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh confirm and stop)"
+      return 1 ;;
+  esac
+  return 0
+}
+
+fm_afk_launch_catchup_pending() {
+  if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
+    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
+    return 0
+  fi
+  return 1
+}
+
+fm_afk_launch_record_require() {
+  local record
+  record=$(fm_afk_contract_path "$FM_AFK_LAUNCH_STATE")
+  if ! fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
+    fm_afk_launch_log "a confirmed away-posture record is required; run propose and confirm before starting the daemon"
+    return 1
+  fi
+  fm_afk_contract_validate "$record" 1 || {
+    fm_afk_launch_log "the away-posture record is not confirmed; run confirm before starting the daemon"
+    return 1
+  }
+}
+
+fm_afk_launch_propose() {
+  fm_afk_launch_catchup_pending && return 1
+  "$FM_AFK_CONTRACT_CMD" propose "$@"
+}
+
+fm_afk_launch_confirm() {
+  fm_afk_launch_catchup_pending && return 1
+  "$FM_AFK_CONTRACT_CMD" confirm
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -460,15 +543,16 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
 
 fm_afk_launch_start() {
   local captain_target captain_backend backup artifact had_afk=0 result
-  if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
-    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
-    return 1
-  fi
+  fm_afk_launch_catchup_pending && return 1
+  fm_afk_launch_daemon_allowed || return 1
+  fm_afk_launch_record_require || return 1
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
+    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
+    return 1; }
   captain_backend=$(discover_supervisor_backend) || {
-    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
+    fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
+    return 1; }
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
@@ -530,10 +614,9 @@ fm_afk_launch_start() {
 fm_afk_launch_start_native() {
   local backup artifact had_afk=0 result=0
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
-  if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
-    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
-    return 1
-  fi
+  fm_afk_launch_catchup_pending && return 1
+  fm_afk_launch_daemon_allowed || return 1
+  fm_afk_launch_record_require || return 1
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
@@ -571,7 +654,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result
+  local pid pid_identity current_identity result=0 read_result archived
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -611,15 +694,24 @@ fm_afk_launch_stop() {
   if [ "$read_result" -eq 0 ]; then
     fm_afk_launch_close_recorded || result=1
   fi
-  # (3) Clear the away-mode flag LAST.
+  # (3) Clear the away-mode flag, then (4) archive the posture record LAST so the
+  # posture ends only once every daemon-side artifact is down.
   if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
     fm_afk_launch_log "failed to clear away-mode flag"
     result=1
   fi
+  if [ "$result" -eq 0 ] && fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
+    if archived=$("$FM_AFK_CONTRACT_CMD" archive); then
+      fm_afk_launch_log "away-posture record archived at $archived"
+    else
+      fm_afk_launch_log "failed to archive the away-posture record; it still stands"
+      result=1
+    fi
+  fi
   if [ "$result" -eq 0 ]; then
-    fm_afk_launch_log "away mode stopped; daemon terminal torn down and .afk cleared"
+    fm_afk_launch_log "away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived"
   else
-    fm_afk_launch_log "away mode stopped; terminal teardown remains recorded for retry"
+    fm_afk_launch_log "away mode stopped; terminal teardown or the record archive remains recorded for retry"
   fi
   return "$result"
 }
@@ -636,6 +728,8 @@ fm_afk_launch_main() {
   trap 'exit 143' TERM
   fm_afk_launch_lock_acquire || return 1
   case "${1:-start}" in
+    propose) shift; fm_afk_launch_propose "$@" ;;
+    confirm) fm_afk_launch_confirm ;;
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;
     stop) fm_afk_launch_stop ;;

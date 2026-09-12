@@ -178,9 +178,7 @@ fm_procevent_owner_lease_seconds() {
   printf '%s\n' "$value"
 }
 
-# How often a runner's guard re-reads that lease. One watcher cycle at the
-# default poll interval, so the guard costs about as much as the cycle that
-# refreshes what it reads.
+# Detection-interval semantics: docs/configuration.md, Process-to-event sources.
 FM_PROCEVENT_OWNER_CHECK_DEFAULT_SECONDS=15
 FM_PROCEVENT_OWNER_CHECK_MIN_SECONDS=1
 FM_PROCEVENT_OWNER_CHECK_MAX_SECONDS=3600
@@ -213,22 +211,50 @@ fm_procevent_launch_floor_seconds() {
   printf '%s\n' "$value"
 }
 
-fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registration-identity>
+# How long reconcile waits for a runner it just detached to prove it took the
+# source's claim. Confirmation reads durable evidence, so a healthy launch
+# settles on the first poll and only a launch not yet proved spends the
+# window. The default stays well below FM_POLL because bin/fm-watch.sh runs
+# reconcile once per supervision cycle, and every launch of a cycle shares ONE
+# window rather than taking a window each.
+FM_PROCEVENT_LAUNCH_CONFIRM_DEFAULT_SECONDS=3
+FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS=1
+FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS=600
+
+fm_procevent_launch_confirm_seconds() {
+  local value=${FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS-}
+  if [ -z "$value" ]; then
+    printf '%s\n' "$FM_PROCEVENT_LAUNCH_CONFIRM_DEFAULT_SECONDS"
+    return 0
+  fi
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS" ] || return 1
+  [ "$value" -le "$FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS" ] || return 1
+  printf '%s\n' "$value"
+}
+
+# The one place the launch-pacing stamp's name is constructed. Every writer,
+# pruner and reader goes through here so the naming rule is stated once.
+fm_procevent_launch_floor_stamp_path() {  # <state-root> <source-id> <registration-identity>
   local reg identity
   case "$3" in *:*) ;; *) return 1 ;; esac
   case "$3" in ''|*[!0-9:]*) return 1 ;; esac
+  fm_procevent_source_id_valid "$2" || return 1
   reg=$(fm_procevent_registry_dir "$1") || return 1
   identity=${3//:/-}
-  rm -f -- "$reg/$2.$identity.last-launch"
+  printf '%s\n' "$reg/$2.$identity.last-launch"
+}
+
+fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registration-identity>
+  local stamp
+  stamp=$(fm_procevent_launch_floor_stamp_path "$1" "$2" "$3") || return 1
+  rm -f -- "$stamp"
 }
 
 fm_procevent_launch_floor_prune_locked() {  # <state-root> <source-id> <registration-identity>
-  local reg identity keep stamp
-  case "$3" in *:*) ;; *) return 1 ;; esac
-  case "$3" in ''|*[!0-9:]*) return 1 ;; esac
+  local reg keep stamp
+  keep=$(fm_procevent_launch_floor_stamp_path "$1" "$2" "$3") || return 1
   reg=$(fm_procevent_registry_dir "$1") || return 1
-  identity=${3//:/-}
-  keep="$reg/$2.$identity.last-launch"
   for stamp in "$reg/$2".*.last-launch "$reg/$2.last-launch"; do
     [ "$stamp" = "$keep" ] && continue
     [ -e "$stamp" ] || [ -L "$stamp" ] || continue
@@ -237,12 +263,9 @@ fm_procevent_launch_floor_prune_locked() {  # <state-root> <source-id> <registra
 }
 
 fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-identity> <seconds>
-  local state=$1 id=$2 expected=$3 floor=$4 reg stamp identity registration current_identity status=0
-  case "$expected" in *:*) ;; *) return 1 ;; esac
-  case "$expected" in ''|*[!0-9:]*) return 1 ;; esac
+  local state=$1 id=$2 expected=$3 floor=$4 reg stamp registration current_identity status=0
+  stamp=$(fm_procevent_launch_floor_stamp_path "$state" "$id" "$expected") || return 1
   reg=$(fm_procevent_registry_dir "$state") || return 1
-  identity=${expected//:/-}
-  stamp="$reg/$id.$identity.last-launch"
   [ ! -L "$stamp" ] || return 1
   [ ! -e "$stamp" ] || [ -f "$stamp" ] || return 1
   perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -e '
@@ -319,6 +342,18 @@ fm_procevent_source_lock_acquire() {
   (umask 077; mkdir -p "$root") || return 1
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
   fm_lock_acquire_wait "$(fm_procevent_source_lock_path "$id")"
+}
+
+# fm_procevent_source_lock_try_acquire <source-id>
+# Non-blocking acquisition for release_start_claim in bin/fm-procevent.sh;
+# that caller owns the exit-cleanup lock-order invariant.
+fm_procevent_source_lock_try_acquire() {
+  local id=$1 root
+  fm_procevent_source_id_valid "$id" || return 1
+  root=$(fm_procevent_claim_root)
+  (umask 077; mkdir -p "$root") || return 1
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  fm_lock_try_acquire "$(fm_procevent_source_lock_path "$id")"
 }
 
 fm_procevent_source_lock_release() {
@@ -597,6 +632,29 @@ fm_procevent_claim_generation_gone_locked() {
     && ! fm_procevent_group_alive "${FM_PROCEVENT_CLAIM_PID:-}"
 }
 
+# fm_procevent_claim_undisplaceable_locked <source-id>
+# The single owner of "this stale claim is one no unattended caller may
+# displace". True when a claim record is still present for the source and its
+# generation is NOT provably gone. Call it only where
+# fm_procevent_claim_state_locked has just returned 1, so the FM_PROCEVENT_CLAIM_*
+# globals below describe this source: that same return also covers a source with
+# no claim record at all, which leaves those globals holding whatever the
+# previous load put there, so the record check has to travel with the generation
+# check rather than being left to each caller.
+#
+# What the surviving process group means is why this refuses rather than
+# relaunches. fm_procevent_group_alive probes the runner's OWN process group,
+# and the runner leads that group with its polling source child inside it, so
+# "the group still has members" can mean that child is still attached to the
+# session the source collects from. Starting a replacement there puts a second
+# destructive poller on one session, which drains and loses what the source was
+# collecting. A source that needs a human beats a source that silently eats what
+# it was supposed to deliver.
+fm_procevent_claim_undisplaceable_locked() {  # <source-id>
+  [ -e "$(fm_procevent_claim_path "$1")" ] || return 1
+  ! fm_procevent_claim_generation_gone_locked
+}
+
 # Capture-reservation cleanup for a claim being reclaimed.
 #
 # Reservation records are keyed by CLAIM TOKEN, and every replacement claims a
@@ -697,6 +755,26 @@ fm_procevent_claim_acquire_locked() {
           if [ "$status" -eq 0 ]; then
             fm_procevent_claim_capture_reservation_reclaim_locked || status=1
           fi
+          # Every cleanup above tidies leftovers that belong to the DEAD
+          # generation - its staging file and its capture reservation, both keyed
+          # by ITS claim token - and a replacement always claims a fresh token,
+          # so nothing a failed tidy-up leaves behind can collide with the
+          # generation that replaces it.
+          # fm_procevent_claim_capture_reservation_reclaim_locked already states
+          # that rule for the reservation record; the staging file takes the same
+          # rule here, and so does the shape check on the registry directory
+          # recorded to hold it, which only decides whether that removal is safe
+          # to attempt. Once the stale owner and the
+          # independently absent process group prove the whole generation gone,
+          # the documented ownership promise is already granted, so a failed
+          # tidy-up may leave litter and nothing more. Vetoing the claim instead
+          # is what leaves a provably dead runner owning the source permanently,
+          # where no reconcile, no retire and no fresh arm can displace it.
+          if [ "$status" -ne 0 ] && fm_procevent_claim_generation_gone_locked; then
+            status=0
+          fi
+          # Two owners is the one outcome worse than none: never proceed on a
+          # claim record that is still there.
           [ "$status" -ne 0 ] || rm -f -- "$claim" || status=1
         else
           status=1
