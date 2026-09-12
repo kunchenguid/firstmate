@@ -26,15 +26,19 @@
 # as it does after a pool-cap refusal. The fake tmux below therefore also
 # answers `#{pane_current_command}` (treehouse for the first
 # FM_FAKE_TREEHOUSE_READS path reads, then the shell named by
-# FM_FAKE_PANE_SHELL) and `capture-pane` (FM_FAKE_PANE_TAIL, replaced by
-# FM_FAKE_PANE_TAIL_LATE once the path read count passes
+# FM_FAKE_PANE_SHELL, then nothing once the path read count passes
+# FM_FAKE_PANE_SHELL_READS) and `capture-pane` (FM_FAKE_PANE_TAIL, replaced
+# by FM_FAKE_PANE_TAIL_LATE once the path read count passes
 # FM_FAKE_PANE_TAIL_LATE_READS). The later cases pin that a fetch outlasting
 # the old 60s budget still spawns, that an acquisition past its own bound is
 # reported as still running, that a refusal fails fast with the pane's own
 # reason, and that an unreadable foreground (an empty FM_FAKE_PANE_SHELL)
 # stays on the settle bound with the pane text standing in: it gives up at
 # 60s, an "Entered worktree" line starts the settle phase, an error line
-# before any entry fails fast, and an error line after the entry does not.
+# before any entry fails fast once two polls agree (and never on the one
+# poll that can catch startup noise after the command's echo), an error
+# line after the entry does not, and a wait that lost its foreground reader
+# only on the final poll keeps the settle refusal it earned.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -76,6 +80,8 @@ case "$*" in
     [ -f "$countfile" ] && n=$(cat "$countfile")
     if [ "$n" -le "${FM_FAKE_TREEHOUSE_READS:-0}" ]; then
       printf 'treehouse\n'
+    elif [ -n "${FM_FAKE_PANE_SHELL_READS:-}" ] && [ "$n" -gt "$FM_FAKE_PANE_SHELL_READS" ]; then
+      printf '\n'
     else
       printf '%s\n' "${FM_FAKE_PANE_SHELL-zsh}"
     fi
@@ -152,12 +158,14 @@ EOF
 
 # Foreground knobs for the fake pane, reset per case: how many polls report
 # treehouse in the foreground, which shell name follows (empty = the
-# foreground cannot be read at all), the pane's rendered tail (and the tail
-# that replaces it after a given number of path reads), and the acquisition
-# bound under test.
+# foreground cannot be read at all), after how many path reads that shell
+# name stops being readable (empty = never), the pane's rendered tail (and
+# the tail that replaces it after a given number of path reads), and the
+# acquisition bound under test.
 reset_settle_knobs() {
   TREEHOUSE_READS=0
   PANE_SHELL=zsh
+  PANE_SHELL_READS=
   PANE_TAIL=
   PANE_TAIL_LATE=
   PANE_TAIL_LATE_READS=
@@ -174,6 +182,7 @@ run_settle_spawn() {
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     FM_FAKE_TREEHOUSE_READS="$TREEHOUSE_READS" FM_FAKE_PANE_SHELL="$PANE_SHELL" \
+    FM_FAKE_PANE_SHELL_READS="$PANE_SHELL_READS" \
     FM_FAKE_PANE_TAIL="$PANE_TAIL" FM_FAKE_PANE_TAIL_LATE="$PANE_TAIL_LATE" \
     FM_FAKE_PANE_TAIL_LATE_READS="$PANE_TAIL_LATE_READS" \
     FM_SPAWN_ACQUIRE_TIMEOUT="$ACQUIRE_TIMEOUT" \
@@ -533,6 +542,103 @@ test_error_line_after_entry_is_not_read_as_a_refusal() {
   pass "an error line after treehouse's entry is not read as a refusal"
 }
 
+# The pty echoes the typed `treehouse get` in cooked mode BEFORE the shell
+# runs its rc files, so for the first second or so the capture reads: the
+# kernel's echo of the command, then any rc error line, then the prompt with
+# its own redraw of the command. A poll inside that window sees an error line
+# after the only echo. That noise must not fail the spawn: the verdict counts
+# only once two consecutive polls agree, and the prompt's redraw clears it on
+# the next poll. The path here settles on the worktree after three project
+# reads, so the spawn must succeed with no refusal at all.
+test_startup_noise_after_the_kernel_echo_is_not_a_refusal() {
+  local rec id out status reads
+  id=settle-blind-echo-noise-z12
+  rec=$(make_settle_case settle-blind-echo-noise "$id" 3 project)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  PANE_SHELL=
+  ACQUIRE_TIMEOUT=100
+  PANE_TAIL='treehouse get\nerror: prompt plugin failed to load\n'
+  PANE_TAIL_LATE_READS=1
+  PANE_TAIL_LATE='treehouse get\nerror: prompt plugin failed to load\n$ treehouse get\nFetching origin...\n'
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should survive shell startup noise caught between the command's echo and the prompt's redraw"$'\n'"$out"
+  assert_not_contains "$out" "reported an error in the pane" \
+    "spawn read the shell's startup noise after the kernel's echo as treehouse's verdict"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the worktree the pane settled on"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -eq 5 ] || fail "expected the three project reads plus the two agreeing worktree reads, got $reads"
+  pass "startup noise between the command's echo and the prompt's redraw is not a refusal"
+}
+
+# A genuine refusal on the same backend: treehouse's line stays in the
+# capture after the command's echo and nothing redraws over it, so the second
+# poll agrees with the first and the spawn fails then - one poll later than a
+# single-read verdict would, and no later.
+test_refusal_line_fails_on_the_second_agreeing_poll() {
+  local rec id out status reads
+  id=settle-blind-refused-twice-z13
+  rec=$(make_settle_case settle-blind-refused-twice "$id" 100000 project)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  PANE_SHELL=
+  ACQUIRE_TIMEOUT=100
+  PANE_TAIL='$ treehouse get\nerror: all 16 worktrees are in use or dirty (max_trees = 16); return one with treehouse return\n$ \n'
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane whose treehouse get refused"$'\n'"$out"
+  assert_contains "$out" "treehouse get reported an error in the pane" \
+    "spawn did not report the error line treehouse printed"
+  assert_contains "$out" "| error: all 16 worktrees are in use or dirty (max_trees = 16)" \
+    "spawn did not relay treehouse's own refusal line from the pane"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -eq 2 ] || fail "a refusal line must fail the spawn on exactly the second agreeing poll, but the spawn polled $reads times"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a refusal line fails the spawn on the second agreeing poll"
+}
+
+# The `unknown` refusal belongs to a wait in which no poll ever read the
+# pane's foreground. A wait that read treehouse, then a shell for sixty
+# polls, and lost the reader only on the final poll has all the evidence the
+# settle refusal rests on, and must say so: the shell foreground it read,
+# the treehouse run it saw, and the one read that failed.
+test_single_failed_final_read_keeps_the_settle_refusal() {
+  local rec id out status reads
+  id=settle-last-read-failed-z14
+  rec=$(make_primary_case settle-last-read-failed "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  reset_settle_knobs
+  TREEHOUSE_READS=2
+  PANE_SHELL_READS=62
+  ACQUIRE_TIMEOUT=100
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
+  assert_contains "$out" "foreground was a shell, not treehouse get; treehouse get was seen running in the pane" \
+    "spawn did not report the shell foreground it read and the treehouse run it saw"
+  assert_contains "$out" "foreground now: unreadable on backend 'tmux'" \
+    "spawn did not report that the final read failed"
+  assert_not_contains "$out" "could not read the pane's foreground process" \
+    "spawn claimed the backend could not read the foreground after sixty readable polls"
+  assert_not_contains "$out" "never seen running" \
+    "spawn denied the treehouse run it read on the first polls"
+  assert_not_contains "$out" "did not enter" \
+    "spawn claimed treehouse did not enter a worktree without evidence of an exit"
+  reads=$(cat "$COUNTFILE")
+  { [ "$reads" -ge 63 ] && [ "$reads" -le 64 ]; } \
+    || fail "two acquiring polls and sixty settle polls must end at the settle bound on the next poll, but the spawn polled $reads times"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a single failed final read keeps the settle refusal a readable wait earned"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
@@ -544,5 +650,8 @@ test_unreadable_foreground_gives_up_at_the_settle_bound
 test_unreadable_foreground_entered_line_starts_the_settle_phase
 test_unreadable_foreground_refusal_line_fails_fast
 test_error_line_after_entry_is_not_read_as_a_refusal
+test_startup_noise_after_the_kernel_echo_is_not_a_refusal
+test_refusal_line_fails_on_the_second_agreeing_poll
+test_single_failed_final_read_keeps_the_settle_refusal
 
 echo "# all fm-spawn-worktree-settle tests passed"

@@ -92,7 +92,7 @@ Spawn-time worktree discovery sends begin and end markers around `pwd`, captures
 cmux exposes no per-surface foreground process either, so that discovery cannot tell a slow `git fetch origin` inside `treehouse get` from a refusal.
 The pane's own text stands in for the foreground, and the [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns what that text means and both bounds of the wait.
 The larger `FM_SPAWN_ACQUIRE_TIMEOUT` bound never applies here, because the spawn holds the per-project Treehouse lock across the wait and waits longer only on positive evidence.
-A refusal treehouse prints before entry fails the spawn at once with the pane's last lines.
+A refusal treehouse prints before entry fails the spawn once two consecutive polls read it, with the pane's last lines.
 A `treehouse get` that has not printed its `Entered worktree` line within the 60-second path-settle bound is given up on, and the refusal names the foreground as unreadable.
 
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through cmux's submit machinery.

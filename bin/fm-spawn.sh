@@ -205,9 +205,13 @@
 #   reader, and a read can fail on any backend; those polls read the pane's
 #   own text instead: treehouse's "Entered worktree" line starts the settle
 #   phase, and an `error:` line or the max_trees pool-cap line seen after the
-#   echoed command and before any entry fails the spawn at once with the
-#   pane's last lines; once entry is seen the pane's text is not read again,
-#   so the nested shell's own startup errors never count as a refusal. A
+#   echoed command and before any entry on two consecutive polls fails the
+#   spawn with the pane's last lines (one poll is not enough: the pty echoes
+#   the typed command before the shell runs its rc files, so a single read
+#   can catch the shell's startup noise after that echo until the prompt
+#   redraws the command and clears the verdict); once entry is seen the
+#   pane's text is not read again, so the nested shell's own startup errors
+#   never count as a refusal. A
 #   shell that is back in the project directory after treehouse was seen
 #   running means treehouse exited without entering (the pool at its cap,
 #   say), and the spawn fails at once. Every refusal from this wait prints
@@ -3072,9 +3076,12 @@ spawn_pane_tail() {  # <target> <lines>
 # echoed `treehouse get` count, so a shell's startup noise is never taken for
 # treehouse's verdict; when no echo is in the capture (it scrolled out, or the
 # pane does not echo) every line counts, and whatever scrolled the echo out
-# took the noise with it. An "Entered worktree" line wins over any error line
-# around it, because the nested shell's own startup may print errors after
-# treehouse has already entered.
+# took the noise with it. The pty echoes the typed command before the shell
+# runs its rc files, so one read can still catch startup noise after that
+# echo until the prompt redraws the command; the caller therefore acts on
+# `refused` only when two consecutive polls agree. An "Entered worktree"
+# line wins over any error line around it, because the nested shell's own
+# startup may print errors after treehouse has already entered.
 #   entered  treehouse printed its "Entered worktree" line
 #   refused  an `error:` line or the max_trees pool-cap line, with no entry
 spawn_pane_signal() {  # <target> -> entered|refused|(nothing)
@@ -3113,9 +3120,9 @@ spawn_worktree_wait_refuse() {  # <kind> <elapsed> <report> <treehouse-seen> <tr
       ;;
     unknown)
       if [ "$entered" = 1 ]; then
-        echo "error: treehouse get printed its 'Entered worktree' line, but no isolated worktree appeared within 60s after it; this backend could not read the pane's foreground process, and the pane's path reader never showed the worktree (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+        echo "error: treehouse get printed its 'Entered worktree' line, but no isolated worktree appeared within 60s after it; this backend could not read the pane's foreground process, and the pane's path reader never showed the worktree; $observed (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
       else
-        echo "error: no isolated worktree appeared within 60s; this backend could not read the pane's foreground process, and the pane printed neither treehouse's 'Entered worktree' line nor an error, so treehouse get may still be running (a slow fetch, say) or may never have started (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+        echo "error: no isolated worktree appeared within 60s; this backend could not read the pane's foreground process, and the pane printed neither treehouse's 'Entered worktree' line nor an error, so treehouse get may still be running (a slow fetch, say) or may never have started; $observed (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
       fi
       ;;
     *)
@@ -3390,10 +3397,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   #              settle bound, with the pane's own text standing in for the
   #              foreground (spawn_pane_signal). Treehouse's "Entered
   #              worktree" line starts the settle phase afresh; an error or
-  #              pool-cap line seen before any entry fails the spawn at once
-  #              with the pane's last lines. Once entry is seen the pane text
-  #              is not read again: the nested shell owns the pane from then
-  #              on, and its own startup errors are not treehouse's verdict.
+  #              pool-cap line seen before any entry on two consecutive polls
+  #              fails the spawn with the pane's last lines (a single read
+  #              can catch the shell's startup noise between the pty's echo
+  #              of the command and the prompt's redraw of it). Once entry is
+  #              seen the pane text is not read again: the nested shell owns
+  #              the pane from then on, and its own startup errors are not
+  #              treehouse's verdict.
   #              A slow fetch on these backends is therefore given up
   #              on at the settle bound, with a refusal that says so: the
   #              per-project Treehouse lock is held across this wait (see the
@@ -3410,6 +3420,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   treehouse_seen=0
   treehouse_entered=0
   project_shell_reads=0
+  refused_reads=0
+  foreground_read=0
   wait_failure=""
   fg_report=""
   while :; do
@@ -3429,20 +3441,29 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     fg_report=$(spawn_foreground_processes "$WT_TARGET" 2>/dev/null || true)
     phase=$(spawn_worktree_phase "$fg_report")
+    [ "$phase" = unknown ] || foreground_read=1
+    signal=""
     if [ "$phase" = unknown ] && [ "$treehouse_entered" = 0 ]; then
-      case "$(spawn_pane_signal "$WT_TARGET")" in
-        entered)
-          treehouse_seen=1
-          treehouse_entered=1
-          settle_secs=0
-          ;;
-        refused)
+      signal=$(spawn_pane_signal "$WT_TARGET")
+    fi
+    case "$signal" in
+      entered)
+        treehouse_seen=1
+        treehouse_entered=1
+        settle_secs=0
+        ;;
+      refused)
+        refused_reads=$((refused_reads + 1))
+        if [ "$refused_reads" -ge 2 ]; then
           treehouse_seen=1
           wait_failure=printed-refusal
           break
-          ;;
-      esac
-    fi
+        fi
+        ;;
+      *)
+        refused_reads=0
+        ;;
+    esac
     case "$phase" in
       acquiring)
         treehouse_seen=1
@@ -3467,7 +3488,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         settle_secs=$((settle_secs + 1))
         if [ "$settle_secs" -gt 60 ]; then
           wait_failure=settle
-          [ "$phase" != unknown ] || wait_failure=unknown
+          [ "$foreground_read" = 1 ] || wait_failure=unknown
           break
         fi
         ;;
