@@ -123,12 +123,29 @@ make_lab() {  # <harness> -> echoes lab dir
   ln -sf "$ROOT/bin/fm-timeout-lib.sh" "$lab/bin/fm-timeout-lib.sh"
   ln -sf "$ROOT/bin/fm-wake-lib.sh" "$lab/bin/fm-wake-lib.sh"
   ln -sf "$ROOT/bin/fm-session-lock-lib.sh" "$lab/bin/fm-session-lock-lib.sh"
-  # The REAL pre-compact stow gate plus its three self-contained libraries, so
+  # The REAL pre-compact stow runner plus its three self-contained libraries, so
   # the tracked PreCompact registration is exercised as shipped, not stubbed.
   ln -sf "$ROOT/bin/fm-precompact-stow.sh" "$lab/bin/fm-precompact-stow.sh"
   ln -sf "$ROOT/bin/fm-gate-refuse-lib.sh" "$lab/bin/fm-gate-refuse-lib.sh"
   ln -sf "$ROOT/bin/fm-primary-scope-lib.sh" "$lab/bin/fm-primary-scope-lib.sh"
   ln -sf "$ROOT/bin/fm-hook-host-lib.sh" "$lab/bin/fm-hook-host-lib.sh"
+  # The REAL post-compact starter plus the two libraries the stow runner's
+  # detached child sources, so the tracked PostCompact registration drives the
+  # recorder instead of exec-ing a missing script on any harness version that
+  # dispatches the event.
+  ln -sf "$ROOT/bin/fm-postcompact-start.sh" "$lab/bin/fm-postcompact-start.sh"
+  ln -sf "$ROOT/bin/fm-operational-input.sh" "$lab/bin/fm-operational-input.sh"
+  ln -sf "$ROOT/bin/fm-timeout-lib.sh" "$lab/bin/fm-timeout-lib.sh"
+  # A stub headless stow agent: the tracked PreCompact runner launches it
+  # detached with the marked prompt as its final argument, so this guard
+  # proves real dispatch and prompt delivery without spending a second model
+  # session per compaction.
+  cat > "$lab/bin/stub-stow-agent" <<'SH'
+#!/usr/bin/env bash
+printf 'stow pass: %s\n' "$*" >> "$(dirname "$0")/../stow-agent-calls"
+exit 0
+SH
+  chmod +x "$lab/bin/stub-stow-agent"
   cat > "$lab/bin/fm-bootstrap.sh" <<'SH'
 #!/usr/bin/env bash
 # Outlives the hook on purpose: the marker can only appear if the worker was
@@ -256,7 +273,7 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   : > "$record"
   tmux -L "$SOCKET" new-session -d -s "$session" -c "$lab" -x 200 -y 50 \
     -e FM_LIVE_RECORD="$record" -e FM_ROOT_OVERRIDE="$lab" -e FM_HOME="$lab" \
-    -e FM_LIVE_NONCE="$LIVE_NONCE" \
+    -e FM_LIVE_NONCE="$LIVE_NONCE" -e FM_PRECOMPACT_STOW_AGENT="$lab/bin/stub-stow-agent" \
     "$*" \
     || fail "$harness $version: could not start an interactive lab session"
 
@@ -312,25 +329,23 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     done
   fi
   send_line "$session" /compact
-  # The tracked PreCompact registration gates the FIRST manual compaction once:
-  # a harness that dispatches it must show the stow instruction and not compact
-  # yet, then comply on the retry. A harness with no PreCompact channel just
-  # compacts, exactly as before the gate existed.
+  # The tracked PreCompact registration performs stow itself: a harness that
+  # dispatches it must launch the detached stub agent with the marked prompt
+  # and still compact straight away - never block, never print an instruction.
+  # A harness with no PreCompact channel just compacts, exactly as before the
+  # runner existed.
   n=0
   while [ "$n" -lt 20 ] && ! grep -qx compact "$record" \
-    && ! capture "$session" | grep -Fq 'pre-compact gate'; do
+    && ! [ -s "$lab/stow-agent-calls" ]; do
     sleep 3
     n=$((n + 1))
   done
-  if capture "$session" | grep -Fq 'pre-compact gate'; then
-    [ -f "$lab/state/.precompact-stow-gate" ] \
-      || { capture "$session" >&2; fail "$harness $version: the pre-compact gate blocked without arming its one-shot marker"; }
-    pass "$harness $version: the first manual /compact is gated once with a visible /stow instruction"
-    send_line "$session" /compact
-    n=0
-    while [ "$n" -lt 20 ] && ! grep -qx compact "$record"; do sleep 3; n=$((n + 1)); done
-    [ ! -f "$lab/state/.precompact-stow-gate" ] \
-      || note "$harness $version: the gate marker survived the retry (harness may not deliver a second PreCompact event)"
+  if [ -s "$lab/stow-agent-calls" ]; then
+    grep -q 'FIRSTMATE_OP' "$lab/stow-agent-calls" \
+      || { capture "$session" >&2; fail "$harness $version: the pre-compact runner launched its agent without the marked stow prompt"; }
+    pass "$harness $version: a manual /compact performs the detached stow pass without blocking"
+  else
+    note "$harness $version: no PreCompact dispatch observed around /compact, so its stow-pass evidence was not refreshed"
   fi
   n=0
   while [ "$n" -lt 40 ] && ! grep -qx compact "$record"; do sleep 3; n=$((n + 1)); done
@@ -355,19 +370,21 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
 # codex version does around it, the next reopen must still fire the tracked
 # session-open channel - a compaction that silenced it would leave the
 # compacted session blind. The compact is issued twice so that, if the version
-# dispatches the tracked PreCompact gate, the one-shot gate has stepped aside
-# by the second attempt: a gate that wedged compaction would fail the
-# 'Context compacted' assertion below.
+# dispatches the tracked PreCompact runner, the second attempt proves the
+# first performed its stow pass and stepped aside: a runner that wedged
+# compaction would fail the 'Context compacted' assertion below.
 probe_compact_reopen() {  # <harness> <version> <lab> <resume-argv...>
   local harness=$1 version=$2 lab=$3
   shift 3
   local record="$lab/record" out source compact_out
   : > "$record"
   ( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
+    FM_PRECOMPACT_STOW_AGENT="$lab/bin/stub-stow-agent" \
     "$@" '/compact' < /dev/null >/dev/null 2>&1 ) || true
-  [ -f "$lab/state/.precompact-stow-gate" ] \
-    && pass "$harness $version: the tracked PreCompact gate fired once on the exec compact path"
+  [ -s "$lab/stow-agent-calls" ] \
+    && pass "$harness $version: the tracked PreCompact runner performed the stow pass on the exec compact path"
   compact_out=$( cd "$lab" && FM_LIVE_RECORD="$record" FM_LIVE_NONCE="$LIVE_NONCE" FM_ROOT_OVERRIDE="$lab" FM_HOME="$lab" \
+    FM_PRECOMPACT_STOW_AGENT="$lab/bin/stub-stow-agent" \
     "$@" '/compact' < /dev/null 2>&1 ) || true
   printf '%s' "$compact_out" | grep -Fq 'Context compacted' \
     || fail "$harness $version: the second /compact did not report 'Context compacted'; refresh this guard against that harness version (output: $(printf '%s' "$compact_out" | tail -n 3 | tr '\n' ' '))"
