@@ -146,6 +146,10 @@ The family's clock is two long scripts that do not contend: `fm-pr-check-securit
 `bin/fm-test-isolation-proof.sh`'s own `--list-exclusions` keeps `fm-pr-check-security` and `fm-teardown` out of the mixed PORTABLE pool, where they would share a machine with unrelated lock and forge stress.
 Admitting them inside their own family is a different question and this proof answers it: the six members present on that date are safe with each other at four workers.
 
+`tests/fm-pr-state.test.sh` and `tests/fm-pr-reviewers.test.sh` joined this family after that date and are not covered by the result above.
+`script_allows_concurrency` in `bin/fm-test-run.sh` still grants them four workers by family membership alone, so they run concurrently on evidence measured without them.
+`bin/fm-test-isolation-proof.sh --pool pr-forge --jobs 4` closes that gap, and its refreshed measurement lands on this branch before the pull request leaves draft.
+
 ### secondmate: admitted
 
 - Date: 2026-09-03
