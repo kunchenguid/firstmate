@@ -161,6 +161,7 @@ case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    [ -z "${FM_TEST_GH_STATE_STARTED:-}" ] || : > "$FM_TEST_GH_STATE_STARTED"
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
     printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
     ;;
@@ -632,9 +633,10 @@ SH
 
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
+  local check_timeout=${FM_TEST_CHECK_TIMEOUT:-1}
   shift 2
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
-    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT="$check_timeout" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
@@ -2302,8 +2304,57 @@ SH
   pass "accepted merge authority persists under the lifecycle lock"
 }
 
+test_teardown_cannot_race_authority_consumption() {
+  local dir state url watcher_pid rc i
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-authority-teardown-race)
+  state="$dir/home/state"
+  fm_write_meta "$state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=local-only' \
+    'yolo=on'
+  write_away_record "$dir"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+    || fail "teardown race: could not arm the merge poll"
+  queue_merge "$dir" "$url"
+  archive_away_record "$dir"
+  FM_TEST_GH_STATE_STARTED="$dir/poll-started" FM_TEST_GH_STATE=MERGED \
+    FM_TEST_GH_SLEEP=0.5 FM_TEST_CHECK_TIMEOUT=3 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher_pid=$!
+  i=0
+  while [ ! -e "$dir/poll-started" ]; do
+    sleep 0.01
+    i=$((i + 1))
+    if [ "$i" -ge 500 ]; then
+      kill "$watcher_pid" 2>/dev/null || true
+      wait "$watcher_pid" 2>/dev/null || true
+      fail "teardown race: watcher did not begin its validated poll"
+    fi
+  done
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown race: cleanup crossed the active poll transaction"
+  [ -f "$state/task-a.merge-authority" ] \
+    || fail "teardown race: refused cleanup removed persisted authority"
+  rc=0
+  wait "$watcher_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "teardown race: watcher failed with $rc: $(cat "$dir/watch.err")"
+  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url yolo" ] \
+    || fail "teardown race: concurrent cleanup downgraded the merge authority"
+  pass "teardown cannot race merged-poll authority consumption"
+}
+
 test_authority_retirement_preserves_replacement() {
-  local dir state url_a url_b rc
+  local dir state url_a url_b rc i
   url_a=https://github.com/o/r/pull/1
   url_b=https://github.com/o/r/pull/2
   dir=$(make_case merge-authority-retirement-replacement)
@@ -2315,9 +2366,12 @@ test_authority_retirement_preserves_replacement() {
   cat > "$dir/replace-authority.sh" <<SH
 #!/usr/bin/env bash
 "$PR_CHECK" task-a "$url_b" >/dev/null
-FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \\
-FM_TEST_GH_GRAPHQL_QUEUED=true \\
-"$PR_MERGE" task-a "$url_b" >/dev/null
+(
+  FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \\
+  FM_TEST_GH_GRAPHQL_QUEUED=true \\
+  "$PR_MERGE" task-a "$url_b" > "$dir/replacement-merge.out" 2> "$dir/replacement-merge.err"
+  printf '%s\n' \$? > "$dir/replacement-merge.rc"
+) &
 SH
   chmod +x "$dir/replace-authority.sh"
   cat > "$dir/fakebin/mv" <<'SH'
@@ -2342,6 +2396,14 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "replacement: original poll failed: $(cat "$dir/watch-a.err")"
+  i=0
+  while [ ! -e "$dir/replacement-merge.rc" ]; do
+    sleep 0.01
+    i=$((i + 1))
+    [ "$i" -lt 200 ] || fail "replacement: serialized replacement merge did not finish"
+  done
+  [ "$(cat "$dir/replacement-merge.rc")" -eq 0 ] \
+    || fail "replacement: serialized replacement merge failed: $(cat "$dir/replacement-merge.err")"
   [ -f "$state/task-a.merge-authority" ] \
     || fail "replacement: original poll retirement deleted the replacement authority"
   grep -qxF "pr=$url_b" "$state/task-a.meta" \
@@ -2365,6 +2427,7 @@ test_merged_poll_row_carries_the_merge_authority
 test_merged_poll_row_names_no_authority_when_no_record_grants_one
 test_authority_persistence_refuses_rebound_metadata
 test_authority_persists_before_control_unlock
+test_teardown_cannot_race_authority_consumption
 test_authority_retirement_preserves_replacement
 test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_different_merged_pr_for_same_task_is_not_absorbed

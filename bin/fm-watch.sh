@@ -1845,8 +1845,16 @@ reconcile_requests_detached() {
   RECONCILE_REQUEST_PID=$!
 }
 
+PR_POLL_CONTROL_LOCK=
+
+pr_poll_control_release() {
+  [ -z "$PR_POLL_CONTROL_LOCK" ] || fm_lock_release "$PR_POLL_CONTROL_LOCK" || return 1
+  PR_POLL_CONTROL_LOCK=
+}
+
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
+  pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
@@ -2016,6 +2024,13 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
+          PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
+          fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
+          if ! fm_pr_poll_snapshot_matches "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+            pr_poll_control_release || exit 1
+            triage_log "PR poll for $id changed before its validated check; skipping the stale snapshot"
+            continue
+          fi
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
@@ -2054,6 +2069,7 @@ while :; do
             exit 1
           fi
           retire_merged_pr_poll "$id"
+          pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
@@ -2061,10 +2077,12 @@ while :; do
           fi
           wake "$reason"
         fi
+        pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
         touch "$STATE/.last-check"
         wake "$reason"
       fi
+      pr_poll_control_release || exit 1
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
