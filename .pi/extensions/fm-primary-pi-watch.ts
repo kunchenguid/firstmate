@@ -911,8 +911,25 @@ export default function (pi: ExtensionAPI) {
       const restoration = await current;
       if (!generationIsLive(owner)) return restoration;
       const latest = latestActionableRestoration(owner);
-      if (!latest || latest === current) return restoration;
-      current = latest;
+      if (latest && latest !== current) {
+        current = latest;
+        continue;
+      }
+      const repairChild = owner.child;
+      if (!repairChild || repairChild === restoration.armChild) return restoration;
+      const ready = await waitForReadiness(repairChild);
+      if (!generationIsLive(owner)) return restoration;
+      const newest = latestActionableRestoration(owner);
+      if (newest && newest !== current) {
+        current = newest;
+        continue;
+      }
+      if (owner.child !== repairChild) {
+        if (owner.child) continue;
+        return restoration;
+      }
+      if (!ready) return restoration;
+      return { failure: "", armChild: repairChild, recovery: armRecovery.get(repairChild) };
     }
   }
 
