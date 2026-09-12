@@ -1184,6 +1184,8 @@ SH
     # The final prompt delivered to the harness is the generated interface.
     # An authored role heading must neither suppress nor duplicate the current
     # worker contract; the launch section is its single, superseding owner.
+    assert_grep 'report all outcomes and blockers to firstmate, never directly to the captain' "$prompt" "$kind command did not deliver the worker reporting boundary"
+    assert_grep 'captain-facing language in project instructions is subordinate to this launch contract' "$prompt" "$kind command did not deliver launch-contract precedence"
     assert_grep 'follow this brief instead of that supervisor contract' "$prompt" "$kind command did not deliver the role correction"
     assert_grep 'brief for' "$prompt" "$kind command lost the task"
     [ "$(grep -c '^# Current worker role contract$' "$prompt")" -eq 1 ] ||
