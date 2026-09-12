@@ -66,6 +66,17 @@ scorecard_stream() {
   esac
 }
 
+scorecard_status() { # <key> <stream-path>
+  if [ "$1" = K2 ]; then
+    jq -e 'select(.op == "wake-drain" and .actor == "present" and (.mode == "main" or .mode == "branch") and (.foldMs | type == "number" and . > 0))' "$2" >/dev/null 2>&1 \
+      && printf measured || printf unmeasured
+  elif [ -s "$2" ] && [ ! -L "$2" ]; then
+    printf measured
+  else
+    printf unmeasured
+  fi
+}
+
 cmd_scorecard() {
   local scorecard="$DATA/stability-scorecard-2026-09-11.md" line key stream file status
   if [ -f "$scorecard" ] && [ ! -L "$scorecard" ]; then
@@ -74,16 +85,14 @@ cmd_scorecard() {
       case "$key" in K1|K2|K3|K4|K5|K6|K7|K8|K9|K10|K12|K13) ;; *) continue ;; esac
       stream=$(scorecard_stream "$key")
       file=$(stream_path "$stream")
-      status=unmeasured
-      [ -s "$file" ] && [ ! -L "$file" ] && status=measured
+      status=$(scorecard_status "$key" "$file")
       printf '%s%s | telemetry=%s\n' "$key" "${line#"$key"}" "$status"
     done < "$scorecard"
   else
     for key in K1 K2 K3 K4 K5 K6 K7 K8 K9 K10 K12 K13; do
       stream=$(scorecard_stream "$key")
       file=$(stream_path "$stream")
-      status=unmeasured
-      [ -s "$file" ] && [ ! -L "$file" ] && status=measured
+      status=$(scorecard_status "$key" "$file")
       printf '%s: %s\n' "$key" "$status"
     done
   fi

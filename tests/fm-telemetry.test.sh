@@ -2,11 +2,12 @@
 # Behavior tests for lifecycle telemetry recording and reporting.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/wake-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CLI="$ROOT/bin/fm-telemetry.sh"
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-telemetry-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-telemetry)
 
@@ -70,6 +71,47 @@ test_cli_surfaces() {
   pass "tail, help, and scorecard surfaces expose bounded telemetry"
 }
 
+test_wake_drain_records_attributed_fold() {
+  local dir state home data fakebin counter out err sequence generation row scorecard
+  dir=$(make_case telemetry-drain)
+  state="$dir/state"
+  home="$dir/home"
+  data="$home/data"
+  fakebin="$dir/fakebin"
+  counter="$dir/date-count"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  mkdir -p "$data"
+  printf '# scorecard\nK2: wake drain\n' > "$data/stability-scorecard-2026-09-11.md"
+  record "$home" lifecycle '{"op":"spawn","elapsedMs":1}'
+  scorecard=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$CLI" scorecard) || fail "scorecard rejected legacy lifecycle data"
+  assert_contains "$scorecard" 'K2: wake drain | telemetry=unmeasured' "scorecard treated an unattributed row as K2 data"
+  cat > "$fakebin/date" <<'SH'
+#!/usr/bin/env bash
+n=$(cat "${FM_FAKE_DATE_COUNTER}" 2>/dev/null || printf 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$FM_FAKE_DATE_COUNTER"
+printf '%s\n' "$n"
+SH
+  chmod +x "$fakebin/date"
+  printf 'working: telemetry fixture\n' > "$state/fixture.status"
+  append_wake "$state" check fixture 'check: telemetry fixture' || fail "fixture wake append failed"
+  PATH="$fakebin:$PATH" FM_FAKE_DATE_COUNTER="$counter" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state" \
+    "$DRAIN" > "$out" 2> "$err" || fail "wake drain failed"
+  row=$(jq -c 'select(.op == "wake-drain" and .actor == "present")' "$data/telemetry/lifecycle.jsonl")
+  printf '%s' "$row" | jq -e '.mode == "main" and (.foldMs | type == "number" and . > 0)' >/dev/null \
+    || fail "wake drain telemetry omitted mode or a positive foldMs: $row"
+  scorecard=$(FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$CLI" scorecard) || fail "scorecard failed after wake drain"
+  assert_contains "$scorecard" 'K2: wake drain | telemetry=measured' "scorecard did not recognize the attributed drain row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  PATH="$fakebin:$PATH" FM_FAKE_DATE_COUNTER="$counter" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_STATE_OVERRIDE="$state" \
+    "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" || fail "wake acknowledgement failed"
+  jq -e 'select(.op == "wake-drain" and .actor == "ack" and .mode == "main")' "$data/telemetry/lifecycle.jsonl" >/dev/null \
+    || fail "wake acknowledgement telemetry omitted actor or mode"
+  pass "wake drain telemetry attributes presentation and acknowledgement with a measurable fold"
+}
+
 test_stats_math() {
   local home out
   home=$(make_home stats)
@@ -89,3 +131,4 @@ test_append_format_and_failure_is_best_effort
 test_rotation
 test_stats_math
 test_cli_surfaces
+test_wake_drain_records_attributed_fold

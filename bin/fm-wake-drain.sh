@@ -68,6 +68,8 @@ case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10
 # safe to split: the branch's ack can never remove a row it was not granted,
 # so it can never swallow a main-owned row still waiting for main.
 ACTOR=$(fm_lease_actor) || exit 2
+DRAIN_TELEMETRY_ACTOR=present
+DRAIN_TELEMETRY_MODE=$ACTOR
 ELIGIBLE_ROWS_FILE="$STATE/.branch-eligible-rows"
 ELIGIBLE_OWNER_FILE="$STATE/.branch-eligible-owner"
 MAIN_ROWS_FILE="$STATE/.main-eligible-rows"
@@ -701,7 +703,7 @@ cleanup() {
   local status=$? elapsed
   elapsed=$(( $(fm_telemetry_now_ms) - DRAIN_TELEMETRY_STARTED ))
   [ "$elapsed" -ge 0 ] || elapsed=0
-  fm_telemetry_record lifecycle "{\"op\":\"wake-drain\",\"elapsedMs\":$elapsed,\"foldMs\":$DRAIN_TELEMETRY_FOLD_MS,\"status\":$status}"
+  fm_telemetry_record lifecycle "{\"op\":\"wake-drain\",\"actor\":\"$DRAIN_TELEMETRY_ACTOR\",\"mode\":\"$DRAIN_TELEMETRY_MODE\",\"elapsedMs\":$elapsed,\"foldMs\":$DRAIN_TELEMETRY_FOLD_MS,\"status\":$status}"
   [ -z "$DRAIN_TMP" ] || rm -f -- "$DRAIN_TMP" 2>/dev/null || true
   [ -z "$DRAIN_VIEW_TMP" ] || rm -f -- "$DRAIN_VIEW_TMP" 2>/dev/null || true
   if [ "$DRAIN_LOCK_HELD" = true ]; then
@@ -738,6 +740,7 @@ fm_wake_queue_sequences_unique "$FM_WAKE_QUEUE" || {
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
 if [ -n "$ACK_THROUGH" ]; then
+  DRAIN_TELEMETRY_ACTOR=ack
   if [ "$ACTOR" = branch ]; then
     PRESENTED_MAX=$(presented_max_row "$ELIGIBLE_ROWS_FILE") || exit 1
   else
@@ -876,7 +879,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  (print_status_presentation) || true
+  print_status_presentation || true
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -897,7 +900,7 @@ if [ "$ACTOR" = main ]; then
     print_branch_held_notice
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
-    (print_status_presentation) || true
+    print_status_presentation || true
     assert_watcher_liveness
     exit 0
   fi
@@ -959,6 +962,6 @@ DRAIN_LOCK_HELD=false
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
-(print_status_presentation "$RAW_ROWS") || true
+print_status_presentation "$RAW_ROWS" || true
 assert_watcher_liveness
 exit 0
