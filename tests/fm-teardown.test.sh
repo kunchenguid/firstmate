@@ -1567,6 +1567,33 @@ EOF
   pass "a legacy record with no endpoint or worktree closes record-only without inventing an incarnation"
 }
 
+test_legacy_record_only_treats_archived_backlog_row_as_closed() {
+  local case_dir out
+  case_dir=$(make_case legacy-record-only-archived)
+  write_legacy_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  (
+    cd "$case_dir" || exit 1
+    tasks-axi "done" task-x1 --keep 0 --file data/backlog.md >/dev/null
+  ) || fail "legacy-record-only-archived: fixture could not archive the backlog row"
+  rm -rf "$case_dir/wt"
+  printf '%s\n' stale > "$case_dir/state/task-x1.progress"
+
+  out=$(run_teardown "$case_dir" 2>"$case_dir/stderr") \
+    || fail "legacy-record-only-archived: teardown refused an already archived row: $(<"$case_dir/stderr")"
+  rg -Fq 'task-x1' "$case_dir/data/done-archive.md" \
+    || fail "legacy-record-only-archived: teardown lost the archived backlog row"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-record-only-archived: teardown left the legacy task record behind"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "legacy-record-only-archived: teardown left a pending close for an already closed row"
+  assert_absent "$case_dir/state/task-x1.progress" \
+    "legacy-record-only-archived: teardown stopped before finishing state cleanup"
+  printf '%s\n' "$out" | rg -Fq 'reason=legacy-no-spawn_gen' \
+    || fail "legacy-record-only-archived: completion did not retain the record-only reason: $out"
+  pass "record-only teardown treats an archived backlog row as already closed"
+}
+
 test_legacy_record_only_marker_replays_after_close_failure() {
   local case_dir marker real out rc
   case_dir=$(make_case legacy-record-only-replay)
@@ -4302,6 +4329,7 @@ test_pi_extension_scratch_does_not_refuse_landed_worktree
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
 test_legacy_record_without_worktree_closes_record_only
+test_legacy_record_only_treats_archived_backlog_row_as_closed
 test_legacy_record_only_marker_replays_after_close_failure
 test_legacy_record_without_a_worktree_field_closes_record_only
 test_legacy_record_with_reassigned_slot_closes_record_only

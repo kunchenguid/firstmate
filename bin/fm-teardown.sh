@@ -124,6 +124,8 @@
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 # A record with no endpoint and no worktree closes record-only when it predates
 # spawn_gen or is a reportless scout, retaining that outcome as a backlog note.
+# An archived or missing backlog row is already closed on this recovery path,
+# so teardown retires the task and pending-close records without reopening it.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -3602,8 +3604,21 @@ rm -rf "$STATE/$ID.inbox"
 # ordering, the row returns to Queued with its deliverable recorded.
 if [ "$BACKLOG_CLOSED" = 1 ]; then
   BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
-  if ! fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
+  BACKLOG_TRANSITION_OK=0
+  if [ "$TEARDOWN_RECORD_ONLY" = 1 ] && ! fm_backlog_row_probe "$DATA" "$ID"; then
+    if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+      if fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" \
+          && fm_backlog_close_marker_remove "$BACKLOG_CLOSE_MARKER" "$STATE"; then
+        BACKLOG_TRANSITION_OK=1
+      fi
+    else
+      FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
+    fi
+  elif fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
       "$DATA" "$ID" "$STATE" "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
+    BACKLOG_TRANSITION_OK=1
+  fi
+  if [ "$BACKLOG_TRANSITION_OK" != 1 ]; then
     fm_lock_release "$META_LOCK"
     META_LOCK_HELD=0
     if [ "$BACKLOG_TRANSITION" = retain ]; then
