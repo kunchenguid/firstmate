@@ -627,6 +627,126 @@ test_unreadable_status_file_keeps_catchup_gated() {
   pass "an unreadable status stays private and gates until a successful reread"
 }
 
+# A meta with no status file used to abort the scan (return 1 on the first
+# unreadable path), hiding every later blocker. Missing is no events.
+test_missing_status_file_is_no_events() {
+  local dir out
+  dir="$TMP_ROOT/missing-status"
+  install_runner "$dir"
+  printf 'window=synthetic:fm-missing\nbackend=tmux\nkind=ship\n' > "$dir/home/state/missing-status.meta"
+  date +%s > "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a meta without a status file should not gate: $out"
+  assert_contains "$out" 'catch-up clear' "missing status did not announce a clear catch-up"
+  assert_not_contains "$out" 'status file unreadable:' "a missing status file aborted the scan"
+  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "missing status left the return gate behind"
+  pass "a missing status file is no events and does not gate"
+}
+
+# Age the status file so its mtime is strictly before the away-entry epoch.
+age_status() {  # <status-path> <epoch>
+  local path=$1 epoch=$2
+  if [ "$(uname)" = Darwin ]; then
+    touch -mt "$(date -r "$epoch" '+%Y%m%d%H%M.%S')" "$path"
+  else
+    touch -m -d "@$epoch" "$path"
+  fi
+}
+
+# A dead task (no current endpoint, not in-flight) with a blocked key older
+# than away-entry must not keep the return gate closed. It is still printed
+# so nothing is hidden.
+test_dead_old_blocker_is_stale_not_gating() {
+  local dir out now old
+  dir="$TMP_ROOT/dead-old-blocker"
+  install_runner "$dir"
+  printf 'backend=tmux\nkind=ship\n' > "$dir/home/state/dead-task.meta"
+  printf 'blocked [key=stale-token]: leftover from a finished worker\n' > "$dir/home/state/dead-task.status"
+  now=$(date +%s)
+  old=$((now - 86400))
+  age_status "$dir/home/state/dead-task.status" "$old"
+  printf '%s\n' "$now" > "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a dead task's old blocked key should not gate: $out"
+  assert_contains "$out" 'catch-up clear' "a dead old blocker did not announce a clear catch-up"
+  assert_contains "$out" 'stale, not gating: dead-task [key=stale-token]' "the dead old key was hidden instead of listed as stale"
+  assert_not_contains "$out" 'firstmate-actionable blocker: dead-task [key=stale-token]' \
+    "a dead old key was still reported as a firstmate-actionable blocker"
+  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "a dead old blocker left the return gate behind"
+  pass "a dead task with an old blocked key is stale and does not gate"
+}
+
+# A live task whose blocked event is newer than away-entry still gates.
+test_live_fresh_blocker_gates() {
+  local dir out rc
+  dir="$TMP_ROOT/live-fresh-blocker"
+  install_runner "$dir"
+  printf 'window=synthetic:fm-live\nbackend=tmux\nkind=ship\n' > "$dir/home/state/live-task.meta"
+  printf '%s\n' "$(( $(date +%s) - 3600 ))" > "$dir/home/state/.afk"
+  printf 'blocked [key=fresh-token]: firstmate can refresh the token\n' > "$dir/home/state/live-task.status"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a live fresh blocked key should gate return (rc=$rc): $out"
+  assert_contains "$out" 'firstmate-actionable blocker: live-task [key=fresh-token]' \
+    "a live fresh blocked key was not reported as a firstmate-actionable blocker"
+  assert_not_contains "$out" 'stale, not gating: live-task [key=fresh-token]' \
+    "a live fresh key was listed as stale"
+  [ -s "$dir/home/state/.afk-return-catchup" ] || fail "a live fresh blocked key did not persist the return gate"
+  pass "a live task with a fresh blocked key keeps the return gate closed"
+}
+
+# A missing status must not abort before a later live blocker is seen.
+test_missing_status_does_not_hide_later_live_blocker() {
+  local dir out rc
+  dir="$TMP_ROOT/missing-then-live"
+  install_runner "$dir"
+  printf 'window=synthetic:fm-aaa\nbackend=tmux\nkind=ship\n' > "$dir/home/state/aaa-missing.meta"
+  printf 'window=synthetic:fm-zzz\nbackend=tmux\nkind=ship\n' > "$dir/home/state/zzz-live.meta"
+  printf '%s\n' "$(( $(date +%s) - 3600 ))" > "$dir/home/state/.afk"
+  printf 'blocked [key=fresh-token]: firstmate can refresh the token\n' > "$dir/home/state/zzz-live.status"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "the later live blocker should still gate (rc=$rc): $out"
+  assert_not_contains "$out" 'status file unreadable:' "a missing status aborted the scan"
+  assert_contains "$out" 'firstmate-actionable blocker: zzz-live [key=fresh-token]' \
+    "a missing status hid the later live blocker"
+  pass "a missing status file does not hide a later live blocker"
+}
+
+# Secondmate streams gate on age, not MAIN endpoint liveness.
+test_secondmate_blocker_gates_only_when_fresh() {
+  local dir out rc now old
+  dir="$TMP_ROOT/secondmate-age"
+  install_runner "$dir"
+  printf 'kind=secondmate\n' > "$dir/home/state/old-mate.meta"
+  printf 'kind=secondmate\n' > "$dir/home/state/fresh-mate.meta"
+  printf 'blocked [key=old-token]: unanswered request from yesterday\n' > "$dir/home/state/old-mate.status"
+  now=$(date +%s)
+  old=$((now - 86400))
+  age_status "$dir/home/state/old-mate.status" "$old"
+  printf '%s\n' "$((now - 3600))" > "$dir/home/state/.afk"
+  printf 'blocked [key=fresh-token]: raised during the away window\n' > "$dir/home/state/fresh-mate.status"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a fresh secondmate blocker should gate (rc=$rc): $out"
+  assert_contains "$out" 'firstmate-actionable blocker: fresh-mate [key=fresh-token]' \
+    "a fresh secondmate blocked key did not gate"
+  assert_contains "$out" 'stale, not gating: old-mate [key=old-token]' \
+    "an old secondmate blocked key was hidden"
+  assert_not_contains "$out" 'firstmate-actionable blocker: old-mate [key=old-token]' \
+    "an old secondmate blocked key still gated"
+  pass "a secondmate blocked key gates only when newer than away-entry"
+}
+
 test_return_guard_refuses_while_the_record_exists() {
   local dir out rc
   dir="$TMP_ROOT/guard-record"
@@ -771,6 +891,11 @@ test_missing_epoch_record_stays_required_after_disappearing
 test_unreadable_outcome_store_keeps_catchup_gated
 test_failed_held_listing_keeps_catchup_gated
 test_unreadable_status_file_keeps_catchup_gated
+test_missing_status_file_is_no_events
+test_dead_old_blocker_is_stale_not_gating
+test_live_fresh_blocker_gates
+test_missing_status_does_not_hide_later_live_blocker
+test_secondmate_blocker_gates_only_when_fresh
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag

@@ -21,9 +21,11 @@
 # BEFORE the daemon shutdown so the shutdown itself cannot read as a gap.
 #
 # THE GATE. `blocked:` is the crewmate protocol's firstmate-actionable verb. A
-# live task's open blocked event must be remediated and closed with
-# `resolved [key=...]`, or explicitly reclassified in the status stream with a
-# durable reason, before an ordinary captain request may proceed.
+# live task's open blocked event, newer than the away-entry epoch, must be
+# remediated and closed with `resolved [key=...]`, or explicitly reclassified
+# in the status stream with a durable reason, before an ordinary captain
+# request may proceed. Missing status files are no events. Older or terminal
+# keys are listed as stale and do not gate.
 # `needs-decision:` is deliberately not part of this blocker gate. The gate
 # keeps every open blocker until that blocker's own resolution is proven.
 # Open-ness is bin/fm-classify-lib.sh's keyed fold (`status_open_decisions`), not
@@ -162,33 +164,107 @@ status_path_readable() {
   [ -f "$1" ] && [ -r "$1" ] && [ ! -L "$1" ]
 }
 
-scan_open_blockers() {  # -> tab-separated blocker rows
-  # Fold each live task's status log through classify-lib's keyed open/resolved
-  # owner. A key is a blocker only when that fold still has it open as
-  # `blocked`; raw `blocked` line counts would keep resolved keys gated.
+# live = recorded window, or in-flight backlog whose last verb is not done/failed.
+# secondmate streams gate on age alone. unknown stays open. dead never gates.
+task_blocker_liveness() {  # <id> <meta> <status> -> live|dead|secondmate|unknown
+  local id=$1 meta=$2 status=$3 kind window last verb
+  kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  window=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ "$kind" = secondmate ]; then
+    printf 'secondmate'
+    return 0
+  fi
+  if [ -n "$window" ]; then
+    printf 'live'
+    return 0
+  fi
+  if command -v fm_backlog_row_probe >/dev/null 2>&1 && fm_backlog_row_probe "$DATA" "$id" 2>/dev/null; then
+    if [ "${FM_BACKLOG_ROW_STATE:-}" = in_flight ]; then
+      last=$(last_status_line "$status")
+      verb=$(status_line_verb "$last")
+      case "$verb" in
+        done|failed) printf 'dead' ;;
+        *) printf 'live' ;;
+      esac
+      return 0
+    fi
+    printf 'dead'
+    return 0
+  fi
+  if [ "${FM_BACKLOG_ROW_RESULT:-}" = not_found ]; then
+    printf 'dead'
+    return 0
+  fi
+  printf 'unknown'
+}
+
+scan_open_blockers() {  # -> tab-separated blocker and stale rows
+  # Fold each task's status log through classify-lib's keyed open/resolved
+  # owner. A key gates only when that fold still has it open as `blocked`,
+  # the task is live or a secondmate stream (unknown stays open), and the
+  # status file is not older than the away-entry epoch. Missing status is
+  # no events; a present unreadable path is recorded and the scan continues.
   local meta id status key verb summary clean_summary open
+  local liveness event_epoch away_epoch fresh gates age now
   STATUS_SCAN_ERROR=
+  now=$(date +%s)
+  away_epoch=$(awk -F '\t' '$1 == "window" { print $2; exit }' "$GATE" 2>/dev/null || true)
+  case "$away_epoch" in ''|*[!0-9]*)
+    away_epoch=$(awk -F '\t' '$1 == "contract" { print $2; exit }' "$GATE" 2>/dev/null || true) ;;
+  esac
+  case "$away_epoch" in ''|*[!0-9]*)
+    away_epoch=$(awk -F '\t' '$1 == "started" { print $2; exit }' "$GATE" 2>/dev/null || true) ;;
+  esac
+  case "$away_epoch" in ''|*[!0-9]*) away_epoch= ;; esac
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta")
     id=${id%.meta}
     status="$STATE/$id.status"
     if ! status_path_readable "$status"; then
-      STATUS_SCAN_ERROR=$status
-      return 1
+      if [ -e "$status" ] || [ -L "$status" ]; then
+        [ -n "$STATUS_SCAN_ERROR" ] || STATUS_SCAN_ERROR=$status
+      fi
+      continue
     fi
     if ! open=$(status_open_decisions "$status"); then
-      STATUS_SCAN_ERROR=$status
-      return 1
+      [ -n "$STATUS_SCAN_ERROR" ] || STATUS_SCAN_ERROR=$status
+      continue
+    fi
+    liveness=$(task_blocker_liveness "$id" "$meta" "$status")
+    # ponytail: status mtime vs away-entry; per-line timestamps if false stale appears
+    event_epoch=$(fm_path_mtime "$status" 2>/dev/null || true)
+    case "$event_epoch" in ''|*[!0-9]*) event_epoch= ;; esac
+    fresh=1
+    if [ -n "$event_epoch" ] && [ -n "$away_epoch" ] && [ "$event_epoch" -lt "$away_epoch" ]; then
+      fresh=0
+    fi
+    gates=0
+    case "$liveness" in
+      unknown) gates=1 ;;
+      live|secondmate) [ "$fresh" -eq 1 ] && gates=1 ;;
+      dead) gates=0 ;;
+      *) liveness=unknown; gates=1 ;;
+    esac
+    if [ -n "$event_epoch" ]; then
+      age=$((now - event_epoch))
+      [ "$age" -ge 0 ] || age=0
+    else
+      age=unknown
     fi
     while IFS="$(printf '\t')" read -r key verb summary; do
       [ "$verb" = blocked ] || continue
       clean_summary=$(printf '%s' "$summary" | clean_field)
-      printf 'blocker\t%s\t%s\t%s\n' "$id" "$key" "$clean_summary"
+      if [ "$gates" -eq 1 ]; then
+        printf 'blocker\t%s\t%s\t%s\n' "$id" "$key" "$clean_summary"
+      else
+        printf 'stale\t%s\t%s\t%s\t%s\t%s\n' "$id" "$key" "$age" "$liveness" "$clean_summary"
+      fi
     done <<EOF
 $open
 EOF
   done
+  [ -z "$STATUS_SCAN_ERROR" ] || return 1
 }
 
 write_pending_seed() {  # <window-epoch> <contract-epoch>  Fail-closed marker before any lifecycle mutation.
@@ -240,6 +316,14 @@ print_blockers() {  # <file>
   while IFS="$(printf '\t')" read -r tag id key summary; do
     [ "$tag" = blocker ] || continue
     printf 'firstmate-actionable blocker: %s [key=%s] %s\n' "$id" "$key" "$summary"
+  done < "$file"
+}
+
+print_stale() {  # <file>
+  local file=$1 tag id key age state summary
+  while IFS="$(printf '\t')" read -r tag id key age state summary; do
+    [ "$tag" = stale ] || continue
+    printf 'stale, not gating: %s [key=%s] age=%ss state=%s %s\n' "$id" "$key" "$age" "$state" "$summary"
   done < "$file"
 }
 
@@ -448,6 +532,16 @@ EOF
   done
   [ "$count" -gt 0 ] || printf '  (nothing)\n'
 
+  count=0
+  while IFS="$(printf '\t')" read -r tag task key age state summary; do
+    [ "$tag" = stale ] || continue
+    count=$((count + 1))
+    if [ "$count" -eq 1 ]; then
+      printf 'Stale, not gating:\n'
+    fi
+    printf '  stale, not gating: %s [key=%s] age=%ss state=%s %s\n' "$task" "$key" "$age" "$state" "$summary"
+  done < "$blockers"
+
   # 5. handled while away.
   printf 'Handled while away:\n'
   routine=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')
@@ -623,6 +717,7 @@ EOF
     printf 'fm-afk-return: catch-up must finish before the captain request\n' >&2
     print_evidence "$GATE" >&2
     print_blockers "$GATE" >&2
+    print_stale "$GATE" >&2
     printf 'fm-afk-return: handle each blocker now, or close it with resolved [key=...] and append a durable reclassification reason, then run bin/fm-afk-return.sh check\n' >&2
     rm -f "$evidence" "$blockers" "$drain_err"
     return 3
