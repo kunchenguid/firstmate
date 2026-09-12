@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # tests/fm-watch-wedge-cap.test.sh - focused unit tests for the
 # FM_WEDGE_MAX_ESCALATIONS cap (local patch 2026-08-19, v6). Verifies:
-#   1. cap fires PERMANENTLY-WEDGED at the threshold and writes the
-#      per-(window, hash) marker;
-#   2. subsequent polls for the same hash are silent (no extra wakes);
+#   1. cap fires PERMANENTLY-WEDGED at the threshold and writes BOTH
+#      markers: STATE/.wedge-permanent-<key> (window-scoped) and
+#      STATE/.wedge-permanent-<key>-<hash12> (per-hash);
+#   2. subsequent polls for any hash in that window are silent (no extra
+#      wakes) - fresh hashes included, per the v12 window-scoped gate;
 #   3. the cap persists across pause-class transitions (paused: then
 #      lifted) - Greptile R4 fix;
 #   4. the cap is bound by FM_CAP_HORIZON_SECS (re-fires after the
-#      horizon elapses) - Greptile R8 fix (v9 design, hash-keyed cap
-#      and horizon-bounded are the two exit conditions; the third is
-#      operator rm);
+#      horizon elapses) - Greptile R8 fix (the exit conditions are the
+#      horizon and an operator removing BOTH markers; a pane hash change
+#      alone does not re-engage while the window-scoped marker stands);
 #   5. invalid override values (0, non-integer) fall back to the default
 #      for FM_WEDGE_MAX_ESCALATIONS and FM_CAP_HORIZON_SECS.
 set -u
@@ -97,12 +99,13 @@ seen_sig() {
 # --- FM_WEDGE_MAX_ESCALATIONS cap (local patch 2026-08-19, v6) ----------------
 # The cap is a hard floor on the LLM-supervised unattended loop that the 2026-
 # 08-18 MiniMax drain (~359M tokens) demonstrated. Past FM_WEDGE_MAX_ESCALATIONS
-# consecutive wedge escalations on the SAME (window, hash), the watcher emits ONE
-# terminal wake with PERMANENTLY-WEDGED and writes a STATE/.wedge-permanent-
-# <key>-<hash12> marker (the timestamp is the cap-fire epoch). Three exit
-# conditions: FM_CAP_HORIZON_SECS elapses since that timestamp (default 24h);
-# the pane hash changes (different marker key naturally invalidates the cap);
-# the operator manually removes the marker. No auto-lift on
+# consecutive wedge escalations on the same window, the watcher emits ONE
+# terminal wake with PERMANENTLY-WEDGED and writes BOTH STATE/.wedge-permanent-
+# <key>-<hash12> (per-hash) and STATE/.wedge-permanent-<key> (window-scoped,
+# v12); each marker's content is the cap-fire epoch. Two exit conditions:
+# FM_CAP_HORIZON_SECS elapses since that timestamp (default 24h), or the
+# operator manually removes BOTH markers - a pane hash change alone does NOT
+# re-engage while the window-scoped marker stands (v12). No auto-lift on
 # pause_state_class=working (the v6/v7 lift sites were removed in v9 because
 # pause_state_class=working can be a steady state during a wedge, not a recovery
 # signal).
@@ -885,8 +888,9 @@ test_wedge_cap_persists_across_pause_class_transitions() {
 }
 
 # v9: cap is bound by FM_CAP_HORIZON_SECS, NOT by pause_state_class=working lift sites.
-# A new hash invalidates the marker naturally (keyed on hash); operator can `rm`
-# manually for immediate re-engagement. See tests below for the new semantics.
+# v12: a new hash does NOT lift the cap - the window-scoped marker silences all
+# hashes in the window; operator can `rm` BOTH markers for immediate
+# re-engagement. See tests below for the new semantics.
 
 test_wedge_cap_expires_after_horizon() {
   local dir state fakebin out capture_file window key pane_hash sig pid max marker
