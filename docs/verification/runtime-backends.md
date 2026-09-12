@@ -648,6 +648,30 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Worker agent display names
+
+Measured 2026-09-12 on Linux x86_64 with Herdr 0.9.0 protocol 22 and Pi in a guarded non-default lab.
+The full `fm-spawn.sh` pane-shell launch produced a task tab labeled `fm-worker-label` while `herdr agent get <pane>` reported `name: null`; its terminal title ended in the repository fallback `firstmate`.
+A separate pane launched through Herdr's named-agent interface reported `name: task-specific-worker`, and changing only the shell-launched pane with `herdr agent rename <pane> fm-counterfactual` made the same exact agent read back with `name: fm-counterfactual`.
+This isolates the cause to Firstmate's unnamed pane-shell launch rather than Pi detection, the task tab, cwd, or Herdr's ability to carry a specific identity.
+
+The active regression runs the full public spawn path with prompt-free Pi, routes every Herdr call through `bin/fm-herdr-lab.sh`, and verifies both `agent get` and `agent list` expose the same task-derived name:
+
+```sh
+bin/fm-test-run.sh tests/fm-backend-herdr.test.sh tests/fm-backend-herdr-agent-name-e2e.test.sh
+```
+
+```text
+ok - Herdr task agent names are role-specific, stable, cross-home unique, normalized, and bounded
+ok - fm_backend_herdr_name_task_agent waits for auto-detection, renames the exact pane, and verifies the visible identity
+ok - fm_backend_herdr_name_task_agent rejects unreadable agent responses
+ok - full fm-spawn names a canonical verified Pi worker
+ok - Herdr's agent get and Agents list agree on the exact named worker pane
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0
+```
+
+Herdr's 0.7.1 documentation already exposes `agent rename`, so this naming path remains within the backend's protocol-14 compatibility floor rather than adding a newer capability requirement.
+
 ### fm-remote server birth and login-keychain access
 
 Measured 2026-09-09 on macOS 26 (Darwin 25.6.0) aarch64 with Claude Code 2.1.266 and Herdr 0.9.0, the guarantee behind `bin/fm-remote-herdr-guard.sh` and the doctor's `herdr-server` check: login-keychain access follows the audit session a process was born into, never the launch shape or the shell.

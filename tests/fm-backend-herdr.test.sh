@@ -323,6 +323,77 @@ test_workspace_label_different_secondmates_get_different_labels() {
   pass "fm_backend_herdr_workspace_label: two different secondmate homes get two different, non-colliding labels"
 }
 
+# --- task agent names: visible identity for shell-launched workers -----------
+
+test_task_agent_names_are_specific_stable_and_session_unique() {
+  local primary1 primary2 second name same other_home scout mate child long
+  primary1="$TMP_ROOT/agent-name-primary-1"; mkdir -p "$primary1"
+  primary2="$TMP_ROOT/agent-name-primary-2"; mkdir -p "$primary2"
+  second="$TMP_ROOT/agent-name-secondmate"; mkdir -p "$second"
+  printf 'domain-a1\n' > "$second/.fm-secondmate-home"
+
+  name=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_agent_name worker-label ship "$1"' "$ROOT" "$primary1")
+  same=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_agent_name worker-label ship "$1"' "$ROOT" "$primary1")
+  other_home=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_agent_name worker-label ship "$1"' "$ROOT" "$primary2")
+  scout=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_agent_name worker-label scout "$1"' "$ROOT" "$primary1")
+  mate=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_agent_name domain-a1 secondmate "$1"' "$ROOT" "$second")
+  child=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_agent_name worker-label ship "$1"' "$ROOT" "$second")
+  long=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_agent_name ABC.DEF-012345678901234567890123456789012345678901234567890123 scout "$1"' "$ROOT" "$second")
+
+  [[ "$name" =~ ^crew-worker-label-[0-9a-f]{10}$ ]] || fail "primary worker name is not task-specific and valid: $name"
+  [ "$same" = "$name" ] || fail "the same task identity should derive the same Herdr agent name"
+  [ "$other_home" != "$name" ] || fail "the same task id in two Firstmate homes must not collide in one Herdr session"
+  [[ "$scout" =~ ^scout-worker-label-[0-9a-f]{10}$ ]] || fail "scout name does not preserve its genuine role and task: $scout"
+  [[ "$mate" =~ ^secondmate-domain-a1-[0-9a-f]{10}$ ]] || fail "secondmate name does not preserve its genuine role and id: $mate"
+  [[ "$child" =~ ^crew-worker-label-[0-9a-f]{10}$ ]] || fail "secondmate-owned worker name does not preserve the task-readable stem: $child"
+  [ "$child" != "$name" ] || fail "the same task id in a primary and secondmate home must not collide in one Herdr session"
+  [[ "$long" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || fail "normalized long task name is outside Herdr's public name grammar: $long"
+  [ "${#long}" -le 32 ] || fail "normalized long task name exceeds Herdr's 32-byte limit: $long"
+  pass "Herdr task agent names are role-specific, stable, cross-home unique, normalized, and bounded"
+}
+
+test_name_task_agent_waits_for_detection_then_renames_and_verifies() {
+  local dir log resp fb home expected out status
+  dir="$TMP_ROOT/agent-name-rename"; mkdir -p "$dir/responses" "$dir/home"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  expected=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_agent_name worker-label ship "$1"' "$ROOT" "$dir/home")
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","pane_id":"w1:p9","name":null}}}\n' > "$resp/2.out"
+  : > "$resp/3.out"
+  printf '{"result":{"agent":{"agent":"pi","pane_id":"w1:p9","name":"%s"}}}\n' "$expected" > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/sleep"
+  chmod +x "$fb/sleep"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_task_agent fmtest:w1:p9 worker-label ship "$1"' \
+    "$ROOT" "$dir/home" 2>&1)
+  status=$?
+  expect_code 0 "$status" "task-agent naming should wait for auto-detection, rename, and verify"
+  [ "$out" = "$expected" ] || fail "task-agent naming returned '$out', want '$expected'"
+  assert_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''rename'$'\x1f''w1:p9'$'\x1f'"$expected" \
+    "task-agent naming did not rename the exact worker pane to its derived identity"
+  [ "$(grep -c $'\x1f''agent'$'\x1f''get'$'\x1f''w1:p9' "$log")" = 3 ] \
+    || fail "task-agent naming should read until detection and verify once after rename"
+  pass "fm_backend_herdr_name_task_agent waits for auto-detection, renames the exact pane, and verifies the visible identity"
+}
+
+test_name_task_agent_rejects_unreadable_agent_response() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/agent-name-unreadable"; mkdir -p "$dir/responses" "$dir/home"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'not-json\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_task_agent fmtest:w1:p9 worker-label ship "$1"' \
+    "$ROOT" "$dir/home" 2>&1)
+  status=$?
+  expect_code 1 "$status" "task-agent naming must reject an unreadable agent response"
+  assert_contains "$out" "unreadable agent response" "task-agent naming did not identify the unreadable response"
+  [ "$(grep -c $'\x1f''agent'$'\x1f''get'$'\x1f''w1:p9' "$log")" = 1 ] \
+    || fail "task-agent naming should reject an unreadable response immediately"
+  pass "fm_backend_herdr_name_task_agent rejects unreadable agent responses"
+}
+
 # --- fm_backend_herdr_cli: session targeting (2026-07-02 incident fix) -------
 
 test_cli_helper_sets_env_and_appends_trailing_session_flag() {
@@ -5178,6 +5249,9 @@ test_workspace_label_secondmate_home_uses_marker_id
 test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
+test_task_agent_names_are_specific_stable_and_session_unique
+test_name_task_agent_waits_for_detection_then_renames_and_verifies
+test_name_task_agent_rejects_unreadable_agent_response
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_recovery_grade_read_widens_only_at_its_own_boundary
