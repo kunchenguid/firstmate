@@ -1112,6 +1112,26 @@ test_send_text_submit_accepts_wrapped_bare_text() {
   pass "fm_backend_zellij_send_text_submit: observes wrapped text in a bare composer"
 }
 
+test_send_text_submit_preserves_non_agy_whitespace_contract() {
+  local dir fb out text
+  dir="$TMP_ROOT/submit-long-non-agy"; mkdir -p "$dir/responses"
+  text='thisisadeliberatelylongunbrokensteerthatwrapsacrossabarecontinuationrow'
+  zellij_pane_response "$dir" 1 7 3
+  printf '%s' $'❯ ' > "$dir/responses/2.out"
+  zellij_pane_response "$dir" 3 7 3
+  zellij_pane_response "$dir" 5 7 3
+  printf '%s' $'❯ thisisadeliberatelylongunbrokensteerthat\nwrapsacrossabarecontinuationrow' > "$dir/responses/6.out"
+  zellij_pane_response "$dir" 7 7 3
+  zellij_pane_response "$dir" 9 7 3
+  printf '%s' $'thisisadeliberatelylongunbrokensteerthatwrapsacrossabarecontinuationrow\n❯ ' > "$dir/responses/10.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "$1" 2 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "a wrapped unbroken non-AGY steer should submit as before, got '$out'"
+  pass "fm_backend_zellij_send_text_submit: preserves non-AGY wrapped unbroken text"
+}
+
 test_send_text_submit_preserves_agent_glyph_within_wrapped_content() {
   local dir fb out text
   dir="$TMP_ROOT/submit-wrapped-agent-glyph"; mkdir -p "$dir/responses"
@@ -1378,6 +1398,7 @@ test_send_text_submit_rejects_existing_intended_text_after_noop_paste
 test_send_text_submit_rejects_furniture_match_after_noop_paste
 test_send_text_submit_accepts_wrapped_boxed_text
 test_send_text_submit_accepts_wrapped_bare_text
+test_send_text_submit_preserves_non_agy_whitespace_contract
 test_send_text_submit_preserves_agent_glyph_within_wrapped_content
 test_send_text_submit_rejects_stale_composer_above_live_shell
 test_composer_state_reads_styled_dump

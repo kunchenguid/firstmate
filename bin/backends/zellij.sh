@@ -557,14 +557,20 @@ fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expe
   cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label" "$harness") || return 1
   caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$capture_lines")
   after=$(fm_composer_extract_selected_content "$caps" "$cap" '' "$harness") || return 1
-  before=$(fm_composer_normalize_compare_text "$before")
-  text=$(fm_composer_normalize_compare_text "$text")
-  after=$(fm_composer_normalize_compare_text "$after")
   [ -n "$text" ] || return 1
   if [ "$harness" = agy ]; then
+    before=$(fm_composer_normalize_compare_text "$before")
+    text=$(fm_composer_normalize_compare_text "$text")
+    after=$(fm_composer_normalize_compare_text "$after")
     [ -z "$before" ] || return 1
     expected=$text
   else
+    fm_composer_normalize_spaces_var before
+    fm_composer_normalize_spaces_var text
+    fm_composer_normalize_spaces_var after
+    before=${before//[$' \t\r\n\v\f']/}
+    text=${text//[$' \t\r\n\v\f']/}
+    after=${after//[$' \t\r\n\v\f']/}
     expected=$before$text
   fi
   [ "$after" = "$expected" ]

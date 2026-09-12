@@ -208,7 +208,7 @@ if [ "${FM_AGY_LIFECYCLE_LIVE_E2E:-}" != 1 ]; then
 fi
 
 run_agy_canonical_lifecycle() (
-  local task="live-agy-lifecycle-$$" lab project home status target version
+  local task="live-agy-lifecycle-$$" lab project home status target version stable_verdict stable_count draft_landed content note_line
   local spawned=0 state capture busy=0 turn_end=0 verdict=unknown trust_seen=0
   [ "${FM_AGY_LIFECYCLE_LIVE_E2E:-}" = 1 ] || return 0
   die() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
@@ -328,20 +328,46 @@ EOF
     grep -Fq 'state=unknown' "$state/$task.busy-state" \
     || die "agy ($version): data-plane interrupt did not preserve unknown semantic state"
   lifecycle_exit_draft='AGY_EXIT_UNSENT_DRAFT'
-  TMUX_TMPDIR="$lab/tmux" tmux send-keys -t "$target" -l "$lifecycle_exit_draft" \
-    || die "agy ($version): could not leave an unsent composer draft before exit"
-  for _ in $(seq 1 30); do
+  stable_verdict=unknown
+  stable_count=0
+  for _ in $(seq 1 20); do
     verdict=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
       bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state "$2" agy' _ "$ROOT" "$target" 2>/dev/null || true)
-    [ "$verdict" = pending ] && break
-    sleep 1
+    if [ "$verdict" = "$stable_verdict" ] && [ "$verdict" != unknown ]; then
+      stable_count=$((stable_count + 1))
+    else
+      stable_verdict=$verdict
+      stable_count=1
+    fi
+    [ "$stable_count" -ge 2 ] && break
+    sleep 0.25
   done
-  [ "$verdict" = pending ] || die "agy ($version): exit draft did not reach a proven pending composer"
+  [ "$stable_count" -ge 2 ] || die "agy ($version): composer did not settle before the exit draft"
+  draft_landed=0
+  for _ in 1 2; do
+    TMUX_TMPDIR="$lab/tmux" tmux send-keys -t "$target" -l "$lifecycle_exit_draft" \
+      || die "agy ($version): could not leave an unsent composer draft before exit"
+    for _ in $(seq 1 20); do
+      verdict=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+        bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state "$2" agy' _ "$ROOT" "$target" 2>/dev/null || true)
+      if [ "$verdict" = pending ]; then
+        content=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+          bash -c '. "$1/bin/fm-backend.sh"; fm_backend_agy_composer_content tmux "$2" "$3"' _ "$ROOT" "$target" "fm-$task" 2>/dev/null || true)
+        case "$content" in
+          *"$lifecycle_exit_draft"*) draft_landed=1; break ;;
+        esac
+      fi
+      sleep 0.25
+    done
+    [ "$draft_landed" -eq 1 ] && break
+  done
+  [ "$draft_landed" -eq 1 ] || die "agy ($version): exit draft did not reach the composer with its marker intact"
   TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-control.sh" "$task" exit >/dev/null 2>&1 \
     || die "agy ($version): exit command failed"
-  grep -Fq "note: exit cleared unsent composer text: $lifecycle_exit_draft" "$status" \
-    || die "agy ($version): exit did not record the cleared composer draft"
+  note_line=$(grep -F 'note: exit cleared unsent composer text:' "$status" | tail -1 || true)
+  printf '%s\n' "$note_line" | grep -Fq "$lifecycle_exit_draft" \
+    || die "agy ($version): exit did not record the cleared composer marker"
   mkdir -p "$home/data/$task"
   : > "$home/data/$task/report.md"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-decision-hold.sh" complete "$task" --none \
