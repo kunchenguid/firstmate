@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Render required project instructions for a worker launch or context recovery.
 # Usage: fm-project-context.sh <project-dir> <worktree> <config-dir>
-# Optional projects use config/project-context/<project-basename>.paths.
 # UseRialto/rialto-backend and UseRialto/rialto-frontend always require
 # config/rialto-project-context.paths: exactly five absolute paths, ordered as
 # backend CLAUDE.md, backend AGENTS.md, frontend CLAUDE.md, frontend AGENTS.md,
@@ -9,11 +8,11 @@
 # Prepare without changing a home:
 # fm-project-context.sh --prepare-rialto <backend-dir> <frontend-dir> <product-AGENTS>
 # Redirect stdout to a staging file, then review before installing configuration.
-# Rendering also requires current-worktree CLAUDE.md and AGENTS.md; optional
-# manifests resolve relative paths there. Output includes full bytes and SHA-256.
+# Rendering also requires current-worktree CLAUDE.md and AGENTS.md.
+# Output includes full bytes and SHA-256.
 set -euo pipefail
 if [ "${1:-}" = --help ]; then
-  sed -n '2,14p' "$0"
+  sed -n '2,12p' "$0"
   exit 0
 fi
 repo_identity() {
@@ -59,25 +58,17 @@ fi
 project=$1
 worktree=$(cd "$2" && pwd -P)
 config=$3
-manifest="$config/project-context/$(basename "$project").paths"
 identity=$(repo_identity "$worktree")
 project_identity=$(repo_identity "$project")
-if [ -n "$identity" ] || [ -n "$project_identity" ]; then
-  manifest="$config/rialto-project-context.paths"
-  [ -f "$manifest" ] || { printf 'error: required Rialto configuration missing: %s; use fm-project-context.sh --prepare-rialto with verified backend, frontend and product AGENTS.md sources\n' "$manifest" >&2; exit 1; }
-  sources=()
-  while IFS= read -r source || [ -n "$source" ]; do sources+=("$source"); done < "$manifest"
-  validate_rialto "${sources[@]}"
-else
-  [ -f "$manifest" ] || exit 0
-fi
+[ -n "$identity" ] || [ -n "$project_identity" ] || exit 0
+manifest="$config/rialto-project-context.paths"
+[ -f "$manifest" ] || { printf 'error: required Rialto configuration missing: %s; use fm-project-context.sh --prepare-rialto with verified backend, frontend and product AGENTS.md sources\n' "$manifest" >&2; exit 1; }
+sources=()
+while IFS= read -r source || [ -n "$source" ]; do sources+=("$source"); done < "$manifest"
+validate_rialto "${sources[@]}"
 buffer=$(mktemp)
 trap 'rm -f -- "$buffer"' EXIT
-{
-  printf '%s\n' 'CLAUDE.md' 'AGENTS.md'
-  cat "$manifest"
-} | while IFS= read -r source || [ -n "$source" ]; do
-  case "$source" in ''|'#'*) continue ;; /*) ;; *) source="$worktree/$source" ;; esac
+for source in "$worktree/CLAUDE.md" "$worktree/AGENTS.md" "${sources[@]}"; do
   [ -f "$source" ] && [ -r "$source" ] || { printf 'error: required project context is unreadable: %s\n' "$source" >&2; exit 1; }
   digest=$(shasum -a 256 "$source")
   digest=${digest%% *}

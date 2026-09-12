@@ -1136,9 +1136,8 @@ The shared staleness proof lives in `bin/fm-lock-lib.sh`, which both `fm-teardow
 ## Required project context
 
 Required development instructions reach every worker runtime through the common launch text.
-Git remotes identifying `UseRialto/rialto-backend` or `UseRialto/rialto-frontend` require `config/rialto-project-context.paths` even without an optional manifest.
+Git remotes identifying `UseRialto/rialto-backend` or `UseRialto/rialto-frontend` require `config/rialto-project-context.paths`.
 This private source configuration follows the existing primary-authoritative secondmate inheritance and convergence path; inaccessible paired sources on a child host stop its worker launch.
-Other projects can opt in with a per-project manifest.
 Use `bin/fm-project-context.sh --prepare-rialto "$BACKEND_CHECKOUT" "$FRONTEND_CHECKOUT" "$PRODUCT_AGENTS" > rialto-project-context.paths` to prepare a staging artifact without modifying a running home.
 Supply the reviewed source checkouts and product instructions, review the emitted paths, and install configuration only through a separately authorized home operation.
 Private absolute paths are never shared defaults.
