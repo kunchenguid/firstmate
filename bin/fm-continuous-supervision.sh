@@ -16,7 +16,7 @@ DIR=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$DIR/.." && pwd)}
 FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
-CONFIG=$FM_HOME/config
+CONFIG=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
 FLAG=$CONFIG/continuous-supervision
 RECORD=$STATE/.continuous-supervision-terminal
 LOCK=$STATE/.continuous-supervision-launch.lock
@@ -41,15 +41,18 @@ lock_acquire() {
   return 1
 }
 
+valid_record_field() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_.:%+-]*) return 1 ;;
+  esac
+}
+
 record_read() {
   REC_SESSION=''
   REC_TARGET=''
   [ -f "$RECORD" ] || return 1
   IFS=$(printf '\t') read -r REC_SESSION REC_TARGET < "$RECORD" || return 2
-  case "$REC_SESSION:$REC_TARGET" in
-    *[!A-Za-z0-9_.:%+-]*) return 2 ;;
-  esac
-  [ -n "$REC_SESSION" ] && [ -n "$REC_TARGET" ]
+  valid_record_field "$REC_SESSION" && valid_record_field "$REC_TARGET" || return 2
 }
 
 session_alive() { tmux has-session -t "$1" 2>/dev/null; }
@@ -72,7 +75,7 @@ wait_ready() {
   local i=0
   while [ "$i" -lt 100 ]; do
     i=$((i + 1))
-    fm_afk_daemon_owns_supervision "$STATE" && return 0
+    fm_afk_daemon_owns_supervision "$STATE" "$CONFIG" && return 0
     session_alive "$1" || return 1
     sleep 0.05
   done
@@ -88,11 +91,15 @@ ensure() {
     log "continuous supervision currently supports tmux supervisor sessions only"
     return 1
   }
+  valid_record_field "$target" || {
+    log "supervisor target '$target' cannot be recorded; use a pane id or a session:window target of [A-Za-z0-9_.:%+-]"
+    return 1
+  }
   lock_acquire || return 1
   record_read
   rc=$?
   if [ "$rc" -eq 0 ] && [ "$REC_TARGET" = "$target" ] \
-     && session_alive "$REC_SESSION" && fm_afk_daemon_owns_supervision "$STATE"; then
+     && session_alive "$REC_SESSION" && fm_afk_daemon_owns_supervision "$STATE" "$CONFIG"; then
     fm_lock_release "$LOCK"
     printf 'continuous-supervision: running session=%s target=%s\n' "$REC_SESSION" "$REC_TARGET"
     return 0
@@ -101,7 +108,7 @@ ensure() {
   # A live daemon without this lifecycle's matching live terminal is another
   # owner (normally an away-mode launch or a surviving prior implementation).
   # Never kill, adopt, or race it. Its own lifecycle must reconcile it first.
-  if fm_afk_daemon_owns_supervision "$STATE" \
+  if fm_afk_daemon_owns_supervision "$STATE" "$CONFIG" \
      && { [ "$rc" -ne 0 ] || ! session_alive "$REC_SESSION"; }; then
     fm_lock_release "$LOCK"
     log "a live supervisor daemon exists without a matching continuous-supervision terminal; refusing a second owner"
@@ -110,7 +117,7 @@ ensure() {
   stop_recorded || { fm_lock_release "$LOCK"; return 1; }
   session="fm-continuous-$(printf '%s' "$FM_HOME" | cksum | awk '{print $1}')-$$"
   if ! tmux new-session -d -s "$session" env FM_HOME="$FM_HOME" \
-      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$target" "$DAEMON"; then
+      FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="$target" "$DAEMON"; then
     fm_lock_release "$LOCK"
     log "failed to launch daemon session $session"
     return 1
@@ -164,7 +171,7 @@ main() {
       ;;
     status)
       [ -f "$FLAG" ] || { printf 'continuous-supervision: disabled\n'; return 0; }
-      if record_read && session_alive "$REC_SESSION" && fm_afk_daemon_owns_supervision "$STATE"; then
+      if record_read && session_alive "$REC_SESSION" && fm_afk_daemon_owns_supervision "$STATE" "$CONFIG"; then
         printf 'continuous-supervision: running session=%s target=%s\n' "$REC_SESSION" "$REC_TARGET"
         return 0
       fi

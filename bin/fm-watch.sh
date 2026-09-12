@@ -300,7 +300,7 @@ _event_cap_fails=0
 # away mode or continuous supervision owns this watcher, which must then behave
 # one-shot so the daemon receives every durable wake.
 afk_present() {
-  [ -e "$STATE/.afk" ] || [ -f "$FM_HOME/config/continuous-supervision" ]
+  [ -e "$STATE/.afk" ] || [ -f "$CONFIG/continuous-supervision" ]
 }
 
 # afk_record_present: 0 while the away-posture record exists (the captain is
@@ -1989,7 +1989,7 @@ while :; do
   # asks the supervisor to reconcile and refill; every merge, teardown, task
   # choice, and spawn still goes through its existing guarded owner.
   refill_out=
-  if refill_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  if refill_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
     fm_run_timed "$CHECK_TIMEOUT" "$SCRIPT_DIR/fm-refill.sh" check 2>/dev/null); then
     if [ -n "$refill_out" ]; then
       fm_wake_append check refill-deficit "check: refill-deficit" || exit 1

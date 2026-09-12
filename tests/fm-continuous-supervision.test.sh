@@ -107,4 +107,18 @@ FM_HOME=$HOME_DIR "$CMD" disable >/dev/null || fail "disable failed"
 [ "$(cat "$HOME_DIR/state/task.inbox/0001")" = "preserve me" ] || fail "disable touched task inbox work"
 pass "disable stops only its recorded service and preserves task work"
 
+: > "$HOME_DIR/config/continuous-supervision"
+tmux new-session -d -s 'cap@odd'
+if FM_HOME=$HOME_DIR FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET='cap@odd:0' \
+  FM_CONTINUOUS_DAEMON=$TMP/fake-daemon.sh "$CMD" ensure > "$TMP/odd.out" 2> "$TMP/odd.err"; then
+  fail "ensure accepted a target its record cannot round-trip"
+fi
+[ ! -e "$HOME_DIR/state/.continuous-supervision-terminal" ] || fail "unrecordable target was recorded"
+if tmux list-sessions -F '#{session_name}' | grep '^fm-continuous-' >/dev/null; then
+  fail "unrecordable target launched a daemon"
+fi
+FM_HOME=$HOME_DIR "$CMD" disable >/dev/null || fail "disable wedged after an unrecordable target"
+[ ! -e "$HOME_DIR/config/continuous-supervision" ] || fail "disable retained opt-in after rejected target"
+pass "an unrecordable supervisor target fails before launch and stays disableable"
+
 echo "All continuous-supervision lifecycle tests passed."

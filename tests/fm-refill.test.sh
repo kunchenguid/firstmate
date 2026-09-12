@@ -46,6 +46,7 @@ run() {
   FM_REFILL_STATE_MAP="$TMP/states" \
   FM_REFILL_READY_FILE="$TMP/ready" \
   FM_REFILL_RESURFACE_SECS=60 \
+  FM_REFILL_CHECK_SECS="${FM_REFILL_CHECK_SECS:-1}" \
   FM_REFILL_NOW="$now" \
   "$CMD" "$@"
 }
@@ -107,6 +108,19 @@ out=$(run 164 check) || fail "terminal reconciliation check failed"
   || fail "terminal work did not wake reconciliation: $out"
 pass "terminal work wakes reconciliation even when the productive target is full"
 
+printf '2\n' > "$TMP/ready"
+out=$(FM_REFILL_CHECK_SECS=30 run 170 check) || fail "cadence-gated check failed"
+[ -z "$out" ] || fail "check snapshotted inside its cadence window: $out"
+grep -Fx 'observed_epoch=164' "$HOME_DIR/state/refill-deficit" >/dev/null \
+  || fail "cadence-gated check rewrote the observation"
+out=$(FM_REFILL_CHECK_SECS=30 run 194 check) || fail "post-cadence check failed"
+[ -n "$out" ] || fail "changed deficit was not observed once the cadence elapsed"
+run 195 set 5 >/dev/null || fail "could not change target inside cadence window"
+out=$(FM_REFILL_CHECK_SECS=30 run 196 check) || fail "target-change check failed"
+[ "$out" = 'refill-deficit: active=3 desired=5 ready=2 terminal=1 other=0' ] \
+  || fail "a changed target was not checked immediately: $out"
+pass "snapshots are cadence-bounded while target changes are checked immediately"
+
 # Exercise the public foreground watcher path rather than treating the detector
 # output as a proxy for delivery. A changed target clears the prior fingerprint,
 # and the real watcher must publish the typed check wake before it exits.
@@ -137,9 +151,35 @@ grep -F $'check\trefill-deficit\tcheck: refill-deficit' "$HOME_DIR/state/.wake-q
   || fail "watcher did not durably queue the deficit wake"
 pass "the real watcher publishes a durable refill-deficit wake"
 
+FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$2/.refill-deficit.lock" || exit 1
+  : > "$3"
+  sleep 1
+  printf "phase=deficit\n" > "$2/refill-deficit"
+  fm_lock_release "$2/.refill-deficit.lock"
+' _ "$ROOT" "$HOME_DIR/state" "$TMP/holder-ready" &
+holder=$!
+i=0
+until [ -e "$TMP/holder-ready" ]; do
+  i=$((i + 1)); [ "$i" -lt 100 ] || fail "lock holder never started"
+  sleep 0.05
+done
 run 166 disable >/dev/null || fail "disable failed"
+wait "$holder" || fail "concurrent check holder failed"
 [ ! -e "$HOME_DIR/config/desired-concurrency" ] || fail "disable retained target"
 [ ! -e "$HOME_DIR/state/refill-deficit" ] || fail "disable retained observation"
-pass "disable retires only owned target state"
+pass "disable waits for a concurrent check and retires only owned target state"
+
+ALT_CONFIG="$TMP/alt-config"
+ALT_STATE="$TMP/elsewhere/alt-state"
+mkdir -p "$ALT_STATE"
+FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$ALT_CONFIG" FM_STATE_OVERRIDE="$ALT_STATE" \
+  "$CMD" set 2 >/dev/null || fail "override set failed"
+[ -f "$ALT_CONFIG/desired-concurrency" ] || fail "set ignored FM_CONFIG_OVERRIDE"
+refill=$(bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_status "$2" 300 "$3"; printf "%s" "$FM_SUP_REFILL"' \
+  _ "$ROOT" "$ALT_STATE" "$ALT_CONFIG")
+[ "$refill" = true ] || fail "supervision predicate did not see the overridden refill target"
+pass "an overridden config target is the one supervision checks"
 
 echo "All desired-concurrency refill tests passed."

@@ -181,7 +181,7 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
-fm_supervision_status "$STATE" "$GRACE"
+fm_supervision_status "$STATE" "$GRACE" "$CONFIG"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0
@@ -213,7 +213,7 @@ fi
 # cycling - just slower than a fixed 300s window - is not misread as down.
 AFK_GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
-  && fm_afk_daemon_owns_supervision "$STATE"; then
+  && fm_afk_daemon_owns_supervision "$STATE" "$CONFIG"; then
   allow_supervised_stop
 fi
 

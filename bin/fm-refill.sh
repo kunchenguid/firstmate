@@ -15,6 +15,9 @@
 #
 # A reconciliation is due when terminal work still needs handling, or when the
 # productive count is below the configured target and dispatchable work exists.
+# Snapshots run at most once per FM_REFILL_CHECK_SECS (default 60) for an
+# unchanged target, using the persisted observation as the cadence marker; a
+# changed or newly set target is checked on the next poll.
 # Identical observations are deduplicated until FM_REFILL_RESURFACE_SECS
 # (default 900) so an unresolved capacity problem remains visible without
 # spending a model turn on every watcher poll. Ambiguous, parked, paused, or
@@ -39,6 +42,7 @@ CREW_STATE_BIN="${FM_REFILL_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 TASKS_AXI="${FM_REFILL_TASKS_AXI:-tasks-axi}"
 NOW="${FM_REFILL_NOW:-$(date +%s)}"
 RESURFACE="${FM_REFILL_RESURFACE_SECS:-900}"
+CHECK_SECS="${FM_REFILL_CHECK_SECS:-60}"
 STATE_TIMEOUT="${FM_REFILL_STATE_TIMEOUT:-10}"
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -46,7 +50,7 @@ STATE_TIMEOUT="${FM_REFILL_STATE_TIMEOUT:-10}"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
 
 valid_count() { case "$1" in ''|*[!0-9]*|0) return 1 ;; *) [ "$1" -le 64 ] ;; esac; }
 valid_positive() { case "$1" in ''|*[!0-9]*|0) return 1 ;; *) return 0 ;; esac; }
@@ -127,17 +131,45 @@ EOF
   mv "$pending" "$OBSERVATION" || { rm -f "$pending"; return 1; }
 }
 
+observation_fresh() {
+  local observed desired
+  [ -f "$OBSERVATION" ] && [ ! -L "$OBSERVATION" ] || return 1
+  desired=$(record_get "$OBSERVATION" desired)
+  [ "$desired" = "$TARGET" ] || return 1
+  observed=$(record_get "$OBSERVATION" observed_epoch)
+  valid_epoch "$observed" || return 1
+  [ "$observed" -le "$NOW" ] && [ $((NOW - observed)) -lt "$CHECK_SECS" ]
+}
+
+disable_target() {
+  local i=0
+  mkdir -p "$STATE" || return 1
+  until fm_lock_try_acquire "$LOCK"; do
+    i=$((i + 1))
+    [ "$i" -lt 300 ] || { echo "fm-refill: another check holds $LOCK" >&2; return 1; }
+    sleep 0.1
+  done
+  rm -f "$TARGET_FILE" "$OBSERVATION"
+  fm_lock_release "$LOCK"
+}
+
 run_check() {
   local previous_fp previous_emit=0 emit=0 age
   target_read || return 0
   valid_epoch "$NOW" || { echo 'fm-refill: invalid clock' >&2; return 1; }
   valid_positive "$RESURFACE" || { echo 'fm-refill: invalid resurface interval' >&2; return 1; }
   valid_positive "$STATE_TIMEOUT" || { echo 'fm-refill: invalid state timeout' >&2; return 1; }
+  valid_positive "$CHECK_SECS" || { echo 'fm-refill: invalid check interval' >&2; return 1; }
+  observation_fresh && return 0
   mkdir -p "$STATE" || return 1
   # Watcher checks are opportunistic. If a direct status/check already owns the
   # observation lock, this poll stays silent and the next poll retries; it must
   # never block the watcher behind an informational snapshot.
   fm_lock_try_acquire "$LOCK" || return 0
+  if observation_fresh; then
+    fm_lock_release "$LOCK"
+    return 0
+  fi
   snapshot || { fm_lock_release "$LOCK"; return 1; }
   previous_fp=$(record_get "$OBSERVATION" fingerprint)
   previous_emit=$(record_get "$OBSERVATION" last_emitted_epoch)
@@ -177,7 +209,7 @@ case "${1:-}" in
     ;;
   disable)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
-    rm -f "$TARGET_FILE" "$OBSERVATION"
+    disable_target || exit 1
     printf 'desired-concurrency: disabled\n'
     ;;
   status) [ "$#" -eq 1 ] || { usage >&2; exit 2; }; run_status ;;

@@ -234,6 +234,7 @@ Working is the only productive state; parked, paused, blocked, unknown, done, an
 The detector performs no merge, cleanup, backlog transition, or spawn.
 The `refill-continuity` agent skill owns the guarded reconcile-and-refill procedure and requires each candidate to be evaluated independently.
 
+Snapshots run at most once per `FM_REFILL_CHECK_SECS` (default 60 seconds) for an unchanged target; a changed target is checked on the next watcher poll.
 An identical deficit is suppressed until `FM_REFILL_RESURFACE_SECS` (default 900 seconds), while a changed task-state or ready-work fingerprint wakes immediately.
 Each current observation is stored atomically in `state/refill-deficit`; `FM_REFILL_STATE_TIMEOUT` (default 10 seconds per worker) bounds current-state reads.
 An absent setting preserves existing behavior exactly.
