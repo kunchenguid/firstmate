@@ -285,8 +285,24 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# This is the closed set of non-PR fields that may coexist with an armed poll.
+# Keeping it here makes PR identity validation independent of line order without
+# accepting an arbitrary key merely because another metadata writer appended it.
+fm_pr_metadata_nonidentity_key_known() {
+  case "$1" in
+    window|endpoint_task_id|worktree|project|harness|kind|mode|yolo|tasktmp|model|effort|busy_gen|spawn_gen|traceparent|backend|\
+    herdr_session|herdr_workspace_id|herdr_tab_id|herdr_pane_id|zellij_session|zellij_tab_id|zellij_pane_id|\
+    orca_worktree_id|terminal|cmux_workspace_id|cmux_surface_id|home|projects|control_relaunch_tx|cleanup_recovery|\
+    remote_host|remote_root|remote_backend|remote_herdr_session|remote_target|decisions_reviewed|decision_keys|\
+    x_request|x_request_ts|x_followups|x_platform|x_reply_max_chars)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line key value pr_count=0 pr_head_count=0 invalid=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -307,23 +323,26 @@ fm_pr_metadata_identity_parse() {
           FM_PR_META_PATH=$FM_PR_PATH
           FM_PR_META_NUMBER=$FM_PR_NUMBER
         fi
-        seen_pr=1
         ;;
       pr_head=*)
-        if [ "$seen_pr" -eq 1 ]; then
+        pr_head_count=$((pr_head_count + 1))
+        if [ "$pr_head_count" -eq 1 ]; then
           value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
+          fm_pr_head_valid "$value" || invalid=1
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
       *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        key=${line%%=*}
+        case "$line" in
+          *=*) fm_pr_metadata_nonidentity_key_known "$key" || invalid=1 ;;
+          *) invalid=1 ;;
+        esac
         ;;
     esac
   done < "$file"
   [ "$pr_count" -eq 1 ] || return 1
-  [ "$post_pr_invalid" -eq 0 ] || return 1
+  [ "$pr_head_count" -le 1 ] || return 1
+  [ "$invalid" -eq 0 ] || return 1
   [ -n "$FM_PR_META_URL" ]
 }
 

@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -384,6 +386,31 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_preserves_an_armed_pr_merge_poll() {
+  local dir out rc url head
+  dir=$(new_case pr-poll rl43)
+  add_ship_task "$dir" rl43 claude
+  url=https://github.com/example/repo/pull/43
+  head=0123456789abcdef0123456789abcdef01234567
+  {
+    printf 'pr=%s\n' "$url"
+    printf 'pr_head=%s\n' "$head"
+  } >> "$dir/home/state/rl43.meta"
+  fm_pr_poll_prepare "$dir/home/state" rl43 github "$url" github.com example/repo 43 \
+    "$ROOT/bin/fm-pr-poll.sh" || fail "could not prepare the relaunch PR poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish the relaunch PR poll fixture"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl43 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the PR merge poll fixture was not initially valid"
+
+  out=$(run_control "$dir" rl43 relaunch --note "continue waiting for the PR merge"); rc=$?
+  expect_code 0 "$rc" "relaunch should preserve a task with an armed PR merge poll"$'\n'"$out"
+  [ -n "$(meta_field "$dir" rl43 control_relaunch_tx)" ] \
+    || fail "the relaunch fixture did not record its transaction"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl43 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "relaunch invalidated the task's armed PR merge poll"
+  pass "fm-control relaunch: an armed PR merge poll remains valid"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1561,6 +1588,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_preserves_an_armed_pr_merge_poll
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
