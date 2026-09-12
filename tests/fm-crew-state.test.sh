@@ -1459,6 +1459,71 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   pass "herdr's native busy verdict reads working with no record present"
 }
 
+# Codex has no verified lifecycle writer, but a Herdr endpoint's native busy
+# verdict is independent positive evidence that the bound worker is streaming.
+# The classifier must consult that backend fact before its Codex-only fallback.
+test_no_run_herdr_codex_native_busy_reads_working() {
+  command -v jq >/dev/null 2>&1 || { pass "Codex Herdr busy fallback skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-codex-busy)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-codex
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-codex.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=codex"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_BUSY=1
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  local out; out=$(run_crew_state "$d" feat-herdr-codex)
+  assert_contains "$out" "state: working" "Codex must accept verified Herdr busy evidence"
+  assert_contains "$out" "source: pane" "Codex Herdr busy evidence remains pane-sourced"
+  assert_contains "$out" "herdr-native" "Codex Herdr busy verdict names its native source"
+  pass "an unverified Codex lifecycle still accepts Herdr's native positive busy verdict"
+}
+
+# Native Herdr evidence is a narrow positive exception for an unverified Codex
+# lifecycle, never a reason to paper over idle or corrupt semantic records.
+test_no_run_herdr_codex_nonpositive_or_invalid_evidence_stays_unknown() {
+  command -v jq >/dev/null 2>&1 || { pass "Codex Herdr negative evidence skipped without jq"; return; }
+  local fixture d out id
+  for fixture in idle malformed gen-mismatch source-mismatch; do
+    reset_fakes
+    d=$(new_case "herdr-codex-$fixture")
+    id="feat-herdr-codex-$fixture"
+    make_repo_on_branch "$d/wt" "fm/$id"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/$id.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+      "backend=herdr" "harness=codex"
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_TMUX_MISSING=1
+    FM_FAKE_HERDR_BUSY=1
+    FM_FAKE_HERDR_AGENT_STATUS=working
+    case "$fixture" in
+      idle)
+        FM_FAKE_HERDR_BUSY=0
+        FM_FAKE_HERDR_AGENT_STATUS=idle
+        ;;
+      malformed)
+        printf 'not a busy-state record\n' > "$d/state/$id.busy-state"
+        ;;
+      gen-mismatch)
+        printf 'current-gen\n' > "$d/state/$id.busy-gen"
+        printf 'v1 gen=stale-gen seq=1 state=busy source=fm-spawn event=spawn ts=1\n' > "$d/state/$id.busy-state"
+        ;;
+      source-mismatch)
+        printf 'current-gen\n' > "$d/state/$id.busy-gen"
+        printf 'v1 gen=current-gen seq=1 state=busy source=claude-hook event=submit ts=1\n' > "$d/state/$id.busy-state"
+        ;;
+    esac
+    out=$(run_crew_state "$d" "$id")
+    assert_contains "$out" "state: unknown" "Codex Herdr $fixture evidence must remain unknown"
+    assert_not_contains "$out" "state: working" "Codex Herdr $fixture evidence must not become working"
+  done
+  pass "Codex accepts only a record-free Herdr native busy verdict, never idle or invalid evidence"
+}
+
 # Regression (2026-09 G7 stale-claim incident): a herdr CLI that errors or
 # stalls under load made pane_readable's capture fail, and the fallback read
 # that single failure as "backend target gone" - text the stale sweep matches
@@ -2528,6 +2593,8 @@ test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
+test_no_run_herdr_codex_native_busy_reads_working
+test_no_run_herdr_codex_nonpositive_or_invalid_evidence_stays_unknown
 test_no_run_herdr_cli_failure_reads_unreachable_not_gone
 test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone
