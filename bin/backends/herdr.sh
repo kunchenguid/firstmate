@@ -369,6 +369,93 @@ fm_backend_herdr_workspace_label() {
   printf 'firstmate'
 }
 
+# fm_backend_herdr_task_agent_name: the stable, session-unique display name for
+# one Firstmate-launched agent. Herdr auto-detects a harness started through the
+# pane shell but leaves its custom name empty, so the Agents sidebar falls back
+# to a generic terminal-title fragment such as the repository name. The task id
+# is the readable identity instead: crew-<id>, scout-<id>, or secondmate-<id>.
+# Task ids are unique only within one home, while Herdr agent names are unique
+# across the whole named session. A short digest of the canonical target home,
+# role, and task id preserves that cross-home uniqueness while leaving the
+# readable stem focused on the task after normalization and the 32-byte Herdr
+# name limit. The role prefixes all begin with a lowercase letter, and task ids
+# have already passed fm_task_id_creation_valid before this runs.
+fm_backend_herdr_task_agent_name() {  # <task-id> <ship|scout|secondmate> <target-home>
+  local id=$1 kind=$2 home=$3 readable identity digest stem
+  [ -d "$home" ] || return 1
+  home=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  case "$kind" in
+    secondmate) readable="secondmate-$id" ;;
+    scout) readable="scout-$id" ;;
+    ship) readable="crew-$id" ;;
+    *) return 1 ;;
+  esac
+  readable=$(printf '%s' "$readable" | tr '[:upper:].' '[:lower:]-')
+  case "$readable" in
+    ''|[!a-z]*|*[!a-z0-9_-]*) return 1 ;;
+  esac
+  identity=$(printf '%s\0%s\0%s' "$home" "$kind" "$id" | git hash-object --stdin 2>/dev/null) || return 1
+  case "$identity" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  digest=${identity:0:10}
+  stem=${readable:0:21}
+  stem=${stem%-}
+  stem=${stem%_}
+  printf '%s-%s' "$stem" "$digest"
+}
+
+# fm_backend_herdr_name_task_agent: wait for Herdr to auto-detect the harness
+# now running in <target>, assign its task-derived display name, and verify the
+# exact pane reports it. This runs after launch delivery for every supported
+# harness. A missing registration, collision, rejected rename, or mismatched
+# read refuses the spawn instead of leaving a misleading generic agent behind.
+fm_backend_herdr_name_task_agent() {  # <target> <task-id> <kind> <target-home>
+  local target=$1 id=$2 kind=$3 home=$4 name out code pane current attempt=0
+  local max_attempts=${FM_BACKEND_HERDR_AGENT_NAME_POLLS:-100}
+  local poll_sleep=${FM_BACKEND_HERDR_AGENT_NAME_POLL_SLEEP:-0.1}
+  name=$(fm_backend_herdr_task_agent_name "$id" "$kind" "$home") || {
+    echo "error: could not derive a valid herdr agent name for task $id" >&2
+    return 1
+  }
+  fm_backend_herdr_parse_target "$target" || return 1
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>&1) || true
+    code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+    pane=$(printf '%s' "$out" | jq -r '.result.agent.pane_id // empty' 2>/dev/null)
+    if [ "$pane" = "$FM_BACKEND_HERDR_PANE" ]; then
+      current=$(printf '%s' "$out" | jq -r '.result.agent.name // empty' 2>/dev/null)
+      if [ "$current" != "$name" ]; then
+        fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent rename "$FM_BACKEND_HERDR_PANE" "$name" >/dev/null 2>&1 || {
+          echo "error: herdr could not name task $id's agent '$name'" >&2
+          return 1
+        }
+      fi
+      out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>&1) || true
+      if printf '%s' "$out" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" --arg name "$name" '
+        .result.agent.pane_id == $pane and .result.agent.name == $name
+      ' >/dev/null 2>&1; then
+        printf '%s' "$name"
+        return 0
+      fi
+      echo "error: herdr did not verify task $id's agent name '$name' on pane $FM_BACKEND_HERDR_PANE" >&2
+      return 1
+    fi
+    case "$code" in
+      agent_not_found|'') ;;
+      *)
+        echo "error: herdr could not inspect task $id's agent before naming it (code $code)" >&2
+        return 1
+        ;;
+    esac
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "$max_attempts" ] || break
+    sleep "$poll_sleep"
+  done
+  echo "error: herdr did not detect task $id's agent before the naming deadline" >&2
+  return 1
+}
+
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
 # BOTH the HERDR_SESSION env var AND appending a trailing `--session <name>`
 # CLI flag. Verified empirically (docs/herdr-backend.md "Session targeting: the

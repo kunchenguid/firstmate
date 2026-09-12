@@ -79,7 +79,11 @@
 #   session stops the spawn before any worker endpoint exists. A launcher
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
-#   exception: it stands up that secondmate home's own workspace.
+#   exception: it stands up that secondmate home's own workspace. After every
+#   supported harness launch, spawn replaces Herdr's empty auto-detected agent
+#   name with a stable task-derived crew, scout, or secondmate identity and
+#   verifies it before reporting success; the primary agent is outside this
+#   worker path and keeps its genuine Firstmate name.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -4065,6 +4069,23 @@ if [ "$HARNESS" = rovo ]; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
     exit 1
   fi
+fi
+# Herdr's pane-shell launch path auto-detects supported harnesses but leaves
+# their custom agent names empty. Its Agents sidebar then substitutes a generic
+# cwd/title fragment such as "firstmate" or "new crew", making an ordinary
+# worker look like another primary or an unnamed role. Every canonical harness
+# converges here after launch (including Kimi/Rovo's separate brief delivery),
+# so one verified rename covers ship, scout, secondmate, and relaunch paths
+# without changing the genuine primary agent outside fm-spawn.
+if [ "$BACKEND" = herdr ]; then
+  case "$HARNESS" in
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+      HERDR_AGENT_HOME=$FM_HOME
+      [ "$KIND" != secondmate ] || HERDR_AGENT_HOME=$PROJ_ABS
+      HERDR_AGENT_NAME=$(fm_backend_herdr_name_task_agent \
+        "$T" "$ID" "$KIND" "$HERDR_AGENT_HOME") || exit 1
+      ;;
+  esac
 fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
