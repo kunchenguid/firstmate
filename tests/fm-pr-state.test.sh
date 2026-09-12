@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# Behavioral tests for bin/fm-pr-state.sh.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+SCRIPT="$ROOT/bin/fm-pr-state.sh"
+TMP_ROOT=$(fm_test_tmproot fm-pr-state-tests)
+FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+command -v jq >/dev/null 2>&1 \
+  || fail "these tests run the script's own jq programs over API-shaped JSON with the real jq, which was not found"
+
+HEAD=c2eac54c17a1ddc2633ad51b83e21e5fe888142e
+OLD_HEAD_1=2710bc5efc936efb70e95b86ca3582e9da7e60f4
+OLD_HEAD_2=4dc2291e6969de1bf204fbdb53c9e57a8353d4e2
+
+# The fake gh answers every query with the JSON shape GitHub returns and runs
+# the --jq program it received with the real jq, so field selection is what is
+# under test. The REST pull-request object always carries the stale
+# `mergeable: null` GitHub reports right after a push.
+# It evaluates with the local jq, while gh itself embeds gojq; the live guard in
+# tests/fm-pr-state-live-e2e.test.sh runs the real engine.
+cat > "$FAKEBIN/gh" <<'SH'
+#!/usr/bin/env bash
+set -o pipefail
+head=c2eac54c17a1ddc2633ad51b83e21e5fe888142e
+serve() {
+  case "$*" in
+    "pr view "*" --json url --jq .url")
+      printf '%s\n' '{"url":"https://github.com/o/r/pull/7"}'
+      ;;
+    "pr view "*" --json mergeable,headRefOid,reviewDecision --jq "*)
+      jq -n --arg mergeable "${FM_TEST_VIEW_MERGEABLE-MERGEABLE}" \
+        --arg head "${FM_TEST_VIEW_HEAD-$head}" \
+        --arg decision "${FM_TEST_VIEW_REVIEW_DECISION-APPROVED}" \
+        '{mergeable: (if $mergeable == "null" then null else $mergeable end),
+          headRefOid: $head, reviewDecision: $decision}'
+      ;;
+    "api /repos/o/r/pulls/7 --jq "*)
+      jq -n --arg head "$head" --arg state "${FM_TEST_STATE-open}" \
+        --arg merged "${FM_TEST_MERGED_AT-}" --arg draft "${FM_TEST_DRAFT-false}" \
+        '{state: $state, merged_at: (if $merged == "" then null else $merged end),
+          draft: ($draft == "true"), mergeable: null,
+          head: {sha: $head, ref: "fm/fixture"}, base: {ref: "dev"},
+          title: "fix: fixture", body: "", user: {login: "prauthor"}}'
+      ;;
+    "api /repos/o/r/pulls/7/reviews?per_page=100 --paginate --jq "*)
+      printf '%s\n' "${FM_TEST_REVIEWS:-[]}"
+      ;;
+    "pr checks "*" --required --json name,state,bucket,workflow --jq "*)
+      if [ -n "${FM_TEST_CHECKS_ERROR-}" ]; then
+        printf '%s\n' "$FM_TEST_CHECKS_ERROR" >&2
+        exit 1
+      fi
+      checks='[{"name":"lint","state":"SUCCESS","bucket":"pass","workflow":"ci"},{"name":"optional","state":"SKIPPED","bucket":"skipping","workflow":"ci"}]'
+      printf '%s\n' "${FM_TEST_REQUIRED_CHECKS:-$checks}"
+      ;;
+    "pr checks "*)
+      printf '%s\n' '[{"name":"browser shard","state":"FAILURE","bucket":"fail","workflow":"ci"}]'
+      ;;
+    *)
+      printf 'unexpected gh call: %s\n' "$*" >&2
+      exit 91
+      ;;
+  esac
+}
+prog=
+prev=
+for arg in "$@"; do
+  [ "$prev" != --jq ] || prog=$arg
+  prev=$arg
+done
+serve "$@" | jq -r "$prog"
+SH
+chmod +x "$FAKEBIN/gh"
+
+run_state() {
+  PATH="$FAKEBIN:$PATH" "$SCRIPT" 7
+}
+
+# reviews "<login> <state> <commit> <submitted_at>"... prints the JSON array
+# GitHub's reviews endpoint returns for those submissions.
+reviews() {
+  printf '%s\n' "$@" | jq -Rsc 'split("\n") | map(select(. != "") | split(" +"; "")
+    | {user: {login: .[0], type: .[1]}, state: .[2], commit_id: .[3], submitted_at: .[4]})'
+}
+
+test_clean_pr_is_silent_and_ignores_advisory_failures() {
+  local out
+  out=$(run_state) || fail "clean fixture was refused"
+  [ -z "$out" ] || fail "clean fixture should be silent, got: $out"
+  pass "clean PR is silent and advisory failures do not block"
+}
+
+test_closed_and_merged_state_are_reported() {
+  local out
+  out=$(FM_TEST_STATE=closed run_state) || fail "closed fixture was refused"
+  assert_contains "$out" 'STATE: closed' "a closed pull request must report its state"
+
+  out=$(FM_TEST_STATE=closed FM_TEST_MERGED_AT=2019-10-04T16:01:04Z run_state) \
+    || fail "merged fixture was refused"
+  assert_contains "$out" 'STATE: merged at 2019-10-04T16:01:04Z' \
+    "a merged pull request must say so rather than reading as merely closed"
+  assert_not_contains "$out" 'STATE: closed' \
+    "merged is the more specific verdict and must not be doubled with closed"
+  pass "closed and merged pull requests report their terminal state"
+}
+
+test_draft_is_a_blocker() {
+  local out
+  out=$(FM_TEST_DRAFT=true run_state) || fail "draft fixture was refused"
+  assert_contains "$out" 'DRAFT: pull request is not ready for review' \
+    "a draft pull request leaves the author something to do"
+  pass "draft state blocks readiness"
+}
+
+test_head_moving_mid_read_invalidates_the_result() {
+  local status=0 out
+  out=$(FM_TEST_VIEW_HEAD=$OLD_HEAD_1 run_state 2>&1) || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a head that moved between readings must invalidate the result, got: $out"
+  assert_contains "$out" 'head changed' \
+    "the refusal must name the moved head so the caller knows to re-run"
+  pass "a head that moves mid-read invalidates rather than mixes two snapshots"
+}
+
+test_stale_blocking_reviews_explain_a_blocking_decision() {
+  local out history
+  history=$(reviews \
+    "coderabbitai[bot] Bot CHANGES_REQUESTED $OLD_HEAD_1 2026-09-01T00:15:44Z" \
+    "coderabbitai[bot] Bot CHANGES_REQUESTED $OLD_HEAD_2 2026-09-01T23:02:13Z" \
+    "commenter User COMMENTED $OLD_HEAD_2 2026-09-01T23:10:00Z" \
+    "alice User APPROVED $OLD_HEAD_2 2026-09-01T23:11:00Z")
+  out=$(FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED FM_TEST_REVIEWS=$history run_state) \
+    || fail "voided-review fixture was refused"
+  assert_contains "$out" 'REVIEW DECISION: CHANGES_REQUESTED' \
+    "GitHub's blocking decision must be printed"
+  assert_contains "$out" "STALE BLOCKING REVIEW: coderabbitai[bot] CHANGES_REQUESTED at $OLD_HEAD_2; current head $HEAD" \
+    "the reviewer's latest stale changes-requested verdict was not shown with both SHAs"
+  assert_not_contains "$out" "$OLD_HEAD_1" \
+    "a verdict the same reviewer later superseded is history, not a blocker"
+  assert_not_contains "$out" 'commenter' \
+    "a stale COMMENTED review is informational noise"
+  assert_not_contains "$out" 'alice' \
+    "a stale approval is not a concrete blocker"
+  pass "stale changes-requested verdicts explain a blocking review decision"
+}
+
+test_approved_pr_with_only_stale_changes_requested_is_silent() {
+  local out history
+  history=$(reviews \
+    "coderabbitai[bot] Bot CHANGES_REQUESTED $OLD_HEAD_1 2026-09-01T00:15:44Z" \
+    "coderabbitai[bot] Bot CHANGES_REQUESTED $HEAD 2026-09-02T13:53:41Z" \
+    "coderabbitai[bot] Bot APPROVED $HEAD 2026-09-02T14:05:42Z")
+  out=$(FM_TEST_VIEW_REVIEW_DECISION=APPROVED FM_TEST_REVIEWS=$history run_state) \
+    || fail "approved stale-review fixture was refused"
+  [ -z "$out" ] || fail "an approved PR with only stale review history should be silent, got: $out"
+  pass "approved PR ignores stale changes-requested history"
+}
+
+test_current_changes_requested_review_is_a_blocker() {
+  local out history
+  history=$(reviews "coderabbitai[bot] Bot CHANGES_REQUESTED $HEAD 2026-09-02T13:53:41Z")
+  out=$(FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED FM_TEST_REVIEWS=$history run_state) \
+    || fail "current-review fixture was refused"
+  assert_contains "$out" "REVIEW: coderabbitai[bot] CHANGES_REQUESTED at $HEAD" \
+    "a current changes-requested review must block readiness"
+  pass "current changes-requested review blocks readiness"
+}
+
+test_changes_requested_decision_is_never_silent() {
+  local out history
+  history=$(reviews \
+    "bob User CHANGES_REQUESTED $HEAD 2026-09-02T13:53:41Z" \
+    "bob User COMMENTED $HEAD 2026-09-02T14:05:42Z")
+  out=$(FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED FM_TEST_REVIEWS=$history run_state) \
+    || fail "comment-after-changes fixture was refused"
+  assert_contains "$out" "REVIEW: bob CHANGES_REQUESTED at $HEAD" \
+    "a later COMMENTED review does not clear the reviewer's change request"
+
+  out=$(FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED run_state) \
+    || fail "decision-only fixture was refused"
+  [ "$out" = 'REVIEW DECISION: CHANGES_REQUESTED' ] \
+    || fail "GitHub's blocking decision must be printed even without an explaining review, got: $out"
+  pass "a CHANGES_REQUESTED decision is always reported"
+}
+
+test_authors_own_changes_requested_review_is_not_a_blocker() {
+  local out history
+  history=$(reviews "prauthor User CHANGES_REQUESTED $HEAD 2026-09-02T13:53:41Z")
+  out=$(FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED FM_TEST_REVIEWS=$history run_state) \
+    || fail "self-review fixture was refused"
+  assert_not_contains "$out" 'REVIEW: prauthor' \
+    "the author's own verdict is not a reviewer blocking them"
+  pass "the author's own review is never listed as a blocker"
+}
+
+test_pending_approval_is_not_a_blocker() {
+  local out
+  out=$(FM_TEST_VIEW_REVIEW_DECISION=REVIEW_REQUIRED run_state) \
+    || fail "review-required fixture was refused"
+  [ -z "$out" ] || fail "awaiting approval leaves nothing for the author, got: $out"
+  pass "a pending approval is not reported as a blocker"
+}
+
+test_required_failure_is_a_blocker() {
+  local out
+  out=$(FM_TEST_REQUIRED_CHECKS='[{"name":"CI Status","state":"FAILURE","bucket":"fail","workflow":"ci"},{"name":"lint","state":"SUCCESS","bucket":"pass","workflow":"ci"}]' run_state) \
+    || fail "blocked fixture was refused"
+  assert_contains "$out" 'REQUIRED CHECK: CI Status (FAILURE)' \
+    "required failure was not reported"
+  assert_not_contains "$out" 'lint' \
+    "a passing required check is not a blocker"
+  pass "required failure blocks readiness"
+}
+
+test_no_required_checks_is_silent() {
+  local out status
+  out=$(FM_TEST_CHECKS_ERROR="no required checks reported on the 'fm/fixture' branch" run_state) \
+    || fail "a base without required checks was refused"
+  [ -z "$out" ] || fail "a base without required checks has no check blocker, got: $out"
+
+  status=0
+  FM_TEST_CHECKS_ERROR='HTTP 502: Bad Gateway' run_state >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "a real check lookup failure must still refuse"
+  pass "a base without required checks is silent, other check lookup failures refuse"
+}
+
+test_no_reported_checks_is_unverified() {
+  local out
+  out=$(FM_TEST_CHECKS_ERROR="no checks reported on the 'fm/fixture' branch" run_state) \
+    || fail "a head without reported checks was refused"
+  [ "$out" = "CHECKS: none reported yet on ${HEAD:0:7}" ] \
+    || fail "a head with no reported checks must read as unverified, not ready, got: $out"
+  pass "a head with no reported checks is unverified rather than ready"
+}
+
+test_help_discloses_unavailable_thread_resolution() {
+  local out
+  out=$("$SCRIPT" --help) || fail "help was refused"
+  assert_contains "$out" 'Unresolved review-thread state is not reported' \
+    "help must disclose the REST-only thread-resolution limit"
+  pass "help discloses the unavailable REST thread-resolution signal"
+}
+
+test_unknown_mergeability_is_a_blocker() {
+  local out
+  out=$(FM_TEST_VIEW_MERGEABLE=null run_state) \
+    || fail "unknown-mergeability fixture was refused"
+  assert_contains "$out" 'MERGEABILITY: unknown' \
+    "null mergeability must not be treated as clean"
+
+  out=$(FM_TEST_VIEW_MERGEABLE=CONFLICTING run_state) \
+    || fail "conflicting fixture was refused"
+  assert_contains "$out" 'MERGEABILITY: conflicting' \
+    "a conflicting merge state must be reported"
+  pass "unknown and conflicting mergeability block readiness"
+}
+
+test_mergeability_uses_current_pr_view_value_without_retry() {
+  local out
+  out=$(FM_TEST_VIEW_MERGEABLE=MERGEABLE run_state) \
+    || fail "current-mergeability fixture was refused"
+  assert_not_contains "$out" 'MERGEABILITY: unknown' \
+    "a current MERGEABLE view must win over the REST object's stale null"
+  pass "mergeability uses the current pull-request view value"
+}
+
+test_refusals_exit_nonzero() {
+  local status=0
+  PATH="$FAKEBIN:$PATH" "$SCRIPT" >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "missing argument refusal exited zero"
+
+  status=0
+  PATH="$FAKEBIN:$PATH" "$SCRIPT" not-a-pr >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "lookup refusal exited zero"
+  pass "argument and lookup refusals exit nonzero"
+}
+
+test_clean_pr_is_silent_and_ignores_advisory_failures
+test_closed_and_merged_state_are_reported
+test_draft_is_a_blocker
+test_head_moving_mid_read_invalidates_the_result
+test_stale_blocking_reviews_explain_a_blocking_decision
+test_approved_pr_with_only_stale_changes_requested_is_silent
+test_current_changes_requested_review_is_a_blocker
+test_changes_requested_decision_is_never_silent
+test_authors_own_changes_requested_review_is_not_a_blocker
+test_pending_approval_is_not_a_blocker
+test_required_failure_is_a_blocker
+test_no_required_checks_is_silent
+test_no_reported_checks_is_unverified
+test_help_discloses_unavailable_thread_resolution
+test_unknown_mergeability_is_a_blocker
+test_mergeability_uses_current_pr_view_value_without_retry
+test_refusals_exit_nonzero
