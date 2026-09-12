@@ -551,11 +551,11 @@ fi
 [ "$out" = "none" ] || fail "exhausted Meta quota returned: $out"
 ok "Muse uses Meta quota"
 
-if out=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:default 2>&1); then
-  fail "agy unexpectedly dispatched without an agy quota row"
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:default 2>&1); then
+  fail "agy unexpectedly dispatched without quota evidence"
 fi
-[ "$out" = "none" ] || fail "agy without a quota row returned: $out"
-ok "agy is accepted as a harness but fails closed without quota evidence"
+[ "$err" = "error: unknown harness: agy" ] || fail "agy without a quota mapping returned: $err"
+ok "agy has no quota mapping and is refused loudly"
 
 jq '.providers += [.providers[] | select(.provider == "claude")]' "$LAB/captured.json" > "$DUPLICATE"
 if err=$(call_choose --snapshot "$DUPLICATE" --candidate claude:default 2>&1); then
