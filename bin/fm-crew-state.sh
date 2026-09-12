@@ -66,11 +66,14 @@
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
 #      A terminal outcome maps to `done` as a statement about the PIPELINE
-#      only: this reader never queries the forge, so it cannot report that a
-#      PR merged, closed, or is reviewable now. `passed` does not even
-#      establish green checks - a step whose gate cannot return a valid
-#      verdict may be SKIPPED with authorization and the run still ends
-#      passed - so both terminal details report PR state as unconfirmed.
+#      only: the `passed` and `checks-passed` details rest on no forge
+#      evidence, and `passed` carries no green-check claim either, since a
+#      step whose gate returns no valid verdict may be SKIPPED with
+#      authorization while the run still ends passed. Both report PR state
+#      as unconfirmed and send the reader to the forge before any
+#      landing-dependent action. The ci-log-tail readings above are the
+#      exception: held-for-merge and ready-for-review rest on positive
+#      evidence from the run's own ci step log (nm_ci_checks_state).
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
