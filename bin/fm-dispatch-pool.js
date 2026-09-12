@@ -30,7 +30,8 @@ function write(file, value) {
 function config(file) {
   const c = read(file);
   requireThat(c.schemaVersion === 1 && object(c.pools) && object(c.defaults), 'invalid_pool_config');
-  requireThat(Object.keys(c).every(k => ['schemaVersion', 'pools', 'defaults'].includes(k)), 'unknown_config_field');
+  requireThat(Object.keys(c).every(k => ['schemaVersion', 'pools', 'defaults', 'priority'].includes(k)), 'unknown_config_field');
+  requireThat(!('priority' in c) || (Array.isArray(c.priority) && c.priority.every(q => token(q) && Object.hasOwn(c.pools, q))), 'invalid_priority');
   for (const [name, pool] of Object.entries(c.pools)) {
     requireThat(token(name) && Array.isArray(pool) && pool.length > 0 && pool.length <= 64, 'invalid_pool');
     const ids = new Set(), tuples = new Set();
@@ -310,6 +311,9 @@ async function main() {
     const same = pool.find(p => hash(p) === hash(pinned.candidate));
     requireThat(same && viable.includes(same.id), 'pinned_candidate_not_viable');
     picked = { candidate: same, next: before };
+  } else if (viable.length && Array.isArray(c.priority) && c.priority.includes(poolName)) {
+    const first = pool.find(q => viable.includes(q.id));
+    picked = { candidate: first, next: before };
   } else if (viable.length) picked = weighted(pool, viable, before);
   db.events.push({ type: terminal ? 'terminal_quota_exhausted' : 'admission', task, generation, pool: poolName, configDigest, evidence, terminal, at: Date.now(), selected: picked?.candidate.id || null });
   if (!picked) { write(stateFile, db); throw new Error('zero_viable_candidates'); }
