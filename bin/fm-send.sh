@@ -161,7 +161,17 @@
 # transition and is never written for those keys. If this send cannot produce
 # a note the guard will accept, or the structural key would be lost to the
 # status-line cap, it refuses before sending and names the cause rather than
-# exiting 0 on a silent no-op. After a delivered close it also
+# exiting 0 on a silent no-op. A key nothing owns refuses the same way, for the
+# same reason: delivering an answer this send cannot close would leave the
+# decision open behind an answer the operator believes settled it. That refusal
+# never costs the message - it lists the keys actually open on the task, calls
+# out a requested key that is only MENTIONED inside an open decision's note
+# (prose under the key grammar, not a stated key), and prints the resend
+# commands with the message quoted back verbatim. The keyed resend leaves an
+# explicit <key> placeholder for the operator to replace, even when only one
+# key is open, so an answer cannot be redirected to an unrelated decision.
+# The plain resend delivers the message without closing any decision.
+# After a delivered close it also
 # re-folds and fails loudly if the named key is still open. On the inbox plane
 # the close happens at ENQUEUE time, because enqueue is durable delivery to
 # the task's record; the worker reading the answer late is covered by the
@@ -557,6 +567,68 @@ fm_send_hold_resolved_id() {  # <task-id> <decision-key>
   return 1
 }
 
+# The still-open keys in a folded "<key>\t<verb>\t<note>" open set, one per line.
+fm_send_open_set_keys() {  # <open-set>
+  [ -n "$1" ] || return 0
+  printf '%s\n' "$1" | cut -f1
+}
+
+# The open decision whose NOTE merely MENTIONS <requested-key> as prose, if any.
+# The key grammar (bin/fm-classify-lib.sh) states a key before the colon or at
+# the head of the note; a token trailing a summary is prose. A worker that
+# trails "[key=X]" therefore opens a DIFFERENT key while leaving X as the only
+# bracket token a reader sees, so X is the key an operator types and the one
+# nothing owns. Prints the key that line actually opened.
+fm_send_decoy_key_owner() {  # <open-set> <requested-key>
+  local key rest
+  [ -n "$1" ] || return 1
+  while IFS=$'\t' read -r key rest; do
+    [ -n "$key" ] || continue
+    case "$rest" in *"[key=$2]"*) printf '%s' "$key"; return 0 ;; esac
+  done <<EOF
+$1
+EOF
+  return 1
+}
+
+# The message this send was carrying, quoted for a copy-paste resend, so a
+# refused key never costs the operator the text they typed.
+fm_send_quoted_message() {  # <text...>
+  printf '%q' "$*"
+}
+
+# --- printed resend commands ------------------------------------------------
+#
+# Every command this script prints for the operator to run must reach the SAME
+# home and the SAME script this invocation used. Neither is recoverable from the
+# command line alone: a one-shot "FM_HOME=<home> bin/fm-send.sh ..." leaves
+# nothing exported for the next command, and a relative invocation cannot be
+# re-run from any other directory. A printed command missing either resolves
+# somewhere else - another home's state dir, or no script at all - so the
+# operator's preserved message is still never delivered.
+# These two are the ONE statement of that context; both printed resend paths
+# (the unconfirmed remote retry and the refused --resolve-key) call them rather
+# than restating the quoting and fallback rules.
+
+# The environment prefix a printed resend must carry: the absolute home always,
+# and FM_STATE_OVERRIDE only when this invocation was actually given one, so the
+# printed command never invents a state dir the caller was not using.
+fm_send_resend_env() {  # -> "FM_HOME=<q> [FM_STATE_OVERRIDE=<q> ]"
+  local home state
+  home=$(cd "$FM_HOME" 2>/dev/null && pwd) || home=$FM_HOME
+  printf 'FM_HOME=%q ' "$home"
+  if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
+    state=$(cd "$STATE" 2>/dev/null && pwd) || state=$STATE
+    printf 'FM_STATE_OVERRIDE=%q ' "$state"
+  fi
+}
+
+# This script's absolute path, quoted. Deliberately not "$0": a relative "$0" is
+# only valid from the directory this invocation happened to run in.
+fm_send_resend_exe() {
+  printf '%q' "$SCRIPT_DIR/fm-send.sh"
+}
+
 # Close-note body for --resolve-key. Ordinary keys keep answered: <excerpt>.
 # A pending-reply-* key uses the owning library's vocabulary so the reserved-key
 # fold actually closes it (fm_pending_reply_close_note_for_key).
@@ -608,7 +680,39 @@ if [ -n "$RESOLVE_KEYS" ]; then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
     fi
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+    # Nothing owns this key, so refuse rather than deliver. Sending the answer
+    # anyway would leave the decision open behind an answer the operator
+    # believes settled it - the orphaned decision --resolve-key exists to
+    # prevent - so the send keeps ONE meaning: answered and closed, or neither.
+    # The cost of refusing is paid here instead of by the operator: name what is
+    # actually open, diagnose the note-token shape that most often fools a
+    # reader of the OPEN DECISIONS listing, and hand the message back quoted so
+    # a refused key never costs the text they typed.
+    {
+      echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped); nothing was sent."
+      if decoy_owner=$(fm_send_decoy_key_owner "$resolve_open_set" "$k"); then
+        printf "  '%s' sits INSIDE the note of the decision keyed '%s', where the key grammar reads it as prose. A key is stated before the colon or at the head of the note, so that line opened '%s'.\n" \
+          "$k" "$decoy_owner" "$decoy_owner"
+      fi
+      resolve_open_keys=$(fm_send_open_set_keys "$resolve_open_set")
+      if [ -n "$resolve_open_keys" ]; then
+        printf '  open on %s: %s\n' "$RESOLVE_TASK_ID" "$(printf '%s' "$resolve_open_keys" | tr '\n' ' ')"
+      else
+        printf '  no decision or blocker is open on %s.\n' "$RESOLVE_TASK_ID"
+      fi
+      resolve_quoted_message=$(fm_send_quoted_message "$@")
+      # Carry this invocation's own routing context into both printed commands:
+      # a resend that resolves to another home, or to no script at all, delivers
+      # the preserved message nowhere.
+      resolve_resend_prefix="$(fm_send_resend_env)$(fm_send_resend_exe)"
+      printf '  resend, your message preserved:\n'
+      if [ -n "$resolve_open_keys" ]; then
+        printf '    %s %s --resolve-key <key> %s\n' \
+          "$resolve_resend_prefix" "$RESOLVE_TASK_ID" "$resolve_quoted_message"
+      fi
+      printf '    %s %s %s   # deliver without closing anything\n' \
+        "$resolve_resend_prefix" "$RESOLVE_TASK_ID" "$resolve_quoted_message"
+    } >&2
     exit 1
   done
   # Refuse before send when a named status-log key cannot actually close: a
@@ -891,13 +995,9 @@ else
       else
         echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       fi
-      resend_home=$(cd "$FM_HOME" 2>/dev/null && pwd) || resend_home=$FM_HOME
-      printf 'FM_HOME=%q ' "$resend_home" >&2
-      if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
-        resend_state=$(cd "$STATE" 2>/dev/null && pwd) || resend_state=$STATE
-        printf 'FM_STATE_OVERRIDE=%q ' "$resend_state" >&2
-      fi
-      printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %q' "$PENDING_REPLY_CORR" "$SCRIPT_DIR/fm-send.sh" >&2
+      printf '%s' "$(fm_send_resend_env)" >&2
+      printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %s' \
+        "$PENDING_REPLY_CORR" "$(fm_send_resend_exe)" >&2
       for resend_arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
         printf ' %q' "$resend_arg" >&2
       done
