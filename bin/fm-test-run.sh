@@ -359,7 +359,9 @@ family_for_basename() {
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
+    fm-claude-ready.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
+    fm-spawn-transaction.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
@@ -676,6 +678,7 @@ tests/fm-calm-pi-extension.test.sh 256
 tests/fm-check-unregister.test.sh 481
 tests/fm-classify-corr-token.test.sh 38742
 tests/fm-classify-decision-key.test.sh 1167
+tests/fm-claude-ready.test.sh 1023
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 21
 tests/fm-claude-stop-autoarm.test.sh 60709
 tests/fm-cmux-claude-composer-live-e2e.test.sh 23
@@ -764,6 +767,7 @@ tests/fm-sessionstart-nudge.test.sh 66194
 tests/fm-shared-captain-inheritance.test.sh 6108
 tests/fm-spawn-dispatch-profile.test.sh 63996
 tests/fm-spawn-pool-base-freshen.test.sh 34920
+tests/fm-spawn-transaction.test.sh 2993
 tests/fm-spawn-worktree-settle.test.sh 5687
 tests/fm-startup-memory-budget.test.sh 6964
 tests/fm-startup-network.test.sh 62274

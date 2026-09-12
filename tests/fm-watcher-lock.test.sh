@@ -337,6 +337,186 @@ test_lock_does_not_steal_live_lock() {
   pass "live-held lock is not stolen"
 }
 
+# Regression: an unwritable lock directory used to be mistaken for a stale lock
+# and retried as `<lock>.steal`, then `.steal.steal`, without a depth bound,
+# until the path overflowed and bash died. Both the classification and the
+# bounded name are asserted, because either one alone could go quietly vacuous.
+test_lock_unwritable_dir_is_classified_not_recursed() {
+  local dir state locks lockdir out longest
+  dir=$(make_case lock-unwritable)
+  state="$dir/state"
+  locks="$dir/unwritable"
+  mkdir -p "$locks"
+  lockdir="$locks/x.lock"
+  chmod 500 "$locks"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s class=%s path=%s\n" "$rc" "${FM_LOCK_FAILURE:-}" "${FM_LOCK_FAILURE_PATH:-}"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  chmod 700 "$locks"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "unwritable lock directory did not refuse acquisition: $out" ;;
+  esac
+  case "$out" in
+    *"class=unwritable"*) ;;
+    *) fail "unwritable lock directory was not classified as unwritable: $out" ;;
+  esac
+  case "$out" in
+    *"path=$locks"*) ;;
+    *) fail "refusal did not name the directory that refused the lock: $out" ;;
+  esac
+  longest=$(find "$locks" -name '*.steal*' 2>/dev/null | head -n 1)
+  [ -z "$longest" ] || fail "steal-of-steal lock names were created: $longest"
+  pass "unwritable lock directory is classified, not recursed"
+}
+
+# Regression: a worker that asked for a lock in a directory it cannot write
+# used to spin or crash instead of saying why. Waiting cannot make a directory
+# writable, so the wait fails closed with the refusing path named.
+test_lock_acquire_wait_fails_closed_on_unwritable_dir() {
+  local dir state locks rc err
+  dir=$(make_case lock-unwritable-wait)
+  state="$dir/state"
+  locks="$dir/unwritable"
+  mkdir -p "$locks"
+  chmod 500 "$locks"
+  err="$dir/wait.err"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    printf "returned\n"
+  ' _ "$LIB" "$locks/x.lock" >/dev/null 2> "$err" || rc=$?
+  chmod 700 "$locks"
+  [ "$rc" -ne 0 ] || fail "waiting for an uncreatable lock returned as if it had been acquired"
+  grep -q "not writable: $locks" "$err" \
+    || fail "wait refusal did not name the unwritable directory: $(cat "$err")"
+  pass "waiting for an uncreatable lock fails closed and names the directory"
+}
+
+# Regression: acquisition against a live holder must report that holder rather
+# than build an arbitration chain behind it.
+test_lock_live_holder_is_reported_without_steal_chain() {
+  local dir state lockdir live out stray
+  dir=$(make_case lock-live-classified)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s class=%s held=%s\n" "$rc" "${FM_LOCK_FAILURE:-}" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=1"*"class=held"*"held=$live"*) ;;
+    *) fail "live-held lock was not reported as held by that pid: $out" ;;
+  esac
+  stray=$(find "$state" -name '.contend.lock.steal*' 2>/dev/null | head -n 1)
+  [ -z "$stray" ] || fail "a live-held lock built an arbitration chain: $stray"
+  pass "live-held lock reports its holder without a steal chain"
+}
+
+# Regression: fm_wake_queued_keys is read inside command and process
+# substitutions, where an exit kills only the subshell. A refusal reaching the
+# caller as an empty-but-successful read is indistinguishable from "nothing is
+# queued" - the answer that suppresses a duplicate wake - so an unreadable
+# queue has to carry its own nonzero status out of the substitution.
+test_queued_keys_reports_an_unreadable_queue_from_a_substitution() {
+  local dir state out status err
+  dir=$(make_case queued-keys-unreadable)
+  state="$dir/state"
+  err="$dir/read.err"
+  chmod 500 "$state"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    queued=$(fm_wake_queued_keys check)
+    printf "rc=%s keys=[%s]\n" "$?" "$queued"
+  ' _ "$LIB" 2> "$err")
+  status=$?
+  chmod 700 "$state"
+  [ "$status" -eq 0 ] || fail "the reading fixture itself died instead of reporting: $out $(cat "$err")"
+  case "$out" in
+    *"rc=0"*) fail "an unreadable wake queue read as an empty queue: $out" ;;
+  esac
+  case "$out" in
+    *"keys=[]"*) ;;
+    *) fail "an unreadable wake queue returned keys: $out" ;;
+  esac
+  grep -q "cannot read the wake queue" "$err" \
+    || fail "an unreadable wake queue named no cause: $(cat "$err")"
+  pass "an unreadable wake queue reports a failed read rather than an empty one"
+}
+
+# Regression: the recursive stale-lock path this replaced is what created
+# `<lock>.steal.steal` chains, so the machines an upgrade reaches are exactly
+# the ones carrying them, and nothing else in bin/ removes one. Depth-1
+# arbitration cannot claim `<lock>.steal` while a leftover blocks it, so a
+# chain left behind would wedge the primary lock forever - trading the old
+# crash for a silent hang.
+test_lock_clears_a_legacy_nested_steal_chain() {
+  local dir state lockdir out level i
+  dir=$(make_case lock-legacy-chain)
+  state="$dir/state"
+  lockdir="$state/.legacy.lock"
+  level=$lockdir
+  i=0
+  while [ "$i" -lt 3 ]; do
+    mkdir -p "$level"
+    printf '%s\n' 999999 > "$level/pid"
+    level="$level.steal"
+    i=$((i + 1))
+  done
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s class=%s\n" "$rc" "${FM_LOCK_FAILURE:-}"
+  ' _ "$LIB" "$lockdir")
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "a leftover nested steal chain blocked acquisition instead of being cleared: $out" ;;
+  esac
+  [ ! -e "$lockdir.steal" ] && [ ! -L "$lockdir.steal" ] \
+    || fail "the leftover steal chain was not removed"
+  [ ! -e "$lockdir.steal.steal" ] && [ ! -L "$lockdir.steal.steal" ] \
+    || fail "a deeper leftover level survived and would block a later claim"
+  pass "a legacy nested steal chain is cleared rather than wedging the lock"
+}
+
+# Regression: the required unwritable refusal must not depend on what is
+# already on disk. A leftover steal in an unwritable directory used to be
+# classified as ordinary contention, so the named permission refusal - the
+# whole point of classifying at all - was unreachable in the compound case.
+test_lock_unwritable_is_classified_despite_a_leftover_steal() {
+  local dir state locks lockdir out
+  dir=$(make_case lock-unwritable-leftover)
+  state="$dir/state"
+  locks="$dir/unwritable"
+  mkdir -p "$locks"
+  lockdir="$locks/x.lock"
+  mkdir -p "$lockdir" "$lockdir.steal"
+  printf '%s\n' 999999 > "$lockdir/pid"
+  printf '%s\n' 999999 > "$lockdir.steal/pid"
+  chmod 500 "$locks"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s class=%s path=%s\n" "$rc" "${FM_LOCK_FAILURE:-}" "${FM_LOCK_FAILURE_PATH:-}"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  chmod 700 "$locks"
+  case "$out" in
+    *"class=unwritable"*"path=$locks"*) ;;
+    *) fail "an unwritable directory holding a leftover steal was not classified as unwritable: $out" ;;
+  esac
+  pass "an unwritable directory is classified even when a leftover steal is present"
+}
+
 test_lock_empty_pid_uses_minimum_grace() {
   local dir state lockdir out
   dir=$(make_case lock-empty-grace)
@@ -1115,6 +1295,12 @@ test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
+test_lock_unwritable_dir_is_classified_not_recursed
+test_lock_acquire_wait_fails_closed_on_unwritable_dir
+test_lock_live_holder_is_reported_without_steal_chain
+test_queued_keys_reports_an_unreadable_queue_from_a_substitution
+test_lock_clears_a_legacy_nested_steal_chain
+test_lock_unwritable_is_classified_despite_a_leftover_steal
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal

@@ -921,6 +921,17 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+# A freshly created endpoint has no other owner until this spawn's task record
+# is durably published: teardown and the watcher only ever learn about an
+# endpoint a record names. Every exit between creation and that publication
+# therefore has to close the endpoint itself, or it is orphaned - a live window
+# nothing will ever clean up, which is what an unborn repository produced. Set
+# only for a fresh allocation, never for a relaunch, so an adopted pre-existing
+# endpoint can never be killed by this obligation.
+SPAWN_ENDPOINT_CLEANUP=0
+SPAWN_ENDPOINT_BACKEND=
+SPAWN_ENDPOINT_TARGET=
+SPAWN_ENDPOINT_TAB=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -999,6 +1010,16 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  # Orca owns its endpoint and worktree together through ORCA_ABORT_CLEANUP
+  # below, so the generic obligation never covers it.
+  if [ "$SPAWN_ENDPOINT_CLEANUP" = 1 ]; then
+    SPAWN_ENDPOINT_CLEANUP=0
+    if [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      fm_backend_kill "$SPAWN_ENDPOINT_BACKEND" "$SPAWN_ENDPOINT_TARGET" \
+        "$SPAWN_ENDPOINT_TAB" "fm-$ID" 2>/dev/null \
+        || echo "warning: could not close task $ID's endpoint $SPAWN_ENDPOINT_TARGET after an aborted spawn; close it by hand" >&2
+    fi
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -2627,6 +2648,40 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+# Repository preflight. An isolated local copy is made by detaching from the
+# project's default branch, so a repository with no commit on it cannot produce
+# one - a clone of a brand-new empty remote has no ref to resolve at all.
+# Proving that here, before any endpoint exists, is what keeps a guaranteed
+# failure from being spent as the full worktree-detection window and then
+# leaving a live endpoint nothing owns.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] \
+   && git -C "$PROJ_ABS" rev-parse --git-dir >/dev/null 2>&1 \
+   && ! git -C "$PROJ_ABS" rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null 2>&1; then
+  echo "error: project $PROJ_ABS has no commit on its default branch, so no isolated local copy can be made from it; push an initial commit to that repository and re-run the spawn" >&2
+  exit 1
+fi
+
+# Claude bypass-permissions readiness. This is the second dialog firstmate
+# cannot answer, and unlike workspace trust it is attended and per-machine, so
+# it cannot be provisioned during a spawn at all: a worker launched without it
+# stops on the confirmation until the watcher reports it wedged and the task is
+# relaunched on another runtime. Refusing here, beside the repository check and
+# before any endpoint exists, is what turns fifteen minutes of escalation into
+# one setup instruction. bin/fm-claude-ready.sh owns the check and that
+# instruction. Only a bypass-mode launch meets the dialog:
+# config/claude-permission-mode=auto does not request bypass mode.
+if [ "$CLAUDE_PERMISSION_MODE" = bypass ]; then
+  case "$HARNESS" in
+    claude*)
+      if ! CLAUDE_READY_REPORT=$("$FM_ROOT/bin/fm-claude-ready.sh" check "$PROJ_ABS" 2>&1); then
+        echo "error: $CLAUDE_READY_REPORT" >&2
+        echo "error: refusing to dispatch $ID on claude, because it would stop on a dialog firstmate cannot answer" >&2
+        exit 1
+      fi
+      ;;
+  esac
+fi
+
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
 # transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
@@ -2910,6 +2965,14 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+# The endpoint now exists and no record names it yet. Own it until publication.
+if [ "$BACKEND" != orca ]; then
+  SPAWN_ENDPOINT_CLEANUP=1
+  SPAWN_ENDPOINT_BACKEND=$BACKEND
+  SPAWN_ENDPOINT_TARGET=$T
+  SPAWN_ENDPOINT_TAB=
+  [ "$BACKEND" != zellij ] || SPAWN_ENDPOINT_TAB=$ZELLIJ_TAB_ID
+fi
 fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
@@ -3777,6 +3840,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_META_TMP=
+  # The record names the endpoint, so teardown owns it from here. A later
+  # failure unwinds through the backlog rollback, which reports the endpoint
+  # and local copy to close by hand rather than closing them silently.
+  SPAWN_ENDPOINT_CLEANUP=0
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created

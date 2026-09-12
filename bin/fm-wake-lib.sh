@@ -550,6 +550,49 @@ fm_lock_remove_path() {
   rmdir "$lockdir" 2>/dev/null
 }
 
+# fm_lock_dir_writable <dir>
+# Probe rather than test -w: -w reports true for root on a mode-0500 directory
+# and false for an ACL that does permit writing, and a lock is only ever as
+# real as the file the caller can actually create there.
+fm_lock_dir_writable() {
+  local dir=$1 probe
+  [ -d "$dir" ] || return 1
+  probe=$(mktemp "$dir/.lock-write.XXXXXX" 2>/dev/null) || return 1
+  rm -f "$probe" 2>/dev/null || return 1
+  return 0
+}
+
+# The recursive stale-lock path this file used to take built `<lock>.steal`,
+# then `.steal.steal`, without a depth bound, so the machines an upgrade reaches
+# are exactly the ones with such chains on disk. Nothing else in bin/ removes
+# one, and depth-1 arbitration cannot claim `<lock>.steal` while a leftover
+# `<lock>.steal.steal` blocks it through fm_lock_claim_blocked_by_steal, so a
+# leftover chain would wedge the primary lock forever - trading the old crash
+# for a silent hang. Clear it instead, deepest level first so no orphan is left
+# to block a later claim, and stop at the first level still owned.
+FM_LOCK_STEAL_CHAIN_MAX="${FM_LOCK_STEAL_CHAIN_MAX:-512}"
+
+fm_lock_clear_stale_steal_chain() {
+  local lockdir=$1 next pid i
+  local levels=()
+  next="$lockdir.steal"
+  while [ "${#levels[@]}" -lt "$FM_LOCK_STEAL_CHAIN_MAX" ]; do
+    { [ -e "$next" ] || [ -L "$next" ]; } || break
+    pid=$(cat "$next/pid" 2>/dev/null || true)
+    if fm_pid_alive "$pid" || fm_lock_mid_acquire_is_fresh "$next" "$pid"; then
+      return 1
+    fi
+    levels[${#levels[@]}]=$next
+    next="$next.steal"
+  done
+  i=${#levels[@]}
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    fm_lock_remove_path "${levels[$i]}" || return 1
+  done
+  return 0
+}
+
 fm_lock_mid_acquire_is_fresh() {
   local lockdir=$1 pid=$2 mid_acquire_stale
   case "$pid" in
@@ -890,14 +933,52 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# fm_lock_try_acquire <lockdir>
+#
+# Non-blocking acquisition. On failure it classifies why in FM_LOCK_FAILURE so
+# a caller can tell a wait that will clear from one that never can:
+#
+#   held        another live process owns the lock; FM_LOCK_HELD_PID names it
+#   unwritable  no lock can be created here; FM_LOCK_FAILURE_PATH names the
+#               directory that refused it
+#   contended   a transient loss; retrying is the right response
+#
+# The classification is only meaningful on failure.
+#
+# Stale-lock recovery arbitrates through one `<lockdir>.steal` lock and stops
+# there. It used to recurse into `.steal.steal...` without a depth bound, so a
+# directory that could hold no lock at all - a sandboxed claim root, a
+# read-only state directory - grew the lock name until the path overflowed and
+# bash died with a segfault rather than reporting the permission problem.
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+  _fm_lock_try_acquire "$1" 0
+}
+
+_fm_lock_try_acquire() {
+  local lockdir=$1 depth=$2 pid steal cur rc steal_owner steal_failure primary_owner current
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
+  FM_LOCK_FAILURE=contended
+  FM_LOCK_FAILURE_PATH=
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  fi
+
+  # Classify an uncreatable lock before anything else, and independently of
+  # what is already on disk: a leftover lock or steal chain in an unwritable
+  # directory is still a permission problem, and waiting cannot clear it. A
+  # live holder is reported below only when a lock could in principle be taken.
+  if ! fm_lock_dir_writable "$(dirname "$lockdir")"; then
+    FM_LOCK_FAILURE=unwritable
+    # shellcheck disable=SC2034 # Read by callers after acquisition fails.
+    FM_LOCK_FAILURE_PATH=$(dirname "$lockdir")
+    return 1
+  fi
+  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    # Creation failed with no lock present, so this was never contention.
+    return 1
   fi
 
   fm_current_pid current || return 1
@@ -920,17 +1001,42 @@ fm_lock_try_acquire() {
   fi
   if fm_pid_alive "$pid"; then
     FM_LOCK_HELD_PID=$pid
+    FM_LOCK_FAILURE=held
     return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$pid"; then
     FM_LOCK_HELD_PID=$pid
+    FM_LOCK_FAILURE=held
+    return 1
+  fi
+
+  if [ "$depth" -ge 1 ]; then
+    # Depth 1 IS the arbitration lock, so there is no further level to
+    # arbitrate with. Reaching here means its own recorded owner is dead and
+    # past the mid-acquire window, so reclaim it directly. `ln -s` stays the
+    # atomic arbiter: two reclaimers can both remove the stale link, but only
+    # one can recreate it, and the loser's primary claim is then refused by
+    # fm_lock_claim_blocked_by_steal.
+    if ! fm_lock_clear_stale_steal_chain "$lockdir"; then
+      FM_LOCK_HELD_PID=$(cat "$lockdir.steal/pid" 2>/dev/null || true)
+      return 1
+    fi
+    fm_lock_remove_path "$lockdir" || true
+    if fm_lock_try_create "$lockdir"; then
+      return 0
+    fi
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! _fm_lock_try_acquire "$steal" $((depth + 1)); then
+    # The nested call has already reset FM_LOCK_FAILURE; carry its class out
+    # unchanged, because an unwritable directory refuses both locks alike.
+    steal_failure=${FM_LOCK_FAILURE:-contended}
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    FM_LOCK_FAILURE=$steal_failure
     return 1
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
@@ -940,12 +1046,14 @@ fm_lock_try_acquire() {
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
+    FM_LOCK_FAILURE=held
     return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$cur"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
+    FM_LOCK_FAILURE=held
     return 1
   fi
   if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
@@ -990,9 +1098,25 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+# fm_lock_acquire_wait <lockdir>
+#
+# Waits out contention, including a lock a live process legitimately holds:
+# that always clears, so blocking is safe and callers may rely on this
+# returning only once the lock is held.
+#
+# A lock that can never be created is not contention, and no amount of waiting
+# makes an unwritable directory writable. That case fails closed here - a named
+# diagnostic and a nonzero exit - rather than returning, because most callers
+# do not check the return value and none can safely continue without the lock
+# they asked for.
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
+    if [ "${FM_LOCK_FAILURE:-}" = unwritable ]; then
+      printf 'error: cannot create lock %s: directory not writable: %s\n' \
+        "$lockdir" "${FM_LOCK_FAILURE_PATH:-$(dirname "$lockdir")}" >&2
+      exit 1
+    fi
     sleep 0.1
   done
 }
@@ -1830,12 +1954,28 @@ fm_wake_append_locked() {
 # durable queue stays the authority: a key appears here exactly while a record
 # for it is queued and unacknowledged, and disappears only after post-handling
 # acknowledgement consumes it.
+# fm_wake_queued_keys <kind>
+#
+# Unlike every other lock-taking helper here, this one is read from inside
+# command and process substitutions (bin/fm-mail.sh, bin/fm-watch.sh,
+# bin/fm-inactive-reconcile.sh). An `exit` in that context kills only the
+# subshell, so fm_lock_acquire_wait's fail-closed refusal would reach the
+# caller as an empty result with a successful-looking read - indistinguishable
+# from "nothing is queued", which is the answer that suppresses a duplicate
+# wake. Report an unreadable queue as status 3 instead, so a caller can tell
+# "nothing queued" from "could not look".
 fm_wake_queued_keys() {
-  local kind=$1
+  local kind=$1 lock_dir
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_queued_keys: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
   esac
+  lock_dir=$(dirname "$FM_WAKE_QUEUE_LOCK")
+  if ! fm_lock_dir_writable "$lock_dir"; then
+    printf 'fm_wake_queued_keys: cannot read the wake queue: directory not writable: %s\n' \
+      "$lock_dir" >&2
+    return 3
+  fi
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   fm_wake_queued_keys_locked "$kind"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"

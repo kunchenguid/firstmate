@@ -28,6 +28,8 @@ A visible trust dialog means pre-registration did not take effect, so inspect th
 The once-per-machine bypass-permissions confirmation is a separate dialog, scoped to the machine rather than the path, and pre-registration does not address it.
 Never send Enter to that one either: it was observed rendering in the same shape as the trust dialog, with the selection on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so Enter ends the session rather than accepting.
 Firstmate cannot move a selection with Enter, Escape, and C-c alone, so it cannot accept this dialog at all, and an operator accepts it once per machine instead.
+Because that prerequisite is attended, `../../../bin/fm-claude-ready.sh` establishes it before dispatch rather than after: a bypass-mode spawn refuses with the operator's exact setup command when the machine has not accepted the confirmation, so no endpoint is allocated for a worker that would stop there.
+That check reads Claude's own `skipDangerousModePermissionPrompt` setting, which is what accepting the dialog records; the script's header owns its evidence and its declared-readiness override.
 Inspect the pane to identify which dialog is on screen, and report it rather than answering it.
 A launch under `config/claude-permission-mode=auto` never meets the bypass confirmation, because it does not request bypass mode: on 2.1.269 `claude --permission-mode auto` reached the composer directly with the footer `⏵⏵ auto mode on (shift+tab to cycle)`, so a captain who refuses the bypass dialog selects `auto` there instead of accepting it.
 The workspace-trust dialog is unaffected by the permission mode and still needs the pre-registration above.
