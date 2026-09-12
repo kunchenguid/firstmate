@@ -510,7 +510,9 @@ test_verify_resolves_a_pre_collapse_key_through_its_derived_marker() {
 # the transition library does: on a beads-configured home its hold/answer/done
 # calls reach tasks-axi with no markdown file override. Fully portable - the
 # stubbed tasks-axi fakes the beads backend, so no bd or beads-capable install
-# is needed.
+# is needed. The stub also shows the body as a quoted JSON scalar carrying
+# escapes and a newline, so the hold pins the shared show-scalar decode owned by
+# bin/fm-backlog-transition-lib.sh against this host's JSON::PP.
 test_captain_hold_mutations_address_the_beads_backend() {
   local home id fb log
   home="$TMP_ROOT/captain-stub-beads/home"
