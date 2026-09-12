@@ -82,14 +82,16 @@ node_free_path() {  # <case-dir> -> a bin dir holding the script's own tools but
 # <case-dir> -> a bin dir whose node resolves on PATH and dies on every call.
 # This is the shape a broken toolchain actually takes - a real one on this
 # machine aborted on a missing shared library - and it is distinct from a
-# missing node, which never resolves at all.
+# missing node, which never resolves at all. The fake runs under /bin/sh,
+# which is dash on the Linux CI runner, so it uses the POSIX `kill -s` form
+# and disables core files so the abort leaves nothing behind in the case dir.
 broken_node_path() {
   local dir=$1/brokennode-bin tool
   mkdir -p "$dir"
   for tool in bash env git mkdir; do
     ln -sf "$(command -v "$tool")" "$dir/$tool"
   done
-  printf '#!/bin/sh\nkill -ABRT $$\n' > "$dir/node"
+  printf '#!/bin/sh\nulimit -c 0\nkill -s ABRT $$\n' > "$dir/node"
   chmod +x "$dir/node"
   printf '%s\n' "$dir"
 }
