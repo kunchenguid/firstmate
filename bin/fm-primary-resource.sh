@@ -13,8 +13,8 @@
 #
 # Thresholds (inclusive, fixed policy):
 #   context: 175000 input-context tokens (Claude usage sum or Codex input_tokens)
-#   quota:   97 percent used (100 - percentRemaining) on a session or weekly
-#            window of the primary's provider
+#   quota:   97 percent used (100 - percentRemaining) on a session, five-hour,
+#            or weekly window of the primary's provider
 # When both triggers apply, quota wins. Only Claude and Codex have verified
 # reliable context adapters; every other adapter is alert-only and never closes
 # the session. One automatic action per incident:
@@ -32,12 +32,17 @@
 #     cannot lose the action
 #   receipts/<incidentId>.json  (immutable once created; no-clobber hard link)
 #     {version, incidentId, action, sourcePid, sourceSessionId, sourceHarness,
-#      sourceProvider, destinationHarness, destinationProvider, stowReceiptPath,
-#      reservedAt}
+#      sourceProvider, destinationHarness, destinationProvider, generation,
+#      stowReceiptPath, reservedAt, windowClaims}
 #   outcomes/<incidentId>.json
 #     {version, incidentId, stage: waiting-idle|exiting|launching|started|failed,
 #      reason, helperEndpoint, updatedAt}
 #   launch/<incidentId>.argv  private NUL-delimited argv; deleted after attempt
+#   launch/<incidentId>.cmd   reconstructed successor launch command line;
+#                             deleted after attempt
+#   claims/<windowIncidentId> no-clobber one-shot claim per exhausted window
+#   episodes/<provider>       active quota-episode marker; cleared only by a
+#                             reliable below-threshold reading
 #   helper-ready/<incidentId> helper acknowledgement marker
 #   .lock                     directory lock via fm_lock_*
 #
@@ -45,9 +50,9 @@
 #   binding        {harness, pid, sessionId, transcriptPath, boundAt}
 #   context        {tokens|null, reliability: reliable|unknown, reason}
 #   quota verdict  {provider, exhausted:[{id,kind,resetsAt,percentUsed}],
-#                   reliability}
+#                   reliability, ambiguousReset}
 #   decision       {action: none|alert|context|quota, incidentId, reason,
-#                   replacement}
+#                   replacement, alertKey on alert actions}
 #   receipt        fields above; outcome stage is a separate file
 #
 # Main home only: observe/arm/check are no-ops in a secondmate home and in task
@@ -86,6 +91,9 @@
 #   FM_PRIMARY_RESOURCE_BUSY_STATE_FILE    override busy|idle|unknown for helper
 #   FM_PRIMARY_RESOURCE_ROUTE_ENV_FILE     inject NUL-delimited environ for route checks
 #   FM_PRIMARY_RESOURCE_ARGV_FILE         inject NUL-delimited argv for commit capture (tests)
+#   FM_PRIMARY_RESOURCE_QUOTA_BUDGET_SECS quota-axi read bound (default 20)
+#   FM_PRIMARY_RESOURCE_LOCK_SECS         state-lock wait bound (default 10)
+#   FM_PRIMARY_RESOURCE_FORCE_OWNER       bypass session-lock self-ownership (tests)
 
 set -u
 export LC_ALL=C
