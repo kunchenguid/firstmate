@@ -91,8 +91,9 @@ for arg in "$@"; do
     case "$arg" in *=*) origin=${arg#*=} ;; esac
     safe_id "$name" || die "invalid project name: $name"
     case "$arg" in
+      # See docs/remote-secondmates.md#provision-a-route for the origin-diagnostic safety contract.
       *=*) fm_project_origin_safe "$origin" \
-        || die "project $name origin is not an accepted clone URL: $origin" ;;
+        || die "project $name origin is not an accepted clone URL; check the origin you passed as $name=<origin-url>" ;;
     esac
     PROJECT_NAMES+=("$name")
     PROJECT_ORIGINS+=("$origin")
@@ -177,8 +178,9 @@ EOF
   fi
   [ -n "$ORIGIN" ] \
     || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"
+  # Keep this diagnostic under the same safety contract as the argument check above.
   fm_project_origin_safe "$ORIGIN" \
-    || die "project $project origin is not an accepted clone URL: $ORIGIN"
+    || die "project $project origin is not an accepted clone URL; inspect the origin of the clone at $PROJECTS/$project, or pass an accepted one as $project=<origin-url>"
   REGISTRY_LINE=$(awk -v p="$project" '$1 == "-" && $2 == p { print; exit }' "$DATA/projects.md" 2>/dev/null || true)
   [ -n "$REGISTRY_LINE" ] || die "project $project has no registry record"
   NAME_B64=$(printf '%s' "$project" | encode)
