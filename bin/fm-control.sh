@@ -630,13 +630,28 @@ relaunch_rollback() {
 resolve_relaunch_profile() {
   PRIOR_HARNESS=$HARNESS
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
+  PRIOR_WRAPPER_RECONSTRUCTIBLE=0
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
   if [ "$HARNESS_SET" = 0 ] \
      && [ "$PRIOR_RECORDED_HARNESS" != "$PRIOR_HARNESS" ]; then
-    die "task $ID records harness '$PRIOR_RECORDED_HARNESS', whose original launch command cannot be reconstructed from its recorded basename; relaunching without --harness would substitute the canonical adapter '$PRIOR_HARNESS' for the command actually running. Pass an explicit --harness to choose the replacement runtime deliberately"
+    # A wrapper executable in a verified CLI family reconstructs through the
+    # spawn-side wrapper rule, so only a non-wrapper basename keeps the
+    # explicit-replacement refusal below.
+    PRIOR_WRAPPER_RECONSTRUCTIBLE=0
+    # (Re-initialized here because this block may be skipped for canonical
+    # harnesses while the target selection below always reads the flag.)
+    case "$PRIOR_RECORDED_HARNESS" in
+      claude-*|codex-*)
+        case "$PRIOR_RECORDED_HARNESS" in
+          *'/'*) ;;
+          *) command -v "$PRIOR_RECORDED_HARNESS" >/dev/null 2>&1 && PRIOR_WRAPPER_RECONSTRUCTIBLE=1 ;;
+        esac
+        ;;
+    esac
+    [ "$PRIOR_WRAPPER_RECONSTRUCTIBLE" = 1 ] || die "task $ID records harness '$PRIOR_RECORDED_HARNESS', whose original launch command cannot be reconstructed from its recorded basename; relaunching without --harness would substitute the canonical adapter '$PRIOR_HARNESS' for the command actually running. Pass an explicit --harness to choose the replacement runtime deliberately"
   fi
   CONTROL_POOL=$(fm_meta_get "$META" route_pool)
   if [ -n "$CONTROL_POOL" ]; then
@@ -685,6 +700,10 @@ resolve_relaunch_profile() {
     fm_control_harness_supported "$CONFIG_HARNESS" \
       || die "the configured secondmate harness '$CONFIG_HARNESS' is not verified; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
     TARGET_HARNESS=$CONFIG_HARNESS
+  elif [ "$PRIOR_WRAPPER_RECONSTRUCTIBLE" = 1 ]; then
+    # A reconstructible wrapper relaunches onto its recorded executable, never
+    # the canonical family adapter the control plane uses for lifecycle keys.
+    TARGET_HARNESS=$PRIOR_RECORDED_HARNESS
   else
     TARGET_HARNESS=$PRIOR_HARNESS
   fi

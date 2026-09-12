@@ -4146,11 +4146,21 @@ if [ -n "$POOL_RECEIPT" ]; then
   # Allocation can outlive the admission evidence. Revalidate the same carrier
   # and account immediately before delivery; never draw a replacement here.
   "$SCRIPT_DIR/fm-dispatch-pool.sh" verify "$CONFIG/dispatch-pools.json" "$STATE" "$ID" "$POOL_RECEIPT" >/dev/null || exit 1
-  pool_binary=$(printf '%s' "$POOL_ROUTE" | jq -r .evidence.binary)
-  pool_auth_home=$(printf '%s' "$POOL_ROUTE" | jq -r .evidence.authHome)
-  LAUNCH=${LAUNCH/#codex /$(shell_quote "$pool_binary") -c $(shell_quote 'model_provider="openai"') }
-  LAUNCH="CODEX_HOME=$(shell_quote "$pool_auth_home") $LAUNCH"
-  if [ "$KIND" != secondmate ]; then
+  pool_source=$(printf '%s' "$POOL_ROUTE" | jq -r .evidence.source)
+  # Only the Codex app-server producer pins an executable and auth home into
+  # the launch; wrapper evidence carries the resolved binary in the launch
+  # already and no auth home at all, so a null would poison the environment.
+  if [ "$pool_source" = codex-app-server ]; then
+    pool_binary=$(printf '%s' "$POOL_ROUTE" | jq -r .evidence.binary)
+    pool_auth_home=$(printf '%s' "$POOL_ROUTE" | jq -r .evidence.authHome)
+    LAUNCH=${LAUNCH/#codex /$(shell_quote "$pool_binary") -c $(shell_quote 'model_provider="openai"') }
+    LAUNCH="CODEX_HOME=$(shell_quote "$pool_auth_home") $LAUNCH"
+  fi
+  # The notify override speaks the Codex -c config flag, so it rides canonical
+  # codex and codex-family wrapper launches only. Claude-family pool workers
+  # report turns through their Stop hook instead; a -c flag would reach the
+  # Claude CLI as --continue and kill the launch.
+  if [ "$KIND" != secondmate ] && { [ "$HARNESS" = codex ] || [ "$WRAPFAMILY" = codex ]; }; then
     pool_notify=$(jq -cn --arg script "$SCRIPT_DIR/fm-dispatch-pool-notify.sh" --arg config "$CONFIG/dispatch-pools.json" --arg state "$STATE" --arg task "$ID" --arg receipt "$POOL_RECEIPT" --arg generation "$SPAWN_GEN" '["bash",$script,$config,$state,$task,$receipt,$generation]')
     # Override only the worker template's notification, preserving its marker.
     # Secondmates retain their existing configured notification unchanged.

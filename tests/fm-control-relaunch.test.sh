@@ -607,6 +607,30 @@ test_prefixed_recorded_harness_requires_explicit_replacement() {
   pass "fm-control relaunch: a prefixed command requires an explicit replacement harness"
 }
 
+test_wrapper_recorded_harness_relaunches_without_explicit_choice() {
+  local dir out rc
+  dir=$(new_case wraprelaunch rlw)
+  add_ship_task "$dir" rlw claude-stubw
+  cat > "$dir/fakebin/claude-stubw" <<'SH'
+#!/usr/bin/env sh
+exit 0
+SH
+  chmod +x "$dir/fakebin/claude-stubw"
+  printf 'claude-stubw' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rlw relaunch --note "continue on wrapper"); rc=$?
+  expect_code 0 "$rc" "implicit relaunch from a wrapper harness should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rlw harness)" = claude-stubw ] \
+    || fail "relaunch should keep the wrapper harness"
+  [ "$(journal_field "$dir" rlw from_harness)" = claude-stubw ] \
+    || fail "relaunch should retain the wrapper basename in its provenance"
+  assert_contains "$out" "harness=claude-stubw" \
+    "relaunch should report the wrapper harness"
+  if printf '%s' "$out" | grep -F -q 'cannot be reconstructed'; then
+    fail "relaunch wrongly refused a reconstructible wrapper harness"
+  fi
+  pass "fm-control relaunch: a wrapper harness reconstructs without an explicit replacement"
+}
+
 test_same_harness_relaunch_keeps_the_profile_axes() {
   local dir out rc
   dir=$(new_case keepprofile rl6)
@@ -1630,6 +1654,7 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
+test_wrapper_recorded_harness_relaunches_without_explicit_choice
 test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_explicit_model_wins_over_the_recorded_one

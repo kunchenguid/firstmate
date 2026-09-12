@@ -123,6 +123,45 @@ test_codex_wrapper_keeps_notify_and_brief_position() {
   pass "codex wrapper keeps notify wiring and brief position behind separator"
 }
 
+test_pool_claude_wrapper_carries_no_codex_notify_or_home() {
+  local rec id out status launch
+  id=wrap-pool-claude-z1
+  rec=$(make_wrapper_case pool-claude "$id")
+  read_wrapper_case "$rec"
+  cat > "$HOME_DIR/config/dispatch-pools.json" <<'JSON'
+{"schemaVersion":1,"defaults":{},"pools":{"wpool":[{"id":"w","harness":"claude-stubw","model":"beta","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1}]}}
+JSON
+
+  out=$(run_wrapper_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --pool wpool)
+  status=$?
+  expect_code 0 "$status" "pool claude wrapper spawn should succeed"
+  assert_contains "$out" "candidate=w" "pool spawn did not report wrapper candidate"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/claude-stubw' 'beta' --" "pool claude wrapper launch shape wrong"
+  if printf '%s' "$launch" | grep -F -q -- '-c "notify='; then fail "pool claude wrapper launch carries codex notify flag"; fi
+  if printf '%s' "$launch" | grep -F -q 'CODEX_HOME='; then fail "pool claude wrapper launch carries null codex home"; fi
+  pass "pool claude wrapper delivery keeps family shape without codex-only wiring"
+}
+
+test_pool_codex_wrapper_keeps_notify_without_home() {
+  local rec id out status launch
+  id=wrap-pool-codex-z1
+  rec=$(make_wrapper_case pool-codex "$id")
+  read_wrapper_case "$rec"
+  cat > "$HOME_DIR/config/dispatch-pools.json" <<'JSON'
+{"schemaVersion":1,"defaults":{},"pools":{"wpool":[{"id":"w","harness":"codex-stubw","model":"alpha","effort":"high","provider":"t","authCarrier":"t","carrier":"wrapper","weight":1}]}}
+JSON
+
+  out=$(run_wrapper_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off --pool wpool)
+  status=$?
+  expect_code 0 "$status" "pool codex wrapper spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex-stubw' 'alpha' --" "pool codex wrapper launch shape wrong"
+  assert_contains "$launch" '-c "notify=' "pool codex wrapper launch lost notify wiring"
+  if printf '%s' "$launch" | grep -F -q 'CODEX_HOME='; then fail "pool codex wrapper launch carries null codex home"; fi
+  pass "pool codex wrapper delivery keeps notify wiring without codex home"
+}
+
 test_wrapper_refusals_fail_before_endpoint() {
   local rec id out status
   id=wrap-refuse-z1
@@ -161,6 +200,8 @@ test_wrapper_refusals_fail_before_endpoint() {
 test_claude_wrapper_threads_listed_alias_before_separator
 test_claude_pinned_wrapper_takes_no_positional_model
 test_codex_wrapper_keeps_notify_and_brief_position
+test_pool_claude_wrapper_carries_no_codex_notify_or_home
+test_pool_codex_wrapper_keeps_notify_without_home
 test_wrapper_refusals_fail_before_endpoint
 
 echo "# all fm-spawn-wrapper tests passed"

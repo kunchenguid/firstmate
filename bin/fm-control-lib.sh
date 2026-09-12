@@ -65,6 +65,20 @@ fm_control_harness_supported() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy) return 0 ;;
   esac
+  # A wrapper executable in a verified CLI family reuses its family's control
+  # mechanics and the spawn-side wrapper launch rule, so it is supported while
+  # installed. Anything else stays unsupported rather than guessed; every arm
+  # below returns explicitly because a case with no matching arm reports
+  # success.
+  case "${1-}" in
+    claude-*|codex-*)
+      case "${1-}" in
+        *'/'*) return 1 ;;
+      esac
+      command -v -- "$1" >/dev/null 2>&1
+      return $?
+      ;;
+  esac
   return 1
 }
 
