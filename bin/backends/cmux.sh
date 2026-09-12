@@ -562,7 +562,7 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] [harness] -> emp
 fm_backend_cmux_agy_composer_content() {  # <target> [expected-label]
   local cap
   cap=$(fm_backend_cmux_composer_capture "$1" "${2:-}" agy) || return 1
-  fm_composer_extract_selected_content "$(fm_backend_cmux_composer_caps agy)" "$cap" '' agy compare
+  fm_composer_extract_selected_content "$(fm_backend_cmux_composer_caps agy)" "$cap" '' agy compare-rows
 }
 
 fm_backend_cmux_agy_delivery_busy() {  # <target> [expected-label]
@@ -577,7 +577,7 @@ fm_backend_cmux_agy_delivery_busy() {  # <target> [expected-label]
 # shared composer verdict. Echoes empty|pending|unknown|send-failed, a subset
 # of the proof-carrying submit vocabulary.
 fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} after expected
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} after
   fm_backend_cmux_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_cmux_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
   if [ "$harness" = agy ]; then
@@ -585,9 +585,7 @@ fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
       printf 'agy-preflight:unknown'
       return 0
     fi
-    expected=$(fm_composer_normalize_compare_text "$text")
-    after=$(fm_composer_normalize_compare_text "$after")
-    [ "$after" = "$expected" ] || { printf 'agy-draft-conflict'; return 0; }
+    fm_composer_agy_expected_matches_rows "$text" "$after" || { printf 'agy-draft-conflict'; return 0; }
   else
     sleep "$settle"
   fi

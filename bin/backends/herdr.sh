@@ -3091,13 +3091,13 @@ fm_backend_herdr_agy_composer_content() {  # <target> [expected-label]
     fm_composer_extract_selected_content 'styled=1
 cursor=0
 identity=1
-rows='"$capture_lines" "$cap" '' agy compare
+rows='"$capture_lines" "$cap" '' agy compare-rows
   else
     cap=$(fm_backend_herdr_capture "$target" "$capture_lines") || return 1
     fm_composer_extract_selected_content 'styled=0
 cursor=0
 identity=1
-rows='"$capture_lines" "$cap" '' agy compare
+rows='"$capture_lines" "$cap" '' agy compare-rows
   fi
 }
 
@@ -3223,7 +3223,7 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered> [harness]
 }
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} i=0 verdict baseline confirm_sleep after expected
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} i=0 verdict baseline confirm_sleep after
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
@@ -3232,9 +3232,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       printf 'agy-preflight:unknown'
       return 0
     fi
-    expected=$(fm_composer_normalize_compare_text "$text")
-    after=$(fm_composer_normalize_compare_text "$after")
-    [ "$after" = "$expected" ] || { printf 'agy-draft-conflict'; return 0; }
+    fm_composer_agy_expected_matches_rows "$text" "$after" || { printf 'agy-draft-conflict'; return 0; }
   else
     sleep "$settle"
   fi

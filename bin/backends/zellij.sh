@@ -551,7 +551,7 @@ fm_backend_zellij_composer_content() {  # <target> [expected-label] [harness] [c
 }
 
 fm_backend_zellij_agy_composer_content() {  # <target> [expected-label]
-  fm_backend_zellij_composer_content "$1" "${2:-}" agy compare
+  fm_backend_zellij_composer_content "$1" "${2:-}" agy compare-rows
 }
 
 fm_backend_zellij_agy_delivery_busy() {  # <target> [expected-label]
@@ -567,17 +567,16 @@ fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expe
   cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label" "$harness") || return 1
   caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$capture_lines")
   if [ "$harness" = agy ]; then
-    after=$(fm_composer_extract_selected_content "$caps" "$cap" '' "$harness" compare) || return 1
+    after=$(fm_composer_extract_selected_content "$caps" "$cap" '' "$harness" compare-rows) || return 1
   else
     after=$(fm_composer_extract_selected_content "$caps" "$cap" '' "$harness") || return 1
   fi
   [ -n "$text" ] || return 1
   if [ "$harness" = agy ]; then
     before=$(fm_composer_normalize_compare_text "$before")
-    text=$(fm_composer_normalize_compare_text "$text")
-    after=$(fm_composer_normalize_compare_text "$after")
     [ -z "$before" ] || return 1
-    expected=$text
+    fm_composer_agy_expected_matches_rows "$text" "$after" || return 1
+    return 0
   else
     fm_composer_normalize_spaces_var before
     fm_composer_normalize_spaces_var text
@@ -611,9 +610,7 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
       printf 'agy-preflight:unknown'
       return 0
     fi
-    expected=$(fm_composer_normalize_compare_text "$text")
-    after=$(fm_composer_normalize_compare_text "$after")
-    [ "$after" = "$expected" ] || { printf 'agy-draft-conflict'; return 0; }
+    fm_composer_agy_expected_matches_rows "$text" "$after" || { printf 'agy-draft-conflict'; return 0; }
   else
     sleep "$settle"
     fm_backend_zellij_composer_observed_append "$target" "$before" "$text" "$expected_label" "$harness" \

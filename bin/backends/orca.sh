@@ -256,7 +256,7 @@ fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] [harness] -
 fm_backend_orca_agy_composer_content() {  # <terminal-id> [expected-label]
   local cap
   cap=$(fm_backend_orca_composer_capture "$1" "${2:-}" agy) || return 1
-  fm_composer_extract_selected_content "$(fm_backend_orca_composer_caps agy)" "$cap" '' agy compare
+  fm_composer_extract_selected_content "$(fm_backend_orca_composer_caps agy)" "$cap" '' agy compare-rows
 }
 
 fm_backend_orca_agy_delivery_busy() {  # <terminal-id> [expected-label]
@@ -288,7 +288,7 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
 # slash-command popup placeholder fill gets the required second Enter without
 # duplicating text.
 fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
-  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} after expected
+  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} harness=${7:-} after
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
   fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
   if [ "$harness" = agy ]; then
@@ -296,9 +296,7 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
       printf 'agy-preflight:unknown'
       return 0
     fi
-    expected=$(fm_composer_normalize_compare_text "$text")
-    after=$(fm_composer_normalize_compare_text "$after")
-    [ "$after" = "$expected" ] || { printf 'agy-draft-conflict'; return 0; }
+    fm_composer_agy_expected_matches_rows "$text" "$after" || { printf 'agy-draft-conflict'; return 0; }
   else
     sleep "$settle"
   fi

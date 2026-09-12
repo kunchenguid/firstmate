@@ -269,13 +269,13 @@ ok - strict posture live: a blank shell row classifies unknown and injection def
 Firstmate's 2026-09-12 run supplied all five passing lines above.
 
 The standalone inbox-doorbell guard was not rerun separately after the fixture correction.
-The canonical lifecycle guard below now contains the AGY doorbell acted-and-acked assertion, but the recorded run predates that assertion.
+The canonical lifecycle guard below contains the AGY doorbell acted-and-acked assertion.
 
 ```text
 env -u ANTIGRAVITY_AGENT FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=agy bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
 
-Canonical lifecycle command, to run after the lifecycle doorbell assertion fix:
+Canonical lifecycle command:
 
 ```text
 env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 FM_AGY_LIFECYCLE_TMUX_WIDTH=220 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
@@ -287,12 +287,13 @@ Narrow-pane lifecycle command:
 env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 FM_AGY_LIFECYCLE_TMUX_WIDTH=80 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
 
-The no-mistakes pipeline sandbox cannot execute these credentialed post-fix lifecycle runs because it has no worktree pool or signed-in AGY session; the doorbell assertions are left in the executable guard for firstmate to run at both widths.
+The no-mistakes pipeline sandbox cannot execute these credentialed post-fix lifecycle runs because it has no worktree pool or signed-in AGY session; the doorbell assertions remain in the executable guard for firstmate to run at both widths.
 
 No post-fix live output is recorded here; the placeholder below remains intentionally unfilled until firstmate runs the real-binary guard at both widths.
 
-Firstmate's 2026-09-12 AGY 1.2.2 narrow-pane rerun reached the new doorbell step but reported `doorbell instruction was not acted on`.
-The capture measured an 80-column boundary with two-column composer margins on both sides, so the available content width is 76 characters rather than 78; the wrap comparison now uses that measured width and the maximum observed row length fallback.
+Firstmate's 2026-09-12 AGY 1.2.2 run against gate tip 7b25b46 passed the lifecycle guard at tmux width 80 with spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown.
+The same run at the default width (120) reached the doorbell step but reported `doorbell instruction was not acted on`.
+The submit comparison now uses the typed text as its guide: each extracted row must match in order, with zero or more ASCII spaces permitted only between rows, while interior row spaces remain exact.
 
 Post-fix output placeholder for firstmate's credentialed runs:
 

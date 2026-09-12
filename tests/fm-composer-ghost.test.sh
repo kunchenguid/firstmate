@@ -503,6 +503,26 @@ test_agy_busy_post_enter_confirms_delivery() {
   pass "fm_composer_submit_retry_core: AGY busy confirms an otherwise unknown submit"
 }
 
+test_agy_expected_guided_rows_match_wrapping_only() {
+  local expected rows
+  expected='prefix/read and acton each path'
+  rows=$'prefix/read and act\non each path'
+  fm_composer_agy_expected_matches_rows "$expected" "$rows" \
+    || fail "AGY expected-guided matching should allow a zero-space row boundary"
+  rows=$'prefix/read and\nact on each path'
+  fm_composer_agy_expected_matches_rows "$expected" "$rows" \
+    && fail "AGY expected-guided matching should reject changed row text"
+  expected='foo  bar'
+  rows='foo bar'
+  fm_composer_agy_expected_matches_rows "$expected" "$rows" \
+    && fail "AGY expected-guided matching should preserve interior spaces"
+  expected='甲乙丙丁'
+  rows=$'甲乙\n丙丁'
+  fm_composer_agy_expected_matches_rows "$expected" "$rows" \
+    || fail "AGY expected-guided matching should preserve CJK row text"
+  pass "fm_composer_agy_expected_matches_rows: wrapping-only boundaries match exactly"
+}
+
 test_misaligned_box_is_unknown() {
   local dir fb capture out fixture
   dir="$TMP_ROOT/misaligned-box"; mkdir -p "$dir"
@@ -762,6 +782,7 @@ test_agy_boundary_pair_widths_must_match
 test_agy_busy_scope_requires_matching_boundaries
 test_agy_submit_waits_for_stable_render
 test_agy_busy_post_enter_confirms_delivery
+test_agy_expected_guided_rows_match_wrapping_only
 test_misaligned_box_is_unknown
 test_unproved_empty_geometry_fails_closed
 test_differing_widths_use_asymmetric_verdicts

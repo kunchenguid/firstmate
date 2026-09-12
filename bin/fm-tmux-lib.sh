@@ -287,11 +287,11 @@ fm_backend_tmux_agy_composer_content() {  # <target> [expected-label]
   cursor=$(fm_tmux_composer_cursor_row "$target") || return 1
   case "$cursor" in ''|*[!0-9]*) return 1 ;; esac
   cap=$(fm_tmux_composer_capture "$target") || return 1
-  fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$cap" "$cursor" agy compare
+  fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$cap" "$cursor" agy compare-rows
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} baseline_idle='' baseline_state after expected
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-} baseline_idle='' baseline_state after
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
@@ -303,9 +303,7 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [har
       printf 'agy-preflight:unknown'
       return 0
     fi
-    expected=$(fm_composer_normalize_compare_text "$text")
-    after=$(fm_composer_normalize_compare_text "$after")
-    if [ "$after" != "$expected" ]; then
+    if ! fm_composer_agy_expected_matches_rows "$text" "$after"; then
       printf 'agy-draft-conflict'
       return 0
     fi

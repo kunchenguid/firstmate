@@ -873,11 +873,9 @@ fm_backend_agy_composer_content() {  # <backend> <target> [expected-label] [comp
 }
 
 fm_backend_agy_composer_matches() {  # <backend> <target> <text> [expected-label]
-  local backend=$1 target=$2 text=$3 expected_label=${4:-} actual expected
-  actual=$(fm_backend_agy_composer_content "$backend" "$target" "$expected_label" compare) || return 1
-  expected=$(fm_composer_normalize_compare_text "$text")
-  actual=$(fm_composer_normalize_compare_text "$actual")
-  [ "$actual" = "$expected" ]
+  local backend=$1 target=$2 text=$3 expected_label=${4:-} rows
+  rows=$(fm_backend_agy_composer_content "$backend" "$target" "$expected_label" compare-rows) || return 1
+  fm_composer_agy_expected_matches_rows "$text" "$rows"
 }
 
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
