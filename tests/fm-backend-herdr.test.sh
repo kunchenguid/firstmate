@@ -4112,9 +4112,11 @@ test_wait_for_working_samples_budget_endpoint_without_final_sleep() {
   pass "fm_backend_herdr_wait_for_working: spreads six samples across the full budget endpoint without a final trailing sleep"
 }
 
-test_send_text_submit_applies_herdr_minimum_confirm_budget() {
+# assert_submit_min_confirm_budget <case>: a 0.4s caller budget is expanded to the
+# 0.6s herdr floor and spread as five 0.1200s sleeps, in the caller's locale.
+assert_submit_min_confirm_budget() {
   local dir log resp fb out sleep_log sleeps
-  dir="$TMP_ROOT/submit-min-budget"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; sleep_log="$dir/sleeps"; : > "$log"; : > "$sleep_log"
+  dir="$TMP_ROOT/$1"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; sleep_log="$dir/sleeps"; : > "$log"; : > "$sleep_log"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
@@ -4129,7 +4131,16 @@ test_send_text_submit_applies_herdr_minimum_confirm_budget() {
   sleeps=$(grep -c '^sleep:0.1200$' "$sleep_log")
   [ "$sleeps" -eq 5 ] || fail "a 0.4s caller budget should be expanded to five 0.1200s sleeps across the 0.6s herdr floor, got $sleeps; log: $(cat "$sleep_log")"
   [ "$(grep -c '^sleep:0.0800$' "$sleep_log")" -eq 0 ] || fail "send_text_submit used the caller's too-short 0.4s budget instead of the herdr floor: $(cat "$sleep_log")"
+}
+
+test_send_text_submit_applies_herdr_minimum_confirm_budget() {
+  assert_submit_min_confirm_budget submit-min-budget
   pass "fm_backend_herdr_send_text_submit: applies the herdr minimum confirmation budget before polling agent-state"
+}
+
+test_send_text_submit_confirm_budget_ignores_decimal_comma_locale() {
+  LC_ALL=de_DE.UTF-8 assert_submit_min_confirm_budget submit-min-budget-de
+  pass "fm_backend_herdr_send_text_submit: the herdr minimum confirmation budget holds under a decimal-comma locale"
 }
 
 test_wait_for_working_returns_idle_when_never_busy_but_readable() {
@@ -5333,6 +5344,7 @@ test_wait_for_working_returns_busy_on_first_poll
 test_wait_for_working_catches_a_slow_transition_mid_window
 test_wait_for_working_samples_budget_endpoint_without_final_sleep
 test_send_text_submit_applies_herdr_minimum_confirm_budget
+test_send_text_submit_confirm_budget_ignores_decimal_comma_locale
 test_wait_for_working_returns_idle_when_never_busy_but_readable
 test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
