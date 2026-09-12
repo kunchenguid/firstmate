@@ -4145,3 +4145,32 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+
+# D5: register the deterministic pipeline-state watch for this task, so the
+# worker can end its turn on a declared wait instead of burning model turns on
+# a sleep loop (bin/fm-dod-lib.sh's Definition of done tells it to). The watch
+# is a process-event `when` source: its condition runs in a blocking child
+# with no model turn, and its action rings this task's steering inbox. It is a
+# repeat watch because a pipeline changes state several times per run, and
+# --edge because bin/fm-nm-state-condition.sh already de-dups its own
+# transitions (it rewrites its snapshot on every poll, true or false), so the
+# generic repeat dedup would risk discarding a real change observed right
+# after a restart between fires. It carries FM_HOME because fm-send refuses to
+# resolve a target without one. Arming is best-effort by design: a failure
+# here costs a slower poll, never the spawn, so it warns and continues.
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+    NM_SNAPSHOT="$STATE/$ID.nm-state"
+    if "$FM_ROOT/bin/fm-procevent-when.sh" arm "nm-state-$ID" \
+        --interval 45 --stable 1 --condition-timeout 60 --action-timeout 120 \
+        --repeat --edge --action-env "FM_HOME=$FM_HOME" \
+        --condition "$FM_ROOT/bin/fm-nm-state-condition.sh" "$WT" "$NM_SNAPSHOT" \
+        --action "$FM_ROOT/bin/fm-send.sh" "$ID" \
+            "no-mistakes state changed: run \`no-mistakes axi status\` in your worktree, append \`resolved: run returned\`, and answer the parked gate." \
+        >/dev/null 2>&1
+    then
+        rm -f -- "$NM_SNAPSHOT"
+        echo "armed: when-nm-state-$ID (pipeline-state watch)"
+    else
+        echo "warning: could not arm the pipeline-state watch for $ID; the worker will fall back to a single status check per resume" >&2
+    fi
+fi

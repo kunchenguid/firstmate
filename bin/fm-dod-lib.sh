@@ -231,10 +231,13 @@ The \`--intent\` string you pass must be self-sufficient: that string plus the c
 When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+While a pipeline round runs, do NOT poll and do NOT sleep. Append \`paused: no-mistakes run in progress, clears on its own\` to the status file and END YOUR TURN. A deterministic watch registered for this task (\`when-nm-state-$id\`, armed at spawn) polls the pipeline state outside any model turn and rings your steering inbox the moment that state changes; resume from that ring, append \`resolved: run returned\`, and answer the parked gate with a short foreground call.
+A \`sleep\` between status checks is a defect here, not patience: every wake-up is a full model turn that re-reads your whole context to learn nothing.
+If the ring never comes and you are resumed for another reason, one \`no-mistakes axi status\` call is fine; a loop of them is not.
 
-One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
-So background the drive call and poll \`no-mistakes axi status\` from a separate call instead of sitting in one blocking hold your harness will kill.
-Where a harness's own command limit is not established, assume it bounds commands and use that same background-and-poll shape.
+A single drive call (\`no-mistakes axi run\` or \`axi respond\`) blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
+Background that one call rather than sitting in a blocking hold your harness will kill, and resume from its result once it finishes - this is a harness-timeout workaround for a single call, not the between-rounds wait the deterministic watch above already covers.
+Where a harness's own command limit is not established, assume it bounds commands and use that same background-and-resume shape.
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 

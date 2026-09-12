@@ -791,9 +791,16 @@ This start-to-start governor is a no-op after a normally blocking poll but caps 
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 1 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so re-arm a live board once to adopt this retry policy.
 
-The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
+The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs.
-Every failure path - a mutated spec or action executable, a condition error past its budget, an expired deadline, a failed action, or an earlier fire whose outcome was never captured - produces a terminal captured outcome that wakes firstmate rather than a silent retry, and a durable single-fire marker claimed before the action makes restarts and re-polls unable to fire it twice.
+An action that needs environment to work at all is armed with hash-bound `NAME=VALUE` assignments recorded in that same spec, and the action executable stays argv[0], so binding its bytes is unaffected.
+A watch armed one-shot fires at most once and every one of its outcomes is terminal.
+A watch armed to repeat answers "ring X every time Y changes" instead: its successful fire is the single non-terminal outcome, and it is also the single silent one, so the runner records it handled without a wake and restarts the poll rather than retiring the source.
+That fire is journalled under `state/when/`, and a repeat watch's deadline is measured from its last fire rather than from arming, so the deadline means the condition stopped changing instead of the watch getting old.
+A repeat action must therefore be safe to run again, which is the standard the one-shot action already had to meet.
+By default a repeat watch also requires an observed false poll between two fires, so a level condition that never flaps cannot refire on a change that never happened; a watch armed `--edge` declares that its own condition already de-dups its transitions (it rewrites its snapshot on every poll, true or false) and skips that generic dedup, because requiring a false poll there could discard a real transition the condition already reported and will never report again.
+Every failure path - a mutated spec or action executable, a condition error past its budget, an expired deadline, a failed action, or, for a one-shot watch, an earlier fire whose outcome was never captured - produces a terminal captured outcome that wakes firstmate rather than a silent retry, in both modes.
+A durable single-fire marker claimed before the action makes restarts and re-polls unable to fire it twice; a repeat watch releases that marker only once its fire has been emitted, so a lost capture costs one extra ring instead of ending the watch.
 The adapter automates only the exact deterministic subset: anything needing judgment, and anything destructive, irreversible, or security-sensitive, keeps the ordinary check-fires-then-firstmate-decides flow, and the adapter's header and `--help` own its commands, flags, and outcome document.
 
 This section is the single owner of the runner's operating contract.
@@ -816,6 +823,8 @@ For built-ins, silence remains independent of the keyed-answer feed below: suppr
 For Lavish that verdict covers exactly one shape - a session the adapter classifies `ended` that carries no queued content block at all, which is a review surface closed with nothing said.
 Any recognized top-level `prompts` or `feedback` block counts as content regardless of its declared count, and a malformed header makes the result indeterminate rather than empty.
 A `Send & End` close carrying the captain's answer arrives as `status: feedback` with `session_ended`, so it classifies `feedback` and is announced unchanged, as is any `ended` result that still carries content, and every `waiting`, `missing`, `unknown`, or unreadable result.
+For `when` that verdict covers exactly one shape too - a repeat watch's successful fire, whose action has already rung its target, so announcing it would only spend a turn on news the target already has.
+Every other `when` outcome, in both modes, is announced unchanged.
 
 Whether a captured result ends its source is adapter knowledge, never the runner's.
 After capture - and after initial `check` publication for the default ordering - the runner asks the immutable captured owner through the built-in `terminal` command or external `result.terminal` operation and retires the registration on exit 0 alone, dropping only the exact registration generation captured by its claim and releasing that claim only after removal succeeds under one source boundary; a missing command, an error, or any other exit keeps the source armed, so an adapter with no notion of ending needs no change.
@@ -823,6 +832,7 @@ A failed terminal removal stays durably terminal and is completed by ordinary re
 Any registration refuses to replace an external registration while its prior runner claim is live, uncertain, orphaned, or terminal-pending; replacement becomes eligible only after that generation is proved gone or its terminal retirement completes.
 A source that has ended therefore captures at most one terminal result, is never restarted, and leaves no recurring poll work, while explicit `retire` stays the supported and idempotent path afterwards.
 For Lavish that verdict covers an ended session, a missing session, and the final feedback of a `Send & End` review, which the published poll marks with `session_ended` before it returns only empty ended sessions.
+For `when` it covers every outcome of a one-shot watch, and every outcome of a repeat watch except its successful fire, which is what keeps a repeat watch registered and restarted until it fails or is retired.
 
 Applying a captured result through code is a built-in adapter seam, and some built-in results carry no judgement at all: they must simply be applied idempotently to this home's own durable state.
 Leaving that to a handler means it can silently not happen, so immediately after the terminal check above the runner calls `bin/fm-procevent-<adapter>.sh autohandle <source-id> <sequence> <result-file>` and lets the built-in adapter apply and acknowledge its own result.
@@ -929,6 +939,20 @@ The runner proves nothing about the source side, and the handled acknowledgement
 The published `lavish-axi poll` clears feedback destructively before returning it, so a result lost between that clearing and the runner reading process output is unrecoverable.
 Never describe this path as at-least-once, no-loss, or lossless.
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
+
+### Pipeline-state watch (`when-nm-state-<task-id>`)
+
+Every `--mode no-mistakes` ship spawn arms one `when` source per task whose condition is `bin/fm-nm-state-condition.sh <worktree> state/<id>.nm-state` and whose action rings that task's steering inbox through `bin/fm-send.sh`.
+It exists so a worker never spends model turns waiting: `bin/fm-dod-lib.sh`'s Definition of done tells the worker to append `paused: no-mistakes run in progress, clears on its own` and end its turn, and this source is what brings it back.
+It is armed with `--repeat`, because a pipeline changes state several times per run and a one-shot watch would die after the first ring, and with `--action-env FM_HOME=<home>`, because `fm-send.sh` refuses to resolve a target without one.
+
+The condition compares a PROJECTION of `no-mistakes axi status` (`status`, `outcome`, `step`, `round`) against a snapshot, not the whole output, because the raw output carries elapsed times that churn on every poll.
+A missing key contributes an empty field, so a no-mistakes release that renames a key degrades the watch to a coarser one rather than to a wrong one.
+The first poll after arming writes the snapshot and returns false, so arming never fires on its own baseline.
+A probe that errors exits 2 and is counted against the source's error budget; it is never read as a true.
+It is also armed with `--edge`, because the condition rewrites its own snapshot to the current projection on every poll, true or false, so it is already edge-detecting and can never report the same transition twice; without `--edge`, the generic repeat dedup that requires an observed false between fires could discard a real transition observed by the fresh poller a reconcile restarts between fires, stalling the watch on a state the pipeline has already left.
+
+`bin/fm-spawn.sh` arms it and `bin/fm-teardown.sh` retires it. Arming is best-effort: a failure warns and the spawn continues, and the worker then falls back to one status check per resume.
 
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 

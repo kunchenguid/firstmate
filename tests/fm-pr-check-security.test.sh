@@ -115,7 +115,7 @@ state_snapshot() {
         printf 'link %s %s\n' "$file" "$(readlink "$file")"
       else
         printf 'file %s %s ' "$file" "$(file_mode "$file")"
-        shasum -a 256 "$file" | awk '{print $1}'
+        fm_custom_check_sha256 "$file"
       fi
     done
   )
@@ -1453,7 +1453,7 @@ poll_artifact_snapshot() {
       printf 'link %s %s\n' "$suffix" "$(readlink "$path")"
     elif [ -f "$path" ]; then
       printf 'file %s %s ' "$suffix" "$(file_mode "$path")"
-      shasum -a 256 "$path" | awk '{print $1}'
+      fm_custom_check_sha256 "$path"
     else
       printf 'other %s\n' "$suffix"
     fi
@@ -1788,10 +1788,10 @@ test_persistent_secondmate_retirement_is_poll_only() {
   printf 'working: persistent endpoint remains healthy\n' > "$state/domain.status"
   printf -- '- domain | scope: test | home: %s\n' "$dir/secondmate-home" > "$dir/home/data/secondmates.md"
   printf 'endpoint-alive\n' > "$dir/endpoint-sentinel"
-  meta_before=$(shasum -a 256 "$state/domain.meta")
-  status_before=$(shasum -a 256 "$state/domain.status")
-  registry_before=$(shasum -a 256 "$dir/home/data/secondmates.md")
-  endpoint_before=$(shasum -a 256 "$dir/endpoint-sentinel")
+  meta_before=$(fm_custom_check_sha256 "$state/domain.meta")
+  status_before=$(fm_custom_check_sha256 "$state/domain.status")
+  registry_before=$(fm_custom_check_sha256 "$dir/home/data/secondmates.md")
+  endpoint_before=$(fm_custom_check_sha256 "$dir/endpoint-sentinel")
   seed_canonical_poll "$dir" domain https://github.com/o/r/pull/2
 
   set +e
@@ -1800,10 +1800,10 @@ test_persistent_secondmate_retirement_is_poll_only() {
   set -e
   [ "$rc" -eq 0 ] || fail "persistent secondmate merged watcher failed: $(cat "$dir/watch.err")"
   assert_poll_absent "$state" domain
-  [ "$(shasum -a 256 "$state/domain.meta")" = "$meta_before" ] || fail "retirement changed secondmate metadata"
-  [ "$(shasum -a 256 "$state/domain.status")" = "$status_before" ] || fail "retirement changed secondmate status"
-  [ "$(shasum -a 256 "$dir/home/data/secondmates.md")" = "$registry_before" ] || fail "retirement changed secondmate registry"
-  [ "$(shasum -a 256 "$dir/endpoint-sentinel")" = "$endpoint_before" ] || fail "retirement changed secondmate endpoint evidence"
+  [ "$(fm_custom_check_sha256 "$state/domain.meta")" = "$meta_before" ] || fail "retirement changed secondmate metadata"
+  [ "$(fm_custom_check_sha256 "$state/domain.status")" = "$status_before" ] || fail "retirement changed secondmate status"
+  [ "$(fm_custom_check_sha256 "$dir/home/data/secondmates.md")" = "$registry_before" ] || fail "retirement changed secondmate registry"
+  [ "$(fm_custom_check_sha256 "$dir/endpoint-sentinel")" = "$endpoint_before" ] || fail "retirement changed secondmate endpoint evidence"
   [ -d "$dir/secondmate-home" ] || fail "retirement removed the persistent secondmate home"
   pass "merged poll retirement preserves every persistent secondmate lifecycle artifact"
 }
@@ -2017,16 +2017,16 @@ test_retirement_refuses_replacement_and_nonterminal_results() {
   fm_pr_poll_retirement_publish "$state" task-a "$POLL" merged || fail "could not publish rearm-race receipt"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/21
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/21
-  replacement_check=$(shasum -a 256 "$state/task-a.check.sh")
-  replacement_data=$(shasum -a 256 "$state/task-a.pr-poll")
-  replacement_registration=$(shasum -a 256 "$state/task-a.pr-poll-registration")
-  replacement_meta=$(shasum -a 256 "$state/task-a.meta")
+  replacement_check=$(fm_custom_check_sha256 "$state/task-a.check.sh")
+  replacement_data=$(fm_custom_check_sha256 "$state/task-a.pr-poll")
+  replacement_registration=$(fm_custom_check_sha256 "$state/task-a.pr-poll-registration")
+  replacement_meta=$(fm_custom_check_sha256 "$state/task-a.meta")
   fm_pr_poll_retirement_recover_one "$state" task-a "$POLL" || fail "stale receipt did not yield to a canonical replacement"
   [ ! -e "$state/task-a.pr-poll-retirement" ] || fail "stale receipt survived canonical replacement recovery"
-  [ "$(shasum -a 256 "$state/task-a.check.sh")" = "$replacement_check" ] || fail "stale receipt changed replacement check"
-  [ "$(shasum -a 256 "$state/task-a.pr-poll")" = "$replacement_data" ] || fail "stale receipt changed replacement data"
-  [ "$(shasum -a 256 "$state/task-a.pr-poll-registration")" = "$replacement_registration" ] || fail "stale receipt changed replacement registration"
-  [ "$(shasum -a 256 "$state/task-a.meta")" = "$replacement_meta" ] || fail "stale receipt changed replacement metadata"
+  [ "$(fm_custom_check_sha256 "$state/task-a.check.sh")" = "$replacement_check" ] || fail "stale receipt changed replacement check"
+  [ "$(fm_custom_check_sha256 "$state/task-a.pr-poll")" = "$replacement_data" ] || fail "stale receipt changed replacement data"
+  [ "$(fm_custom_check_sha256 "$state/task-a.pr-poll-registration")" = "$replacement_registration" ] || fail "stale receipt changed replacement registration"
+  [ "$(fm_custom_check_sha256 "$state/task-a.meta")" = "$replacement_meta" ] || fail "stale receipt changed replacement metadata"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "replacement poll lost canonical provenance"
 
   dir=$(make_case retirement-template-update-rearm-race)
@@ -2045,17 +2045,17 @@ test_retirement_refuses_replacement_and_nonterminal_results() {
     || fail "could not publish pre-update rearm receipt"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/24
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/24 "$current_poll"
-  replacement_check=$(shasum -a 256 "$state/task-a.check.sh")
-  replacement_data=$(shasum -a 256 "$state/task-a.pr-poll")
-  replacement_registration=$(shasum -a 256 "$state/task-a.pr-poll-registration")
-  replacement_meta=$(shasum -a 256 "$state/task-a.meta")
+  replacement_check=$(fm_custom_check_sha256 "$state/task-a.check.sh")
+  replacement_data=$(fm_custom_check_sha256 "$state/task-a.pr-poll")
+  replacement_registration=$(fm_custom_check_sha256 "$state/task-a.pr-poll-registration")
+  replacement_meta=$(fm_custom_check_sha256 "$state/task-a.meta")
   fm_pr_poll_retirement_recover_one "$state" task-a "$current_poll" \
     || fail "template update blocked stale receipt recovery"
   [ ! -e "$state/task-a.pr-poll-retirement" ] || fail "pre-update receipt survived canonical replacement recovery"
-  [ "$(shasum -a 256 "$state/task-a.check.sh")" = "$replacement_check" ] || fail "pre-update receipt changed replacement check"
-  [ "$(shasum -a 256 "$state/task-a.pr-poll")" = "$replacement_data" ] || fail "pre-update receipt changed replacement data"
-  [ "$(shasum -a 256 "$state/task-a.pr-poll-registration")" = "$replacement_registration" ] || fail "pre-update receipt changed replacement registration"
-  [ "$(shasum -a 256 "$state/task-a.meta")" = "$replacement_meta" ] || fail "pre-update receipt changed replacement metadata"
+  [ "$(fm_custom_check_sha256 "$state/task-a.check.sh")" = "$replacement_check" ] || fail "pre-update receipt changed replacement check"
+  [ "$(fm_custom_check_sha256 "$state/task-a.pr-poll")" = "$replacement_data" ] || fail "pre-update receipt changed replacement data"
+  [ "$(fm_custom_check_sha256 "$state/task-a.pr-poll-registration")" = "$replacement_registration" ] || fail "pre-update receipt changed replacement registration"
+  [ "$(fm_custom_check_sha256 "$state/task-a.meta")" = "$replacement_meta" ] || fail "pre-update receipt changed replacement metadata"
   fm_pr_poll_artifacts_valid "$state" task-a "$current_poll" || fail "updated replacement poll lost canonical provenance"
 
   dir=$(make_case custom-merged-not-retired)
