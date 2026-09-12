@@ -731,7 +731,13 @@ done
 pe "$H" reconcile >/dev/null 2>&1
 sleep 0.3
 : > "$REPEAT_TRIG"
-for _ in $(seq 1 150); do
+# 300 tries (30s), double the file's other wait budgets: this loop spawns a
+# `pe reconcile` process every iteration on top of the polling runner it is
+# waiting on, so it is measurably more contention-sensitive under a loaded
+# shared CI runner than a passive wait_for_result/wait_for_file check - it
+# has been the only assertion in this file to flake there (twice, on two
+# different shards), while never failing locally.
+for _ in $(seq 1 300); do
   [ "$(count_lines "$REPEATLOG")" -ge 2 ] && break
   pe "$H" reconcile >/dev/null 2>&1
   sleep 0.1
