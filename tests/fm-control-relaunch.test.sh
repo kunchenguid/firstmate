@@ -299,6 +299,25 @@ SH
 
 # --- 1. same-harness relaunch -----------------------------------------------
 
+test_codex_relaunch_preserves_sandbox_and_approval() {
+  local dir out rc launch
+  dir=$(new_case safe-codex rl-safe-codex)
+  add_ship_task "$dir" rl-safe-codex codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl-safe-codex relaunch --note "continue with human approval"); rc=$?
+  expect_code 0 "$rc" "ordinary codex relaunch should succeed"$'\n'"$out"
+  launch=$(cat "$dir/fake/literal")
+  assert_contains "$launch" "--sandbox workspace-write --ask-for-approval on-request" \
+    "ordinary relaunch must retain sandboxing and human approval"
+  assert_not_contains "$launch" "--dangerously-bypass" "ordinary relaunch must not select bypass"
+  assert_contains "$launch" 'notify=' "ordinary relaunch must retain notification wiring"
+  assert_contains "$launch" "$dir/home/state/rl-safe-codex.turn-ended" "notification must retain task identity"
+  assert_contains "$launch" "encode launch-brief" "ordinary relaunch must retain its brief"
+  [ "$(meta_field "$dir" rl-safe-codex worktree)" = "$dir/wt" ] || fail "relaunch must preserve the worktree"
+  pass "ordinary codex relaunch preserves sandboxing, human approval, and notification"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   local dir out rc gen_before gen_after
   dir=$(new_case same rl1)
@@ -527,6 +546,10 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   [ ! -e "$dir/wt/.claude/settings.local.json" ] \
     || fail "the previous harness's per-task wiring must be cleared on a switch"
   assert_grep "codex" "$dir/fake/literal" "the replacement launch should be the new harness"
+  assert_contains "$(cat "$dir/fake/literal")" "--sandbox workspace-write --ask-for-approval on-request" \
+    "switching to codex must preserve sandboxing and human approval"
+  assert_not_contains "$(cat "$dir/fake/literal")" "--dangerously-bypass" \
+    "switching to codex must not select bypass"
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
@@ -1558,6 +1581,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_codex_relaunch_preserves_sandbox_and_approval
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata

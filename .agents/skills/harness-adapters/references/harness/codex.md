@@ -19,6 +19,12 @@ A directory trust dialog appears on the first run for a repository root: "Do you
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
 
+## Launch permissions
+
+`../../../bin/fm-spawn.sh` owns the sandbox and approval flags for canonical Codex launches and relaunches.
+Workers can pause for human approval in their terminal; do not assume the request is forwarded to the primary conversation.
+A sandboxed workspace write does not prove access to Firstmate's home-side status, report, or steering files; verify those paths before treating a worker as fully supervised.
+
 ## Skill popup
 
 A `$<skill>` invocation opens a `$` autocomplete popup.
