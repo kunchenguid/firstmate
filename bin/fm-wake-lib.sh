@@ -2041,6 +2041,36 @@ fm_wake_actor_pending_count() {  # <actor> [<rows-file> <owner-file>]
   printf '%s\n' "$count"
 }
 
+# Normalize one runtime target into the suffix used by every watcher-owned
+# per-window record. Keep this derivation shared with teardown so one format
+# change cannot strand an old task's stale, churn, or pause state.
+fm_wake_window_marker_key() {  # <window>
+  local key=${1//:/_}
+  key=${key//\//_}
+  printf '%s' "${key//./_}"
+}
+
+# Retire every watcher record scoped to one task and its recorded runtime target.
+# All paths are exact, never globs: teardown must not touch another task whose id
+# or normalized target happens to share a prefix.
+fm_wake_retire_task_watch_markers() {  # <state> <window> <task>
+  local state=$1 key task=$3
+  key=$(fm_wake_window_marker_key "$2") || return 1
+  rm -f \
+    "$state/.hash-$key" \
+    "$state/.count-$key" \
+    "$state/.churn-since-$key" \
+    "$state/.stale-$key" \
+    "$state/.stale-since-$key" \
+    "$state/.wedge-escalations-$key" \
+    "$state/.paused-$key" \
+    "$state/.paused-rechecked-$key" \
+    "$state/.paused-resurfaced-$key" \
+    "$state/.writing-since-$key" \
+    "$state/.writing-resurfaced-$key" \
+    "$state/.turnend-surfaced-$task"
+}
+
 # --- signal announcement signatures -----------------------------------------
 #
 # The watcher's per-file signal scan (bin/fm-watch.sh scan_signals) detects a

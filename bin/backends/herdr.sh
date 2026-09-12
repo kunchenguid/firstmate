@@ -2223,23 +2223,20 @@ EOF
 #                 stability across a server restart"), and what a future
 #                 `resume_agents_on_restore = false` restore would produce too
 #                 (a plain shell, never an agent).
-#   stale-agent - `agent get` reports a registered agent_status (working, idle,
-#                 done, or blocked) but fm_backend_herdr_pane_process_state
-#                 proves the pane is shell-only: the registered agent's process
-#                 has exited and Herdr kept its registration (issue #4115;
-#                 Herdr does not release a Pi registration on TUI shutdown when
-#                 a nested shell sits under the pane's top shell, the crew
-#                 shape). This is the explicit agent-free reason: the pane is
-#                 recoverable, and the record it carries is not evidence of a
-#                 running agent. No registered status outranks the process
-#                 view, because a killed mid-turn agent leaves `working`
-#                 behind just as a quit one leaves `idle`.
-#   live        - `agent get` succeeds with a registered agent_status and the
-#                 process-level view is `agent` or `other`: a harness process
-#                 is running, or something that is not a bare shell is, so the
-#                 registration keeps its authority. An idle or blocked agent
-#                 is still a genuine, still-registered agent, not a restored
-#                 husk, so it is never a close-and-replace candidate.
+#   stale-agent - `agent get` reports a registered agent_status but the process
+#                 view proves the registration is terminal: either the pane is
+#                 shell-only, or status is `done` and no harness process is
+#                 live (`other`). Herdr can retain `agent=omp status=done` after
+#                 the worker exits; that terminal registration must not block
+#                 exit or relaunch. No non-terminal registered status outranks
+#                 a shell-only process view, because a killed mid-turn agent
+#                 leaves `working` behind just as a quit one leaves `idle`.
+#   live        - `agent get` succeeds with a registered non-terminal status
+#                 and the process-level view is `agent` or `other`, or a
+#                 `done` registration still has a positively identified
+#                 harness process. An idle or blocked agent is still a genuine,
+#                 still-registered agent when a non-shell process remains, not
+#                 a restored husk, so it is never a close-and-replace candidate.
 #   unknown     - anything else: an unparseable/unexpected response from
 #                 either call, a `pane get` success whose own echoed pane_id
 #                 does not round-trip (guards against misreading a herdr
@@ -2250,7 +2247,7 @@ EOF
 #                 here, never toward closing - this is the conservative
 #                 backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code presence status
+  local session=$1 pane_id=$2 out code presence status process_state
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
@@ -2270,9 +2267,13 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
     working|idle|done|blocked) ;;
     *) printf 'unknown'; return 0 ;;
   esac
-  case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
-    agent|other) printf 'live' ;;
+  process_state=$(fm_backend_herdr_pane_process_state "$session" "$pane_id")
+  case "$process_state" in
+    agent) printf 'live' ;;
     shell) printf 'stale-agent' ;;
+    other)
+      [ "$status" = "done" ] && printf 'stale-agent' || printf 'live'
+      ;;
     *) printf 'unknown' ;;
   esac
 }

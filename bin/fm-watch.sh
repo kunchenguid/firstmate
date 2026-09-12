@@ -2,15 +2,14 @@
 # Firstmate watcher.
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
-# The no-verb signal and stale path is absorb-only-on-positive-evidence: a wake
-# is absorbed only when the crew shows it is still working through an actively
-# running no-mistakes step or a backend busy signal. A home that opts in with
-# config/turnend-churn-absorb lets a bare turn-end also use bounded pane churn
-# since the previous poll. Every other no-verb wake surfaces, so a crew
-# that finishes (or stops and waits) is never silently swallowed. A declared wait,
-# either a paused: external wait or a verified captain-held transfer, is the
-# separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# A no-verb signal with no positive execution evidence surfaces immediately once,
+# then repeated bare turn-end markers for that task are absorbed for a bounded
+# cooldown. Any status append bypasses the cooldown. A home that opts in with
+# config/turnend-churn-absorb can instead absorb a bare turn-end from the start
+# while bounded pane churn proves progress. A declared wait, either a paused:
+# external wait or a verified captain-held transfer, is the separate idle absorb
+# case and re-surfaces only on its long bounded cadence, although its initial
+# no-verb status signal still surfaces in normal mode.
 # That cadence is hours long and condition-aware: a paused: line naming
 # `until <UTC ISO 8601>` is rechecked when that time passes, but a declared time
 # beyond FM_PAUSE_RESURFACE_SECS cannot extend the ordinary recheck cadence, and
@@ -226,6 +225,12 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
+TURNEND_SURFACE_COOLDOWN_SECS=${FM_TURNEND_SURFACE_COOLDOWN_SECS:-300}  # minimum
+                                      # interval between unproven bare turn-end
+                                      # surfaces for one task; status bypasses it
+case "$TURNEND_SURFACE_COOLDOWN_SECS" in
+  ''|*[!0-9]*|0) TURNEND_SURFACE_COOLDOWN_SECS=300 ;;
+esac
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
@@ -385,18 +390,10 @@ window_label() {
   [ -n "$task" ] && printf 'fm-%s' "$task"
 }
 
-# The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
-# `_` so a window name is usable as a filename suffix. Every per-window file the
-# watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*), and live homes hold those markers on
-# disk under the current format, so the format lives here alone: a second copy is
-# how a future change to it silently orphans a window's markers instead of clearing
-# them. The helpers below take the derived key rather than re-deriving it, so one
-# poll of one window derives it once.
+# bin/fm-wake-lib.sh owns the marker-key derivation shared with teardown.
+# Helpers below still derive each polled window once and pass that key through.
 window_key() {  # <window>
-  local key=${1//:/_}
-  key=${key//\//_}
-  printf '%s' "${key//./_}"
+  fm_wake_window_marker_key "$1"
 }
 
 inbox_steer_escalate_unavailable() {  # <window> <task> <record>
@@ -1366,6 +1363,22 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( now - m ))
 }
 
+# A bare turn-end with no positive work evidence still surfaces immediately once.
+# Later mechanical inner-turn markers for that task are absorbed for this bounded
+# interval, while any authored status append bypasses the cooldown.
+turnend_surface_marker() {  # <turn-ended-file>
+  local base=${1##*/}
+  printf '%s/.turnend-surfaced-%s' "$STATE" "${base%.turn-ended}"
+}
+
+turnend_surface_recent() {  # <turn-ended-file>
+  [ "$(age_of "$(turnend_surface_marker "$1")")" -lt "$TURNEND_SURFACE_COOLDOWN_SECS" ]
+}
+
+record_turnend_surface() {  # <turn-ended-file>
+  : > "$(turnend_surface_marker "$1")"
+}
+
 # Layer 2 + 3 signal scan: status files and turn-end markers.
 # Each file is compared against its persisted reported signature in .seen-* rather
 # than mtime-vs-a-startup-touch, so signals that land while no watcher is running
@@ -2109,9 +2122,20 @@ while :; do
     # path. Publication failure stays side-band.
     home_summary_refresh_detached
     files=""
+    signal_status_tasks=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
       case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
+      case "$f" in
+        *.status)
+          task=${f##*/}
+          task=${task%.status}
+          case " $signal_status_tasks " in
+            *" $task "*) ;;
+            *) signal_status_tasks="$signal_status_tasks $task" ;;
+          esac
+          ;;
+      esac
     done <<EOF
 $pending
 EOF
@@ -2157,11 +2181,64 @@ EOF
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+      # Only the no-verb path is rate-limited. The away owner and every authored
+      # status event retain immediate delivery. A mixed batch filters per task,
+      # so one task's cooldown cannot hide another task's first turn-end.
+      if ! afk_present && [ "$signal_actionable" -ne 0 ]; then
+        surface_pending=""
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          case "$f" in
+            *.turn-ended)
+              task=${f##*/}
+              task=${task%.turn-ended}
+              case " $signal_status_tasks " in
+                *" $task "*) ;;
+                *)
+                  if turnend_surface_recent "$f"; then
+                    printf '%s' "$sig" > "$sf"
+                    triage_log "absorbed repeated bare turn-end inside cooldown: $task"
+                    continue
+                  fi
+                  ;;
+              esac
+              ;;
+          esac
+          surface_pending="${surface_pending}${sf}	${sig}	${f}
+"
+        done <<EOF
+$pending
+EOF
+        if [ -n "$surface_pending" ]; then
+          pending=$surface_pending
+          files=""
+          while IFS=$(printf '\t') read -r sf sig f; do
+            [ -n "$sf" ] || continue
+            case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
+          done <<EOF
+$pending
+EOF
+          reason="signal:$files"
+        else
+          pending=""
+        fi
+      fi
+      if [ -n "$pending" ]; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"
         case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
         fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
+        case "$f" in
+          *.turn-ended)
+            task=${f##*/}
+            task=${task%.turn-ended}
+            case " $signal_status_tasks " in
+              *" $task "*) ;;
+              *) record_turnend_surface "$f" || true ;;
+            esac
+            ;;
+        esac
       done <<EOF
 $pending
 EOF
@@ -2190,6 +2267,7 @@ EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
       wake "$reason"
+      fi
     else
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue

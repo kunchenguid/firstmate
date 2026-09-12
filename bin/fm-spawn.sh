@@ -3493,8 +3493,9 @@ EOF
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification for omp (Oh My
 // Pi); written by fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-// Semantic state: "agent_start" -> busy when a low-level agent run begins;
-// "agent_end" -> idle only when event.willContinue is not true. omp has no
+// Semantic state: "agent_start" and each inner "turn_start" -> busy;
+// "agent_end" -> idle only when event.willContinue is not true. The turn_start
+// refresh repairs an older idle edge before every inner turn. omp has no
 // agent_settled at all (verified, omp 18.1.2 and 18.1.11: zero occurrences in
 // the binary); agent_end is its loop boundary and willContinue is the reliable
 // "another loop is coming" flag, covering auto-retries, compaction retries,
@@ -3514,6 +3515,7 @@ const busyEvent = (state: string, event: string) =>
   });
 export default function (pi: any) {
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
+  pi.on("turn_start", () => busyEvent("busy", "turn-start"));
   pi.on("agent_end", (event: any) => {
     if (event && event.willContinue === true) return;
     return busyEvent("idle", "agent-end");

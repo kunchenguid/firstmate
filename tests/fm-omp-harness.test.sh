@@ -23,8 +23,8 @@
 #      state/<id>.omp-ext.ts; a secondmate launch names no -e at all.
 #   4. A <provider>/<id> model is validated only when `omp models --json` lists
 #      that provider; an unlisted provider passes through with a notice.
-#   5. Busy state: agent_start is busy, agent_end with willContinue stays busy,
-#      a plain agent_end is idle, turn_end is a notification only.
+#   5. Busy state: agent_start and turn_start are busy, agent_end with
+#      willContinue stays busy, a plain agent_end is idle, turn_end is notification only.
 #   6. The turn-end guard extension compels one continuation on exit 2 and
 #      stands down when the payload already carries stop_hook_active.
 #   7. The watch extension arms through fm_watch_arm_omp and delivers an
@@ -292,6 +292,7 @@ const ctx = { isIdle: () => false };
 switch (process.env.MODE) {
   case "handlers": console.log(Object.keys(handlers).sort().join(" ")); break;
   case "agent-start": await handlers["agent_start"]({ type: "agent_start" }, ctx); break;
+  case "turn-start": await handlers["turn_start"]({ type: "turn_start", turnIndex: 0 }, ctx); break;
   case "end-continuing": await handlers["agent_end"]({ type: "agent_end", willContinue: true }, ctx); break;
   case "end-final": await handlers["agent_end"]({ type: "agent_end" }, ctx); break;
   case "turn-end": await handlers["turn_end"]({ type: "turn_end", turnIndex: 0 }, ctx); break;
@@ -316,17 +317,12 @@ test_busy_extension_lifecycle() {
   case " $out " in
     *" agent_settled "*) fail "the omp extension must not listen for agent_settled (omp has no such event)" ;;
   esac
-  for handler in agent_start agent_end turn_end; do
+  for handler in agent_start agent_end turn_start turn_end; do
     case " $out " in
       *" $handler "*) ;;
       *) fail "the omp extension must register $handler, got '$out'" ;;
     esac
   done
-
-  rm -f "$state/$id.turn-ended"
-  out=$(drive_omp_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "turn_end no longer touches the notification marker"
-  [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy fm-spawn" ] || fail "turn_end must stay a notification, not a state edge"
 
   out=$(drive_omp_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy omp-ext" ] || fail "agent_start must classify 'busy omp-ext'"
@@ -334,13 +330,24 @@ test_busy_extension_lifecycle() {
   out=$(drive_omp_ext "$ext" end-continuing) || fail "continuing agent_end drive failed: $out"
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy omp-ext" ] || fail "agent_end with willContinue must stay busy (a session_stop continuation is coming)"
 
-  out=$(drive_omp_ext "$ext" end-final) || fail "final agent_end drive failed: $out"
+  out=$(drive_omp_ext "$ext" end-final) || fail "first final agent_end drive failed: $out"
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "idle omp-ext" ] || fail "a plain agent_end must classify 'idle omp-ext'"
+
+  out=$(drive_omp_ext "$ext" turn-start) || fail "turn_start drive failed: $out"
+  [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy omp-ext" ] || fail "turn_start must refresh an older idle record to 'busy omp-ext'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_omp_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "turn_end no longer touches the notification marker"
+  [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy omp-ext" ] || fail "turn_end must stay a notification and preserve turn_start's busy state"
+
+  out=$(drive_omp_ext "$ext" end-final) || fail "terminal agent_end drive failed: $out"
+  [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "idle omp-ext" ] || fail "terminal agent_end must classify 'idle omp-ext'"
 
   # A record from another harness's writer is never trusted for omp.
   fm_busy_source_trusted omp pi-ext && fail "omp must not trust the Pi extension's records"
   fm_busy_source_trusted omp omp-ext || fail "omp must trust its own extension's records"
-  pass "omp extension: agent_start busy, willContinue stays busy, plain agent_end idle, turn_end a notification"
+  pass "omp extension: each turn refreshes busy, willContinue stays busy, terminal agent_end idles, turn_end only notifies"
 }
 
 # --- 4. Control, composer, supervision model -----------------------------------
@@ -539,6 +546,8 @@ import { pathToFileURL } from "node:url";
 import { writeFileSync, existsSync, readFileSync } from "node:fs";
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const handlers = new Map(); let tool = null; let command = null; const sent = [];
+const primaryCtx = { sessionManager: { getSessionId: () => "primary-session" } };
+const childCtx = { sessionManager: { getSessionId: () => "nested-child-session" } };
 const pi = {
   on(e, h) { handlers.set(e, h); },
   registerCommand(n, o) { if (n === "fm-watch-arm-omp") command = o.handler; },
@@ -555,15 +564,22 @@ const result = await tool.execute();
 if (!/^watcher: started omp extension arm child 1;/.test(result.content[0].text)) throw new Error(`unexpected arm result: ${result.content[0].text}`);
 const marker = readFileSync(`${process.env.FM_HOME}/state/.omp-watch-extension-loaded`, "utf8").split("\n");
 if (marker[1] !== String(process.pid)) throw new Error("loaded marker must record the session pid");
+await handlers.get("session_start")({ type: "session_start" }, primaryCtx);
 const again = await tool.execute();
 if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`redundant arm was not an ownership no-op: ${again.content[0].text}`);
+await handlers.get("session_start")({ type: "session_start" }, childCtx);
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, childCtx);
+const afterChildShutdown = await tool.execute();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(afterChildShutdown.content[0].text)) {
+  throw new Error(`nested child shutdown stopped the primary arm: ${afterChildShutdown.content[0].text}`);
+}
 await new Promise((r) => setTimeout(r, 2500));
 if (sent.length !== 1) throw new Error(`expected one follow-up wake, saw ${sent.length}: ${JSON.stringify(sent)}`);
 if (!sent[0].m.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: omp-e2e done")) throw new Error(`unexpected wake text: ${sent[0].m}`);
 if (sent[0].o?.deliverAs !== "followUp") throw new Error("wake must be delivered as a follow-up");
 // The wake is consumed when omp starts the next run with that exact prompt.
 await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
-await handlers.get("session_shutdown")({}, {});
+await handlers.get("session_shutdown")({ type: "session_shutdown" }, primaryCtx);
 if (existsSync(`${process.env.FM_HOME}/state/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a consumed wake must not ride the replacement handoff");
 process.exit(0);
 EOF
@@ -571,7 +587,7 @@ EOF
   status=$?
   expect_code 0 "$status" "omp watch extension contract: $out"
   [ -z "$out" ] || fail "omp watch extension test printed output: $out"
-  pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
+  pass ".omp watch extension: the primary session owns its arm across nested child shutdown, then delivers one follow-up"
 }
 
 test_detection_anchored_name_and_marker_precedence

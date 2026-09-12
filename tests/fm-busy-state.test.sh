@@ -376,25 +376,45 @@ test_dead_endpoint_overrides() {
 }
 
 test_herdr_native_busy_only() {
-  local state out
+  local state out gen
   state=$(new_state_dir herdr-native)
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
-  fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE"; }
+  fm_backend_busy_state() {
+    [ "$FAKE_NATIVE" != failure ] || return 1
+    printf '%s' "$FAKE_NATIVE"
+  }
   FAKE_NATIVE=busy
-  out=$(fm_busy_classify herdr s:p claude t1 "$state")
+  out=$(fm_busy_classify herdr s:p omp t1 "$state")
   [ "$out" = "busy herdr-native" ] || fail "native busy with no record must classify busy, got '$out'"
   FAKE_NATIVE=idle
-  out=$(fm_busy_classify herdr s:p claude t1 "$state")
+  out=$(fm_busy_classify herdr s:p omp t1 "$state")
   [ "$out" = "unknown missing" ] || fail "native idle must NOT classify idle, got '$out'"
-  # A valid record outranks the native verdict.
-  local gen
+
   gen=$("$EV" arm "$state" t1)
-  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
+  "$EV" apply "$state" t1 idle --gen "$gen" --source omp-ext --event agent-end
   FAKE_NATIVE=busy
-  out=$(fm_busy_classify herdr s:p claude t1 "$state")
-  [ "$out" = "idle claude-hook" ] || fail "the adapter record must outrank herdr's native verdict, got '$out'"
+  out=$(fm_busy_classify herdr s:p omp t1 "$state")
+  [ "$out" = "busy herdr-native" ] || fail "native busy must override an older trusted idle record, got '$out'"
+
+  "$EV" apply "$state" t1 busy --gen "$gen" --source omp-ext --event turn-start
+  FAKE_NATIVE=idle
+  out=$(fm_busy_classify herdr s:p omp t1 "$state")
+  [ "$out" = "busy omp-ext" ] || fail "native idle must not override a trusted busy record, got '$out'"
+
+  "$EV" apply "$state" t1 idle --gen "$gen" --source omp-ext --event agent-end
+  out=$(fm_busy_classify herdr s:p omp t1 "$state")
+  [ "$out" = "idle omp-ext" ] || fail "trusted idle plus native idle must remain idle, got '$out'"
+
+  printf 'superseded-gen\n' > "$state/t1.busy-gen"
+  FAKE_NATIVE=busy
+  out=$(fm_busy_classify herdr s:p omp t1 "$state")
+  [ "$out" = "busy herdr-native" ] || fail "native busy must override a generation-mismatched record, got '$out'"
+
+  FAKE_NATIVE=failure
+  out=$(fm_busy_classify herdr s:p omp t1 "$state")
+  [ "$out" = "unknown gen-mismatch" ] || fail "a failed native read must preserve the stored-record verdict, got '$out'"
   unset -f fm_backend_busy_state
-  pass "herdr's native verdict is trusted for busy only, and records outrank it"
+  pass "herdr native busy overrides non-busy records, while native idle and read failure never negate them"
 }
 
 # The record parser runs inside sourcing callers (the watcher, the daemon, the

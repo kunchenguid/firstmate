@@ -511,6 +511,15 @@ test_registered_agent_with_a_non_shell_foreground_process_stays_alive() {
   pass "herdr stale registration: only a shell-only pane demotes a registration"
 }
 
+test_done_registration_without_a_live_agent_process_is_agent_free() {
+  local out
+  out=$(FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 stale_registration_case done-tool "done" \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4250,"foreground_processes":[{"pid":4250,"name":"git","argv0":"git","argv":["git","status"],"cmdline":"git status"}]}}}')
+  [ "$out" = "stale-agent dead refused" ] \
+    || fail "a terminal registration with no live harness process must be agent-free, got '$out'"
+  pass "herdr stale registration: terminal done without a harness process is agent-free"
+}
+
 # settle_registration_case: one pane classification over a scripted sequence
 # of `pane process-info` samples, so the settle window's resampling is
 # observable in the fake CLI's call log.
@@ -5185,6 +5194,7 @@ test_stale_registration_over_a_shell_only_pane_is_agent_free
 test_stale_registration_ignores_status_and_reads_the_process
 test_registered_agent_with_a_live_foreground_process_stays_alive
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive
+test_done_registration_without_a_live_agent_process_is_agent_free
 test_transient_prompt_helper_settles_into_stale_agent
 test_exhausted_settle_window_keeps_a_non_shell_foreground_live
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive

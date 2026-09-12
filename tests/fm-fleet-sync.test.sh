@@ -316,6 +316,24 @@ test_dirty_is_stuck_untouched() {
   pass "dirty working tree is reported STUCK and left untouched"
 }
 
+test_untracked_treehouse_config_does_not_block_fast_forward() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" gamma-untracked)
+  advance_origin "$home" gamma-untracked C1
+  printf 'pool = "local"\n' > "$clone/treehouse.toml"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "gamma-untracked: synced" "untracked pool metadata blocked the fast-forward"
+  assert_not_contains "$out" "STUCK" "untracked pool metadata was reported as uncommitted work"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "clone with untracked pool metadata was not fast-forwarded"
+  grep -Fx 'pool = "local"' "$clone/treehouse.toml" >/dev/null \
+    || fail "fast-forward removed or changed the untracked pool metadata"
+  pass "an untracked treehouse.toml survives while its real clone fast-forwards"
+}
+
 test_non_default_branch_is_stuck_untouched() {
   local home clone out
   home=$(new_home)
@@ -698,6 +716,7 @@ test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
+test_untracked_treehouse_config_does_not_block_fast_forward
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards

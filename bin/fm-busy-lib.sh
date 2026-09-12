@@ -50,13 +50,17 @@
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. a valid, gen-matching, source-trusted record -> its state and source
-#   4. no record at all: herdr's native busy verdict is trusted as busy
+#   3. a valid, gen-matching, source-trusted busy record -> busy and its source
+#   4. herdr's native busy verdict overrides every non-busy stored-record result
+#      because positive live work wins over an older negative observation
+#   5. a valid, gen-matching, source-trusted non-busy record -> its state/source
+#   6. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the Grok/Rovo
 #      temporary regex fallbacks classify a grok or rovo task from its
 #      rendered tail, then unknown missing
-#   5. malformed, stale, or untrusted records -> unknown, never a fallback
+#   7. malformed, stale, or untrusted records -> unknown unless Herdr reports
+#      positive native busy activity; no negative native verdict overrides them
 # Grok and Rovo are the ONLY rendered-text classifications that survive the
 # redesign, because neither's structured lifecycle was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
@@ -859,7 +863,7 @@ fm_busy_rovo_tail_busy() {
 # if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
-  local out rc r_state r_source native log
+  local out rc r_state r_source native log semantic_verdict=
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
@@ -898,22 +902,22 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     out=${out#* }
     r_source=${out%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
-      printf '%s %s' "$r_state" "$r_source"
+      if [ "$r_state" = busy ]; then
+        printf '%s %s' "$r_state" "$r_source"
+        return 0
+      fi
+      semantic_verdict="$r_state $r_source"
     else
-      printf 'unknown source-mismatch'
+      semantic_verdict='unknown source-mismatch'
     fi
-    return 0
+  else
+    case "$out" in
+      malformed|gen-mismatch) semantic_verdict="unknown $out" ;;
+    esac
   fi
-  case "$out" in
-    malformed|gen-mismatch)
-      printf 'unknown %s' "$out"
-      return 0
-      ;;
-  esac
-  # No record at all. A native herdr busy verdict is semantic enough to trust
-  # for BUSY (streaming means a turn is running); native idle is narrower
-  # than turn state (a long foreground tool call reads idle) and stays
-  # unknown here.
+  # Herdr's generation state is positive evidence only. A live busy verdict
+  # outranks an older idle, unknown, malformed, stale, or untrusted stored
+  # observation, while native idle can never negate another source.
   if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     if [ "$native" = busy ]; then
@@ -921,6 +925,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
     fi
   fi
+  if [ -n "$semantic_verdict" ]; then
+    printf '%s' "$semantic_verdict"
+    return 0
+  fi
+  # No record at all. Native idle is narrower than turn state because a long
+  # foreground tool call can read idle, so it stays unknown here.
   case "$harness" in
     muse*)
       # Semantic, on demand: fold this task's bound session log. An open run is

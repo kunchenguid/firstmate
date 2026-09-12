@@ -7,9 +7,9 @@
 # no unique commits (it is an ancestor of origin/<default>) and whose <default>
 # branch is free to check out is re-attached and then fast-forwarded ("recovered:").
 # Every other off-default state - a non-default named branch, a detached HEAD with
-# unique commits, a dirty tree, or a diverged default - may hold real work, so it
-# is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
-# ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
+# unique commits, tracked worktree changes, or a diverged default - may hold real
+# work, so it is left untouched and reported as a quantified, loud "STUCK: ... N
+# commits behind ... - needs attention" warning. Nothing is ever forced,
 # stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
@@ -357,8 +357,11 @@ sync_project() {
   fi
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  # Only tracked changes can carry uncommitted project work. Root-local pool
+  # metadata such as an untracked treehouse.toml is not part of a fast-forward;
+  # Git itself still refuses safely if an untracked path would be overwritten.
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  [ -z "$(git -C "$PROJ" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ] || dirty=yes
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then
@@ -367,9 +370,9 @@ sync_project() {
     # origin/<default>) and whose <default> branch is free to check out here.
     # Re-attaching to an already-published commit strands nothing, and the
     # fast-forward path below then catches the clone up. Anything else - a
-    # non-default named branch, a detached HEAD with unique commits, a dirty tree,
-    # or <default> already checked out elsewhere - may hold real work, so it is
-    # reported loudly and left untouched.
+    # non-default named branch, a detached HEAD with unique commits, tracked
+    # worktree changes, or <default> already checked out elsewhere - may hold
+    # real work, so it is reported loudly and left untouched.
     if [ -z "$cur" ] && [ "$dirty" = no ] \
         && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
         && ! default_checked_out_elsewhere \
@@ -385,7 +388,7 @@ sync_project() {
       return 0
     fi
   elif [ "$dirty" = yes ]; then
-    # On the default branch but with uncommitted changes we must not disturb.
+    # On the default branch, tracked changes may be uncommitted work.
     report_stuck "$(stuck_state)"
     return 0
   fi

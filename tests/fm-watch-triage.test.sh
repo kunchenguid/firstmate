@@ -750,6 +750,61 @@ test_turn_ended_not_working_surfaced() {
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
 }
 
+test_repeated_bare_turn_end_is_rate_limited_per_task() {
+  local dir state fakebin out drain_out pid marker
+  dir=$(make_case turn-ended-cooldown); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  : > "$state/first.turn-ended"
+  FM_TURNEND_SURFACE_COOLDOWN_SECS=300 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the first bare turn-end did not surface"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after first turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/first.turn-ended" >/dev/null \
+    || fail "the first bare turn-end was not queued"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first bare turn-end"
+  marker="$state/.turnend-surfaced-first"
+  [ -e "$marker" ] || fail "the first bare turn-end recorded no cooldown marker"
+
+  printf x >> "$state/first.turn-ended"
+  : > "$out"
+  FM_TURNEND_SURFACE_COOLDOWN_SECS=300 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a repeated bare turn-end inside the cooldown surfaced"; }
+  [ ! -s "$state/.wake-queue" ] || fail "a repeated bare turn-end inside the cooldown was queued"
+
+  printf 'working: authored status bypasses the mechanical cooldown\n' > "$state/first.status"
+  printf y >> "$state/first.turn-ended"
+  wait_for_exit "$pid" 100 || fail "a status append inside the turn-end cooldown did not surface"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after status bypass failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/first.status" >/dev/null \
+    || fail "the authored status append was not queued during the turn-end cooldown: $(cat "$drain_out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the status bypass"
+
+  : > "$state/second.turn-ended"
+  : > "$out"
+  FM_TURNEND_SURFACE_COOLDOWN_SECS=300 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a different task inherited the first task's turn-end cooldown"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after second task failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/second.turn-ended" >/dev/null \
+    || fail "a different task's first bare turn-end was not queued"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second task"
+
+  set_mtime $(( $(date +%s) - 301 )) "$marker"
+  printf z >> "$state/first.turn-ended"
+  : > "$out"
+  FM_TURNEND_SURFACE_COOLDOWN_SECS=300 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a bare turn-end after the cooldown did not surface"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after expired cooldown failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/first.turn-ended" >/dev/null \
+    || fail "the bare turn-end after the cooldown was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "bare turn-end surfaces are rate-limited per task while status and cooldown expiry bypass"
+}
+
 # --- bare turn-end, unverifiable harness: pane churn is the third proof --------
 # A harness whose semantic busy state has no verified source (codex) can never
 # report working, so the two proofs above are unreachable for it and EVERY worker
@@ -4809,6 +4864,7 @@ test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
+test_repeated_bare_turn_end_is_rate_limited_per_task
 test_turn_ended_churning_pane_absorbed
 test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_churn_resets_wedge_state_before_stale_poll

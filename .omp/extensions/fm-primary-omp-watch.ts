@@ -23,11 +23,14 @@
 // Session-generation ownership (stated once here):
 // omp emits session_shutdown for ordinary same-process replacements (/new,
 // /resume, /fork) as well as terminal quit. This extension binds one generation
-// per session activation. Only the active live generation may start, stop,
-// rearm, or clear the arm child. An owning replacement session_start (or fresh
-// factory bind) arms its new generation without a model turn. A replacement
-// handoff carries actionable closes that were still pending delivery; its
-// durable state lives at state/extensions/omp-primary-watch/session-replacement-actionable.json.
+// to the primary session id from ctx.sessionManager.getSessionId(). A nested
+// child or subagent may emit the same lifecycle events through the shared
+// extension runner; a different session id can neither replace nor stop the
+// primary generation. Only the active live generation may start, stop, rearm,
+// or clear the arm child. An owning replacement session_start (or fresh factory
+// bind) arms its new generation without a model turn. A replacement handoff
+// carries actionable closes that were still pending delivery; its durable state
+// lives at state/extensions/omp-primary-watch/session-replacement-actionable.json.
 // Stale callbacks from a prior generation are no-ops against the active replacement.
 //
 // Delivery versus consumption (stated once here):
@@ -253,6 +256,20 @@ function userMessageText(content: unknown): string {
     }
   }
   return parts.join("\n");
+}
+
+function contextSessionId(ctx: unknown): string {
+  if (!ctx || typeof ctx !== "object" || !("sessionManager" in ctx)) return "";
+  const manager = ctx.sessionManager;
+  if (!manager || typeof manager !== "object" || !("getSessionId" in manager)) return "";
+  const getSessionId = manager.getSessionId;
+  if (typeof getSessionId !== "function") return "";
+  try {
+    const id = getSessionId.call(manager);
+    return typeof id === "string" ? id : "";
+  } catch {
+    return "";
+  }
 }
 
 function nodeErrorCode(error: unknown): string {
@@ -485,6 +502,7 @@ process.once("exit", cleanupOnProcessExit);
 
 export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
+  let owningSessionId = "";
   activateGeneration(generation);
 
   async function sendWake(
@@ -1028,14 +1046,19 @@ export default function (pi: ExtensionAPI) {
     consumeWake(generation, userMessageText(message.content));
   });
 
-  pi.on?.("session_start", async () => {
+  pi.on?.("session_start", async (_event, ctx) => {
+    const sessionId = contextSessionId(ctx);
+    if (!sessionId) return;
+    if (owningSessionId && owningSessionId !== sessionId && !generation.stopping) return;
     if (generation.stopping) generation = createGeneration();
+    owningSessionId = sessionId;
     activateGeneration(generation);
     markLoaded();
     if (lockOwnership() !== "owned") return;
     activateOwnedWatch(generation);
   });
-  pi.on?.("session_shutdown", async () => {
+  pi.on?.("session_shutdown", async (_event, ctx) => {
+    if (contextSessionId(ctx) !== owningSessionId || !owningSessionId) return;
     // omp carries no shutdown reason (verified: `reason` is undefined), so the
     // replacement handoff is always persisted when anything is pending; a
     // terminal quit then merely replays an already-drained wake next start.
