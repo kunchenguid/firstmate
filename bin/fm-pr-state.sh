@@ -14,9 +14,11 @@
 # history is printed only to explain CHANGES_REQUESTED, naming each reviewer
 # whose latest verdict still requests changes and marking it STALE when it was
 # left at a superseded head.
-# Every reading is taken against one exact head. A push that lands mid-read
-# invalidates the whole result rather than mixing two heads, so the caller
-# re-runs the command against the new head.
+# The two pull-request reads are taken against one exact head, and a push that
+# lands between them invalidates the result rather than mixing two heads, so the
+# caller re-runs the command against the new head. The check and review reads
+# that follow are not re-verified against that head, so no line reports which
+# head it was read against.
 # A closed or merged pull request reports that terminal state and nothing else.
 # Unresolved review-thread state is out of this command's scope.
 #
@@ -121,14 +123,14 @@ esac
 GH_STDERR=$(mktemp "${TMPDIR:-/tmp}/fm-pr-state.XXXXXX") \
   || die "could not create temporary file"
 trap 'rm -f "$GH_STDERR"' EXIT INT TERM
-if ! REQUIRED=$(gh pr checks "$URL" --required --json name,state,bucket,workflow --jq '
+if ! REQUIRED=$(gh pr checks "$URL" --required --json name,state,bucket --jq '
   .[]
   | select(.bucket != "pass" and .bucket != "skipping")
   | "REQUIRED CHECK: \(.name) (\(.state))"' 2>"$GH_STDERR"); then
   if grep -q "^no checks reported on the '" "$GH_STDERR"; then
-    REQUIRED="CHECKS: none reported yet on ${HEAD:0:7}"
+    REQUIRED="CHECKS: none reported yet"
   elif grep -q "^no required checks reported on the '" "$GH_STDERR"; then
-    REQUIRED="CHECKS: no required check has reported on ${HEAD:0:7}; readiness unconfirmed"
+    REQUIRED="CHECKS: no required check has reported; readiness unconfirmed"
   else
     cat "$GH_STDERR" >&2
     die "could not read required checks for $URL"
@@ -154,10 +156,10 @@ if [ "$REVIEW_DECISION" = CHANGES_REQUESTED ]; then
       for (reviewer in state) {
         if (state[reviewer] != "CHANGES_REQUESTED") continue
         if (commit[reviewer] == head)
-          printf "REVIEW: %s CHANGES_REQUESTED at %s\n", reviewer, head
+          printf "REVIEW: %s CHANGES_REQUESTED\n", reviewer
         else
-          printf "STALE BLOCKING REVIEW: %s CHANGES_REQUESTED at %s; current head %s\n", \
-            reviewer, commit[reviewer], head
+          printf "STALE BLOCKING REVIEW: %s CHANGES_REQUESTED at %s\n", \
+            reviewer, commit[reviewer]
       }
     }' | LC_ALL=C sort
 fi

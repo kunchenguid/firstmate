@@ -45,7 +45,7 @@ serve() {
     "api /repos/o/r/pulls/7/reviews?per_page=100 --paginate --jq "*)
       printf '%s\n' "${FM_TEST_REVIEWS:-[]}"
       ;;
-    "pr checks "*" --required --json name,state,bucket,workflow --jq "*)
+    "pr checks "*" --required --json name,state,bucket --jq "*)
       if [ -n "${FM_TEST_CHECKS_ERROR-}" ]; then
         printf '%s\n' "$FM_TEST_CHECKS_ERROR" >&2
         exit 1
@@ -121,7 +121,7 @@ test_head_moving_mid_read_invalidates_the_result() {
 }
 
 test_stale_blocking_reviews_explain_a_blocking_decision() {
-  local out history
+  local out history expected
   history=$(reviews \
     "coderabbitai[bot] Bot CHANGES_REQUESTED $OLD_HEAD_1 2026-09-01T00:15:44Z" \
     "coderabbitai[bot] Bot CHANGES_REQUESTED $OLD_HEAD_2 2026-09-01T23:02:13Z" \
@@ -129,10 +129,9 @@ test_stale_blocking_reviews_explain_a_blocking_decision() {
     "alice User APPROVED $OLD_HEAD_2 2026-09-01T23:11:00Z")
   out=$(FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED FM_TEST_REVIEWS=$history run_state) \
     || fail "voided-review fixture was refused"
-  assert_contains "$out" 'REVIEW DECISION: CHANGES_REQUESTED' \
-    "GitHub's blocking decision must be printed"
-  assert_contains "$out" "STALE BLOCKING REVIEW: coderabbitai[bot] CHANGES_REQUESTED at $OLD_HEAD_2; current head $HEAD" \
-    "the reviewer's latest stale changes-requested verdict was not shown with both SHAs"
+  expected=$(printf 'REVIEW DECISION: CHANGES_REQUESTED\nSTALE BLOCKING REVIEW: coderabbitai[bot] CHANGES_REQUESTED at %s' "$OLD_HEAD_2")
+  [ "$out" = "$expected" ] \
+    || fail "a stale verdict names the commit it was left at and no head this reading was not verified against, got: $out"
   assert_not_contains "$out" "$OLD_HEAD_1" \
     "a verdict the same reviewer later superseded is history, not a blocker"
   assert_not_contains "$out" 'commenter' \
@@ -159,8 +158,8 @@ test_current_changes_requested_review_is_a_blocker() {
   history=$(reviews "coderabbitai[bot] Bot CHANGES_REQUESTED $HEAD 2026-09-02T13:53:41Z")
   out=$(FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED FM_TEST_REVIEWS=$history run_state) \
     || fail "current-review fixture was refused"
-  assert_contains "$out" "REVIEW: coderabbitai[bot] CHANGES_REQUESTED at $HEAD" \
-    "a current changes-requested review must block readiness"
+  [ "$out" = $'REVIEW DECISION: CHANGES_REQUESTED\nREVIEW: coderabbitai[bot] CHANGES_REQUESTED' ] \
+    || fail "a verdict left at the head under review blocks readiness and names no head, got: $out"
   pass "current changes-requested review blocks readiness"
 }
 
@@ -171,8 +170,8 @@ test_changes_requested_decision_is_never_silent() {
     "bob User COMMENTED $HEAD 2026-09-02T14:05:42Z")
   out=$(FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED FM_TEST_REVIEWS=$history run_state) \
     || fail "comment-after-changes fixture was refused"
-  assert_contains "$out" "REVIEW: bob CHANGES_REQUESTED at $HEAD" \
-    "a later COMMENTED review does not clear the reviewer's change request"
+  [ "$out" = $'REVIEW DECISION: CHANGES_REQUESTED\nREVIEW: bob CHANGES_REQUESTED' ] \
+    || fail "a later COMMENTED review does not clear the reviewer's change request, got: $out"
 
   out=$(FM_TEST_VIEW_REVIEW_DECISION=CHANGES_REQUESTED run_state) \
     || fail "decision-only fixture was refused"
@@ -214,7 +213,7 @@ test_unreported_required_checks_are_unconfirmed() {
   local out status
   out=$(FM_TEST_CHECKS_ERROR="no required checks reported on the 'fm/fixture' branch" run_state) \
     || fail "a head without reported required checks was refused"
-  [ "$out" = "CHECKS: no required check has reported on ${HEAD:0:7}; readiness unconfirmed" ] \
+  [ "$out" = 'CHECKS: no required check has reported; readiness unconfirmed' ] \
     || fail "gh cannot tell an unconfigured required check from an unreported one, so neither may read as ready, got: $out"
 
   status=0
@@ -227,7 +226,7 @@ test_no_reported_checks_is_unverified() {
   local out
   out=$(FM_TEST_CHECKS_ERROR="no checks reported on the 'fm/fixture' branch" run_state) \
     || fail "a head without reported checks was refused"
-  [ "$out" = "CHECKS: none reported yet on ${HEAD:0:7}" ] \
+  [ "$out" = 'CHECKS: none reported yet' ] \
     || fail "a head with no reported checks must read as unverified, not ready, got: $out"
   pass "a head with no reported checks is unverified rather than ready"
 }
