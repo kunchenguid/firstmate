@@ -196,17 +196,22 @@ test_required_failure_is_a_blocker() {
   pass "required failure blocks readiness"
 }
 
+# The next two cases supply gh's own "nothing reported" sentences through
+# FM_TEST_CHECKS_ERROR, so they prove the behaviour GIVEN those strings and
+# nothing about the strings themselves. A gh reword is invisible to this
+# hermetic suite; only a run against a real gh would catch one.
 test_unreported_required_checks_are_unconfirmed() {
   local out status
   out=$(FM_TEST_CHECKS_ERROR="no required checks reported on the 'fm/fixture' branch" run_state) \
     || fail "a head without reported required checks was refused"
   [ "$out" = 'CHECKS: no required check has reported; readiness unconfirmed' ] \
     || fail "a head where nothing required has reported must not pass silently as ready, got: $out"
+  # This asserts the branch taken for that sentence, not that gh still says it.
 
   status=0
   FM_TEST_CHECKS_ERROR='HTTP 502: Bad Gateway' run_state >/dev/null 2>&1 || status=$?
   [ "$status" -ne 0 ] || fail "a real check lookup failure must still refuse"
-  pass "an unreported required check is unconfirmed, other check lookup failures refuse"
+  pass "given gh's sentence, an unreported required check is unconfirmed, other check lookup failures refuse"
 }
 
 test_no_reported_checks_is_unverified() {
@@ -215,7 +220,8 @@ test_no_reported_checks_is_unverified() {
     || fail "a head without reported checks was refused"
   [ "$out" = 'CHECKS: none reported yet' ] \
     || fail "a head with no reported checks must read as unverified, not ready, got: $out"
-  pass "a head with no reported checks is unverified rather than ready"
+  # This asserts the branch taken for that sentence, not that gh still says it.
+  pass "given gh's sentence, a head with no reported checks is unverified rather than ready"
 }
 
 test_help_states_what_silence_means_and_what_is_out_of_scope() {

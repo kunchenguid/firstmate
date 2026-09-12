@@ -110,6 +110,11 @@ if ! REQUIRED=$(gh pr checks "$URL" --required --json name,state,bucket --jq '
   .[]
   | select(.bucket != "pass" and .bucket != "skipping")
   | "REQUIRED CHECK: \(.name) (\(.state))"' 2>"$GH_STDERR"); then
+  # These two sentences are gh's own human-readable error text, verified against
+  # gh 2.100.0 on 2026-09-12. gh reports "nothing reported" as an error rather
+  # than as structured data, so matching its text is the only way to tell that
+  # apart from a real lookup failure. An unrecognised message falls through to
+  # the refusal below, so a reword degrades loudly rather than silently.
   if grep -q "^no checks reported on the '" "$GH_STDERR"; then
     REQUIRED="CHECKS: none reported yet"
   elif grep -q "^no required checks reported on the '" "$GH_STDERR"; then
