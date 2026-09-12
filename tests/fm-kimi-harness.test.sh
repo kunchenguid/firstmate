@@ -38,13 +38,13 @@ state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
 fake_screen() {
   case "$state" in
     ready)
-      printf 'Welcome to Kimi Code!\ncontext: 0%% (0/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
+      printf 'Welcome to Kimi Code!\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K3-256k thinking: high  …/worktree  master    ctrl+o expand\ncontext: 0%% (0/256k)\n'
       ;;
     pointer-typed)
-      printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
+      printf '╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\nNever Ask  K3-256k thinking: high  …/worktree  master    ctrl+o expand\ncontext: 0%% (0/256k)\n'
       ;;
     delivered)
-      printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
+      printf '✨ Read the brief at %s and follow it exactly.\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K3-256k thinking: high  …/worktree  master    ctrl+o expand\ncontext: 1%% (2k/256k)\n' "$FM_FAKE_BRIEF_REAL"
       ;;
     *)
       printf 'shell starting\n$ \n'
@@ -53,8 +53,8 @@ fake_screen() {
 }
 fake_cursor_y() {
   case "$state" in
-    pointer-typed) printf '3\n' ;;
-    ready|delivered) printf '3\n' ;;
+    pointer-typed) printf '1\n' ;;
+    ready|delivered) printf '2\n' ;;
     *) printf '1\n' ;;
   esac
 }
