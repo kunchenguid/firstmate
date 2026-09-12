@@ -237,8 +237,8 @@ function lockOwnership(): LockOwnership {
 }
 
 function markLoaded(): void {
-  const sessionPid = lockPid();
-  if (!sessionPid) return;
+  if (lockOwnership() === "other") return;
+  const sessionPid = lockPid() || String(process.pid);
   mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${sessionPid}\n`);
 }

@@ -104,8 +104,8 @@ function lockOwnership(): LockOwnership {
 }
 
 function markLoaded(): void {
-  const sessionPid = sessionLockPid();
-  if (!sessionPid) return;
+  if (!existsSync(state) || lockOwnership() === "other") return;
+  const sessionPid = sessionLockPid() || String(process.pid);
   writeFileSync(marker, `${extensionVersion}\n${sessionPid}\n`);
 }
 
@@ -349,7 +349,6 @@ function runSessionstartHook(generation: SessionstartGeneration): Promise<Sessio
         settle({ kind: "failed" });
         return;
       }
-      markLoaded();
       const raw = Buffer.concat(chunks).toString("utf8").trim();
       if (!raw) {
         settle({ kind: "empty" });
