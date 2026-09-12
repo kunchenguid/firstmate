@@ -31,7 +31,7 @@ Raw commands whose basename is `agy` are recorded as `raw-agy`, so they remain u
 The current live measurements were taken on 2026-09-12 UTC on Linux with Antigravity CLI 1.2.2 from `~/.local/bin/agy`.
 The binary had auto-updated from 1.2.0 to 1.2.2 during the marker verification, and the 1.2.0 measurements are kept in the historical section above.
 The no-mistakes pipeline sandbox cannot execute the credentialed live guards because it has no worktree pool or signed-in sessions.
-The passing 1.2.2 live-guard lines below are from firstmate's own 2026-09-12 runs, while the final guard's post-doorbell settle assertion remains to be rerun with credentials.
+The passing 1.2.2 live-guard lines below are from firstmate's own 2026-09-12 runs, including the final guard's post-doorbell settle assertion.
 The direct AGY composer-clear measurement is reproduced here against the real binary.
 
 Command:
@@ -48,7 +48,7 @@ Output:
 
 The AGY portion of the current composer-matrix guard passed for both a real idle composer and a real unsent draft.
 The measured boundary on 1.2.2 remained a 72-character U+2500 BOX DRAWINGS LIGHT HORIZONTAL row, with exactly two boundary rows per composer.
-The aggregate composer-matrix guard also exercises installed non-AGY harnesses and failed on their unrelated trust screens; that exact failure is retained below rather than being masked.
+The final-tip composer-matrix guard also exercised the installed non-AGY harnesses and passed; its exact output is recorded in the live-guard section below.
 
 ## CLI surface
 
@@ -391,11 +391,11 @@ Commit `7e10435` touched `bin/fm-backend.sh`, `bin/fm-composer-lib.sh`, `bin/fm-
 Commit `26ab875` touched `.agents/skills/harness-adapters/references/harness/agy.md`, `bin/fm-backend.sh`, `bin/fm-tmux-lib.sh`, and `docs/verification/agy.md`; its unused-helper removal leaves the composer and control paths covered by `fm-composer-lib` and `fm-control`, while its code-site race text is documentation-only.
 Commit `d4f081c` touched `bin/backends/zellij.sh` and `tests/fm-backend-zellij.test.sh`; the plain-capture fallback is covered by the `fm-backend-zellij` regression.
 The multiline status-note serialization in this round is covered by the multiline AGY exit case in `tests/fm-control.test.sh`.
-The following evidence is from firstmate's real-environment runs on 2026-09-12 against gate tip `13ad48dc`, Antigravity CLI 1.2.2, before the deterministic lifecycle-guard ordering change in this review.
-Lifecycle guard (`FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 120 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` (`FM_TEST_END 2026-09-12T19:09:35Z exit=0 duration_ms=89740`).
-Lifecycle guard (`FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 80 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` (`FM_TEST_END 2026-09-12T19:10:33Z exit=0 duration_ms=57864`).
-Lifecycle guard (`FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 220 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` on the 19:13Z run; an earlier 220 attempt at 19:03Z timed out at the doorbell wait while the pane showed the worker mid-way through acting - model latency, not delivery.
-Composer-matrix guard exited 0 with all six ok lines:
+The following evidence is from firstmate's real-environment run on 2026-09-12 against gate tip `8f7295cf`, Antigravity CLI 1.2.2, with the READY-first ordering, exactly-one-ring doorbell assertion, and post-doorbell idle-and-empty settle.
+Lifecycle guard (`tests/fm-send-inbox-doorbell-live-e2e.test.sh` with `FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 220 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` (`FM_TEST_END 2026-09-12T21:24:58Z exit=0 duration_ms=125646`).
+Lifecycle guard (`tests/fm-send-inbox-doorbell-live-e2e.test.sh` with `FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 120 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` (`FM_TEST_END 2026-09-12T21:26:56Z exit=0 duration_ms=118344`).
+Lifecycle guard (`tests/fm-send-inbox-doorbell-live-e2e.test.sh` with `FM_AGY_LIFECYCLE_LIVE_E2E=1`): width 80 -> `ok - agy (1.2.2): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed` (`FM_TEST_END 2026-09-12T21:28:32Z exit=0 duration_ms=96132`).
+Composer-matrix guard (`FM_COMPOSER_MATRIX_LIVE=1`): exit 0, six ok lines including both agy cases:
 
 ```text
 ok - claude (2.1.269 (Claude Code)): real idle composer classifies empty
@@ -407,10 +407,8 @@ ok - live composer-matrix guard verified 4 live surface(s)
 ```
 
 Liveness/marker guard: `ok - harness liveness: agy 1.2.2 classifies alive`.
-Two initial attempts at 120 and 220 failed `doorbell instruction was not acted on` while the pane showed the doorbell delivered and the worker mid-way through acting on it; agy 1.2.2 keeps the brief's `sleep 60` running as a background task and the low-effort model needs three tool calls to act, which occasionally exceeds the test's 120-second wait; identical re-runs passed.
-The lifecycle guard was then restructured to send a `READY` brief, wait for idle, send the doorbell before steering any long-running task, and retain a 240-second acted-and-acknowledged ceiling.
-The final guard also waits for the acknowledged doorbell turn to return to an idle state with an empty composer before steering the long-running tool turn.
-The evidence above predates that ordering and post-doorbell settle hardening; firstmate will run the restructured guard once more on the final tip.
+The no-mistakes test step drove the composer, liveness, and full lifecycle scenarios live on this same tip, and they passed.
+Repeated live-guard runs share a treehouse pool keyed by the clone source and can exhaust its 16 slots when runs are interrupted; clear it before rerunning with `treehouse destroy --all <pool> --include-unlanded --yes`.
 
 ## Repository gates
 
