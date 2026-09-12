@@ -21,16 +21,19 @@ Deterministic shell owns only schema, configuration, and version validation plus
 
 ## Worker-side quota helper
 
-The canonical shell helper for a worker that has already performed its model-selection reasoning and now needs to pick the first viable candidate is `bin/fm-quota-choose.sh`.
+The canonical shell helper for a worker that has already performed its model-selection reasoning and now needs to pick among the viable candidates is `bin/fm-quota-choose.sh`.
 Pass it the intake's already-captured default TOON or permitted JSON fallback through stdin or `--snapshot`; it never takes another quota snapshot, so it selects from the same quota state as the intake.
-Pass each candidate as `harness:model`, with earlier candidates preferred.
+Pass each candidate as `harness:model`; by default the helper ranks the eligible candidates by this skill's "Rank by spendPriority" rule, taking the highest known `spendPriority` from the tightest applicable scope.
+`--ordered` is the exception, restoring first-eligible selection in argument order for a caller whose candidate order is itself a deliberate preference rather than an array to rank.
 The helper maps each harness to its primary provider family and applies the provider-wide scopes plus the exact model or product scopes for the model.
 An `exhausted_now` runway vetoes the candidate.
 The helper selects a candidate only when its applicable quota has a known `effectivePercentRemaining` greater than zero.
+An exact tie among the top known scalars exits 3 naming every tied candidate instead of breaking it, which you escalate the same way you would a tie you found by hand.
+A candidate with no known scalar stays eligible and ranks below every known value, and when two or more candidates are eligible but none has a known scalar the helper exits 3 naming every eligible candidate instead of choosing by argument order, while a single eligible candidate is still printed alone with exit 0.
 This is an optional narrow helper with a known limitation: it maps each harness to one primary provider family only, so a candidate whose established provider differs from that primary family is checked against the wrong quota row.
 omp has no primary family, so the helper keys an `omp:` candidate on its model prefix, mapping only `openai-codex/` and `claude-bridge/` and refusing every other prefix; the helper's header owns that mapping.
 Authoritative multi-provider routing - including provider discovery from the harness catalog and quota matching by that explicit provider - stays owned by this skill's intake procedure above and AGENTS.md section 4, not by the helper.
-Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family.
+Use it only when every candidate's provider is the harness's primary family.
 It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
 

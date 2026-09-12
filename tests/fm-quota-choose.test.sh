@@ -43,6 +43,11 @@ MALFORMED_COUNTED_TOON="$LAB/malformed-counted-quota.toon"
 UNKNOWN_EXHAUSTED_TOON="$LAB/unknown-exhausted-quota.toon"
 TRAILING_EMPTY_TOON="$LAB/trailing-empty-quota.toon"
 QUOTED_TOON="$LAB/quoted-quota.toon"
+RANK_TOON="$LAB/rank-quota.toon"
+TIE_TOON="$LAB/tie-quota.toon"
+SCOPE_RANK_TOON="$LAB/scope-rank-quota.toon"
+UNMEASURABLE_SCOPE_TOON="$LAB/unmeasurable-scope-quota.toon"
+RANK_JSON="$LAB/rank-quota.json"
 FAKEBIN="$LAB/fakebin"
 CALLS="$LAB/calls"
 
@@ -179,8 +184,11 @@ if help=$("$BIN/fm-quota-choose.sh" --help 2>&1); then
   fail "help unexpectedly exited zero"
 fi
 printf '%s\n' "$help" | grep -Fq \
-  "candidate order and every candidate's provider is the harness's primary family." \
+  "Use this helper only when every candidate's provider is" \
   || fail "help omitted the multi-provider usage restriction"
+printf '%s\n' "$help" | grep -Fq \
+  -e "--ordered restores first-eligible selection in argument order" \
+  || fail "help omitted the --ordered exception"
 if printf '%s\n' "$help" | grep -Fq 'set -u'; then
   fail "help leaked executable source"
 fi
@@ -640,5 +648,125 @@ ok "invalid availability status fails closed"
 
 [ "$(wc -l < "$CALLS" | tr -d '[:space:]')" = 1 ] || fail "helper took an additional quota snapshot"
 ok "helper reuses the captured quota snapshot"
+
+
+# Ranking by spendPriority. The first eligible candidate in argument order is
+# deliberately not the highest-ranked one, so order alone cannot pass these.
+cat > "$RANK_TOON" <<'TOON'
+bin: quota-axi
+generatedAt: "2030-01-01T00:00:00Z"
+quota[3]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  codex,all_models,60,-2.0035,through_reset,established,weekly,"2030-01-02T00:00:00Z"
+  claude,all_models,50,0.5,through_reset,established,seven_day,"2030-01-02T00:00:00Z"
+  grok,all_products,90,2.5655,through_reset,established,credits,"2030-01-02T00:00:00Z"
+exhaustion[0]:
+attention[0]:
+TOON
+out=$(call_choose --snapshot "$RANK_TOON" codex:default claude:default grok:default)
+[ "$out" = "grok default" ] || fail "ranked pick: expected 'grok default', got '$out'"
+out=$(call_choose --snapshot "$RANK_TOON" grok:default claude:default codex:default)
+[ "$out" = "grok default" ] || fail "ranked pick is order-independent, got '$out'"
+ok "highest known spendPriority beats the first eligible candidate"
+
+out=$(call_choose --ordered --snapshot "$RANK_TOON" codex:default claude:default grok:default)
+[ "$out" = "codex default" ] || fail "--ordered: expected 'codex default', got '$out'"
+out=$(call_choose --ordered --snapshot "$RANK_TOON" claude:default grok:default)
+[ "$out" = "claude default" ] || fail "--ordered: expected 'claude default', got '$out'"
+ok "--ordered restores first-eligible selection"
+
+# An exact tie among the top known scalars is escalated, never broken by order.
+cat > "$TIE_TOON" <<'TOON'
+bin: quota-axi
+generatedAt: "2030-01-01T00:00:00Z"
+quota[3]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,50,1.25,through_reset,established,seven_day,"2030-01-02T00:00:00Z"
+  codex,all_models,60,1.25,through_reset,established,weekly,"2030-01-02T00:00:00Z"
+  grok,all_products,99,unknown,through_reset,unknown,credits,"2030-01-02T00:00:00Z"
+exhaustion[0]:
+attention[0]:
+TOON
+out=$(call_choose --snapshot "$TIE_TOON" claude:default codex:default 2>/dev/null) && rc=0 || rc=$?
+[ "$rc" = 3 ] || fail "exact tie exited $rc with '$out'"
+[ "$out" = "tie claude default
+tie codex default" ] || fail "exact tie named: '$out'"
+out=$(call_choose --snapshot "$TIE_TOON" codex:default claude:default 2>/dev/null) && rc=0 || rc=$?
+[ "$rc" = 3 ] || fail "reversed tie exited $rc with '$out'"
+[ "$out" = "tie codex default
+tie claude default" ] || fail "reversed tie named: '$out'"
+ok "an exact tie among the top known scalars exits 3 naming every tied candidate"
+
+out=$(call_choose --snapshot "$TIE_TOON" grok:default claude:default)
+[ "$out" = "claude default" ] || fail "unknown spendPriority outranked a known one: '$out'"
+out=$(call_choose --snapshot "$TIE_TOON" grok:default claude:default codex:default 2>/dev/null) && rc=0 || rc=$?
+[ "$rc" = 3 ] || fail "tie beside an unknown candidate exited $rc with '$out'"
+[ "$out" = "tie claude default
+tie codex default" ] || fail "unknown candidate entered the tie: '$out'"
+out=$(call_choose --ordered --snapshot "$TIE_TOON" grok:default claude:default)
+[ "$out" = "grok default" ] || fail "--ordered ignored the caller's order under a tie: '$out'"
+ok "unknown spendPriority never wins and never joins a tie"
+
+# The tightest applicable scope supplies the ranking scalar, so the same
+# provider ranks differently for a model with its own row.
+cat > "$SCOPE_RANK_TOON" <<'TOON'
+bin: quota-axi
+generatedAt: "2030-01-01T00:00:00Z"
+quota[3]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,50,0.5,through_reset,established,seven_day,"2030-01-02T00:00:00Z"
+  claude,"model:fable",40,3.0,through_reset,established,"model:fable","2030-01-02T00:00:00Z"
+  grok,all_products,90,2.0,through_reset,established,credits,"2030-01-02T00:00:00Z"
+exhaustion[0]:
+attention[0]:
+TOON
+out=$(call_choose --snapshot "$SCOPE_RANK_TOON" grok:default claude:default)
+[ "$out" = "grok default" ] || fail "provider-wide ranking: expected 'grok default', got '$out'"
+out=$(call_choose --snapshot "$SCOPE_RANK_TOON" grok:default claude:fable)
+[ "$out" = "claude fable" ] || fail "model-scope ranking: expected 'claude fable', got '$out'"
+ok "a model-scope row overrides the provider row for ranking"
+
+# A present-but-unmeasurable model scope is not backfilled from the healthier
+# provider-wide row, so that candidate ranks as unknown.
+cat > "$UNMEASURABLE_SCOPE_TOON" <<'TOON'
+bin: quota-axi
+generatedAt: "2030-01-01T00:00:00Z"
+quota[3]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  codex,all_models,65,1.9,through_reset,established,weekly,"2030-01-02T00:00:00Z"
+  codex,"model:codex_bengalfox",65,unknown,unknown,unknown,weekly,"2030-01-02T00:00:00Z"
+  claude,all_models,50,0.5,through_reset,established,seven_day,"2030-01-02T00:00:00Z"
+exhaustion[0]:
+attention[0]:
+TOON
+out=$(call_choose --snapshot "$UNMEASURABLE_SCOPE_TOON" codex:model:codex_bengalfox claude:default)
+[ "$out" = "claude default" ] || fail "unmeasurable model scope was backfilled from the provider row: '$out'"
+out=$(call_choose --snapshot "$UNMEASURABLE_SCOPE_TOON" codex:default claude:default)
+[ "$out" = "codex default" ] || fail "provider-wide codex ranking: expected 'codex default', got '$out'"
+ok "an unmeasurable model scope is not backfilled from the provider-wide row"
+
+# With no known scalar anywhere there is nothing comparable to rank on, so two
+# or more eligible candidates are escalated as a tie rather than picked by order.
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:default --candidate claude:claude-3-5-sonnet 2>/dev/null) && rc=0 || rc=$?
+[ "$rc" = 3 ] || fail "all-unknown ranking exited $rc with '$out'"
+[ "$out" = "tie pi default
+tie claude claude-3-5-sonnet" ] || fail "all-unknown ranking named: '$out'"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:claude-3-5-sonnet --candidate pi:default 2>/dev/null) && rc=0 || rc=$?
+[ "$rc" = 3 ] || fail "reversed all-unknown ranking exited $rc with '$out'"
+[ "$out" = "tie claude claude-3-5-sonnet
+tie pi default" ] || fail "reversed all-unknown ranking named: '$out'"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:default)
+[ "$out" = "pi default" ] || fail "single all-unknown candidate: expected 'pi default', got '$out'"
+out=$(call_choose --ordered --snapshot "$LAB/captured.json" --candidate pi:default --candidate claude:claude-3-5-sonnet)
+[ "$out" = "pi default" ] || fail "--ordered all-unknown: expected 'pi default', got '$out'"
+ok "candidates with no known scalar escalate as a tie instead of falling back to argument order"
+
+# The JSON snapshot path carries the same selection evidence.
+jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[0].selection) =
+      {"status":"known","spendPriority":0.1} |
+    (.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability[0].selection) =
+      {"status":"known","spendPriority":2.0}' \
+  "$LAB/captured.json" > "$RANK_JSON"
+out=$(call_choose --snapshot "$RANK_JSON" --candidate claude:claude-3-5-sonnet --candidate pi:default)
+[ "$out" = "pi default" ] || fail "JSON ranking: expected 'pi default', got '$out'"
+out=$(call_choose --ordered --snapshot "$RANK_JSON" --candidate claude:claude-3-5-sonnet --candidate pi:default)
+[ "$out" = "claude claude-3-5-sonnet" ] || fail "JSON --ordered: expected 'claude claude-3-5-sonnet', got '$out'"
+ok "JSON snapshots rank on their selection evidence"
 
 printf '# all fm-quota-choose tests passed\n'
