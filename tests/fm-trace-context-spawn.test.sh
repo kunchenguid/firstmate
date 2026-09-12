@@ -214,8 +214,12 @@ run_two_level() {
   smlog="$base/sm-launch.log"
   smfake=$(make_spawn_fakebin "$base/sm-fake")
   : > "$smlog"
+  # A claude secondmate spawn pre-registers workspace trust for the HOME it
+  # launches into (bin/fm-claude-trust.sh), so this runs against a throwaway
+  # HOME; without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$base/user-home"
   env FM_TRACE_CONTEXT="$penv" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" HOME="$base/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
     FM_SPAWN_NO_GUARD=1 CLAUDECODE=1 TMUX="fake,1,0" \
@@ -387,8 +391,12 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
   printf 'charter\n' > "$sm/data/charter.md"
   fake=$(make_spawn_fakebin "$base/fake")
 
+  # A claude secondmate spawn pre-registers workspace trust for the HOME it
+  # launches into (bin/fm-claude-trust.sh), so this runs against a throwaway
+  # HOME; without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$base/user-home"
   out=$(env -u FM_TRACE_CONTEXT \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" HOME="$base/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
     FM_SPAWN_NO_GUARD=1 CLAUDECODE=1 TMUX="fake,1,0" \

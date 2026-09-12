@@ -300,7 +300,48 @@ That warning rendered in the same shape as the trust dialog, with the selection 
 That gate is not a production blocker, because a normal environment has already accepted it and the treatment arm above ran against the real config and saw neither dialog.
 This change does not address that warning and does not claim to.
 
-`bin/fm-spawn.sh` therefore pre-registers the task worktree through `bin/fm-claude-trust.sh` before launch, and `tests/fm-claude-trust.test.sh` pins both halves of the scope contract: a fresh worktree is trusted, and an out-of-scope path is refused.
+### Secondmate homes
+
+Verified 2026-09-11 on Claude Code 2.1.269.
+A secondmate launches in its own firstmate home rather than a task worktree, and that home meets the same gate.
+The control arm launched a standalone-clone secondmate home that the store had no entry for, the way `bin/fm-spawn.sh --secondmate` launches one.
+
+```sh
+tmux -L <sock> new-session -d -s ctrl -x 180 -y 44 -c <home> \
+  "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions"
+```
+
+```
+ Accessing workspace:
+ /private/tmp/fm-sm-trust-live-69759/fm-homes/livemate-n1
+ Quick safety check: Is this a project you created or one you trust? ...
+ ❯ No, exit
+   Yes, I trust this folder
+```
+
+The treatment arm pre-registered that same home through the secondmate-home mode and launched it identically against the operator's real config.
+
+```sh
+bin/fm-claude-trust.sh --secondmate-home <home> livemate-n1
+```
+
+```
+trusted: /private/tmp/fm-sm-trust-live-69759/fm-homes/livemate-n1
+```
+
+```
+ ▐▛███▛█   Claude Code v2.1.269
+▝▜██████▀  Opus 4.8 with high effort · Claude Max
+  ▝▝ ▝▝    /private/tmp/fm-sm-trust-live-69759/fm-homes/livemate-n1
+...
+❯
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+```
+
+No dialog appeared, the composer was reached, and neither did the machine-scoped bypass warning, because this ran against the real config.
+The lab home was deleted and the test entry was removed from the store and verified absent, with the same point-in-time caveat as the worktree arms above.
+
+`bin/fm-spawn.sh` therefore pre-registers the directory every claude launch starts in through `bin/fm-claude-trust.sh` before launch, and `tests/fm-claude-trust.test.sh` pins both halves of the scope contract for both shapes: a fresh worktree and a seeded secondmate home are trusted, and an out-of-scope path is refused.
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 

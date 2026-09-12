@@ -305,13 +305,13 @@
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
 # claude is the one harness whose pre-launch setup can REFUSE the spawn: before
 # any per-task state exists, and before its worktree .claude/settings.local.json
-# hooks are written, a non-secondmate claude launch pre-registers the worktree in
-# the launching user's own Claude trust store through bin/fm-claude-trust.sh,
-# because Claude's interactive workspace-trust dialog gates a fresh worktree and
-# firstmate cannot answer it. That helper's header owns the structural scope test
-# and every refusal; a failed registration stops this spawn rather than launching
-# a worker that would wedge on the dialog. A --secondmate launch never runs it,
-# so a claude secondmate home keeps its own one-time trust decision.
+# hooks are written, every claude launch pre-registers the directory the pane
+# starts in - the task worktree, or the secondmate home for a --secondmate spawn -
+# in the launching user's own Claude trust store through bin/fm-claude-trust.sh,
+# because Claude's interactive workspace-trust dialog gates a folder it has never
+# seen and firstmate cannot answer it. That helper's header owns the structural
+# scope test for both shapes and every refusal; a failed registration stops this
+# spawn rather than launching a worker that would wedge on the dialog.
 # Every claude launch also carries the attribution-off policy in its per-launch
 # --settings JSON, so a spawned worker never writes a Co-Authored-By trailer,
 # Claude-Session link, or generated-with line into a commit or PR body;
@@ -3217,27 +3217,35 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-# Pre-register Claude's workspace trust for the worktree, at the first point the
-# worktree is known and before any per-task state is created below. The dialog
-# gates the pane before the brief is ever read, and it also gates loading the
-# project settings written further down, so nothing armed below takes effect
-# without it. bin/fm-claude-trust.sh owns the structural scope test and refuses
-# any path that is not this project's own isolated worktree; a refusal blocks the
-# spawn rather than launching a worker that would wedge on a dialog firstmate
-# cannot answer. Refusing here rather than beside the arm keeps this in the same
-# class as the two worktree refusals just above: no temp root, no retired
-# relaunch wiring and no busy record exists yet to strand, so the refusal names
-# the endpoint the same way they do and leaves nothing else behind.
-if [ "$KIND" != secondmate ]; then
-  case "$HARNESS" in
-    claude*)
-      if ! "$FM_ROOT/bin/fm-claude-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
-        echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
-        exit 1
-      fi
-      ;;
-  esac
-fi
+# Pre-register Claude's workspace trust for the directory this launch starts in,
+# at the first point that directory is known and before any per-task state is
+# created below. The dialog gates the pane before the brief is ever read, and it
+# also gates loading the project settings written further down, so nothing armed
+# below takes effect without it. EVERY claude launch needs it, a secondmate's
+# included: its home is just as unseen by Claude as a fresh worktree, and
+# skipping the step for that kind left a standalone-clone secondmate home with
+# nothing registered and a pane wedged on a dialog firstmate cannot answer.
+# bin/fm-claude-trust.sh owns the structural scope test for both shapes and
+# refuses anything that is neither this project's own isolated worktree nor a
+# seeded secondmate home marked for this id; a refusal blocks the spawn rather
+# than launching a worker that would wedge. Refusing here rather than beside the
+# arm keeps this in the same class as the two worktree refusals just above: no
+# temp root, no retired relaunch wiring and no busy record exists yet to strand,
+# so the refusal names the endpoint the same way they do and leaves nothing else
+# behind.
+case "$HARNESS" in
+  claude*)
+    if [ "$KIND" = secondmate ]; then
+      spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+    else
+      spawn_trust_args=("$WT" "$PROJ_ABS")
+    fi
+    if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+      echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
+      exit 1
+    fi
+    ;;
+esac
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
