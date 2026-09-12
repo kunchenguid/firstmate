@@ -45,6 +45,10 @@ A pending-close record that fails validation outright is a different case and st
 `--force` does not lift the deferral, because it authorizes discarding unlanded work, never the captain's question; only `answer` with the captain's words or evidence-backed `reconcile close` resolves the call, by either closing the question or releasing the gated work.
 `bin/fm-backlog-transition-lib.sh` owns the transition and its record, and `bin/fm-captain-hold.sh --help` owns the predicate's contract.
 
+Inactive terminal-outcome reconciliation applies the same read-only `open` predicate after its ledger and activity-age exclusions but before endpoint or current-state inspection.
+An open captain hold makes reconciliation return without emitting another alert or changing task records, endpoint evidence, worktree contents, or branch state, even when the preserved status ledger ends in `done` or `resolved`; an unreadable predicate does not suppress reconciliation.
+`bin/fm-inactive-reconcile.sh`'s header owns the exact scan ordering and failure behavior.
+
 ## Answer-time resolution
 
 "A keyed answer resolves its matching captain-held task" is one capability with one owner.
@@ -193,6 +197,8 @@ It proves: cleanup of a finished task whose own row is the captain call leaves t
 The suite does not test the accepted merge-to-cleanup re-hold window or asynchronous queued-forge landing because those events occur after the locally serialized merge command has returned.
 The markdown-to-beads migration family runs the same suite's beads fixture (bd-driven scratch graph, self-skipping on markdown-only tasks-axi installs) and proves: `verify` and `complete` resolve an attested legacy id through a migrated row's marker note, through the configured prefix when no row carries a note - naming the resolved row in the completion line - and through the marker note of a pre-collapse derived identity; a marker-noted row wins over an unrelated captain-held row occupying the bare prefix namesake; an unresolvable id is refused once naming the id (never an empty name); and the attested id stays in `decision_keys=` for idempotent re-verification.
 One case in that family needs no beads install and always runs: a stubbed tasks-axi that fails any markdown file override proves the captain-hold hold, answer, and close mutations reach a beads-configured home without one.
+
+`tests/fm-inactive-reconcile.test.sh` proves repeated scans leave both dirty preserved work and a clean local-only branch unchanged and emit no inactive alert while their captain holds remain open, while recent tasks avoid the hold lookup entirely.
 
 The reconcile path is pinned in the same suite: a reconcile answer arriving through the keyed-answer intake, in the default close mode and in the `release` mode a captain-gated work card declares, is refused and leaves both tasks held with no resolution record or request; only the separately bound captured-source intake records one durable request per task idempotently across a replay.
 It also proves the two verification outcomes - an evidence-backed `reconciled` close that records the evidence under its own label and never as the captain's words, and a note that leaves the call queued, held, and dated - while both outcomes refuse without a pending board request, each durable mutation applies only once across close, probe, and request-retirement failures, a later distinct request with the same note still appends its own dated record, every failed retirement is surfaced with its pending request retained, incompatible resolution modes cannot replay as captain answers, and normal close, release, and replay paths retire pending requests.
