@@ -238,6 +238,30 @@ run_merge_entry() {
     "$PR_MERGE" "$@"
 }
 
+# Mirror the whole search path with one command removed. An absent-tool case
+# proves nothing while a real copy of that tool is still reachable anywhere on
+# PATH, so the mirror replaces the search path rather than prepending to it.
+mirror_path_without() {  # <case dir> <command name>; prints the mirror directory
+  local dir=$1 missing=$2 out bindir entry name
+  out="$dir/without-$missing"
+  mkdir -p "$out"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = "$missing" ] && continue
+      [ -e "$out/$name" ] || ln -s "$entry" "$out/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$out" command -v "$missing" >/dev/null 2>&1 \
+    || fail "the $missing-free search path still resolved $missing"
+  printf '%s\n' "$out"
+}
+
 # shellcheck disable=SC2016 # Literal rejected URL bytes are parser test data.
 INVALID_URLS=(
   'https://gitlab.com/single/-/merge_requests/1'
@@ -327,6 +351,29 @@ INVALID_URLS=(
   'https://github.com/o/'\''"r"'\''/pull/1'
   "https://github.com/o/r/pull/1'"
   'https://github.com/o/r/pull/1"'
+  'https://code.fedgroup.co.za:7990/Firefly/Zuri2/issues/188'
+  'https://code.fedgroup.co.za:7990/Firefly/Zuri2/pull/188'
+  'https://code.fedgroup.co.za:7990/Firefly/Zuri2/pulls/188/files'
+  'https://code.fedgroup.co.za:7990/Firefly/Zuri2/pulls/188/'
+  'https://code.fedgroup.co.za:7990/Firefly/Zuri2/pulls/0'
+  'https://code.fedgroup.co.za:7990/Firefly/Zuri2/pulls/01'
+  'https://code.fedgroup.co.za:70000/Firefly/Zuri2/pulls/188'
+  'https://code.fedgroup.co.za:07990/Firefly/Zuri2/pulls/188'
+  'https://code.fedgroup.co.za:/Firefly/Zuri2/pulls/188'
+  'https://github.com/o/r/pulls/1'
+  'https://gitea.example/Firefly/Zuri2/sub/pulls/188'
+  'https://gitea.example/Firefly/pulls/188'
+  'https://gitea.example/../Zuri2/pulls/188'
+  'https://gitea.example/Firefly/../pulls/188'
+  'https://gitea.example//Zuri2/pulls/188'
+  'https://gitea.example/Firefly//pulls/188'
+  'https://gitea.example/-Firefly/Zuri2/pulls/188'
+  'https://gitea.example/Firefly/Zuri2.git/pulls/188'
+  'https://user@gitea.example/Firefly/Zuri2/pulls/188'
+  'https://GITEA.example/Firefly/Zuri2/pulls/188'
+  'http://gitea.example/Firefly/Zuri2/pulls/188'
+  'https://gitea.example/Firefly/Zuri2/pulls/188?tab=files'
+  'https://gitea.example/Firefly/Zuri2/pulls/188#issuecomment-1'
 )
 
 # shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
@@ -392,6 +439,24 @@ https://gitlab.com/group/project/-/merge_requests/1|gitlab.com|group/project|1
 https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/sub/deep/project|42
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
+EOF
+  # Gitea is recognised by its plural "/pulls/" segment and never by hostname,
+  # so a self-hosted instance on any host and any port resolves. The proven
+  # instance in docs/gitea-merge-watch.md is the first row.
+  while IFS='|' read -r url host path number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Gitea pull request URL"
+    [ "$FM_PR_PROVIDER" = gitea ] || fail "parser did not tag a Gitea pull request URL as gitea"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Gitea pull request URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Gitea authority"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Gitea project path"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Gitea pull request number"
+    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
+      || fail "parser set GitHub owner/repository for a Gitea pull request URL"
+  done <<'EOF'
+https://code.fedgroup.co.za:7990/Firefly/Zuri2/pulls/188|code.fedgroup.co.za:7990|Firefly/Zuri2|188
+https://gitea.example.com/Firefly/Zuri2/pulls/7|gitea.example.com|Firefly/Zuri2|7
+https://git.internal:3000/team/tools_v2.x/pulls/123456|git.internal:3000|team/tools_v2.x|123456
 EOF
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
@@ -1303,7 +1368,7 @@ SH
 # https://gitlab.com/KarotKris/gitlab-merge-watch-fixture is in
 # docs/gitlab-merge-watch.md; this exercises the same paths hermetically.
 test_gitlab_merge_watch() {
-  local dir state out rc url value noglab entry bindir name
+  local dir state out rc url value noglab
   dir=$(make_case gitlab-merge-watch)
   state="$dir/home/state"
   url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
@@ -1339,25 +1404,8 @@ group/subgroup/project
   ! grep -qF -- "$url" "$dir/glab.log" \
     || fail "GitLab poll passed a merge request URL to glab"
 
-  # An absent CLI must produce no wake rather than a false merge. The whole
-  # search path is mirrored without glab, because a real glab anywhere on
-  # PATH would make this prove nothing.
-  noglab="$dir/noglab"
-  mkdir -p "$noglab"
-  while IFS= read -r bindir; do
-    [ -d "$bindir" ] || continue
-    for entry in "$bindir"/*; do
-      [ -e "$entry" ] || continue
-      name=$(basename "$entry")
-      [ "$name" = glab ] && continue
-      [ -e "$noglab/$name" ] || ln -s "$entry" "$noglab/$name" 2>/dev/null
-    done
-  done <<EOF
-$dir/fakebin
-$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
-EOF
-  ! PATH="$noglab" command -v glab >/dev/null 2>&1 \
-    || fail "the glab-free search path still resolved glab"
+  # An absent CLI must produce no wake rather than a false merge.
+  noglab=$(mirror_path_without "$dir" glab)
   out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$noglab" \
     bash "$state/task-a.check.sh")
@@ -1412,6 +1460,177 @@ EOF
     || fail "merge wrapper merged despite an unreadable merge request state"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
+}
+
+# Gitea has no CLI in firstmate's tool set, so the watch reads that instance's
+# own REST API with curl and jq and resolves its credential through git's own
+# helper chain. These stand in for the network and for the operator's stored
+# login; jq is the real one, so the merge verdict is decided by the same parse
+# the shipped watch runs.
+write_gitea_fakes() {
+  local dir=$1
+  cat > "$dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_GIT_LOG:-/dev/null}"
+if [ "${1:-}" = credential ] && [ "${2:-}" = fill ]; then
+  cat >> "${FM_TEST_GIT_STDIN:-/dev/null}"
+  [ "${FM_TEST_GIT_CRED_FAIL:-0}" = 0 ] || exit 1
+  [ "${FM_TEST_GIT_CRED_EMPTY:-0}" = 0 ] || exit 0
+  printf 'protocol=https\nusername=%s\npassword=%s\n' \
+    "${FM_TEST_GIT_USER:-fixture-user}" "${FM_TEST_GIT_PASSWORD:-fixture-secret}"
+  exit 0
+fi
+exit 0
+SH
+  cat > "$dir/fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_CURL_LOG:-/dev/null}"
+cat >> "${FM_TEST_CURL_STDIN:-/dev/null}"
+[ "${FM_TEST_CURL_FAIL:-0}" = 0 ] || exit 22
+printf '%s' "${FM_TEST_GITEA_BODY-}"
+SH
+  chmod +x "$dir/fakebin/git" "$dir/fakebin/curl"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  : > "$dir/git.log"
+  : > "$dir/git.stdin"
+  : > "$dir/curl.log"
+  : > "$dir/curl.stdin"
+}
+
+run_gitea_poll() {
+  local dir=$1
+  FM_TEST_GIT_LOG="$dir/git.log" FM_TEST_GIT_STDIN="$dir/git.stdin" \
+    FM_TEST_CURL_LOG="$dir/curl.log" FM_TEST_CURL_STDIN="$dir/curl.stdin" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash "$dir/home/state/task-a.check.sh"
+}
+
+# The Gitea watch must follow a pull request on a self-hosted instance,
+# including one published on a non-default port, and must never turn an
+# unreadable pull request into a merge. Its evidence against the real instance
+# is in docs/gitea-merge-watch.md; this exercises the same paths hermetically.
+test_gitea_merge_watch() {
+  local dir state out rc url value before nocurl
+  dir=$(make_case gitea-merge-watch)
+  state="$dir/home/state"
+  url=https://gitea.example:7990/Firefly/Zuri2/pulls/188
+  write_gitea_fakes "$dir"
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitea "$url" gitea.example:7990 Firefly/Zuri2 188 "$POLL" \
+    || fail "could not prepare a Gitea poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gitea poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Gitea poll provenance or metadata binding was invalid"
+  [ "$(cat "$state/task-a.pr-poll")" = "gitea
+$url
+gitea.example:7990
+Firefly/Zuri2
+188" ] || fail "published Gitea sidecar bytes were not exact"
+
+  # Only an exact "merged": true wakes firstmate. Every other body, including
+  # one this build cannot parse, stays silent rather than reporting a merge.
+  for value in '{"merged": false, "state": "open"}' '{"merged": "true"}' \
+    '{"state": "closed"}' '{"merged": true' '[{"merged": true}]' 'merged' ''; do
+    out=$(FM_TEST_GITEA_BODY="$value" run_gitea_poll "$dir")
+    [ -z "$out" ] || fail "Gitea poll emitted for a body that is not an exact merge"
+  done
+  out=$(FM_TEST_GITEA_BODY='{"merged": true, "state": "closed", "merge_commit_sha": "fbda0283"}' \
+    run_gitea_poll "$dir")
+  [ "$out" = merged ] || fail "Gitea poll did not emit exactly one merged line"
+
+  # A failed read and an unresolvable credential are both silent here, because
+  # bin/fm-pr-check.sh is where a missing prerequisite is reported instead.
+  out=$(FM_TEST_CURL_FAIL=1 FM_TEST_GITEA_BODY='{"merged": true}' run_gitea_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted after the API read failed"
+  out=$(FM_TEST_GIT_CRED_EMPTY=1 FM_TEST_GITEA_BODY='{"merged": true}' run_gitea_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted with no credential for the instance"
+  out=$(FM_TEST_GIT_CRED_FAIL=1 FM_TEST_GITEA_BODY='{"merged": true}' run_gitea_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted after the credential lookup failed"
+
+  # The API is addressed by the stored authority, owner, repository and index,
+  # and the credential is handed to curl on stdin so it never reaches argv.
+  : > "$dir/curl.log"
+  : > "$dir/curl.stdin"
+  : > "$dir/git.stdin"
+  out=$(FM_TEST_GIT_PASSWORD='tok"en\back' FM_TEST_GITEA_BODY='{"merged": true}' \
+    run_gitea_poll "$dir")
+  [ "$out" = merged ] || fail "Gitea poll did not emit for a merged pull request"
+  grep -qF -- 'https://gitea.example:7990/api/v1/repos/Firefly/Zuri2/pulls/188' "$dir/curl.log" \
+    || fail "Gitea poll did not address the instance's own API by owner, repository and index"
+  ! grep -qF -- "$url" "$dir/curl.log" \
+    || fail "Gitea poll passed the browser URL to the API"
+  grep -qxF -- 'host=gitea.example:7990' "$dir/git.stdin" \
+    || fail "Gitea poll asked git for a credential for some other authority"
+  ! grep -qF -- 'tok' "$dir/curl.log" \
+    || fail "Gitea poll exposed the credential in curl's arguments"
+  grep -qxF -- 'user = "fixture-user:tok\"en\\back"' "$dir/curl.stdin" \
+    || fail "Gitea poll did not escape the credential for curl's config parser"
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly, and the port is part of that identity.
+  printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" elsewhere.example:7990 Firefly/Zuri2 188 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GITEA_BODY='{"merged": true}' run_gitea_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" gitea.example:7990 Firefly/Other 188 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GITEA_BODY='{"merged": true}' run_gitea_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for a sidecar whose repository was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' gitea "$url" gitea.example Firefly/Zuri2 188 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GITEA_BODY='{"merged": true}' run_gitea_poll "$dir")
+  [ -z "$out" ] || fail "Gitea poll emitted for a sidecar whose port was dropped"
+
+  # Arming is the one point where a missing prerequisite can still be reported,
+  # so an absent tool and an unresolvable credential each stop the watch there.
+  write_task_meta "$dir" task-b
+  nocurl=$(mirror_path_without "$dir" curl)
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$nocurl" \
+    "$PR_CHECK" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Gitea watch succeeded with curl absent"
+  case "$out" in
+    *"requires curl on PATH"*) ;;
+    *) fail "arming a Gitea watch with curl absent did not report the missing tool" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused Gitea arming left a poll armed"
+
+  set +e
+  out=$(FM_TEST_GIT_CRED_EMPTY=1 run_check_entry "$dir" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Gitea watch succeeded with no credential for the instance"
+  case "$out" in
+    *"requires a git credential for that host"*) ;;
+    *) fail "arming a Gitea watch with no credential did not name the missing credential" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused Gitea arming left a poll armed"
+
+  out=$(run_check_entry "$dir" task-b "$url" 2>&1) \
+    || fail "arming a Gitea watch failed with every prerequisite present: $out"
+  [ -e "$state/task-b.check.sh" ] || fail "arming a Gitea watch published no poll"
+  grep -qxF "pr=$url" "$state/task-b.meta" \
+    || fail "arming a Gitea watch recorded no canonical PR URL"
+
+  # Merging a Gitea pull request is not implemented. The refusal comes before
+  # anything is recorded, so it never arms a watch for a merge it then declines.
+  write_task_meta "$dir" task-c
+  before=$(state_snapshot "$state")
+  set +e
+  run_merge_entry "$dir" task-c "$url" > "$dir/merge-c.out" 2> "$dir/merge-c.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "merge wrapper accepted a Gitea pull request"
+  grep -qF 'merging a Gitea pull request is not supported' "$dir/merge-c.err" \
+    || fail "merge wrapper refused a Gitea pull request for some other reason"
+  [ "$(state_snapshot "$state")" = "$before" ] || fail "refused Gitea merge changed state"
+  [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a Gitea URL"
+
+  pass "Gitea pull requests are followed on any instance and port and never wake falsely"
 }
 
 seed_canonical_poll() {
@@ -2419,6 +2638,7 @@ SH
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_gitea_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report

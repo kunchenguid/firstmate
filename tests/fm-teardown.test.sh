@@ -651,6 +651,14 @@ backlog_row_state() {
     sed -n 's/^  state: *//p' | head -1
 }
 
+# One field of the row as tasks-axi itself reports it, read from the structured
+# `show --full` view rather than from the rendered markdown.
+backlog_row_field() {  # <case-dir> <field>
+  local case_dir=$1 field=$2
+  tasks-axi show task-x1 --full --file "$case_dir/data/backlog.md" 2>/dev/null |
+    sed -n "s/^  $field: *//p" | head -1
+}
+
 # Build the teardown test's executable search path without lsof, regardless of
 # whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
 make_path_without_lsof() {  # <case-dir>
@@ -725,6 +733,40 @@ test_teardown_closes_the_backlog_item_itself() {
   printf '%s\n' "$out" | grep -F 'Run tasks-axi done' >/dev/null \
     && fail "teardown still asked a later turn to close the item it already closed: $out"
   pass "teardown closes its own backlog item before reporting success"
+}
+
+# tasks-axi accepts a completion link through --pr only when the URL's path ends
+# in /pull/<number>. A Gitea /pulls/<n> or GitLab /-/merge_requests/<n> URL is
+# rejected there, and the close runs after the endpoint and the isolated copy are
+# already gone, so a rejected close is an unfinishable teardown that retries the
+# same rejected command forever. Teardown therefore routes by the URL: the shape
+# tasks-axi holds as a link goes to --pr, everything else to --note, where the
+# closed row still shows a URL a reader can click.
+test_teardown_records_a_pr_url_the_backlog_can_hold() {
+  local case_dir label url expected_links expected_body
+  while IFS='|' read -r label url expected_links expected_body; do
+    [ -n "$label" ] || continue
+    case_dir=$(make_case "close-link-$label")
+    write_meta "$case_dir" no-mistakes ship
+    printf '%s\n' "pr=$url" >> "$case_dir/state/task-x1.meta"
+    seed_backlog_in_flight "$case_dir"
+
+    run_teardown "$case_dir" >/dev/null \
+      || fail "close-link-$label: teardown failed on a $label pull request URL"
+    [ "$(backlog_row_state "$case_dir")" = "done" ] \
+      || fail "close-link-$label: teardown returned success with its backlog item still open"
+    [ "$(backlog_row_field "$case_dir" links)" = "$expected_links" ] \
+      || fail "close-link-$label: closed row recorded links $(backlog_row_field "$case_dir" links)"
+    [ "$(backlog_row_field "$case_dir" body)" = "$expected_body" ] \
+      || fail "close-link-$label: closed row recorded body $(backlog_row_field "$case_dir" body)"
+    assert_absent "$case_dir/state/task-x1.backlog-close" \
+      "close-link-$label: a landed close left its pending-close record behind"
+  done <<'EOF'
+github|https://github.com/example/repo/pull/7|"pr:https://github.com/example/repo/pull/7"|""
+gitea|https://code.fedgroup.co.za:7990/Firefly/Zuri2/pulls/188|none|"https://code.fedgroup.co.za:7990/Firefly/Zuri2/pulls/188"
+gitlab|https://gitlab.example.com/group/project/-/merge_requests/42|none|"https://gitlab.example.com/group/project/-/merge_requests/42"
+EOF
+  pass "teardown records a PR URL through --pr or --note by URL shape, so every forge closes cleanly"
 }
 
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
@@ -3668,6 +3710,7 @@ EOF
 
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_teardown_records_a_pr_url_the_backlog_can_hold
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

@@ -1394,7 +1394,9 @@ work_is_landed() {
 
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# other ship carries the PR recorded on its own record. How that PR URL is
+# recorded belongs to fm_backlog_completion_link_args, which decides from the
+# URL rather than the forge.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
@@ -1407,8 +1409,9 @@ backlog_done_args() {
     *)
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
-      elif [ -n "$PR_URL" ]; then
-        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+      else
+        fm_backlog_completion_link_args "$PR_URL"
+        BACKLOG_DONE_ARGS=("${FM_BACKLOG_COMPLETION_LINK_ARGS[@]+"${FM_BACKLOG_COMPLETION_LINK_ARGS[@]}"}")
       fi
       ;;
   esac

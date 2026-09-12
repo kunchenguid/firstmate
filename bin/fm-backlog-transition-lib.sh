@@ -558,6 +558,83 @@ fm_backlog_mutate() {  # <data-dir> <verb> <id> [flag...]
   return "$command_status"
 }
 
+# Is this an https URL a completion link may carry? Shape only: an authority
+# with valid labels and an optional numeric port, a non-empty path, no
+# whitespace, no character outside the URL set, and every percent escape
+# complete. Shared by the close-argument builder and the pending-close record
+# validator so a staged close and its replay judge the same string identically.
+fm_backlog_link_url_valid() {  # <url>
+  local url=${1-} tail authority path host port rest label valid=1 percent_tail
+  [ "${#url}" -le 2048 ] || return 1
+  case "$url" in https://*) ;; *) return 1 ;; esac
+  case "$url" in
+    *[[:space:]]*|*[!A-Za-z0-9:/?\&=._#%+~@-]*) return 1 ;;
+  esac
+  tail=${url#https://}
+  authority=${tail%%/*}
+  path=${tail#*/}
+  [ "$path" != "$tail" ] || return 1
+  host=$authority
+  port=
+  case "$authority" in
+    *:*) host=${authority%%:*}; port=${authority#*:} ;;
+  esac
+  case "$host" in
+    ''|[-.]*|*[-.]|*..*|*[!A-Za-z0-9.-]*) return 1 ;;
+    *[A-Za-z0-9]*) ;;
+    *) return 1 ;;
+  esac
+  rest=$host
+  while :; do
+    label=${rest%%.*}
+    case "$label" in ''|-*|*-) valid=0; break ;; esac
+    [ "$rest" = "$label" ] && break
+    rest=${rest#*.}
+  done
+  [ "$valid" = 1 ] || return 1
+  case "$authority" in
+    *:*) case "$port" in ''|*[!0-9]*|??????*) return 1 ;; esac ;;
+  esac
+  case "$path" in *[A-Za-z0-9]*) ;; *) return 1 ;; esac
+  percent_tail=$path
+  while case "$percent_tail" in *%*) true ;; *) false ;; esac; do
+    percent_tail=${percent_tail#*%}
+    case "$percent_tail" in
+      [0-9A-Fa-f][0-9A-Fa-f]*) percent_tail=${percent_tail#??} ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+# tasks-axi records a link through `--pr` only when the URL is one its own
+# validator accepts: http(s) whose path ends in `/pull/<number>`. GitHub is the
+# only forge that shape fits. Gitea's `/pulls/<number>` and GitLab's
+# `/-/merge_requests/<number>` are refused there, which would wedge the close
+# that carries them, so they go through `--note` instead: the closed row then
+# shows the URL on its own body line, still clickable.
+fm_backlog_pr_link_recordable() {  # <url>
+  local LC_ALL=C
+  [[ "${1-}" =~ ^https?://[^[:space:]]+/pull/[0-9]+$ ]]
+}
+
+# The completion flags for a shipped task's recorded pull request URL. The
+# routing is decided by the URL, never by the forge, so every forge whose URL
+# tasks-axi cannot hold as a link is recorded the same way. Empty for an empty
+# URL, so a caller with nothing recorded closes with no completion flags.
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+FM_BACKLOG_COMPLETION_LINK_ARGS=()
+fm_backlog_completion_link_args() {  # <pr-url>
+  local url=${1-}
+  FM_BACKLOG_COMPLETION_LINK_ARGS=()
+  [ -n "$url" ] || return 0
+  if fm_backlog_pr_link_recordable "$url"; then
+    FM_BACKLOG_COMPLETION_LINK_ARGS=(--pr "$url")
+  else
+    FM_BACKLOG_COMPLETION_LINK_ARGS=(--note "$url")
+  fi
+}
+
 fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
@@ -896,8 +973,6 @@ fm_backlog_close_marker_path() {  # <state-dir> <id>
 fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id> <state-dir>
   local marker=$1 authorized_data data_resolved expected_id=$3 state=$4
   local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 mode=close line raw_bytes arg_value
-  local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
-  local percent_tail percent_valid
   local id_count=0 data_count=0 spawn_gen_count=0 cleanup_incomplete_count=0 mode_count=0
   local args=()
   FM_BACKLOG_CLOSE_VALIDATED_ID=
@@ -992,60 +1067,13 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
-        --pr)
-          arg_value=${args[1]}
-          [ "${#arg_value}" -le 2048 ] \
-            && case "$arg_value" in https://*) true ;; *) false ;; esac \
-            && case "$arg_value" in
-              *[[:space:]]*|*[!A-Za-z0-9:/?\&=._#%+~@-]*) false ;;
-              *) true ;;
-            esac \
-            && {
-              url_tail=${arg_value#https://}
-              url_authority=${url_tail%%/*}
-              url_path=${url_tail#*/}
-              url_host=$url_authority
-              url_port=
-              case "$url_authority" in
-                *:*) url_host=${url_authority%%:*}; url_port=${url_authority#*:} ;;
-              esac
-              [ "$url_path" != "$url_tail" ] \
-                && case "$url_host" in
-                  ''|[-.]*|*[-.]|*..*|*[!A-Za-z0-9.-]*) false ;;
-                  *[A-Za-z0-9]*) true ;;
-                  *) false ;;
-                esac \
-                && {
-                  host_rest=$url_host
-                  host_valid=1
-                  while :; do
-                    host_label=${host_rest%%.*}
-                    case "$host_label" in ''|-*|*-) host_valid=0; break ;; esac
-                    [ "$host_rest" = "$host_label" ] && break
-                    host_rest=${host_rest#*.}
-                  done
-                  [ "$host_valid" = 1 ]
-                } \
-                && case "$url_authority" in
-                  *:*) case "$url_port" in ''|*[!0-9]*|??????*) false ;; *) true ;; esac ;;
-                  *) true ;;
-                esac \
-                && case "$url_path" in *[A-Za-z0-9]*) true ;; *) false ;; esac \
-                && {
-                  percent_tail=$url_path
-                  percent_valid=1
-                  while case "$percent_tail" in *%*) true ;; *) false ;; esac; do
-                    percent_tail=${percent_tail#*%}
-                    case "$percent_tail" in
-                      [0-9A-Fa-f][0-9A-Fa-f]*) percent_tail=${percent_tail#??} ;;
-                      *) percent_valid=0; break ;;
-                    esac
-                  done
-                  [ "$percent_valid" = 1 ]
-                }
-            }
+        --note)
+          # A close whose URL tasks-axi cannot hold as a link records it here
+          # instead, so the note carries either that fixed token or a URL held
+          # to exactly the shape the --pr branch demands.
+          [ "${args[1]}" = "local%20main" ] || fm_backlog_link_url_valid "${args[1]}"
           ;;
+        --pr) fm_backlog_link_url_valid "${args[1]}" ;;
         --report)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 4096 ] \
@@ -1166,7 +1194,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
-  if [ "${args[0]-}" = --note ]; then
+  if [ "${args[0]-}" = --note ] && [ "${args[1]-}" = "local%20main" ]; then
     args[1]="local main"
   fi
   meta="$state/$id.meta"

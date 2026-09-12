@@ -273,3 +273,8 @@ It is optional by design, and the other consumers already treat it that way: `bi
 The merge path does not record one either, and deliberately does not depend on one.
 A rebase moves the head and leaves any recorded value stale, so a merge decided from metadata can verify a commit that no longer exists.
 Reading the head live at merge time, reporting a recorded value that disagrees, and binding the merge to what was actually verified is what closes that gap.
+
+## How the task backlog records a merge request URL
+
+`tasks-axi` holds a completion link through `--pr` only when the URL's path ends in `/pull/<number>`, so a `/-/merge_requests/<number>` URL is recorded through `--note` and appears on the closed row's body line instead.
+That routing is decided by the URL rather than by the forge and is described once, with its evidence, in [docs/gitea-merge-watch.md](gitea-merge-watch.md#how-the-task-backlog-records-a-gitea-url).
