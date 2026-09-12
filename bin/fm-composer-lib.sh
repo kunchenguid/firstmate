@@ -414,20 +414,26 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
 
 # The `pi-vimmode` extension draws a mode row INSIDE pi's separated composer
-# region: the rule glyph, the vim mode, an optional `line:column` cursor cell,
-# then the rule glyph again. Verified live on pi 0.84.4 through Herdr as
-# `─ INSERT 1:1 ─` with the composer empty and the pane idle - the row that
-# made an idle pi read `pending` and skipped its doorbell (issue #3819).
-# It is terminal furniture, not typed text, so pi's row scan and the content
-# extractor both skip it.
-# The pattern is deliberately anchored on the full row and demands a real vim
-# mode token: pi's row scan treats EVERY other surviving byte as input (even a
-# lone prompt glyph is a draft there), so a looser rule-framed match would read
-# a draft that merely opens and closes with `─` as an empty composer and let a
-# doorbell overwrite it. FM_COMPOSER_PI_STATUS_RE overrides for an unverified
-# pi-vimmode render; matching is case-sensitive because vim's own mode labels
-# are upper-case and lower-case prose is user input.
-FM_COMPOSER_PI_STATUS_RE_DEFAULT='^─+[[:space:]]+(NORMAL|INSERT|VISUAL|VISUAL LINE|VISUAL BLOCK|REPLACE)([[:space:]]+[0-9]+:[0-9]+)?[[:space:]]+─+$'
+# region. ONE render is verified: pi 0.84.4 through Herdr, composer empty and
+# pane idle, showing exactly `─ INSERT 1:1 ─` - a single rule glyph, the mode,
+# the `line:column` cursor cell, a single rule glyph. That is the row that made
+# an idle pi read `pending` and skipped its doorbell (issue #3819). It is
+# terminal furniture, not typed text, so pi's row scan and the content extractor
+# both skip it.
+# The pattern accepts that shape and nothing wider, because pi's row scan treats
+# EVERY other surviving byte in the region as input (even a lone prompt glyph is
+# a draft there): a wider rule-framed match would read a draft that merely opens
+# and closes with `─` as an EMPTY composer and let a doorbell overwrite unsent
+# text. Unmatched furniture only defers a ring, which the watcher retries, so
+# narrow is the fail-safe direction and other mode labels, other rule widths,
+# and a missing cursor cell stay deliberately unaccepted;
+# FM_COMPOSER_PI_STATUS_RE overrides for a pane that renders differently.
+# The rule glyph is matched literally and never quantified, for the same reason
+# FM_COMPOSER_OMP_STATUS_RE_DEFAULT and FM_OMP_SPINNER_FRAMES_RE use literal
+# alternation: `grep -E` compiles a quantified multibyte glyph byte-wise under a
+# non-UTF-8 locale, which is how a verdict starts differing between a UTF-8
+# shell and a LC_ALL=C daemon (issue #1988).
+FM_COMPOSER_PI_STATUS_RE_DEFAULT='^─[[:space:]]+INSERT[[:space:]]+[0-9]+:[0-9]+[[:space:]]+─$'
 
 # The bounded row window adapters should capture for a composer read. One
 # shared policy (previously three per-backend variables that had drifted to

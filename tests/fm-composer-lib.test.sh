@@ -170,6 +170,18 @@ assert_screen() {
   [ "$out" = "$want" ] || fail "$label under LC_ALL=C: expected $want, got '$out'"
 }
 
+# assert_extract <label> <want> <caps> <screen>: extracted composer content,
+# asserted under the ambient locale AND LC_ALL=C. Extraction consults the same
+# furniture predicates as the verdict, so it owes the same locale invariance.
+assert_extract() {
+  local label=$1 want=$2 out
+  shift 2
+  out=$(fm_composer_extract_selected_content "$@")
+  [ "$out" = "$want" ] || fail "$label: expected '$want', got '$out'"
+  out=$(LC_ALL=C fm_composer_extract_selected_content "$@")
+  [ "$out" = "$want" ] || fail "$label under LC_ALL=C: expected '$want', got '$out'"
+}
+
 test_matrix_claude_bare_nbsp_row() {
   # Real idle claude: `❯` + U+00A0, borderless, between horizontal rules.
   # The audit's headline defect: this row read `pending` under LC_ALL=C
@@ -356,15 +368,15 @@ test_pi_vimmode_status_row_is_furniture() {
   # `─ INSERT 1:1 ─` inside its separated region. The pane was idle and the
   # composer empty, yet the row scan read `pending`, so fm-send skipped the
   # doorbell and the re-ring ladder retired the record unrung.
-  local screen typed out
+  local screen typed
   screen=$'transcript\n────────────────────────\n─ INSERT 1:1 ─\n────────────────────────\n vim footer'
   assert_screen "pi idle behind the vimmode row" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tidle')"
   assert_screen "pi done behind the vimmode row" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tdone')"
   assert_screen "pi idle behind the vimmode row on tmux" empty "$CAPS_TMUX" "$screen" 2 "$(printf 'pi\tidle')"
-  # The mode row renders without the cursor cell in other vim modes.
-  screen=$'transcript\n────────────────────────\n─ NORMAL ─\n────────────────────────'
-  assert_screen "pi done behind a bare mode row" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tdone')"
-  # Furniture removes the row; it does not grant a live pi an empty verdict.
+  # The cursor cell moves with the caret, and a multi-row draft raises the line.
+  screen=$'transcript\n────────────────────────\n─ INSERT 12:340 ─\n────────────────────────'
+  assert_screen "pi idle behind a moved cursor cell" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tidle')"
+  # Furniture removes the row; it does not grant a LIVE pi an empty verdict.
   assert_screen "working pi behind the vimmode row" unknown "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tworking')"
   assert_screen "blocked pi behind the vimmode row" unknown "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tblocked')"
   # Pi's region treats every other surviving byte as input. A draft that merely
@@ -376,18 +388,26 @@ test_pi_vimmode_status_row_is_furniture() {
   assert_screen "pi draft quoting a mode token" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
   typed=$'────────────────────────\nfix the flaky test\n────────────────────────'
   assert_screen "plain pi draft" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  # Only the ONE verified render is furniture. These two rows are plausible
+  # vim-status shapes that pi 0.84.4 was never observed drawing, so they stay
+  # input: a row nobody has captured is not proof of an empty composer, and
+  # deferring a ring is recoverable where overwriting a draft is not. Both
+  # assertions also pin the locale invariance - a rule glyph quantified as `─+`
+  # matches a widened rule under UTF-8 and not under LC_ALL=C (issue #1988), so
+  # the verdict would split between a UTF-8 shell and a daemon.
+  typed=$'transcript\n────────────────────────\n── INSERT 1:1 ──\n────────────────────────'
+  assert_screen "pi row with a widened rule" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  typed=$'transcript\n────────────────────────\n─ NORMAL ─\n────────────────────────'
+  assert_screen "pi row with an unobserved mode label" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
   # Extraction reads the same region, so it must agree on what is furniture:
   # the mode row's `1:1` cell moves as the user types, and a paste proof that
   # includes it can never match what was sent.
   screen=$'transcript\n────────────────────────\n─ INSERT 1:1 ─\n────────────────────────\n vim footer'
-  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
-  [ -z "$out" ] \
-    || fail "pi extraction must exclude the vimmode mode row, got '$out'"
+  assert_extract "pi extraction drops the vimmode row" '' "$CAPS_STYLED_NOID" "$screen"
   typed=$'transcript\n────────────────────────\n─ retry the deploy ─\n────────────────────────'
-  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$typed")
-  [ "$out" = '─ retry the deploy ─' ] \
-    || fail "pi extraction must keep a rule-framed draft, got '$out'"
-  pass "pi-vimmode's mode row is furniture in both pi readers; every other byte stays input"
+  assert_extract "pi extraction keeps a rule-framed draft" '─ retry the deploy ─' \
+    "$CAPS_STYLED_NOID" "$typed"
+  pass "pi-vimmode's verified mode row is furniture in both pi readers; every other byte stays input"
 }
 
 test_matrix_pi_separated_needs_identity() {
