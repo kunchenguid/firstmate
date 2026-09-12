@@ -17,6 +17,9 @@
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
+# Dedicated NO_MISTAKES_MIRROR cases pin gate-remote drift reporting across
+# registry postures, the NM_HOME-resolved root, absent remotes, and the home's
+# own firstmate checkout.
 # Dedicated network-phase cases pin FM_BOOTSTRAP_NETWORK as a true partition of
 # one run into its local and network halves, and the one-hop tasks-axi
 # compatibility handoff that keeps a session start from paying for that verdict
@@ -865,8 +868,11 @@ run_routine_bootstrap_fixture() {
   fixture=${fixture#*|}
   home=${fixture%%|*}
   fakebin=${fixture#*|}
+  # NM_HOME pins the resolved no-mistakes root at an empty hermetic directory,
+  # so the mirror check reads this fixture's ungated checkout against it rather
+  # than against the operator's real root.
   PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    NM_HOME="$2/nm-root" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     "$shell" "$ROOT/bin/fm-bootstrap.sh"
 }
 
@@ -897,8 +903,10 @@ test_network_phase_partitions_the_run() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   # Break the two diagnostics that stand for the two halves: a local tool floor
-  # and the network GitHub-auth probe.
-  rm -f "$fakebin/node"
+  # and the network GitHub-auth probe. chrome-devtools-axi is the removed tool
+  # because it cannot exist under BASE_PATH on a host (unlike node, which a
+  # distro installs into /usr/bin), so the local half stays hermetic.
+  rm -f "$fakebin/chrome-devtools-axi"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 1
@@ -907,18 +915,18 @@ SH
 
   all_out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
+  assert_contains "$all_out" "MISSING: chrome-devtools-axi (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
 
   skip_out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$skip_out" "MISSING: node (install:" "the local half lost its own diagnostic"
+  assert_contains "$skip_out" "MISSING: chrome-devtools-axi (install:" "the local half lost its own diagnostic"
   assert_not_contains "$skip_out" "NEEDS_GH_AUTH" "the local half still made a network call"
 
   only_out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$only_out" "NEEDS_GH_AUTH" "the network half lost its own diagnostic"
-  assert_not_contains "$only_out" "MISSING: node" "the network half repeated the local half's work"
+  assert_not_contains "$only_out" "MISSING: chrome-devtools-axi" "the network half repeated the local half's work"
 
   combined=$(printf '%s\n%s\n' "$skip_out" "$only_out" | LC_ALL=C sort)
   [ "$combined" = "$(printf '%s\n' "$all_out" | LC_ALL=C sort)" ] \
@@ -1158,6 +1166,147 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_no_mistakes_mirror_check() {
+  local case_dir home fakebin root_a root_b out expect ungated gate_id
+
+  # Registry fixtures across every posture: only the no-mistakes legs are
+  # mirror-checked, and only clones that exist under projects/.
+  case_dir="$TMP_ROOT/no-mistakes-mirror"
+  home="$case_dir/home"
+  root_a="$case_dir/root-a"
+  root_b="$case_dir/root-b"
+  mkdir -p "$home/config" "$home/data" "$home/projects"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$home/data/projects.md" <<'REG'
+- macro [no-mistakes] - drift fixture (added 2026-09-04)
+- portal [no-mistakes-prod-only] - drift fixture (added 2026-09-04)
+- quick [direct-PR] - drift fixture (added 2026-09-04)
+- vault [local-only] - drift fixture (added 2026-09-04)
+- ghost [no-mistakes] - registered but never cloned (added 2026-09-04)
+- well [no-mistakes] - healthy fixture (added 2026-09-04)
+- absent [no-mistakes] - uninitialized fixture (added 2026-09-04)
+REG
+  for name in macro portal quick vault; do
+    git init -q -b main "$home/projects/$name"
+    git -C "$home/projects/$name" remote add no-mistakes "$root_b/repos/$name.git"
+  done
+  git init -q -b main "$home/projects/well"
+  git -C "$home/projects/well" remote add no-mistakes "$root_a/repos/well.git"
+  git init -q -b main "$home/projects/absent"
+
+  mkdir -p "$case_dir/non-git-root"
+
+  # NM_HOME pins the resolved root hermetically; the non-git FM_ROOT keeps
+  # the tangle and firstmate checks inert so only registry lines can print.
+  out=$(PATH="$fakebin:$BASE_PATH" NM_HOME="$root_a" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$case_dir/non-git-root" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  expect="NO_MISTAKES_MIRROR: macro remote=$root_b/repos/macro.git expected-root=$root_a (run no-mistakes init inside $home/projects/macro to point its gate at the active root)
+NO_MISTAKES_MIRROR: portal remote=$root_b/repos/portal.git expected-root=$root_a (run no-mistakes init inside $home/projects/portal to point its gate at the active root)
+NO_MISTAKES_MIRROR: absent remote=absent expected-root=$root_a (run no-mistakes init inside $home/projects/absent to point its gate at the active root)"
+  [ "$out" = "$expect" ] \
+    || fail "mirror check: expected exactly the macro/portal/absent drift lines, got: $out"
+
+  # This home's own firstmate checkout is checked too, under the same root.
+  case_dir="$TMP_ROOT/no-mistakes-mirror-root"
+  home="$case_dir/home"
+  root_a="$case_dir/root-a"
+  root_b="$case_dir/root-b"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  git init -q -b main "$case_dir/fm-root"
+  git -C "$case_dir/fm-root" commit --allow-empty -m fixture >/dev/null
+  git -C "$case_dir/fm-root" remote add no-mistakes "$root_b/repos/fm.git"
+  out=$(PATH="$fakebin:$BASE_PATH" NM_HOME="$root_a" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$case_dir/fm-root" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  expect="NO_MISTAKES_MIRROR: firstmate remote=$root_b/repos/fm.git expected-root=$root_a (run no-mistakes init inside $case_dir/fm-root to point its gate at the active root)"
+  [ "$out" = "$expect" ] \
+    || fail "mirror check: expected the firstmate drift line, got: $out"
+
+  # Trailing-slash NM_HOME must normalize to the canonical root, and a bare
+  # "/" root must survive the slash-strip instead of collapsing to empty.
+  out=$(PATH="$fakebin:$BASE_PATH" NM_HOME="$root_a///" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$case_dir/fm-root" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  expect="NO_MISTAKES_MIRROR: firstmate remote=$root_b/repos/fm.git expected-root=$root_a (run no-mistakes init inside $case_dir/fm-root to point its gate at the active root)"
+  [ "$out" = "$expect" ] \
+    || fail "mirror check: trailing-slash NM_HOME should normalize to the root, got: $out"
+  out=$(PATH="$fakebin:$BASE_PATH" NM_HOME=/ FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$case_dir/fm-root" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  expect="NO_MISTAKES_MIRROR: firstmate remote=$root_b/repos/fm.git expected-root=/ (run no-mistakes init inside $case_dir/fm-root to point its gate at the active root)"
+  [ "$out" = "$expect" ] \
+    || fail "mirror check: a bare / NM_HOME must survive normalization, got: $out"
+  # With a bare / root the healthy prefix is /repos/*, not //repos/*: a remote
+  # already under it must stay silent (re-init could never produce a //repos
+  # URL, so the warning would be unfixable).
+  git -C "$case_dir/fm-root" remote set-url no-mistakes /repos/fm.git
+  out=$(PATH="$fakebin:$BASE_PATH" NM_HOME=/ FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$case_dir/fm-root" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "mirror check: a bare / root should accept a /repos/* remote, got: $out"
+
+  # The default resolution leg: with NM_HOME unset, the root is
+  # ~/.no-mistakes, so a remote under it stays silent. The URL is a string
+  # only; nothing under the real home is read or written.
+  git -C "$case_dir/fm-root" remote set-url no-mistakes "$HOME/.no-mistakes/repos/fm.git"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$case_dir/fm-root" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    env -u NM_HOME "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "mirror check: default-root resolution should stay silent, got: $out"
+
+  # A firstmate checkout with no gate remote at all: drift only when this root
+  # holds the gate record no-mistakes init writes for that checkout. A home
+  # nothing ever gated - every git-clone-provisioned secondmate home - must
+  # stay silent instead of printing the same unfixable line every session.
+  ungated="$case_dir/ungated-root"
+  git init -q -b main "$ungated"
+  git -C "$ungated" commit --allow-empty -m fixture >/dev/null
+  out=$(PATH="$fakebin:$BASE_PATH" NM_HOME="$root_a" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ungated" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "mirror check: a never-gated firstmate checkout should stay silent, got: $out"
+
+  # Same checkout, now carrying that gate record: losing the remote is real
+  # drift and must still report. <root>/repos/<id>.git is no-mistakes' own
+  # layout, with <id> the first 12 hex digits of the sha256 of the work tree.
+  gate_id=$(git -C "$ungated" rev-parse --show-toplevel | tr -d '\n' | \
+    { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | cut -c1-12)
+  mkdir -p "$root_a/repos/$gate_id.git"
+  out=$(PATH="$fakebin:$BASE_PATH" NM_HOME="$root_a" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ungated" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  expect="NO_MISTAKES_MIRROR: firstmate remote=absent expected-root=$root_a (run no-mistakes init inside $ungated to point its gate at the active root)"
+  [ "$out" = "$expect" ] \
+    || fail "mirror check: a gated checkout that lost its remote must report, got: $out"
+
+  # The gate record only decides the absent case: a remote pointing at another
+  # root is drift on its own, with or without a record here.
+  git -C "$ungated" remote add no-mistakes "$root_b/repos/fm.git"
+  out=$(PATH="$fakebin:$BASE_PATH" NM_HOME="$root_a" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ungated" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  expect="NO_MISTAKES_MIRROR: firstmate remote=$root_b/repos/fm.git expected-root=$root_a (run no-mistakes init inside $ungated to point its gate at the active root)"
+  [ "$out" = "$expect" ] \
+    || fail "mirror check: a wrong-root remote must report regardless of the gate record, got: $out"
+
+  # With neither NM_HOME nor HOME set (a unit file, a cron job, env -i) there is
+  # no root to resolve, and bootstrap is a reporting command that always exits
+  # 0: the mirror check must go quiet rather than abort the whole digest.
+  out=$(env -u HOME -u NM_HOME PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ungated" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh") \
+    || fail "bootstrap must still report and exit 0 with no HOME and no NM_HOME"
+  assert_not_contains "$out" "NO_MISTAKES_MIRROR:" \
+    "with no resolvable no-mistakes root there is no mirror drift to report"
+
+  pass "bootstrap reports no-mistakes gate-remote drift outside the resolved root"
+}
+
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1186,3 +1335,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_no_mistakes_mirror_check

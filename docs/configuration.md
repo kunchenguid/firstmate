@@ -476,6 +476,8 @@ An absent or incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with i
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
+Bootstrap also reports one `NO_MISTAKES_MIRROR:` line per no-mistakes-posture project clone, and for the home's own firstmate checkout, whose `no-mistakes` gate remote does not sit under `repos/` inside the data root the installed CLI resolves (`NM_HOME` when set non-empty, else `~/.no-mistakes`); the printed `no-mistakes init` fix inside the affected clone is the operator's to run, never bootstrap's.
+A gate remote that is missing altogether is drift only where something declares the clone should be gated: the registry posture for a project clone, and for the firstmate checkout the gate record `no-mistakes init` leaves under the active root, so a home that was gated and then lost its remote is still reported while a secondmate home nothing ever gated stays silent.
 The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact clone-refresh overlap, liveness-before-convergence, per-mate concurrency, ordered diagnostic replay, and sequential-fallback contract.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.
@@ -588,6 +590,32 @@ Same-line silence is only for a proven no-op: a successful poll with no new mail
 A fail-closed poll that already queued a wake, and a timeout, always print so the watcher wakes to drain it.
 `FM_MAIL_CHECK_BUDGET` (default 15, valid 5..25) bounds one standing poll and is cut down to fit `FM_CHECK_TIMEOUT`.
 `bin/fm-mail-check.sh disarm` removes the standing check.
+
+## Stale-claim sweep (bin/fm-stale-sweep.sh)
+
+The Beads graph a beads-backed home's `.tasks.toml` points at never reclaims an in_progress claim on its own, so a task whose worker endpoint died stays claimed forever and dispatch capacity silently shrinks.
+[`bin/fm-stale-sweep.sh`](../bin/fm-stale-sweep.sh) makes those stale claims reclaim themselves.
+A dry run prints a table (id, home, age, verdict, action, plus the row's own claim-actor and provenance evidence on no-home rows) and a summary with the count it would reclaim; `--apply` performs the reclaims, and `--older-than <hours>` overrides the default 24-hour threshold measured from the row's `updated_at` (the last recorded graph activity).
+For every stale row the sweep resolves the owning home (the registered home holding `state/<id>.meta`, else the row's provenance line), asks that home with `fm-crew-state.sh`, and reclaims only on positive death evidence - a missing or dead endpoint, or a remote dead/missing verdict.
+Anything merely unproven (an unreadable pane, an unreachable remote) is kept.
+A row no local home owns is listed and kept too; `--apply-orphans` additionally reclaims such an orphan row only when it is older than 48 hours, carries no claim marker, and has no landing URL in its description.
+The marker guard reads presence, not decodability: a row whose `tasks-axi` claim marker is present but whose payload will not decode shows no claim actor in the table and is still not orphan-reclaimable, because the marker records that something claimed the row.
+The reclaim appends `reclaimed <date>: endpoint dead, previous claim by <actor>` to the row's body and reopens it through the owning home's tasks-axi when that home's backlog reaches the swept graph, falling back to the sweep home's own tasks-axi otherwise while still naming the resolved owner, and only after re-proving the row is still in flight and unheld.
+The sweep never touches a row whose endpoint is live and never removes a meta, worktree, or pane, so stuck-crewmate recovery can still inspect what died.
+A home whose backlog is not beads-backed has no graph to sweep and the script says so instead of guessing.
+
+Register the daily check with `bin/fm-stale-sweep.sh arm`.
+That writes `state/stale-sweep.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal `FM_CHECK_INTERVAL` cadence and turns its one line into a `check:` wake; no separate schedule is involved.
+The check runs the sweep dry at most once per `FM_STALE_SWEEP_INTERVAL` (default 86400 seconds, `0` disables the gate, otherwise 900 to 604800), stays silent when nothing is reclaimable, and reports one line when dead-endpoint rows are reclaimable so firstmate decides whether to run `--apply`; if `FM_STALE_SWEEP_BUDGET_SECS` was cut to fit `FM_CHECK_TIMEOUT`, that cut is reported on the report line even on polls where nothing is reclaimable, and so is a budget that stopped the sweep before every candidate was probed.
+`FM_STALE_SWEEP_BUDGET_SECS` (default 25, 1 to 3600) bounds one probe and is cut down to what `FM_CHECK_TIMEOUT` allows, exactly like the tool-update check's budget.
+`FM_STALE_SWEEP_STATE_TIMEOUT` (default 90) bounds one home's `fm-crew-state.sh` call, capped to the remaining budget in check mode.
+`FM_STALE_SWEEP_BD_TIMEOUT` (default 120) bounds the `bd list` graph read, also capped to the remaining budget in check mode so a slow graph read fails visibly inside the probe instead of being killed silently.
+`bin/fm-stale-sweep.sh disarm` removes the shim, its trust binding, and the report record.
+
+A full treehouse pool is the sibling condition: [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) detects treehouse's exact `all N worktrees are in use` refusal during the worktree wait, records a load-kind capacity hold whose reason names the pool (`bin/fm-capacity-lib.sh` owns the reason contract), attempts to close the endpoint it had created for the task so the later redispatch can create it again rather than colliding with a stale one, and exits 2 with the item left queued, and [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) releases the oldest capacity hold recorded for the same pool once a worktree is returned to it, printing which item became ready. When the worktree-derived pool scan matches nothing, teardown also scans the project-root fallback identity a spawn may have had to record when treehouse could not answer it, so such a hold is still released instead of stranded.
+That close is best effort, so the refusal reads the endpoint back and its printed line reports what the read proved rather than what was attempted: `endpoint <target> closed` when the backend proves it gone (tmux and herdr can), `endpoint <target> IS STILL OPEN` when the read proves it standing, and `close attempted but NOT CONFIRMED` when the read cannot settle it either way - on zellij and cmux, whose only presence read is a readiness probe that also fails on a label mismatch or an unreadable CLI, and on herdr whenever the pane read is unanswerable rather than a structured present or gone. On herdr the projection cleanup the spawn owes is performed before that read rather than left to the exit path, so the line describes the endpoint's settled state instead of one that is closed a moment later. The last two also print a warning on stderr and mean the same thing for the operator: close or check that endpoint by hand before the held item is redispatched, because the redispatch cannot create a second endpoint for the same task.
+That release runs only on the teardown path that still finds the worktree present, so a pool slot freed another way - a hand `treehouse return`, a prune, or a prior teardown that returned the worktree and then failed - leaves the hold recorded with no diagnostic until an operator lifts it by hand with `tasks-axi unhold <id>`, run from the home (adding `--file <home>/data/backlog.md` on a markdown-backed home), which is the same call the release path makes.
+`bin/fm-captain-hold.sh` cannot do it: its `answer --release` only lifts a `captain`-kind hold and refuses a `load`-kind capacity hold.
 
 ## Relay (.env)
 
@@ -1009,6 +1037,11 @@ FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 pro
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
+FM_STALE_SWEEP_INTERVAL=86400   # seconds between stale-claim sweep dry runs in check mode; 0 disables the gate, otherwise 900..604800 (docs/configuration.md "Stale-claim sweep")
+FM_STALE_SWEEP_BUDGET_SECS=25   # 1..3600 seconds allowed for one sweep probe; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_STALE_SWEEP_STATE_TIMEOUT=90   # seconds allowed for one home's fm-crew-state.sh call; capped to the remaining budget in check mode
+FM_STALE_SWEEP_BD_TIMEOUT=120   # seconds allowed for the bd list graph read; capped to the remaining budget in check mode
+FM_STALE_SWEEP_NOW=     # test override for the stale-sweep cadence and staleness clock
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no activity in its owning home; 1..86400

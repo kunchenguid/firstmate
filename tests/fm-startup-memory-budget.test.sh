@@ -8,6 +8,10 @@ set -u
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-startup-memory-budget)
+# Pin the no-mistakes data root the bootstrap mirror check resolves at a
+# directory holding no gate records, so the ungated fixture roots below stay
+# silent on their own terms instead of against whatever the real root holds.
+export NM_HOME="$TMP_ROOT/nm-root"
 BUDGET="$ROOT/bin/fm-startup-memory-budget.sh"
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 CONFIG_PUSH="$ROOT/bin/fm-config-push.sh"

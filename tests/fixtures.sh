@@ -109,6 +109,15 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
+  capture-pane)
+    # Pane CONTENT for spawn-world capture calls: tests drive it through a file
+    # (e.g. treehouse's wrapped pool-full refusal text) while the default stays
+    # empty so capture-based launch-progress greps keep seeing nothing.
+    if [ -n "${FM_FAKE_PANE_TEXT_FILE:-}" ] && [ -f "$FM_FAKE_PANE_TEXT_FILE" ]; then
+      cat "$FM_FAKE_PANE_TEXT_FILE"
+    fi
+    exit 0
+    ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows)
     if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then

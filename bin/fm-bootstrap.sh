@@ -17,6 +17,8 @@
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
+#                 "NO_MISTAKES_MIRROR: <project> remote=<url>|absent
+#                 expected-root=<root>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -69,6 +71,27 @@
 #          quota-axi is required for the agent-owned dispatch-profile array
 #          procedure in AGENTS.md section 4 and
 #          .agents/skills/quota-array-dispatch/SKILL.md.
+#          NO_MISTAKES_MIRROR is detect-only drift reporting (never a repair):
+#          a no-mistakes-posture project clone, or this home's own firstmate
+#          checkout, whose "no-mistakes" gate remote lives outside <root>/repos/
+#          is pushing its gates to a mirror root no daemon serves. A gate remote
+#          that is absent entirely is drift only where something says the clone
+#          is meant to be gated: the registry posture for a project clone, and
+#          for the firstmate checkout the gate record init writes under the
+#          active root (<root>/repos/<sha256 of the work-tree path, first 12 hex
+#          digits>.git). So a home that was gated and then lost its remote is
+#          reported, while a home nothing ever gated - every secondmate home,
+#          which provisioning creates with `git clone` and never inits - is
+#          silent instead of reporting the same unfixable line every session.
+#          <root> is resolved exactly as the installed CLI resolves it from
+#          that clone: $NM_HOME when set (non-empty), else ~/.no-mistakes
+#          (verified against no-mistakes v1.60.2: `NM_HOME=/x no-mistakes
+#          doctor` prints "data directory /x", empty NM_HOME falls back to the
+#          default, and `no-mistakes init --help` documents that init sets up a
+#          local bare gate repo and adds or repairs the "no-mistakes" remote).
+#          The operator fix, named in the printed line, is rerunning
+#          `no-mistakes init` inside that clone; bootstrap itself never modifies
+#          a clone and never runs init.
 #          On a primary home, the locked mutable path materializes the visible
 #          default config/startup-memory-budget=7500 when absent. It never
 #          guesses at malformed or unsafe existing files, and secondmate homes
@@ -1451,6 +1474,94 @@ detect_local_tools() {
   fi
 }
 
+# Did `no-mistakes init` ever gate this clone against this root? The record init
+# writes for a clone is the bare gate repo at <root>/repos/<id>.git, where <id>
+# is the first 12 hex digits of the sha256 of the clone's work-tree path
+# (verified against no-mistakes v1.60.2 by deriving every id in an active root's
+# repos/ from its recorded working path). A missing digest tool, an unreadable
+# work tree, or a changed derivation reads as "never initialized", so this can
+# only silence a report, never invent one.
+no_mistakes_gate_initialized() {  # <root> <clone>
+  local root=$1 clone=$2 top id
+  top=$(git -C "$clone" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ -n "$top" ] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    id=$(printf '%s' "$top" | sha256sum | cut -c1-12)
+  elif command -v shasum >/dev/null 2>&1; then
+    id=$(printf '%s' "$top" | shasum -a 256 | cut -c1-12)
+  else
+    return 1
+  fi
+  [ -d "$root/repos/$id.git" ]
+}
+
+# One checkout's no-mistakes gate-remote placement. Silent when the remote
+# sits under <root>/repos/ or the path is not a git work tree (so a non-git
+# FM_ROOT fixture or a plain directory stays inert); one diagnostic line
+# otherwise. <absent-is-drift> decides whether a checkout carrying no gate
+# remote at all is drift: a registry posture or this root's own gate record
+# says the clone is meant to be gated, so losing the remote is real drift,
+# while a checkout nothing ever gated is silent. The header's
+# NO_MISTAKES_MIRROR paragraph owns the contract.
+check_no_mistakes_mirror_one() {  # <label> <clone> <root> <absent-is-drift>
+  local label=$1 clone=$2 root=$3 absent_is_drift=$4 url
+  git -C "$clone" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  url=$(git -C "$clone" remote get-url no-mistakes 2>/dev/null || true)
+  # A bare "/" root must not double the leading slash: "$root"/repos/* would
+  # become //repos/* and never match a healthy /repos/<repo>.git remote, and
+  # re-running no-mistakes init against the same root could never clear it.
+  case "$root" in
+    /) case "$url" in /repos/*) return 0 ;; esac ;;
+    *) case "$url" in "$root"/repos/*) return 0 ;; esac ;;
+  esac
+  if [ -z "$url" ]; then
+    [ "$absent_is_drift" = 1 ] || return 0
+    url=absent
+  fi
+  echo "NO_MISTAKES_MIRROR: $label remote=$url expected-root=$root (run no-mistakes init inside $clone to point its gate at the active root)"
+}
+
+# Detect-only no-mistakes mirror drift for this home: every registered
+# no-mistakes-posture project clone (bin/fm-project-mode.sh owns the registry
+# posture parse), plus this home's own firstmate checkout, must carry a
+# "no-mistakes" remote under the root the installed CLI would resolve. The
+# registry posture is what makes a project clone's missing remote drift; the
+# firstmate checkout has no registry entry, so this root's own gate record
+# stands in for it and a home nothing ever gated stays silent.
+detect_no_mistakes_mirror() {
+  local root name mode clone fm_absent_is_drift=0
+  root=${NM_HOME:-}
+  if [ -z "$root" ]; then
+    # Bootstrap is a reporting command that always exits 0, so an environment
+    # with no HOME (a unit file, a cron job, env -i) must leave mirror drift
+    # unreported rather than abort the whole digest on an unbound variable.
+    root=${HOME:-}
+    [ -n "$root" ] || return 0
+    root=$root/.no-mistakes
+  fi
+  # init canonicalizes NM_HOME when it writes the remote, so a trailing-slash
+  # NM_HOME must not poison the <root>/repos/* prefix match below. A bare "/"
+  # root is already canonical and must survive the strip.
+  while [ "$root" != "/" ] && [ "$root" != "${root%/}" ]; do root=${root%/}; done
+  no_mistakes_gate_initialized "$root" "$FM_ROOT" && fm_absent_is_drift=1
+  check_no_mistakes_mirror_one firstmate "$FM_ROOT" "$root" "$fm_absent_is_drift"
+  [ -f "$DATA/projects.md" ] || return 0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    # Registered but never cloned is skipped either way, so test it before
+    # paying a fork per registry line inside the bounded local phase.
+    clone="$PROJECTS/$name"
+    [ -d "$clone" ] || continue
+    mode=$("$SCRIPT_DIR/fm-project-mode.sh" --raw "$name" 2>/dev/null || true)
+    mode=${mode%% *}
+    case "$mode" in
+      no-mistakes|no-mistakes-prod-only) ;;
+      *) continue ;;
+    esac
+    check_no_mistakes_mirror_one "$name" "$clone" "$root" 1
+  done < <(awk '$1=="-" && $2!="" { print $2 }' "$DATA/projects.md" 2>/dev/null)
+}
+
 detect_local_config() {
   # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
   # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
@@ -1484,6 +1595,7 @@ detect_local_config() {
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+  detect_no_mistakes_mirror
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,

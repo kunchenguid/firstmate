@@ -762,6 +762,99 @@ EOF
 # exact retry is idempotent, a drifted retry is rejected, dependent work routed
 # behind the answered task is released by the close, and the completion gate is
 # satisfied only by a recorded answer.
+# The stale sweep reclaims a row only under the owning home's per-task record
+# lock (state/.meta-<id>.lock), and its reopen is serialized against every
+# completion path through that same lock. The captain-hold answer closes a
+# task, so it must hold the record lock too: while the lock is held the answer
+# waits (and the task stays held and in flight), and once the lock frees the
+# answer closes the task exactly as before. Without the record lock the answer
+# would run straight through the sweep's proof -> reopen window and let the
+# sweep resurrect this closed row as Queued.
+test_answer_serializes_on_the_per_task_record_lock() {
+  local home id holder_pid answer_pid show out
+  home=$(make_home answer-lock)
+  id=sample-guard-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Guard the answer path" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the answer-lock origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Guard review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-guard-call \
+    --title "Choose the guard option" --reason "captain guard choice pending" --repo sample >/dev/null \
+    || fail "could not register the captain-held task"
+
+  # A live holder owning the record lock exactly the way a completing actor
+  # (teardown, or the sweep's own refusal gate) observes it. It releases on a
+  # trigger file rather than a signal: the blocked answer must re-acquire an
+  # ordinary free lock, never depend on stale-owner steal timing.
+  cat > "$home/holder.sh" <<SH
+#!/usr/bin/env bash
+set -u
+FM_ROOT_OVERRIDE="$ROOT"
+FM_STATE_OVERRIDE="$home/holder-state"
+. "$ROOT/bin/fm-wake-lib.sh"
+fm_lock_try_acquire "\$1" >/dev/null 2>&1 || exit 3
+while [ ! -e "\$2" ]; do sleep 0.05; done
+fm_lock_release "\$1" >/dev/null 2>&1
+SH
+  chmod +x "$home/holder.sh"
+  "$home/holder.sh" "$home/state/.meta-sample-guard-call.lock" "$home/release-now" \
+    >/dev/null 2>&1 &
+  holder_pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -e "$home/state/.meta-sample-guard-call.lock" ] && break
+    sleep 0.1
+  done
+  [ -e "$home/state/.meta-sample-guard-call.lock" ] \
+    || fail "fixture holder never took the per-task record lock"
+
+  printf 'Captain chose the guard option.\n' > "$home/guard-decision.txt"
+  run_captain "$home" answer sample-guard-call --decision-file "$home/guard-decision.txt" \
+    > "$home/answer.out" 2> "$home/answer.err" &
+  answer_pid=$!
+
+  # While the record lock is held, the answer must not close the task. Before
+  # the record lock the answer runs straight through, so any poll seeing a
+  # closed row fails the run.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    sleep 0.1
+    show=$(tasks_in "$home" show sample-guard-call)
+    case "$show" in
+      *"state: queued"*"held: yes"*) : ;;
+      *) fail "the answer closed the task while another actor held the record lock" ;;
+    esac
+  done
+  kill -0 "$answer_pid" 2>/dev/null \
+    || fail "the answer finished while the record lock was still held"
+
+  # Releasing the lock lets the blocked answer proceed to the ordinary close.
+  touch "$home/release-now"
+  wait "$holder_pid" 2>/dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 \
+    26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50; do
+    kill -0 "$answer_pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$answer_pid" 2>/dev/null; then
+    kill -KILL "$answer_pid" 2>/dev/null
+    wait "$answer_pid" 2>/dev/null
+    fail "the answer never completed after the record lock freed"
+  fi
+  wait "$answer_pid" 2>/dev/null
+  out=$(cat "$home/answer.out")
+  assert_contains "$out" "answered: sample-guard-call" \
+    "the answer after the lock freed did not report its close"
+  show=$(tasks_in "$home" show sample-guard-call --full)
+  assert_contains "$show" "state: done" \
+    "the answer after the lock freed did not close the task"
+  assert_contains "$show" "Resolution recorded by fm-captain-hold" \
+    "the answer after the lock freed lost the decision record"
+  [ ! -e "$home/state/.meta-sample-guard-call.lock" ] \
+    || fail "the answer left the per-task record lock behind"
+  pass "an answer waits for the per-task record lock the sweep reclaims under"
+}
+
 test_answer_records_and_closes() {
   local home id json show
   home=$(make_home answer-close)
@@ -3854,6 +3947,7 @@ SH
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
+test_answer_serializes_on_the_per_task_record_lock
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age

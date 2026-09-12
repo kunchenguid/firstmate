@@ -62,7 +62,13 @@
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
 #   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
+#   session provider only, exactly like herdr/zellij, so it does. When
+#   treehouse get instead refuses because the pool is full ("all N worktrees
+#   are in use..."), the spawn detects that exact refusal during the worktree
+#   wait, holds the still-Queued item with a load-kind capacity hold whose
+#   reason names the pool (bin/fm-capacity-lib.sh owns the contract), prints
+#   one line naming the hold, and exits 2; bin/fm-teardown.sh releases the
+#   oldest hold for the same pool when a worktree returns to it. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -370,6 +376,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-capacity-lib.sh
+. "$SCRIPT_DIR/fm-capacity-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 
@@ -982,20 +990,7 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
-     && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
-    if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
-      echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
-      HERDR_PROJECTION_ABORT_CLEANUP=0
-    fi
-  fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
-    HERDR_PROJECTION_ABORT_CLEANUP=0
-    fm_backend_herdr_projection_cleanup_exact \
-      "$HERDR_PROJECTION_ABORT_SESSION" \
-      "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
-  fi
+  spawn_herdr_projection_abort_cleanup || true
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
@@ -1141,6 +1136,30 @@ spawn_herdr_presentation_order_lock_release() {
   [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ] || return 0
   HERDR_PRESENTATION_ORDER_LOCK_HELD=0
   fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+}
+
+# The herdr projection cleanup this spawn owes for the endpoint it created:
+# take the presentation order lock every projection mutation takes, close the
+# exact panes, and disarm so it runs exactly once. The EXIT trap calls it, and
+# so does any path that must know the endpoint's final state before it prints
+# one - the cleanup has to have happened before the endpoint is read back, or
+# the read describes a pane the trap is about to remove. Returns non-zero only
+# when the lock was unavailable and the cleanup was therefore refused, which
+# also disarms it: nothing closes the endpoint after that.
+spawn_herdr_projection_abort_cleanup() {
+  [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] || return 0
+  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ] \
+     && ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
+    echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    return 1
+  fi
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+  fm_backend_herdr_projection_cleanup_exact \
+    "$HERDR_PROJECTION_ABORT_SESSION" \
+    "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+    "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+  return 0
 }
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
@@ -2958,6 +2977,148 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 
+# treehouse get's terminal refusal when the pool has nothing to hand out:
+#   "all %d worktrees are in use or dirty (max_trees = %d). Run ..."
+# and its mixed-flavor sibling "all %d worktrees are in use, dirty, or hold
+# the other backend's worktrees (...)". Both share the leading count clause,
+# so one prefix match covers them. The message can wrap at the pane width, so
+# the capture is flattened (newlines and squeezed runs become single spaces)
+# before matching; that reconstructs the message regardless of where it wrapped.
+# Sets POOL_FULL_N and POOL_FULL_MAX for the capacity hold reason.
+POOL_FULL_N=
+POOL_FULL_MAX=
+spawn_treehouse_pool_refusal() {
+  local cap flat
+  cap=$(fm_backend_capture "$BACKEND" "$WT_TARGET" 60 "$W" 2>/dev/null || true)
+  [ -n "$cap" ] || return 1
+  flat=$(printf '%s\n' "$cap" | tr '\n' ' ' | tr -s ' ')
+  [[ "$flat" =~ all\ ([0-9]+)\ worktrees\ are\ in\ use ]] || return 1
+  POOL_FULL_N=${BASH_REMATCH[1]}
+  POOL_FULL_MAX=
+  [[ "$flat" =~ max_trees\ =\ ([0-9]+) ]] && POOL_FULL_MAX=${BASH_REMATCH[1]}
+  return 0
+}
+
+# A full pool is a recorded capacity hold, not a silent wait: detect the exact
+# refusal, hold the still-Queued item (bin/fm-capacity-lib.sh owns the reason
+# contract), print one line naming the hold, and leave the item queued - never
+# In flight - for redispatch once teardown releases the hold. Exit 2 is the
+# capacity signal. The endpoint this path created is closed here, on every exit
+# path, because it is what the redispatch would collide with: the backends
+# refuse to create a second endpoint for the same task (bin/backends/tmux.sh
+# rejects an existing fm-<id> window), and nothing else can remove it - the
+# pane never left the project and holds no work, and fm-teardown.sh refuses a
+# task whose state/<id>.meta was never published, which is exactly this path.
+# Every backend close is best effort and some refuse while still returning 0
+# (fm_backend_herdr_kill declines an unlocked pane close when a sibling spawn
+# holds the presentation session lock), so the endpoint is READ BACK after the
+# close and the printed line reports what the read proved, never what was
+# attempted: an endpoint still standing is the operator's to close before the
+# redispatch, and saying so is the only thing that gets it looked at. A read
+# that settles neither way gets the third answer rather than either claim - the
+# close is reported as unconfirmed and the endpoint as the operator's to check.
+# On herdr the projection cleanup this spawn owes runs HERE, before the read
+# back, instead of being left to the EXIT trap: the trap fires after exit 2 and
+# closes the projection under the presentation lock, so a read taken before it
+# would describe a pane that is removed moments later and send the operator to
+# close by hand an endpoint that no longer exists. When that cleanup is refused
+# because the lock is unavailable, nothing closes the endpoint afterwards and
+# no close is confirmed, which is the unconfirmed answer.
+# At this point no meta, busy record, or backlog transition exists yet, so
+# nothing else needs unwinding.
+spawn_capacity_refuse() {
+  local pool reason endpoint_note verdict cleanup_refused=0
+  pool=$(fm_capacity_pool_of_project "$PROJ_ABS_REAL" 2>/dev/null || true)
+  [ -n "$pool" ] || pool=$PROJ_ABS_REAL
+  reason=$(fm_capacity_reason "$pool" "$POOL_FULL_N" "$POOL_FULL_MAX")
+  fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" 2>/dev/null || true
+  if [ "$BACKEND" = herdr ]; then
+    spawn_herdr_projection_abort_cleanup || cleanup_refused=1
+  fi
+  if [ "$cleanup_refused" = 1 ]; then
+    verdict=unconfirmed
+  else
+    verdict=$(spawn_capacity_endpoint_verdict)
+  fi
+  case "$verdict" in
+    gone)
+      endpoint_note="endpoint $T closed so the redispatch can create it again"
+      ;;
+    open)
+      endpoint_note="endpoint $T IS STILL OPEN - close it by hand before the redispatch, which cannot create a second endpoint for $ID"
+      echo "warning: the capacity refusal could not close endpoint $T for $ID; the redispatch after the hold is released will collide with it until it is closed by hand" >&2
+      ;;
+    *)
+      endpoint_note="endpoint $T close attempted but NOT CONFIRMED - the read settled neither way, so check $T by hand before the redispatch, which cannot create a second endpoint for $ID"
+      echo "warning: the capacity refusal attempted to close endpoint $T for $ID and could not confirm it absent on the $BACKEND backend; check the endpoint by hand before the redispatch after the hold is released, which will collide with it if it is still open" >&2
+      ;;
+  esac
+  if [ "$BACKLOG_TRANSITION" = 1 ]; then
+    if ! fm_capacity_hold "$DATA" "$ID" "$reason"; then
+      echo "error: treehouse refused the spawn: $reason, and recording the capacity hold on $ID failed; the item is left queued with no hold recorded; $endpoint_note" >&2
+      exit 2
+    fi
+    printf 'held: %s - %s; item left queued for redispatch when a worktree frees; %s\n' "$ID" "$reason" "$endpoint_note"
+  else
+    # A manual-backend home owns its backlog by hand, so no hold is invented;
+    # the refusal is still terminal for this dispatch either way.
+    printf 'refused: %s - %s; manual backlog home, record the hold by hand; %s\n' "$ID" "$reason" "$endpoint_note"
+  fi
+  exit 2
+}
+
+# What did reading the endpoint back after the close actually prove - `gone`,
+# `open`, or `unconfirmed`? Every read is an existing read-only presence
+# primitive; only two backends can answer `gone`, because only their negative
+# read is an ABSENCE read:
+#   herdr  - fm_backend_herdr_pane_presence_state classifies the exact pane
+#            from its structured reply, so all three answers are reachable:
+#            pane_not_found is `gone`, an echoed pane id is `open`, and its
+#            `unknown` - any other error, an unparseable reply, a server that
+#            has since exited - is `unconfirmed`, as is a target that will not
+#            parse or an adapter that will not source.
+#   tmux   - fm_backend_target_exists looks the window up directly, so a failed
+#            lookup means no such window (a dead server has none either, and
+#            the redispatch starts its own).
+# zellij and cmux reach this path too, but fm_backend_target_exists dispatches
+# both to a READINESS predicate (fm_backend_zellij_target_ready,
+# fm_backend_cmux_target_ready) that also fails on a label mismatch or an
+# unreadable CLI, so a failed read there is not absence: they answer `open`
+# when the read proves the endpoint present and `unconfirmed` otherwise, and
+# the refusal reports a close it cannot see rather than claiming one. Giving
+# those adapters their own confirmed-gone primitive, the way herdr has one, is
+# the follow-up that would let them answer `gone`. An unanswerable read is
+# never taken as proof.
+spawn_capacity_endpoint_verdict() {
+  case "$BACKEND" in
+    herdr)
+      fm_backend_source herdr 2>/dev/null || { printf 'unconfirmed'; return 0; }
+      fm_backend_herdr_parse_target "$T" 2>/dev/null \
+        || { printf 'unconfirmed'; return 0; }
+      case "$(fm_backend_herdr_pane_presence_state \
+                "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null)" in
+        dead) printf 'gone' ;;
+        present) printf 'open' ;;
+        *) printf 'unconfirmed' ;;
+      esac
+      ;;
+    tmux)
+      if fm_backend_target_exists tmux "$T" "$W" 2>/dev/null; then
+        printf 'open'
+      else
+        printf 'gone'
+      fi
+      ;;
+    *)
+      if fm_backend_target_exists "$BACKEND" "$T" "$W" 2>/dev/null; then
+        printf 'open'
+      else
+        printf 'unconfirmed'
+      fi
+      ;;
+  esac
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -3170,6 +3331,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   last_seen=""
   last_reason="the pane reported no path"
   for _ in $(seq 1 60); do
+    # A pool-full refusal is terminal for treehouse get, so check it before
+    # each path poll: the pane never leaves the project on that path, and the
+    # refusal turns the wait into a recorded capacity hold instead of a
+    # 60-second silence. spawn_capacity_refuse never returns.
+    if spawn_treehouse_pool_refusal; then
+      spawn_capacity_refuse
+    fi
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then

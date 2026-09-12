@@ -5,6 +5,12 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# Returning a worktree to its treehouse pool also frees one pool slot, so after
+# a successful return teardown releases the oldest capacity hold recorded for
+# that same pool (bin/fm-capacity-lib.sh owns the reason contract
+# bin/fm-spawn.sh writes when the pool refuses a spawn) and prints which item
+# became ready. The release is best-effort: a failure leaves the hold recorded
+# for the next teardown to retry and never aborts the teardown itself.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -262,6 +268,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-capacity-lib.sh
+. "$SCRIPT_DIR/fm-capacity-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -3344,6 +3352,29 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # unclaimed until its next holder claims it, and leaves the claim in place
   # whenever the return did not actually happen.
   fm_treehouse_slot_owner_release "$WT" "$ID"
+  # The returned worktree freed exactly one pool slot, so hand it to the oldest
+  # capacity hold recorded for that same pool (bin/fm-capacity-lib.sh owns the
+  # reason contract bin/fm-spawn.sh records): releasing makes the held item
+  # dispatchable again instead of waiting for the next backlog re-evaluation.
+  # Best-effort by design - a failed release leaves the hold recorded for the
+  # next teardown to retry, never aborting this one.
+  if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+    capacity_pool=$(fm_capacity_pool_of_worktree "$WT" 2>/dev/null || true)
+    if [ -n "$capacity_pool" ]; then
+      fm_capacity_release_oldest "$DATA" "$capacity_pool" || true
+      # Spawn may have had to record its hold under the fallback pool identity
+      # (the canonical project root, as fm_capacity_pool_of_project resolves it
+      # when treehouse cannot answer); when the worktree-derived scan released
+      # nothing, scan that identity too before leaving the hold stranded for a
+      # manual unhold.
+      if [ -z "$FM_CAPACITY_RELEASED_ID" ] && [ -n "$PROJ" ]; then
+        capacity_fallback=$(fm_capacity_canonical_or_raw "$PROJ" 2>/dev/null || true)
+        if [ -n "$capacity_fallback" ] && [ "$capacity_fallback" != "$capacity_pool" ]; then
+          fm_capacity_release_oldest "$DATA" "$capacity_fallback" || true
+        fi
+      fi
+    fi
+  fi
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
