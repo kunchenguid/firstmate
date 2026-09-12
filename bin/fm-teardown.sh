@@ -1663,6 +1663,13 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
+  # agy is the one adapter whose per-task wiring lives inside the worktree at a
+  # path git sees: bin/fm-spawn.sh writes .agents/hooks.json there because agy
+  # offers no external settings-path override, and nothing excludes it.
+  # Exempting the file alone is not enough - the default `normal` untracked mode
+  # collapses a newly created directory into one `?? .agents/` row that no
+  # file-path pattern can match - so an agy task lists every untracked path and
+  # exempts the exact hook file. Every other harness keeps the cheaper default.
   if [ "$(meta_value "$META" harness)" = agy ]; then
     untracked_mode=all
     untracked_exempt='^\?\? (\.claude/|\.agents/hooks\.json$|\.fm-(grok|kimi)-turnend$)'

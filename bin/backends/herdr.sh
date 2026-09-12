@@ -2968,8 +2968,10 @@ fm_backend_herdr_send_literal() {  # <target> <text>
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
-# Escape, C-c, and C-d, as used by lifecycle control and stuck-crewmate-recovery) onto
-# herdr's `pane send-keys` names. Verified empirically: enter, escape/esc, and
+# Escape, C-c, as used by fm-send.sh --key and stuck-crewmate-recovery, plus
+# C-d, which only fm-send.sh --key reaches because no verified adapter exits on
+# it - agy's own exit is the /quit composer command) onto herdr's
+# `pane send-keys` names. Verified empirically: enter, escape/esc, and
 # both ctrl+c/C-c all work (case-insensitive on herdr's side, but normalize
 # explicitly rather than relying on that).
 fm_backend_herdr_normalize_key() {  # <key>
