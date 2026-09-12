@@ -23,7 +23,7 @@ if [ "${1:-}" = --help ]; then
   if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
     printf '%s\n' 'Pi 0.82.0' 'Options: --help'
   else
-    printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode>'
+    printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode> --session-id <id>'
   fi
 elif [ -n "${FM_PI_ARGS:-}" ]; then
   printf '%s\n' "$@" > "$FM_PI_ARGS"
@@ -31,6 +31,23 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/$tool"
+}
+
+make_spawn_claude_probe() {
+  local fakebin=$1
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --help ]; then
+  if [ "${FM_FAKE_CLAUDE_SESSION_ID_SUPPORT:-0}" = 1 ]; then
+    printf '%s\n' 'Claude Code' 'Options: --session-id <uuid>'
+  else
+    printf '%s\n' 'Claude Code' 'Options: --help'
+  fi
+fi
+exit 0
+SH
+  chmod +x "$fakebin/claude"
 }
 
 make_spawn_fakebin() {
@@ -54,6 +71,7 @@ SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
+  make_spawn_claude_probe "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -98,6 +116,7 @@ run_spawn() {
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_CLAUDE_SESSION_ID_SUPPORT="${FM_TEST_CLAUDE_SESSION_ID_SUPPORT:-0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
@@ -274,6 +293,8 @@ QUOTA
   expect_code 0 "$status" "Tachikoma composition: $out"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi example/example-model high
   assert_grep 'routing_source=tachikoma' "$HOME_DIR/state/$id.meta" "missing router provenance"
+  assert_grep 'billing_pool_ref=subscription' "$HOME_DIR/state/$id.meta" \
+    "Tachikoma-selected subscription pool was not retained for terminal usage attribution"
   jq -se 'any(.[]; .intake.selection.routingSource=="tachikoma" and (.intake.selection.tachikomaDecision|length)==36 and .intake.selection.quota.headroom=="sufficient" and .intake.selection.quota.observedAt!=null)' "$HOME_DIR/data/routing-outcomes.jsonl" >/dev/null || fail "intake lost decision identity"
   [ "$(wc -l < "$HOME_DIR/data/tachikoma/decisions.jsonl" | tr -d ' ')" = 1 ] || fail "spawn routed more than once"
   pass "Tachikoma selection reaches real spawn metadata, launch construction, and immutable telemetry"
@@ -543,6 +564,25 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   launch=$(cat "$LAUNCH_LOG")
   [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+}
+
+test_claude_binds_a_supported_telemetry_session() {
+  local rec id out status launch attempt
+  id=profile-claude-session-z2a
+  rec=$(make_spawn_case profile-claude-session claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CLAUDE_SESSION_ID_SUPPORT=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn with session-id support should succeed"
+  attempt=$(awk -F= '$1=="telemetry_attempt" {print $2}' "$HOME_DIR/state/$id.meta")
+  assert_grep "telemetry_session_id=${attempt#mra_}" "$HOME_DIR/state/$id.meta" \
+    "Claude metadata did not retain the exact telemetry session id"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --session-id ${attempt#mra_}" \
+    "Claude launch did not bind its supported telemetry session"
+  pass "Claude binds a telemetry session when its installed CLI supports an explicit id"
 }
 
 test_claude_threads_model_and_effort() {
@@ -881,7 +921,7 @@ test_pi_firstmate_context_is_scoped_to_project_and_worker_kind() {
 }
 
 test_pi_threads_model_and_max_effort() {
-  local rec id out status launch
+  local rec id out status launch attempt
   id=profile-pi-z8
   rec=$(make_spawn_case profile-pi pi "$id")
   read_case_record "$rec"
@@ -891,18 +931,21 @@ test_pi_threads_model_and_max_effort() {
   status=$?
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
+  attempt=$(awk -F= '$1=="telemetry_attempt" {print $2}' "$HOME_DIR/state/$id.meta")
+  assert_grep "telemetry_session_id=$attempt" "$HOME_DIR/state/$id.meta" \
+    "pi metadata did not retain the exact telemetry session id"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi launch did not force the regular TUI while threading the requested model and max thinking level"
+  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' --session-id $attempt -e" \
+    "pi launch did not bind the telemetry session while threading the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi launch lost the canonical typed launch-brief envelope"
-  pass "pi receives --model and --thinking max profile flags"
+  pass "pi binds one telemetry session while receiving model and thinking profile flags"
 }
 
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
-  local rec id out status launch
+  local rec id out status launch attempt
   id=profile-pi-signed-z8b
   rec=$(make_spawn_case profile-pi-signed pi-signed "$id")
   read_case_record "$rec"
@@ -913,9 +956,12 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   expect_code 0 "$status" "pi-signed spawn with max effort should succeed"
   assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
+  attempt=$(awk -F= '$1=="telemetry_attempt" {print $2}' "$HOME_DIR/state/$id.meta")
+  assert_grep "telemetry_session_id=$attempt" "$HOME_DIR/state/$id.meta" \
+    "pi-signed metadata did not retain the exact telemetry session id"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi-signed launch did not force the regular TUI with Pi's model, thinking, and extension semantics"
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' --session-id $attempt -e" \
+    "pi-signed launch did not bind the telemetry session with its model, thinking, and extension semantics"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
   assert_present "$HOME_DIR/state/$id.pi-ext.ts" "pi-signed launch did not install Pi's turn-end extension"
@@ -931,7 +977,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$ext" "\"--gen\", \"$gen\"" "pi extension does not carry the armed incarnation gen"
   assert_contains "$ext" '"--source", "pi-ext"' "pi extension does not attribute its semantic source"
   assert_contains "$ext" 'pi.on("turn_end"' "pi extension lost the turn-end notification touch"
-  pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
+  pass "pi-signed binds one telemetry session with shared Pi launch semantics and configured identity"
 }
 
 test_pi_tui_mode_probe_is_cached_per_binary_path() {
@@ -976,13 +1022,19 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
       if [ "$version" = 0.82.0 ]; then
         assert_not_contains "$launch" "--tui-mode" \
           "$harness $version launch must omit unsupported --tui-mode"
+        assert_not_contains "$launch" "--session-id" \
+          "$harness $version launch must omit an unsupported session-id flag"
+        assert_not_contains "$(cat "$HOME_DIR/state/$id.meta")" "telemetry_session_id=" \
+          "$harness $version metadata must omit unsupported session binding"
       else
         assert_contains "$launch" "'$FAKEBIN_DIR/$harness' --tui-mode regular" \
           "$harness $version launch must preserve the regular TUI"
+        assert_contains "$launch" "--session-id" \
+          "$harness $version launch must bind the supported durable session"
       fi
     done
   done
-  pass "Pi launch probing omits --tui-mode on older Pi and preserves it on supporting Pi"
+  pass "Pi launch probing omits unsupported TUI and session flags while preserving supported bindings"
 }
 
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
@@ -1440,13 +1492,14 @@ test_raw_launch_refuses_unapplied_axes() {
 # the complete script below. Unknown selectors refuse rather than skip tests.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   case "$FM_TEST_ONLY" in
-    test_unsupported_effort_refuses_before_attempt_or_launch|test_raw_launch_refuses_unapplied_axes|test_native_pi_ultra_is_explicit_and_model_scoped|test_pi_threads_model_and_max_effort|test_pi_signed_threads_shared_pi_profile_and_preserves_identity|test_opencode_threads_model_with_default_effort) "$FM_TEST_ONLY"; exit "$?" ;;
+    test_unsupported_effort_refuses_before_attempt_or_launch|test_raw_launch_refuses_unapplied_axes|test_native_pi_ultra_is_explicit_and_model_scoped|test_claude_binds_a_supported_telemetry_session|test_pi_threads_model_and_max_effort|test_pi_signed_threads_shared_pi_profile_and_preserves_identity|test_opencode_threads_model_with_default_effort) "$FM_TEST_ONLY"; exit "$?" ;;
     launch-axes)
       result=0
       for check in \
         test_unsupported_effort_refuses_before_attempt_or_launch \
         test_tachikoma_routes_through_real_spawn_and_telemetry \
         test_no_profile_keeps_claude_profile_defaults \
+        test_claude_binds_a_supported_telemetry_session \
         test_claude_threads_model_and_effort \
         test_codex_threads_model_and_effort \
         test_codex_refuses_invalid_max_effort \
@@ -1551,6 +1604,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_claude_binds_a_supported_telemetry_session
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_refuses_invalid_max_effort

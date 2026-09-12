@@ -672,7 +672,7 @@ test_teardown_seals_observations_without_equating_cleanup_with_success() {
     [ "$rc" -eq 0 ] || fail "telemetry $kind teardown failed: $result"
     [ ! -f "$case_dir/state/task-x1.meta" ] || fail "telemetry $kind left task metadata"
     result=$(FM_HOME="$case_dir" "$ROOT/bin/fm-model-telemetry.sh" sheet --format json)
-    printf '%s' "$result" | jq -e --arg expected "$expected" '.[]|select(.taskId=="task-x1")|.state=="terminal" and .classification==$expected and .metrics.relaunches==0 and .metrics.assistantTurns==null and .metrics.testRed==null and .usageSource=="no-verified-source"' >/dev/null || fail "telemetry $kind confused cleanup permission with acceptance or lost unknowns: $result"
+    printf '%s' "$result" | jq -e --arg expected "$expected" '.[]|select(.taskId=="task-x1")|.state=="terminal" and .classification==$expected and .metrics.relaunches==0 and .metrics.assistantTurns==null and .metrics.testRed==null and .usageSource=="no-verified-source" and .cachedTokens==null and .usageComplete==false and .missingReason=="no-verified-source"' >/dev/null || fail "telemetry $kind confused cleanup permission with acceptance or lost complete usage facts: $result"
   done
   pass "teardown seals exact attempts before cleanup and never treats a pushed branch as accepted"
 }

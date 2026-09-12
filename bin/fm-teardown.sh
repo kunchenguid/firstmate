@@ -3451,11 +3451,9 @@ if [ "$KIND" != secondmate ] && [ -n "$TELEMETRY_ATTEMPT" ]; then
       TELEMETRY_OUTCOME_ID=$PR_URL
     fi
   fi
-  TELEMETRY_USAGE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-model-telemetry.sh" usage --attempt "$TELEMETRY_ATTEMPT" --worktree "$WT") || exit 1
-  TELEMETRY_FACTS=$(printf '%s' "$TELEMETRY_USAGE" | jq -c \
+  TELEMETRY_FACTS=$(jq -cn \
     --arg result "$TELEMETRY_RESULT" --arg kind "$TELEMETRY_OUTCOME_KIND" --arg id "$TELEMETRY_OUTCOME_ID" \
-    '. + {gate:{source:"delivery",result:$result,stepReruns:null},outcomeLink:{kind:$kind,id:(if $id=="" then null else $id end)}}')
+    '{gate:{source:"delivery",result:$result,stepReruns:null},outcomeLink:{kind:$kind,id:(if $id=="" then null else $id end)},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null}}')
   FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-model-telemetry.sh" terminal-facts --state "$STATE" --task "$ID" \
     --attempt "$TELEMETRY_ATTEMPT" --payload "$TELEMETRY_FACTS" >/dev/null || exit 1

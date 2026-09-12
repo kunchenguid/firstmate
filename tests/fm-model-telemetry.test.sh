@@ -600,6 +600,192 @@ test_intake_accepts_routing_provenance_additive_fields() {
   pass "intake accepts routing-provenance additive fields in any subset and rejects unknown values and foreign keys"
 }
 
+test_terminal_facts_reads_the_bound_pi_session() {
+  local home payload attempt worktree facts row sessions evidence_hash
+  home=$(make_home bound-pi-usage)
+  worktree="$home/worktree"
+  sessions="$home/pi-sessions"
+  mkdir -p "$worktree" "$sessions"
+  payload=$(intake_payload | jq -c '
+    .tuple.harness="pi" |
+    .tuple.provider="openai-codex" |
+    .selection.candidateAssessments[0].tuple=.tuple
+  ')
+  attempt=$(run_intake "$home" bound-pi-usage "$payload") || fail "Pi usage intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  cat > "$home/state/bound-pi-usage.meta" <<EOF
+worktree=$worktree
+harness=pi
+telemetry_attempt=$attempt
+telemetry_session_id=$attempt
+billing_pool_ref=usage-pool
+EOF
+  cat > "$sessions/task.jsonl" <<EOF
+{"type":"session","id":"$attempt","timestamp":"2026-08-02T00:00:05Z","cwd":"$worktree"}
+{"type":"message","timestamp":"2026-08-02T00:00:10Z","message":{"role":"assistant","usage":{"input":11,"output":7,"cacheRead":2,"cacheWrite":0}}}
+{"type":"message","timestamp":"2026-08-02T00:00:25Z","message":{"role":"assistant","usage":{"input":13,"output":17,"cacheRead":0,"cacheWrite":3}}}
+EOF
+  cat > "$sessions/unrelated.jsonl" <<EOF
+{"type":"session","id":"unrelated-session","timestamp":"2026-08-02T00:00:01Z","cwd":"$worktree"}
+{"type":"message","timestamp":"2026-08-02T00:00:20Z","message":{"role":"assistant","usage":{"input":100,"output":100,"cacheRead":100,"cacheWrite":0}}}
+EOF
+  facts=$(jq -cn '{gate:{source:"delivery",result:"green",stepReruns:0},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:null}')
+  FM_MODEL_TELEMETRY_NOW_OVERRIDE=2026-08-02T00:00:25Z FM_PI_SESSIONS_OVERRIDE="$sessions" FM_HOME="$home" \
+    "$TELEMETRY" terminal-facts --state "$home/state" --task bound-pi-usage --attempt "$attempt" --payload "$facts" >/dev/null \
+    || fail "terminal-facts could not collect the bound Pi session"
+  evidence_hash=$(shasum -a 256 "$sessions/task.jsonl" | awk '{print $1}')
+  row=$(jq -es --arg a "$attempt" 'map(select(.eventType=="attempt-terminal" and .attemptId==$a)) | .[0].terminal' "$home/data/routing-outcomes.jsonl")
+  printf '%s' "$row" | jq -e --arg attempt "$attempt" --arg path "$sessions/task.jsonl" --arg hash "$evidence_hash" '
+    .usage.inputTokens==24 and .usage.outputTokens==24 and .usage.cachedTokens==5 and
+    .usage.cost==null and .usage.currency==null and .wallMs==25000 and .wallSeconds==25 and
+    .usageSource=="recorded" and .sessionId==$attempt and
+    .usageEvidenceRef=={path:$path,sha256:$hash} and .billingPoolRef=="usage-pool" and
+    .usageComplete==true and .missingReason==null
+  ' >/dev/null || fail "terminal-facts did not record complete bound Pi usage evidence: $row"
+  pass "terminal-facts ignores unrelated Pi sessions and records complete usage with intake-to-terminal wall time"
+}
+
+test_terminal_facts_binds_metadata_to_attempt_and_refuses_partial_recorded_usage() {
+  local home payload first second third fourth fifth sixth seventh worktree facts partial complete terminal err
+  home=$(make_home bound-usage-integrity)
+  worktree="$home/worktree"
+  mkdir -p "$worktree"
+  payload=$(intake_payload | jq -c '
+    .tuple.harness="pi" |
+    .tuple.provider="openai-codex" |
+    .selection.candidateAssessments[0].tuple=.tuple
+  ')
+  first=$(run_intake "$home" bound-usage-first "$payload") || fail "first bound-usage intake failed"
+  first=$(printf '%s' "$first" | jq -r .attemptId)
+  second=$(run_intake "$home" bound-usage-second "$payload") || fail "second bound-usage intake failed"
+  second=$(printf '%s' "$second" | jq -r .attemptId)
+  cat > "$home/state/bound-usage-first.meta" <<EOF
+worktree=$worktree
+harness=pi
+telemetry_attempt=$first
+telemetry_session_id=$first
+EOF
+  facts=$(jq -cn '{gate:{source:"delivery",result:"green",stepReruns:0},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},wallSeconds:null}')
+  err=$(FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task bound-usage-first --attempt "$second" --payload "$facts" 2>&1) &&
+    fail "terminal-facts sealed one attempt with another task's metadata"
+  assert_contains "$err" "task metadata attempt does not match" \
+    "mismatched task metadata refusal was not actionable: $err"
+  jq -e --arg attempt "$second" 'select(.eventType=="attempt-terminal" and .attemptId==$attempt)' "$home/data/routing-outcomes.jsonl" >/dev/null &&
+    fail "mismatched metadata wrote a terminal for the other attempt"
+
+  third=$(run_intake "$home" bound-usage-third "$payload") || fail "third bound-usage intake failed"
+  third=$(printf '%s' "$third" | jq -r .attemptId)
+  partial=$(jq -cn '{gate:{source:"delivery",result:"green",stepReruns:0},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:12,outputTokens:7,cost:null,currency:null},usageSource:"recorded",sessionId:null,usageEvidenceRef:null,usageComplete:true,missingReason:null,wallSeconds:60}')
+  err=$(FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task bound-usage-third --attempt "$third" --payload "$partial" 2>&1) &&
+    fail "terminal-facts accepted incomplete usage as recorded"
+  assert_contains "$err" "terminal facts payload violates the whitelist" \
+    "partial recorded usage refusal was not actionable: $err"
+
+  fourth=$(run_intake "$home" bound-usage-fourth "$payload") || fail "fourth bound-usage intake failed"
+  fourth=$(printf '%s' "$fourth" | jq -r .attemptId)
+  cat > "$home/state/bound-usage-fourth.meta" <<EOF
+worktree=$worktree
+harness=pi
+telemetry_attempt=$fourth
+EOF
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task bound-usage-fourth --attempt "$fourth" --payload "$facts" >/dev/null ||
+    fail "terminal-facts did not seal the unbound usage as unavailable"
+  jq -e --arg attempt "$fourth" 'select(.eventType=="attempt-terminal" and .attemptId==$attempt) | .terminal | .usageComplete==false and .usageSource=="no-verified-source" and .missingReason=="no-verified-source"' "$home/data/routing-outcomes.jsonl" >/dev/null ||
+    fail "unbound task metadata was not reported as no-verified-source"
+
+  fifth=$(run_intake "$home" bound-usage-fifth "$payload") || fail "fifth bound-usage intake failed"
+  fifth=$(printf '%s' "$fifth" | jq -r .attemptId)
+  cat > "$home/state/bound-usage-fifth.meta" <<EOF
+worktree=$worktree
+harness=pi
+telemetry_attempt=$fifth
+telemetry_session_id=unsafe/session
+EOF
+  err=$(FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task bound-usage-fifth --attempt "$fifth" --payload "$facts" 2>&1) &&
+    fail "terminal-facts accepted an unsafe task session binding"
+  assert_contains "$err" "task metadata telemetry session id is unsafe" \
+    "unsafe task session binding refusal was not actionable: $err"
+
+  sixth=$(run_intake "$home" bound-usage-sixth "$payload") || fail "sixth bound-usage intake failed"
+  sixth=$(printf '%s' "$sixth" | jq -r .attemptId)
+  cat > "$home/state/bound-usage-sixth.meta" <<EOF
+worktree=$worktree
+harness=pi
+telemetry_attempt=$sixth
+telemetry_session_id=$sixth
+EOF
+  complete=$(jq -cn '{gate:{source:"delivery",result:"green",stepReruns:0},outcomeLink:{kind:"commit",id:"0123456789abcdef"},usage:{inputTokens:12,outputTokens:7,cachedTokens:3,cost:null,currency:null},usageSource:"recorded",sessionId:"foreign_session",usageEvidenceRef:{path:"/tmp/session.jsonl",sha256:"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},usageComplete:true,missingReason:null,wallSeconds:60}')
+  err=$(FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task bound-usage-sixth --attempt "$sixth" --payload "$complete" 2>&1) &&
+    fail "terminal-facts accepted complete usage bound to another session"
+  assert_contains "$err" "recorded usage session does not match task metadata" \
+    "complete facts session mismatch refusal was not actionable: $err"
+
+  seventh=$(run_intake "$home" bound-usage-seventh "$payload") || fail "seventh bound-usage intake failed"
+  seventh=$(printf '%s' "$seventh" | jq -r .attemptId)
+  cat > "$home/state/bound-usage-seventh.meta" <<EOF
+worktree=$worktree
+harness=pi
+telemetry_attempt=$seventh
+telemetry_session_id=$seventh
+EOF
+  terminal=$(terminal_payload accepted | jq -c '(.usage={inputTokens:12,outputTokens:7,cachedTokens:3,cost:null,currency:null}) + {usageSource:"recorded",sessionId:"foreign_session",usageEvidenceRef:{path:"/tmp/session.jsonl",sha256:"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},usageComplete:true,missingReason:null}')
+  err=$(FM_HOME="$home" "$TELEMETRY" terminal --state "$home/state" --task bound-usage-seventh --attempt "$seventh" --payload "$terminal" 2>&1) &&
+    fail "terminal accepted complete usage bound to another session"
+  assert_contains "$err" "recorded usage session does not match task metadata" \
+    "complete terminal session mismatch refusal was not actionable: $err"
+  pass "terminal paths bind complete usage to their exact durable session"
+}
+
+test_usage_adapters_collect_complete_claude_and_codex_sessions() {
+  local home worktree sessions payload attempt observation
+  home=$(make_home provider-usage)
+  worktree="$home/worktree"
+  sessions="$home/sessions"
+  mkdir -p "$worktree" "$sessions"
+
+  payload=$(intake_payload | jq -c '
+    .tuple.harness="claude" |
+    .tuple.provider="anthropic" |
+    .selection.candidateAssessments[0].tuple=.tuple
+  ')
+  attempt=$(run_intake "$home" claude-usage "$payload") || fail "Claude usage intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  cat > "$sessions/claude.jsonl" <<EOF
+{"sessionId":"claude-session","timestamp":"2026-08-02T00:00:05Z","cwd":"$worktree"}
+{"type":"assistant","message":{"id":"claude-message-1","usage":{"input_tokens":11,"output_tokens":7,"cache_creation_input_tokens":2,"cache_read_input_tokens":0}}}
+{"type":"assistant","message":{"id":"claude-message-2","usage":{"input_tokens":13,"output_tokens":17,"cache_creation_input_tokens":0,"cache_read_input_tokens":3}}}
+EOF
+  observation=$(FM_CLAUDE_PROJECTS_OVERRIDE="$sessions" FM_HOME="$home" \
+    "$TELEMETRY" usage --attempt "$attempt" --worktree "$worktree" --session-id claude-session) ||
+    fail "Claude usage collection failed"
+  printf '%s' "$observation" | jq -e '
+    .usage=={inputTokens:24,outputTokens:24,cachedTokens:5,cost:null,currency:null} and
+    .usageSource=="recorded" and .usageComplete==true and .missingReason==null and
+    .sessionId=="claude-session" and (.usageEvidenceRef.path|endswith("/claude.jsonl"))
+  ' >/dev/null || fail "Claude usage adapter lost complete message usage: $observation"
+
+  payload=$(intake_payload | jq -c '
+    .tuple.harness="codex" |
+    .selection.candidateAssessments[0].tuple=.tuple
+  ')
+  attempt=$(run_intake "$home" codex-usage "$payload") || fail "Codex usage intake failed"
+  attempt=$(printf '%s' "$attempt" | jq -r .attemptId)
+  cat > "$sessions/codex.jsonl" <<EOF
+{"timestamp":"2026-08-02T00:00:05Z","type":"session_meta","payload":{"id":"codex-session","timestamp":"2026-08-02T00:00:05Z","cwd":"$worktree"}}
+{"timestamp":"2026-08-02T00:00:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":11,"output_tokens":7,"cached_input_tokens":2,"cache_write_input_tokens":0}}}}
+{"timestamp":"2026-08-02T00:00:25Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":24,"output_tokens":24,"cached_input_tokens":2,"cache_write_input_tokens":3}}}}
+EOF
+  observation=$(FM_CODEX_SESSIONS_OVERRIDE="$sessions" FM_HOME="$home" \
+    "$TELEMETRY" usage --attempt "$attempt" --worktree "$worktree" --session-id codex-session) ||
+    fail "Codex usage collection failed"
+  printf '%s' "$observation" | jq -e '
+    .usage=={inputTokens:24,outputTokens:24,cachedTokens:5,cost:null,currency:null} and
+    .usageSource=="recorded" and .usageComplete==true and .missingReason==null and
+    .sessionId=="codex-session" and (.usageEvidenceRef.path|endswith("/codex.jsonl"))
+  ' >/dev/null || fail "Codex usage adapter lost complete total usage: $observation"
+  pass "Claude and Codex adapters collect one bound session with separate cached tokens"
+}
+
 test_terminal_records_explicit_usage_source() {
   local home attempt facts row
   home=$(make_home usage-source)
@@ -652,7 +838,7 @@ test_terminal_records_explicit_usage_source() {
 # attempts, acceptance, cost, tokens, task classes served, quota utilization,
 # and the usageSource breakdown. This is the deliverable; no dashboard is built.
 test_subscription_sheet_joins_a_representative_week() {
-  local home a json n cw cp ct gl ow day md cw_md cw_usage ct_md ct_usage err="$TMP_ROOT/subscription-sheet-err"
+  local home a json csv n cw cp ct gl ow day md cw_md cw_usage ct_md ct_usage err="$TMP_ROOT/subscription-sheet-err"
   home=$(make_home subscription-sheet)
   sub_intake() {
     local harness=$1 provider=$2 model=$3 account=$4 family=$5 routing=$6 rule=$7 task=$8 started=$9 decision=${10} headroom=${11}
@@ -683,6 +869,8 @@ test_subscription_sheet_joins_a_representative_week() {
   a=$(run_intake "$home" gl1 "$(sub_intake cursor-agent cursor glm-4.5 "" glm fallback default bounded-implementation-proven-root-fix 2026-09-12T12:00:00Z selected unmeasurable)" | jq -r .attemptId); sub_seal gl1 "$a" accepted null null no-verified-source
   # Claude/work again: a session that was read but reported no token totals.
   a=$(run_intake "$home" cw4 "$(sub_intake claude anthropic claude-opus work claude profile rule-1 rote-reversible-edit 2026-09-09T12:00:00Z selected sufficient)" | jq -r .attemptId); sub_seal cw4 "$a" accepted null null session-matched-no-tokens
+  # Claude/work again: concurrent sessions can be ambiguous and must retain their own unavailable bucket.
+  a=$(run_intake "$home" cw5 "$(sub_intake claude anthropic claude-opus work claude profile rule-1 rote-reversible-edit 2026-09-10T12:00:00Z selected sufficient)" | jq -r .attemptId); sub_seal cw5 "$a" accepted null null session-ambiguous
   # Out-of-window attempt that must be excluded by --from.
   run_intake "$home" old1 "$(sub_intake claude anthropic claude-opus work claude profile rule-1 bounded-implementation-proven-root-fix 2026-08-30T10:00:00Z selected sufficient)" >/dev/null
 
@@ -690,7 +878,7 @@ test_subscription_sheet_joins_a_representative_week() {
   n=$(printf '%s' "$json" | jq 'length')
   [ "$n" = 5 ] || fail "expected 5 subscriptions for the representative week, got $n"
   cw=$(printf '%s' "$json" | jq -c '.[] | select(.accountProfile=="work" and .harness=="claude")')
-  printf '%s' "$cw" | jq -e '.attempts==4 and .accepted==3 and .rejectedOrFailed==1 and .open==0 and .inputTokens==3300 and .outputTokens==4900 and .usageRecorded==3 and .usageSessionMatchedNoTokens==1 and (.taskClasses|index("bounded-implementation-proven-root-fix")>=0) and (.taskClasses|index("adversarial-review-security-review")>=0) and .quotaSelected==4 and .headroomTight==1' >/dev/null \
+  printf '%s' "$cw" | jq -e '.attempts==5 and .accepted==4 and .rejectedOrFailed==1 and .open==0 and .inputTokens==3300 and .outputTokens==4900 and .usageRecorded==3 and .usageSessionMatchedNoTokens==1 and .usageSessionAmbiguous==1 and (.taskClasses|index("bounded-implementation-proven-root-fix")>=0) and (.taskClasses|index("adversarial-review-security-review")>=0) and .quotaSelected==5 and .headroomTight==1' >/dev/null \
     || fail "claude/work subscription row was wrong: $cw"
   cp=$(printf '%s' "$json" | jq -c '.[] | select(.accountProfile=="personal" and .harness=="claude")')
   printf '%s' "$cp" | jq -e '.attempts==2 and .accepted==1 and .open==1' >/dev/null || fail "claude/personal subscription row was wrong: $cp"
@@ -701,8 +889,11 @@ test_subscription_sheet_joins_a_representative_week() {
   # out of the breakdown that is supposed to explain the missing tokens.
   printf '%s' "$ct" | jq -e '.usageSessionMatchedNoTokens==0' >/dev/null \
     || fail "codex/team wrongly counted a session-matched-no-tokens row: $ct"
-  printf '%s' "$json" | jq -e '[.[]|.usageSessionMatchedNoTokens]|add==1' >/dev/null \
-    || fail "the usageSource breakdown lost the session-matched-no-tokens row: $json"
+  printf '%s' "$json" | jq -e '([.[]|.usageSessionMatchedNoTokens]|add)==1 and ([.[]|.usageSessionAmbiguous]|add)==1' >/dev/null \
+    || fail "the usageSource breakdown lost a session-matched-no-tokens or session-ambiguous row: $json"
+  csv=$(FM_HOME="$home" "$TELEMETRY" subscription-sheet --from 2026-09-08T00:00:00Z --to 2026-09-14T23:59:59Z --format csv)
+  printf '%s\n' "$csv" | head -n 1 | grep -q ',usageSessionAmbiguous,' \
+    || fail "the CSV header omitted the session-ambiguous usage bucket: $csv"
   gl=$(printf '%s' "$json" | jq -c '.[] | select(.harness=="cursor-agent")')
   printf '%s' "$gl" | jq -e '.attempts==1 and .accepted==1 and .usageNoVerifiedSource==1 and .dispatchModelFamily=="glm" and .headroomUnmeasurable==1' >/dev/null \
     || fail "cursor/glm subscription row was wrong: $gl"
@@ -735,8 +926,8 @@ test_subscription_sheet_joins_a_representative_week() {
   cw_md=$(printf '%s\n' "$md" | grep '^| claude/anthropic/work/')
   [ -n "$cw_md" ] || fail "the markdown table lost the claude/work subscription: $md"
   cw_usage=$(printf '%s\n' "$cw_md" | awk -F'|' '{gsub(/ /,"",$(NF-1)); print $(NF-1)}')
-  [ "$cw_usage" = "3/1/0" ] \
-    || fail "the markdown usage cell hid the named-absence rows (want recorded/unavailable/absent 3/1/0): $cw_md"
+  [ "$cw_usage" = "3/2/0" ] \
+    || fail "the markdown usage cell hid the named-absence rows (want recorded/unavailable/absent 3/2/0): $cw_md"
   ct_md=$(printf '%s\n' "$md" | grep -F '| codex/openai/default/gpt-5/gpt-5 |')
   ct_usage=$(printf '%s\n' "$ct_md" | awk -F'|' '{gsub(/ /,"",$(NF-1)); print $(NF-1)}')
   [ -n "$ct_md" ] || fail "the markdown table lost the codex/team subscription: $md"
@@ -1001,8 +1192,8 @@ test_intake_records_task_id_on_event_and_sheet() {
   sheet=$(FM_HOME="$home" "$TELEMETRY" sheet --format json) || fail "task-id sheet failed"
   printf '%s' "$sheet" | jq -e --arg a "$attempt" '.[0].recordType=="attempt" and .[0].attemptId==$a and .[0].taskId=="typed-task"' >/dev/null \
     || fail "the JSON sheet does not surface a taskId column"
-  FM_HOME="$home" "$TELEMETRY" sheet --format csv | head -n 1 | grep -q ',taskId,quotaDecision,usageSource$' \
-    || fail "the CSV sheet header lacks the additive taskId column"
+  FM_HOME="$home" "$TELEMETRY" sheet --format csv | head -n 1 | grep -q ',taskId,quotaDecision,usageSource,sessionId,usageEvidenceRef,billingPoolRef,usageComplete,missingReason$' \
+    || fail "the CSV sheet header lacks the additive taskId and usage-evidence columns"
   pass "intake persists the task id slug and the sheet surfaces it as a column"
 }
 
@@ -1048,8 +1239,8 @@ test_terminal_facts_round_trip_blocked_class_and_green_none() {
     fail "terminal-facts accepted an invented primaryFailureClass"
   assert_contains "$err" "terminal facts payload violates the whitelist" \
     "invented facts-class refusal did not name the whitelist"
-  FM_HOME="$home" "$TELEMETRY" sheet --format csv | head -n 1 | grep -q ',taskId,quotaDecision,usageSource$' \
-    || fail "the CSV sheet header lacks the additive usageSource column"
+  FM_HOME="$home" "$TELEMETRY" sheet --format csv | head -n 1 | grep -q ',taskId,quotaDecision,usageSource,sessionId,usageEvidenceRef,billingPoolRef,usageComplete,missingReason$' \
+    || fail "the CSV sheet header lacks the additive usage-evidence columns"
   pass "terminal-facts round-trips a blocked class and a green none through the sheet with typed usageSource"
 }
 
@@ -1082,11 +1273,11 @@ test_usage_observation_whitelist_refuses_invalid_shapes() {
   assert_contains "$err" "session usage observation violates the whitelist" \
     "extra top-level key refusal did not name the whitelist"
 
-  observation='{"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"wallSeconds":60,"usageSource":"recorded"}'
+  observation='{"usage":{"inputTokens":null,"outputTokens":null,"cachedTokens":null,"cost":null,"currency":null},"wallMs":null,"wallSeconds":null,"usageSource":"session-not-found","assistantTurns":null,"sessionId":null,"usageEvidenceRef":null,"usageComplete":false,"missingReason":"session-not-found"}'
   FM_HOME="$home" FM_MODEL_TELEMETRY_TEST_USAGE_OBSERVATION="$observation" \
     "$TELEMETRY" usage --attempt "$attempt" --worktree "$worktree" >/dev/null \
     || fail "a whitelisted usage observation was refused"
-  pass "usage refuses malformed session observations and accepts the exact-key whitelist"
+  pass "usage refuses malformed session observations and accepts the complete exact-key whitelist"
 }
 
 test_intake_refuses_unknown_quota_decision_and_sheet_surfaces_it() {
@@ -1104,8 +1295,8 @@ test_intake_refuses_unknown_quota_decision_and_sheet_surfaces_it() {
   printf '%s' "$sheet" | jq -e --arg a "$attempt" \
     '.[0].recordType=="attempt" and .[0].attemptId==$a and .[0].quotaDecision=="selected"' >/dev/null \
     || fail "the JSON sheet does not surface a quotaDecision column"
-  FM_HOME="$home" "$TELEMETRY" sheet --format csv | head -n 1 | grep -q ',taskId,quotaDecision,usageSource$' \
-    || fail "the CSV sheet header lacks the additive quotaDecision column"
+  FM_HOME="$home" "$TELEMETRY" sheet --format csv | head -n 1 | grep -q ',taskId,quotaDecision,usageSource,sessionId,usageEvidenceRef,billingPoolRef,usageComplete,missingReason$' \
+    || fail "the CSV sheet header lacks the additive quotaDecision and usage-evidence columns"
   pass "new intake refuses an unknown quota decision and the sheet surfaces quotaDecision"
 }
 
@@ -1170,6 +1361,9 @@ test_candidate_sample_excludes_non_quality_outcomes_and_binds_frozen_verdict
 test_legacy_lossless_and_read_only_sheets
 test_account_profile_evidence_is_bound_only_to_claude
 test_intake_accepts_routing_provenance_additive_fields
+test_terminal_facts_reads_the_bound_pi_session
+test_terminal_facts_binds_metadata_to_attempt_and_refuses_partial_recorded_usage
+test_usage_adapters_collect_complete_claude_and_codex_sessions
 test_terminal_records_explicit_usage_source
 test_subscription_sheet_joins_a_representative_week
 test_spawn_failure_records_pre_launch_refusals

@@ -252,6 +252,37 @@ test_wait_scorecard_metrics() {
     "K17 did not report lock wait per spawn"
   pass "scorecard reports K16 MAIN wait and K17 lock wait"
 }
+test_scorecard_reports_k15_by_task_class_and_effort() {
+  local home out
+  home=$(make_home k15)
+  cat > "$home/data/routing-outcomes.jsonl" <<'EOF'
+{"schemaVersion":"firstmate.model-run-telemetry/v1","eventType":"attempt-intake","attemptId":"mra_00000000-0000-4000-8000-000000000001","intake":{"taskRootId":"mrt_00000000-0000-4000-8000-000000000001","parentAttemptId":null,"taskClass":"bounded-implementation-proven-root-fix","tuple":{"effort":"xhigh"}}}
+{"schemaVersion":"firstmate.model-run-telemetry/v1","eventType":"attempt-terminal","attemptId":"mra_00000000-0000-4000-8000-000000000001","terminal":{"classification":"failed","usageComplete":true,"usage":{"inputTokens":2,"outputTokens":3,"cachedTokens":1}}}
+{"schemaVersion":"firstmate.model-run-telemetry/v1","eventType":"attempt-intake","attemptId":"mra_00000000-0000-4000-8000-000000000002","intake":{"taskRootId":"mrt_00000000-0000-4000-8000-000000000001","parentAttemptId":"mra_00000000-0000-4000-8000-000000000001","taskClass":"bounded-implementation-proven-root-fix","tuple":{"effort":"xhigh"}}}
+{"schemaVersion":"firstmate.model-run-telemetry/v1","eventType":"attempt-terminal","attemptId":"mra_00000000-0000-4000-8000-000000000002","terminal":{"classification":"accepted","usageComplete":true,"usage":{"inputTokens":11,"outputTokens":7,"cachedTokens":5}}}
+{"schemaVersion":"firstmate.model-run-telemetry/v1","eventType":"attempt-intake","attemptId":"mra_00000000-0000-4000-8000-000000000003","intake":{"taskRootId":"mrt_00000000-0000-4000-8000-000000000001","parentAttemptId":"mra_00000000-0000-4000-8000-000000000001","taskClass":"bounded-implementation-proven-root-fix","tuple":{"effort":"xhigh"}}}
+{"schemaVersion":"firstmate.model-run-telemetry/v1","eventType":"attempt-terminal","attemptId":"mra_00000000-0000-4000-8000-000000000003","terminal":{"classification":"failed","usageComplete":true,"usage":{"inputTokens":100,"outputTokens":100,"cachedTokens":100}}}
+{"schemaVersion":"firstmate.model-run-telemetry/v1","eventType":"attempt-intake","attemptId":"mra_00000000-0000-4000-8000-000000000004","intake":{"taskRootId":"mrt_00000000-0000-4000-8000-000000000004","parentAttemptId":null,"taskClass":"rote-reversible-edit","tuple":{"effort":"high"}}}
+{"schemaVersion":"firstmate.model-run-telemetry/v1","eventType":"attempt-intake","attemptId":"mra_00000000-0000-4000-8000-000000000005","intake":{"taskRootId":"mrt_00000000-0000-4000-8000-000000000004","parentAttemptId":"mra_00000000-0000-4000-8000-000000000004","taskClass":"rote-reversible-edit","tuple":{"effort":"high"}}}
+{"schemaVersion":"firstmate.model-run-telemetry/v1","eventType":"attempt-terminal","attemptId":"mra_00000000-0000-4000-8000-000000000005","terminal":{"classification":"accepted","usageComplete":true,"usage":{"inputTokens":11,"outputTokens":7,"cachedTokens":5}}}
+{"schemaVersion":"firstmate.model-run-telemetry/v1","eventType":"attempt-intake","attemptId":"mra_00000000-0000-4000-8000-000000000006","intake":{"taskRootId":"mrt_00000000-0000-4000-8000-000000000006","parentAttemptId":null,"taskClass":"documentation-specification-decision-extraction","tuple":{"effort":"high"}}}
+{"schemaVersion":"firstmate.model-run-telemetry/v1","eventType":"attempt-terminal","attemptId":"mra_00000000-0000-4000-8000-000000000006","terminal":{"classification":"accepted","usageComplete":true,"usage":{"inputTokens":11,"outputTokens":7,"cachedTokens":5}}}
+EOF
+  jq -c '
+    if .eventType=="attempt-terminal" and (.attemptId=="mra_00000000-0000-4000-8000-000000000001" or .attemptId=="mra_00000000-0000-4000-8000-000000000002" or .attemptId=="mra_00000000-0000-4000-8000-000000000003") then
+      .terminal += {usageSource:"recorded",sessionId:("session_" + .attemptId),usageEvidenceRef:{path:"/tmp/session.jsonl",sha256:"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},missingReason:null}
+    else . end
+  ' "$home/data/routing-outcomes.jsonl" > "$home/data/routing-outcomes.jsonl.next" || fail "could not enrich K15 complete usage fixtures"
+  mv "$home/data/routing-outcomes.jsonl.next" "$home/data/routing-outcomes.jsonl"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$CLI" scorecard) || fail "scorecard with accepted usage failed"
+  assert_contains "$out" 'K15: taskClass=bounded-implementation-proven-root-fix effort=xhigh tokensPerAcceptedSeat=29 acceptedSeats=1' \
+    "scorecard did not limit retry tokens to the final accepted lineage: $out"
+  assert_not_contains "$out" 'K15: taskClass=rote-reversible-edit effort=high' \
+    "scorecard treated an accepted child with an unsealed parent as completely measured: $out"
+  assert_not_contains "$out" 'K15: taskClass=documentation-specification-decision-extraction effort=high' \
+    "scorecard treated token-only usage without a durable session and evidence reference as measured: $out"
+  pass "scorecard reports K15 only for a complete final accepted retry lineage"
+}
 
 test_stats_math() {
   local home out
@@ -277,3 +308,4 @@ test_watcher_status_wait_emitter
 test_wait_scorecard_metrics
 test_cli_surfaces
 test_wake_drain_records_attributed_fold
+test_scorecard_reports_k15_by_task_class_and_effort

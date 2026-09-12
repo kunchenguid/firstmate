@@ -338,6 +338,8 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __PIWORKERCONTEXT__ optional Firstmate-repository worker context flags for Pi
+#     __PISESSIONFLAG__ optional durable Pi session flag for one ordinary model attempt
+#     __CLAUDESESSIONFLAG__ optional durable Claude session flag for one ordinary model attempt
 #     __OMPBIN__   quoted concrete omp executable path resolved from PATH
 #     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (omp busy-state and
 #                  turn-end extension, written by this script; outside the worktree so
@@ -2215,6 +2217,18 @@ pi_supports_tui_mode() {
   return 1
 }
 
+pi_supports_session_id() {
+  local executable=$1 help
+  help=$("$executable" --help 2>&1) || return 1
+  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--session-id([[:space:]=]|$)'
+}
+
+claude_supports_session_id() {
+  local executable=$1 help
+  help=$("$executable" --help 2>&1) || return 1
+  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--session-id([[:space:]=]|$)'
+}
+
 # omp pre-launch model validation. `omp models --json` (omp 18.1.11) prints
 # {"models":[{"provider","id","selector":"<provider>/<id>",...}]} for built-in and
 # auto-discovered providers only; it never lists a provider an extension
@@ -2276,7 +2290,7 @@ launch_template() {
     # sources are not guaranteed to load that scope, so a worker would
     # otherwise run with attribution back on; carrying it per launch keeps the
     # policy in force regardless of which settings scopes end up loaded.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG____CLAUDESESSIONFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __RESUME____MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox __SESSION__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -2290,7 +2304,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' ' __MODELFLAG____EFFORTFLAG____PIWORKERCONTEXT__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG____PIWORKERCONTEXT____PISESSIONFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # omp (Oh My Pi), a Pi fork. Same one-positional-brief, --model, --thinking,
@@ -2478,14 +2492,28 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
 fi
 
 case "$HARNESS" in
+  claude)
+    CLAUDE_BIN=$(command -v claude 2>/dev/null) || {
+      echo "error: claude executable not found on PATH; install it or select a different verified harness" >&2
+      exit 1
+    }
+    CLAUDE_SESSION_ID_SUPPORTED=0
+    if claude_supports_session_id "$CLAUDE_BIN"; then
+      CLAUDE_SESSION_ID_SUPPORTED=1
+    fi
+    ;;
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
       exit 1
     }
     PI_TUI_MODE=
+    PI_SESSION_ID_SUPPORTED=0
     if pi_supports_tui_mode "$PI_BIN"; then
       PI_TUI_MODE=' --tui-mode regular'
+    fi
+    if pi_supports_session_id "$PI_BIN"; then
+      PI_SESSION_ID_SUPPORTED=1
     fi
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
@@ -5456,6 +5484,20 @@ if ! TELEMETRY_RESULT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OV
 fi
 TELEMETRY_ATTEMPT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.attemptId | select(test("^mra_[0-9a-f-]{36}$"))') || { echo "error: invalid model telemetry intake receipt" >&2; exit 1; }
 TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | select(test("^mrt_[0-9a-f-]{36}$"))') || { echo "error: invalid model telemetry task root" >&2; exit 1; }
+TELEMETRY_SESSION_ID=
+if [ "$KIND" != secondmate ] && { [ "$HARNESS" = pi ] || [ "$HARNESS" = pi-signed ]; } \
+  && [ "${PI_SESSION_ID_SUPPORTED:-0}" = 1 ]; then
+  TELEMETRY_SESSION_ID=$TELEMETRY_ATTEMPT
+elif [ "$KIND" != secondmate ] && [ "$HARNESS" = claude ] \
+  && [ "${CLAUDE_SESSION_ID_SUPPORTED:-0}" = 1 ]; then
+  TELEMETRY_SESSION_ID=${TELEMETRY_ATTEMPT#mra_}
+fi
+BILLING_POOL_REF=
+if [ -n "${TACHIKOMA_ROUTE:-}" ]; then
+  BILLING_POOL_REF=$(printf '%s' "$TACHIKOMA_ROUTE" | jq -r '.pool // empty') || BILLING_POOL_REF=
+  case "$BILLING_POOL_REF" in ''|*[!A-Za-z0-9._:-]*) BILLING_POOL_REF= ;; esac
+  [ "${#BILLING_POOL_REF}" -le 160 ] || BILLING_POOL_REF=
+fi
 
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
@@ -5482,7 +5524,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree treehouse_slot treehouse_lease project harness kind access mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree treehouse_slot treehouse_lease project harness kind access mode yolo tasktmp model effort busy_gen spawn_gen telemetry_session_id billing_pool_ref traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5514,6 +5556,8 @@ preserve_relaunch_meta() {
   [ -z "$TACHIKOMA_DECISION" ] || echo "tachikoma_decision=$TACHIKOMA_DECISION"
   echo "telemetry_attempt=$TELEMETRY_ATTEMPT"
   echo "telemetry_task_root=$TELEMETRY_TASK_ROOT"
+  [ -z "$TELEMETRY_SESSION_ID" ] || echo "telemetry_session_id=$TELEMETRY_SESSION_ID"
+  [ -z "$BILLING_POOL_REF" ] || echo "billing_pool_ref=$BILLING_POOL_REF"
   [ -z "$TASK_BASE_COMMIT" ] || echo "base_commit=$TASK_BASE_COMMIT"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
@@ -5738,6 +5782,16 @@ LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PIWORKERCONTEXT__/$PI_WORKER_CONTEXT_FLAGS}
+PI_SESSION_FLAG=
+CLAUDE_SESSION_FLAG=
+if [ -n "$TELEMETRY_SESSION_ID" ]; then
+  case "$HARNESS" in
+    pi|pi-signed) PI_SESSION_FLAG="--session-id $TELEMETRY_SESSION_ID " ;;
+    claude) CLAUDE_SESSION_FLAG="--session-id $TELEMETRY_SESSION_ID " ;;
+  esac
+fi
+LAUNCH=${LAUNCH//__PISESSIONFLAG__/$PI_SESSION_FLAG}
+LAUNCH=${LAUNCH//__CLAUDESESSIONFLAG__/$CLAUDE_SESSION_FLAG}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}

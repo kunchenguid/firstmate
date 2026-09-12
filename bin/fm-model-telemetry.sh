@@ -6,7 +6,7 @@
 #   fm-model-telemetry.sh terminal --state <dir> --task <id> [--attempt <mra_uuid>] --payload <json>
 #   fm-model-telemetry.sh terminal-facts --state <dir> --task <id> [--attempt <mra_uuid>] --payload <json>
 #   fm-model-telemetry.sh seal-or-incomplete --state <dir> --task <id> [--attempt <mra_uuid>] [--terminal-payload <json>]
-#   fm-model-telemetry.sh usage --attempt <mra_uuid> --worktree <absolute-path>
+#   fm-model-telemetry.sh usage --attempt <mra_uuid> --worktree <absolute-path> [--session-id <id>] [--billing-pool-ref <id>]
 #   fm-model-telemetry.sh candidate-register --candidate <id> --payload <json>
 #   fm-model-telemetry.sh candidate-verdict --comparison <mrc_uuid> --verdict <adopted|discarded> --rollback-evidence <tested|documented>:<id>
 #   fm-model-telemetry.sh sheet [--format json|csv|md]
@@ -71,9 +71,10 @@
 # reported usage, optional session-observed wall time, and an optional typed
 # primaryFailureClass the caller already knows. It derives classification,
 # first-pass acceptance, correction count, and end time at the immutable
-# terminal seal, and preserves the observed wall time without substituting
-# intake-to-seal elapsed time. A non-green gate uses the caller's class when
-# present; a green gate is always none.
+# terminal seal. When it collects a task's durable session itself, wall time is
+# the immutable intake startedAt-to-endedAt interval, not the session log's
+# last-message interval. A non-green gate uses the caller's class when present;
+# a green gate is always none.
 # Routing candidate registration and verdict rows share this canonical ledger
 # under the additive firstmate.model-routing-candidate/v1 schema, so an older
 # attempt-only reader treats them as opaque foreign rows instead of rejecting
@@ -94,9 +95,10 @@
 # the original V1 gate-source enum: terminal-facts records the trigger as a
 # bounded transition evidence ref and keeps gateFacts.source=delivery.
 # The read-only usage command derives the harness and attempt start from the
-# immutable intake, then returns token totals and active wall time from durable
-# harness sessions whose recorded cwd and start time identify that exact attempt.
-# Its result is {usage:{inputTokens,outputTokens,cost,currency},wallSeconds}.
+# immutable intake, then returns token totals, cached tokens, elapsed wall time,
+# one session identifier, and a path-plus-hash evidence reference from the
+# durable harness session that identifies that exact attempt. A multiple-session
+# cwd/time match is unmeasured rather than partially attributed.
 # Codex, Claude, Pi/pi-signed, and OpenCode have verified local sources; every
 # other harness or missing exact match returns null facts. FM_CODEX_SESSIONS_OVERRIDE,
 # FM_CLAUDE_PROJECTS_OVERRIDE, FM_PI_SESSIONS_OVERRIDE, and
@@ -236,6 +238,15 @@ now_rfc3339() {
   date -u '+%Y-%m-%dT%H:%M:%SZ'
 }
 
+elapsed_ms() {
+  local started=$1 ended=$2
+  node -e '
+    const [started, ended] = process.argv.slice(1).map(Date.parse);
+    if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) process.exit(1);
+    process.stdout.write(String(ended - started));
+  ' "$started" "$ended" || die "could not derive terminal wall time"
+}
+
 canonical_json() {
   printf '%s' "$1" | jq -ceS '.' 2>/dev/null || die "malformed JSON payload"
 }
@@ -352,22 +363,36 @@ validate_terminal() {
   printf '%s' "$1" | jq -e '
     def keys_are($a): (keys|sort)==($a|sort);
     def oneof($a): . as $v | ($a|index($v))!=null;
-    def safeid: type=="string" and length>=1 and length<=96 and test("^[A-Za-z0-9._:-]+$");
+    def safeid: type=="string" and length>=1 and length<=160 and test("^[A-Za-z0-9._:-]+$");
     def dt: type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$");
+    def usage_source: oneof(["recorded","no-verified-source","session-not-found","session-matched-no-tokens","session-ambiguous","unreadable","worktree-missing"]);
+    def usage:
+      (keys_are(["inputTokens","outputTokens","cost","currency"]) or keys_are(["inputTokens","outputTokens","cachedTokens","cost","currency"])) and
+      all([.inputTokens,.outputTokens,.cachedTokens,.cost][]; .==null or (type=="number" and .>=0)) and
+      (.currency==null or (.currency|type=="string" and test("^[A-Z]{3}$")));
+    def usage_metadata:
+      (.sessionId==null or (.sessionId|safeid)) and
+      (.usageEvidenceRef==null or (.usageEvidenceRef|keys_are(["path","sha256"]) and (.path|type=="string" and length>=1 and length<=1024 and test("^[^[:cntrl:]]+$")) and (.sha256|type=="string" and test("^[0-9a-f]{64}$")))) and
+      (.billingPoolRef==null or (.billingPoolRef|safeid)) and
+      (.usageComplete==null or (.usageComplete|type=="boolean")) and
+      (.missingReason==null or (.missingReason|usage_source)) and
+      (if .usageComplete==true then
+         .usageSource=="recorded" and .missingReason==null and
+         (.usage.inputTokens|type=="number") and (.usage.outputTokens|type=="number") and (.usage.cachedTokens|type=="number") and
+         (.sessionId|safeid) and .usageEvidenceRef!=null
+       elif .usageComplete==false then .usageSource!="recorded" and .usageSource!=null and .missingReason==.usageSource
+       else true end);
     def terminal_keys:
-      del(.metrics) |
-      (keys|sort)==(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification"]|sort) or
-      (keys|sort)==(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification","gateFacts"]|sort) or
-      (keys|sort)==(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification","usageSource"]|sort) or
-      (keys|sort)==(["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification","gateFacts","usageSource"]|sort);
-    def usage_source:
-      (.usageSource==null or (.usageSource|oneof(["recorded","no-verified-source","session-not-found","session-matched-no-tokens","unreadable","worktree-missing"])));
-    (terminal_keys) and
+      (keys - ["metrics","gateFacts","usageSource","wallMs","sessionId","usageEvidenceRef","billingPoolRef","usageComplete","missingReason"] | sort)==
+      (["classification","refusalQuality","endedAt","wallSeconds","firstPassAccepted","correctionCount","interventionCount","evidence","outcomeLink","usage","primaryFailureClass","flags","reclassification"]|sort);
+    terminal_keys and
     (if has("metrics") then (.metrics|keys_are(["assistantTurns","relaunches","testRed","testGreen","blockers","reviewFindings"]) and all(.[]; .==null or (type=="number" and floor==. and .>=0))) else true end) and
-    usage_source and
+    (.usageSource==null or (.usageSource|usage_source)) and usage_metadata and
     (.classification|oneof(["accepted","rejected","failed","refused","timed-out","quota-stopped","cancelled","incomplete"])) and
     (.refusalQuality|oneof(["compliant","noncompliant","not-applicable","unknown"])) and
-    (.endedAt==null or (.endedAt|dt)) and (.wallSeconds==null or (.wallSeconds|type=="number" and .>=0)) and
+    (.endedAt==null or (.endedAt|dt)) and
+    (.wallSeconds==null or (.wallSeconds|type=="number" and .>=0)) and
+    (.wallMs==null or (.wallMs|type=="number" and floor==. and .>=0)) and
     (.firstPassAccepted==null or (.firstPassAccepted|type=="boolean")) and
     (.correctionCount==null or (.correctionCount|type=="number" and floor==. and .>=0)) and
     (.interventionCount|type=="number" and floor==. and .>=0) and
@@ -377,7 +402,7 @@ validate_terminal() {
       (.oracle|oneof(["pass","fail","not-run","unknown"])) and
       (.refs|type=="array" and length<=16 and all(.[]; keys_are(["kind","id"]) and (.kind|oneof(["test","review","oracle","receipt","transition","report"])) and (.id|safeid)))) and
     (.outcomeLink|keys_are(["kind","id"]) and (.kind|oneof(["none","commit","pull-request","report","spec-kit-outcome"])) and (.id==null or (.id|type=="string" and length<=160))) and
-    (.usage|keys_are(["inputTokens","outputTokens","cost","currency"]) and all([.inputTokens,.outputTokens,.cost][]; .==null or (type=="number" and .>=0)) and (.currency==null or (.currency|type=="string" and test("^[A-Z]{3}$")))) and
+    (.usage|usage) and
     (.primaryFailureClass|oneof(["none","capability","refusal","timeout","quota","tool","transport","environment","external-wait","scope-change","integrity","approval-wait","custody-wait","lease-conflict","state-divergence","outcome-observed-cause-unobserved","unknown"])) and
     (.flags|keys_are(["tool","transport","environment","externalWait","scopeChange","quota"]) and all([.tool,.transport,.environment,.externalWait,.scopeChange,.quota][]; type=="boolean")) and
     (.reclassification|keys_are(["fromTaskClass","toTaskClass","reasonCodes","escalated"]) and
@@ -397,11 +422,27 @@ validate_terminal_facts() {
   printf '%s' "$1" | jq -e '
     def keys_are($a): (keys|sort)==($a|sort);
     def oneof($a): . as $v | ($a|index($v))!=null;
-    def safeid: type=="string" and length>=1 and length<=160;
-    (del(.assistantTurns,.metrics) | (keys_are(["gate","outcomeLink","usage"]) or keys_are(["gate","outcomeLink","usage","wallSeconds"]) or
-     keys_are(["gate","outcomeLink","usage","usageSource"]) or keys_are(["gate","outcomeLink","usage","wallSeconds","usageSource"]) or
-     keys_are(["gate","outcomeLink","usage","primaryFailureClass"]) or keys_are(["gate","outcomeLink","usage","wallSeconds","primaryFailureClass"]) or
-     keys_are(["gate","outcomeLink","usage","usageSource","primaryFailureClass"]) or keys_are(["gate","outcomeLink","usage","wallSeconds","usageSource","primaryFailureClass"]))) and
+    def safeid: type=="string" and length>=1 and length<=160 and test("^[A-Za-z0-9._:-]+$");
+    def usage_source: oneof(["recorded","no-verified-source","session-not-found","session-matched-no-tokens","session-ambiguous","unreadable","worktree-missing"]);
+    def usage:
+      (keys_are(["inputTokens","outputTokens","cost","currency"]) or keys_are(["inputTokens","outputTokens","cachedTokens","cost","currency"])) and
+      all([.inputTokens,.outputTokens,.cachedTokens,.cost][]; .==null or (type=="number" and .>=0)) and
+      (.currency==null or (.currency|type=="string" and test("^[A-Z]{3}$")));
+    def usage_metadata:
+      (.sessionId==null or (.sessionId|safeid)) and
+      (.usageEvidenceRef==null or (.usageEvidenceRef|keys_are(["path","sha256"]) and (.path|type=="string" and length>=1 and length<=1024 and test("^[^[:cntrl:]]+$")) and (.sha256|type=="string" and test("^[0-9a-f]{64}$")))) and
+      (.billingPoolRef==null or (.billingPoolRef|safeid)) and
+      (.usageComplete==null or (.usageComplete|type=="boolean")) and
+      (.missingReason==null or (.missingReason|usage_source)) and
+      (if .usageComplete==true then
+         .usageSource=="recorded" and .missingReason==null and
+         (.usage.inputTokens|type=="number") and (.usage.outputTokens|type=="number") and (.usage.cachedTokens|type=="number") and
+         (.sessionId|safeid) and .usageEvidenceRef!=null
+       elif .usageComplete==false then .usageSource!="recorded" and .usageSource!=null and .missingReason==.usageSource
+       else true end);
+    def facts_keys:
+      (keys - ["assistantTurns","metrics","wallSeconds","wallMs","usageSource","primaryFailureClass","sessionId","usageEvidenceRef","billingPoolRef","usageComplete","missingReason"] | sort)==(["gate","outcomeLink","usage"]|sort);
+    facts_keys and
     (.assistantTurns==null or (.assistantTurns|type=="number" and floor==. and .>=0)) and
     (if has("metrics") then (.metrics|keys_are(["testRed","testGreen","blockers","reviewFindings"]) and all(.[]; .==null or (type=="number" and floor==. and .>=0))) else true end) and
     (.gate|keys_are(["source","result","stepReruns"]) and
@@ -411,12 +452,10 @@ validate_terminal_facts() {
     (.outcomeLink|keys_are(["kind","id"]) and
       (.kind|oneof(["none","commit","pull-request","report","spec-kit-outcome"])) and
       (.id==null or (.id|safeid))) and
-    (.usage|keys_are(["inputTokens","outputTokens","cost","currency"]) and
-      all([.inputTokens,.outputTokens,.cost][]; .==null or (type=="number" and .>=0)) and
-      (.currency==null or (.currency|type=="string" and test("^[A-Z]{3}$")))) and
-    (.usageSource==null or (.usageSource|oneof(["recorded","no-verified-source","session-not-found","session-matched-no-tokens","unreadable","worktree-missing"]))) and
+    (.usage|usage) and (.usageSource==null or (.usageSource|usage_source)) and usage_metadata and
     (.primaryFailureClass==null or (.primaryFailureClass|oneof(["none","capability","refusal","timeout","quota","tool","transport","environment","external-wait","scope-change","integrity","approval-wait","custody-wait","lease-conflict","state-divergence","outcome-observed-cause-unobserved","unknown"]))) and
-    (.wallSeconds==null or (.wallSeconds|type=="number" and .>=0))
+    (.wallSeconds==null or (.wallSeconds|type=="number" and .>=0)) and
+    (.wallMs==null or (.wallMs|type=="number" and floor==. and .>=0))
   ' >/dev/null || die "terminal facts payload violates the whitelist"
 }
 
@@ -908,6 +947,25 @@ seal_command() {
   jq -cn --arg status "$status" --arg attempt "$attempt" '{status:$status,attemptId:$attempt}'
 }
 
+validate_recorded_usage_binding() {
+  local task=$1 attempt=$2 payload=$3 meta meta_attempt expected_session reported_session complete
+  complete=$(printf '%s' "$payload" | jq -r '.usageComplete // false')
+  [ "$complete" = true ] || return 0
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || die "recorded usage requires task metadata"
+  meta_attempt=$(task_meta_value "$meta" telemetry_attempt)
+  [ "$meta_attempt" = "$attempt" ] || die "task metadata attempt does not match the terminal attempt"
+  expected_session=$(task_meta_value "$meta" telemetry_session_id)
+  [ -n "$expected_session" ] || expected_session=$(task_meta_value "$meta" session_id)
+  [ -n "$expected_session" ] || expected_session=$(task_meta_value "$meta" pi_session_id)
+  case "$expected_session" in
+    '') die "recorded usage requires a durable task session id" ;;
+    *[!A-Za-z0-9._:-]*) die "task metadata telemetry session id is unsafe" ;;
+  esac
+  reported_session=$(printf '%s' "$payload" | jq -r .sessionId)
+  [ "$reported_session" = "$expected_session" ] || die "recorded usage session does not match task metadata"
+}
+
 terminal_command() {
   local task=$1 payload=$2 attempt_arg=${3:-} path attempt canonical existing status
   require_safe_task_id "$task"
@@ -925,6 +983,7 @@ terminal_command() {
       die "terminal-conflict"
     fi
   else
+    validate_recorded_usage_binding "$task" "$attempt" "$canonical"
     append_terminal_event "$attempt" "$canonical"
   fi
   rm -f "$path"
@@ -933,22 +992,56 @@ terminal_command() {
 }
 
 terminal_facts_command() {
-  local task=$1 payload=$2 attempt_arg=${3:-} path attempt facts ended wall terminal status usage_source
+  local task=$1 payload=$2 attempt_arg=${3:-} path attempt facts ended wall terminal status intake harness started observation auto_usage wall_ms meta
   require_safe_task_id "$task"
   facts=$(canonical_json "$payload")
   validate_terminal_facts "$facts"
   path=$(receipt_path "$task")
+
+  # Hold the seal lock through the bounded session observation so a competing
+  # terminal cannot record a different usage snapshot for this attempt.
   with_lock_begin
   validate_ledger_for_write
   attempt=$(resolve_attempt_for_task "$task" "$attempt_arg")
   if find_terminal "$attempt" >/dev/null 2>&1; then
     status=duplicate
   else
-    find_intake "$attempt" >/dev/null || die "terminal facts have no intake row"
+    intake=$(find_intake "$attempt") || die "terminal facts have no intake row"
+    harness=$(printf '%s' "$intake" | jq -r .intake.tuple.harness)
+    started=$(printf '%s' "$intake" | jq -r .intake.startedAt)
+    status=recorded
+  fi
+
+  # Callers that already provide both totals retain their provider-reported
+  # facts. Otherwise, a live task record supplies the exact worker session.
+  auto_usage=0
+  if [ "$status" = recorded ] && ! printf '%s' "$facts" | jq -e '(.usage.inputTokens|type=="number") and (.usage.outputTokens|type=="number")' >/dev/null; then
+    meta="$STATE/$task.meta"
+    if [ -e "$meta" ] || [ -L "$meta" ]; then
+      [ -f "$meta" ] && [ ! -L "$meta" ] || die "task metadata is unavailable for terminal usage collection"
+      observation=$(task_usage_observation "$task" "$attempt" "$harness" "$started") || die "task session usage collection failed"
+      facts=$(printf '%s' "$facts" | jq -c --argjson observation "$observation" '
+        . + {usage:$observation.usage,
+             usageSource:$observation.usageSource,assistantTurns:$observation.assistantTurns,
+             sessionId:$observation.sessionId,usageEvidenceRef:$observation.usageEvidenceRef,
+             billingPoolRef:$observation.billingPoolRef,usageComplete:$observation.usageComplete,
+             missingReason:$observation.missingReason}') || die "session usage observation could not be merged"
+      auto_usage=1
+      validate_terminal_facts "$facts"
+    fi
+  fi
+
+  if [ "$status" != duplicate ]; then
+    validate_recorded_usage_binding "$task" "$attempt" "$facts"
     ended=$(now_rfc3339)
+    if [ "$auto_usage" = 1 ]; then
+      wall_ms=$(elapsed_ms "$started" "$ended")
+      facts=$(printf '%s' "$facts" | jq -c --argjson wallMs "$wall_ms" '. + {wallMs:$wallMs,wallSeconds:($wallMs / 1000)}') ||
+        die "terminal wall time could not be merged"
+      validate_terminal_facts "$facts"
+    fi
     wall=$(printf '%s' "$facts" | jq -c '.wallSeconds // null')
-    usage_source=$(printf '%s' "$facts" | jq -c '.usageSource // null')
-    terminal=$(jq -cnS --arg ended "$ended" --argjson wall "$wall" --argjson usageSource "$usage_source" --argjson facts "$facts" '
+    terminal=$(jq -cnS --arg ended "$ended" --argjson wall "$wall" --argjson facts "$facts" '
       ($facts.gate.result) as $result |
       ($facts.gate.stepReruns) as $reruns |
       ({classification:(if $result=="green" then "accepted" elif $result=="failed" then "failed" elif $result=="cancelled" then "cancelled" else "incomplete" end),
@@ -962,7 +1055,7 @@ terminal_facts_command() {
        flags:{tool:false,transport:false,environment:false,externalWait:false,scopeChange:false,quota:false},
        reclassification:{fromTaskClass:null,toTaskClass:null,reasonCodes:["none"],escalated:false},
        gateFacts:($facts.gate | .source=(if (.source|IN("task-terminal","teardown")) then "delivery" else .source end))}
-       + (if $usageSource==null then {} else {usageSource:$usageSource} end)
+       + (reduce ["wallMs","usageSource","sessionId","usageEvidenceRef","billingPoolRef","usageComplete","missingReason"][] as $key ({}; if $facts|has($key) then . + {($key):$facts[$key]} else . end))
        + {metrics:({assistantTurns:($facts.assistantTurns // null),relaunches:null,testRed:null,testGreen:null,blockers:null,reviewFindings:null} + ($facts.metrics // {}))})')
     validate_terminal "$terminal"
     append_terminal_event "$attempt" "$terminal"
@@ -1105,38 +1198,86 @@ candidate_verdict_command() {
     '{status:"recorded",comparisonId:$comparison,candidateId:$candidate,verdict:$verdict,sample:$sample}'
 }
 
-usage_command() {
-  local attempt=$1 worktree=$2 intake harness started observation
-  require_opaque_id attempt "$attempt"
+validate_usage_observation() {
+  printf '%s' "$1" | jq -e '
+    def keys_are($a): (keys|sort)==($a|sort);
+    def source: IN("recorded","session-not-found","session-matched-no-tokens","session-ambiguous","no-verified-source","unreadable","worktree-missing");
+    keys_are(["usage","wallMs","wallSeconds","usageSource","assistantTurns","sessionId","usageEvidenceRef","billingPoolRef","usageComplete","missingReason"]) and
+    (.usage|keys_are(["inputTokens","outputTokens","cachedTokens","cost","currency"]) and all([.inputTokens,.outputTokens,.cachedTokens,.cost][]; .==null or (type=="number" and .>=0)) and (.currency==null or (.currency|type=="string" and test("^[A-Z]{3}$")))) and
+    (.wallMs==null or (.wallMs|type=="number" and floor==. and .>=0)) and
+    (.wallSeconds==null or (.wallSeconds|type=="number" and .>=0)) and
+    (.assistantTurns==null or (.assistantTurns|type=="number" and floor==. and .>=0)) and
+    (.sessionId==null or (.sessionId|type=="string" and length>=1 and length<=160 and test("^[A-Za-z0-9._:-]+$"))) and
+    (.usageEvidenceRef==null or (.usageEvidenceRef|keys_are(["path","sha256"]) and (.path|type=="string" and length>=1 and length<=1024 and test("^[^[:cntrl:]]+$")) and (.sha256|type=="string" and test("^[0-9a-f]{64}$")))) and
+    (.billingPoolRef==null or (.billingPoolRef|type=="string" and length>=1 and length<=160 and test("^[A-Za-z0-9._:-]+$"))) and
+    (.usageComplete|type=="boolean") and (.missingReason==null or (.missingReason|source)) and (.usageSource|source) and
+    (if .usageComplete then .usageSource=="recorded" and .missingReason==null and (.usage.inputTokens|type=="number") and (.usage.outputTokens|type=="number") and (.usage.cachedTokens|type=="number") and (.sessionId|type=="string" and length>=1 and length<=160 and test("^[A-Za-z0-9._:-]+$")) and .usageEvidenceRef!=null else .missingReason==.usageSource end)
+  ' >/dev/null || die "session usage observation violates the whitelist"
+}
+
+collect_usage_observation() {
+  local harness=$1 worktree=$2 started=$3 session_id=${4:-} billing_pool_ref=${5:-} observation
   case "$worktree" in /*) ;; *) die "--worktree must be absolute" ;; esac
+  if [ -n "${FM_MODEL_TELEMETRY_TEST_USAGE_OBSERVATION:-}" ]; then
+    observation="$FM_MODEL_TELEMETRY_TEST_USAGE_OBSERVATION"
+  else
+    observation=$(NODE_NO_WARNINGS=1 node "$SCRIPT_DIR/fm-model-usage.mjs" "$harness" "$worktree" "$started" "$session_id") ||
+      die "session usage collection failed"
+  fi
+  observation=$(printf '%s' "$observation" | jq -c --arg billing "$billing_pool_ref" '. + {billingPoolRef:(if $billing=="" then null else $billing end)}') ||
+    die "session usage collection produced malformed JSON"
+  validate_usage_observation "$observation"
+  printf '%s\n' "$observation"
+}
+
+usage_command() {
+  local attempt=$1 worktree=$2 session_id=${3:-} billing_pool_ref=${4:-} intake harness started
+  require_opaque_id attempt "$attempt"
   with_lock_begin
   validate_private_file "$LEDGER" ledger
   intake=$(find_intake "$attempt") || die "usage has no intake row for attempt $attempt"
   harness=$(printf '%s' "$intake" | jq -r .intake.tuple.harness)
   started=$(printf '%s' "$intake" | jq -r .intake.startedAt)
   with_lock_end
-  if [ -n "${FM_MODEL_TELEMETRY_TEST_USAGE_OBSERVATION:-}" ]; then
-    observation="$FM_MODEL_TELEMETRY_TEST_USAGE_OBSERVATION"
-  else
-    observation=$(NODE_NO_WARNINGS=1 node "$SCRIPT_DIR/fm-model-usage.mjs" "$harness" "$worktree" "$started") ||
-      die "session usage collection failed"
+  collect_usage_observation "$harness" "$worktree" "$started" "$session_id" "$billing_pool_ref"
+}
+
+task_meta_value() {
+  local meta=$1 key=$2 line value=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "$key="*) value=${line#*=} ;; esac
+  done < "$meta"
+  printf '%s' "$value"
+}
+
+task_usage_observation() {
+  local task=$1 attempt=$2 harness=$3 started=$4 meta worktree session_id billing_pool_ref meta_attempt
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  worktree=$(task_meta_value "$meta" worktree)
+  session_id=$(task_meta_value "$meta" telemetry_session_id)
+  [ -n "$session_id" ] || session_id=$(task_meta_value "$meta" session_id)
+  [ -n "$session_id" ] || session_id=$(task_meta_value "$meta" pi_session_id)
+  billing_pool_ref=$(task_meta_value "$meta" billing_pool_ref)
+  meta_attempt=$(task_meta_value "$meta" telemetry_attempt)
+  case "$session_id" in
+    '') jq -cn --arg billing "$billing_pool_ref" '{usage:{inputTokens:null,outputTokens:null,cachedTokens:null,cost:null,currency:null},wallMs:null,wallSeconds:null,usageSource:"no-verified-source",assistantTurns:null,sessionId:null,usageEvidenceRef:null,billingPoolRef:(if $billing=="" then null else $billing end),usageComplete:false,missingReason:"no-verified-source"}'; return ;;
+    *[!A-Za-z0-9._:-]*) die "task metadata telemetry session id is unsafe" ;;
+  esac
+  case "$billing_pool_ref" in ''|*[!A-Za-z0-9._:-]*) billing_pool_ref= ;; esac
+  if [ "$meta_attempt" != "$attempt" ]; then
+    die "task metadata attempt does not match the terminal attempt"
   fi
-  printf '%s' "$observation" | jq -e '
-    ((del(.assistantTurns)|keys|sort)==["usage","usageSource","wallSeconds"]) and
-    (.assistantTurns==null or (.assistantTurns|type=="number" and floor==. and .>=0)) and
-    (.usage|keys|sort)==["cost","currency","inputTokens","outputTokens"] and
-    all([.usage.inputTokens,.usage.outputTokens,.usage.cost][]; .==null or (type=="number" and .>=0)) and
-    (.usage.currency==null or (.usage.currency|type=="string" and test("^[A-Z]{3}$"))) and
-    (.wallSeconds==null or (.wallSeconds | type=="number" and .>=0)) and
-    (.usageSource|IN("recorded","session-not-found","session-matched-no-tokens","no-verified-source","unreadable","worktree-missing"))
-  ' >/dev/null || die "session usage observation violates the whitelist"
-  printf '%s\n' "$observation"
+  case "$worktree" in
+    /*) collect_usage_observation "$harness" "$worktree" "$started" "$session_id" "$billing_pool_ref" ;;
+    *) jq -cn --arg billing "$billing_pool_ref" '{usage:{inputTokens:null,outputTokens:null,cachedTokens:null,cost:null,currency:null},wallMs:null,wallSeconds:null,usageSource:"worktree-missing",assistantTurns:null,sessionId:null,usageEvidenceRef:null,billingPoolRef:(if $billing=="" then null else $billing end),usageComplete:false,missingReason:"worktree-missing"}' ;;
+  esac
 }
 
 sheet_json() {
   [ -e "$LEDGER" ] || { printf '[]\n'; return; }
   jq -Rcs --arg v "$SCHEMA_VERSION" --arg cv "$CANDIDATE_SCHEMA_VERSION" '
-    def blank($raw): {recordType:"legacy",schemaVersion:null,attemptId:null,taskId:null,quotaDecision:null,usageSource:null,taskRootId:null,parentAttemptId:null,source:null,attemptClass:null,projectRef:null,taskClass:null,harness:null,provider:null,model:null,modelVersion:null,cliVersion:null,effort:null,exploration:null,machineLoadAverage1m:null,machineLogicalCpuCount:null,state:"legacy",classification:null,quality:null,firstPassAccepted:null,correctionCount:null,stepReruns:null,gateSource:null,primaryFailureClass:null,startedAt:null,endedAt:null,wallSeconds:null,inputTokens:null,outputTokens:null,costReported:false,cost:null,currency:null,costPerAcceptedDelivery:null,legacyRaw:$raw};
+    def blank($raw): {recordType:"legacy",schemaVersion:null,attemptId:null,taskId:null,quotaDecision:null,usageSource:null,sessionId:null,usageEvidenceRef:null,billingPoolRef:null,usageComplete:null,missingReason:null,taskRootId:null,parentAttemptId:null,source:null,attemptClass:null,projectRef:null,taskClass:null,harness:null,provider:null,model:null,modelVersion:null,cliVersion:null,effort:null,exploration:null,machineLoadAverage1m:null,machineLogicalCpuCount:null,state:"legacy",classification:null,quality:null,firstPassAccepted:null,correctionCount:null,stepReruns:null,gateSource:null,primaryFailureClass:null,startedAt:null,endedAt:null,wallSeconds:null,wallMs:null,inputTokens:null,outputTokens:null,cachedTokens:null,costReported:false,cost:null,currency:null,costPerAcceptedDelivery:null,legacyRaw:$raw};
     split("\n") | map(select(length>0)|fromjson) as $rows |
     ($rows | map(select(.schemaVersion!=$v and .schemaVersion!=$cv) | blank(.))) +
     ($rows | map(select(.schemaVersion==$v and .eventType=="attempt-intake")) | map(. as $i |
@@ -1144,11 +1285,11 @@ sheet_json() {
       ($t.terminal.classification // null) as $classification |
       ($t.terminal.gateFacts.stepReruns // null) as $reruns |
       ($t.terminal.usage.cost // null) as $cost |
-      {recordType:"attempt",schemaVersion:$v,attemptId:$i.attemptId,tachikomaDecision:($i.intake.selection.tachikomaDecision // null),metrics:($t.terminal.metrics // null),taskId:($i.taskId // null),quotaDecision:($i.intake.selection.quota.decision // null),usageSource:(if $t==null then null elif $t.terminal.usageSource==null then "absent" else $t.terminal.usageSource end),taskRootId:$i.intake.taskRootId,parentAttemptId:$i.intake.parentAttemptId,source:$i.intake.source,attemptClass:$i.intake.attemptClass,projectRef:$i.intake.projectRef,taskClass:$i.intake.taskClass,harness:$i.intake.tuple.harness,provider:$i.intake.tuple.provider,accountProfile:($i.intake.tuple.accountProfile // null),model:$i.intake.tuple.model,modelVersion:$i.intake.tuple.modelVersion,cliVersion:$i.intake.tuple.cliVersion,effort:$i.intake.tuple.effort,
+      {recordType:"attempt",schemaVersion:$v,attemptId:$i.attemptId,tachikomaDecision:($i.intake.selection.tachikomaDecision // null),metrics:($t.terminal.metrics // null),taskId:($i.taskId // null),quotaDecision:($i.intake.selection.quota.decision // null),usageSource:(if $t==null then null elif $t.terminal.usageSource==null then "absent" else $t.terminal.usageSource end),sessionId:($t.terminal.sessionId // null),usageEvidenceRef:($t.terminal.usageEvidenceRef // null),billingPoolRef:($t.terminal.billingPoolRef // null),usageComplete:(if $t==null or ($t.terminal|has("usageComplete")|not) then null else $t.terminal.usageComplete end),missingReason:($t.terminal.missingReason // null),taskRootId:$i.intake.taskRootId,parentAttemptId:$i.intake.parentAttemptId,source:$i.intake.source,attemptClass:$i.intake.attemptClass,projectRef:$i.intake.projectRef,taskClass:$i.intake.taskClass,harness:$i.intake.tuple.harness,provider:$i.intake.tuple.provider,accountProfile:($i.intake.tuple.accountProfile // null),model:$i.intake.tuple.model,modelVersion:$i.intake.tuple.modelVersion,cliVersion:$i.intake.tuple.cliVersion,effort:$i.intake.tuple.effort,
        exploration:($i.intake.exploration.kind // null),machineLoadAverage1m:($i.intake.exploration.machineCondition.loadAverage1m // null),machineLogicalCpuCount:($i.intake.exploration.machineCondition.logicalCpuCount // null),
        state:(if $t==null then "open" else "terminal" end),classification:$classification,
        quality:(if $t==null then null elif $classification!="accepted" then $classification elif $reruns==null then "accepted-step-reruns-unknown" elif $reruns==0 then "accepted-first-pass" else "accepted-after-step-reruns" end),
-       firstPassAccepted:($t.terminal.firstPassAccepted),correctionCount:($t.terminal.correctionCount // null),stepReruns:$reruns,gateSource:($t.terminal.gateFacts.source // null),primaryFailureClass:($t.terminal.primaryFailureClass // null),startedAt:$i.intake.startedAt,endedAt:($t.terminal.endedAt // null),wallSeconds:($t.terminal.wallSeconds // null),inputTokens:($t.terminal.usage.inputTokens // null),outputTokens:($t.terminal.usage.outputTokens // null),
+       firstPassAccepted:($t.terminal.firstPassAccepted),correctionCount:($t.terminal.correctionCount // null),stepReruns:$reruns,gateSource:($t.terminal.gateFacts.source // null),primaryFailureClass:($t.terminal.primaryFailureClass // null),startedAt:$i.intake.startedAt,endedAt:($t.terminal.endedAt // null),wallSeconds:($t.terminal.wallSeconds // null),wallMs:($t.terminal.wallMs // null),inputTokens:($t.terminal.usage.inputTokens // null),outputTokens:($t.terminal.usage.outputTokens // null),cachedTokens:($t.terminal.usage.cachedTokens // null),
        costReported:($cost|type=="number"),cost:$cost,currency:($t.terminal.usage.currency // null),costPerAcceptedDelivery:(if $classification=="accepted" then $cost else null end),legacyRaw:null}))
   ' "$LEDGER"
 }
@@ -1160,8 +1301,8 @@ sheet_command() {
   case "$format" in
     json) printf '%s\n' "$json" ;;
     csv)
-      printf '%s\n' 'recordType,schemaVersion,attemptId,taskRootId,parentAttemptId,source,attemptClass,projectRef,taskClass,harness,provider,model,effort,exploration,machineLoadAverage1m,machineLogicalCpuCount,state,classification,quality,stepReruns,gateSource,primaryFailureClass,startedAt,endedAt,wallSeconds,inputTokens,outputTokens,costReported,cost,currency,costPerAcceptedDelivery,modelVersion,cliVersion,firstPassAccepted,correctionCount,legacyRaw,taskId,quotaDecision,usageSource'
-      printf '%s' "$json" | jq -r '.[] | [.recordType,.schemaVersion,.attemptId,.taskRootId,.parentAttemptId,.source,.attemptClass,.projectRef,.taskClass,.harness,.provider,.model,.effort,.exploration,.machineLoadAverage1m,.machineLogicalCpuCount,.state,.classification,.quality,.stepReruns,.gateSource,.primaryFailureClass,.startedAt,.endedAt,.wallSeconds,.inputTokens,.outputTokens,.costReported,.cost,.currency,.costPerAcceptedDelivery,.modelVersion,.cliVersion,.firstPassAccepted,.correctionCount,(.legacyRaw|if .==null then null else tojson end),.taskId,.quotaDecision,.usageSource] | @csv'
+      printf '%s\n' 'recordType,schemaVersion,attemptId,taskRootId,parentAttemptId,source,attemptClass,projectRef,taskClass,harness,provider,model,effort,exploration,machineLoadAverage1m,machineLogicalCpuCount,state,classification,quality,stepReruns,gateSource,primaryFailureClass,startedAt,endedAt,wallSeconds,wallMs,inputTokens,outputTokens,cachedTokens,costReported,cost,currency,costPerAcceptedDelivery,modelVersion,cliVersion,firstPassAccepted,correctionCount,legacyRaw,taskId,quotaDecision,usageSource,sessionId,usageEvidenceRef,billingPoolRef,usageComplete,missingReason'
+      printf '%s' "$json" | jq -r '.[] | [.recordType,.schemaVersion,.attemptId,.taskRootId,.parentAttemptId,.source,.attemptClass,.projectRef,.taskClass,.harness,.provider,.model,.effort,.exploration,.machineLoadAverage1m,.machineLogicalCpuCount,.state,.classification,.quality,.stepReruns,.gateSource,.primaryFailureClass,.startedAt,.endedAt,.wallSeconds,.wallMs,.inputTokens,.outputTokens,.cachedTokens,.costReported,.cost,.currency,.costPerAcceptedDelivery,.modelVersion,.cliVersion,.firstPassAccepted,.correctionCount,(.legacyRaw|if .==null then null else tojson end),.taskId,.quotaDecision,.usageSource,.sessionId,(.usageEvidenceRef|if .==null then null else tojson end),.billingPoolRef,.usageComplete,.missingReason] | @csv'
       ;;
     md)
       printf '%s\n' '| type | attempt | root | parent | tuple | CLI | exploration | load | state | quality | first pass | corrections | step reruns | seconds | tokens in/out | cost | cost/accepted | failure | legacy | task | quota | usage |'
@@ -1191,13 +1332,13 @@ subscription_sheet_command() {
   case "$format" in
     json) printf '%s\n' "$json" ;;
     csv)
-      printf '%s\n' 'subscription,harness,provider,accountProfile,dispatchModelFamily,model,attempts,accepted,rejectedOrFailed,open,cost,currency,inputTokens,outputTokens,taskClasses,taskClassUnresolved,quotaSelected,quotaStopped,quotaUnknown,headroomSufficient,headroomTight,headroomExhausted,headroomUnmeasurable,headroomUnknown,usageRecorded,usageNoVerifiedSource,usageSessionNotFound,usageSessionMatchedNoTokens,usageUnreadable,usageWorktreeMissing,usageAbsent'
-      printf '%s' "$json" | jq -r '.[] | [.subscription,.harness,(.provider//""),(.accountProfile//""),(.dispatchModelFamily//""),(.model//""),.attempts,.accepted,.rejectedOrFailed,.open,(.cost//""),(.currency//""),(.inputTokens//""),(.outputTokens//""),(.taskClasses|join(";")),.taskClassUnresolved,.quotaSelected,.quotaStopped,.quotaUnknown,.headroomSufficient,.headroomTight,.headroomExhausted,.headroomUnmeasurable,.headroomUnknown,.usageRecorded,.usageNoVerifiedSource,.usageSessionNotFound,.usageSessionMatchedNoTokens,.usageUnreadable,.usageWorktreeMissing,.usageAbsent] | @csv'
+      printf '%s\n' 'subscription,harness,provider,accountProfile,dispatchModelFamily,model,attempts,accepted,rejectedOrFailed,open,cost,currency,inputTokens,outputTokens,taskClasses,taskClassUnresolved,quotaSelected,quotaStopped,quotaUnknown,headroomSufficient,headroomTight,headroomExhausted,headroomUnmeasurable,headroomUnknown,usageRecorded,usageNoVerifiedSource,usageSessionNotFound,usageSessionMatchedNoTokens,usageSessionAmbiguous,usageUnreadable,usageWorktreeMissing,usageAbsent'
+      printf '%s' "$json" | jq -r '.[] | [.subscription,.harness,(.provider//""),(.accountProfile//""),(.dispatchModelFamily//""),(.model//""),.attempts,.accepted,.rejectedOrFailed,.open,(.cost//""),(.currency//""),(.inputTokens//""),(.outputTokens//""),(.taskClasses|join(";")),.taskClassUnresolved,.quotaSelected,.quotaStopped,.quotaUnknown,.headroomSufficient,.headroomTight,.headroomExhausted,.headroomUnmeasurable,.headroomUnknown,.usageRecorded,.usageNoVerifiedSource,.usageSessionNotFound,.usageSessionMatchedNoTokens,.usageSessionAmbiguous,.usageUnreadable,.usageWorktreeMissing,.usageAbsent] | @csv'
       ;;
     md)
       printf '%s\n' '| subscription | attempts | accepted | rejected/failed | open | cost | tokens in/out | task classes | quota selected/stopped/unknown | headroom sufficient/tight/exhausted | usage recorded/unavailable/absent |'
       printf '%s\n' '|---|---|---|---|---|---|---|---|---|---|---|'
-      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.subscription|esc) | \(.attempts) | \(.accepted) | \(.rejectedOrFailed) | \(.open) | \((if .cost==null then "absent" else ((.currency // "")+" "+(.cost|tostring)) end)|esc) | \(([.inputTokens,.outputTokens]|map(select(.!=null))|join("/"))|esc) | \(.taskClasses|join(",")) unresolved=\(.taskClassUnresolved) | \(.quotaSelected)/\(.quotaStopped)/\(.quotaUnknown) | \(.headroomSufficient)/\(.headroomTight)/\(.headroomExhausted) | \(.usageRecorded)/\(.usageNoVerifiedSource + .usageSessionNotFound + .usageSessionMatchedNoTokens + .usageUnreadable + .usageWorktreeMissing)/\(.usageAbsent) |"'
+      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.subscription|esc) | \(.attempts) | \(.accepted) | \(.rejectedOrFailed) | \(.open) | \((if .cost==null then "absent" else ((.currency // "")+" "+(.cost|tostring)) end)|esc) | \(([.inputTokens,.outputTokens]|map(select(.!=null))|join("/"))|esc) | \(.taskClasses|join(",")) unresolved=\(.taskClassUnresolved) | \(.quotaSelected)/\(.quotaStopped)/\(.quotaUnknown) | \(.headroomSufficient)/\(.headroomTight)/\(.headroomExhausted) | \(.usageRecorded)/\(.usageNoVerifiedSource + .usageSessionNotFound + .usageSessionMatchedNoTokens + .usageSessionAmbiguous + .usageUnreadable + .usageWorktreeMissing)/\(.usageAbsent) |"'
       ;;
     *) die "subscription-sheet format must be json, csv, or md" ;;
   esac
@@ -1353,6 +1494,7 @@ subscription_sheet_json() {
       usageNoVerifiedSource: (map(select(.terminal.usageSource=="no-verified-source")) | length),
       usageSessionNotFound: (map(select(.terminal.usageSource=="session-not-found")) | length),
       usageSessionMatchedNoTokens: (map(select(.terminal.usageSource=="session-matched-no-tokens")) | length),
+      usageSessionAmbiguous: (map(select(.terminal.usageSource=="session-ambiguous")) | length),
       usageUnreadable: (map(select(.terminal.usageSource=="unreadable")) | length),
       usageWorktreeMissing: (map(select(.terminal.usageSource=="worktree-missing")) | length),
       usageAbsent: (map(select(.terminal!=null and (.terminal.usageSource==null))) | length)
@@ -1413,15 +1555,19 @@ case "$COMMAND" in
     . "$SCRIPT_DIR/fm-wake-lib.sh"
     attempt_arg=''
     worktree=''
+    session_id=''
+    billing_pool_ref=''
     want=''
     while [ "$#" -gt 0 ]; do
       if [ -n "$want" ]; then
-        case "$want" in attempt) attempt_arg=$1 ;; worktree) worktree=$1 ;; esac
+        case "$want" in attempt) attempt_arg=$1 ;; worktree) worktree=$1 ;; session-id) session_id=$1 ;; billing-pool-ref) billing_pool_ref=$1 ;; esac
         want=
       else
         case "$1" in
           --attempt) want=attempt ;;
           --worktree) want=worktree ;;
+          --session-id) want=session-id ;;
+          --billing-pool-ref) want=billing-pool-ref ;;
           *) die "unknown argument $1" ;;
         esac
       fi
@@ -1430,7 +1576,7 @@ case "$COMMAND" in
     [ -z "$want" ] || die "--$want requires a value"
     [ -n "$attempt_arg" ] || die "--attempt is required"
     [ -n "$worktree" ] || die "--worktree is required"
-    usage_command "$attempt_arg" "$worktree"
+    usage_command "$attempt_arg" "$worktree" "$session_id" "$billing_pool_ref"
     ;;
   candidate-register)
     # shellcheck source=bin/fm-wake-lib.sh

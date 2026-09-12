@@ -118,6 +118,52 @@ scorecard_status() { # <key> <stream-path>
   fi
 }
 
+k15_scorecard() {
+  local ledger="$DATA/routing-outcomes.jsonl"
+  [ -f "$ledger" ] && [ ! -L "$ledger" ] || return 0
+  jq -rs --arg schema 'firstmate.model-run-telemetry/v1' '
+    def complete_usage:
+      .usageComplete==true and .usageSource=="recorded" and .missingReason==null and
+      (.usage.inputTokens|type=="number") and
+      (.usage.outputTokens|type=="number") and
+      (.usage.cachedTokens|type=="number") and
+      (.sessionId|type=="string" and length>=1 and length<=160 and test("^[A-Za-z0-9._:-]+$")) and
+      (.usageEvidenceRef|type=="object" and (.path|type=="string" and length>=1 and length<=1024 and test("^[^[:cntrl:]]+$")) and (.sha256|type=="string" and test("^[0-9a-f]{64}$")));
+    def lineage($attempt_id; $by_id; $seen):
+      if ($seen | index($attempt_id)) != null or ($by_id[$attempt_id] // null) == null then null
+      else $by_id[$attempt_id] as $attempt |
+        if $attempt.parentAttemptId==null then [$attempt]
+        else lineage($attempt.parentAttemptId; $by_id; ($seen + [$attempt_id])) as $parents |
+          if $parents==null then null else [$attempt] + $parents end
+        end
+      end;
+    [.[] | select(.schemaVersion==$schema and .eventType=="attempt-intake") |
+      {attemptId,taskRootId:(.intake.taskRootId // .attemptId),parentAttemptId:.intake.parentAttemptId,taskClass:.intake.taskClass,effort:.intake.tuple.effort}] as $attempts |
+    [.[] | select(.schemaVersion==$schema and .eventType=="attempt-terminal")] as $terminals |
+    [$attempts | sort_by(.taskRootId) | group_by(.taskRootId)[] |
+      . as $attempts_for_task |
+      (reduce $attempts_for_task[] as $attempt ({}; .[$attempt.attemptId]=$attempt)) as $attempts_by_id |
+      [$terminals[] as $terminal |
+        ($attempts_by_id[$terminal.attemptId] // null) as $attempt |
+        select($attempt!=null) |
+        {attempt:$attempt,terminal:$terminal.terminal}] as $sealed |
+      ($sealed | map(select(.terminal.classification=="accepted")) | last) as $accepted |
+      select($accepted!=null) |
+      lineage($accepted.attempt.attemptId; $attempts_by_id; []) as $lineage |
+      select($lineage!=null) |
+      [$lineage[] as $attempt |
+        ($sealed | map(select(.attempt.attemptId==$attempt.attemptId)) | first) as $run |
+        {complete:($run!=null and ($run.terminal|complete_usage)),
+         tokens:(if $run!=null and ($run.terminal|complete_usage) then ($run.terminal.usage.inputTokens + $run.terminal.usage.outputTokens + $run.terminal.usage.cachedTokens) else 0 end)}] as $runs |
+      {taskClass:$accepted.attempt.taskClass,effort:$accepted.attempt.effort,acceptedSeats:1,
+       complete:(all($runs[]; .complete)),tokens:($runs|map(.tokens)|add)}]
+    | sort_by(.taskClass,.effort) | group_by([.taskClass,.effort])[]
+    | {taskClass:.[0].taskClass,effort:.[0].effort,acceptedSeats:length,completeSeats:map(select(.complete))|length,tokens:map(.tokens)|add}
+    | select(.completeSeats==.acceptedSeats)
+    | "K15: taskClass=\(.taskClass) effort=\(.effort) tokensPerAcceptedSeat=\(.tokens / .acceptedSeats) acceptedSeats=\(.acceptedSeats)"
+  ' "$ledger"
+}
+
 cmd_scorecard() {
   local scorecard="$DATA/stability-scorecard-2026-09-11.md" line key stream file status seen_k16=0 seen_k17=0
   if [ -f "$scorecard" ] && [ ! -L "$scorecard" ]; then
@@ -143,6 +189,7 @@ cmd_scorecard() {
       printf '%s: %s\n' "$key" "$status"
     done
   fi
+  k15_scorecard
 }
 
 case "${1:-}" in
