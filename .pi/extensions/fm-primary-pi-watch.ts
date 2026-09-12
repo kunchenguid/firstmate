@@ -49,6 +49,7 @@ type ArmResult = {
 
 type ActionableRestoration = {
   failure: string;
+  armChild?: ChildProcess;
   recovery?: { generation: string; watcherPid: string };
 };
 
@@ -594,16 +595,11 @@ export default function (pi: ExtensionAPI) {
   }
 
   function confirmHandlingDeliveryWithRetry(
-    owner: SessionGeneration,
     recovery: { generation: string; watcherPid: string },
   ): { ok: boolean; detail: string } {
-    const snapshot = (): { generation: string; watcherPid: string } => {
-      const current = owner.child ? armRecovery.get(owner.child) : undefined;
-      return current ?? recovery;
-    };
-    const first = confirmHandlingDelivery(snapshot());
+    const first = confirmHandlingDelivery(recovery);
     if (first.ok) return first;
-    return confirmHandlingDelivery(snapshot());
+    return confirmHandlingDelivery(recovery);
   }
 
   function offerWakeToBranch(message: string): Promise<void> | null {
@@ -649,15 +645,16 @@ export default function (pi: ExtensionAPI) {
     message: string,
     repairFailed: boolean,
     pending: PendingActionableClose,
-    recovery?: { generation: string; watcherPid: string },
+    restoration: ActionableRestoration,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
+    const recovery = restoration.recovery;
     if (recovery) {
-      const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
+      const confirmed = confirmHandlingDeliveryWithRetry(recovery);
       if (!confirmed.ok) {
         const watcherPid = recovery.watcherPid;
         if (!pidAlive(watcherPid)) {
-          await retireArm(owner.child);
+          await retireArm(restoration.armChild ?? null);
         }
         return await sendWake(owner, `${message}\n\n${confirmed.detail}`, pending);
       }
@@ -782,14 +779,14 @@ export default function (pi: ExtensionAPI) {
           // from this serialized delivery loop. Joining its token promise here
           // preserves delivery order without making the next successor wait
           // for an earlier branch settlement.
-          const restoration = await beginActionableRestoration(owner, pending);
+          const restoration = await awaitLatestActionableRestoration(owner, pending);
           if (!generationIsLive(owner)) {
             settleClaim("failed");
             releaseClaim();
             return;
           }
           const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
-          const delivered = await deliverActionableWake(owner, message, Boolean(restoration.failure), pending, restoration.recovery);
+          const delivered = await deliverActionableWake(owner, message, Boolean(restoration.failure), pending, restoration);
           if (!delivered) {
             settleClaim("failed");
             releaseClaim();
@@ -899,6 +896,26 @@ export default function (pi: ExtensionAPI) {
     return restoration;
   }
 
+  function latestActionableRestoration(owner: SessionGeneration): Promise<ActionableRestoration> | null {
+    let latest: Promise<ActionableRestoration> | null = null;
+    for (const restoration of owner.actionableRestorations.values()) latest = restoration;
+    return latest;
+  }
+
+  async function awaitLatestActionableRestoration(
+    owner: SessionGeneration,
+    pending: PendingActionableClose,
+  ): Promise<ActionableRestoration> {
+    let current = beginActionableRestoration(owner, pending);
+    while (true) {
+      const restoration = await current;
+      if (!generationIsLive(owner)) return restoration;
+      const latest = latestActionableRestoration(owner);
+      if (!latest || latest === current) return restoration;
+      current = latest;
+    }
+  }
+
   async function restoreAfterActionableClose(
     owner: SessionGeneration,
     predecessorArmPid: string,
@@ -909,7 +926,7 @@ export default function (pi: ExtensionAPI) {
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
       if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
-        return { failure: "", recovery: armRecovery.get(successorChild) };
+        return { failure: "", armChild: successorChild, recovery: armRecovery.get(successorChild) };
       }
       if (replacement.ok) {
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";

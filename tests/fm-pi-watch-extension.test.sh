@@ -428,17 +428,14 @@ EOF
   pass "Pi actionable close starts one successor before wake delivery settles"
 }
 
-# The 2026-09-11 recurrence: successor B closed actionably while wake A's
-# branch settlement was still pending. C must become ready before A settles;
-# delivery may stay serialized, so the B-first case pre-settles B's promise
-# before its offer is admitted after A.
-test_pi_overlapping_actionable_closes_restore_liveness_per_close() {
-  local order repo home plugin log trigger stop live out status
+test_pi_three_overlapping_actionable_closes_restore_latest_liveness() {
+  local order repo home plugin log trigger ready stop live out status
   for order in a-first b-first; do
     repo="$TMP_ROOT/pi-actionable-overlap-$order-root"
     home="$TMP_ROOT/pi-actionable-overlap-$order-home"
     log="$TMP_ROOT/pi-actionable-overlap-$order.log"
     trigger="$TMP_ROOT/pi-actionable-overlap-$order.trigger"
+    ready="$TMP_ROOT/pi-actionable-overlap-$order.ready"
     stop="$TMP_ROOT/pi-actionable-overlap-$order.stop"
     live="$TMP_ROOT/pi-actionable-overlap-$order.live"
     mkdir -p "$repo/bin" "$home/state" "$home/config"
@@ -452,21 +449,30 @@ if [ "${1:-}" = --handling-delivered ]; then
 fi
 printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
-printf 'watcher: started pid=%s (beacon fresh) recovery-generation=overlap-%s\n' "$$" "$count"
-if [ "$count" -le 2 ]; then
+if [ "$count" -le 3 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=overlap-%s\n' "$$" "$count"
   while [ ! -e "$FM_TRIGGER_FILE.$count" ]; do sleep 0.02; done
-  [ "$count" -eq 1 ] && printf 'signal: overlap wake A\n' || printf 'signal: overlap wake B\n'
+  case "$count" in
+    1) label=A ;;
+    2) label=B ;;
+    *) label=C ;;
+  esac
+  printf 'signal: overlap wake %s\n' "$label"
   exit 0
 fi
 printf '%s\n' "$$" > "${FM_LIVE_FILE:?}"
 cleanup() { rm -f "$FM_LIVE_FILE"; }
 trap 'cleanup; exit 0' TERM INT
+while [ ! -e "$FM_READY_FILE" ]; do sleep 0.02; done
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=overlap-%s\n' "$$" "$count"
+printf 'ready=%s\n' "$$" >> "$FM_ARM_LOG"
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 cleanup
 SH
     chmod +x "$repo/bin/fm-watch-arm.sh"
     out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
-      FM_TRIGGER_FILE="$trigger" FM_STOP_FILE="$stop" FM_LIVE_FILE="$live" FM_SETTLE_ORDER="$order" \
+      FM_TRIGGER_FILE="$trigger" FM_READY_FILE="$ready" FM_STOP_FILE="$stop" FM_LIVE_FILE="$live" \
+      FM_SETTLE_ORDER="$order" \
       node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -475,7 +481,7 @@ let tool = null;
 const offers = [];
 const prompts = [];
 const settlements = {};
-for (const label of ["A", "B"]) {
+for (const label of ["A", "B", "C"]) {
   let resolve;
   const promise = new Promise((settled) => { resolve = settled; });
   settlements[label] = { promise, resolve };
@@ -491,7 +497,10 @@ const bus = {
   },
 };
 bus.on("fm-branch-supervision:dispatch", (offer) => {
-  const label = offer.message.includes("wake A") ? "A" : offer.message.includes("wake B") ? "B" : "";
+  const label = offer.message.includes("wake A") ? "A"
+    : offer.message.includes("wake B") ? "B"
+      : offer.message.includes("wake C") ? "C"
+        : "";
   if (!label) throw new Error(`unexpected branch offer: ${offer.message}`);
   offers.push(label);
   offer.accept(settlements[label].promise);
@@ -542,44 +551,67 @@ await waitFor(() => armRows().length === 1, "watcher A");
 writeFileSync(`${process.env.FM_TRIGGER_FILE}.1`, "close A\n");
 await waitFor(() => offers.join("") === "A", "wake A branch offer");
 await waitFor(() => armRows().length === 2, "successor B");
-if (process.env.FM_SETTLE_ORDER === "b-first") settlements.B.resolve();
-writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close B\n");
-await waitFor(() => armRows().length === 3 && existsSync(process.env.FM_LIVE_FILE), "successor C before A settlement");
-const livePid = readFileSync(process.env.FM_LIVE_FILE, "utf8").trim();
-if (!pidAlive(livePid)) throw new Error(`successor C was not alive: ${livePid}`);
-if (offers.join("") !== "A") throw new Error(`wake B delivery escaped serialization before A settled: ${offers.join(",")}`);
-await new Promise((resolve) => setTimeout(resolve, 80));
-const duringOverlap = await tool.execute("overlap-health", {}, undefined, undefined, {});
-if (!duringOverlap.details?.ok || !duringOverlap.details.message.includes("verified-ready watcher")) {
-  throw new Error(`overlap arm result was not tied to verified readiness: ${JSON.stringify(duringOverlap.details)}`);
+if (process.env.FM_SETTLE_ORDER === "b-first") {
+  settlements.B.resolve();
+  settlements.C.resolve();
 }
-if (armRows().length !== 3) throw new Error(`manual overlap check started a parallel arm: ${armRows().join(" | ")}`);
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close B\n");
+await waitFor(() => armRows().length === 3, "successor C");
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.3`, "close C\n");
+await waitFor(() => armRows().length === 4 && existsSync(process.env.FM_LIVE_FILE), "successor D before A settlement");
+const livePid = readFileSync(process.env.FM_LIVE_FILE, "utf8").trim();
+if (!pidAlive(livePid)) throw new Error(`successor D was not alive: ${livePid}`);
+if (offers.join("") !== "A") throw new Error(`later wake delivery escaped serialization before A settled: ${offers.join(",")}`);
+settlements.A.resolve();
+await new Promise((resolve) => setTimeout(resolve, 80));
+if (!existsSync(process.env.FM_LIVE_FILE) || !pidAlive(livePid)) {
+  throw new Error("stale restoration retired successor D before its readiness result");
+}
+if (offers.join("") !== "A") throw new Error(`wake B did not await successor D readiness: ${offers.join(",")}`);
+if (prompts.length !== 0) throw new Error(`stale restoration leaked to main: ${prompts.join(" | ")}`);
+const whilePending = await tool.execute("overlap-pending-health", {}, undefined, undefined, {});
+if (!whilePending.details?.ok || !whilePending.details.message.includes("readiness verification pending")) {
+  throw new Error(`pending successor D overclaimed readiness: ${JSON.stringify(whilePending.details)}`);
+}
+if (armRows().length !== 4) throw new Error(`manual overlap check started a parallel arm: ${armRows().join(" | ")}`);
+writeFileSync(process.env.FM_READY_FILE, "ready D\n");
+await waitFor(() => readFileSync(process.env.FM_ARM_LOG, "utf8").includes(`ready=${livePid}`), "successor D readiness");
+const afterReady = await tool.execute("overlap-ready-health", {}, undefined, undefined, {});
+if (!afterReady.details?.ok || !afterReady.details.message.includes("verified-ready watcher")) {
+  throw new Error(`ready successor D was not reported as verified: ${JSON.stringify(afterReady.details)}`);
+}
 if (process.env.FM_SETTLE_ORDER === "a-first") {
-  settlements.A.resolve();
   await waitFor(() => offers.join("") === "AB", "wake B offer after A settlement");
   settlements.B.resolve();
+  await waitFor(() => offers.join("") === "ABC", "wake C offer after B settlement");
+  settlements.C.resolve();
 } else {
-  settlements.A.resolve();
-  await waitFor(() => offers.join("") === "AB", "pre-settled wake B offer after A settlement");
+  await waitFor(() => offers.join("") === "ABC", "pre-settled later wakes after A settlement");
 }
-await waitFor(() => confirmRows().length === 2, "both handling confirmations");
+await waitFor(() => confirmRows().length === 3, "all handling confirmations");
 await new Promise((resolve) => setTimeout(resolve, 150));
-if (offers.join("") !== "AB") throw new Error(`actionable wakes were not delivered exactly once: ${offers.join(",")}`);
-if (confirmRows().length !== 2) throw new Error(`handling confirmation duplicated: ${confirmRows().join(" | ")}`);
-if (armRows().length !== 3) throw new Error(`settlement order created another arm chain: ${armRows().join(" | ")}`);
+if (offers.join("") !== "ABC") throw new Error(`actionable wakes were not delivered exactly once: ${offers.join(",")}`);
+if (confirmRows().length !== 3) throw new Error(`handling confirmation duplicated: ${confirmRows().join(" | ")}`);
+if (armRows().length !== 4) throw new Error(`settlement order created another arm chain: ${armRows().join(" | ")}`);
 if (prompts.length !== 0) throw new Error(`accepted branch wakes leaked to main: ${prompts.join(" | ")}`);
 if (!existsSync(process.env.FM_LIVE_FILE) || !pidAlive(readFileSync(process.env.FM_LIVE_FILE, "utf8").trim())) {
-  throw new Error("verified successor C did not remain the singleton owner");
+  throw new Error("verified successor D did not remain the singleton owner");
+}
+const liveArmPids = armRows()
+  .map((row) => row.match(/^arm=([0-9]+)/)?.[1] ?? "")
+  .filter((pid) => pid && pidAlive(pid));
+if (liveArmPids.length !== 1 || liveArmPids[0] !== livePid) {
+  throw new Error(`successor D was not the only live arm owner: ${liveArmPids.join(",")}`);
 }
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
-await waitFor(() => !existsSync(process.env.FM_LIVE_FILE), "successor C shutdown");
+await waitFor(() => !existsSync(process.env.FM_LIVE_FILE), "successor D shutdown");
 EOF
     )
     status=$?
-    expect_code 0 "$status" "Pi overlapping actionable closes must restore C before A settles ($order): $out"
+    expect_code 0 "$status" "Pi overlapping actionable closes must preserve successor D ($order): $out"
     [ -z "$out" ] || fail "Pi actionable-overlap test ($order) printed output: $out"
   done
-  pass "Pi restores every overlapping actionable close immediately and delivers each wake once in either settlement order"
+  pass "Pi joins the latest overlapping restoration and delivers three wakes exactly once"
 }
 
 test_pi_branch_offer_owns_actionable_wake() {
@@ -4136,7 +4168,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
-test_pi_overlapping_actionable_closes_restore_liveness_per_close
+test_pi_three_overlapping_actionable_closes_restore_latest_liveness
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
