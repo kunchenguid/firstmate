@@ -11,16 +11,21 @@
 #   <path>
 #   <number>
 #   <authority>                 yolo | away-grant | attended
-# The identity is the canonical identity parsed from the task's pr= metadata.
-# The file is atomically published, mode 0600, single-link, and on the state
-# filesystem. A poll consumes it only when all identity fields match its own
-# validated snapshot. Missing, malformed, or mismatched state means external;
-# it is never resolved again from a later away-posture record.
+# The identity comes from the merge run's immutable canonical URL parse;
+# persistence revalidates the task's current pr= metadata under its metadata
+# and lifecycle locks and refuses a mismatch. The file is atomically published,
+# mode 0600, single-link, and on the state filesystem. A poll consumes it only
+# when all identity fields match its own validated snapshot. Missing, malformed,
+# or mismatched state means external; it is never resolved again from a later
+# away-posture record.
 #
 # Resolution authorizes nothing by itself. bin/fm-pr-merge.sh owns the merge
-# gate and persists only after a forge command succeeds. bin/fm-watch.sh reads
-# the record only after the poll has observed a landed merge, then retires it
-# after durable outcome publication. Teardown removes any remaining record.
+# gate and persists only after a forge command succeeds, before releasing the
+# task lifecycle lock. After observing a landed merge, bin/fm-watch.sh acquires
+# that same lock, revalidates the poll, publishes its durable outcome, and
+# retires only the exact authority record it read. Teardown uses the same lock,
+# so it cannot interleave with that consumption transaction, and removes any
+# remaining record.
 #
 # Sourced by those scripts and by tests. No side effects on source beyond its
 # sourced libraries.

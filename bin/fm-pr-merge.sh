@@ -71,8 +71,10 @@
 # held for the captain return. An unreadable record refuses rather than being
 # skipped. Neither posture releases a captain hold, and the grant lapses when
 # the record is archived.
-# The lock ends when the local forge command returns; docs/captain-hold-lifecycle.md owns
-# the accepted asynchronous-landing and merge-to-cleanup residuals.
+# A failed forge command releases the lock after it returns. A successful one
+# retains the lock until the accepted merge authority is persisted against the
+# still-matching task metadata; docs/captain-hold-lifecycle.md owns the accepted
+# asynchronous-landing and merge-to-cleanup residuals.
 #
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
