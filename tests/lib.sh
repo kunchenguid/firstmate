@@ -383,6 +383,12 @@ SH
 #                                 `status --json` lists as available when they
 #                                 carry no lease; unset lists only leased slots
 #   FM_FAKE_TREEHOUSE_GET_FAIL=1  `get --lease` fails like a full pool
+#   FM_FAKE_TREEHOUSE_GET_HANG=1  `get --lease` records its lease and then
+#                                 hangs without printing the path, the shape
+#                                 of a get killed at fm_run_timed's bound
+#                                 after Treehouse already wrote the lease
+#   FM_FAKE_TREEHOUSE_STATUS_FAIL=1  `status --json` fails, so the pool's
+#                                 lease state cannot be read
 # `return --if-lease-holder <h>` refuses with Treehouse's own messages when the
 # target is unleased or leased to another holder, whatever --force says, and
 # releases the lease otherwise; a bare `return` releases any lease unchecked.
@@ -444,11 +450,19 @@ case "${1:-}" in
     fi
     [ -n "$path" ] || { echo "fake treehouse: no lease path configured" >&2; exit 1; }
     [ -z "$leases" ] || printf '%s\t%s\n' "$path" "$holder" >> "$leases"
+    if [ "${FM_FAKE_TREEHOUSE_GET_HANG:-0}" = 1 ]; then
+      sleep 600
+      exit 1
+    fi
     printf '%s\n' "$path"
     exit 0
     ;;
   status)
     [ "${2:-}" = --json ] || exit 0
+    if [ "${FM_FAKE_TREEHOUSE_STATUS_FAIL:-0}" = 1 ]; then
+      echo "failed to read pool state: fake treehouse status unavailable" >&2
+      exit 1
+    fi
     printf '['
     sep=
     n=0

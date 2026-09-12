@@ -2086,6 +2086,85 @@ SH
   pass "secondmate force teardown preserves child worktree after unproven lock refusal"
 }
 
+# The child's slot reads as leased to the child, so the return carries the
+# holder check; the lease then changes hands before the return (modeled by a
+# wrapper that re-leases the slot to another task on the way into `return`),
+# and Treehouse refuses its precondition. That refusal must stop the forced
+# cleanup with the slot untouched: the raw removal other return failures fall
+# through to would delete a slot Treehouse just proved is another task's.
+test_secondmate_force_teardown_preserves_child_on_holder_refusal() {
+  local home subhome childproj childwt fakebin log err leases rc
+  home="$TMP_ROOT/force-holder-home"
+  subhome="$TMP_ROOT/force-holder-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-holder-child-pool/1/alpha"
+  err="$TMP_ROOT/force-holder-child.err"
+  leases="$TMP_ROOT/force-holder-child-pool/leases"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
+  fm_git_worktree "$childproj" "$childwt" force-child-holder
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-holder-child-pool/treehouse-state.json"
+  printf '%s\t%s\n' "$childwt" child > "$leases"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-holder-child-fake")
+  log="$TMP_ROOT/force-holder-child-fake/tmux.log"
+  fm_test_fake_treehouse "$fakebin"
+  mv "$fakebin/treehouse" "$fakebin/treehouse-pool"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+if [ "${1:-}" = return ]; then
+  printf '%s\t%s\n' "${FM_FAKE_TREEHOUSE_SLOT_PATH:?}" other-task > "${FM_FAKE_TREEHOUSE_LEASES:?}"
+fi
+exec "$(dirname "$0")/treehouse-pool" "$@"
+SH
+  chmod +x "$fakebin/treehouse"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-holder-child-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_SLOT_PATH="$childwt" FM_FAKE_TREEHOUSE_LEASES="$leases" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "force teardown succeeded after Treehouse refused the child's holder precondition"
+  grep -F "treehouse return --force --if-lease-holder child $childwt" "$log" >/dev/null \
+    || fail "force teardown did not return the child's slot with the holder check: $(cat "$log")"
+  [ "$(grep -c 'treehouse return' "$log")" -eq 1 ] || fail "force teardown retried a holder-refused return: $(cat "$log")"
+  [ -d "$childwt" ] || fail "force teardown raw-removed a child slot Treehouse proved is another task's"
+  [ -e "$childwt/.git" ] || fail "force teardown gutted the child slot after the holder refusal"
+  [ "$(awk -F'\t' '{ print $2 }' "$leases")" = other-task ] || fail "the other task's lease did not survive: $(cat "$leases")"
+  [ -d "$subhome" ] || fail "force teardown removed the subhome after the child holder refusal"
+  [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after the child holder refusal"
+  [ -e "$home/state/domain.meta" ] || fail "force teardown cleared the parent record after the child holder refusal"
+  grep -F 'lease holder does not match' "$err" >/dev/null || fail "force teardown did not surface Treehouse's precondition message"
+  grep -F "child worktree return refused by Treehouse's lease precondition" "$err" >/dev/null \
+    || fail "force teardown did not explain that the child's slot was left untouched"
+  pass "secondmate force teardown preserves a child slot whose lease changed hands before the holder-checked return"
+}
+
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home() {
   local opdir home subhome target fakebin err log
   for opdir in data config projects; do
@@ -3021,6 +3100,7 @@ test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_refuses_duplicated_child_slot
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
+test_secondmate_force_teardown_preserves_child_on_holder_refusal
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
 test_secondmate_teardown_refuses_registered_nested_home

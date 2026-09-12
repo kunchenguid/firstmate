@@ -121,7 +121,12 @@
 # every local Firstmate home hold the same lock from before slot allocation
 # through metadata publication, closing the publication
 # gap; forced secondmate teardown takes it and runs the same checks for every
-# descendant Treehouse slot before touching any child.
+# descendant Treehouse slot before touching any child, returns each child's
+# leased slot with the same holder check, and stops the forced cleanup with
+# that child's slot untouched when Treehouse refuses the holder precondition
+# (the lease changed hands between the read and the return) - the fallback
+# raw removal that other child return failures fall through to never runs on
+# a slot Treehouse has just proved is not that child's.
 # These refusals are not relaxed by --force: --force authorizes discarding THIS
 # task's unlanded work, never another task's live work. Nothing of this task's
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
@@ -1518,12 +1523,23 @@ STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS
 TEARDOWN_TREEHOUSE_LOCK_REFUSED=2
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
 TEARDOWN_PROCEVENT_RESTORE_FAILED=4
+TEARDOWN_TREEHOUSE_HOLDER_REFUSED=5
 
 # True when treehouse/git stderr shows the transient index.lock "File exists" race.
 # Other return failures must not enter the retry path.
 treehouse_return_is_index_lock_error() {
   local text=$1
   printf '%s\n' "$text" | grep -Eq "Unable to create ['\"].*index\\.lock['\"]: File exists"
+}
+
+# True when Treehouse refused the return on its lease precondition (Treehouse
+# v2.1.1 reports `--if-lease-holder` / `--if-lease-id` mismatches, and a holder
+# check on an unleased slot, as "lease precondition failed"). That refusal is
+# Treehouse proving the slot is not this task's any more; it is never a lock
+# race and never retried.
+treehouse_return_is_holder_refusal() {
+  local text=$1
+  printf '%s\n' "$text" | grep -Fq "lease precondition failed"
 }
 
 # Absolute path to the git index lock for a worktree/repo dir, or empty when it
@@ -1583,7 +1599,10 @@ cleanup_stale_lock_for_safety_check() {
 # A non-empty <holder> adds Treehouse's own `--if-lease-holder` precondition, so
 # a slot whose lease no longer names that holder is refused by Treehouse under
 # its state lock before any process is terminated or any file reset; the
-# refusal is never retried because it is not a lock race.
+# refusal is never retried because it is not a lock race, and it returns
+# TEARDOWN_TREEHOUSE_HOLDER_REFUSED so a caller with a fallback removal step
+# (forced secondmate child cleanup) stops instead of deleting a slot Treehouse
+# just proved is not this task's.
 teardown_treehouse_return() {  # <dir> <cd-dir> <label> [post-cleanup-check] [holder]
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} holder=${5:-}
   local out lock attempt=0 max_retries lock_desc
@@ -1599,6 +1618,10 @@ teardown_treehouse_return() {  # <dir> <cd-dir> <label> [post-cleanup-check] [ho
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 
+  if treehouse_return_is_holder_refusal "$out"; then
+    echo "teardown: $label return refused by Treehouse's lease precondition (holder '${holder:-none}'): the slot's lease changed hands after the ownership read, so it is not this task's to return and is left untouched" >&2
+    return "$TEARDOWN_TREEHOUSE_HOLDER_REFUSED"
+  fi
   if ! treehouse_return_is_index_lock_error "$out"; then
     return 1
   fi
@@ -3040,7 +3063,8 @@ cleanup_firstmate_home_children() {
           teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" "" "$child_lease_holder" \
             || child_return_rc=$?
           if [ "$child_return_rc" -ne 0 ]; then
-            if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+            if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ] \
+               || [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_HOLDER_REFUSED" ]; then
               return "$child_return_rc"
             fi
             safe_rm_rf_child_worktree "$child_wt" "$child_proj"

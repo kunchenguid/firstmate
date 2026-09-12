@@ -780,7 +780,50 @@ test_pool_slot_lease_follows_the_spawn_outcome() {
     || fail "the aborted spawn left its slot leased to a task with no record: $(cat "$POOL_LEASES")"
   assert_contains "$out" "returned task $id's leased Treehouse slot" \
     "the aborted spawn did not report returning its lease"
-  pass "a Treehouse slot is leased under the launched task id, a leased slot is never handed on, a failed lease refuses, and an abort returns the task's own lease"
+
+  # A get killed at its bound may already have written its lease without ever
+  # printing the path: the abort looks the lease up by holder and returns it.
+  id='pool-slot-lease-deadline-r1'
+  rec=$(make_case slot-lease-deadline "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  out=$(FM_FAKE_TREEHOUSE_GET_HANG=1 FM_TREEHOUSE_LEASE_TIMEOUT=1 run_pool_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker after its lease timed out"
+  assert_contains "$out" "did not lease a worktree for task $id within 1s" \
+    "the timed-out lease was not reported at its bound"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the timed-out spawn published task metadata"
+  grep -Fxq -- "treehouse return --force --if-lease-holder $id $POOL_DIR" "$POOL_LOG" \
+    || fail "the timed-out spawn did not find its lease by holder and return it: $(cat "$POOL_LOG")"
+  ! grep -Fq -- "$id" "$POOL_LEASES" \
+    || fail "a get killed at its bound left its slot leased to a task with no record: $(cat "$POOL_LEASES")"
+  assert_contains "$out" "returned task $id's leased Treehouse slot $POOL_DIR" \
+    "the timed-out spawn did not report returning the lease it found by holder"
+
+  # The same deadline, but the pool's lease state cannot be read afterwards:
+  # the lookup is unproven rather than empty, so the abort must say a lease
+  # may be orphaned and hand the operator the release command instead of
+  # treating "could not look" as "nothing leased".
+  id='pool-slot-lease-unproven-r1'
+  rec=$(make_case slot-lease-unproven "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  out=$(FM_FAKE_TREEHOUSE_GET_HANG=1 FM_FAKE_TREEHOUSE_STATUS_FAIL=1 FM_TREEHOUSE_LEASE_TIMEOUT=1 \
+    run_pool_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker after its lease timed out with an unreadable pool"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the unproven-lease spawn published task metadata"
+  ! grep -Fq -- "treehouse return" "$POOL_LOG" \
+    || fail "a spawn whose lease lookup was unproven guessed at a slot to return: $(cat "$POOL_LOG")"
+  assert_contains "$out" "task $id may hold a Treehouse slot lease with no task record" \
+    "an unproven lease lookup was silently treated as no lease"
+  assert_contains "$out" "treehouse status --json failed from" \
+    "the unproven-lease warning did not name why the pool could not be read"
+  assert_contains "$out" "treehouse return --force --if-lease-holder '$id'" \
+    "the unproven-lease warning did not hand the operator the release command"
+  grep -Fxq -- "$POOL_DIR	$id" "$POOL_LEASES" \
+    || fail "the fixture did not leave the orphaned lease the warning is about: $(cat "$POOL_LEASES")"
+  pass "a Treehouse slot is leased under the launched task id, a leased slot is never handed on, a failed lease refuses, and an abort returns the task's own lease or names the one it could not find"
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool

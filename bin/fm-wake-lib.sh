@@ -1402,15 +1402,39 @@ fm_treehouse_slot_lease_state() {  # <project-dir> <worktree> <task-id>
 # Print the path of the one slot leased under a task id, for a spawn that
 # leased a slot but never learned its path. Prints nothing and returns 1 when
 # no slot, more than one slot, or an unreadable status leaves the answer
-# unproven; a release must never guess between two candidates.
+# unproven; a release must never guess between two candidates. The two
+# failures are not the same answer: FM_TREEHOUSE_LEASE_FIND_REASON stays empty
+# when the pool was read and records no lease under the holder, and names why
+# the answer is unproven otherwise, so a caller can tell "nothing to release"
+# from "a lease may exist that could not be found". FM_TREEHOUSE_LEASE_FIND_PATH
+# carries the found path for callers that run this in their own shell.
+# shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
 fm_treehouse_lease_find() {  # <project-dir> <task-id>
-  local project=$1 id=$2 lines
-  [ -n "$id" ] || return 1
-  _fm_treehouse_status_read "$project" || return 1
-  lines=$(_fm_treehouse_status_entries holder "$id") || return 1
+  local project=$1 id=$2 lines count
+  FM_TREEHOUSE_LEASE_FIND_PATH=
+  FM_TREEHOUSE_LEASE_FIND_REASON=
+  if [ -z "$id" ]; then
+    FM_TREEHOUSE_LEASE_FIND_REASON="no task id to look the lease up by"
+    return 1
+  fi
+  if ! _fm_treehouse_status_read "$project"; then
+    FM_TREEHOUSE_LEASE_FIND_REASON=$FM_TREEHOUSE_STATUS_REASON
+    return 1
+  fi
+  if ! lines=$(_fm_treehouse_status_entries holder "$id"); then
+    FM_TREEHOUSE_LEASE_FIND_REASON="node could not parse treehouse status --json from '$project' as a pool listing"
+    return 1
+  fi
   [ -n "$lines" ] || return 1
-  case "$lines" in *$'\n'*) return 1 ;; esac
-  printf '%s\n' "${lines##*$'\t'}"
+  case "$lines" in
+    *$'\n'*)
+      count=$(printf '%s\n' "$lines" | wc -l | tr -d ' ')
+      FM_TREEHOUSE_LEASE_FIND_REASON="$count slots are leased to '$id', so no single slot can be named"
+      return 1
+      ;;
+  esac
+  FM_TREEHOUSE_LEASE_FIND_PATH=${lines##*$'\t'}
+  printf '%s\n' "$FM_TREEHOUSE_LEASE_FIND_PATH"
 }
 
 fm_failure_episode_reset() {

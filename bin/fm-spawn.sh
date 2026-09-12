@@ -123,8 +123,13 @@
 #   return. A slot that cannot be leased, or whose leased path fails the
 #   isolation test below, refuses the spawn. A spawn that aborts after leasing but
 #   before metadata publication returns its own lease under the same lock, so
-#   no slot stays leased to a task no record describes; an abort after
-#   publication leaves the lease to the record, which teardown returns.
+#   no slot stays leased to a task no record describes. The same holder-checked
+#   return also runs when the backlog commit fails after publication and the
+#   record is rolled back: the project lock is already released by then, so
+#   that return relies on Treehouse's own holder check alone (its stated
+#   contract), and the operator is told the slot was returned rather than to
+#   close it by hand. An abort that leaves the record in place leaves the lease
+#   to the record, which teardown returns.
 #   A relaunch leases nothing: it reads the recorded slot's lease and refuses
 #   when another holder has it, relaunches a slot with no lease on the record
 #   alone, and refuses an unreadable lease state.
@@ -1063,28 +1068,44 @@ spawn_abort_cleanup() {
   # must return that lease, or the slot stays leased to a task no record
   # describes and nothing would ever reclaim it: teardown and relaunch, the two
   # reclaim points, both start from the record. The return is holder-checked,
-  # so it can only ever release this task's own lease, and it runs while the
-  # project lock that allocated the slot is still held (every abort before
-  # metadata publication); an abort after publication leaves the lease to the
-  # record, which teardown returns. A lease attempt that produced no path may
-  # still have written its lease (a get killed at its deadline), so that case
-  # looks the lease up by holder first. `treehouse return --force` terminates
-  # any process still sitting in the slot, including the task pane's own shell
-  # when it had already entered the slot, so the window named by the refusal
-  # above may be gone by the time it is inspected.
+  # so it can only ever release this task's own lease. For every abort before
+  # metadata publication it runs while the project lock that allocated the
+  # slot is still held; it also runs after the fresh-spawn backlog commit
+  # fails and spawn_fresh_commit_rollback removes the published record, and by
+  # then that lock has been released, so on that path Treehouse's own holder
+  # check under its state lock is the only guard - which is all a
+  # holder-checked return ever relies on. An abort that leaves the record in
+  # place leaves the lease to the record, which teardown returns. A lease
+  # attempt that produced no path may still have written its lease (a get
+  # killed at its deadline), so that case looks the lease up by holder first;
+  # a lookup that could not be proved either way (the pool unreadable, or
+  # several slots under this holder) is reported with the hand-release
+  # command rather than treated as "nothing leased". `treehouse return
+  # --force` terminates any process still sitting in the slot, including the
+  # task pane's own shell when it had already entered the slot, so the window
+  # named by the refusal above may be gone by the time it is inspected.
   if [ "$SPAWN_LEASE_ATTEMPTED" = 1 ] \
      && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     spawn_leased_slot=${WT:-}
+    spawn_lease_unproven=""
     if [ "$SPAWN_SLOT_LEASED" != 1 ] && [ -z "$spawn_leased_slot" ]; then
-      spawn_leased_slot=$(fm_treehouse_lease_find "$PROJ_ABS" "$ID" 2>/dev/null) || spawn_leased_slot=""
+      if fm_treehouse_lease_find "$PROJ_ABS" "$ID" >/dev/null 2>&1; then
+        spawn_leased_slot=$FM_TREEHOUSE_LEASE_FIND_PATH
+      else
+        spawn_lease_unproven=$FM_TREEHOUSE_LEASE_FIND_REASON
+      fi
     fi
     if [ -n "$spawn_leased_slot" ]; then
       SPAWN_SLOT_LEASED=0
-      if fm_treehouse_lease_release "$PROJ_ABS" "$spawn_leased_slot" "$ID" >/dev/null 2>&1; then
+      spawn_release_err=""
+      if spawn_release_err=$(fm_treehouse_lease_release "$PROJ_ABS" "$spawn_leased_slot" "$ID" 2>&1 >/dev/null); then
         echo "note: returned task $ID's leased Treehouse slot $spawn_leased_slot after the aborted spawn; any shell that had already entered it was terminated with it, so window $T may be gone" >&2
       else
-        echo "warning: task $ID's Treehouse slot $spawn_leased_slot may still be leased to it with no task record; release it by hand with: (cd '$PROJ_ABS' && treehouse return --force --if-lease-holder '$ID' '$spawn_leased_slot')" >&2
+        spawn_release_err=${spawn_release_err//$'\n'/ }
+        echo "warning: task $ID's Treehouse slot $spawn_leased_slot may still be leased to it with no task record (treehouse return refused: ${spawn_release_err:-no output}); release it by hand with: (cd '$PROJ_ABS' && treehouse return --force --if-lease-holder '$ID' '$spawn_leased_slot')" >&2
       fi
+    elif [ -n "$spawn_lease_unproven" ]; then
+      echo "warning: task $ID may hold a Treehouse slot lease with no task record - the pool could not say ($spawn_lease_unproven); find any slot leased to '$ID' with (cd '$PROJ_ABS' && treehouse status --json) and release it by hand with: (cd '$PROJ_ABS' && treehouse return --force --if-lease-holder '$ID' <slot-path>)" >&2
     fi
     SPAWN_LEASE_ATTEMPTED=0
   fi
@@ -4161,7 +4182,11 @@ fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
     if spawn_fresh_commit_rollback; then
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
+      if [ "$SPAWN_LEASE_ATTEMPTED" = 1 ]; then
+        echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T by hand (its leased Treehouse slot $WT is returned below, which terminates any shell still in it), then re-run the spawn" >&2
+      else
+        echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
+      fi
     else
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
     fi
