@@ -245,6 +245,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/herdr-recovery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },

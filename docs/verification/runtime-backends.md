@@ -1258,6 +1258,46 @@ The current catch-up reporting boundary is pinned by `tests/fm-afk-return.test.s
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+### Post-restart seat recovery
+
+`bin/fm-herdr-recovery.sh` classifies codex trust and approval dialogs from the
+pane text and drives the recovery Enters, so its shapes are measured against
+the real binaries; verified 2026-09-10 on Herdr 0.9.0 (protocol 22) and
+codex-cli 0.153.4, Linux x86_64.
+
+Live dialog rendering captured through `herdr pane read` on a real codex seat
+in an isolated lab pane: the untrusted-directory gate renders
+"Do you trust the contents of this directory?" with numbered options and
+"Press enter to continue", and the exec approval prompt renders
+"Would you like to run the following command?", an "Environment:" line, a
+"Reason:" line, the command on a "$ " prefixed line, numbered options with
+"(y)/(p)/(esc)" hints, and "Press enter to confirm or esc to cancel".
+`herdr pane list` reports one JSON blob whose `.result.panes[]` entries carry
+`pane_id` and `agent_status`, and `herdr pane send-keys <pane> enter` accepts
+the highlighted first option; `pane list` and `pane get` reject a `--json`
+flag on herdr 0.9.0.
+A codex seat parked at a dialog reports `agent_status=blocked` through the
+pane API (observed live in the fleet and reproduced through
+`herdr pane report-agent` in the lab).
+
+```sh
+tests/fm-herdr-recovery.test.sh          # portable classifier and inventory suite (fake herdr)
+tests/fm-herdr-recovery-e2e.test.sh      # real lab session, real pane plumbing, scripted seats
+```
+
+Observed E2E output:
+
+```text
+seat fm-e2e-a harness=codex pane=fm-lab-...:w1:p1 before=blocked after=working enters=1 recovered
+seat fm-e2e-b harness=codex pane=fm-lab-...:w2:p1 before=blocked after=working enters=1 recovered
+summary: seats=2 recovered=2 needs-human=0 no-action=0
+ok - both scripted seats were recovered through the real Herdr pane plumbing
+```
+
+The E2E is the guard that refreshes this record; run it after every Herdr or
+codex upgrade rather than trusting the versions above, because the dialog
+wording is vendor output the classifier keys on.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
