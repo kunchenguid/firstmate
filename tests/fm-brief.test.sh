@@ -792,6 +792,10 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "Write \`data/$id/debrief.md\` in this worktree before appending \`done:\`" "$brief" \
+      "$id: ship DOD omitted the worktree debrief path"
+    assert_grep "A \`done\` line is refused while that file is absent or empty." "$brief" \
+      "$id: ship DOD allowed done without a debrief"
     if [ "$mode" = no-mistakes ]; then
       assert_no_grep "identify the exact check commands CI itself runs" "$brief" \
         "$id: no-mistakes briefs must not carry a pre-handoff check rule; the pipeline owns that mode's checks"
@@ -1028,6 +1032,10 @@ test_direct_pr_dod_requires_review_ready_pr() {
     "direct-PR DOD reported done before the PR reached its review-ready state"
   assert_grep "git push <fork-remote> HEAD:refs/heads/fm/$id" "$brief" \
     "direct-PR DOD did not require an explicit task-branch publication refspec"
+  assert_grep "Write \`data/$id/debrief.md\` in this worktree before appending \`done:\`" "$brief" \
+    "direct-PR DOD omitted the worktree debrief path"
+  assert_grep "A \`done\` line is refused while that file is absent or empty." "$brief" \
+    "direct-PR DOD allowed done without a debrief"
   pass "fm-brief.sh: direct-PR completion requires a review-ready PR and explicit publication refspec"
 }
 

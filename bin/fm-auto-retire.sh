@@ -6,8 +6,10 @@
 #   fm-auto-retire.sh -h
 #
 # Selects a record that is safe to hand to fm-teardown.sh without --force:
-#   - a non-scout, non-secondmate task with pr= whose forge state is MERGED
-#     and whose last status verb is done
+#   - a non-scout, non-secondmate task with pr= whose forge state is MERGED,
+#     whose last status verb is done, and whose worktree data/<id>/debrief.md
+#     is copied to $FM_HOME/data/<id>/debrief.md before teardown; an absent or
+#     empty debrief is refused as debrief-missing and left for a later cycle
 #   - a scout whose last status verb is done and whose report.md is present
 # The done check snapshots the status file's byte length and mtime; if either
 # changed before retirement, the record is refused as status-moved and left
@@ -33,7 +35,7 @@ SLACK_BIN="${FM_SLACK_POST_BIN:-$SCRIPT_DIR/fm-slack-post.sh}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
-  sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -133,6 +135,19 @@ classify() {  # <id> <meta> -> merged|scout|skip|unclassified|status-moved
   esac
 }
 
+# Copy the ship's worktree debrief into the home before teardown. Absent,
+# empty, or unreadable files refuse with debrief-missing so a later cycle can
+# retry. Scouts and secondmates do not use this path.
+preserve_ship_debrief() {  # <id> <meta>
+  local id=$1 meta=$2 wt src dest
+  wt=$(meta_field "$meta" worktree)
+  src="${wt%/}/data/$id/debrief.md"
+  dest="$DATA/$id/debrief.md"
+  [ -n "$wt" ] && [ -f "$src" ] && [ ! -L "$src" ] && [ -s "$src" ] || return 1
+  mkdir -p "$DATA/$id" || return 1
+  cp "$src" "$dest" || return 1
+}
+
 retire_one() {  # <id> <reason>
   local id=$1 reason=$2 out rc
   if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
@@ -160,7 +175,13 @@ for meta in "$STATE"/*.meta; do
   already_marked "$id" && continue
   class=$(classify "$id" "$meta") || class=unclassified
   case "$class" in
-    merged) retire_one "$id" "merged PR" ;;
+    merged)
+      if preserve_ship_debrief "$id" "$meta"; then
+        retire_one "$id" "merged PR"
+      else
+        printf 'refused: %s (debrief-missing)\n' "$id"
+      fi
+      ;;
     scout) retire_one "$id" "done scout with report" ;;
     status-moved) printf 'refused: %s (status-moved)\n' "$id" ;;
     skip) ;;

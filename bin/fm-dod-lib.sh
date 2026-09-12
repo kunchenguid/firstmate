@@ -190,6 +190,16 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+# Ship completion keeps a debrief in the disposable worktree until retirement
+# copies it home. Scout and secondmate definitions of done do not use this.
+fm_dod_debrief_block() {  # <task-id>
+  local id=$1
+  cat <<EOF
+Write \`data/$id/debrief.md\` in this worktree before appending \`done:\` (what changed, head, oracle, tests + exit codes, deferrals).
+A \`done\` line is refused while that file is absent or empty.
+EOF
+}
+
 # Both new and promoted PR deliveries persist the same context in the owning
 # home, not the disposable project checkout. The helper owns its file format.
 fm_dod_pr_context_block() {  # <task-id>
@@ -218,6 +228,7 @@ The task is complete only when its PR is ready for review: CI is green and every
 When it is implemented and committed, publish only your task branch with \`git push <fork-remote> HEAD:refs/heads/fm/$id\` and open a PR with \`gh-axi\`.
 EOF
       fm_dod_pr_context_block "$id" || return 1
+      fm_dod_debrief_block "$id"
       cat <<EOF
 After context validation succeeds and after the PR reaches that ready state, append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
@@ -231,6 +242,9 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+EOF
+      fm_dod_debrief_block "$id"
+      cat <<EOF
 When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
@@ -269,6 +283,7 @@ Two firstmate-specific rules layer on top of that guidance:
 
 EOF
       fm_dod_pr_context_block "$id" || return 1
+      fm_dod_debrief_block "$id"
       cat <<EOF
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge) and context validation succeeds, append \`done: PR {url} checks green\` and stop. You are finished.
 EOF

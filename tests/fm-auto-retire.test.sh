@@ -27,6 +27,18 @@ write_meta() {  # <dir> <id> <kind> [pr]
   } > "$1/home/state/$2.meta"
 }
 
+plant_ship_debrief() {  # <dir> <id> [body]
+  local dir=$1 id=$2 wt
+  wt="$dir/worktrees/$id"
+  mkdir -p "$wt/data/$id"
+  if [ "${3+set}" = set ]; then
+    printf '%s' "$3" > "$wt/data/$id/debrief.md"
+  else
+    printf 'debrief body\n' > "$wt/data/$id/debrief.md"
+  fi
+  printf 'worktree=%s\n' "$wt" >> "$dir/home/state/$id.meta"
+}
+
 install_fakes() {  # <dir>
   local dir=$1
   cat > "$dir/fakebin/gh" <<'SH'
@@ -44,6 +56,11 @@ case " \$* " in
   *" --force "*) printf 'FORCE\n' >> "$dir/teardown.log"; exit 1 ;;
 esac
 id=\$1
+if [ -f "$dir/home/data/\$id/debrief.md" ] && [ -s "$dir/home/data/\$id/debrief.md" ]; then
+  printf 'debrief-present-at-teardown %s\n' "\$id" >> "$dir/teardown.log"
+else
+  printf 'debrief-missing-at-teardown %s\n' "\$id" >> "$dir/teardown.log"
+fi
 if [ -f "$dir/refuse/\$id" ]; then
   echo "REFUSED: worktree has uncommitted changes." >&2
   exit 1
@@ -75,11 +92,17 @@ test_merged_done_ship_is_retired() {
   seed_home "$dir"
   install_fakes "$dir"
   write_meta "$dir" merged-ship ship 'https://github.com/example/repo/pull/1'
+  plant_ship_debrief "$dir" merged-ship
   printf 'done: PR merged\n' > "$dir/home/state/merged-ship.status"
   out=$(run_retire "$dir") || fail "merged ship retire failed: $out"
   assert_contains "$out" "retired: merged-ship (merged PR)" "merged ship was not retired"
   [ ! -e "$dir/home/state/merged-ship.meta" ] || fail "merged ship meta survived"
   grep -qx 'teardown merged-ship' "$dir/teardown.log" || fail "teardown was not invoked without extra flags"
+  grep -qx 'debrief-present-at-teardown merged-ship' "$dir/teardown.log" \
+    || fail "teardown ran before the home debrief copy landed"
+  [ -s "$dir/home/data/merged-ship/debrief.md" ] || fail "home debrief copy missing after retirement"
+  grep -qx 'debrief body' "$dir/home/data/merged-ship/debrief.md" \
+    || fail "home debrief copy did not match the worktree file"
   grep -q 'slack message retired merged-ship (merged PR)' "$dir/slack.log" \
     || fail "slack line missing: $(cat "$dir/slack.log" 2>/dev/null)"
   pass "a done ship with a merged PR is retired through ordinary teardown"
@@ -141,6 +164,7 @@ test_teardown_refusal_never_claims_retirement_or_a_decision() {
   mkdir -p "$dir/refuse"
   : > "$dir/refuse/dirty-ship"
   write_meta "$dir" dirty-ship ship 'https://github.com/example/repo/pull/1'
+  plant_ship_debrief "$dir" dirty-ship
   printf 'done: PR merged\n' > "$dir/home/state/dirty-ship.status"
   out=$(run_retire "$dir") || fail "refusal pass failed: $out"
   assert_contains "$out" "refused: dirty-ship" "refusal was not reported"
@@ -210,6 +234,7 @@ test_watcher_surfaces_one_retirement() {
   seed_home "$dir"
   install_fakes "$dir"
   write_meta "$dir" merged-ship ship 'https://github.com/example/repo/pull/1'
+  plant_ship_debrief "$dir" merged-ship
   printf 'done: PR merged\n' > "$dir/home/state/merged-ship.status"
   out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
@@ -223,6 +248,44 @@ test_watcher_surfaces_one_retirement() {
   pass "an ordinary watcher cycle surfaces one retirement"
 }
 
+test_merged_done_ship_without_debrief_is_refused() {
+  local dir out
+  dir="$TMP_ROOT/debrief-missing"
+  seed_home "$dir"
+  install_fakes "$dir"
+  write_meta "$dir" missing-ship ship 'https://github.com/example/repo/pull/1'
+  mkdir -p "$dir/worktrees/missing-ship"
+  printf 'worktree=%s\n' "$dir/worktrees/missing-ship" >> "$dir/home/state/missing-ship.meta"
+  printf 'done: PR merged\n' > "$dir/home/state/missing-ship.status"
+  write_meta "$dir" empty-ship ship 'https://github.com/example/repo/pull/1'
+  plant_ship_debrief "$dir" empty-ship ""
+  printf 'done: PR merged\n' > "$dir/home/state/empty-ship.status"
+  out=$(run_retire "$dir") || fail "missing debrief pass failed: $out"
+  assert_contains "$out" "refused: missing-ship (debrief-missing)" \
+    "absent debrief was not refused with the named reason"
+  assert_contains "$out" "refused: empty-ship (debrief-missing)" \
+    "empty debrief was not refused with the named reason"
+  assert_not_contains "$out" "retired:" "a ship without a debrief was retired"
+  [ -f "$dir/home/state/missing-ship.meta" ] || fail "missing-debrief record was removed"
+  [ -f "$dir/home/state/empty-ship.meta" ] || fail "empty-debrief record was removed"
+  [ ! -e "$dir/teardown.log" ] || fail "teardown ran without a debrief"
+  [ ! -e "$dir/home/state/missing-ship.auto-retire" ] \
+    || fail "absent debrief was marked as a permanent refusal"
+  [ ! -e "$dir/home/data/missing-ship/debrief.md" ] \
+    || fail "absent debrief still produced a home copy"
+  plant_ship_debrief "$dir" missing-ship
+  out=$(run_retire "$dir") || fail "debrief retry pass failed: $out"
+  assert_contains "$out" "retired: missing-ship (merged PR)" \
+    "a later cycle did not retire once the debrief appeared"
+  assert_contains "$out" "refused: empty-ship (debrief-missing)" \
+    "empty debrief was retired on the retry cycle"
+  grep -qx 'debrief-present-at-teardown missing-ship' "$dir/teardown.log" \
+    || fail "retry teardown ran before the home debrief copy landed"
+  [ -s "$dir/home/data/missing-ship/debrief.md" ] || fail "retry did not copy the debrief home"
+  [ -f "$dir/home/state/empty-ship.meta" ] || fail "empty-debrief record was removed on retry"
+  pass "a done ship without a debrief is refused as debrief-missing and left for a later cycle"
+}
+
 test_merged_done_ship_is_retired
 test_done_scout_with_report_is_retired
 test_open_pr_and_working_ship_are_left_alone
@@ -231,3 +294,4 @@ test_teardown_refusal_never_claims_retirement_or_a_decision
 test_secondmate_and_reportless_scout_are_left_alone
 test_working_appended_during_forge_lookup_is_refused
 test_watcher_surfaces_one_retirement
+test_merged_done_ship_without_debrief_is_refused
