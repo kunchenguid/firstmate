@@ -31,7 +31,11 @@ test('CLI composes executable source, pace, render, JSONL and seven-day history'
   assert.ok(Number.isFinite(frame.resources.cpuPercent));
   const calls = fs.readFileSync(path.join(f.home, 'calls'), 'utf8');
   assert.match(calls, /--json.*--full.*--no-credential-refresh/);
-  assert.match(f.run(['--clean']), /36% LEFT \| ideal 50% \| -14% PACE/);
+  const cleanFrame = f.run(['--clean']);
+  assert.match(cleanFrame, /7D ALL\s+##------\s+36%\s+-14%/);
+  assert.match(cleanFrame, /1 pools \| 1 over pace \| 0 unavailable \| 0 identity mismatch/);
+  assert.match(cleanFrame, /private@example.test/);
+  assert.match(cleanFrame, /\[RESET (?:23h59m|1d0h)\]/);
   assert.doesNotMatch(f.run(['--clean']), /\x1b|▓|░/);
   const history = JSON.parse(f.run(['history', '--json']));
   assert.equal(history.length, 3);
@@ -78,26 +82,41 @@ test('malformed source becomes unavailable rather than a plausible empty report'
   assert.match((await quotaSource(f.env).read([]))[0].error, /invalid/);
 });
 
-test('six pools use one row at 100 columns and two at 80 with safe terminal text', () => {
+test('six pools use three fixed columns at 100 and two at 80 with aligned metrics', () => {
   const now = Date.parse('2026-09-11T00:00:00Z');
   const inputs = Array.from({ length: 6 }, (_, i) => ({ id: `p${i}`, label: `POOL ${i}`, data: {
-    ...provider, account: { email: `user${i}@example.test` }, windows: Array.from({ length: 3 }, (_, j) => ({ ...provider.windows[0], id: `w${j}` })),
+    ...provider, account: { email: `user${i}@example.test` }, windows: Array.from({ length: [3, 1, 1, 2, 2, 2][i] }, (_, j) => ({ ...provider.windows[0], id: `w${j}` })),
   } }));
   const frame = classify(inputs, now);
-  for (const [width, height, headingRows] of [[100, 30, 1], [80, 24, 2]]) {
+  for (const [width, height, headingRows] of [[100, 30, 2], [80, 24, 3]]) {
     const text = renderFrame(frame, { width });
     assert.ok(text.trimEnd().split('\n').length <= height, text);
     assert.ok(text.split('\n').every(line => line.length <= width), text);
     assert.equal(text.split('\n').filter(line => line.includes('POOL')).length, headingRows);
     for (let i = 0; i < 6; i++) assert.match(text, new RegExp(`POOL ${i}`));
-    assert.match(text, /▓|▒|░/);
+    assert.match(text, /▓|░/);
+    const lines = text.trimEnd().split('\n');
+    const firstLimit = lines[3];
+    assert.equal(firstLimit.indexOf('▓'), 12);
+    assert.equal(firstLimit.indexOf('▓', 20), 46);
+    assert.equal(firstLimit.indexOf('36%'), 22);
+    assert.equal(firstLimit.indexOf('-14%'), 27);
+    assert.equal(lines[0].indexOf('POOL 1'), 34);
+    assert.equal(lines[1].indexOf('36%'), 14);
+    assert.match(lines.at(-2), /^6 pools \| 6 over pace \| 0 unavailable \| 0 identity mismatch \| 0 duplicate$/);
+    assert.match(lines.at(-1), /MARVIN.*LEFT.*PACE.*2026-09-11T00:00:00.000Z/);
+    const ascii = renderFrame(frame, { width, clean: true, color: true });
+    assert.equal(ascii.split('\n').length, text.split('\n').length);
+    assert.equal(ascii.split('\n')[0].indexOf('POOL 1'), 34);
+    assert.match(ascii, /##------\s+36%\s+-14%/);
+    assert.doesNotMatch(ascii, /[^\x20-\x7e\n]/);
   }
   frame.pools[0].email = '\x1b[2J\nforged';
   assert.doesNotMatch(renderFrame(frame), /\x1b/);
-  assert.match(renderFrame(frame, { color: true }), /\x1b\[38;5;215mHOT/);
+  assert.match(renderFrame(frame, { color: true }), /\x1b\[38;5;222m\[HOT\]/);
 });
 
-test('six-account menu with duplicate/identity warnings and four limits fits 80x24', () => {
+test('dense menus grow vertically without hiding limits, identities or warnings', () => {
   const names = ['claude', 'codex', 'codex', 'cursor', 'kimi', 'grok'];
   const inputs = names.map((name, i) => ({ id: `p${i}`, label: `POOL ${i}`, expectedEmail: `expected${i}@example.test`, data: {
     ...provider, provider: name, account: { email: name === 'codex' ? 'shared@example.test' : `expected${i}@example.test` },
@@ -107,9 +126,57 @@ test('six-account menu with duplicate/identity warnings and four limits fits 80x
   assert.equal(frame.counts.mismatch, 2);
   assert.equal(frame.counts.duplicate, 2);
   const text = renderFrame(frame, { width: 80 });
-  assert.ok(text.trimEnd().split('\n').length <= 24, text);
+  assert.ok(text.split('\n').every(line => line.length <= 80), text);
+  assert.equal((text.match(/7D ALL/g) || []).length, 19);
+  assert.equal((text.match(/shared@example.test/g) || []).length, 2);
+  assert.equal((text.match(/\[RESET 1d0h\]/g) || []).length, 6);
   assert.match(text, /DUPLICATE ACCOUNT/);
   assert.match(text, /IDENTITY MISMATCH/);
+});
+
+test('grid retains unknown states and sanitizes long external fields at every width', () => {
+  const frame = classify([{ id: 'offline', data: { provider: 'offline', windows: [] } },
+    { id: 'unknown', data: { ...provider, windows: [{ id: 'api', label: 'API QUOTA', percentRemaining: 0 }] } }], Date.now());
+  frame.pools[0].label = 'LONG\x1b[2J\nNAME'.repeat(8);
+  frame.pools[0].email = '界\taccount@example.test'.repeat(8);
+  frame.pools[0].plan = '\x1b[32m' + 'plan'.repeat(20);
+  for (const width of [20, 32, 67, 80, 100, 299]) for (const ascii of [false, true]) {
+    const text = renderFrame(frame, { width, clean: ascii });
+    assert.ok(text.split('\n').every(line => line.length <= width), text);
+    assert.doesNotMatch(text, /\x1b|\t|界/);
+    assert.match(text, /\[UNAVAILABLE\]/);
+    assert.match(text, /\[PACE UNKNOWN\]/);
+    assert.match(text, /\?{12}/);
+    assert.match(text, /\[RESET \?\]/);
+    if (width >= 32) assert.match(text, /API\s+[-░]{8}\s+0%\s+\?/);
+  }
+  const empty = renderFrame(classify([], Date.now()));
+  assert.match(empty, /No quota pools configured or discovered/);
+  assert.match(empty, /0 pools \| 0 over pace/);
+});
+
+test('static and TTY styling agree while clean and NO_COLOR retain a readable grid', () => {
+  const now = Date.parse('2026-09-11T00:00:00Z');
+  const frame = classify([{ id: 'hot', data: provider }, { id: 'under', data: {
+    ...provider, account: { email: 'other@example.test' }, windows: [{ ...provider.windows[0], percentRemaining: 70 }],
+  } }], now);
+  const colored = renderFrame(frame, { color: true });
+  assert.match(colored, /\x1b\[38;5;222m\[HOT\]/);
+  assert.match(colored, /\x1b\[38;5;141m\[UNDER\]/);
+  assert.match(colored, /\x1b\[38;5;245mprivate@example.test/);
+  assert.equal(colored.replace(/\x1b\[[0-9;]*m/g, '').trimEnd(), renderFrame(frame).trimEnd());
+  const writes = [];
+  const renderer = terminalRenderer({ tty: true, color: true, write: text => writes.push(text) }, { watch: true, width: () => 100 });
+  assert.equal(renderer.render(frame), renderFrame(frame));
+  assert.match(writes.join(''), /\x1b\[38;5;141m\[UNDER\]/);
+  assert.match(writes.join(''), /\x1b\[38;5;222m\[HOT\]/);
+  writes.length = 0;
+  terminalRenderer({ tty: true, color: true, write: text => writes.push(text) }, { clean: true, width: () => 100 }).render(frame);
+  assert.equal(writes.join(''), renderFrame(frame, { clean: true }));
+  assert.doesNotMatch(writes.join(''), /[^\x20-\x7e\n]/);
+  writes.length = 0;
+  terminalRenderer({ tty: false, color: false, write: text => writes.push(text) }, { width: () => 100 }).render(frame);
+  assert.equal(writes.join(''), renderFrame(frame));
 });
 
 test('TTY watch emits only changed cells and stays silent for unchanged quota evidence', () => {

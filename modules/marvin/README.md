@@ -25,12 +25,16 @@ bin/fm-marvin.sh stats
 
 Every verb accepts `-h` and `--help` without querying quota-axi.
 `watch` runs in the foreground and Ctrl+C exits; refresh is measured after each completed frame, so reads never overlap.
-`NO_COLOR` disables color and `--clean` prints full identities, source labels, window names, ideal percentages, and reset countdowns as static ASCII.
+`NO_COLOR` disables color and `--clean` prints the same aligned grid as static ASCII.
+Pool headers carry pace badges; a 12-cell gauge leads each account, followed by fixed-width limit bars, percentages, signed pace deltas, and the earliest reset badge.
+The footer counts pools, over-pace pools, unavailable pools, identity mismatches, and duplicates beside the observation timestamp.
 JSON output includes complete untruncated fields and one object per refresh, plus `resources.rssBytes` and `resources.cpuPercent` for this observer process.
 CPU percent is process CPU time divided by process uptime, not host load or quota-axi child CPU.
 TTY watch writes only changed cells and skips unchanged quota evidence; timestamps alone do not trigger a redraw.
-Six cards share one row at 100 columns and wrap into two rows at 80 columns; unusually many limits or warnings grow the output rather than hide data.
-Compact account fields end in `~` when shortened and limit labels are abbreviated (`M5H`/`M7D` denote model-specific windows); use `--clean` or `--json` for the complete values.
+Cards occupy fixed 32-cell columns with two-cell gutters: three columns at 100 cells and two at 80 cells.
+Reset badges align at the foot of each row of cards; unusually many limits or warnings grow the output rather than hide data.
+Account fields and limit labels end in `~` when shortened; common labels use `7D ALL`, `5H SESSION`, `WEEKLY`, and `API`.
+Use `--json` for complete identities, credential-source labels, original window names, ideal percentages, and per-window reset times.
 
 ## How to configure
 

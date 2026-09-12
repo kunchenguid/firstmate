@@ -17,7 +17,7 @@ const help = `Usage: fm-marvin.sh [status|watch|history|stats] [options]
   stats        Summarize telemetry from the last day. Example: fm-marvin.sh stats
 Options (accepted by every verb):
   -h, --help       Show this help without credentials. Example: fm-marvin.sh watch -h
-  --clean          Static full-detail ASCII output. Example: fm-marvin.sh --clean
+  --clean          Static aligned ASCII grid. Example: fm-marvin.sh --clean
   --json           JSON instead of terminal output. Example: fm-marvin.sh --json
   --config FILE    Pool/window settings. Example: fm-marvin.sh --config marvin.json
   --refresh N      Seconds between completed frames (1..86400; default 60). Example: fm-marvin.sh watch --refresh 30
