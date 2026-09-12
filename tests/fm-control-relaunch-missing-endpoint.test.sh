@@ -181,16 +181,36 @@ journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
 }
 
+# stop_server: kill the private server and wait until it is actually gone.
+# `kill-server` returns as soon as the server acknowledges; the server then
+# reaps its panes (a recreated window hosts the stand-in agent) and closes its
+# listening socket a moment later, while the socket file itself stays behind.
+# A client that connects during that window reaches the dying server and fails
+# with "server exited unexpectedly" instead of starting a fresh one, so wait
+# until a client can no longer connect at all before returning. `list-sessions`
+# never starts a server of its own, so it is a pure probe.
+stop_server() {
+  local _ probe=''
+  private_tmux kill-server >/dev/null 2>&1 || true
+  for _ in $(seq 1 100); do
+    if probe=$(private_tmux list-sessions 2>&1 >/dev/null); then
+      sleep 0.1
+      continue
+    fi
+    case $probe in
+      *"no server running on "*|*"error connecting to "*) return 0 ;;
+    esac
+    sleep 0.1
+  done
+  fail "the private tmux server did not exit after kill-server: $probe"
+}
+
 # start_server: a fresh private server whose only session is `firstmate` with
 # one idle window, so a recorded fm-<id> window is authoritatively absent.
 start_server() {
-  private_tmux kill-server >/dev/null 2>&1 || true
+  stop_server
   private_tmux new-session -d -s firstmate -n idle -c "$LAB" \
     || fail "could not start the private tmux server"
-}
-
-stop_server() {
-  private_tmux kill-server >/dev/null 2>&1 || true
 }
 
 pane_path() {  # <target>
