@@ -47,6 +47,7 @@ State all five of these elements in one concise, evidence-first escalation:
 5. A recommendation with the reason it best serves the accepted intent.
 
 Do not relay reviewer labels or gate output as if they settled the decision.
+`AGENTS.md` section 9 owns the form the captain sees these elements in.
 
 ## Classification examples
 
