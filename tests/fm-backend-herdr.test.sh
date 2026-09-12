@@ -4367,6 +4367,29 @@ test_send_text_submit_idle_native_empty_composer_confirms_delivery() {
   pass "fm_backend_herdr_send_text_submit: idle native agent-state plus empty composer reports empty (landed Claude turn)"
 }
 
+# Regression for the Muse-on-Herdr false negative: the native agent probe was
+# unreadable, but the submitted message visibly started Muse thinking. The
+# post-Enter bare Muse prompt is the shared classifier's structural proof that
+# the composer cleared. It must confirm delivery without a second Enter; a
+# local Herdr pattern that does not know Muse's glyph would return unknown.
+test_send_text_submit_unknown_native_muse_empty_composer_confirms_delivery() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-muse-unknown-native-empty-composer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: literal send; 2: unreadable native agent state; 3: pre-Enter rendered
+  # pane, with the typed text but no busy footer; 4: Enter; 5: Muse's cleared
+  # truecolor bare prompt after it accepts the message.
+  printf '1\n' > "$resp/2.exit"
+  printf '  \xe2\x9f\xa9 hello captain\n' > "$resp/3.out"
+  printf '\033[38;2;90;160;255m\033[48;2;38;56;84m⟩\033[0m\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "an unreadable native Muse state plus a cleared Muse composer must confirm delivery, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a cleared Muse composer must not trigger duplicate Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: unreadable native Muse state plus shared empty Muse composer confirms one landed Enter"
+}
+
 test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-idle-native-rendered-busy-queued"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5379,6 +5402,7 @@ test_send_text_submit_preexisting_working_pending_is_queued_enter
 test_send_text_submit_preexisting_working_does_not_confirm_failed_enter
 test_send_text_submit_idle_baseline_does_not_confirm_failed_enter
 test_send_text_submit_idle_native_empty_composer_confirms_delivery
+test_send_text_submit_unknown_native_muse_empty_composer_confirms_delivery
 test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued
 test_composer_state_cursor_midturn_row_reads_pending
 test_rendered_busy_state_reads_the_cursor_busy_token
