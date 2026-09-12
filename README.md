@@ -195,6 +195,7 @@ Bearings invocation examples:
 - `/bearings include PRs` keeps chat-only mode and opts into live PR enrichment.
 - `/bearings file` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch and links it from the four-section chat digest.
 - `/bearings file include PRs` combines the dated report with live PR enrichment.
+- `bin/fm-vigie.sh` provides a bounded, read-only daily/event recommendation digest; use `--json` for AXI data or `--fr` for a concise French notification surface. It does not schedule delivery or close work.
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 
@@ -229,6 +230,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/verification/supervision.md](docs/verification/supervision.md) - active maintainer verification for session-start, guard, continuity, and wedge integrations.
 - [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi and `pi-signed`, omp, Grok, Cursor, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
+- [docs/vigie.md](docs/vigie.md) - the bounded daily/event recommendation digest and its read-only semantics.
 - [docs/documentation-audiences.md](docs/documentation-audiences.md) - documentation audiences and the machine-checked placement boundary.
 - [`AGENTS.md`](AGENTS.md) - the supervisor contract, role boundary, and routing index for conditional procedures.
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to contribute, including the dev/test commands.
