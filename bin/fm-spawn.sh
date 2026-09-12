@@ -55,16 +55,18 @@
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
 #   config/backend, then runtime auto-detection from the runtime firstmate's
-#   environment: $TMUX, HERDR_ENV=1, or cmux runtime signals (via
-#   bin/fm-backend.sh's fm_backend_detect, with cmux fallback details in
-#   docs/cmux-backend.md),
-#   then tmux.
+#   environment (bin/fm-backend.sh's fm_backend_detect; docs/configuration.md
+#   "Runtime backend" owns the exact marker order and which backends are
+#   auto-detected at all), then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
 #   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
-#   auto-detected herdr or cmux spawn prints a loud stderr notice;
-#   auto-detected tmux stays silent; zellij and orca are never auto-detected.
+#   session provider only, exactly like herdr/zellij, so it does. A resolved
+#   backend that is known but not spawn-capable refuses at
+#   fm_backend_validate_spawn before any task record exists, so auto-detection
+#   can select a backend this script will then refuse. An auto-detected
+#   non-tmux backend prints a loud stderr notice; auto-detected tmux stays
+#   silent.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. cmux does not support --secondmate spawns yet.
