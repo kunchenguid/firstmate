@@ -272,6 +272,48 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+# The watcher runs a task's merge poll only while its artifacts still validate
+# against the task record (bin/fm-pr-lib.sh); a record the identity parser
+# refuses is what the watcher reports as an unauthenticated state check. Run in
+# a subshell so the library's globals never leak into the suite.
+poll_authenticated() {  # <home> <id>
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_poll_artifacts_valid "$1/state" "$2" "$ROOT/bin/fm-pr-poll.sh"
+  )
+}
+
+# Promotion rewrites kind=/mode=/yolo= by APPENDING them, so on a scout whose
+# PR is already armed the three land after pr=. bin/fm-pr-lib.sh's identity
+# parser refuses a record carrying an unknown line after pr=, and the watcher
+# reports that refusal as an unauthenticated state check - the merge would then
+# go unnoticed. Nothing gates arming on kind, so an armed scout is reachable.
+test_promote_keeps_the_armed_merge_poll_authenticated() {
+  local home meta out status
+  home="$TMP_ROOT/promote-pr-poll/home"
+  mkdir -p "$home/state"
+  meta="$home/state/promote-d2.meta"
+  write_brief "$home" promote-d2
+  printf 'window=fm-promote-d2\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-pr-check.sh" promote-d2 https://github.com/example/repo/pull/22 2>&1)
+  status=$?
+  expect_code 0 "$status" "arming the merge poll on a scout should succeed"$'\n'"$out"
+  poll_authenticated "$home" promote-d2 \
+    || fail "the merge poll must authenticate before the promotion, or this case proves nothing"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-d2 --mode direct-PR --yolo on 2>&1)
+  status=$?
+  expect_code 0 "$status" "promoting an armed scout should succeed"$'\n'"$out"
+  assert_grep 'kind=ship' "$meta" "promotion did not rewrite the task record"
+  poll_authenticated "$home" promote-d2 \
+    || fail "promotion disarmed the armed merge poll, so the merge would go unnoticed"
+  pass "fm-promote: promoting an armed scout leaves its merge poll authenticated"
+}
+
 # A symlink at state/<id>.meta is the containment hazard the shared publisher
 # refuses: promotion must not rewrite the symlink target in place.
 test_promote_refuses_a_symlinked_task_record() {
@@ -797,6 +839,7 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_keeps_the_armed_merge_poll_authenticated
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy

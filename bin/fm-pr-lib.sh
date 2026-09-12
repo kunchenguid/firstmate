@@ -315,7 +315,18 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
+      # Fields whose writers append to a record that may already carry pr=:
+      # the Relay binding (bin/fm-x-lib.sh), the captain-hold completion
+      # attestation (bin/fm-captain-hold.sh), the scout-to-ship promotion
+      # (bin/fm-promote.sh), and the trace carrier republished after a relaunch
+      # (spawn_record_traceparent in bin/fm-spawn.sh). Each rewrites by
+      # appending, so they legitimately land after pr= and must not disarm the
+      # merge poll. A genuinely unknown field after pr= is still refused.
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+        ;;
+      decisions_reviewed=*|decision_keys=*)
+        ;;
+      traceparent=*|kind=*|mode=*|yolo=*)
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1

@@ -188,6 +188,18 @@ run_shim() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
 }
 
+# The watcher runs a task's merge poll only while its artifacts still validate
+# against the task record (bin/fm-pr-lib.sh); a record the identity parser
+# refuses is what the watcher reports as an unauthenticated state check. Run in
+# a subshell so the library's globals never leak into the suite.
+poll_authenticated() {  # <home> <id>
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_poll_artifacts_valid "$1/state" "$2" "$ROOT/bin/fm-pr-poll.sh"
+  )
+}
+
 write_origin_meta() {  # <home> <id> [kind]
   local home=$1 id=$2 kind=${3:-scout}
   fm_write_meta "$home/state/$id.meta" \
@@ -674,6 +686,41 @@ EOF
 # status decisions refuses --none, refuses an inventory naming absent tasks,
 # attests a verified inventory of captain-held task ids, and transfers every
 # still-open status decision to that durable inventory.
+# The completion attestation APPENDS its two keys to the task record, so on a
+# task whose PR is already armed they land after pr=. bin/fm-pr-lib.sh's
+# identity parser refuses a record carrying an unknown line after pr=, and the
+# watcher reports that refusal as an unauthenticated state check - the merge
+# would then go unnoticed. The attestation's own writers are therefore known to
+# that parser.
+test_completion_attestation_keeps_the_armed_merge_poll_authenticated() {
+  local home id out
+  home=$(make_home completion-pr-poll)
+  id=sample-pr-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review sample delivery" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the investigation backlog fixture"
+  write_origin_meta "$home" "$id"
+  printf 'working: report drafted\n' > "$home/state/$id.status"
+  cat > "$home/data/$id/report.md" <<'EOF'
+# Sample delivery review
+
+No captain choices remain open.
+EOF
+
+  out=$(FM_STATE_OVERRIDE="$home/state" FM_HOME="$home" \
+    "$ROOT/bin/fm-pr-check.sh" "$id" https://github.com/example/repo/pull/21 2>&1) \
+    || fail "arming the merge poll failed: $out"
+  poll_authenticated "$home" "$id" \
+    || fail "the merge poll must authenticate before the attestation, or this case proves nothing"
+
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "the shared completion gate failed on a task with no open captain calls"
+  assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
+  poll_authenticated "$home" "$id" \
+    || fail "the completion attestation disarmed the armed merge poll, so the merge would go unnoticed"
+  pass "captain-hold completion: the attestation leaves an armed merge poll authenticated"
+}
+
 test_completion_gate_attests_and_transfers() {
   local home id json open before after
   home=$(make_home completion-gate)
@@ -3853,6 +3900,7 @@ SH
 
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
+test_completion_attestation_keeps_the_armed_merge_poll_authenticated
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility
