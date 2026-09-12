@@ -153,9 +153,9 @@ status_is_terminal_verb() {
 # (working, resolved, captain-held) and paused never match from free-text prose;
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
-# Regex matching ignores emission-time tags before the record separator, even malformed,
-# so existing FM_CAPTAIN_RE overrides keep matching; other metadata and note text
-# remain intact, as do the stored and surfaced event bytes.
+# Regex matching ignores a well-formed optional numeric emission-time tag before
+# the first colon, so existing FM_CAPTAIN_RE overrides keep matching; other
+# metadata and note text remain intact, as do the stored and surfaced event bytes.
 status_is_captain_relevant() {
   local line=$1 verb
   [ -n "$line" ] || return 1
@@ -267,19 +267,21 @@ status_stamp_line() {  # <new-status-line> -> line (without newline)
   fi
 }
 
-# Match complete time tags before finding the separator: malformed values may
-# contain colons. Relevance and retry matching share this normalization.
+# Strip only a well-formed optional numeric time tag before the first colon.
+# A malformed value is ordinary line bytes, never a time tag, so relevance,
+# retry dedup, key, and note all read the same line. Relevance and retry
+# matching share this normalization.
 _FM_STATUS_UNTIMED_AWK='
   function untimed(s, colon, head) {
-    if (!match(s, /^([^:]| \[at=[^]]*\])*:/)) return s
-    colon = RLENGTH
+    colon = index(s, ":")
+    if (!colon) return s
     head = substr(s, 1, colon - 1)
-    gsub(/ \[at=[^]]*\]/, "", head)
+    gsub(/ \[at=[0-9]+\]/, "", head)
     return head substr(s, colon)
   }
 '
 
-# Retry deduplication ignores only the optional time tags, even malformed;
+# Retry deduplication ignores only a well-formed optional numeric time tag;
 # all other bytes, including correlation metadata, still identify the event.
 status_event_recorded() {  # <status-file> <new-status-line>
   [ -f "$1" ] || return 1
