@@ -51,8 +51,9 @@
 #     home without the current Pi session lock cannot have a live lease, so
 #     the guard is a no-op there - non-Pi behavior is unchanged by construction.
 #   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns -
-#     merging a PR, landing local-only work, spawning workers - refuse the
-#     branch actor outright, lease or no lease.
+#     merging a PR, landing local-only work, spawning workers, arming or
+#     restarting the watcher - refuse the branch actor outright, lease or no
+#     lease.
 #   - "backlog" is a reserved claimable resource name used by the branch
 #     prompt around its own data/backlog.md writes. This is deliberately
 #     branch-side containment only; main's tasks-axi path has no executable
