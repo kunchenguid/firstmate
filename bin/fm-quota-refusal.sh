@@ -3,8 +3,10 @@
 # Usage: fm-quota-refusal.sh detect
 #        fm-quota-refusal.sh apply --task <id>
 #
-# Reads the candidate text from stdin. `detect` prints `provider=` and `reset=`
-# lines and exits 0 on a match, 1 otherwise. `apply` records the same match as
+# Reads candidate text or a structured Pi turn-end event from stdin.
+# Structured events are matched only for provider errors or non-zero tool results.
+# `detect` prints `provider=` and `reset=` lines and exits 0 on a match, 1 otherwise.
+# `apply` records the same match as
 # `blocked [key=quota-exhausted]: <provider> reset=<when>` on the task status,
 # a provider-scope cooldown through bin/fm-quota-cooldown.sh, and one Slack
 # line through bin/fm-slack-post.sh. Repeat apply on the same task is a no-op.
@@ -12,7 +14,6 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-}"
 STATE="${FM_STATE_OVERRIDE:-${FM_HOME:+$FM_HOME/state}}"
 
@@ -49,7 +50,53 @@ fi
 
 TEXT=$(cat)
 MATCH=$(FM_QUOTA_COOLDOWN_NOW="${FM_QUOTA_COOLDOWN_NOW:-}" node - "$TEXT" <<'NODE'
-const text = process.argv[2] || '';
+function eventText(raw) {
+  let event;
+  try {
+    event = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  const message = event && typeof event === 'object' ? event.message : null;
+  const structured = event && typeof event === 'object' &&
+    (event.type === 'turn_end' || Array.isArray(event.toolResults) ||
+      (message && typeof message === 'object' && 'stopReason' in message));
+  if (!structured) return raw;
+
+  const parts = [];
+  const add = (value) => {
+    if (typeof value === 'string' && value) parts.push(value);
+  };
+  const addMessage = (value) => {
+    if (!value || typeof value !== 'object') return;
+    add(value.errorMessage);
+    add(value.error);
+    add(value.output);
+    if (typeof value.content === 'string') add(value.content);
+    else if (Array.isArray(value.content)) {
+      for (const chunk of value.content) {
+        if (chunk && typeof chunk === 'object') {
+          add(chunk.text);
+          add(chunk.error);
+        }
+      }
+    }
+  };
+
+  if (message && message.stopReason === 'error') addMessage(message);
+  if (Array.isArray(event.toolResults)) {
+    for (const result of event.toolResults) {
+      const exitCode = result && result.exitCode;
+      const nonZero = result && (result.isError === true || result.error != null ||
+        (exitCode != null && String(exitCode) !== '0') ||
+        ['error', 'failed', 'failure'].includes(result.status));
+      if (nonZero) addMessage(result);
+    }
+  }
+  return parts.join('\\n');
+}
+
+const text = eventText(process.argv[2] || '');
 const nowRaw = process.env.FM_QUOTA_COOLDOWN_NOW || new Date().toISOString();
 const now = new Date(nowRaw);
 const year = Number.isFinite(now.getTime()) ? now.getUTCFullYear() : new Date().getUTCFullYear();

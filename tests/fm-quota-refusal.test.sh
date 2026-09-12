@@ -18,6 +18,10 @@ CURSOR_LIMIT="You've hit your usage limit for Auto. Your usage limit resets 9/14
 OPENAI_QUOTA='Error: 429 You exceeded your current quota, please check your plan and billing details. insufficient_quota'
 XAI_QUOTA='Error: This request exceeds your xAI usage quota. Please try again later.'
 ANTHROPIC_QUOTA='{"type":"error","error":{"type":"rate_limit_error","message":"You have exceeded your usage limits. Your limit will reset at 2026-09-15T00:00:00Z."}}'
+ASSISTANT_TEXT_EVENT='{"type":"turn_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"The provider documentation says: You have hit your usage limit."}]}}'
+PROVIDER_429_EVENT='{"type":"turn_end","message":{"role":"assistant","stopReason":"error","errorMessage":"429: Your token-plan 1-week quota has been exhausted. The quota will reset at 09-15 18:58:00 UTC."}}'
+TOOL_FAILURE_EVENT='{"type":"turn_end","toolResults":[{"isError":true,"output":"429: You have hit your usage limit."}]}'
+TOOL_SUCCESS_EVENT='{"type":"turn_end","toolResults":[{"isError":false,"output":"The provider documentation says: You have hit your usage limit."}]}'
 
 detect() {
   FM_QUOTA_COOLDOWN_NOW=2026-09-12T00:00:00Z "$DETECT" detect
@@ -59,6 +63,14 @@ test_each_vendor_phrasing_is_detected() {
   expect_detect "$XAI_QUOTA" xai "xai usage quota" >/dev/null
   expect_detect "$ANTHROPIC_QUOTA" anthropic "anthropic rate_limit_error quota" >/dev/null
   pass "cursor, openai, xai, and anthropic quota phrasings are detected"
+}
+
+test_event_provenance_controls_phrase_matching() {
+  expect_undetected "$ASSISTANT_TEXT_EVENT" "ordinary assistant text event"
+  expect_detect "$PROVIDER_429_EVENT" qwen "provider 429 event" >/dev/null
+  expect_undetected "$TOOL_SUCCESS_EVENT" "successful tool result"
+  expect_detect "$TOOL_FAILURE_EVENT" cursor "non-zero tool result" >/dev/null
+  pass "ordinary assistant text is ignored while provider and tool errors are detected"
 }
 
 test_unrelated_errors_are_not_detected() {
@@ -116,6 +128,7 @@ SH
 
 test_qwen_token_plan_429_is_detected
 test_each_vendor_phrasing_is_detected
+test_event_provenance_controls_phrase_matching
 test_unrelated_errors_are_not_detected
 test_apply_writes_status_records_cooldown_and_posts_slack
 

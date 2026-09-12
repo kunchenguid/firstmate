@@ -5073,29 +5073,25 @@ export default function (pi: any) {
   });
   pi.on("turn_end", (event: any) => {
     execFile("touch", ["$TURNEND"]);
-    const parts: string[] = [];
     const msg = event && event.message;
-    if (msg && msg.errorMessage) parts.push(String(msg.errorMessage));
-    const content = msg && msg.content;
-    if (typeof content === "string") parts.push(content);
-    else if (Array.isArray(content)) {
-      for (const c of content) {
-        if (c && c.text) parts.push(String(c.text));
-        if (c && c.error) parts.push(String(c.error));
-      }
-    }
-    if (Array.isArray(event && event.toolResults)) {
-      for (const t of event.toolResults) {
-        if (t && t.error) parts.push(String(t.error));
-        if (t && t.output) parts.push(String(t.output));
-      }
-    }
-    const text = parts.join("\n");
-    if (!text) return;
+    const providerError = msg && msg.stopReason === "error";
+    const toolResults = Array.isArray(event && event.toolResults) ? event.toolResults : [];
+    const nonZeroToolResult = toolResults.some((result: any) => {
+      const exitCode = result && result.exitCode;
+      return result && (result.isError === true || result.error != null ||
+        (exitCode != null && String(exitCode) !== "0") ||
+        ["error", "failed", "failure"].includes(result.status));
+    });
+    if (!providerError && !nonZeroToolResult) return;
+    const payload = JSON.stringify({
+      type: "turn_end",
+      message: providerError ? msg : undefined,
+      toolResults: nonZeroToolResult ? toolResults : undefined,
+    });
     const child = execFile("$FM_ROOT/bin/fm-quota-refusal.sh", ["apply", "--task", "$ID"], {
       env: { ...process.env, FM_HOME: "$FM_HOME", FM_STATE_OVERRIDE: "$STATE_REAL" },
     });
-    child.stdin?.end(text);
+    child.stdin?.end(payload);
   });
   // A native harness can make progress inside one Pi turn. This separate
   // marker prevents false wedge alarms without fabricating a completed turn.
