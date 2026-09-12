@@ -662,6 +662,7 @@ EOF
     home="$TMP_ROOT/startup/$mode"
     mkdir -p "$home/state" "$home/data" "$home/config"
     printf 'manual\n' > "$home/config/backlog-backend"
+    # shellcheck disable=SC2016 # Variables expand in the child shell.
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_HARNESS=omp MODE="$mode" \
       FM_SESSION_START_STAGE_FILE="$home/state/stage" \
@@ -686,6 +687,7 @@ await import(pathToFileURL(process.env.WATCH_EXT).href).then(({ default: load })
 await import(pathToFileURL(process.env.GUARD_EXT).href).then(({ default: load }) => load(noop));
 EOF
   bin=$(make_named_shells "$TMP_ROOT/nested/bin")
+  # shellcheck disable=SC2016 # Variables expand in the child shell.
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" WATCH_EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" GUARD_EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" \
     "$bin/omp" -c 'printf "%s\n" "$$" > "$1/state/.lock"; node "$2"' _ "$home" "$driver" 2>&1)
   status=$?
