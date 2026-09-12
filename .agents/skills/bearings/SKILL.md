@@ -57,13 +57,12 @@ Board answers are acted on later under the normal authority rules; this skill's 
    The `(return-catchup)` gate is the same shape: an action-free notice that an away-return catch-up is still open, naming the blockers left to clear or the reason the catch-up was retained.
    Render it under Charted Next like any other warning row: reporting is not ordinary work, while acting on the fleet still waits for `bin/fm-afk-return.sh check` (`/afk`).
 
-2. **Record a later reconcile notification for any home whose own books disagree.**
+2. **Use the reconciliation requests recorded by snapshot capture.**
    When the snapshot reports a secondmate home whose `invalidity` is `orphan_in_flight`, `unowned_current`, or `terminal_in_flight`, that home's backlog and its own task metadata disagree and only that home may fix it.
-   Run `printf '%s\n' "$snapshot" | bin/fm-secondmate-reconcile.sh request --snapshot -` immediately after gathering the snapshot.
-   This atomically records one local one-shot request per mismatched target and returns without sending, taking a mate lifecycle lock, or waiting behind a local or remote delivery queue.
+   `bin/fm-bearings-snapshot.sh` atomically records one local one-shot request per mismatched target before it returns, without sending, taking a mate lifecycle lock, or waiting behind a local or remote delivery queue.
    The supervision loop later claims the requests and runs the cooldown-limited fire-and-forget deliveries; the script header owns per-target coalescing, request durability, retries, cooldown, identity checks, and retirement.
    Continue composing the digest from the captured snapshot as soon as the local requests are recorded.
-   If local request publication fails, continue composing, report that durability blocker, and never fall back to an inline send.
+   If local request publication fails, snapshot capture still returns the bearings projection and reports that durability blocker on stderr; carry the blocker into the digest and never fall back to an inline send.
    A home is still asked at most once per four-hour window, while a skipped or failed later delivery leaves the request durable for another supervision pass.
    Never edit another home's backlog or metadata from here, and never expect or wait on a reply.
 

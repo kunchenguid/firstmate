@@ -87,8 +87,11 @@
 #   --all-pr-repos   query every discovered repository under --include-prs
 #   -h,--help        usage
 #
-# Output contract: `fm-bearings.v1`. No locks or reports; the underlying snapshot's
-# parent-side remote-ledger cache refresh is the only default fleet-state mutation.
+# Output contract: `fm-bearings.v1`. No locks or reports. The underlying snapshot
+# may refresh the parent-side remote-ledger cache, and this wrapper durably queues
+# reconciliation for any secondmate inventory mismatch carried by the projection
+# it returns. Delivery remains asynchronous in the watcher, and a failed queue write
+# is a stderr durability warning only: the bearings projection is still returned.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -238,7 +241,9 @@ if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
 else
   SNAP=$(FM_SNAPSHOT_NOW="$NOW" "$FLEET" --json) || exit $?
 fi
-HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
+SNAP_HOME=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | select(length > 0)') \
+  || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
+HOME_LABEL=$(printf '%s' "$SNAP_HOME" | jq -Rr 'split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
 
 # --- optional live GitHub PR enrichment -------------------------------------
@@ -654,6 +659,17 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }
+
+# Observing a secondmate inventory mismatch must be enough to schedule its
+# repair. Publishing the completed projection binds the request to the exact
+# bounded document being rendered and removes an agent-memory seam. This only
+# writes the parent-local one-shot queue; the watcher owns delivery and cooldown.
+RECONCILE_STATE=${FM_STATE_OVERRIDE:-$SNAP_HOME/state}
+if ! printf '%s\n' "$MODEL" \
+    | FM_HOME="$SNAP_HOME" FM_STATE_OVERRIDE="$RECONCILE_STATE" \
+      "$SCRIPT_DIR/fm-secondmate-reconcile.sh" request --snapshot - >/dev/null; then
+  echo "fm-bearings-snapshot: WARNING: could not durably queue secondmate inventory reconciliation; any inventory mismatch below needs a manual fm-secondmate-reconcile.sh run" >&2
+fi
 
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"
