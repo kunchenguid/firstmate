@@ -438,7 +438,7 @@ When Relay-linked work reaches a milestone or terminal state, load `fmx-respond`
 
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
 Waiting on a healthy supervision cycle is silent; empty polls, elapsed time, and no-change updates are not captain-facing progress.
-Never broadly kill watchers, especially never `pkill -f bin/fm-watch.sh`, because that can kill sibling firstmate homes.
+Worktrees are isolated but the process table is not: never match processes by command line or name to kill them (`pkill -f`, `killall`, `pgrep -f ... | kill`), because such a match reaches every sibling lane, parallel firstmate home, and the captain's own session, not just your target - kill only a specific pid or your own process group or descendants, and the watcher (`pkill -f bin/fm-watch.sh`) is the sharpest instance of this.
 A forced repair must use the home-scoped owner path emitted by supervision instructions.
 
 Guard warnings do not replace the contract.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Stable PreToolUse transport for the watcher-arm command policy.
+# Stable PreToolUse transport for the watcher-arm and broad-process-kill
+# command policy.
 #
 # A firstmate primary must arm the watcher or run a Codex checkpoint as a
 # standalone verified harness call.
@@ -127,28 +128,32 @@ fi
 [ -n "$CMD" ] || exit 0
 
 # Strict-superset prefilter (transport only; owns zero classification semantics).
-# Every protected watcher execution and every broad watcher kill resolves to the
-# fm-watch byte sequence AFTER the classifier's byte normalization, so a command
-# that cannot contain fm-watch even after that normalization can never be a
-# deniable watcher command and is fast-allowed without the Node policy owner.
+# Every deniable command resolves, AFTER the classifier's byte normalization, to
+# one of a small set of trigger substrings: a protected watcher execution or a
+# broad watcher kill contains "fm-watch", and a general broad process kill
+# contains "kill" (pkill, killall, fuser -k, and kill of pid -1 all carry it), a
+# discovery command that feeds a kill - "pgrep", "ps", "lsof", "pidof", "fuser" -
+# or the "xargs" pipe tail that consumes one. A command that cannot contain any
+# of those even after normalization can never be denied and is fast-allowed
+# without the Node policy owner.
 # We mirror the classifier's cheapest byte transforms here (drop line-
-# continuation and escape backslashes, quotes, and newlines) so obfuscated
-# protected paths such as fm-watc\<newline>h-arm.sh or fm-"watch"-arm.sh still
-# delegate. Stripping only these non-alphanumeric bytes can never destroy an
-# existing fm-watch run.
+# continuation and escape backslashes, quotes, and newlines) so obfuscated forms
+# such as fm-watc\<newline>h-arm.sh, fm-"watch"-arm.sh, or pk"ill" still delegate.
+# Stripping only these non-alphanumeric bytes can never destroy an existing
+# trigger substring.
 #
 # The fast path may allow ONLY when BOTH hold: (a) the stripped/normalized text
-# lacks the fm-watch watcher substring, AND (b) the raw command carries no
+# lacks every trigger substring, AND (b) the raw command carries no
 # quoting-decoder marker - a $ immediately followed by a single quote (ANSI-C
 # $'...') or a double quote (bash locale $"..."), both of which the classifier
-# decodes and can therefore reconstruct fm-watch from bytes this cheap byte
-# strip cannot. This marker set is COUPLED to the classifier's decoder set in
-# bin/fm-arm-command-policy.mjs: adding any new quote/expansion form the
-# classifier decodes REQUIRES extending this marker set in the same change, or
-# the prefilter stops being a strict superset. Otherwise the command always
-# delegates to the classifier - the single owner of every decision. Any deeper
-# decode-required obfuscation stays the classifier's and the post-arm liveness
-# guards' responsibility.
+# decodes and can therefore reconstruct a trigger substring from bytes this cheap
+# byte strip cannot. This trigger set and marker set are COUPLED to the
+# classifier in bin/fm-arm-command-policy.mjs: adding any new denied command
+# family or any new quote/expansion form the classifier decodes REQUIRES
+# extending these sets in the same change, or the prefilter stops being a strict
+# superset. Otherwise the command always delegates to the classifier - the single
+# owner of every decision. Any deeper decode-required obfuscation stays the
+# classifier's and the post-arm liveness guards' responsibility.
 PREFILTER=$CMD
 PREFILTER=${PREFILTER//\\/}
 PREFILTER=${PREFILTER//\"/}
@@ -159,7 +164,7 @@ case "$CMD" in
   *"\$'"*|*'$"'*) ;;
   *)
     case "$PREFILTER" in
-      *fm-watch*) ;;
+      *fm-watch*|*kill*|*pgrep*|*ps*|*lsof*|*pidof*|*fuser*|*xargs*) ;;
       *) exit 0 ;;
     esac
     ;;
