@@ -3857,6 +3857,19 @@ fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+# Render from the resolved worker checkout immediately before harness delivery.
+# This common launch brief is consumed by Codex, OMP and every worker adapter.
+if [ "$KIND" != secondmate ]; then
+  PROJECT_CONTEXT_TMP="$DATA/$ID/.project-context.${BASHPID:-$$}"
+  if ! "$SCRIPT_DIR/fm-project-context.sh" "$PROJ_ABS" "$WT" "$CONFIG" > "$PROJECT_CONTEXT_TMP"; then
+    rm -f -- "$PROJECT_CONTEXT_TMP"
+    echo "error: required project instructions could not be loaded" >&2
+    exit 1
+  fi
+  cat "$PROJECT_CONTEXT_TMP" >> "$BRIEF"
+  rm -f -- "$PROJECT_CONTEXT_TMP"
+fi
+
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
