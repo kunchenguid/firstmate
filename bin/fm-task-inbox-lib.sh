@@ -3,7 +3,8 @@
 # constant doorbell.
 #
 # ONE owner of the steering-inbox contract: the record format, sequence
-# allocation, the idempotent re-enqueue dedup, the handled/ acknowledgement,
+# allocation, the idempotent re-enqueue dedup, the handled/ acknowledgement
+# (which means received and understood, never the requested work completed),
 # the self-describing doorbell line, and the watcher's re-ring ladder policy.
 # bin/fm-send.sh writes and rings locally, the host-local remote steer leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) writes idempotently and rings
@@ -18,13 +19,18 @@
 # duplicated doorbell is a no-op by construction (the worker finds the inbox
 # empty or already handled), and a swallowed doorbell is detected by the
 # absence of the worker's acknowledgement and re-rung on a bounded schedule.
+# That detection only holds because the acknowledgement means received: a
+# worker that withheld it until the requested work finished would look stuck
+# for the whole legitimate duration of that work.
 # A positively dead or missing endpoint bypasses that schedule without being
 # typed into, and its unhandled record surfaces through the ordinary stale wake
 # into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
-#   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement
+#   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement;
+#                              it is due as soon as the record is read, and the
+#                              work it asks for proceeds on its own schedule
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
 #   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
