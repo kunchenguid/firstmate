@@ -677,6 +677,26 @@ test_teardown_seals_observations_without_equating_cleanup_with_success() {
   pass "teardown seals exact attempts before cleanup and never treats a pushed branch as accepted"
 }
 
+test_merged_direct_pr_teardown_seals_pull_request_url() {
+  local case_dir pr_url result rc
+  case_dir=$(make_case telemetry-merged-direct-pr)
+  pr_url=https://github.com/example/repo/pull/7
+  write_meta "$case_dir" direct-PR ship
+  printf 'pr=%s\n' "$pr_url" >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt work "fixture work"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  record_teardown_model_attempt "$case_dir"
+
+  result=$(run_teardown "$case_dir" 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "merged direct-PR teardown failed to seal terminal facts: $result"
+  jq -e --arg url "$pr_url" '
+    select(.eventType=="attempt-terminal")
+    | .terminal.outcomeLink=={kind:"pull-request",id:$url}
+  ' "$case_dir/data/routing-outcomes.jsonl" >/dev/null \
+    || fail "merged direct-PR teardown did not preserve its pull-request URL in the terminal seal"
+  pass "merged direct-PR teardown seals the exact pull-request URL before cleanup"
+}
+
 setup_allow_local_teardown() {
   local name=$1 case_dir wt_head
   case_dir=$(make_case "$name")
@@ -4288,6 +4308,7 @@ EOF
 }
 
 test_teardown_seals_observations_without_equating_cleanup_with_success
+test_merged_direct_pr_teardown_seals_pull_request_url
 test_local_only_fork_remote_allows
 test_teardown_skips_pipeline_retirement_when_nested_home_is_gone
 test_teardown_retires_pipeline_records_on_normal_remove

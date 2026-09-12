@@ -401,7 +401,7 @@ validate_terminal() {
       (.reviewer|oneof(["pass","fail","not-run","unknown"])) and
       (.oracle|oneof(["pass","fail","not-run","unknown"])) and
       (.refs|type=="array" and length<=16 and all(.[]; keys_are(["kind","id"]) and (.kind|oneof(["test","review","oracle","receipt","transition","report"])) and (.id|safeid)))) and
-    (.outcomeLink|keys_are(["kind","id"]) and (.kind|oneof(["none","commit","pull-request","report","spec-kit-outcome"])) and (.id==null or (.id|type=="string" and length<=160))) and
+    (.outcomeLink|keys_are(["kind","id"]) and (.kind|oneof(["none","commit","pull-request","report","spec-kit-outcome"])) and (.id==null or (.id|type=="string" and length>=1 and length<=160 and test("^[^[:cntrl:]]+$")))) and
     (.usage|usage) and
     (.primaryFailureClass|oneof(["none","capability","refusal","timeout","quota","tool","transport","environment","external-wait","scope-change","integrity","approval-wait","custody-wait","lease-conflict","state-divergence","outcome-observed-cause-unobserved","unknown"])) and
     (.flags|keys_are(["tool","transport","environment","externalWait","scopeChange","quota"]) and all([.tool,.transport,.environment,.externalWait,.scopeChange,.quota][]; type=="boolean")) and
@@ -451,7 +451,7 @@ validate_terminal_facts() {
       (.stepReruns==null or (.stepReruns|type=="number" and floor==. and .>=0))) and
     (.outcomeLink|keys_are(["kind","id"]) and
       (.kind|oneof(["none","commit","pull-request","report","spec-kit-outcome"])) and
-      (.id==null or (.id|safeid))) and
+      (.id==null or (.id|type=="string" and length>=1 and length<=160 and test("^[^[:cntrl:]]+$")))) and
     (.usage|usage) and (.usageSource==null or (.usageSource|usage_source)) and usage_metadata and
     (.primaryFailureClass==null or (.primaryFailureClass|oneof(["none","capability","refusal","timeout","quota","tool","transport","environment","external-wait","scope-change","integrity","approval-wait","custody-wait","lease-conflict","state-divergence","outcome-observed-cause-unobserved","unknown"]))) and
     (.wallSeconds==null or (.wallSeconds|type=="number" and .>=0)) and
@@ -1566,7 +1566,7 @@ case "$COMMAND" in
         case "$1" in
           --attempt) want=attempt ;;
           --worktree) want=worktree ;;
-          --session-id) want=session-id ;;
+          --session-id) want="session-id" ;;
           --billing-pool-ref) want=billing-pool-ref ;;
           *) die "unknown argument $1" ;;
         esac

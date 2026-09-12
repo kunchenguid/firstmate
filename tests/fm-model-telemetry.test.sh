@@ -72,6 +72,37 @@ test_terminals_and_retry_links() {
   pass "model telemetry records explicit outcomes, refusal quality, evidence, and linked model/effort retries"
 }
 
+test_terminal_facts_records_pull_request_url() {
+  local home attempt facts
+  home=$(make_home pull-request-outcome)
+  attempt=$(run_intake "$home" pull-request-outcome "$(intake_payload)" | jq -er .attemptId) \
+    || fail "pull-request outcome intake failed"
+  facts=$(jq -cn '{gate:{source:"delivery",result:"green",stepReruns:null},outcomeLink:{kind:"pull-request",id:"https://github.com/example/repo/pull/12"},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null}}')
+  FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task pull-request-outcome --payload "$facts" >/dev/null \
+    || fail "terminal facts refused a pull-request URL outcome id"
+  jq -e --arg attempt "$attempt" '
+    select(.eventType=="attempt-terminal" and .attemptId==$attempt)
+    | .terminal.outcomeLink=={kind:"pull-request",id:"https://github.com/example/repo/pull/12"}
+  ' "$home/data/routing-outcomes.jsonl" >/dev/null || fail "terminal row did not preserve the pull-request URL outcome id"
+
+  run_intake "$home" empty-outcome "$(intake_payload)" >/dev/null || fail "empty outcome intake failed"
+  if FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task empty-outcome \
+    --payload "$(printf '%s' "$facts" | jq -c '.outcomeLink.id=""')" >/dev/null 2>&1; then
+    fail "terminal facts accepted an empty outcome id"
+  fi
+  run_intake "$home" long-outcome "$(intake_payload)" >/dev/null || fail "long outcome intake failed"
+  if FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task long-outcome \
+    --payload "$(printf '%s' "$facts" | jq -c '.outcomeLink.id=("x" * 161)')" >/dev/null 2>&1; then
+    fail "terminal facts accepted an outcome id longer than 160 characters"
+  fi
+  run_intake "$home" control-outcome "$(intake_payload)" >/dev/null || fail "control outcome intake failed"
+  if FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task control-outcome \
+    --payload "$(printf '%s' "$facts" | jq -c '.outcomeLink.id="line\nbreak"')" >/dev/null 2>&1; then
+    fail "terminal facts accepted a control character in an outcome id"
+  fi
+  pass "terminal facts records a pull-request URL within the bounded outcome-id contract"
+}
+
 test_crash_recovery_and_terminal_idempotency() {
   local home payload receipt attempt result terminal before after rc
   home=$(make_home recovery)
@@ -1348,6 +1379,7 @@ test_subscription_sheet_counts_unresolved_task_class() {
 
 test_terminal_metrics_keep_observation_and_unknown_distinct
 test_terminals_and_retry_links
+test_terminal_facts_records_pull_request_url
 test_crash_recovery_and_terminal_idempotency
 test_relaunch_supersedes_stale_receipt
 test_reseal_after_explicit_terminal_never_deadlocks
