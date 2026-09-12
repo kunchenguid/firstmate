@@ -432,6 +432,29 @@ test_raw_launch_rejects_agy_marker_assignment() {
   pass "raw launches reject inline AGY identity assignments"
 }
 
+test_raw_launch_rejects_agy_marker_in_nested_commands() {
+  local rec id out status launch
+  for id in profile-raw-agy-env-z15b profile-raw-agy-export-z15c; do
+    rec=$(make_spawn_case "$id" claude "$id")
+    read_case_record "$rec"
+    enable_dispatch_profile "$HOME_DIR"
+    if [ "$id" = profile-raw-agy-env-z15b ]; then
+      launch='env ANTIGRAVITY_AGENT=1 custom-agent --flag'
+    else
+      launch='sh -c "export ANTIGRAVITY_AGENT=1; custom-agent"'
+    fi
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$launch")
+    status=$?
+    expect_code 1 "$status" "raw nested AGY marker launch should be refused: $launch"
+    assert_contains "$out" "ANTIGRAVITY_AGENT" \
+      "raw nested AGY marker refusal was not explicit: $launch"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] \
+      || fail "refused raw nested AGY marker launch published metadata: $launch"
+  done
+  pass "raw launches reject nested AGY identity assignments"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -1297,7 +1320,7 @@ SH
 # permission flag, and any other token refuses before endpoint or metadata.
 claude_expected_launch() {  # <home> <id> <permission-flag>
   local home=$1 id=$2 flag=$3
-  printf '%s' "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
+  printf '%s' "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u ANTIGRAVITY_AGENT CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
 }
 
 test_claude_permission_mode_bypass_matches_absent_launch() {
@@ -1399,6 +1422,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_launch_rejects_agy_marker_assignment
+test_raw_launch_rejects_agy_marker_in_nested_commands
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

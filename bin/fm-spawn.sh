@@ -1738,14 +1738,12 @@ case "$ARG3" in
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in
-        ANTIGRAVITY_AGENT=*)
-          echo "error: raw launch cannot assign ANTIGRAVITY_AGENT" >&2
-          exit 1
-          ;;
-      esac
-    done
+    case "$LAUNCH" in
+      *ANTIGRAVITY_AGENT*)
+        echo "error: raw launch cannot mention reserved marker ANTIGRAVITY_AGENT" >&2
+        exit 1
+        ;;
+    esac
     for word in $LAUNCH; do
       case "$word" in
         [A-Za-z_]*=*) continue ;;
