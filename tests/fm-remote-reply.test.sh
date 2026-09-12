@@ -94,7 +94,7 @@ assert_contains "$out" "armed: $SID offset=0" "remote reply source was not armed
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-one.out" 2>&1 &
 RUNNER=$!
 wait_for "$CLAIMS/$SID.claim" || fail "process-event runner never claimed the remote reply source"
-printf 'done [corr=0123456789abcdef]: build verified (data/reply/report.md)\n' \
+printf 'done [corr=0123456789abcdef] [at=1700000000]: build verified (data/reply/report.md)\n' \
   >> "$REMOTE/state/parent-replies.status"
 wait "$RUNNER" || fail "remote reply source failed to capture its first delta"
 RESULT=$(find "$PARENT/state/procevent-inbox" -name "$SID.1.result" -print -quit 2>/dev/null)
@@ -159,6 +159,8 @@ cmp -s "$SOURCE_AFTER" "$REMOTE/state/parent-replies.status" \
   || fail "handling consumed or rewrote the remote append-only log"
 expected_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
 assert_grep "offset=$expected_offset" "$PARENT/state/remote-replies/ios.cursor" "reply cursor did not advance to the committed delta"
+assert_grep 'done [corr=0123456789abcdef] [at=1700000000]: build verified' "$PARENT/state/ios.status" \
+  "relay replaced the source event time with observation time"
 pass "ingest appends one validated line, fetches its document, and advances the cursor"
 
 out=$(remote_env "$ADAPTER" handle ios 1 "$RESULT")
@@ -197,6 +199,8 @@ assert_contains "$out" 'ingested: ios appended=0' "earlier generation did not re
 assert_contains "$out" 'handled: remote-reply-ios 2' "earlier generation remained unacknowledged after later cursor advancement"
 [ "$(grep -cF 'working [corr=1111111111111111]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "earlier generation replay duplicated its parent status"
+grep -Fxq 'working [corr=1111111111111111]: second generation' "$PARENT/state/ios.status" \
+  || fail "relay invented an emission time for a legacy source event"
 pass "later generations cannot invalidate an unacknowledged ingested result"
 
 # The channel mirrors the remote mate's content-bearing status lines at most once
@@ -215,6 +219,8 @@ fm_pending_reply_mark_delivered "$PARENT/state" "$PENDING_CORR" \
 {
   printf 'working [key=version-audit]: family --version audit complete (data/reply/report.md)\n'
   printf 'needs-decision [key=rough-cut-version]: implement --version or retire the tool\n'
+  printf 'needs-decision [at=1700000000]: which base branch?\n'
+  printf 'needs-decision [at=1700086400]: which base branch?\n'
   printf 'done [corr=%s]: release chain audited\n' "$PENDING_CORR"
 } >> "$REMOTE/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
@@ -225,6 +231,10 @@ remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" > "$TMP_ROOT/handle-mirror.out
 assert_grep 'working [key=version-audit]' "$PARENT/state/ios.status" "an uncorrelated progress line never reached the parent stream"
 assert_grep 'needs-decision [key=rough-cut-version]' "$PARENT/state/ios.status" "a newly raised remote decision never reached the parent stream"
 assert_grep "done [corr=$PENDING_CORR]" "$PARENT/state/ios.status" "the correlated answer sharing the delta was lost"
+for epoch in 1700000000 1700086400; do
+  grep -Fxq "needs-decision [at=$epoch]: which base branch?" "$PARENT/state/ios.status" \
+    || fail "relay discarded a distinct event with identical text and a different time"
+done
 mirror_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
 assert_grep "offset=$mirror_offset" "$PARENT/state/remote-replies/ios.cursor" \
   "the cursor did not advance past an uncorrelated line"
@@ -249,6 +259,16 @@ remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" >/dev/null 2>&1 || true
 assert_grep "offset=$mirror_offset" "$PARENT/state/remote-replies/ios.cursor" \
   "replaying the mirrored delta moved the cursor"
 pass "a replayed mirrored delta is idempotent in both the stream and the cursor"
+[ "$(grep -Fc ': which base branch?' "$PARENT/state/ios.status")" -eq 2 ] \
+  || fail "replaying a delta duplicated distinct timed requests"
+if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+  printf 'Remote source status records:\n'
+  cat "$REMOTE/state/parent-replies.status"
+  printf '\nParent status after handling and replaying generation 4:\n'
+  cat "$PARENT/state/ios.status"
+  printf '\nCommitted remote cursor:\n'
+  cat "$PARENT/state/remote-replies/ios.cursor"
+fi
 
 # Bytes crossing a machine boundary are normalized, never dropped: a control
 # character cannot make the parent's status file unsafe and cannot stop the
@@ -499,6 +519,12 @@ assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-arm
 remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
+status_line_at_epoch "$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" >/dev/null \
+  || fail "new continuity escalation has unknown emission time"
+if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+  printf '\nNew continuity escalation after ingest retry:\n'
+  grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status"
+fi
 pass "truncation is detected, escalated once, and not silently rebased"
 
 rm -f "$PARENT/state/procevent-inbox/$SID.12.handled"

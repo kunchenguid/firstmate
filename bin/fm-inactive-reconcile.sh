@@ -12,7 +12,7 @@
 # first runs the LEDGER-FIRST parent delivery: a direct child whose status
 # ledger ends in a whole `done:` or `failed:` line has stated its own outcome,
 # so that line is published on the parent channel at once through
-# bin/fm-parent-channel-lib.sh as
+# bin/fm-parent-channel-lib.sh from this unstamped payload:
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
 # report pointer, without consulting fm-crew-state.sh and without waiting for
@@ -313,8 +313,9 @@ meta_incarnation() { # <meta>
 
 # The task's delivered PR. Recorded meta pr= is the only authoritative source;
 # the fallback scrape accepts only a preferred terminal line in a mode's
-# ready-signal shape (`done: PR <url>` or `done: PR <url> checks green`), so a
-# PR a worker merely mentioned in prose is never claimed as the delivery.
+# ready-signal shape (`done: PR <url>` or `done: PR <url> checks green`,
+# optionally stamped `done [at=<epoch>]:`), so a PR a worker merely mentioned in
+# prose is never claimed as the delivery.
 # A scout never delivers a PR, so it never carries one.
 pr_for_task() { # <meta> [preferred-line]
   local meta=$1 preferred=${2:-} value
@@ -322,7 +323,7 @@ pr_for_task() { # <meta> [preferred-line]
   value=$(meta_field "$meta" pr)
   if [ -z "$value" ] && [ -n "$preferred" ]; then
     value=$(printf '%s\n' "$preferred" \
-      | sed -nE 's|^done: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\1|p' \
+      | sed -nE 's|^done( \[at=[0-9]+\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
       | head -1 || true)
   fi
   clean_field "$value"

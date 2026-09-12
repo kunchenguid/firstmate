@@ -132,6 +132,62 @@ EOF
     "mode=ship"
 }
 
+test_event_age_uses_only_emission_time() {
+  local home fakebin out line expected_epoch expected_age
+  local before after emitted epoch observed
+  home=$(make_home event-age)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  printf 'secondmate-task\n' > "$home/secondmate-home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
+    > "$home/secondmate-home/.fm-secondmate-parent"
+  before=$(date +%s)
+  FM_HOME="$home/secondmate-home" "$ROOT/bin/fm-secondmate-report.sh" \
+    'done' 0123456789abcdef 'audit complete' || fail "parent report failed"
+  after=$(date +%s)
+  emitted=$(tail -1 "$home/state/secondmate-task.status")
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$ROOT/bin/fm-classify-lib.sh"
+  epoch=$(status_line_at_epoch "$emitted") || fail "new parent report has unknown time"
+  [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] \
+    || fail "parent report did not record emission time"
+  for line in "$emitted" 'working: legacy' 'working [at=1700000000]: timed' \
+    'working [at=1700000200]: future' 'working [at=oops]: malformed'; do
+    printf '%s\n\n' "$line" > "$home/state/secondmate-task.status"
+    # Deliberately unrelated file age must never substitute for event age.
+    touch -t 202001010000 "$home/state/secondmate-task.status"
+    expected_epoch=null; expected_age=null; observed=1700000100
+    case "$line" in
+      "$emitted") expected_epoch=$epoch; expected_age=100; observed=$((epoch + 100)) ;;
+      *1700000000*) expected_epoch=1700000000; expected_age=100 ;;
+      *1700000200*) expected_epoch=1700000200 ;;
+    esac
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW_EPOCH=$observed "$SNAPSHOT" --json)
+    printf '%s' "$out" | jq -e --argjson epoch "$expected_epoch" --argjson age "$expected_age" '
+      .tasks[] | select(.id == "secondmate-task")
+      | .paths.status_log.last_event
+      | has("emitted_at_epoch") and .emitted_at_epoch == $epoch
+        and has("age_seconds") and .age_seconds == $age
+    ' >/dev/null || fail "event time/age came from something other than the record: $line"
+    printf '%s' "$out" | jq -e --argjson epoch "$expected_epoch" --argjson age "$expected_age" '
+      .secondmate_current.records[] | select(.id == "secondmate-task")
+      | .current.state == "unknown"
+        and .parent_event.emitted_at_epoch == $epoch and .parent_event.age_seconds == $age
+        and .freshness.age_seconds == $age
+    ' >/dev/null || fail "fallback confused event age and current state: $line"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '$ touch -t 202001010000 %s\n' "$home/state/secondmate-task.status"
+      printf '$ FM_HOME=%s FM_SNAPSHOT_NOW_EPOCH=%s bin/fm-fleet-snapshot.sh --json\n' "$home" "$observed"
+      printf '%s' "$out" | jq '{
+        last_event: (.tasks[] | select(.id == "secondmate-task") | .paths.status_log.last_event),
+        secondmate: (.secondmate_current.records[] | select(.id == "secondmate-task")
+          | {current, parent_event, freshness})
+      }'
+    fi
+  done
+  pass "snapshot exposes emission time and unknown-safe event age independently of file age and current state"
+}
+
 test_empty_fleet_json() {
   local home out view
   home=$(make_home empty)
@@ -181,6 +237,12 @@ test_fixture_snapshot_json() {
       and .endpoint.agent_alive == "alive"
       and (.actions.watch | contains("do not routinely fm-peek"))
   ' >/dev/null || fail "secondmate return-channel guidance missing"
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "secondmate-task")
+    | .paths.status_log.last_event
+    | has("emitted_at_epoch") and .emitted_at_epoch == null
+      and has("age_seconds") and .age_seconds == null
+  ' >/dev/null || fail "legacy event must have explicit unknown time and age"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "cmux-task")
     | .backend == "cmux"
@@ -1045,6 +1107,7 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_event_age_uses_only_emission_time
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory

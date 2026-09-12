@@ -761,16 +761,16 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief
+  local home kind id brief append before after epoch templates template line signals
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
-  for kind in ship scout secondmate; do
-    id="brief-pause-verb-$kind"
+  for kind in ship:no-mistakes ship:direct-PR ship:local-only scout secondmate; do
+    id="brief-pause-verb-${kind//:/-}"
     case "$kind" in
-      ship)
+      ship:*)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode "${kind#ship:}" >/dev/null 2>&1
         ;;
       scout)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
@@ -782,6 +782,53 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
+    # Execute the scaffold's generated status-append interface. The shell must
+    # evaluate the stamp when appending, not while generating instructions.
+    # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
+    append=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$brief")
+    append=${append//\{state\}/done}
+    append=${append//\{one short line\}/test event}
+    # shellcheck disable=SC2016 # The generated command must retain substitution.
+    assert_contains "$append" '$(date +%s)' "scaffold froze its event timestamp"
+    mkdir -p "$home/state"
+    before=$(date +%s)
+    bash -c "$append" || fail "generated status command failed"
+    after=$(date +%s)
+    epoch=$(bash -c '. "$1"; status_line_at_epoch "$(cat "$2")"' _ \
+      "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+    [ -n "$epoch" ] && [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] \
+      || fail "$kind scaffold emitted no append-time timestamp"
+    # Every status signal the brief instructs a worker to append is an
+    # executable template, not only rule 4's echo: render each one and read its
+    # stamp back. Extracting by "append" as well as by the stamp means dropping
+    # a stamp from any instruction fails here rather than shrinking the set.
+    # shellcheck disable=SC2016 # The extracted templates must retain substitution.
+    templates=$(grep -o -e 'append `[^`]*: [^`]*`' \
+      -e '`[^`]*\[at=\$(date +%s)\][^`]*`' "$brief" \
+      | sed 's/^append //' | tr -d '`' | sort -u)
+    signals=0
+    while IFS= read -r template; do
+      [ -n "$template" ] || continue
+      case "$template" in
+        'echo "'*) template=${template#echo \"}; template=${template%%\" >>*} ;;
+      esac
+      template=${template//\{state\}/done}
+      template=$(printf '%s' "$template" \
+        | sed -e 's/{[^}]*}/one short line/g' -e 's/<[^>]*>/slug/g')
+      before=$(date +%s)
+      line=$(eval "printf '%s' \"$template\"") \
+        || fail "$kind signal template did not render: $template"
+      after=$(date +%s)
+      epoch=$(bash -c '. "$1"; status_line_at_epoch "$2"' _ \
+        "$ROOT/bin/fm-classify-lib.sh" "$line")
+      [ -n "$epoch" ] && [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] \
+        || fail "$kind signal carries no append-time stamp: $template"
+      signals=$((signals + 1))
+    done <<SIGNALS
+$templates
+SIGNALS
+    [ "$signals" -ge 4 ] \
+      || fail "$kind brief instructed only $signals stamped status signals"
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
