@@ -194,6 +194,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
+# Opt-in idle-worker pre-cache-expiry compaction (config/idle-compact); ships
+# inert. The SAME owner backs bin/fm-watch.sh's housekeeping tick, so the
+# eligibility test and action sequence cannot drift between the two
+# supervision paths. See bin/fm-idle-compact.sh's header for the full contract.
+# shellcheck source=bin/fm-idle-compact.sh
+. "$FM_DAEMON_DIR/fm-idle-compact.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -1202,6 +1209,14 @@ housekeeping() {  # <state>
       fi
     done
   fi
+
+  # (4) idle-compact sweep: opt-in pre-cache-expiry compaction for a genuinely
+  #     idle Claude crewmate. A no-op single [ -f ] check when config/idle-
+  #     compact is absent; otherwise the same shared owner bin/fm-watch.sh
+  #     calls, so the two supervision paths share one eligibility test and
+  #     action sequence. Never surfaces a wake or escalation itself - a
+  #     deferred or failed attempt is silent routine, retried on a later sweep.
+  fm_idle_compact_tick "$state" || true
 }
 
 # Find a recorded or live window target whose task id matches the marker key.

@@ -47,8 +47,10 @@ ack_stopped_cycle() {  # <state>
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
+  # The trailing extra assignments go through env(1): a "$@" expansion in
+  # command-prefix position is parsed as the command name, not as assignments.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 env "$@" "$WATCH" > "$out" &
 }
 
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
@@ -1502,6 +1504,137 @@ test_self_announced_close_does_not_rewake_but_next_note_does() {
   grep -F "signal: $status_file" "$out" >/dev/null \
     || fail "the later note did not surface as a signal"
   pass "a self-announced close never wakes its own home, and the next real note still does"
+}
+
+# --- idle-compact's own induced turn-ends, and only those, are absorbed ------
+# Each opt-in idle-compact episode makes the crewmate take two turns it never
+# asked for (the precompact-notes save and the /compact). Left alone, every one
+# of them would surface here as an actionable no-verb wake and cost the captain
+# a full wake-handling turn on housekeeping it never requested. The exemption
+# is owned by bin/fm-idle-compact.sh and is episode-scoped and one-shot per
+# induced send; these two cases pin both halves of that fence against a real
+# watcher.
+
+# Enable the opt-in feature for one case, in its OWN config dir, and arm an
+# in-flight save-sent episode for <task> whose induced turn has not landed yet.
+# Everything goes through the production owners: the episode marker via
+# fm-idle-compact.sh, the .seen-* baseline via fm-wake-lib.sh.
+arm_idle_compact_episode() {  # <dir> <state> <task>
+  local dir=$1 state=$2 task=$3
+  mkdir -p "$dir/config"
+  printf '30\n' > "$dir/config/idle-compact"
+  : > "$state/$task.turn-ended"
+  set_mtime "$(( $(date +%s) - 600 ))" "$state/$task.turn-ended"
+  prime_turnend_seen "$state/$task.turn-ended"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    marker=$(fm_idle_compact_marker_path "$2" "$3")
+    fm_idle_compact_marker_write "$marker" phase=save-sent \
+      "sent_epoch=$(date +%s)" \
+      "baseline_turnended=$(fm_idle_compact_turnended_sig "$2" "$3")"
+  ' _ "$ROOT/bin/fm-idle-compact.sh" "$state" "$task"
+}
+
+# Wait until <file>'s .seen-* suppressor records <file>'s CURRENT signature,
+# i.e. the watcher has finished deciding about it one way or the other.
+wait_seen_current() {  # <file> [limit]
+  local f=$1 limit=${2:-60} i=0 base
+  base=$(basename "$f" | tr '.' '_')
+  while [ "$i" -lt "$limit" ]; do
+    [ "$(cat "$(dirname "$f")/.seen-$base" 2>/dev/null || true)" = "$(seen_sig "$f")" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_idle_compact_induced_turn_end_absorbed() {
+  local dir state fakebin out pid
+  dir=$(make_case idle-compact-induced); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  arm_idle_compact_episode "$dir" "$state" task
+  # A parked crew is never provably working, so without the exemption this
+  # turn-end would surface (that is exactly test_turn_ended_not_working_surfaced).
+  export FM_FAKE_CREW_STATE='state: parked · source: status-log · needs-decision: which gate'
+  watch_bg "$state" "$fakebin" "$out" FM_CONFIG_OVERRIDE="$dir/config"
+  pid=$!
+  touch "$state/task.turn-ended"
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "watcher exited for the turn-end idle-compact's own save message induced: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an induced turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an induced turn-end enqueued a durable wake record"
+  wait_seen_current "$state/task.turn-ended" || fail "an absorbed induced turn-end did not advance its .seen-* suppressor"
+  reap "$pid"
+  pass "the turn-end an idle-compact episode induced is absorbed (no exit, no queue, suppressor advanced)"
+}
+
+test_non_induced_turn_end_in_the_same_window_still_wakes() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case idle-compact-not-induced); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  arm_idle_compact_episode "$dir" "$state" task
+  export FM_FAKE_CREW_STATE='state: parked · source: status-log · needs-decision: which gate'
+  watch_bg "$state" "$fakebin" "$out" FM_CONFIG_OVERRIDE="$dir/config"
+  pid=$!
+  touch "$state/task.turn-ended"
+  wait_seen_current "$state/task.turn-ended" || { reap "$pid"; fail "the induced turn-end was never decided"; }
+  is_live_non_zombie "$pid" || { reap "$pid"; fail "the induced turn-end must be absorbed, not surfaced"; }
+
+  # Real crew work lands in the SAME episode window: the captain steered this
+  # crewmate while it was waiting to be compacted, and its turn just ended.
+  # Only the one turn idle-compact induced is exempt, so this must wake.
+  sleep 1.2
+  touch "$state/task.turn-ended"
+  wait_for_exit "$pid" 60 || fail "a non-induced turn-end in the same episode window was swallowed"
+  grep -F "signal: $state/task.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced non-induced turn-end: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced turn-end failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/task.turn-ended" >/dev/null \
+    || fail "the non-induced turn-end was not queued"
+  pass "a non-induced turn-end in the same idle-compact episode window still wakes normally"
+}
+
+# The two absorption cases above prove this watcher CONSULTS the idle-compact
+# owner, not that its loop ever runs the sweep that acts. Deleting the sweep
+# call from the loop would leave the opt-in feature silently dead on this
+# supervision path with every other test still green, so pin the loop's own
+# observable: the sweep stamps state/.idle-compact-last-sweep once per due
+# sweep, and only while the feature is configured.
+wait_path() {  # <path> [limit]
+  local path=$1 limit=${2:-60} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$path" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_watcher_loop_sweeps_only_once_the_feature_is_configured() {
+  local dir state fakebin out pid beat
+  dir=$(make_case idle-compact-sweep-wired); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  mkdir -p "$dir/config"
+
+  # No config/idle-compact yet: the loop still turns (its liveness beacon is
+  # touched in the same iteration, immediately before the sweep call), and the
+  # sweep must leave nothing behind.
+  watch_bg "$state" "$fakebin" "$out" FM_CONFIG_OVERRIDE="$dir/config"
+  pid=$!
+  beat="$state/.last-watcher-beat"
+  wait_path "$beat" 80 || { reap "$pid"; fail "the watcher loop never completed an iteration: $(cat "$out")"; }
+  [ ! -e "$state/.idle-compact-last-sweep" ] \
+    || { reap "$pid"; fail "the watcher swept with config/idle-compact absent - the feature must ship inert"; }
+
+  # Opt in mid-run: the gate is a per-tick file check, so the very next
+  # iteration sweeps.
+  printf '30\n' > "$dir/config/idle-compact"
+  wait_path "$state/.idle-compact-last-sweep" 80 \
+    || { reap "$pid"; fail "the watcher loop never ran the idle-compact sweep with the feature configured: $(cat "$out")"; }
+  is_live_non_zombie "$pid" || { reap "$pid"; fail "the idle-compact sweep exited the watcher instead of staying silent routine"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "the idle-compact sweep printed a wake reason: $(cat "$out")"; }
+  reap "$pid"
+  pass "the watcher's own loop runs the idle-compact sweep only once the feature is configured, and never wakes for it"
 }
 
 # --- actionable wakes are surfaced (queue + exit) ---------------------------
@@ -4831,6 +4964,9 @@ test_turn_ended_surfaced_batch_opens_no_partial_deadline
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
+test_idle_compact_induced_turn_end_absorbed
+test_non_induced_turn_end_in_the_same_window_still_wakes
+test_watcher_loop_sweeps_only_once_the_feature_is_configured
 test_actionable_signal_surfaced
 test_needs_decision_signal_payload_marked_for_branch_exclusion
 test_needs_decision_reconciliation_required_still_marked

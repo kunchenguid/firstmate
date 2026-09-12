@@ -260,7 +260,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "You drive no-mistakes by responding to its gates" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -439,6 +439,120 @@ test_ship_project_memory_wording() {
   assert_grep "follow \`$ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract" "$brief" \
     "project-memory contract no longer defers to the ensure helper"
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
+}
+
+# Quota-efficiency worker rules belong only in the no-mistakes DOD: a
+# direct-PR or local-only brief never runs no-mistakes, and a scout brief
+# carries no delivery contract at all.
+test_no_mistakes_dod_carries_quota_efficiency_rules() {
+  local home id brief
+  home="$TMP_ROOT/quota-efficiency-home"
+  mkdir -p "$home/data"
+  id="brief-quota-nm1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  assert_grep "paused: awaiting compaction before validation" "$brief" \
+    "no-mistakes DOD must tell the worker the exact declared-state phrase to append after its implementation commit"
+  assert_grep "do NOT run \`no-mistakes axi run\` yet" "$brief" \
+    "no-mistakes DOD must tell the worker to stop before starting no-mistakes, not run it immediately"
+  assert_grep "rings you with a durable inbox message telling you to start the validation run" "$brief" \
+    "no-mistakes DOD must describe firstmate's compact-then-ring handoff"
+
+  assert_grep "Default convergence after the second review round" "$brief" \
+    "no-mistakes DOD must state the default convergence rule"
+  assert_grep "Deferred findings" "$brief" \
+    "no-mistakes DOD must name the PR-body section for findings not auto-applied"
+  assert_grep "This brief's own \`# Task\` section may override that default" "$brief" \
+    "no-mistakes DOD must let the task text override the convergence default"
+
+  assert_grep "Pass an absolute path as the PATH argument of \`grep\`, \`sed\`, \`find\`, and \`cat\`" "$brief" \
+    "no-mistakes DOD must require absolute paths for grep/sed/find/cat"
+  assert_grep "never \`cd\` before reading or writing a relative path" "$brief" \
+    "no-mistakes DOD must ban cd-then-relative-path shapes"
+
+  for id_mode in "brief-quota-dp1:direct-PR" "brief-quota-lo1:local-only"; do
+    id=${id_mode%%:*}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "${id_mode##*:}" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_no_grep "paused: awaiting compaction before validation" "$brief" \
+      "$id: the declared-state compaction rule is no-mistakes-only"
+    assert_no_grep "Default convergence after the second review round" "$brief" \
+      "$id: the convergence-default rule is no-mistakes-only"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-quota-scout1 some-proj --scout >/dev/null 2>&1
+  brief="$home/data/brief-quota-scout1/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_no_grep "paused: awaiting compaction before validation" "$brief" \
+    "scout brief must not carry the ship-only declared-state compaction rule"
+  assert_no_grep "Default convergence after the second review round" "$brief" \
+    "scout brief must not carry the ship-only convergence-default rule"
+
+  pass "fm-brief.sh: no-mistakes DOD carries the quota-efficiency worker rules, absent from direct-PR/local-only/scout"
+}
+
+# idle-compact ships inert (docs/configuration.md "Idle-worker
+# pre-compaction") whenever config/idle-compact is absent or invalid, and
+# that config can be added, removed, or edited at ANY point after a brief is
+# generated - including while a worker is already waiting on a ring that
+# will now never come. The no-mistakes DOD must never bake a generation-time
+# snapshot of that config into the brief: it must always tell the worker to
+# check the LIVE config itself (`fm-idle-compact.sh enabled`) right before
+# deciding to pause, and to give up waiting on a bounded fallback if a ring
+# never arrives. Proven here by asserting the brief text is identical
+# whether or not config/idle-compact exists at generation time.
+test_no_mistakes_dod_checks_idle_compact_live_not_at_generation_time() {
+  local home_with home_without id brief_with brief_without
+  home_with="$TMP_ROOT/idle-compact-configured-home"
+  home_without="$TMP_ROOT/idle-compact-unconfigured-home"
+  mkdir -p "$home_with/data" "$home_with/config" "$home_without/data"
+  : > "$home_with/config/idle-compact"
+  id="brief-idlec-live-check"
+
+  FM_HOME="$home_with" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief_with="$home_with/data/$id/brief.md"
+  assert_present "$brief_with" "brief was not scaffolded with config/idle-compact present"
+
+  FM_HOME="$home_without" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief_without="$home_without/data/$id/brief.md"
+  assert_present "$brief_without" "brief was not scaffolded with config/idle-compact absent"
+
+  # Both homes' briefs embed their own (different) FM_HOME path elsewhere
+  # (state/inbox paths), so compare only the "# Definition of done" section
+  # itself, not the whole file, for identical wording regardless of
+  # generation-time config state.
+  dod_section() { awk '/^# Definition of done$/{grab=1;next} grab && /^# /{exit} grab' "$1"; }
+  dod_with=$(dod_section "$brief_with")
+  dod_without=$(dod_section "$brief_without")
+  [ -n "$dod_with" ] || fail "could not locate the # Definition of done section in $brief_with"
+  [ "$dod_with" = "$dod_without" ] || \
+    fail "the no-mistakes Definition of done differs based on config/idle-compact at brief-GENERATION time; the decision must be made at wait time instead"
+
+  assert_grep "check whether idle-compact is armed on this host right now" "$brief_with" \
+    "no-mistakes DOD must tell the worker to check idle-compact's live state, not trust this brief"
+  assert_grep "bin/fm-idle-compact.sh enabled" "$brief_with" \
+    "no-mistakes DOD must name the live-check command"
+  assert_grep "Check live rather than trusting this brief: the config can change after this brief was written." "$brief_with" \
+    "no-mistakes DOD must say why the check happens at wait time"
+  assert_grep "If armed, append \`paused: awaiting compaction before validation\`" "$brief_with" \
+    "no-mistakes DOD must gate the declared-state pause on the live check, not on generation-time state"
+  assert_grep "If not armed, start \`no-mistakes axi run\` yourself" "$brief_with" \
+    "no-mistakes DOD must tell the worker to drive no-mistakes immediately when the live check reports not armed"
+  assert_grep "You never schedule your own wake for this" "$brief_with" \
+    "no-mistakes DOD must make explicit a stopped worker cannot self-time its own wait"
+  assert_grep "Bounded fallback, applied only when you are ever resumed while still in this paused state" "$brief_with" \
+    "no-mistakes DOD must evaluate the bounded fallback only on an actual re-wake, never on a self-scheduled timer"
+  assert_grep "compare now to the status file's own mtime for the \`paused: awaiting compaction before validation\` line" "$brief_with" \
+    "no-mistakes DOD must measure elapsed time against the declared status line's own timestamp, not a countdown the worker runs itself"
+  assert_grep "if more than 60 minutes have passed with no ring, re-run" "$brief_with" \
+    "no-mistakes DOD must bound how long a worker waits, in case idle-compact is disarmed while it is already waiting"
+  assert_grep "or more than 90 minutes have passed regardless of that check, stop waiting and start \`no-mistakes axi run\` yourself" "$brief_with" \
+    "no-mistakes DOD must give a worker an unconditional escape from an indefinite wait"
+
+  pass "fm-brief.sh: no-mistakes DOD checks idle-compact live at wait time, never at brief-generation time"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -913,6 +1027,8 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_no_mistakes_dod_carries_quota_efficiency_rules
+test_no_mistakes_dod_checks_idle_compact_live_not_at_generation_time
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

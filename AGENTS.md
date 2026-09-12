@@ -83,6 +83,7 @@ config/turnend-churn-absorb  optional presence flag opting this home into the de
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/watched-tools.json  optional list of the tools this home depends on, read by the update check armed with bin/fm-tool-update-check.sh; LOCAL, gitignored, firstmate-maintained but human-editable, and NOT inherited by secondmate homes; see docs/configuration.md "Watched tool updates"
+config/idle-compact  optional idle threshold in minutes (default 15) enabling opt-in pre-cache-expiry compaction of a genuinely idle Claude crewmate; LOCAL, gitignored; absent = feature off; see docs/configuration.md "Idle-worker pre-compaction" and bin/fm-idle-compact.sh
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -93,6 +94,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  <id>/precompact-notes.md  crewmate-saved working state written just before an idle-compact /compact and re-read after it (docs/configuration.md "Idle-worker pre-compaction")
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               runtime records and signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
@@ -150,6 +152,7 @@ state/               runtime records and signals; gitignored
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
+  .idle-compact-* .idle-compact.lock .idle-compact.log   opt-in idle-compact episode markers (also the post-episode activity stamp the next idle window is measured from), sweep stamp, sweep lock shared by watcher and away-mode daemon, and the size-capped log the ring backstop alone writes (bin/fm-idle-compact.sh); never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```
 

@@ -278,6 +278,8 @@ family_for_basename() {
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
+    fm-harness-precedence.test.sh|\
+    fm-idle-compact.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
@@ -341,6 +343,7 @@ family_for_basename() {
     fm-cursor-primary-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
+    fm-idle-compact-live-e2e.test.sh|fm-idle-compact-herdr-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\

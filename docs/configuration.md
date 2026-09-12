@@ -191,6 +191,61 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Idle-worker pre-compaction (config/idle-compact)
+
+Once a Claude prompt cache expires (a one-hour TTL on this account), the next steer to a long-idle crewmate reprocesses its whole context uncached, which is real quota burn on a subscription account.
+`bin/fm-idle-compact.sh` is the shared owner of an opt-in housekeeping pass that compacts a genuinely idle Claude crewmate while its cache is still warm, so a later revival is cheap.
+It ships inert, exactly like Relay: an absent local, gitignored `config/idle-compact` means no behavior change anywhere.
+When present, its first non-empty, non-comment line is the idle threshold in whole minutes; 15 is the documented recommended value.
+An empty-but-present file (blank or comment-only) also enables the feature at that same 15-minute default.
+A malformed value (not a positive integer) is treated exactly like an absent file - disabled - because a config typo must never turn into a watcher-loop failure.
+`bin/fm-watch.sh`'s main loop and `bin/fm-supervise-daemon.sh`'s `housekeeping` both call the same shared entry point on their own existing cadence, so the eligibility and action logic has exactly one owner and the two supervision paths cannot drift.
+
+Eligibility, checked for every task recorded under `state/*.meta`, is strictly the intersection of every condition below - never mid-task:
+
+- `kind` is not `secondmate` (a secondmate's idle pane is its normal healthy state, and it holds its own fleet) and the harness is `claude` (the only harness with a verified `/compact` slash command today; see "Harness compatibility" below).
+- `bin/fm-crew-state.sh`'s reconciled current state - the same authoritative source the watcher's provably-working triage consults - is `parked`, `done`, `blocked`, or `paused`, never `working` (an active no-mistakes run step or a busy pane, even behind a quiet-looking pane) or `unknown`.
+- The task's last activity of any kind is at least the configured threshold old.
+  That basis is the newest mtime among the task's `state/<id>.meta` spawn record, its `state/<id>.status` log, its `state/<id>.turn-ended` marker, and the pane-activity stamp described below, through `bin/fm-wake-lib.sh`'s shared `fm_last_activity_age` - the same primitive `bin/fm-inactive-reconcile.sh` measures inactivity with, so the two cannot disagree about how long a crew has been quiet.
+  The status log alone is not enough: a status line is a wake event written on wake-worthy transitions, not on every turn (AGENTS.md's sparse status-reporting contract), so a crewmate steered back to work, doing it, and ending its turn can leave an hours-old status file untouched - and compacting it right then would throw away the warm cache this feature exists to preserve.
+- A live safety gate immediately before typing anything: `bin/fm-busy-lib.sh`'s `fm_busy_classify` reports an exact `idle` verdict (never `busy` and never an unproven `unknown`) and `bin/fm-backend.sh`'s `fm_backend_composer_state` reports exactly `empty`, reusing the identical primitives the away-mode daemon's own injection boundary uses.
+  A busy pane, an unproven verdict, or a non-empty composer defers to the next sweep rather than erroring.
+
+**Declared-state fast path:** a worker cannot self-trigger `/compact` (it is a terminal built-in, not a tool), so every no-mistakes ship brief tells the worker, right after its implementation commit, to check whether idle-compact is armed on this host RIGHT NOW - `bash $FM_ROOT/bin/fm-idle-compact.sh enabled` (exit 0 = armed, exit 1 = absent, invalid, or zero `config/idle-compact`; an empty-but-present file is valid and uses the 15-minute default) - rather than trusting anything baked into the brief at generation time. `config/idle-compact` can be added, removed, or edited at any point between when a brief is written and when the worker actually reaches this instruction, so a generation-time snapshot can promise a ring that will never come or skip one that would have arrived; the live check is always current. If armed, the worker appends the status line `paused: awaiting compaction before validation` and ends its turn before starting `no-mistakes axi run`. The worker never schedules its own wake for this; a bounded fallback applies only on whatever wake the worker is actually given while still paused (a firstmate check-in, a heartbeat, anything) - it compares the current time to the status file's own mtime for that line, re-checks `enabled` past 60 minutes with no ring, and gives up and drives `no-mistakes axi run` itself past 90 minutes regardless - covering idle-compact being disarmed while the worker is already waiting. If not armed, the worker drives `no-mistakes axi run` itself immediately, since nothing would ever resume a worker that paused and waited here.
+The task's own latest status line is read as declaring that pause when it *starts with* that phrase on a word boundary: the same brief asks the worker to note its measured lane size, so the line that actually lands routinely carries trailing detail, and requiring whole-line equality silently dropped such workers onto the ordinary path.
+When the line declares the pause, eligibility ignores the idle-minutes threshold entirely (every other exclusion and the live safety gate still apply), and the episode skips the notes-save turn below and sends `/compact` directly, naming the branch, the brief path, and the delivery contract.
+See `bin/fm-idle-compact.sh`'s header comment for the exact mechanics and `bin/fm-dod-lib.sh`'s no-mistakes block for the worker-facing instruction.
+
+**The ring, and the backstop behind it.** A worker whose latest status line declares the compaction pause is waiting on firstmate, not on an external event, so at the `settling` -> `done` transition it is rung once with "compacted - start the validation run now".
+That ring rides `fm-send`'s durable inbox plane, not the typed plane: it becomes a record the watcher's re-ring ladder covers and escalates, so it is deliberately *not* gated behind the live safety gate that guards typed text, and the episode advances to `phase=done` only once the record exists.
+Either signal rings - the episode's own `declared=1` marker field, or a status log that still declares the pause at the transition - because an episode that took the ordinary save-then-compact path leaves exactly the same waiting worker.
+`FM_IDLE_COMPACT_RING_BACKSTOP_SECS` (default 600) then guards the residue: an unchanged `phase=done` marker older than that, over a status line that still declares the pause, with no ring record for *this episode* anywhere in the task's inbox (pending or acknowledged), gets one re-send and one line in `state/.idle-compact.log`. The per-episode scoping matters because sequence numbers - and so `handled/` records - are never reused for a task's whole lifetime: a task that runs several idle-compact episodes across its life keeps every earlier episode's acknowledged ring on disk too, and matching on ring text alone would let a stale episode's own already-acknowledged ring silently satisfy a later episode's check.
+The backstop is the only thing in the feature that logs, because it firing at all means the primary path missed.
+Both gaps are real: on 2026-09-06 two overnight lanes were compacted, never rung, and sat idle 35 to 60 minutes until firstmate rang them by hand.
+
+A durable per-task marker at `state/.idle-compact-<task>` (named after the existing `.hb-surfaced-<task>`/`.seen-*` convention) drives a 4-phase state machine so one idle episode produces at most one compaction (the declared-state fast path above skips straight to step 2, marked `declared=1`):
+
+1. No marker: eligible and safe -> send a guarded message asking the crewmate to write its open decision keys, current gate/step, next actions, and key file paths to `data/<id>/precompact-notes.md` (it survives worktree churn), then record `phase=save-sent` with the current `state/<id>.turn-ended` signature and the send epoch.
+2. `phase=save-sent`: wait for a *new* `turn-ended` signature (proof the save turn actually completed, the same signal the watcher's signal scan already trusts) before doing anything else; a bounded `FM_IDLE_COMPACT_SAVE_TIMEOUT_SECS` abandons a turn that never completes.
+   Once the turn is confirmed complete, the full eligibility check is re-run (the crew may have been steered back to work during the wait - the never-mid-task rule applies to the `/compact` send exactly as it does to the first send) and the live safety gate must still be clear; then send `/compact` with focus text that tells the summarizer to preserve the pointer to the brief, the status-append protocol, and the notes file path, and record `phase=settling` with the send epoch.
+3. `phase=settling`: wait `FM_IDLE_COMPACT_SETTLE_SECS` (default: one sweep interval) for the compaction summary to finish rendering, then record `phase=done` with the status line and pane-tail signature at that moment - captured after the render, so the compaction's own output is baked into the baseline and never reads as new worker activity (which would otherwise re-trigger a fresh save+compact episode every couple of sweeps).
+4. `phase=done`: compared on every sweep against the current `state/<id>.status` and pane-tail signatures; either changing (a new status append or new pane activity) ends the episode, exactly the reset condition the requirement calls for.
+   The status side uses the same size:mtime signature `bin/fm-wake-lib.sh` owns and the watcher's own `.seen-*` dedup uses, not the last line's text, so a second textually identical append (a repeated `blocked: waiting on the gate`) still counts as the new append it is.
+   The marker is then replaced by a `phase=reset` stamp rather than deleted: pane activity leaves no mtime anywhere else, and that stamp is what makes the next episode wait out a full fresh idle window instead of re-arming on the same sweep.
+
+Each episode makes the crewmate take two turns it never asked for (the notes save and the `/compact`), and every completed turn touches `state/<id>.turn-ended`, which the watcher's signal scan would otherwise surface as an actionable wake - two extra firstmate wake-handling turns per crewmate per episode, spent on housekeeping the captain never requested.
+`bin/fm-idle-compact.sh` owns the exemption for exactly those turns, and `bin/fm-watch.sh`'s signal triage asks it per pending signal, so both supervision paths read one answer.
+It is deliberately narrow: only a `turn-ended` file (a status append always wakes), only while that task's own marker is in an in-flight phase, only within `FM_IDLE_COMPACT_SAVE_TIMEOUT_SECS` of the send that induced it, at most one turn per send, only when the watcher's `.seen-*` marker shows no earlier turn-end still unannounced, and only while no sweep holds this home's `state/.idle-compact.lock` (a mid-flight sweep means the signal is not provably this feature's own, so it wakes, the direction every other arm of the test already fails toward).
+A second turn-end in the same window - real crew work landing while the crewmate waits to be compacted - carries a different signature and wakes normally.
+
+Every message is delivered through `bin/fm-send.sh` exactly as any other steer, under the same plane selection `fm-send.sh` applies to any unmarked task-selector text: only the leading-`/` `/compact` command rides the typed plane, with type-once-verified-Enter submission, per-harness settle timing and delivery confirmation unchanged; the plain-text notes save and the ring both ride the durable inbox plane - and idle-compact never calls a backend primitive or raw tmux command directly.
+A deferred or failed attempt at any phase is silent routine - it is retried on the next sweep - never a captain-facing escalation, and it never touches a secondmate or the primary session (the primary is never recorded under `state/*.meta`, so it is out of scope by construction).
+
+### Harness compatibility
+
+Reviewed and not applicable for every other verified primary/crew harness (`codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `muse`): none has a verified compaction command or slash-command surface equivalent to Claude Code's `/compact`, so idle-compact's action step has nothing to invoke for them.
+Eligibility's harness check (`harness=claude` in `state/<id>.meta`) skips every other harness gracefully rather than guessing at an unverified command.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.
@@ -1099,6 +1154,11 @@ FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pan
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
 FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
+FM_IDLE_COMPACT_INTERVAL=300       # seconds between idle-compact eligibility sweeps (watcher and away-mode daemon alike)
+FM_IDLE_COMPACT_SAVE_TIMEOUT_SECS=900   # seconds to wait for a sent precompact-notes save turn to complete before abandoning that idle episode
+FM_IDLE_COMPACT_SETTLE_SECS=       # seconds after a /compact send before the done-phase status/pane baseline is captured (default: FM_IDLE_COMPACT_INTERVAL), so the compaction render never reads as new activity
+FM_IDLE_COMPACT_RING_BACKSTOP_SECS=600  # seconds a phase=done marker over a still-declared pause may sit with no ring recorded anywhere in the task's inbox before the backstop re-sends the ring, once per episode
+FM_IDLE_COMPACT_LOG_MAX_BYTES=65536     # size cap for state/.idle-compact.log (only the ring backstop writes here) before it is trimmed to its last 200 lines
 FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale/pause-recheck, and scan passes
 FM_CRASH_THRESHOLD=10              # watcher crashes allowed inside FM_CRASH_WINDOW before daemon backoff
 FM_CRASH_WINDOW=60                 # seconds in the crash-loop detection window

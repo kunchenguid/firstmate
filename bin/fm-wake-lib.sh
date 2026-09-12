@@ -123,6 +123,30 @@ fm_poll_derived_grace() {
   printf '%s\n' "$derived"
 }
 
+# fm_last_activity_age <now-epoch> <file>...
+# Seconds since the NEWEST mtime among <file>..., the "last activity" basis for
+# a task: a crewmate is only as idle as its most recent durable trace, so any
+# ONE fresh file (a status append, a completed turn, a fresh spawn record)
+# proves recent activity no matter how stale the others are.
+# Missing, unreadable, and non-numeric mtimes are skipped; a set with no usable
+# mtime at all prints 0 (reads as "just active", the conservative direction for
+# every caller, since acting on absent evidence is what must never happen).
+# A future mtime (clock skew, a copied tree) also prints 0 for the same reason.
+# Callers pass their own <now-epoch> so each keeps its existing clock seam
+# rather than inheriting a second one from this library.
+fm_last_activity_age() {
+  local now=$1 newest=0 m file
+  shift
+  for file in "$@"; do
+    [ -e "$file" ] || continue
+    m=$(fm_path_mtime "$file" 2>/dev/null || true)
+    case "$m" in ''|*[!0-9]*) continue ;; esac
+    [ "$m" -le "$newest" ] || newest=$m
+  done
+  [ "$newest" -gt 0 ] || { printf '0\n'; return; }
+  if [ "$now" -lt "$newest" ]; then printf '0\n'; else printf '%s\n' $((now - newest)); fi
+}
+
 # fm_watcher_lock_unheld <state>
 # True when the watcher lock or its symlinked owner directory is absent, or when
 # the existing lock records no pid at all. Any non-empty pid remains held here;

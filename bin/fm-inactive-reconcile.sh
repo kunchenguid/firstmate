@@ -255,17 +255,13 @@ queue_presentation() { # <record> <fingerprint> <payload>
   publish_actionable "inactive-outcome:$fingerprint" "$payload"
 }
 
+# The newest-of-meta/status/turn-ended activity basis is owned by
+# bin/fm-wake-lib.sh (fm_last_activity_age), shared with the idle-compact
+# sweep's idle-duration gate so the two cannot answer "how long has this crew
+# been quiet" differently. This home's own clock seam (reconcile_now, which
+# FM_INACTIVE_RECONCILE_NOW pins in tests) stays here and is passed in.
 last_activity_age() { # <meta> <status> <turn-ended>
-  local meta=$1 status=$2 turn=$3 now m newest=0 file
-  now=$(reconcile_now)
-  for file in "$meta" "$status" "$turn"; do
-    [ -e "$file" ] || continue
-    m=$(file_mtime "$file" 2>/dev/null || true)
-    case "$m" in ''|*[!0-9]*) continue ;; esac
-    [ "$m" -le "$newest" ] || newest=$m
-  done
-  [ "$newest" -gt 0 ] || { printf '0\n'; return; }
-  if [ "$now" -lt "$newest" ]; then printf '0\n'; else printf '%s\n' $((now - newest)); fi
+  fm_last_activity_age "$(reconcile_now)" "$@"
 }
 
 scan_marker_age() {
