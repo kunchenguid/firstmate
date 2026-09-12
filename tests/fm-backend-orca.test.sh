@@ -1323,6 +1323,166 @@ test_dispatcher_sources_orca_and_routes_primitives() {
   pass "fm-backend dispatcher: accepts orca and routes capture through bin/backends/orca.sh"
 }
 
+# Orca issues the worktree id and firstmate records it verbatim, so the id's
+# shape belongs to Orca and has already changed once: the atom form older
+# records carry became today's "<repo-id>::<absolute-path>" compound, whose
+# path half routinely holds spaces. Both must resolve, and every corrupt or
+# ambiguous record must still refuse.
+test_orca_worktree_id_accepts_opaque_forms_and_refuses_corruption() {
+  # Single quotes are the point: these cases must reach the validator as the
+  # literal bytes a corrupt record would hold, never as an expansion.
+  # shellcheck disable=SC2016
+  local verdicts expected values=(
+    'wt-teardown'
+    '74c6a297-f6ab-433d-b0ca-6136c9b1dbea'
+    '74c6a297-f6ab-433d-b0ca-6136c9b1dbea::/Users/cap/orca/workspaces/node/fm-audit-k9'
+    'repo-1::/Users/cap/orca/work spaces/my project/fm-audit-k9'
+    'repo-1::/Users/cap/orca/My Repo (fork)/fm-audit-k9'
+    "repo-1::/Users/cap/orca/Cap's & Co [1]/fm-audit-k9"
+    'repo-1::/Users/cap/orca/$notes {draft}/fm-audit-k9'
+    ''
+    'wt 7'
+    ' wt-7'
+    'wt-7 '
+    $'wt-\t7'
+    $'wt-7\nwt-8'
+    $'wt-7\r'
+    $'repo-1::/Users/cap/wt\t9'
+    'repo-1::relative/path'
+    'repo-1::'
+    '::/Users/cap/wt'
+    'repo-1::/Users/cap/a::/Users/cap/b'
+    're po::/Users/cap/wt'
+  )
+  expected=$'accept\naccept\naccept\naccept\naccept\naccept\naccept'
+  expected="$expected"$'\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse'
+  expected="$expected"$'\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse\nrefuse'
+  verdicts=$( bash -c '
+    . "$1/bin/fm-backend.sh"
+    fm_backend_source orca || exit 9
+    shift 1
+    for value in "$@"; do
+      if fm_backend_orca_worktree_id_valid "$value"; then
+        printf "accept\n"
+      else
+        printf "refuse\n"
+      fi
+    done
+  ' _ "$ROOT" "${values[@]}" )
+  [ "$verdicts" = "$expected" ] || fail \
+    "Orca worktree id verdicts changed"$'\n'"--- got ---"$'\n'"$verdicts"$'\n'"--- want ---"$'\n'"$expected"
+  pass "fm_backend_orca_worktree_id_valid: legacy atom and compound ids resolve, including punctuated workspace paths; corrupt and ambiguous ids refuse"
+}
+
+test_orca_endpoint_records_validate_both_worktree_id_forms() {
+  local dir state id target
+  dir="$TMP_ROOT/endpoint-id-forms"
+  mkdir -p "$dir/state" "$dir/worktree" "$dir/project"
+  state="$dir/state"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+
+  for id in orcalegacyid orcacompoundid orcaspacedid; do
+    case "$id" in
+      orcalegacyid) target='worktree-9' ;;
+      orcacompoundid) target="74c6a297-f6ab-433d-b0ca-6136c9b1dbea::$dir/worktree" ;;
+      orcaspacedid) target="repo-1::$dir/work tree with spaces" ;;
+    esac
+    fm_write_meta "$state/$id.meta" \
+      "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+      "worktree=$dir/worktree" "project=$dir/project" \
+      "backend=orca" "orca_worktree_id=$target"
+    fm_backend_validate_task_endpoint "$state/$id.meta" "$id" \
+      || fail "Orca endpoint with worktree id '$target' refused"
+    [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] \
+      || fail "Orca validation stopped selecting the recorded terminal for '$target'"
+  done
+
+  id=orcabadcompoundid
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=orca" "orca_worktree_id=repo-1::relative/worktree"
+  set +e
+  fm_backend_validate_task_endpoint "$state/$id.meta" "$id" >/dev/null 2>&1
+  target=$?
+  set -e
+  [ "$target" -ne 0 ] || fail "Orca endpoint accepted a compound worktree id with a relative path"
+  pass "fm_backend_validate_task_endpoint: Orca records validate on either worktree id form and still refuse a malformed one"
+}
+
+test_ship_teardown_removes_orca_worktree_for_compound_id_with_spaces() {
+  local proj wt data state config id worktree_id out rc neutral
+  id="orcacompoundshipz7"
+  proj="$TMP_ROOT/compound-ship-project"
+  wt="$TMP_ROOT/compound ship wt"
+  data="$TMP_ROOT/compound-ship-data"
+  state="$TMP_ROOT/compound-ship-state"
+  config="$TMP_ROOT/compound-ship-config"
+  worktree_id="74c6a297-f6ab-433d-b0ca-6136c9b1dbea::$wt"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-compound" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
+    "backend=orca" "orca_worktree_id=$worktree_id"
+  orca_case compound-ship
+  printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$worktree_id" "$wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "Orca ship teardown should succeed for a compound worktree id whose path matches"$'\n'"$out"
+  # The fake CLI logs one \x1f-separated field per argv entry, so matching the
+  # whole spaced selector as ONE field is the proof it reached Orca unsplit.
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show'$'\x1f''--worktree'$'\x1f'"id:$worktree_id"$'\x1f''--json' \
+    "teardown did not resolve the compound Orca worktree id as a single argument"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$worktree_id"$'\x1f''--force'$'\x1f''--json' \
+    "teardown did not remove the compound Orca worktree as a single argument"
+  assert_absent "$state/$id.meta" "successful compound-id teardown should remove task metadata"
+  pass "fm-teardown.sh backend=orca: a compound worktree id with spaces resolves and removes unsplit"
+}
+
+test_ship_teardown_refuses_compound_orca_id_path_mismatch() {
+  local proj wt other_wt data state config id worktree_id out rc neutral
+  id="orcacompoundmismatchz8"
+  proj="$TMP_ROOT/compound-mismatch-project"
+  wt="$TMP_ROOT/compound mismatch wt"
+  other_wt="$TMP_ROOT/compound mismatch other wt"
+  data="$TMP_ROOT/compound-mismatch-data"
+  state="$TMP_ROOT/compound-mismatch-state"
+  config="$TMP_ROOT/compound-mismatch-config"
+  worktree_id="74c6a297-f6ab-433d-b0ca-6136c9b1dbea::$wt"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  git -C "$proj" worktree add --quiet -b "fm/$id-other" "$other_wt"
+  mkdir -p "$data/$id" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-compound-mismatch" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
+    "backend=orca" "orca_worktree_id=$worktree_id"
+  orca_case compound-mismatch
+  printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$worktree_id" "$other_wt" > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "compound Orca id resolving to another worktree should refuse teardown"
+  assert_contains "$out" "not inspected worktree" \
+    "compound-id mismatch refusal should name the mismatch"
+  assert_present "$state/$id.meta" "refused compound-id teardown removed task metadata"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "refused compound-id teardown still removed the Orca worktree"
+  pass "fm-teardown.sh backend=orca: a compound id whose resolved path differs still refuses before removal"
+}
+
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
@@ -1369,6 +1529,10 @@ test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_removes_orca_worktree_when_id_path_matches
 test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
+test_orca_worktree_id_accepts_opaque_forms_and_refuses_corruption
+test_orca_endpoint_records_validate_both_worktree_id_forms
+test_ship_teardown_removes_orca_worktree_for_compound_id_with_spaces
+test_ship_teardown_refuses_compound_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
 test_secondmate_force_teardown_removes_orca_child_via_orca
