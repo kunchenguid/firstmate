@@ -98,6 +98,34 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
   printf '%s\n' "$wid"
 }
 
+# fm_backend_tmux_pane_in_path: the first pane anywhere in <session> whose
+# current working directory resolves (pwd -P) to <path-abs>, printed as
+# `<session>:<window-name>.<pane-index>`; prints nothing when no pane sits
+# there. The agent-state classifier's `missing` verdict only proves that the
+# exact window NAME is absent from the inventory, so a window renamed away
+# from fm-<id> can still host a live agent in the task's worktree. A caller
+# about to recreate fm-<id> asks this first so it never lands a second
+# agent beside that one. A pane whose path cannot be read is skipped: an
+# unreadable pane is not evidence of an occupant, and the classifier already
+# refuses on an unreadable inventory.
+fm_backend_tmux_pane_in_path() {  # <session> <path-abs> -> prints pane target or nothing
+  local ses=$1 want=$2 want_real pane_id label path path_real
+  want_real=$(cd "$want" 2>/dev/null && pwd -P) || want_real=$want
+  while read -r pane_id label; do
+    [ -n "$pane_id" ] || continue
+    path=$(fm_backend_tmux_current_path "$pane_id")
+    [ -n "$path" ] || continue
+    path_real=$(cd "$path" 2>/dev/null && pwd -P) || path_real=$path
+    if [ "$path" = "$want" ] || [ "$path_real" = "$want_real" ]; then
+      printf '%s\n' "$label"
+      return 0
+    fi
+  done <<EOF
+$(tmux list-panes -s -t "$ses" -F '#{pane_id} #{session_name}:#{window_name}.#{pane_index}' 2>/dev/null)
+EOF
+  return 0
+}
+
 # fm_backend_tmux_current_path: the live pane's current working directory, or
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.

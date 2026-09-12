@@ -19,7 +19,10 @@
 #   (e) an `unreadable` endpoint still refuses (never recreated);
 #   (f) a record whose session is not the one the container resolves to
 #       refuses rather than silently landing the window elsewhere;
-#   (g) `interrupt` and `exit` keep refusing on `missing`.
+#   (g) `interrupt` and `exit` keep refusing on `missing`;
+#   (h) a window renamed away from fm-<id> that still hosts a live agent in
+#       the recorded worktree reads `missing` yet refuses, naming the pane,
+#       so a second fm-<id> window (and a second agent) is never created.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -33,11 +36,10 @@ CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-relaunch-missing-$$"
-# fm_test_tmproot's own cleanup trap fires when its command substitution exits,
-# so recreate the root before resolving it and clean it up from this file's trap.
-LAB=$(fm_test_tmproot fm-relaunch-missing)
-mkdir -p "$LAB"
-LAB=$(cd "$LAB" && pwd)
+# fm_test_tmproot registers the root in lib.sh's `$$`-keyed cleanup registry;
+# this file's own EXIT trap below replaces lib.sh's, so it calls
+# fm_test_cleanup last to reap that registry (and the root) itself.
+LAB=$(fm_test_tmproot fm-relaunch-missing) || fail "could not create the lab root"
 TASK_TMPS=()
 
 cleanup_all() {
@@ -46,7 +48,7 @@ cleanup_all() {
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
-  rm -rf "$LAB"
+  fm_test_cleanup
 }
 trap cleanup_all EXIT
 
@@ -349,4 +351,48 @@ test_spawn_relaunch_refuses_when_the_recorded_worktree_is_not_a_git_work_tree
 test_relaunch_refuses_a_worktree_two_tasks_record
 test_relaunch_still_refuses_an_unreadable_endpoint
 test_relaunch_refuses_a_record_in_another_session
+# --- (h) renamed window still hosting the agent ------------------------------
+
+# wait_state <target> <state>: poll the liveness probe until it reads <state>.
+wait_state() {
+  local _
+  for _ in $(seq 1 50); do
+    [ "$(fm_backend_agent_state tmux "$1")" = "$2" ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+test_relaunch_refuses_when_a_renamed_pane_still_sits_in_the_worktree() {
+  local dir out rc alive_windows
+  start_server
+  dir=$(new_case renamed-window mw9)
+  private_tmux new-window -d -t firstmate: -n fm-mw9 -c "$dir/wt" \
+    || fail "could not create the recorded window in the recorded worktree"
+  private_tmux send-keys -t firstmate:fm-mw9 'claude' Enter
+  wait_state firstmate:fm-mw9 alive \
+    || fail "precondition: the stand-in agent must read alive in the recorded window"
+  private_tmux rename-window -t firstmate:fm-mw9 detached-name \
+    || fail "could not rename the recorded window away"
+  [ "$(fm_backend_agent_state tmux firstmate:fm-mw9)" = missing ] \
+    || fail "precondition: the recorded name must read missing once the window is renamed away"
+  out=$(run_control "$dir" mw9 relaunch --note "server hiccup"); rc=$?
+  expect_code 1 "$rc" "a relaunch must refuse while a pane still sits in the recorded worktree"$'\n'"$out"
+  assert_contains "$out" "pane firstmate:detached-name.0 already sits in its recorded worktree '$dir/wt'" \
+    "the refusal should name the occupying pane and the worktree"
+  private_tmux list-windows -t firstmate -F '#{window_name}' | grep -qx fm-mw9 \
+    && fail "no second fm-mw9 window may be created beside the renamed one"
+  [ "$(private_tmux list-windows -t firstmate -F '#{window_name}' | wc -l | tr -d ' ')" = 2 ] \
+    || fail "the session must still hold exactly the idle and renamed windows"
+  alive_windows=$(private_tmux list-windows -t firstmate -F '#{window_name}' | while read -r w; do
+    [ "$(fm_backend_agent_state tmux "firstmate:$w")" = alive ] && printf '%s\n' "$w"
+  done)
+  [ "$alive_windows" = detached-name ] \
+    || fail "exactly the renamed window may host an agent after the refusal, got '$alive_windows'"
+  [ "$(meta_field "$dir" mw9 window)" = "firstmate:fm-mw9" ] \
+    || fail "the record must be left untouched by the refusal"
+  pass "fm-control relaunch: a window renamed away from fm-<id> that still sits in the worktree refuses, naming the pane"
+}
+
 test_interrupt_and_exit_keep_refusing_on_missing
+test_relaunch_refuses_when_a_renamed_pane_still_sits_in_the_worktree

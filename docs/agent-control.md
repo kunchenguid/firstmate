@@ -123,5 +123,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
-- `tests/fm-control-relaunch-missing-endpoint.test.sh` - relaunch against a missing tmux endpoint on a private-socket real tmux server: window and whole-server recreation into the recorded worktree, and the worktree, collision, session, and unreadable refusals.
+- `tests/fm-control-relaunch-missing-endpoint.test.sh` - relaunch against a missing tmux endpoint on a private-socket real tmux server: window and whole-server recreation into the recorded worktree, and the worktree, collision, session, occupied-pane, and unreadable refusals.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
