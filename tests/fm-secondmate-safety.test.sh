@@ -2030,6 +2030,14 @@ EOF
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
 case "${1:-}" in
+  status)
+    # The child slot is a pool slot with no durable lease (taken before spawns
+    # leased), so teardown's ownership read must find it listed and unleased.
+    [ "${2:-}" = --json ] || exit 0
+    printf '[{"name":"1","path":"%s","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}]\n' \
+      "${FM_FAKE_TREEHOUSE_SLOT_PATH:?}"
+    exit 0
+    ;;
   return)
     shift
     target=
@@ -2063,6 +2071,7 @@ SH
 
   set +e
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-lock-child-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_SLOT_PATH="$childwt" \
     FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
   rc=$?

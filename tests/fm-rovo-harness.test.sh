@@ -121,7 +121,8 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_test_fake_treehouse "$fakebin"
+  fm_fake_exit0 "$fakebin" gh-axi gh
   fm_fake_exit0 "$fakebin" rovo
   printf '%s\n' "$fakebin"
 }

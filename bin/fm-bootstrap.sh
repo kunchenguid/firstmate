@@ -53,8 +53,10 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
-#          treehouse is also MISSING when its installed version lacks
-#          "treehouse get --lease" support.
+#          treehouse is also MISSING when its installed version lacks durable
+#          lease support: "treehouse get --lease" together with
+#          "treehouse return --if-lease-holder", which bin/fm-spawn.sh and
+#          bin/fm-teardown.sh depend on for every pool slot.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
@@ -917,8 +919,12 @@ NO_MISTAKES_MIN=1.46.0
 GH_AXI_MIN=0.1.29
 LAVISH_AXI_MIN=0.1.46
 
+# Durable-lease support is two flags that shipped separately: `get --lease`
+# (Treehouse v1.8.0) and `return --if-lease-holder` (v2.1.0, together with the
+# `status --json` read bin/fm-wake-lib.sh parses). Both must be advertised.
 treehouse_supports_lease() {
-  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
+  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)' \
+    && treehouse return --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--if-lease-holder([^[:alnum:]_-]|$)'
 }
 
 # Shared semantic-version floor for the tool gates below. A version string that

@@ -40,7 +40,8 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
 
 # A fake toolchain where every required tool is present and gh is authenticated.
-# treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
+# treehouse's `get --help` advertises --lease, and its `return --help`
+# --if-lease-holder, only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -70,6 +71,14 @@ if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
     printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
   else
     printf '%s\n' 'Usage: treehouse get'
+  fi
+  exit 0
+fi
+if [ "${1:-}" = return ] && [ "${2:-}" = --help ]; then
+  if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
+    printf '%s\n' 'Usage: treehouse return [path] [--force] [--if-lease-holder <holder>] [--if-lease-id <id>]'
+  else
+    printf '%s\n' 'Usage: treehouse return [path] [--force]'
   fi
   exit 0
 fi
