@@ -119,22 +119,38 @@ sha256_file() {
 
 RESUME_PENDING=0
 if [ "${1:-}" = --resume-pending ]; then
-  [ "$#" -eq 1 ] || { echo "usage: fm-backlog-handoff.sh --resume-pending" >&2; exit 1; }
+  [ "$#" -eq 1 ] || {
+    echo "usage: fm-backlog-handoff.sh --resume-pending" >&2
+    exit 1
+  }
   RESUME_PENDING=1
   ID=
   shift
 else
-  [ "$#" -ge 2 ] || { echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2; exit 1; }
+  [ "$#" -ge 2 ] || {
+    echo "usage: fm-backlog-handoff.sh <secondmate-id> <item-key>..." >&2
+    exit 1
+  }
   ID=$1
-  case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "error: unsafe secondmate id: $ID" >&2; exit 1 ;; esac
+  case "$ID" in '' | *[!A-Za-z0-9._-]*)
+    echo "error: unsafe secondmate id: $ID" >&2
+    exit 1
+    ;;
+  esac
   shift
 fi
 
 secondmate_home() {
   local id=$1 home
-  [ -f "$REG" ] || { echo "error: no secondmate registry at $REG" >&2; return 1; }
+  [ -f "$REG" ] || {
+    echo "error: no secondmate registry at $REG" >&2
+    return 1
+  }
   home=$(secondmate_registry_field "$REG" "$id" home || true)
-  [ -n "$home" ] || { echo "error: secondmate $id has no home in $REG" >&2; return 1; }
+  [ -n "$home" ] || {
+    echo "error: secondmate $id has no home in $REG" >&2
+    return 1
+  }
   printf '%s\n' "$home"
 }
 
@@ -144,14 +160,17 @@ path_is_ancestor_of() {
   [ -n "$path" ] || return 1
   [ "$ancestor" != "$path" ] || return 1
   case "$path" in
-    "$ancestor"/*) return 0 ;;
+  "$ancestor"/*) return 0 ;;
   esac
   return 1
 }
 
 resolved_existing_dir() {
   local path=$1
-  [ -d "$path" ] || { echo "error: firstmate home does not exist or is not a directory: $path" >&2; return 1; }
+  [ -d "$path" ] || {
+    echo "error: firstmate home does not exist or is not a directory: $path" >&2
+    return 1
+  }
   cd "$path" && pwd -P
 }
 
@@ -299,7 +318,7 @@ backlog_key_noncanonical_body_lines() {
 
 seed_backlog_scaffold() { # <path>
   mkdir -p "$(dirname "$1")"
-  [ -f "$1" ] || printf '## In flight\n\n## Queued\n\n## Done\n' > "$1"
+  [ -f "$1" ] || printf '## In flight\n\n## Queued\n\n## Done\n' >"$1"
 }
 
 # A public commitment made through the relay binds its work by home AND id, so an
@@ -347,16 +366,19 @@ receiver_wake_batch_id() { # <item-key>...
 
 receiver_wake_state_write() { # <secondmate-id> <state>
   local id=$1 value=$2 marker="$STATE/.backlog-handoff-$1.wake-pending" tmp
-  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$id" in '' | *[!A-Za-z0-9._-]*) return 1 ;; esac
   case "$value" in
-    pending|confirmed) ;;
-    prepared:*) printf '%s' "$value" | grep -Eq '^prepared:[a-f0-9]{16}:[a-f0-9]{16}$' || return 1 ;;
-    pending:*) printf '%s' "$value" | grep -Eq '^pending:[a-f0-9]{16}$' || return 1 ;;
-    confirmed:*) printf '%s' "$value" | grep -Eq '^confirmed:[a-f0-9]{16}$' || return 1 ;;
-    *) return 1 ;;
+  pending | confirmed) ;;
+  prepared:*) printf '%s' "$value" | grep -Eq '^prepared:[a-f0-9]{16}:[a-f0-9]{16}$' || return 1 ;;
+  pending:*) printf '%s' "$value" | grep -Eq '^pending:[a-f0-9]{16}$' || return 1 ;;
+  confirmed:*) printf '%s' "$value" | grep -Eq '^confirmed:[a-f0-9]{16}$' || return 1 ;;
+  *) return 1 ;;
   esac
-  tmp=$(umask 077; mktemp "$STATE/.backlog-handoff-wake.XXXXXX") || return 1
-  if ! printf '%s\n' "$value" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$marker"; then
+  tmp=$(
+    umask 077
+    mktemp "$STATE/.backlog-handoff-wake.XXXXXX"
+  ) || return 1
+  if ! printf '%s\n' "$value" >"$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$marker"; then
     rm -f -- "$tmp"
     return 1
   fi
@@ -365,22 +387,25 @@ receiver_wake_state_write() { # <secondmate-id> <state>
 receiver_wake_mark() { # <secondmate-id> <prepared|pending> [batch-id]
   local id=$1 wake_phase=$2 batch=${3:-} marker="$STATE/.backlog-handoff-$1.wake-pending" value corr rec
   local wake_state
-  case "$wake_phase" in prepared|pending) ;; *) return 1 ;; esac
+  case "$wake_phase" in prepared | pending) ;; *) return 1 ;; esac
   if [ -e "$marker" ] || [ -L "$marker" ]; then
     [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
     value=$(cat "$marker" 2>/dev/null || true)
     case "$value" in
-      prepared:*)
-        corr=${value#*:}
-        corr=${corr%%:*}
-        rec=$(fm_pending_reply_path "$STATE" "$corr")
-        [ -f "$rec" ] && [ ! -L "$rec" ] \
-          && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ]
-        return $?
-        ;;
-      pending:*) receiver_wake_pending_valid "$id"; return $? ;;
-      pending) ;;
-      *) return 1 ;;
+    prepared:*)
+      corr=${value#*:}
+      corr=${corr%%:*}
+      rec=$(fm_pending_reply_path "$STATE" "$corr")
+      [ -f "$rec" ] && [ ! -L "$rec" ] &&
+        [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ]
+      return $?
+      ;;
+    pending:*)
+      receiver_wake_pending_valid "$id"
+      return $?
+      ;;
+    pending) ;;
+    *) return 1 ;;
     esac
   fi
   corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$id" "$RECEIVER_WAKE_MESSAGE") || return 1
@@ -408,11 +433,11 @@ receiver_wake_discard_prepared() { # <secondmate-id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   value=$(cat "$marker" 2>/dev/null || true)
   case "$value" in
-    prepared:*)
-      corr=${value#prepared:}
-      corr=${corr%%:*}
-      ;;
-    *) return 1 ;;
+  prepared:*)
+    corr=${value#prepared:}
+    corr=${corr%%:*}
+    ;;
+  *) return 1 ;;
   esac
   fm_pending_reply_discard_undelivered "$STATE" "$corr" || return 1
   rm -f -- "$marker"
@@ -423,12 +448,12 @@ receiver_wake_promote_prepared() { # <secondmate-id> <batch-id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   value=$(cat "$marker" 2>/dev/null || true)
   case "$value" in
-    prepared:*:"$batch")
-      corr=${value#prepared:}
-      corr=${corr%%:*}
-      ;;
-    pending:*) return 0 ;;
-    *) return 1 ;;
+  prepared:*:"$batch")
+    corr=${value#prepared:}
+    corr=${corr%%:*}
+    ;;
+  pending:*) return 0 ;;
+  *) return 1 ;;
   esac
   receiver_wake_state_write "$id" "pending:$corr"
 }
@@ -438,12 +463,12 @@ receiver_wake_discard_pending() { # <secondmate-id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   value=$(cat "$marker" 2>/dev/null || true)
   case "$value" in
-    pending:*)
-      corr=${value#pending:}
-      fm_pending_reply_discard_undelivered "$STATE" "$corr" || return 1
-      ;;
-    pending) ;;
-    *) return 1 ;;
+  pending:*)
+    corr=${value#pending:}
+    fm_pending_reply_discard_undelivered "$STATE" "$corr" || return 1
+    ;;
+  pending) ;;
+  *) return 1 ;;
   esac
   rm -f -- "$marker"
 }
@@ -455,8 +480,8 @@ receiver_wake_pending_valid() { # <secondmate-id>
   case "$value" in pending:*) corr=${value#pending:} ;; *) return 1 ;; esac
   printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' || return 1
   rec=$(fm_pending_reply_path "$STATE" "$corr")
-  [ -f "$rec" ] && [ ! -L "$rec" ] \
-    && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] || return 1
+  [ -f "$rec" ] && [ ! -L "$rec" ] &&
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] || return 1
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   [ -z "$delivered" ] || return 1
   fm_pending_reply_corr_reusable "$STATE" "$corr" "$id"
@@ -469,9 +494,9 @@ receiver_wake_pending_delivered_valid() { # <secondmate-id>
   case "$value" in pending:*) corr=${value#pending:} ;; *) return 1 ;; esac
   printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' || return 1
   rec=$(fm_pending_reply_path "$STATE" "$corr")
-  [ -f "$rec" ] && [ ! -L "$rec" ] \
-    && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] \
-    && [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ]
+  [ -f "$rec" ] && [ ! -L "$rec" ] &&
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] &&
+    [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ]
 }
 
 receiver_wake_confirmed_valid() { # <secondmate-id>
@@ -482,9 +507,9 @@ receiver_wake_confirmed_valid() { # <secondmate-id>
   case "$value" in confirmed:*) corr=${value#confirmed:} ;; *) return 1 ;; esac
   printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' || return 1
   rec=$(fm_pending_reply_path "$STATE" "$corr")
-  [ -f "$rec" ] && [ ! -L "$rec" ] \
-    && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] \
-    && [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ]
+  [ -f "$rec" ] && [ ! -L "$rec" ] &&
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] &&
+    [ -n "$(fm_pending_reply_get "$rec" delivered_epoch)" ]
 }
 
 receiver_wake_drop_marker() { # <secondmate-id> <reason>
@@ -552,15 +577,15 @@ wake_pending_secondmate_receiver() { # <secondmate-id> [retain-confirmed]
   fi
   value=$(cat "$marker" 2>/dev/null || true)
   case "$value" in
-    confirmed|confirmed:*) return 0 ;;
-    prepared|prepared:*)
-      printf 'error: receiver wake for secondmate %s was prepared before its backlog became durable\n' "$id" >&2
-      return 1
-      ;;
-    pending)
-      receiver_wake_mark_pending "$id" || return 1
-      value=$(cat "$marker" 2>/dev/null || true)
-      ;;
+  confirmed | confirmed:*) return 0 ;;
+  prepared | prepared:*)
+    printf 'error: receiver wake for secondmate %s was prepared before its backlog became durable\n' "$id" >&2
+    return 1
+    ;;
+  pending)
+    receiver_wake_mark_pending "$id" || return 1
+    value=$(cat "$marker" 2>/dev/null || true)
+    ;;
   esac
   case "$value" in pending:*) corr=${value#pending:} ;; *)
     printf 'error: receiver wake state for secondmate %s is unsafe or invalid\n' "$id" >&2
@@ -568,8 +593,8 @@ wake_pending_secondmate_receiver() { # <secondmate-id> [retain-confirmed]
     ;;
   esac
   rec=$(fm_pending_reply_path "$STATE" "$corr")
-  [ -f "$rec" ] && [ ! -L "$rec" ] \
-    && [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] || return 1
+  [ -f "$rec" ] && [ ! -L "$rec" ] &&
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$id" ] || return 1
   fm_pending_reply_reconcile_delivery "$STATE" "$corr" >/dev/null 2>&1 || true
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   if [ -z "$delivered" ]; then
@@ -602,40 +627,74 @@ remote_deliver_outbox() { # <secondmate-id> <outbox-path>
     echo "error: pending outbox is unavailable or unsafe: $outbox" >&2
     return 1
   }
-  snapshot=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-handoff-payload.XXXXXX") || return 1
+  snapshot=$(
+    umask 077
+    mktemp "${TMPDIR:-/tmp}/fm-handoff-payload.XXXXXX"
+  ) || return 1
   if ! cp -p -- "$outbox" "$snapshot"; then
     rm -f -- "$snapshot"
     return 1
   fi
-  bytes=$(LC_ALL=C wc -c < "$snapshot" | tr -d ' ')
-  hash=$(sha256_file "$snapshot") || { rm -f -- "$snapshot"; return 1; }
+  bytes=$(LC_ALL=C wc -c <"$snapshot" | tr -d ' ')
+  hash=$(sha256_file "$snapshot") || {
+    rm -f -- "$snapshot"
+    return 1
+  }
   counter="$STATE/.remote-handoff-$id.generation"
   current=0
   if [ -e "$counter" ] || [ -L "$counter" ]; then
-    [ -f "$counter" ] && [ ! -L "$counter" ] || { rm -f -- "$snapshot"; return 1; }
-    IFS= read -r current < "$counter" || { rm -f -- "$snapshot"; return 1; }
-    case "$current" in ''|*[!0-9]*) rm -f -- "$snapshot"; return 1 ;; esac
-    [ "${#current}" -le 17 ] || { rm -f -- "$snapshot"; return 1; }
+    [ -f "$counter" ] && [ ! -L "$counter" ] || {
+      rm -f -- "$snapshot"
+      return 1
+    }
+    IFS= read -r current <"$counter" || {
+      rm -f -- "$snapshot"
+      return 1
+    }
+    case "$current" in '' | *[!0-9]*)
+      rm -f -- "$snapshot"
+      return 1
+      ;;
+    esac
+    [ "${#current}" -le 17 ] || {
+      rm -f -- "$snapshot"
+      return 1
+    }
   fi
   generation=$((current + 1))
-  counter_tmp=$(umask 077; mktemp "$STATE/.remote-handoff-generation.XXXXXX") \
-    || { rm -f -- "$snapshot"; return 1; }
-  printf '%s\n' "$generation" > "$counter_tmp" \
-    || { rm -f -- "$snapshot" "$counter_tmp"; return 1; }
-  chmod 600 "$counter_tmp" \
-    || { rm -f -- "$snapshot" "$counter_tmp"; return 1; }
-  mv -f -- "$counter_tmp" "$counter" \
-    || { rm -f -- "$snapshot" "$counter_tmp"; return 1; }
+  counter_tmp=$(
+    umask 077
+    mktemp "$STATE/.remote-handoff-generation.XXXXXX"
+  ) ||
+    {
+      rm -f -- "$snapshot"
+      return 1
+    }
+  printf '%s\n' "$generation" >"$counter_tmp" ||
+    {
+      rm -f -- "$snapshot" "$counter_tmp"
+      return 1
+    }
+  chmod 600 "$counter_tmp" ||
+    {
+      rm -f -- "$snapshot" "$counter_tmp"
+      return 1
+    }
+  mv -f -- "$counter_tmp" "$counter" ||
+    {
+      rm -f -- "$snapshot" "$counter_tmp"
+      return 1
+    }
   remote_rel="state/handoff/$id.outbox.md"
   if ! "$SCRIPT_DIR/fm-on.sh" --stdin "$id" fm-remote-file.sh put "$remote_rel" 1048576 \
-    "$bytes" "$hash" "$generation" < "$snapshot"; then
+    "$bytes" "$hash" "$generation" <"$snapshot"; then
     rm -f -- "$snapshot"
     echo "error: handoff transfer to $id was unavailable or completion is unknown; outbox preserved at $outbox" >&2
     return 1
   fi
   rm -f -- "$snapshot"
   if ! receive_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-backlog-receive.sh \
-    "$remote_rel" "$bytes" "$hash" "$generation" < /dev/null 2>&1); then
+    "$remote_rel" "$bytes" "$hash" "$generation" </dev/null 2>&1); then
     [ -z "$receive_out" ] || printf '%s\n' "$receive_out" >&2
     echo "error: handoff receipt by $id was unavailable or completion is unknown; outbox preserved at $outbox" >&2
     return 1
@@ -729,15 +788,15 @@ remote_handoff() { # <secondmate-id> <keys...>
       continue
     fi
     case "$main_section" in
-      '## Queued') to_move+=("$key") ;;
-      '## In flight') in_flight+=("$key") ;;
-      '## Done') done_items+=("$key") ;;
-      '') missing+=("$key") ;;
-      *) not_queued+=("$key") ;;
+    '## Queued') to_move+=("$key") ;;
+    '## In flight') in_flight+=("$key") ;;
+    '## Done') done_items+=("$key") ;;
+    '') missing+=("$key") ;;
+    *) not_queued+=("$key") ;;
     esac
   done
-  if [ "${#in_flight[@]}" -gt 0 ] || [ "${#done_items[@]}" -gt 0 ] \
-    || [ "${#not_queued[@]}" -gt 0 ] || [ "${#missing[@]}" -gt 0 ]; then
+  if [ "${#in_flight[@]}" -gt 0 ] || [ "${#done_items[@]}" -gt 0 ] ||
+    [ "${#not_queued[@]}" -gt 0 ] || [ "${#missing[@]}" -gt 0 ]; then
     [ "${#in_flight[@]}" -eq 0 ] || echo "error: refusing to hand off in-flight backlog items: ${in_flight[*]}" >&2
     [ "${#done_items[@]}" -eq 0 ] || echo "error: refusing to hand off Done backlog items: ${done_items[*]}" >&2
     [ "${#not_queued[@]}" -eq 0 ] || echo "error: refusing to hand off non-Queued outbox or backlog items: ${not_queued[*]}" >&2
@@ -756,8 +815,8 @@ remote_handoff() { # <secondmate-id> <keys...>
   # staged into that outbox, the old confirmation would suppress the wake for
   # the new work. Finish receipt, wake reconciliation, and cleanup for the old
   # batch first. A failure leaves the fresh items dispatchable in main.
-  if [ "${#to_move[@]}" -gt 0 ] && [ -f "$outbox" ] \
-    && [ "$(outbox_item_count "$outbox")" -gt 0 ]; then
+  if [ "${#to_move[@]}" -gt 0 ] && [ -f "$outbox" ] &&
+    [ "$(outbox_item_count "$outbox")" -gt 0 ]; then
     remote_deliver_outbox "$id" "$outbox" || {
       echo "error: previous remote handoff for secondmate $id could not be completed; nothing new was staged" >&2
       return 1
@@ -784,7 +843,11 @@ remote_handoff() { # <secondmate-id> <keys...>
 with_remote_route_locks() { # <secondmate-id> <function> <args...>
   local id=$1 operation=$2 rc
   shift 2
-  case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: unsafe remote handoff id: $id" >&2; return 1 ;; esac
+  case "$id" in '' | *[!A-Za-z0-9._-]*)
+    echo "error: unsafe remote handoff id: $id" >&2
+    return 1
+    ;;
+  esac
   ACTIVE_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
   fm_lock_acquire_wait "$ACTIVE_REGISTRY_LOCK"
   if [ "$(secondmate_registry_field "$REG" "$id" remote 2>/dev/null || true)" != 1 ]; then
@@ -815,7 +878,12 @@ resume_pending_outboxes() {
   for outbox in "$DATA/handoff"/*.outbox.md; do
     [ -e "$outbox" ] || [ -L "$outbox" ] || continue
     id=$(basename "$outbox" .outbox.md)
-    case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: unsafe pending handoff id: $id" >&2; failed=1; continue ;; esac
+    case "$id" in '' | *[!A-Za-z0-9._-]*)
+      echo "error: unsafe pending handoff id: $id" >&2
+      failed=1
+      continue
+      ;;
+    esac
     with_remote_route_locks "$id" resume_remote_outbox "$id" "$outbox" || failed=1
   done
   return "$failed"
@@ -838,7 +906,12 @@ resume_pending_wakes() {
     name=$(basename "$marker")
     id=${name#.backlog-handoff-}
     id=${id%.wake-pending}
-    case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: unsafe pending wake id: $id" >&2; failed=1; continue ;; esac
+    case "$id" in '' | *[!A-Za-z0-9._-]*)
+      echo "error: unsafe pending wake id: $id" >&2
+      failed=1
+      continue
+      ;;
+    esac
     [ "$(secondmate_registry_field "$REG" "$id" remote 2>/dev/null || true)" = 1 ] || continue
     with_remote_route_locks "$id" resume_remote_wake "$id" || failed=1
   done
@@ -868,7 +941,10 @@ fm_lock_release "$ACTIVE_REGISTRY_LOCK"
 ACTIVE_REGISTRY_LOCK=
 
 RAW_HOME=$(secondmate_home "$ID") || exit 1
-[ -n "$RAW_HOME" ] || { echo "error: secondmate $ID has no home in $REG" >&2; exit 1; }
+[ -n "$RAW_HOME" ] || {
+  echo "error: secondmate $ID has no home in $REG" >&2
+  exit 1
+}
 SUB_HOME=$(validate_secondmate_home "$ID" "$RAW_HOME") || exit 1
 SUB_BACKLOG="$SUB_HOME/data/backlog.md"
 validate_backlog_file "main backlog" "$MAIN_BACKLOG" || exit 1
@@ -887,10 +963,10 @@ for key in "$@"; do
     ALREADY+=("$key")
   elif section=$(backlog_key_section "$MAIN_BACKLOG" "$key"); then
     case "$section" in
-      "## Queued") TO_MOVE+=("$key") ;;
-      "## In flight") IN_FLIGHT+=("$key") ;;
-      "## Done") DONE+=("$key") ;;
-      *) NOT_QUEUED+=("$key") ;;
+    "## Queued") TO_MOVE+=("$key") ;;
+    "## In flight") IN_FLIGHT+=("$key") ;;
+    "## Done") DONE+=("$key") ;;
+    *) NOT_QUEUED+=("$key") ;;
     esac
   else
     MISSING+=("$key")
@@ -927,11 +1003,11 @@ REQUESTED_BATCH=$(receiver_wake_batch_id "$@") || {
 if [ "${#TO_MOVE[@]}" -eq 0 ]; then
   WAKE_PENDING_MARKER="$STATE/.backlog-handoff-$ID.wake-pending"
   case "$(cat "$WAKE_PENDING_MARKER" 2>/dev/null || true)" in
-    prepared:*:"$REQUESTED_BATCH") receiver_wake_promote_prepared "$ID" "$REQUESTED_BATCH" || exit 1 ;;
-    prepared:*)
-      echo "error: a prepared receiver wake for secondmate $ID belongs to a different routed batch; retry that original handoff before handling ${ALREADY[*]}" >&2
-      exit 1
-      ;;
+  prepared:*:"$REQUESTED_BATCH") receiver_wake_promote_prepared "$ID" "$REQUESTED_BATCH" || exit 1 ;;
+  prepared:*)
+    echo "error: a prepared receiver wake for secondmate $ID belongs to a different routed batch; retry that original handoff before handling ${ALREADY[*]}" >&2
+    exit 1
+    ;;
   esac
   echo "nothing to move: ${ALREADY[*]:-no keys} already present in $SUB_BACKLOG"
   wake_pending_secondmate_receiver "$ID" || exit 1
@@ -959,17 +1035,17 @@ fi
 WAKE_PENDING_MARKER="$STATE/.backlog-handoff-$ID.wake-pending"
 if [ -e "$WAKE_PENDING_MARKER" ] || [ -L "$WAKE_PENDING_MARKER" ]; then
   case "$(cat "$WAKE_PENDING_MARKER" 2>/dev/null || true)" in
-    prepared:*:"$REQUESTED_BATCH") receiver_wake_discard_prepared "$ID" || exit 1 ;;
-    prepared:*)
-      echo "error: a prepared receiver wake for secondmate $ID belongs to a different routed batch; retry that original handoff before moving ${TO_MOVE[*]}" >&2
+  prepared:*:"$REQUESTED_BATCH") receiver_wake_discard_prepared "$ID" || exit 1 ;;
+  prepared:*)
+    echo "error: a prepared receiver wake for secondmate $ID belongs to a different routed batch; retry that original handoff before moving ${TO_MOVE[*]}" >&2
+    exit 1
+    ;;
+  *)
+    wake_pending_secondmate_receiver "$ID" || {
+      echo "error: previous receiver wake for secondmate $ID is unresolved; nothing new was moved" >&2
       exit 1
-      ;;
-    *)
-      wake_pending_secondmate_receiver "$ID" || {
-        echo "error: previous receiver wake for secondmate $ID is unresolved; nothing new was moved" >&2
-        exit 1
-      }
-      ;;
+    }
+    ;;
   esac
 fi
 receiver_wake_mark_prepared "$ID" "$REQUESTED_BATCH" || {
@@ -984,7 +1060,7 @@ receiver_wake_mark_prepared "$ID" "$REQUESTED_BATCH" || {
 mkdir -p "$SUB_HOME/data"
 SUB_CREATED=0
 if [ ! -f "$SUB_BACKLOG" ]; then
-  printf '## In flight\n\n## Queued\n\n## Done\n' > "$SUB_BACKLOG"
+  printf '## In flight\n\n## Queued\n\n## Done\n' >"$SUB_BACKLOG"
   SUB_CREATED=1
 fi
 

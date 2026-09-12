@@ -252,7 +252,7 @@ fi
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
-fm_send_id_from_meta() {  # <meta-file>
+fm_send_id_from_meta() { # <meta-file>
   local base
   base=${1##*/}
   printf '%s' "${base%.meta}"
@@ -269,7 +269,7 @@ fm_send_id_from_meta() {  # <meta-file>
 # WHICH adapters need that clear, and which key clears them, comes from the one
 # control-plane capability table (bin/fm-control-lib.sh) rather than a second
 # copy here - the same table bin/fm-control.sh's interrupt verb reads.
-fm_send_clear_after_interrupt() {  # <key>
+fm_send_clear_after_interrupt() { # <key>
   local key=$1 family clear
   [ "$key" = Escape ] || return 0
   family=$(fm_control_harness_family "$TARGET_HARNESS") || return 0
@@ -282,14 +282,14 @@ fm_send_clear_after_interrupt() {  # <key>
   fi
 }
 
-fm_send_normalize_key() {  # <key>
+fm_send_normalize_key() { # <key>
   case "$1" in
-    Escape|escape|Esc|esc) printf '%s' Escape ;;
-    *) printf '%s' "$1" ;;
+  Escape | escape | Esc | esc) printf '%s' Escape ;;
+  *) printf '%s' "$1" ;;
   esac
 }
 
-fm_send_record_interrupt() {  # <key>
+fm_send_record_interrupt() { # <key>
   local key=$1 id gen
   [ "$key" = Escape ] || return 0
   case "$TARGET_HARNESS" in claude*) : ;; *) return 0 ;; esac
@@ -309,7 +309,7 @@ fm_send_record_interrupt() {  # <key>
   }
 }
 
-fm_send_meta_for_key_value() {  # <state-dir> <key> <value>
+fm_send_meta_for_key_value() { # <state-dir> <key> <value>
   local state=$1 key=$2 value=$3 meta got
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
@@ -321,13 +321,13 @@ fm_send_meta_for_key_value() {  # <state-dir> <key> <value>
   return 1
 }
 
-fm_send_count_colons() {  # <string>
+fm_send_count_colons() { # <string>
   local s=$1 no_colons
   no_colons=${s//:/}
-  printf '%s' $(( ${#s} - ${#no_colons} ))
+  printf '%s' $((${#s} - ${#no_colons}))
 }
 
-fm_send_resolve_target() {  # <raw-target>
+fm_send_resolve_target() { # <raw-target>
   local raw=$1 meta pane_meta target backend assumed colons id session hint
 
   RESOLVED_TARGET=""
@@ -372,16 +372,16 @@ fm_send_resolve_target() {  # <raw-target>
   fi
 
   case "$raw" in
-    fm-*:*)
-      # A named Herdr session may itself begin with "fm-". Keep that explicit
-      # session:pane target on the validated backend-target path below rather
-      # than mistaking it for an unresolved task selector.
-      ;;
-    fm-*)
-      RESOLUTION_TRIED="meta=$STATE/$raw.meta; legacy-meta=$STATE/${raw#fm-}.meta; backend=none"
-      echo "error: no metadata for $raw in $STATE (tried $RESOLUTION_TRIED); pass a well-formed explicit backend target only when targeting outside this firstmate home" >&2
-      return 1
-      ;;
+  fm-*:*)
+    # A named Herdr session may itself begin with "fm-". Keep that explicit
+    # session:pane target on the validated backend-target path below rather
+    # than mistaking it for an unresolved task selector.
+    ;;
+  fm-*)
+    RESOLUTION_TRIED="meta=$STATE/$raw.meta; legacy-meta=$STATE/${raw#fm-}.meta; backend=none"
+    echo "error: no metadata for $raw in $STATE (tried $RESOLUTION_TRIED); pass a well-formed explicit backend target only when targeting outside this firstmate home" >&2
+    return 1
+    ;;
   esac
 
   pane_meta=$(fm_send_meta_for_key_value "$STATE" herdr_pane_id "$raw" 2>/dev/null || true)
@@ -409,22 +409,22 @@ fm_send_resolve_target() {  # <raw-target>
   fi
 
   case "$raw" in
-    *:*)
-      colons=$(fm_send_count_colons "$raw")
-      if [ "$colons" -ge 2 ]; then
-        assumed=herdr
-      else
-        assumed=tmux
-      fi
-      if ! fm_backend_target_exists "$assumed" "$raw"; then
-        echo "error: explicit target '$raw' is not a live $assumed endpoint (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed). Use fm-<id> for a recorded task/lane, or pass a target whose backend endpoint can be verified." >&2
-        return 1
-      fi
-      RESOLVED_TARGET=$raw
-      TARGET_BACKEND=$assumed
-      RESOLUTION_TRIED="meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed; endpoint=verified"
-      return 0
-      ;;
+  *:*)
+    colons=$(fm_send_count_colons "$raw")
+    if [ "$colons" -ge 2 ]; then
+      assumed=herdr
+    else
+      assumed=tmux
+    fi
+    if ! fm_backend_target_exists "$assumed" "$raw"; then
+      echo "error: explicit target '$raw' is not a live $assumed endpoint (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed). Use fm-<id> for a recorded task/lane, or pass a target whose backend endpoint can be verified." >&2
+      return 1
+    fi
+    RESOLVED_TARGET=$raw
+    TARGET_BACKEND=$assumed
+    RESOLUTION_TRIED="meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed; endpoint=verified"
+    return 0
+    ;;
   esac
 
   echo "error: target '$raw' is not resolvable (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=none). Use fm-$raw for a recorded task/lane, or pass a well-formed explicit backend target such as session:window." >&2
@@ -455,45 +455,57 @@ fi
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
-fm_send_add_resolve_key() {  # <key>
+fm_send_add_resolve_key() { # <key>
   local k=$1
   case "$k" in
-    ''|*[!A-Za-z0-9._-]*)
-      echo "error: --resolve-key '$k' is not a valid decision key (allowed: A-Z a-z 0-9 . _ -)" >&2
-      return 1
-      ;;
+  '' | *[!A-Za-z0-9._-]*)
+    echo "error: --resolve-key '$k' is not a valid decision key (allowed: A-Z a-z 0-9 . _ -)" >&2
+    return 1
+    ;;
   esac
   case " $RESOLVE_KEYS " in
-    *" $k "*)
-      echo "error: duplicate --resolve-key '$k'" >&2
-      return 1
-      ;;
+  *" $k "*)
+    echo "error: duplicate --resolve-key '$k'" >&2
+    return 1
+    ;;
   esac
   RESOLVE_KEYS="${RESOLVE_KEYS}${RESOLVE_KEYS:+ }$k"
 }
 while :; do
   case "${1:-}" in
-    --resolve-key)
-      [ $# -ge 2 ] || { echo "error: --resolve-key requires a key" >&2; exit 1; }
-      fm_send_add_resolve_key "$2" || exit 1
-      shift 2
-      ;;
-    --resolve-key=*)
-      fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
-      shift
-      ;;
-    --fire-and-forget)
-      [ $# -ge 2 ] || { echo "error: --fire-and-forget requires a delivery id" >&2; exit 1; }
-      [ -z "$FIRE_AND_FORGET_ID" ] || { echo "error: duplicate --fire-and-forget" >&2; exit 1; }
-      FIRE_AND_FORGET_ID=$2
-      shift 2
-      ;;
-    --fire-and-forget=*)
-      [ -z "$FIRE_AND_FORGET_ID" ] || { echo "error: duplicate --fire-and-forget" >&2; exit 1; }
-      FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
-      shift
-      ;;
-    *) break ;;
+  --resolve-key)
+    [ $# -ge 2 ] || {
+      echo "error: --resolve-key requires a key" >&2
+      exit 1
+    }
+    fm_send_add_resolve_key "$2" || exit 1
+    shift 2
+    ;;
+  --resolve-key=*)
+    fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
+    shift
+    ;;
+  --fire-and-forget)
+    [ $# -ge 2 ] || {
+      echo "error: --fire-and-forget requires a delivery id" >&2
+      exit 1
+    }
+    [ -z "$FIRE_AND_FORGET_ID" ] || {
+      echo "error: duplicate --fire-and-forget" >&2
+      exit 1
+    }
+    FIRE_AND_FORGET_ID=$2
+    shift 2
+    ;;
+  --fire-and-forget=*)
+    [ -z "$FIRE_AND_FORGET_ID" ] || {
+      echo "error: duplicate --fire-and-forget" >&2
+      exit 1
+    }
+    FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
+    shift
+    ;;
+  *) break ;;
   esac
 done
 
@@ -545,7 +557,7 @@ RESOLVE_HOLD_KEYS=
 # derived `<task>-decision-<key>` identity for pre-collapse rows. Answerable
 # means not closed and still carrying the captain-hold annotations tasks-axi
 # preserves even past a hold-until date.
-fm_send_hold_resolved_id() {  # <task-id> <decision-key>
+fm_send_hold_resolved_id() { # <task-id> <decision-key>
   local show id state hold_kind
   command -v tasks-axi >/dev/null 2>&1 || return 1
   for id in "$2" "$1-decision-$2"; do
@@ -563,7 +575,7 @@ fm_send_hold_resolved_id() {  # <task-id> <decision-key>
 # Close-note body for --resolve-key. Ordinary keys keep answered: <excerpt>.
 # A pending-reply-* key uses the owning library's vocabulary so the reserved-key
 # fold actually closes it (fm_pending_reply_close_note_for_key).
-fm_send_resolve_close_note() {  # <key> <excerpt>
+fm_send_resolve_close_note() { # <key> <excerpt>
   local k=$1 excerpt=$2 owned
   if owned=$(fm_pending_reply_close_note_for_key "$k" "$RESOLVE_TASK_ID" operator-resolve-key "$excerpt"); then
     printf '%s' "$owned"
@@ -573,12 +585,21 @@ fm_send_resolve_close_note() {  # <key> <excerpt>
 }
 
 if [ -n "$FIRE_AND_FORGET_ID" ]; then
-  printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' \
-    || { echo "error: --fire-and-forget delivery id must be 16 lowercase hex characters" >&2; exit 1; }
-  [ "$MARK_FROM_FIRSTMATE" = 1 ] \
-    || { echo "error: --fire-and-forget requires a recorded secondmate task selector" >&2; exit 1; }
-  [ -z "$RESOLVE_KEYS" ] \
-    || { echo "error: --fire-and-forget cannot accompany --resolve-key" >&2; exit 1; }
+  printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' ||
+    {
+      echo "error: --fire-and-forget delivery id must be 16 lowercase hex characters" >&2
+      exit 1
+    }
+  [ "$MARK_FROM_FIRSTMATE" = 1 ] ||
+    {
+      echo "error: --fire-and-forget requires a recorded secondmate task selector" >&2
+      exit 1
+    }
+  [ -z "$RESOLVE_KEYS" ] ||
+    {
+      echo "error: --fire-and-forget cannot accompany --resolve-key" >&2
+      exit 1
+    }
 fi
 
 if [ -n "$RESOLVE_KEYS" ]; then
@@ -599,10 +620,10 @@ if [ -n "$RESOLVE_KEYS" ]; then
   resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
   for k in $RESOLVE_KEYS; do
     case "$resolve_open_set" in
-      "$k"$'\t'*|*$'\n'"$k"$'\t'*)
-        RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
-        continue
-        ;;
+    "$k"$'\t'* | *$'\n'"$k"$'\t'*)
+      RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
+      continue
+      ;;
     esac
     # Not open in the status log. A decision already transferred to its durable
     # captain-held task is exactly this case, and it is answerable - just
@@ -641,7 +662,7 @@ fi
 # answered the decision, so it goes through the guarded self-announced append
 # (bin/fm-wake-lib.sh) and does not wake this same session again; any
 # concurrent foreign status bytes leave the watcher's wake path untouched.
-fm_send_close_resolved_keys() {  # <answer-text>
+fm_send_close_resolved_keys() { # <answer-text>
   local note=$1 k line close_note append_rc still manual_close_cmd
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
@@ -657,10 +678,10 @@ fm_send_close_resolved_keys() {  # <answer-text>
     fi
     still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
     case "$still" in
-      "$k"$'\t'*|*$'\n'"$k"$'\t'*)
-        echo "error: the answer was delivered to $T, but decision key '$k' is still open in $RESOLVE_STATUS_FILE; it may have been reopened concurrently or the fold did not accept the close. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
-        return 1
-        ;;
+    "$k"$'\t'* | *$'\n'"$k"$'\t'*)
+      echo "error: the answer was delivered to $T, but decision key '$k' is still open in $RESOLVE_STATUS_FILE; it may have been reopened concurrently or the fold did not accept the close. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
+      return 1
+      ;;
     esac
   done
 }
@@ -669,7 +690,7 @@ fm_send_close_resolved_keys() {  # <answer-text>
 # lines, exactly the way every other channel does. fm-send decides nothing here:
 # it does not build a decision record or choose a close path; the keys were
 # already resolved to task ids above, so the intake needs no legacy origin.
-fm_send_feed_resolved_holds() {  # <answer-text>
+fm_send_feed_resolved_holds() { # <answer-text>
   local note=$1 k lines=''
   [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
@@ -696,26 +717,29 @@ fm_send_feed_resolved_holds() {  # <answer-text>
 # error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then
-  [ -z "$FIRE_AND_FORGET_ID" ] \
-    || { echo "error: --fire-and-forget cannot accompany --key" >&2; exit 1; }
-  case "$*" in
-    *--resolve-key*)
-      echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
+  [ -z "$FIRE_AND_FORGET_ID" ] ||
+    {
+      echo "error: --fire-and-forget cannot accompany --key" >&2
       exit 1
-      ;;
+    }
+  case "$*" in
+  *--resolve-key*)
+    echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
+    exit 1
+    ;;
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
     case "$FM_SEND_REMOTE_BUDGET" in
-      ''|*[!0-9]*|0)
-        echo "error: FM_SEND_REMOTE_BUDGET must be a positive integer: $FM_SEND_REMOTE_BUDGET" >&2
-        exit 1
-        ;;
+    '' | *[!0-9]* | 0)
+      echo "error: FM_SEND_REMOTE_BUDGET must be a positive integer: $FM_SEND_REMOTE_BUDGET" >&2
+      exit 1
+      ;;
     esac
     if ! fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
-      fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" < /dev/null; then
+      fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" </dev/null; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
@@ -734,10 +758,10 @@ else
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
     case "$FM_SEND_REMOTE_BUDGET" in
-      ''|*[!0-9]*|0)
-        echo "error: FM_SEND_REMOTE_BUDGET must be a positive integer: $FM_SEND_REMOTE_BUDGET" >&2
-        exit 1
-        ;;
+    '' | *[!0-9]* | 0)
+      echo "error: FM_SEND_REMOTE_BUDGET must be a positive integer: $FM_SEND_REMOTE_BUDGET" >&2
+      exit 1
+      ;;
     esac
   fi
   # The pre-marker answer text, kept for the closing resolved note so the
@@ -758,8 +782,8 @@ else
     else
       existing_corr=$(fm_pending_reply_extract_corr "$MESSAGE")
     fi
-    if [ -n "$existing_corr" ] \
-      && fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID"; then
+    if [ -n "$existing_corr" ] &&
+      fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID"; then
       PENDING_REPLY_CORR=$existing_corr
     else
       if [ "$existing_corr_explicit" = 1 ]; then
@@ -770,13 +794,16 @@ else
         echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
         exit 1
       fi
-      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE") \
-        || { echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2; exit 1; }
+      PENDING_REPLY_CORR=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$TARGET_TASK_ID" "$MESSAGE") ||
+        {
+          echo "error: failed to create parent pending-reply expectation for $TARGET_TASK_ID" >&2
+          exit 1
+        }
       PENDING_REPLY_CREATED=1
     fi
     fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
-    if [ "$PENDING_REPLY_CREATED" != 1 ] \
-      && fm_pending_reply_delivery_attempt_unresolved "$STATE" "$PENDING_REPLY_CORR"; then
+    if [ "$PENDING_REPLY_CREATED" != 1 ] &&
+      fm_pending_reply_delivery_attempt_unresolved "$STATE" "$PENDING_REPLY_CORR"; then
       if [ "$TARGET_BACKEND" = remote ]; then
         if ! fm_pending_reply_reset_known_undelivered "$STATE" "$PENDING_REPLY_CORR"; then
           echo "error: pending-reply delivery for $TARGET_TASK_ID could not be reset for an idempotent remote resend of correlation $PENDING_REPLY_CORR" >&2
@@ -788,8 +815,8 @@ else
       fi
     fi
     if ! fm_pending_reply_prepare_delivery "$STATE" "$PENDING_REPLY_CORR"; then
-      [ "$PENDING_REPLY_CREATED" != 1 ] \
-        || fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      [ "$PENDING_REPLY_CREATED" != 1 ] ||
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
       exit 1
     fi
@@ -814,9 +841,9 @@ else
       INBOX_PLANE=1
     else
       case "$RESOLVE_ANSWER_TEXT" in
-        /*) ;;
-        \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
-        *) INBOX_PLANE=1 ;;
+      /*) ;;
+      \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
+      *) INBOX_PLANE=1 ;;
       esac
     fi
   fi
@@ -847,13 +874,13 @@ else
       CURRENT_REMOTE_HOST=$(fm_meta_get "$TARGET_META" remote_host)
       CURRENT_REMOTE_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
     fi
-    if [ "$CURRENT_REMOTE_ID" != "$TARGET_REMOTE_ID" ] \
-      || { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] \
-        && [ "$CURRENT_REMOTE_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } \
-      || { [ -n "${FM_SEND_EXPECTED_REMOTE_HOST:-}" ] \
-        && [ "$CURRENT_REMOTE_HOST" != "$FM_SEND_EXPECTED_REMOTE_HOST" ]; } \
-      || [ -z "$CURRENT_REMOTE_HOST" ] \
-      || [ "$CURRENT_REMOTE_HOST" != "$TARGET_REMOTE_HOST" ]; then
+    if [ "$CURRENT_REMOTE_ID" != "$TARGET_REMOTE_ID" ] ||
+      { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] &&
+        [ "$CURRENT_REMOTE_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } ||
+      { [ -n "${FM_SEND_EXPECTED_REMOTE_HOST:-}" ] &&
+        [ "$CURRENT_REMOTE_HOST" != "$FM_SEND_EXPECTED_REMOTE_HOST" ]; } ||
+      [ -z "$CURRENT_REMOTE_HOST" ] ||
+      [ "$CURRENT_REMOTE_HOST" != "$TARGET_REMOTE_HOST" ]; then
       fm_lock_release "$REMOTE_META_LOCK"
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
@@ -873,14 +900,14 @@ else
     # remote job's own timeout also relays as 124; treating it as unconfirmed
     # stays safe because the remote enqueue deduplicates.)
     fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
-      fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" < /dev/null || remote_rc=$?
+      fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" </dev/null || remote_rc=$?
     if [ "$remote_rc" -eq 124 ]; then
       remote_completion_unknown=1
     elif [ "$remote_rc" -eq 255 ]; then
       remote_completion_unknown=1
       remote_rc=0
       fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
-        fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" < /dev/null || remote_rc=$?
+        fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" </dev/null || remote_rc=$?
     fi
     fm_lock_release "$REMOTE_META_LOCK"
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
@@ -912,7 +939,7 @@ else
       exit 1
     fi
     if [ "$remote_rc" -ne 0 ]; then
-      fm_send_known_undelivered_cleanup || \
+      fm_send_known_undelivered_cleanup ||
         echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
       echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID (the remote steering-inbox record could not be written; the remote leg's stderr above has the reason)" >&2
       exit 1
@@ -954,11 +981,11 @@ else
       CURRENT_INBOX_BACKEND=$(fm_backend_of_meta "$TARGET_META")
       CURRENT_INBOX_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
     fi
-    if [ "$CURRENT_INBOX_TARGET" != "$T" ] \
-      || [ "$CURRENT_INBOX_BACKEND" != "$TARGET_BACKEND" ] \
-      || { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] \
-        && [ "$CURRENT_INBOX_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } \
-      || [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
+    if [ "$CURRENT_INBOX_TARGET" != "$T" ] ||
+      [ "$CURRENT_INBOX_BACKEND" != "$TARGET_BACKEND" ] ||
+      { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] &&
+        [ "$CURRENT_INBOX_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } ||
+      [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
       fm_lock_release "$INBOX_META_LOCK"
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
@@ -1017,9 +1044,9 @@ else
     ring_rc=0
     fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
     case "$ring_rc" in
-      1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
-      2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
-      3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
+    1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+    2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+    3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     esac
     exit 0
   fi
@@ -1032,11 +1059,11 @@ else
   # needlessly slow plain text to claude/opencode/pi. The target backend's
   # verified submit retry still backs the settle up either way.
   case "$*" in
-    /*) settle=1.2 ;;
-    \$*)
-      if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
-      ;;
-    *) settle=0.3 ;;
+  /*) settle=1.2 ;;
+  \$*)
+    if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
+    ;;
+  *) settle=0.3 ;;
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
@@ -1051,42 +1078,42 @@ else
     send_rc=$?
   fi
   if [ "$send_rc" -ne 0 ]; then
-    fm_send_known_undelivered_cleanup || \
+    fm_send_known_undelivered_cleanup ||
       echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
   case "$verdict" in
-    empty)
-      ;;
-    send-failed)
-      fm_send_known_undelivered_cleanup || \
-        echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
-      echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
-      exit 1
-      ;;
-    pending)
-      # The text was typed into the live target and Enter was sent; only the
-      # submit read-back stayed unconfirmed (e.g. a busy harness queues the
-      # steer and keeps rendering it). That is not a proven failure, so never
-      # re-type the message: verify the pane instead. Exit 3 is the documented
-      # delivered-unconfirmed status.
-      # The pending-reply expectation is deliberately NOT discarded here:
-      # dropping it would silently stop tracking a marked request that very
-      # likely landed. It stays armed on its unconfirmed-delivery marker, so a
-      # correlated report still resolves it and an unanswered one still
-      # surfaces through the library's own reconciliation
-      # (bin/fm-pending-reply-lib.sh).
-      echo "fm-send: text delivered to $T but submission is unconfirmed (verdict=pending; tried $RESOLUTION_TRIED); do not retype or blindly resend - verify with fm-peek.sh, then re-send '--key Enter' only if the composer still holds the text" >&2
-      exit 3
-      ;;
-    *)
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
-      echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
-      exit 1
-      ;;
+  empty)
+    ;;
+  send-failed)
+    fm_send_known_undelivered_cleanup ||
+      echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+    echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
+    exit 1
+    ;;
+  pending)
+    # The text was typed into the live target and Enter was sent; only the
+    # submit read-back stayed unconfirmed (e.g. a busy harness queues the
+    # steer and keeps rendering it). That is not a proven failure, so never
+    # re-type the message: verify the pane instead. Exit 3 is the documented
+    # delivered-unconfirmed status.
+    # The pending-reply expectation is deliberately NOT discarded here:
+    # dropping it would silently stop tracking a marked request that very
+    # likely landed. It stays armed on its unconfirmed-delivery marker, so a
+    # correlated report still resolves it and an unanswered one still
+    # surfaces through the library's own reconciliation
+    # (bin/fm-pending-reply-lib.sh).
+    echo "fm-send: text delivered to $T but submission is unconfirmed (verdict=pending; tried $RESOLUTION_TRIED); do not retype or blindly resend - verify with fm-peek.sh, then re-send '--key Enter' only if the composer still holds the text" >&2
+    exit 3
+    ;;
+  *)
+    if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+      fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+    fi
+    echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
+    exit 1
+    ;;
   esac
   # Delivery confirmed. Mark the pending expectation delivered without resolving
   # it: only a correlated parent report acknowledges the request.
