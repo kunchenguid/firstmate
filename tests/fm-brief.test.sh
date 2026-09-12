@@ -221,6 +221,36 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# The captain has banned an agent co-author commit trailer outright, and
+# nothing else enforces that ban, so every ship mode's Definition of done
+# must carry a hard, unmissable prohibition (bin/fm-dod-lib.sh's
+# fm_commit_attribution_block, the single owner shared with bin/fm-promote.sh).
+# Assert the shape - a standing rule, that it reaches pipeline-authored
+# commits too, and that only the task's own unmerged branch may be rewritten -
+# not the exact sentence, so the wording stays free to improve.
+test_ship_briefs_forbid_agent_coauthor_trailer() {
+  local home id mode brief
+  home="$TMP_ROOT/coauthor-home"
+  write_registry "$home"
+
+  for id_mode in "brief-coauthor-nm:no-mistakes" "brief-coauthor-dp:direct-PR" "brief-coauthor-lo:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "$id: --mode $mode scaffold failed"
+    brief="$home/data/$id/brief.md"
+    assert_grep "co-author" "$brief" "$id: brief did not mention the co-author trailer ban at all"
+    assert_grep "HARD RULE" "$brief" "$id: co-author ban was not phrased as a hard, unmissable rule"
+    assert_grep "pipeline step writes it on your behalf" "$brief" \
+      "$id: co-author ban did not cover pipeline-authored commits on the worker's own branch"
+    assert_grep "own unmerged branch" "$brief" \
+      "$id: co-author ban did not authorize rewriting the task's own unmerged branch"
+    assert_grep "already reached the default branch" "$brief" \
+      "$id: co-author ban did not forbid touching commits already on the default branch"
+  done
+  pass "fm-brief.sh: every ship mode forbids an agent co-author commit trailer"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -906,6 +936,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ship_briefs_forbid_agent_coauthor_trailer
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
