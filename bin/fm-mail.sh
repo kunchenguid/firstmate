@@ -380,6 +380,7 @@ wake_for() {
     if mail_record_evidence "$generation" "$id" "$tag"; then
       :
     elif mail_rollback_wake_locked "$wake_key" "$generation" "$id"; then
+      fm_wake_row_uncommitted
       echo "fm-mail: wake for $id rolled back (journal and cursor writes failed); retried on next poll" >&2
       status=1
     elif mail_record_evidence "$generation" "$id" "$tag"; then
@@ -405,6 +406,11 @@ wake_for() {
     fi
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  # Ring the watcher now rather than leaving the mail to the poll cadence. This
+  # cannot use fm_wake_append (the lock has to stay held across the evidence
+  # write above), but it must not restate when a row is durable either: the
+  # append and the rollback above already told fm-wake-lib.sh, and this asks it.
+  fm_wake_tap_if_committed
   return "$status"
 }
 

@@ -5054,6 +5054,59 @@ test_wait_transition_reconcile_blocked_returns_record() {
   pass "fm_backend_herdr_wait_transition: reconnect level-reconcile returns an uncommitted blocked pane"
 }
 
+# The watcher runs this wait as a background child and reads the child's DEATH
+# to decide whether its tap ended the wait (bin/fm-watch.sh watch_wait_bg: a
+# status >128 is "tapped"). That child must therefore die BY the signal, never
+# exit with a status of its own. A subshell asking `trap -p` for its own
+# disposition is answered with the PARENT shell's, so any attempt to save and
+# restore "the caller's" TERM trap here installs the watcher's `exit 1` handler
+# into this child, and a tap after the wait returns is then reported as an
+# ordinary exit rather than a tap. The same window catches a second way to lose
+# the signal death: the wait's TERM trap outlives the function that installed
+# it, so a body that dereferences that function's locals aborts on an unbound
+# variable once they are out of scope and exits 1 without reaching its handler.
+# The fixture therefore runs under `set -u`, driving the real function in
+# exactly the production shape - a `&` child of a `set -u` shell whose own TERM
+# trap is `exit 1` - and pins the status the tap must produce.
+test_wait_transition_leaves_a_tappable_term_disposition() {
+  local dir state agent temp fb reader lines rc out
+  dir="$TMP_ROOT/wt-term-disposition"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"
+  mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" blocked
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
+  out=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess     FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent"     FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines"     bash -c '
+      set -u
+      . "$0/bin/backends/herdr.sh"
+      state=$1; ready=$2; holdpid=$3
+      # The watcher main shell'"'"'s own disposition (bin/fm-watch.sh).
+      trap "exit 1" TERM
+      wait_child() {
+        local h
+        fm_backend_herdr_wait_transition sess 1 "$state" sess:wG:pQ >/dev/null
+        sleep 30 & h=$!
+        printf "%s\n" "$h" > "$holdpid"
+        : > "$ready"
+        wait "$h"
+      }
+      wait_child &
+      c=$!
+      i=0
+      while [ "$i" -lt 100 ] && [ ! -e "$ready" ]; do sleep 0.1; i=$((i + 1)); done
+      if [ ! -e "$ready" ]; then kill "$c" 2>/dev/null; printf "never-returned\n"; exit 0; fi
+      kill -TERM "$c"
+      rc=0; wait "$c" 2>/dev/null || rc=$?
+      kill "$(cat "$holdpid" 2>/dev/null)" 2>/dev/null || true
+      printf "%s\n" "$rc"
+    ' "$ROOT" "$state" "$dir/ready" "$dir/holdpid" 2> "$dir/stderr" | tail -1)
+  [ "$out" != never-returned ] || fail "the wait never returned, so its TERM disposition was never exercised"
+  rc=$out
+  case "$rc" in ''|*[!0-9]*) fail "expected a numeric child status, got '$rc'" ;; esac
+  [ "$rc" -gt 128 ] \
+    || fail "a tap after the herdr wait returned must kill its child by signal (>128), got $rc - the wait child's TERM disposition cannot produce a signal death, so watch_wait_bg cannot see the tap: $(cat "$dir/stderr" 2>/dev/null)"
+  pass "fm_backend_herdr_wait_transition: a tap kills its wait child by signal instead of the caller's TERM disposition"
+}
+
 test_wait_transition_subscribes_before_reconcile() {
   local dir state agent fb reader lines ready rc
   dir="$TMP_ROOT/wt-subscribe-first"; state="$dir/state"; agent="$dir/agents"; mkdir -p "$state" "$agent"
@@ -5369,6 +5422,7 @@ test_apply_transition_defer_and_fallback_are_noops
 test_wait_transition_no_panes_returns_2
 test_wait_transition_not_capable_returns_2
 test_wait_transition_reconcile_blocked_returns_record
+test_wait_transition_leaves_a_tappable_term_disposition
 test_wait_transition_subscribes_before_reconcile
 test_wait_transition_reconcile_dedupes_when_marked
 test_wait_transition_stream_blocked_returns_record
