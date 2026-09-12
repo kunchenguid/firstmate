@@ -506,6 +506,7 @@ $INBOX_SECTION
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+If it exits 3, the project keeps two distinct real instruction files and that is the project owner's decision, not yours: do not merge, replace, symlink, or edit either file, do not re-run it expecting a different answer, and record the exit-3 report in your status as a \`note:\` for firstmate.
 Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
