@@ -107,6 +107,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
+# shellcheck source=bin/fm-merge-authority-lib.sh
+. "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 
@@ -765,33 +767,27 @@ require_released_captain_hold() {
 }
 
 FM_PR_MERGE_AUTHORITY=
+# The gate on top of the shared authority read. bin/fm-merge-authority-lib.sh
+# owns what the away-posture record and the task's recorded yolo posture say;
+# this function owns what a merge run may do about it, so the answer the merge
+# poll later tags its ledger row with is the same answer gated here.
 require_away_merge_grant() {
-  local yolo grants grant
   FM_PR_MERGE_AUTHORITY=
-  fm_afk_contract_present "$STATE" || return 0
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1; then
-    echo "error: PR merge refused - the away-posture record could not be read; nothing was merged" >&2
-    return 1
-  fi
-  yolo=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
-  if [ "$yolo" = on ]; then
-    FM_PR_MERGE_AUTHORITY=yolo
+  if fm_merge_authority_resolve "$FM_HOME" "$STATE" "$META" "$ID"; then
+    FM_PR_MERGE_AUTHORITY=$FM_MERGE_AUTHORITY
     return 0
   fi
-  grants=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-afk-contract.sh" grants 2>/dev/null) || {
-    echo "error: PR merge refused - the away-posture record's grants could not be read; nothing was merged" >&2
-    return 1
-  }
-  while IFS= read -r grant; do
-    [ "$grant" = "$ID" ] || continue
-    FM_PR_MERGE_AUTHORITY=away-grant
-    return 0
-  done <<EOF
-$grants
-EOF
-  echo "error: task $ID is held for the captain return" >&2
+  case "$FM_MERGE_AUTHORITY_REASON" in
+    record-unreadable)
+      echo "error: PR merge refused - the away-posture record could not be read; nothing was merged" >&2
+      ;;
+    grants-unreadable)
+      echo "error: PR merge refused - the away-posture record's grants could not be read; nothing was merged" >&2
+      ;;
+    *)
+      echo "error: task $ID is held for the captain return" >&2
+      ;;
+  esac
   return 1
 }
 

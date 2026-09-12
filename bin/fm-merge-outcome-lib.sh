@@ -43,9 +43,10 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 #   poll - this home's merge poll detected the merge, so the canonical outcome
 #          also wakes this home after any upward hop needed by a secondmate.
 # Optional <authority> is yolo or away-grant when the merge ran while the
-# away-posture record existed; it is appended to the ledger line. Known audit
-# gap: queued merges and a poll that wins direct-merge deduplication publish an
-# untagged row because the poll path does not persist merge authority.
+# away-posture record existed; it is appended to the ledger line. Both origins
+# supply it, so a queued merge and a poll that wins direct-merge deduplication
+# carry the same tag as a direct attended merge; bin/fm-merge-authority-lib.sh
+# is the one owner of what that value may be and of where it is read from.
 #
 # Returns 0 when the outcome is recorded (or already was), 2 on an invalid
 # request, 3 when this home's own role or parent binding cannot be read well
