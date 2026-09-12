@@ -3,6 +3,7 @@
 # lifecycle verbs addressed to an exact task id.
 #
 # Usage: fm-control.sh <task-id> interrupt
+#        fm-control.sh --guard-capabilities --json
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
@@ -85,6 +86,16 @@
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #
+# Exact `--guard-capabilities --json` is a non-mutating proof probe. It
+# advertises the spawn-generation guard, which is enforced before every
+# lifecycle action when FM_CONTROL_EXPECTED_SPAWN_GEN is non-empty. A relaunch
+# expects the old generation and publishes a fresh one after replacement.
+# Explicit task ids only are covered; endpoint identity remains owned by the
+# existing exact metadata and backend validation.
+#
+# Environment knobs:
+#   FM_CONTROL_EXPECTED_SPAWN_GEN optional exact current task generation
+#
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
@@ -95,6 +106,22 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+
+# shellcheck source=bin/fm-command-guard-lib.sh
+. "$SCRIPT_DIR/fm-command-guard-lib.sh"
+if [ "$#" -eq 2 ] && [ "${1:-}" = --guard-capabilities ] && [ "${2:-}" = --json ]; then
+  if [ -z "${FM_HOME:-}" ]; then
+    echo "error: FM_HOME is not set; fm-control cannot prove command guards" >&2
+    exit 1
+  fi
+  FM_PROBE_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  if ! fm_command_guard_probe_preflight "$FM_HOME" "$FM_PROBE_STATE"; then
+    echo "error: fm-control cannot prove command guards for an unreadable home, state directory, or metadata" >&2
+    exit 1
+  fi
+  fm_command_guard_emit control
+  exit 0
+fi
 
 usage() {
   # The whole leading comment block, ending at the first non-comment line.
@@ -115,13 +142,13 @@ if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
   echo "error: FM_HOME is not set; fm-control refuses to resolve a task without an explicit firstmate home" >&2
   exit 1
 fi
-[ -d "$FM_HOME" ] || {
+[ -d "$FM_HOME" ] && [ -r "$FM_HOME" ] || {
   echo "error: FM_HOME '$FM_HOME' is not a directory" >&2
   exit 1
 }
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-[ -d "$STATE" ] || {
+[ -d "$STATE" ] && [ -r "$STATE" ] || {
   echo "error: state dir '$STATE' is missing; fm-control cannot resolve tasks for FM_HOME '$FM_HOME'" >&2
   exit 1
 }
@@ -150,6 +177,8 @@ die() {  # <message>
 
 CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
+CONTROL_META_LOCK=
+CONTROL_META_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
 
@@ -158,6 +187,10 @@ control_cleanup() {
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
+  fi
+  if [ "$CONTROL_META_LOCK_HELD" = 1 ]; then
+    CONTROL_META_LOCK_HELD=0
+    fm_lock_release "$CONTROL_META_LOCK" || true
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
@@ -283,6 +316,26 @@ if [ ! -f "$META" ]; then
   esac
   die "no task '$ID' in $STATE (fm-control resolves an exact task id only)"
 fi
+
+# The control lock is the lifetime authority for the lifecycle action. Take the
+# metadata lock only for the final generation precondition, then release it so
+# relaunch can publish its replacement record through fm-spawn.sh without lock
+# inversion or send starvation. Spawn, relaunch, and teardown all honor the
+# control lock before publishing metadata.
+CONTROL_META_LOCK=$(fm_meta_lock_path "$META") || die "could not resolve task metadata lock for $ID"
+fm_lock_acquire_wait "$CONTROL_META_LOCK" \
+  || die "task $ID metadata could not be locked for generation validation"
+CONTROL_META_LOCK_HELD=1
+if [ -n "${FM_CONTROL_EXPECTED_SPAWN_GEN:-}" ]; then
+  CONTROL_SPAWN_GEN=$(fm_backend_meta_exact_value "$META" spawn_gen 2>/dev/null || true)
+else
+  CONTROL_SPAWN_GEN=$(fm_meta_get "$META" spawn_gen)
+fi
+if ! fm_command_guard_check_optional control spawn-generation "$CONTROL_SPAWN_GEN"; then
+  die "task $ID's current spawn generation does not match FM_CONTROL_EXPECTED_SPAWN_GEN; refusing before lifecycle action"
+fi
+fm_lock_release "$CONTROL_META_LOCK"
+CONTROL_META_LOCK_HELD=0
 
 # A remotely placed secondmate records its endpoint on ANOTHER host, so every
 # postcondition this plane verifies - the agent-state classification, the busy

@@ -8,6 +8,26 @@ For a `kind=secondmate` target it always prepends the from-firstmate routing mar
 The **control plane** is [`bin/fm-control.sh`](../bin/fm-control.sh): allowlisted lifecycle verbs addressed to an exact task id.
 
 The split exists because the data plane's marking is exactly right for a message and exactly wrong for a lifecycle command.
+
+## Guard proof
+
+Both mutating entrypoints answer the exact non-mutating probe `--guard-capabilities --json`.
+The successful stdout is one JSON object with schema `fm-command-guard-proof.v1`, the command name, `verified: true`, and a deterministic guard list.
+`bin/fm-command-guard-lib.sh` owns that immutable capability table and the optional-environment comparison helpers used by the commands.
+
+`fm-control.sh` advertises `spawn-generation`.
+When `FM_CONTROL_EXPECTED_SPAWN_GEN` is non-empty, control rereads the current task generation under the task metadata lock and refuses before interrupt, exit, relaunch, or any lifecycle bytes when it is missing or different.
+Relaunch uses the old generation as its precondition and publishes a fresh generation through `bin/fm-spawn.sh` after replacement.
+Control remains generation-only in v1; its existing exact task-id, metadata, backend, endpoint, and lifecycle postcondition checks remain authoritative for endpoint safety.
+
+`fm-send.sh` advertises `spawn-generation`, `endpoint`, and `remote-host` for every owned task-selector path, including typed local sends.
+When the corresponding `FM_SEND_EXPECTED_SPAWN_GEN`, `FM_SEND_EXPECTED_ENDPOINT`, or `FM_SEND_EXPECTED_REMOTE_HOST` value is non-empty, the command rereads the canonical task binding under the per-task metadata lock and refuses before pending-reply records, inbox enqueue, remote transport, doorbells, or typed backend submission when the value is missing or different.
+Unset or empty values preserve ordinary behavior.
+An explicit backend target is an endpoint outside this home's task ledger, so it is excluded from the proof's authority claim and does not acquire task-selector guard semantics.
+
+The probe is recognized only for those exact two arguments.
+Other spellings remain ordinary command input, and a missing or unreadable home, state directory, or metadata record cannot produce a positive proof.
+The probe creates no state or delivery records.
 A routing-marked `/quit` arrives as ordinary chat - `[fm-from-firstmate] /quit` - which the agent reasons about instead of executing.
 The failure repeated across harnesses and homes, and the workaround (remember to use an unmarked send for agent-control commands, and improvise the right key or command per harness) lived only in agent prose, so it failed again every time a session did not happen to recall it.
 

@@ -492,6 +492,24 @@ test_remote_expected_host_revalidates_final_route() {
 
   rc=0
   send_env "$fb" "$home" "$ssh_log" \
+    FM_SEND_EXPECTED_ENDPOINT=fm-remote:p1 \
+    "$SEND" rsm --fire-and-forget 3333333333333333 "matching expected endpoint" \
+    >"$dir/endpoint-match.out" 2>"$dir/endpoint-match.err" || rc=$?
+  expect_code 0 "$rc" "a matching expected remote endpoint must allow delivery"
+  count=$(remote_inbox_records "$rhome" | grep -c . || true)
+  [ "$count" = 2 ] || fail "a matching expected remote endpoint did not deliver exactly once"
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    FM_SEND_EXPECTED_ENDPOINT=stale-remote:p1 \
+    "$SEND" rsm --fire-and-forget 4444444444444444 "stale expected endpoint" \
+    >"$dir/endpoint-mismatch.out" 2>"$dir/endpoint-mismatch.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a mismatched expected remote endpoint reported delivery"
+  count=$(remote_inbox_records "$rhome" | grep -c . || true)
+  [ "$count" = 2 ] || fail "a mismatched expected remote endpoint reached the remote inbox"
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
     FM_SEND_EXPECTED_SPAWN_GEN="" FM_SEND_EXPECTED_REMOTE_HOST=retired-mac \
     "$SEND" rsm --fire-and-forget 2222222222222222 "stale expected host" \
     >"$dir/mismatch.out" 2>"$dir/mismatch.err" || rc=$?
@@ -500,8 +518,8 @@ test_remote_expected_host_revalidates_final_route() {
   assert_contains "$err" "retired or changed route" \
     "a mismatched expected remote host did not report the route replacement: $err"
   count=$(remote_inbox_records "$rhome" | grep -c . || true)
-  [ "$count" = 1 ] || fail "a mismatched expected remote host reached the remote inbox"
-  pass "fm-send remote: expected host is enforced by final route validation"
+  [ "$count" = 2 ] || fail "a mismatched expected remote host reached the remote inbox"
+  pass "fm-send remote: expected endpoint and host are enforced by final route validation"
 }
 
 test_remote_resolve_key_closes_at_enqueue() {
