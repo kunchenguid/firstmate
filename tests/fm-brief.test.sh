@@ -102,6 +102,65 @@ test_ordinary_briefs_state_slice_contracts() {
   pass "fm-brief: ship and scout briefs state four short Rules-section slice contracts"
 }
 
+# S7: keep every Rules constraint, drop repeated rationale. The wait-premise
+# sentence, status verbs, and safety mechanics stay; the wake/idle/copy
+# explanations do not.
+test_ship_and_scout_rules_drop_repeated_rationale() {
+  local kind id brief section_file
+  for kind in ship scout reader; do
+    id="brief-rules-trim-$kind"
+    case "$kind" in
+      scout)
+        FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 \
+          || fail "fm-brief.sh failed to generate the $kind Rules-trim brief"
+        ;;
+      reader)
+        FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --access reader >/dev/null 2>&1 \
+          || fail "fm-brief.sh failed to generate the $kind Rules-trim brief"
+        ;;
+      *)
+        FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode direct-PR >/dev/null 2>&1 \
+          || fail "fm-brief.sh failed to generate the $kind Rules-trim brief"
+        ;;
+    esac
+    brief="$BRIEF_HOME/data/$id/brief.md"
+    section_file="$TMP_ROOT/$kind-rules-trim-section"
+    awk '/^# Rules$/ {seen=1; next} seen && /^# / {exit} seen {print}' "$brief" > "$section_file"
+    assert_no_grep 'Each append wakes firstmate' "$section_file" \
+      "$kind Rules still carry the wake-firstmate rationale"
+    assert_no_grep 'firstmate reads your pane for that' "$section_file" \
+      "$kind Rules still tell the worker that firstmate reads the pane"
+    assert_no_grep 'leaves your idle pane alone' "$section_file" \
+      "$kind Rules still explain idle-pane polling"
+    assert_no_grep 'copies that URL from your line' "$section_file" \
+      "$kind Rules still explain why full PR URLs are copied"
+    assert_no_grep 'Firstmate will reply with the decision' "$section_file" \
+      "$kind Rules still narrate who replies to needs-decision"
+    assert_no_grep 'Firstmate will apply the configured authority and reply' "$section_file" \
+      "$kind Rules still narrate configured-authority reply"
+    assert_no_grep "Firstmate's reply normally writes that closing line at answer time" "$section_file" \
+      "$kind Rules still narrate who writes the closing resolved line"
+    assert_grep 'No step-by-step FYI progress lines' "$section_file" \
+      "$kind Rules dropped the no-FYI-progress constraint"
+    assert_grep 'a blocker or wait clears WITHOUT a firstmate reply' "$section_file" \
+      "$kind Rules dropped the self-resolve-when-cleared constraint"
+    assert_grep 'even when the answer is what started that work' "$section_file" \
+      "$kind Rules dropped the done/working-never-closes constraint"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'an explicit operator `NM_HOME` remains authoritative' "$section_file" \
+      "$kind Rules dropped the NM_HOME authority constraint"
+    if [ "$kind" = ship ]; then
+      assert_grep 'never a bare number such as "PR 108"' "$section_file" \
+        "$kind Rules dropped the full-PR-URL constraint"
+      assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$section_file" \
+        "$kind Rules dropped the nonterminal working: constraint"
+      assert_grep 'ask-user findings' "$section_file" \
+        "$kind Rules dropped the ask-user-findings needs-decision trigger"
+    fi
+  done
+  pass "fm-brief: ship and scout Rules keep constraints and drop repeated rationale"
+}
+
 test_instructed_wait_premise_binds_to_real_wait_reader() {
   local id brief sentence pr_url pr_token quota_provider quota_token home fakebin out
 
@@ -2131,6 +2190,7 @@ test_worker_role_scope
 test_script_parses
 test_crewmate_brief_explains_session_lock_scope
 test_ordinary_briefs_state_slice_contracts
+test_ship_and_scout_rules_drop_repeated_rationale
 test_instructed_wait_premise_binds_to_real_wait_reader
 test_ordinary_briefs_bookend_load_bearing_task
 test_brief_selector_rules_and_fill_oracles
