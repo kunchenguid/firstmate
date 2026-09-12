@@ -148,6 +148,9 @@ if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # report that landed work as part of the branch's own change, so the base
   # follows the landed work by the same rule the pooled base does
   # (fm_pool_base_prefers_local_default in bin/fm-pool-base-lib.sh).
+  # Both the decision and the diff read refs/heads/<default>: a bare <default>
+  # resolves a same-named tag first, which would diff a commit the decision was
+  # never made about.
   ORIGIN_TIP=$(git -C "$WT" rev-parse --verify --quiet "origin/$DEFAULT^{commit}" 2>/dev/null || true)
   LOCAL_TIP=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" 2>/dev/null || true)
   if fm_pool_base_prefers_local_default "$WT" "$TASK_MODE" "$ORIGIN_TIP" "$LOCAL_TIP"; then

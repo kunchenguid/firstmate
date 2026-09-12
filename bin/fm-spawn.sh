@@ -214,7 +214,11 @@
 #   recorded worktree without fetching or resetting its base. An unreachable
 #   detected origin, a default branch that cannot be determined, or a non-clean
 #   worktree refuses a fresh spawn rather than risking a PR based on stale
-#   history or discarding local work.
+#   history or discarding local work. That middle refusal carries a known limit:
+#   an origin-less repository whose default branch is named anything other than
+#   main or master is not supported by this path, because default_branch in
+#   bin/fm-ff-lib.sh is its single owner and answers from origin/HEAD, main, or
+#   master only (freshen_spawn_worktree_base states why that belongs there).
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
