@@ -373,12 +373,18 @@ test_pi_vimmode_status_row_is_furniture() {
   assert_screen "pi idle behind the vimmode row" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tidle')"
   assert_screen "pi done behind the vimmode row" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tdone')"
   assert_screen "pi idle behind the vimmode row on tmux" empty "$CAPS_TMUX" "$screen" 2 "$(printf 'pi\tidle')"
-  # The cursor cell moves with the caret, and a multi-row draft raises the line.
-  screen=$'transcript\n────────────────────────\n─ INSERT 12:340 ─\n────────────────────────'
-  assert_screen "pi idle behind a moved cursor cell" empty "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tidle')"
   # Furniture removes the row; it does not grant a LIVE pi an empty verdict.
   assert_screen "working pi behind the vimmode row" unknown "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tworking')"
   assert_screen "blocked pi behind the vimmode row" unknown "$CAPS_STYLED" "$screen" '' "$(printf 'pi\tblocked')"
+  # The caret cell is only furniture parked at the origin. Anywhere else it is
+  # positive evidence the composer holds text, and it is the LAST such evidence
+  # when the draft itself is de-emphasised: ghost stripping empties the draft
+  # row, so `1:14` is all that remains to prove 13 unsent characters. Reading
+  # that `empty` would hand consumers the one verdict they overwrite input on.
+  typed=$'transcript\n────────────────────────\n'"${ESC}[2mretry the deploy${ESC}[0m"$'\n─ INSERT 1:14 ─\n────────────────────────'
+  assert_screen "pi ghosted draft betrayed by its caret" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
+  typed=$'transcript\n────────────────────────\n─ INSERT 12:340 ─\n────────────────────────'
+  assert_screen "pi row with a moved caret" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
   # Pi's region treats every other surviving byte as input. A draft that merely
   # OPENS and CLOSES with the rule glyph is user text, and reading it `empty`
   # would let the doorbell overwrite an unsent steer.
@@ -400,8 +406,7 @@ test_pi_vimmode_status_row_is_furniture() {
   typed=$'transcript\n────────────────────────\n─ NORMAL ─\n────────────────────────'
   assert_screen "pi row with an unobserved mode label" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
   # Extraction reads the same region, so it must agree on what is furniture:
-  # the mode row's `1:1` cell moves as the user types, and a paste proof that
-  # includes it can never match what was sent.
+  # a paste proof that includes the mode row can never match what was sent.
   screen=$'transcript\n────────────────────────\n─ INSERT 1:1 ─\n────────────────────────\n vim footer'
   assert_extract "pi extraction drops the vimmode row" '' "$CAPS_STYLED_NOID" "$screen"
   typed=$'transcript\n────────────────────────\n─ retry the deploy ─\n────────────────────────'

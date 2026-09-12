@@ -416,8 +416,8 @@ FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:
 # The `pi-vimmode` extension draws a mode row INSIDE pi's separated composer
 # region. ONE render is verified: pi 0.84.4 through Herdr, composer empty and
 # pane idle, showing exactly `─ INSERT 1:1 ─` - a single rule glyph, the mode,
-# the `line:column` cursor cell, a single rule glyph. That is the row that made
-# an idle pi read `pending` and skipped its doorbell (issue #3819). It is
+# the caret parked at the origin cell, a single rule glyph. That is the row that
+# made an idle pi read `pending` and skipped its doorbell (issue #3819). It is
 # terminal furniture, not typed text, so pi's row scan and the content extractor
 # both skip it.
 # The pattern accepts that shape and nothing wider, because pi's row scan treats
@@ -428,12 +428,19 @@ FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:
 # narrow is the fail-safe direction and other mode labels, other rule widths,
 # and a missing cursor cell stay deliberately unaccepted;
 # FM_COMPOSER_PI_STATUS_RE overrides for a pane that renders differently.
+# The caret cell is matched LITERALLY at `1:1` rather than as any `line:column`,
+# because a caret anywhere else is positive evidence the composer holds text.
+# The row scan needs no help reading a visible draft - the draft's own row
+# returns `pending` - so accepting a moved caret buys nothing and costs the one
+# case where it is the LAST evidence left: a de-emphasised draft that
+# fm_composer_strip_ghost removes leaves `─ INSERT 1:14 ─` as the only surviving
+# row, and reading that `empty` would type a doorbell over 13 unsent characters.
 # The rule glyph is matched literally and never quantified, for the same reason
 # FM_COMPOSER_OMP_STATUS_RE_DEFAULT and FM_OMP_SPINNER_FRAMES_RE use literal
 # alternation: `grep -E` compiles a quantified multibyte glyph byte-wise under a
 # non-UTF-8 locale, which is how a verdict starts differing between a UTF-8
 # shell and a LC_ALL=C daemon (issue #1988).
-FM_COMPOSER_PI_STATUS_RE_DEFAULT='^─[[:space:]]+INSERT[[:space:]]+[0-9]+:[0-9]+[[:space:]]+─$'
+FM_COMPOSER_PI_STATUS_RE_DEFAULT='^─[[:space:]]+INSERT[[:space:]]+1:1[[:space:]]+─$'
 
 # The bounded row window adapters should capture for a composer read. One
 # shared policy (previously three per-backend variables that had drifted to
