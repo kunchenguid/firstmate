@@ -42,6 +42,48 @@ last_probe_bytes() {  # <probe-file> <status-file>
   grep -F "$(printf '%s\t' "$2")" "$1" 2>/dev/null | tail -1 | cut -f2
 }
 
+# This is an incremental large-directory budget, not the eventual interactive
+# latency goal. A loaded macOS host measured 160s after the optimization; allow
+# scheduler headroom while bounding the subprocess-heavy regression. The
+# lifecycle cases below retain the repeated-drain and resolution assertions.
+test_cold_200_status_drain_stays_bounded() {
+  local dir state out i started elapsed real_uname probes
+  dir=$(make_case timing-200-status-logs)
+  state="$dir/state"
+  out="$dir/drain.out"
+  real_uname=$(command -v uname) || fail "uname is required for the process-count probe"
+  mkdir -p "$dir/probe-bin"
+  : > "$dir/uname.log"
+  # Count real platform probes through the executable interface. Platform
+  # detection is process-wide, so its cost must not grow with the file count.
+  cat > "$dir/probe-bin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'call\n' >> "$FM_UNAME_PROBE_LOG"
+exec "$FM_REAL_UNAME" "$@"
+SH
+  chmod +x "$dir/probe-bin/uname"
+  for ((i=1; i<=200; i++)); do
+    printf 'working: routine progress\n' > "$state/task-$i.status"
+  done
+  printf 'needs-decision [key=shape]: choose the shape\nworking: continuing\n' > "$state/task-1.status"
+  started=$SECONDS
+  fm_run_timed 300 env PATH="$dir/probe-bin:$PATH" FM_REAL_UNAME="$real_uname" \
+    FM_UNAME_PROBE_LOG="$dir/uname.log" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" \
+    || fail "cold 200-status drain exceeded 300 seconds"
+  elapsed=$((SECONDS - started))
+  rg -qF 'task-1 [key=shape] needs-decision: choose the shape' "$out" \
+    || fail "cold drain lost the open decision"
+  if rg -q 'STATUS PRESENTATION (SKIPPED|INCOMPLETE)' "$out"; then
+    fail "cold drain met its budget by skipping presentation"
+  fi
+  [ "$(wc -l < "$state/.status-presentation-cursor")" -eq 200 ] \
+    || fail "cold drain did not commit all 200 presentation rows"
+  probes=$(wc -l < "$dir/uname.log")
+  [ "$probes" -gt 0 ] && [ "$probes" -le 32 ] \
+    || fail "200-status drain repeated platform detection per file ($probes probes; budget 32)"
+  pass "cold 200-status drain stayed below 300s without skipping presentation (elapsed=${elapsed}s platform_probes=$probes)"
+}
+
 test_cold_fold_of_60_status_logs_stays_bounded() {
   local dir state out started elapsed load i j status ident size
   dir=$(make_case cold-60-status-logs)
@@ -396,6 +438,7 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   pass "an old fold cache is rebuilt once before same-version incremental reads resume"
 }
 
+test_cold_200_status_drain_stays_bounded
 test_cold_fold_of_60_status_logs_stays_bounded
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
