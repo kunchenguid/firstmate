@@ -418,8 +418,7 @@ FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:
 # pane idle, showing exactly `─ INSERT 1:1 ─` - a single rule glyph, the mode,
 # the caret parked at the origin cell, a single rule glyph. That is the row that
 # made an idle pi read `pending` and skipped its doorbell (issue #3819). It is
-# terminal furniture, not typed text, so pi's row scan and the content extractor
-# both skip it.
+# terminal furniture, not typed text, so pi's row scan skips it.
 # The pattern accepts that shape and nothing wider, because pi's row scan treats
 # EVERY other surviving byte in the region as input (even a lone prompt glyph is
 # a draft there): a wider rule-framed match would read a draft that merely opens
@@ -1003,9 +1002,9 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
 
 # _fm_composer_row_is_pi_status: 0 when the row is pi-vimmode's mode row
 # (FM_COMPOSER_PI_STATUS_RE_DEFAULT above) - furniture inside pi's separated
-# region. Callers pass the row's CLASSIFICATION content, never the plain row,
-# so ghost stripping has already had its say and bytes that survive styling are
-# judged as the input they are.
+# region. The caller passes the row's CLASSIFICATION content, never the plain
+# row, so ghost stripping has already had its say and bytes that survive styling
+# are judged as the input they are.
 _fm_composer_row_is_pi_status() {  # <row-content>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_PI_STATUS_RE:-$FM_COMPOSER_PI_STATUS_RE_DEFAULT}" sensitive
 }
@@ -1249,12 +1248,8 @@ EOF
     # (the zellij paste proof depends on observing exactly what was typed).
     # OpenCode's left-bar hint and legacy shell-glyph boxed placeholders have no
     # such styling proof, so their structurally fixed positions remain the two
-    # idle-regex exceptions here. Pi's separated region carries a third piece of
-    # harness furniture, pi-vimmode's mode row, and the same predicate that
-    # keeps it out of pi's verdict keeps it out of the extracted content.
+    # idle-regex exceptions here.
     if [ -z "$content" ] \
-       || { [ "$FM_COMPOSER_SELECTED_KIND" = pi ] \
-            && _fm_composer_row_is_pi_status "$content"; } \
        || { { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
               || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ]; }; } \
             && [ "$placeholder_position" = 1 ] \

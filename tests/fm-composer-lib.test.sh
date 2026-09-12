@@ -170,18 +170,6 @@ assert_screen() {
   [ "$out" = "$want" ] || fail "$label under LC_ALL=C: expected $want, got '$out'"
 }
 
-# assert_extract <label> <want> <caps> <screen>: extracted composer content,
-# asserted under the ambient locale AND LC_ALL=C. Extraction consults the same
-# furniture predicates as the verdict, so it owes the same locale invariance.
-assert_extract() {
-  local label=$1 want=$2 out
-  shift 2
-  out=$(fm_composer_extract_selected_content "$@")
-  [ "$out" = "$want" ] || fail "$label: expected '$want', got '$out'"
-  out=$(LC_ALL=C fm_composer_extract_selected_content "$@")
-  [ "$out" = "$want" ] || fail "$label under LC_ALL=C: expected '$want', got '$out'"
-}
-
 test_matrix_claude_bare_nbsp_row() {
   # Real idle claude: `❯` + U+00A0, borderless, between horizontal rules.
   # The audit's headline defect: this row read `pending` under LC_ALL=C
@@ -405,14 +393,7 @@ test_pi_vimmode_status_row_is_furniture() {
   assert_screen "pi row with a widened rule" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
   typed=$'transcript\n────────────────────────\n─ NORMAL ─\n────────────────────────'
   assert_screen "pi row with an unobserved mode label" pending "$CAPS_STYLED" "$typed" '' "$(printf 'pi\tidle')"
-  # Extraction reads the same region, so it must agree on what is furniture:
-  # a paste proof that includes the mode row can never match what was sent.
-  screen=$'transcript\n────────────────────────\n─ INSERT 1:1 ─\n────────────────────────\n vim footer'
-  assert_extract "pi extraction drops the vimmode row" '' "$CAPS_STYLED_NOID" "$screen"
-  typed=$'transcript\n────────────────────────\n─ retry the deploy ─\n────────────────────────'
-  assert_extract "pi extraction keeps a rule-framed draft" '─ retry the deploy ─' \
-    "$CAPS_STYLED_NOID" "$typed"
-  pass "pi-vimmode's verified mode row is furniture in both pi readers; every other byte stays input"
+  pass "pi-vimmode's verified mode row is furniture in pi's verdict; every other byte stays input"
 }
 
 test_matrix_pi_separated_needs_identity() {
