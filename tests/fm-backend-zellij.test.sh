@@ -429,6 +429,134 @@ test_server_ensure_skips_attach_when_already_exists() {
   pass "fm_backend_zellij_server_ensure: reuses an existing session without calling attach"
 }
 
+# make_windows_zellij_fakebin: a `zellij` + `powershell.exe` fake pair for the
+# native-Windows branch of fm_backend_zellij_server_ensure. Unlike
+# make_zellij_fakebin's static FM_ZELLIJ_SESSION_LIST, `zellij list-sessions`
+# here reads a session-membership file so the fake `powershell.exe` can
+# simulate the real Start-Process behavior of making the session actually come
+# up - the poll loop in fm_backend_zellij_server_ensure then observes it and
+# returns promptly instead of spinning out the full 10s timeout.
+make_windows_zellij_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/zellij" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_ZELLIJ_LOG:?}"
+{
+  printf 'zellij'
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+if [ "${1:-}" = list-sessions ]; then
+  cat "${FM_ZELLIJ_SESSION_FILE:?}" 2>/dev/null
+  exit 0
+fi
+if [ "${1:-}" = attach ] && [ -n "${FM_ZELLIJ_ATTACH_STARTS_SESSION:-}" ]; then
+  printf '%s\n' "$3" >> "${FM_ZELLIJ_SESSION_FILE:?}"
+fi
+exit 0
+SH
+  chmod +x "$fb/zellij"
+  cat > "$fb/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_POWERSHELL_LOG:?}"
+{
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+if [ -n "${FM_POWERSHELL_STARTS_SESSION:-}" ]; then
+  printf '%s\n' "$FM_POWERSHELL_STARTS_SESSION" >> "${FM_ZELLIJ_SESSION_FILE:?}"
+fi
+exit 0
+SH
+  chmod +x "$fb/powershell.exe"
+  printf '%s\n' "$fb"
+}
+
+test_server_ensure_uses_powershell_start_process_on_windows() {
+  # Git Bash's `&` backgrounding does not detach a process from the invoking
+  # bash's lifetime the way a Unix double-fork does, so the old `nohup ... &`
+  # session died with its one-shot invocation and never survived to be found -
+  # confirmed live on Windows 11. The fix launches via a genuinely separate
+  # Windows process (PowerShell's Start-Process) instead.
+  local dir fb session_file
+  dir="$TMP_ROOT/server-windows"; mkdir -p "$dir"
+  fb=$(make_windows_zellij_fakebin "$dir")
+  session_file="$dir/sessions"
+  : > "$session_file"
+  OSTYPE=msys PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/zellij.log" FM_ZELLIJ_SESSION_FILE="$session_file" \
+    FM_POWERSHELL_LOG="$dir/powershell.log" FM_POWERSHELL_STARTS_SESSION=firstmate \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_server_ensure firstmate' "$ROOT"
+  expect_code 0 $? "server_ensure should succeed on Windows once the PowerShell-launched session appears"
+  assert_contains "$(cat "$dir/powershell.log")" $'\x1f''-NoProfile' \
+    "server_ensure did not launch powershell.exe with -NoProfile on Windows"
+  assert_contains "$(cat "$dir/powershell.log")" "attach','-b','firstmate'" \
+    "server_ensure did not embed the session name in the PowerShell Start-Process argument list"
+  assert_not_contains "$(cat "$dir/zellij.log")" $'\x1f''attach' \
+    "server_ensure should not call zellij attach directly on Windows - only powershell.exe should"
+  pass "fm_backend_zellij_server_ensure: launches the headless session via PowerShell Start-Process on native Windows"
+}
+
+test_server_ensure_refuses_unsafe_session_name_on_windows() {
+  local dir fb out status
+  dir="$TMP_ROOT/server-windows-unsafe"; mkdir -p "$dir"
+  fb=$(make_windows_zellij_fakebin "$dir")
+  : > "$dir/powershell.log"
+  out=$( OSTYPE=msys PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/zellij.log" FM_ZELLIJ_SESSION_FILE="$dir/sessions" \
+    FM_POWERSHELL_LOG="$dir/powershell.log" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_server_ensure "$1"' "$ROOT" "firstmate'; Remove-Item C:\\" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "server_ensure should refuse a session name containing a single quote"
+  assert_contains "$out" "refusing zellij session name" "server_ensure did not report the charset refusal"
+  [ ! -s "$dir/powershell.log" ] || fail "server_ensure invoked powershell.exe despite an unsafe session name"
+  pass "fm_backend_zellij_server_ensure: refuses an unsafe session name before ever building the PowerShell command"
+}
+
+test_server_ensure_uses_nohup_on_cygwin() {
+  # Cygwin implements real fork/setsid, so `&` detaches properly there and it
+  # never had the Git Bash backgrounding problem - it also frequently has no
+  # powershell.exe on PATH, so routing it through Start-Process would break a
+  # working platform. Same platform boundary as the lock fix's own
+  # fm_lock_legacy_dir_platform.
+  local dir fb session_file
+  dir="$TMP_ROOT/server-cygwin"; mkdir -p "$dir"
+  fb=$(make_windows_zellij_fakebin "$dir")
+  session_file="$dir/sessions"
+  : > "$session_file"
+  : > "$dir/powershell.log"
+  OSTYPE=cygwin PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/zellij.log" FM_ZELLIJ_SESSION_FILE="$session_file" \
+    FM_POWERSHELL_LOG="$dir/powershell.log" FM_ZELLIJ_ATTACH_STARTS_SESSION=1 \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_server_ensure firstmate' "$ROOT"
+  expect_code 0 $? "server_ensure should succeed on Cygwin via the unchanged nohup-based launch"
+  assert_contains "$(cat "$dir/zellij.log")" $'\x1f''attach' \
+    "server_ensure did not launch zellij attach directly on Cygwin"
+  [ ! -s "$dir/powershell.log" ] || fail "server_ensure routed Cygwin through powershell.exe instead of nohup"
+  pass "fm_backend_zellij_server_ensure: keeps the nohup-based launch on Cygwin, unlike MSYS/MinGW"
+}
+
+test_server_ensure_accepts_unusual_session_name_off_windows() {
+  # The charset guard exists only because the Windows branch interpolates the
+  # name into a single-quoted PowerShell string. The nohup branch passes it
+  # through ordinary shell quoting, so names zellij itself accepts (spaces,
+  # `+`, `@`, ...) must keep working there.
+  local dir fb session_file
+  dir="$TMP_ROOT/server-posix-odd-name"; mkdir -p "$dir"
+  fb=$(make_windows_zellij_fakebin "$dir")
+  session_file="$dir/sessions"
+  : > "$session_file"
+  : > "$dir/powershell.log"
+  OSTYPE=linux-gnu PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/zellij.log" FM_ZELLIJ_SESSION_FILE="$session_file" \
+    FM_POWERSHELL_LOG="$dir/powershell.log" FM_ZELLIJ_ATTACH_STARTS_SESSION=1 \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_server_ensure "$1"' "$ROOT" 'fm smoke+1'
+  expect_code 0 $? "server_ensure should accept a space-bearing session name on the nohup-based branch"
+  assert_contains "$(cat "$dir/zellij.log")" $'\x1f''fm smoke+1' \
+    "server_ensure did not pass the session name through verbatim on the nohup-based branch"
+  [ ! -s "$dir/powershell.log" ] || fail "server_ensure invoked powershell.exe on a non-Windows OSTYPE"
+  pass "fm_backend_zellij_server_ensure: accepts session names outside the PowerShell charset off Windows"
+}
+
 # --- dispatch wiring (fm-backend.sh) ------------------------------------------
 
 test_dispatch_routes_zellij_backend() {
@@ -1315,6 +1443,10 @@ test_resolve_bare_selector_refuses_cross_session_ambiguous_untagged
 test_session_exists_true_when_listed
 test_session_exists_false_when_absent
 test_server_ensure_skips_attach_when_already_exists
+test_server_ensure_uses_powershell_start_process_on_windows
+test_server_ensure_refuses_unsafe_session_name_on_windows
+test_server_ensure_uses_nohup_on_cygwin
+test_server_ensure_accepts_unusual_session_name_off_windows
 test_dispatch_routes_zellij_backend
 test_dispatch_busy_state_unknown_for_zellij
 test_create_task_refuses_duplicate_label
