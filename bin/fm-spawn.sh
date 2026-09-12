@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--intake-rule <slug>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--intake-rule <slug>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -43,6 +43,19 @@
 #   the new incarnation. The replacement still never starts outside the copy
 #   holding the work: a Herdr shell that has drifted out of the recorded
 #   worktree is told once to return, and only a shell that will not go refuses.
+#   A fresh (non-relaunch) spawn additionally freezes this task's intake
+#   identity into state/<id>.meta as intake_at, intake_harness, intake_model,
+#   intake_effort, intake_rule, and session_ptr (the worktree, the join key
+#   into harness session sidecars keyed by worktree path). --intake-rule
+#   <slug> supplies intake_rule - the matched config/crew-dispatch.json rule as
+#   a stable slug, or default/explicit-override - and is refused on
+#   --relaunch; when omitted, intake_rule is recorded as "default". These six
+#   keys are never in --relaunch's owned/overwritten set, so every relaunch's
+#   own preserve_relaunch_meta call (below) carries them forward unchanged from
+#   the task's first spawn: the intake identity is a fact about how the task
+#   started, not about its current incarnation, so it survives every later
+#   harness or model switch (data/cost-per-accepted-issue-scout/report.md
+#   section 3.2 A).
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -507,6 +520,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+INTAKE_RULE_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -514,6 +528,7 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+INTAKE_RULE_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -530,6 +545,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      intake-rule) INTAKE_RULE_ARG=$a; INTAKE_RULE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -553,6 +569,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --intake-rule) want_value=intake-rule ;;
+    --intake-rule=*) INTAKE_RULE_ARG=${a#--intake-rule=}; INTAKE_RULE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -564,6 +582,7 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$INTAKE_RULE_SET" -eq 0 ] || [ -n "$INTAKE_RULE_ARG" ] || { echo "error: --intake-rule requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -591,6 +610,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$INTAKE_RULE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's frozen intake identity; --intake-rule cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -3922,6 +3942,26 @@ preserve_relaunch_meta() {
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
+  fi
+  if [ "$RELAUNCH" -eq 0 ]; then
+    # Per-incarnation identity, frozen at the FIRST spawn only (data/cost-per-accepted-issue-scout/report.md
+    # section 3.2 A). These keys are deliberately absent from preserve_relaunch_meta's
+    # owned set above, so a relaunch's own preserve_relaunch_meta call carries
+    # them forward byte-for-byte from the prior record instead of this block
+    # ever re-deriving them from the replacement incarnation's harness/model/
+    # effort. That is what keeps the model that did the first, often largest,
+    # share of the work from disappearing from the record when a task is
+    # relaunched onto a different harness or model.
+    echo "intake_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "intake_harness=$HARNESS"
+    echo "intake_model=${MODEL:-default}"
+    echo "intake_effort=${EFFORT:-default}"
+    echo "intake_rule=${INTAKE_RULE_ARG:-default}"
+    # The join key into harness session sidecars, which key their own files by
+    # worktree path rather than task id (report section 1.5); relaunch does not
+    # change a task's worktree, so freezing it here is what survives a future
+    # change to that assumption, not a hedge against today's behavior.
+    echo "session_ptr=$WT"
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta

@@ -401,6 +401,31 @@ test_claude_threads_model_and_effort() {
   pass "claude receives --model and --effort profile flags"
 }
 
+# data/cost-per-accepted-issue-scout/report.md section 3.2 A: a fresh spawn
+# freezes its intake identity into meta, separately from the live harness/
+# model/effort fields, so a later relaunch (see tests/fm-control-relaunch.test.sh)
+# has a frozen record to preserve.
+test_intake_identity_frozen_at_first_spawn() {
+  local rec id out status meta intake_at
+  id=profile-intake-z1
+  rec=$(make_spawn_case profile-intake claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model sonnet --effort high --intake-rule bounded-implementation)
+  status=$?
+  expect_code 0 "$status" "claude spawn with --intake-rule should succeed"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "intake_harness=claude" "$meta" "meta missing intake_harness=claude"
+  assert_grep "intake_model=sonnet" "$meta" "meta missing intake_model=sonnet"
+  assert_grep "intake_effort=high" "$meta" "meta missing intake_effort=high"
+  assert_grep "intake_rule=bounded-implementation" "$meta" "meta missing intake_rule=bounded-implementation"
+  assert_grep "session_ptr=$WT_DIR" "$meta" "meta missing session_ptr=$WT_DIR"
+  intake_at=$(grep '^intake_at=' "$meta" | cut -d= -f2-)
+  [ -n "$intake_at" ] || fail "meta missing a non-empty intake_at="
+  pass "a fresh spawn freezes intake_at/harness/model/effort/rule and session_ptr into meta"
+}
+
 test_codex_threads_model_and_effort() {
   local rec id out status launch
   id=profile-codex-z3
@@ -1338,5 +1363,6 @@ test_non_claude_harness_ignores_config_dir
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_intake_identity_frozen_at_first_spawn
 
 echo "# all fm-spawn-dispatch-profile tests passed"

@@ -386,6 +386,54 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+# data/cost-per-accepted-issue-scout/report.md section 3.2 A: a relaunch onto a
+# different harness/model/effort must never overwrite the intake identity that
+# a first spawn froze into meta, or the model that did the first, often
+# largest, share of the work disappears from the record - the report's own
+# fix-4115-herdr-liveness worked example. This is the hard correctness bar
+# this change is graded on: prove it against a HARNESS SWITCH, not merely a
+# model/effort change within the same harness.
+test_relaunch_preserves_frozen_intake_identity_across_a_harness_switch() {
+  local dir out rc
+  dir=$(new_case intake-frozen rl43)
+  add_ship_task "$dir" rl43 claude
+  {
+    printf '%s\n' 'intake_at=2026-09-10T21:17:40Z'
+    printf '%s\n' 'intake_harness=claude'
+    printf '%s\n' 'intake_model=claude-fable-5-1'
+    printf '%s\n' 'intake_effort=high'
+    printf '%s\n' 'intake_rule=complex-investigation'
+    printf '%s\n' "session_ptr=$dir/wt"
+    printf '%s\n' 'model=claude-fable-5-1'
+    printf '%s\n' 'effort=high'
+  } >> "$dir/home/state/rl43.meta"
+
+  out=$(run_control "$dir" rl43 relaunch --harness codex --model gpt-5 --effort medium \
+    --note "captain ordered an immediate leave of claude-fable-5-1"); rc=$?
+  expect_code 0 "$rc" "a harness-switching relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl43 intake_at)" = "2026-09-10T21:17:40Z" ] \
+    || fail "intake_at must survive a harness-switching relaunch unchanged"
+  [ "$(meta_field "$dir" rl43 intake_harness)" = claude ] \
+    || fail "intake_harness must stay the FIRST harness, not the replacement"
+  [ "$(meta_field "$dir" rl43 intake_model)" = claude-fable-5-1 ] \
+    || fail "intake_model must stay the FIRST model, not the replacement"
+  [ "$(meta_field "$dir" rl43 intake_effort)" = high ] \
+    || fail "intake_effort must stay the FIRST effort, not the replacement"
+  [ "$(meta_field "$dir" rl43 intake_rule)" = complex-investigation ] \
+    || fail "intake_rule must survive a harness-switching relaunch unchanged"
+  [ "$(meta_field "$dir" rl43 session_ptr)" = "$dir/wt" ] \
+    || fail "session_ptr must survive a harness-switching relaunch unchanged"
+  # The LIVE identity is exactly what a relaunch DOES update - that is the
+  # whole point of the fields being distinct from intake_*.
+  [ "$(meta_field "$dir" rl43 harness)" = codex ] \
+    || fail "the live harness must reflect the replacement"
+  [ "$(meta_field "$dir" rl43 model)" = gpt-5 ] \
+    || fail "the live model must reflect the replacement"
+  [ "$(meta_field "$dir" rl43 effort)" = medium ] \
+    || fail "the live effort must reflect the replacement"
+  pass "fm-control relaunch: a harness switch updates live identity but never the frozen intake identity"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
@@ -1497,6 +1545,9 @@ test_spawn_relaunch_refuses_contradicting_flags() {
   out=$(run_spawn "$dir" rl16 "$dir/proj" --relaunch); rc=$?
   expect_code 1 "$rc" "a project positional should be refused alongside --relaunch"
   assert_contains "$out" "takes the task id only" "the refusal should name the positional rule"
+  out=$(run_spawn "$dir" rl16 --relaunch --intake-rule bounded-implementation); rc=$?
+  expect_code 1 "$rc" "--intake-rule should be refused alongside --relaunch"
+  assert_contains "$out" "frozen intake identity" "the refusal should name the frozen intake identity rule"
   pass "fm-spawn --relaunch: every identity axis comes from the record, and a contradicting flag refuses"
 }
 
@@ -1561,6 +1612,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_preserves_frozen_intake_identity_across_a_harness_switch
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

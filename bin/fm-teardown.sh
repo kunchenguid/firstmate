@@ -28,6 +28,15 @@
 # NOTE: this uses `open`'s silent default and depends only on its unchanged
 # 0/1/2 exit-code contract. The optional `--identity` output that bin/fm-watch.sh
 # asks for prints only on an exit 0 and changes nothing read here.
+# Before the removals above, a non-secondmate teardown writes
+# data/<id>/cost.json (bin/fm-cost-summary-lib.sh): this task's frozen intake
+# identity, its final live identity, and a best-effort list-price USD
+# consumption total read from harness session sidecars. That file lives under
+# data/, which this cleanup never touches, so it survives teardown exactly
+# like a scout's own data/<id>/report.md - the only other place left, after
+# state/<id>.meta and its control-relaunch sidecars are removed below, that
+# still joins a task to what it cost
+# (data/cost-per-accepted-issue-scout/report.md section 3.2 B).
 # The same pending-close record carries that intent as
 # `mode=retain`, so an interrupted cleanup replays the retention rather than a
 # close. "Cannot tell" refuses before any destructive step, --force does not
@@ -286,6 +295,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-cost-summary-lib.sh
+. "$SCRIPT_DIR/fm-cost-summary-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -3442,6 +3453,22 @@ if [ "$KIND" = secondmate ]; then
   handoff_wake_retire_stage_commit \
     || { echo "error: receiver wake cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
   remove_secondmate_registry_entry "$ID"
+fi
+# Close-out consumption summary (data/cost-per-accepted-issue-scout/report.md
+# section 3.2 B): written to data/<id>/cost.json, which SURVIVES the cleanup
+# below exactly like a scout's own data/<id>/report.md, before that cleanup
+# removes control-relaunch/*.meta-prior and the task record that are the only
+# other places this task's intake identity and consumption sidecars are
+# joined together. Skipped for a secondmate: its data/ IS the home being
+# retired below, so writing into it here would be immediately destroyed
+# rather than surviving. Best-effort and non-fatal: a failure here must never
+# block the teardown it is only recording a summary of.
+if [ "$KIND" != secondmate ]; then
+  TEARDOWN_LANDED=null
+  if [ "$KIND" = ship ] && [ "$FORCE" != "--force" ]; then
+    TEARDOWN_LANDED=true
+  fi
+  fm_cost_summary_write "$DATA" "$ID" "$META" "$KIND" "$PR_URL" "$TEARDOWN_LANDED" || true
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
