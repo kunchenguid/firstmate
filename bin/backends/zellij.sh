@@ -545,8 +545,13 @@ fm_backend_zellij_composer_state() {  # <target> [expected-label] [harness] -> e
 fm_backend_zellij_composer_content() {  # <target> [expected-label] [harness] [comparison]
   local target=$1 expected_label=${2:-} harness=${3:-} comparison=${4:-} cap caps capture_lines
   capture_lines=$(fm_composer_capture_lines_for_harness "$harness")
-  cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label" "$harness") || return 1
-  caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$capture_lines")
+  if cap=$(fm_backend_zellij_composer_capture "$target" "$expected_label" "$harness"); then
+    caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$capture_lines")
+  elif cap=$(fm_backend_zellij_capture "$target" "$capture_lines" "$expected_label") && [ -n "$cap" ]; then
+    caps=$(printf 'styled=0\ncursor=0\nidentity=0\nrows=%s' "$capture_lines")
+  else
+    return 1
+  fi
   fm_composer_extract_selected_content "$caps" "$cap" '' "$harness" "$comparison"
 }
 

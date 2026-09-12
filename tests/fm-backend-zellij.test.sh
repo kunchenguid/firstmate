@@ -57,6 +57,13 @@ fi
 next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 n=$next
 echo "$n" > "$COUNT_FILE"
+if printenv FM_ZELLIJ_ANSI_UNAVAILABLE 2>/dev/null | grep -qx 1; then
+  for a in "$@"; do
+    if [ "$a" = --ansi ]; then
+      exit 2
+    fi
+  done
+fi
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
@@ -1183,6 +1190,31 @@ test_send_text_submit_agy_reconstructs_visual_wrap() {
   pass "fm_backend_zellij_send_text_submit: AGY reconstructs mid-token visual wraps"
 }
 
+test_send_text_submit_agy_uses_plain_capture_fallback() {
+  local dir fb out boundary typed empty n
+  dir="$TMP_ROOT/submit-agy-plain-fallback"; mkdir -p "$dir/responses"
+  boundary=$(printf '─%.0s' {1..72})
+  typed="$boundary"$'\n> hello world\n'"$boundary"$'\n? for shortcuts'
+  empty="$boundary"$'\n>\n'"$boundary"$'\n? for shortcuts'
+  for n in 1 3 5 6 8 10 12 14 15 17; do
+    zellij_pane_response "$dir" "$n" 7 3
+  done
+  printf '%s' "$empty" > "$dir/responses/4.out"
+  printf '%s' "$typed" > "$dir/responses/9.out"
+  printf '%s' "$typed" > "$dir/responses/13.out"
+  printf '%s' "$empty" > "$dir/responses/18.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_ANSI_UNAVAILABLE=1 FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "hello world" 2 0.01 0.01 "" agy' "$ROOT" )
+  [ "$out" = empty ] || fail "AGY plain capture fallback should allow a typed submit, got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''paste' \
+    "AGY plain capture fallback should type the text"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "AGY plain capture fallback should submit with Enter"
+  pass "fm_backend_zellij_send_text_submit: AGY uses plain capture when ANSI is unavailable"
+}
+
 test_send_text_submit_agy_reconstructs_word_wrap() {
   local dir fb out boundary first second text typed empty
   dir="$TMP_ROOT/submit-agy-word-wrap"; mkdir -p "$dir/responses"
@@ -1497,6 +1529,7 @@ test_send_text_submit_accepts_wrapped_bare_text
 test_send_text_submit_preserves_non_agy_whitespace_contract
 test_send_text_submit_preserves_agent_glyph_within_wrapped_content
 test_send_text_submit_agy_reconstructs_visual_wrap
+test_send_text_submit_agy_uses_plain_capture_fallback
 test_send_text_submit_agy_reconstructs_word_wrap
 test_send_text_submit_agy_preserves_significant_spaces
 test_send_text_submit_rejects_stale_composer_above_live_shell
