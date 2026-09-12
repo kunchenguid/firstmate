@@ -32,6 +32,11 @@ Inspect the pane to identify which dialog is on screen, and report it rather tha
 A launch under `config/claude-permission-mode=auto` never meets the bypass confirmation, because it does not request bypass mode: on 2.1.269 `claude --permission-mode auto` reached the composer directly with the footer `⏵⏵ auto mode on (shift+tab to cycle)`, so a captain who refuses the bypass dialog selects `auto` there instead of accepting it.
 The workspace-trust dialog is unaffected by the permission mode and still needs the pre-registration above.
 
+Inspect, and inspect again after each confirmation, because clearing one gate can reveal the next.
+`../../../bin/fm-crew-state.sh` reporting `harness busy` is not proof the agent started: `../../../bin/fm-spawn.sh` arms a busy record at launch, so a Claude task reads `harness busy (fm-spawn)` from the moment it is spawned, and a worker parked on either dialog keeps reading that indefinitely.
+Read the source token in the parenthesis rather than the word `busy`: only `harness busy (claude-hook)` is a real Claude turn.
+Prove the start by reading the pane for real tool calls before reporting the task as under way.
+
 ## Composer ghost
 
 Completed turns can render dim predicted text inside an empty composer, indistinguishable in plain `tmux capture-pane`.
