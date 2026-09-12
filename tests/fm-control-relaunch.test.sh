@@ -72,6 +72,9 @@ case "${1:-}" in
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
         /exit|/quit)
+          if [ "$payload" = /quit ] && [ -n "${FM_FAKE_AGY_LIVE_COMPOSER:-}" ]; then
+            printf '────────────────\n> /quit\n────────────────\n? for shortcuts\n' > "$D/pane"
+          fi
           printf 'zsh' > "$D/command"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
@@ -109,7 +112,9 @@ case "${1:-}" in
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  capture-pane)
+    if [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
+    exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
 esac
 exit 0
@@ -168,6 +173,16 @@ EOF
   TASK_TMPS+=("/tmp/fm-$id")
 }
 
+add_agy_ship_task() {
+  local dir=$1 id=$2 root
+  add_ship_task "$dir" "$id" agy
+  printf 'agy' > "$dir/fake/command"
+  printf 'agy' > "$dir/fake/becomes"
+  printf '────────────────\n>\n────────────────\n? for shortcuts\n' > "$dir/fake/pane"
+  root="$dir/home/state/$id.agy-hooks"
+  printf '%s\n' "$root"
+}
+
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
   # A claude spawn pre-registers workspace trust in the launching user's own
@@ -185,6 +200,7 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_FAKE_AGY_LIVE_COMPOSER="${FM_FAKE_AGY_LIVE_COMPOSER:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -547,6 +563,71 @@ test_unexpected_directory_at_file_wiring_refuses_for_claude() {
   assert_no_grep "encode launch-brief" "$dir/fake/literal" \
     "a refused relaunch must not launch a replacement"
   pass "relaunch keeps recursive deletion restricted to agy's owned directory artifact"
+}
+
+test_agy_relaunch_preserves_unowned_hook_paths() {
+  local kind dir root target before out rc id
+  for kind in file symlink directory; do
+    id="agy-unowned-$kind"
+    dir=$(new_case "$id" "$id")
+    root=$(add_agy_ship_task "$dir" "$id")
+    case "$kind" in
+      file)
+        printf 'foreign agy hook file\n' > "$root"
+        before="$dir/root.before"
+        cp "$root" "$before"
+        ;;
+      symlink)
+        target="$dir/wt"
+        printf 'foreign symlink target\n' > "$target/sentinel"
+        ln -s "$target" "$root"
+        before="$dir/root.before"
+        printf '%s\n' "$target" > "$before"
+        ;;
+      directory)
+        mkdir -p "$root/nested"
+        printf 'foreign agy hook directory\n' > "$root/nested/sentinel"
+        before="$dir/root.before"
+        cp -a "$root" "$before"
+        ;;
+    esac
+    out=$(FM_FAKE_AGY_LIVE_COMPOSER=1 \
+      run_control "$dir" "$id" relaunch --note "preserve foreign agy path"); rc=$?
+    expect_code 1 "$rc" "an unowned AGY $kind must refuse relaunch"
+    assert_contains "$out" "$root" "an unowned AGY $kind refusal must name the path"
+    case "$kind" in
+      file)
+        cmp -s "$root" "$before" || fail "an unowned AGY file changed during relaunch rollback"
+        ;;
+      symlink)
+        [ -L "$root" ] || fail "an unowned AGY symlink was removed during relaunch rollback"
+        [ "$(readlink "$root")" = "$target" ] || fail "an unowned AGY symlink target changed"
+        [ "$(cat "$before")" = "$(readlink "$root")" ] || fail "an unowned AGY symlink was not byte-identical"
+        ;;
+      directory)
+        diff -ru "$before" "$root" >/dev/null || fail "an unowned AGY directory changed during relaunch rollback"
+        ;;
+    esac
+    assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+      "an unowned AGY $kind must not launch a replacement"
+  done
+  pass "AGY relaunch preserves unowned files, symlinks, and directories"
+}
+
+test_agy_relaunch_rollback_removes_owned_replacement_root() {
+  local dir root out rc id=agy-owned-rollback old_gen
+  dir=$(new_case agy-owned-rollback "$id")
+  root=$(add_agy_ship_task "$dir" "$id")
+  old_gen=previous-agy-generation
+  mkdir -p "$root"
+  printf '%s\n' "$old_gen" > "$root/.firstmate-spawn-gen"
+  printf '%s\n' "spawn_gen=$old_gen" "agy_hooks_owned=1" >> "$dir/home/state/$id.meta"
+  out=$(FM_FAKE_AGY_LIVE_COMPOSER=1 FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
+    run_control "$dir" "$id" relaunch --note "remove owned replacement root"); rc=$?
+  expect_code 1 "$rc" "an AGY replacement launch transport failure must fail closed"
+  assert_absent "$root" \
+    "an AGY replacement launch failure must remove its owned hook root"
+  pass "AGY relaunch rollback removes the owned replacement hook root"
 }
 
 test_harness_switch_does_not_carry_the_old_profile_axes() {
@@ -1584,6 +1665,8 @@ test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_unexpected_directory_at_file_wiring_refuses_for_claude
+test_agy_relaunch_preserves_unowned_hook_paths
+test_agy_relaunch_rollback_removes_owned_replacement_root
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement

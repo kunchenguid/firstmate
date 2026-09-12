@@ -28,6 +28,13 @@ set -u
 
 fm_live_gate default-on FM_HARNESS_LIVENESS_DRIFT tmux
 
+AGY_MARKER_PROBE=0
+if [ "${FM_HARNESS_LIVENESS_DRIFT_AGY_MARKER:-}" != 0 ] \
+   && { [ "${FM_HARNESS_LIVENESS_DRIFT_AGY_MARKER:-}" = 1 ] || [ "${FM_LIVE:-}" = 1 ]; }; then
+  fm_live_gate opt-in FM_HARNESS_LIVENESS_DRIFT_AGY_MARKER tmux agy
+  AGY_MARKER_PROBE=1
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
@@ -119,6 +126,7 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse agy; do
   # same flag fm-spawn passes for the same reason.
   launch_args=""
   [ "$harness" = cursor ] && launch_args="--trust"
+  [ "$harness" = agy ] && launch_args="--prompt-interactive --dangerously-skip-permissions"
   # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
   "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- "$bin_path" $launch_args \
     || fail "$harness ($version): could not launch a window for the liveness probe"
@@ -139,6 +147,26 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse agy; do
   note "$harness $version: title='$title' foreground=[$comms]"
 
   pass "harness liveness: $harness $version classifies alive"
+  if [ "$harness" = agy ] && [ "$AGY_MARKER_PROBE" -eq 1 ]; then
+    marker_env="$LAB/agy-marker-env"
+    marker_harness="$LAB/agy-marker-harness"
+    printf -v marker_command \
+      "Use your shell tool to run exactly: env | grep '^ANTIGRAVITY_AGENT=' > %q; %q > %q; then reply MARKER_PROBE_DONE." \
+      "$marker_env" "$ROOT/bin/fm-harness.sh" "$marker_harness"
+    "$REAL_TMUX" -L "$SOCKET" send-keys -t "$target" -l "$marker_command" \
+      || fail "agy ($version): could not submit the marker probe"
+    "$REAL_TMUX" -L "$SOCKET" send-keys -t "$target" Enter \
+      || fail "agy ($version): could not submit the marker probe"
+    for _ in $(seq 1 180); do
+      [ -s "$marker_env" ] && [ -s "$marker_harness" ] && break
+      sleep 1
+    done
+    grep -Fxq 'ANTIGRAVITY_AGENT=1' "$marker_env" \
+      || fail "agy ($version): the tool environment lacked ANTIGRAVITY_AGENT=1"
+    grep -Fxq agy "$marker_harness" \
+      || fail "agy ($version): fm-harness.sh did not report agy from the tool process"
+    pass "harness marker: agy $version exports ANTIGRAVITY_AGENT=1 and detects as agy from a tool process"
+  fi
   CHECKED=$((CHECKED + 1))
 done
 

@@ -943,7 +943,7 @@ spawn_fresh_wiring_rollback() {
   if [ -n "${AGY_HOOK_ROOT_PATH:-}" ] \
       && { [ -e "$AGY_HOOK_ROOT_PATH" ] || [ -L "$AGY_HOOK_ROOT_PATH" ]; }; then
     if ! agy_remove_owned_hook_root "$AGY_HOOK_ROOT_PATH" "$STATE_REAL" "$meta" "$ID" \
-        "${AGY_HOOK_ROOT_CREATED:-0}" "$SPAWN_GEN"; then
+        "${AGY_HOOK_ROOT_CREATED:-0}"; then
       status=1
     fi
   fi
@@ -1166,7 +1166,7 @@ clear_relaunch_harness_wiring() {
     [ -n "$path" ] || continue
     if [ "$harness" = agy ] && [ "$path" = "$state/$id.agy-hooks" ]; then
       if ! agy_remove_owned_hook_root "$path" "$state" "$state/$id.meta" "$id" \
-          "$agy_root_owned" "$SPAWN_GEN"; then
+          "$agy_root_owned"; then
         return 1
       fi
       continue
@@ -1190,26 +1190,13 @@ spawn_herdr_presentation_order_lock_release() {
 }
 
 agy_hook_root_matches_owner() {
-  local root=$1 state_root=$2 meta=$3 expected_gen=${4:-} prefer_expected=${5:-0}
-  local root_real state_real marker marker_gen owner_gen
-  if [ "$prefer_expected" = 1 ]; then
-    [ -n "$expected_gen" ] || return 1
-    owner_gen=$expected_gen
-  else
-    owner_gen=$(fm_meta_get "$meta" spawn_gen)
-    [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ] || {
-      [ -n "$expected_gen" ] || return 1
-      owner_gen=$expected_gen
-    }
-  fi
+  local root=$1 state_root=$2 meta=$3
+  local root_real marker marker_gen owner_gen
+  [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ] || return 1
+  owner_gen=$(fm_meta_get "$meta" spawn_gen)
   [ -n "$owner_gen" ] || return 1
   agy_hook_root_path_is_safe "$root" "$state_root" || return 1
-  state_real=$(cd -P -- "$state_root" && pwd -P) || return 1
   root_real=$(cd -P -- "$root" && pwd -P) || return 1
-  case "$root_real/" in
-    "$state_real/"*) ;;
-    *) return 1 ;;
-  esac
   marker="$root_real/.firstmate-spawn-gen"
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   marker_gen=$(cat "$marker") || return 1
@@ -1242,7 +1229,7 @@ agy_clear_hook_ownership_meta() {
 }
 
 agy_remove_owned_hook_root() {
-  local root=$1 state_root=$2 meta=$3 id=$4 current_owned=${5:-0} expected_gen=${6:-}
+  local root=$1 state_root=$2 meta=$3 id=$4 current_owned=${5:-0}
   if [ ! -e "$root" ] && [ ! -L "$root" ]; then
     if [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ]; then
       agy_clear_hook_ownership_meta "$meta" "$state_root" "$id" || return 1
@@ -1254,8 +1241,7 @@ agy_remove_owned_hook_root() {
       echo "warning: retaining agy hook path $root; current-spawn ownership path is unsafe" >&2
       return 1
     fi
-  elif ! agy_hook_root_matches_owner "$root" "$state_root" "$meta" \
-      "$expected_gen" 0; then
+  elif ! agy_hook_root_matches_owner "$root" "$state_root" "$meta"; then
     echo "warning: retaining agy hook path $root; ownership could not be proven" >&2
     return 1
   fi
