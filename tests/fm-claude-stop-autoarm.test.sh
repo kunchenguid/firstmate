@@ -287,6 +287,34 @@ test_reclaims_stale_session_lock_before_arming() {
   pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming"
 }
 
+test_reclaims_zombie_session_lock_before_arming() {
+  local dir fakeproc owner out status expected_owner actual_owner
+  dir=$(make_primary_dir "$TMP_ROOT/zombie-session-lock")
+  fakeproc="$dir/proc"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  mkdir -p "$fakeproc/$owner"
+  printf '%s (claude) Z 1\n' "$owner" > "$fakeproc/$owner/stat"
+  out=$(printf '%s\n' '{"session_id":"zombie"}' \
+    | FM_PROC_ROOT_OVERRIDE="$fakeproc" FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/expected-owner"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1); status=$?
+  expected_owner=$(cat "$dir/state/expected-owner")
+  actual_owner=$(cat "$dir/state/.lock")
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  expect_code 2 "$status" "a zombie recorded session owner must be reclaimed before the actionable rewake"
+  [ "$actual_owner" = "$expected_owner" ] \
+    || fail "zombie session lock was not claimed by the current harness: expected $expected_owner, got $actual_owner"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming the zombie session lock"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "zombie-lock recovery must record outcome=rewake"
+  pass "auto-arm: a zombie recorded session owner is reclaimed through fm-lock.sh before arming"
+}
+
 test_inert_when_lock_held_by_other_harness() {
   local dir other out status owner_after
   dir=$(make_primary_dir "$TMP_ROOT/other-lock")
@@ -1201,6 +1229,7 @@ test_fm_lock_status_still_works_with_shared_lib() {
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
+test_reclaims_zombie_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
