@@ -44,7 +44,10 @@
 #     ledger write; the failure notice additionally requires its marker write.
 #     A refused generation exits 0 silently even after printing. A close that
 #     reports no actionable reason is benign when a live identity-matched
-#     watcher still has a fresh beacon.
+#     watcher still has a fresh beacon. An actionable close is decided BEFORE
+#     the attended-alarm suppression and ends the failure episode, because it
+#     proves the whole mechanism works: only a non-actionable close can be
+#     suppressed by a stale alarm.
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
@@ -293,14 +296,17 @@ if [ "$HEALTHY" -eq 1 ]; then
   exit 0
 fi
 
-# After the synchronous guard has consumed the episode's attended fail-open,
-# do not create another exit-2 continuation that could defeat it.
-if [ -e "$FAILURE_ALARM" ]; then
-  autoarm_record failed-suppressed
-  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  exit 0
-fi
-
+# An ACTIONABLE close is positive proof that this mechanism works: the arm
+# started a watcher, that watcher ran a full cycle, and it delivered a real
+# supervision wake. It is therefore decided BEFORE the attended-alarm
+# suppression below, and it ends the failure episode exactly as a verified live
+# watcher does. Ordering it after that suppression is what let one stale
+# attended alarm swallow every later wake indefinitely: an actionable close
+# breaks the retry loop before fm_watcher_healthy runs, so HEALTHY stays 0, and
+# the reset above - the episode's only clearing path - was unreachable for as
+# long as closes kept coming back actionable (observed 2026-09-03..09: markers
+# six days old, every outcome failed-suppressed, real wakes queued and never
+# delivered to the model).
 if [ "$ACTIONABLE" -eq 1 ]; then
   # Cheap early-out before composing the banner; the real commit decision is
   # the owned terminal write below.
@@ -314,9 +320,24 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
+    # Clear the episode only AFTER the winning commit, so a superseded owner
+    # never mutates shared episode state. A refused or contended reset is
+    # harmless here: the wake is already committed, and the next actionable
+    # close retries the reset.
+    fm_autoarm_reset_owned "$STATE" "$MY_GEN" >/dev/null 2>&1 || true
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 2
   fi
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
+fi
+
+# After the synchronous guard has consumed the episode's attended fail-open,
+# do not create another exit-2 continuation that could defeat it. Only a
+# non-actionable close reaches this: an actionable one is positive recovery and
+# was already translated above.
+if [ -e "$FAILURE_ALARM" ]; then
+  autoarm_record failed-suppressed
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
