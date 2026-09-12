@@ -46,7 +46,7 @@
 # on the stream. Gating on it here made a remote mate's own progress lines and
 # newly raised decisions - which carry no corr= by contract - unrepresentable,
 # and rejecting one line failed the whole delta, so the cursor could never
-# advance past it. No single line can stop or wedge the stream.
+# advance past it. A missing correlation token never stops or wedges the stream.
 #
 # What remains here is only what crossing a machine boundary genuinely adds:
 #   - cursor continuity and identity (offset plus prefix digest)
@@ -298,12 +298,24 @@ fetch_document() { # <id> <remote-relative> <result-var>
   printf -v "$result_var" '%s' "$local_rel"
 }
 
-# The one adaptation a machine boundary forces on the mirrored bytes: NUL and
-# every other C0 control except tab and newline, plus DEL, become '?'. Printable
-# ASCII and every high byte pass through untouched, so ordinary UTF-8 notes
-# mirror exactly as a local secondmate would have written them. Newlines remain
-# framing rather than payload bytes, and blank separators are not carried into
-# the parent status stream.
+# Validate the complete captured payload before shell line processing. Perl's
+# core Encode module gives macOS and Linux the same strict UTF-8 boundary while
+# leaving the original bytes untouched for the subsequent mirror.
+validate_utf8_payload() { # <source>
+  perl -MEncode=decode,FB_CROAK -e '
+    binmode STDIN;
+    local $/;
+    my $bytes = <STDIN>;
+    eval { decode("UTF-8", $bytes, FB_CROAK); 1 } or exit 1;
+  ' < "$1"
+}
+
+# The one adaptation a machine boundary forces on a valid UTF-8 payload: NUL and
+# every other C0 control except tab and newline, plus DEL, become '?'. Within a
+# content-bearing line, printable ASCII, tabs, and all non-ASCII bytes pass
+# through untouched, so ordinary notes mirror exactly as a local secondmate
+# would have written them. Newlines remain framing rather than payload bytes,
+# and blank separators are not carried into the parent status stream.
 normalize_payload() { # <source> <destination>
   LC_ALL=C tr '\000-\010\013-\037\177' '?' < "$1" > "$2"
 }
@@ -352,6 +364,7 @@ cmd_ingest() {
   actual_hash=$(sha256_file "$payload")
   [ "$actual_bytes" -eq "$payload_bytes" ] && [ "$actual_hash" = "$payload_hash" ] \
     || die "result payload bytes do not match its committed digest"
+  validate_utf8_payload "$payload" || die "remote reply payload is not valid UTF-8"
   normalized_payload="$tmp/normalized-payload"
   normalize_payload "$payload" "$normalized_payload" || die "cannot normalize remote reply payload"
   status_file="$STATE/$id.status"
