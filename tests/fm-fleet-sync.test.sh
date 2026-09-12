@@ -332,6 +332,35 @@ test_non_default_branch_is_stuck_untouched() {
   pass "non-default named branch is reported STUCK and left untouched"
 }
 
+# Regression: a clean checkout parked on a NON-default named branch that TRACKS a
+# remote (the real firstmate layout - proj-ts lives on `staging`, not `main`) must
+# be fast-forwarded to its OWN upstream, not left to drift while the default is
+# the only branch that ever syncs. This is the bug that let a staging checkout
+# fall dozens of commits behind while nothing synced it.
+test_non_default_tracking_branch_fast_forwards() {
+  local home clone work out
+  home=$(new_home)
+  clone=$(build_pair "$home" omicron)
+  work="$home/work-omicron"
+  # Publish `staging` on origin and put the clone on it, tracking origin/staging.
+  git -C "$work" push -q origin main:refs/heads/staging
+  git -C "$clone" fetch -q origin
+  git -C "$clone" checkout -q -b staging origin/staging
+  # Advance origin/STAGING only (not the default), so the sole fast-forward
+  # available is on the non-default branch.
+  commit_file "$work" file.txt staging-advance "staging advance"
+  git -C "$work" push -q origin HEAD:refs/heads/staging
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "omicron: synced" "clean non-default tracking branch fast-forwards to its own upstream"
+  assert_not_contains "$out" "STUCK" "a clean branch that tracks a remote is not flagged STUCK for being off the default"
+  [ "$(git -C "$clone" rev-parse staging)" = "$(git -C "$clone" rev-parse origin/staging)" ] \
+    || fail "staging was not fast-forwarded to origin/staging"
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = "staging" ] || fail "checkout branch was changed"
+  pass "clean non-default branch tracking a remote fast-forwards to its own upstream"
+}
+
 test_diverged_is_stuck_untouched() {
   local home clone out before
   home=$(new_home)
@@ -699,6 +728,7 @@ test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
+test_non_default_tracking_branch_fast_forwards
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
