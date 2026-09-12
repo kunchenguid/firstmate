@@ -1287,6 +1287,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=orca does not support --secondmate spawns yet" >&2
     exit 1
   fi
+  if [ "$BACKEND" = thurbox ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=thurbox does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
   if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
@@ -1339,8 +1343,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
-  # classifier that can (bin/fm-control-lib.sh owns that capability table).
+  # one into the same endpoint, and only tmux, herdr and thurbox have a
+  # recovery-grade classifier that can (bin/fm-control-lib.sh owns that
+  # capability table).
   fm_control_backend_state_verified "$BACKEND" || {
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
@@ -1350,6 +1355,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
+  if [ "$BACKEND" = thurbox ]; then
+    # thurbox's own `dead` covers a PARKED session (row alive, pane gone) as
+    # well as an ordinary live pane with a shell in it. Every other backend's
+    # `dead` endpoint still has a pane to type into; a parked one does not, so
+    # it must be resumed before the replacement harness can be delivered.
+    fm_backend_thurbox_relaunch_prepare "$RELAUNCH_TARGET" || {
+      echo "error: task $ID's thurbox session is parked and could not be resumed for relaunch" >&2
+      exit 1
+    }
+  fi
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -1375,6 +1390,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+  fi
+  if [ "$BACKEND" = thurbox ]; then
+    # Re-hydrated for the same reason as herdr's fields above: the meta-write
+    # step below echoes thurbox_session_id unconditionally, and a relaunch
+    # never runs the fresh-spawn branch that would otherwise set it.
+    THURBOX_SESSION_ID=$(fm_meta_get "$RELAUNCH_META" thurbox_session_id)
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
@@ -1487,12 +1508,13 @@ launch_template() {
     # agent never queues or submits a bug-report draft on the captain's behalf even
     # under a managed Claude settings policy: CLAUDE_CODE_SEND_FEEDBACK=0 is read
     # directly and is not subject to managed-settings precedence, while --settings
-    # '{"feedbackDrafts":"off"}' sets the documented settings key (Claude Code
-    # changelog 2.1.247) that a managed policy CAN override back on. Either control
-    # alone disables the feature; keep both so a managed override of one still
-    # leaves the other in force. Both are per-launch, scoped to this invocation only,
-    # and never touch the captain's global ~/.claude/settings.json.
-    # The same inline --settings JSON also carries the attribution policy
+    # __CLAUDESETTINGS__ (default '{"feedbackDrafts":"off",...}') sets the
+    # documented settings key (Claude Code changelog 2.1.247) that a managed
+    # policy CAN override back on. Either control alone disables the feature;
+    # keep both so a managed override of one still leaves the other in force.
+    # Both are per-launch, scoped to this invocation only, and never touch the
+    # captain's global ~/.claude/settings.json.
+    # The same --settings JSON also carries the attribution policy
     # ("attribution": {"commit": "", "pr": "", "sessionUrl": false}), which
     # suppresses Claude Code's Co-Authored-By trailer, Claude-Session link, and
     # generated-with line in commits and PR bodies. The captain sets that
@@ -1500,24 +1522,29 @@ launch_template() {
     # sources are not guaranteed to load that scope, so a worker would
     # otherwise run with attribution back on; carrying it per launch keeps the
     # policy in force regardless of which settings scopes end up loaded.
+    # __CLAUDESETTINGS__ is its own placeholder rather than a literal because
+    # claude's --settings is single-valued ("<file-or-json>", not variadic): on
+    # thurbox, firstmate's own object is merged with thurbox's hook payload into
+    # one value below rather than typed as a second, silently-dropped
+    # --settings flag.
     # __CLAUDEPERMFLAG__ is the permission flag config/claude-permission-mode
     # selects (header above): --dangerously-skip-permissions by default, or
     # --permission-mode auto for a captain who refuses bypass mode.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __THURBOXARGS____CLAUDEPERMFLAG__ --settings __CLAUDESETTINGS__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __THURBOXARGS____MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __THURBOXARGS____MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __THURBOXARGS____MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
       if [ "$kind" = secondmate ]; then
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __THURBOXARGS____MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __THURBOXARGS____MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # omp (Oh My Pi), a Pi fork. Same one-positional-brief, --model, --thinking,
@@ -2884,6 +2911,15 @@ EOF
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
+  thurbox)
+    fm_backend_thurbox_container_ensure || exit 1
+    T=$(fm_backend_thurbox_create_task "$W" "$PROJ_ABS") || exit 1
+    if [ -z "$T" ]; then
+      echo "error: thurbox did not return a session id for $W" >&2
+      exit 1
+    fi
+    THURBOX_SESSION_ID=${T#thurbox:}
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -2929,6 +2965,7 @@ spawn_send_text_line() {  # <target> <text>
     zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_text_line "$1" "$2" ;;
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+    thurbox) fm_backend_thurbox_send_text_line "$1" "$2" ;;
   esac
 }
 spawn_current_path() {  # <target>
@@ -2937,6 +2974,7 @@ spawn_current_path() {  # <target>
     herdr) fm_backend_herdr_current_path "$1" ;;
     zellij) fm_backend_zellij_current_path "$1" "$W" ;;
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+    thurbox) fm_backend_thurbox_current_path "$1" ;;
   esac
 }
 spawn_send_literal() {  # <target> <text>
@@ -2946,6 +2984,7 @@ spawn_send_literal() {  # <target> <text>
     zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_literal "$1" "$2" ;;
     cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
+    thurbox) fm_backend_thurbox_send_literal "$1" "$2" ;;
   esac
 }
 spawn_send_key() {  # <target> <key>
@@ -2955,6 +2994,7 @@ spawn_send_key() {  # <target> <key>
     zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_key "$1" "$2" ;;
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
+    thurbox) fm_backend_thurbox_send_key "$1" "$2" ;;
   esac
 }
 
@@ -3713,7 +3753,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id thurbox_session_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3756,6 +3796,11 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
+  fi
+  if [ "$BACKEND" = thurbox ]; then
+    # The session uuid is already inside window=thurbox:<uuid>; recording it on
+    # its own line keeps a bare-uuid read from having to parse the target.
+    echo "thurbox_session_id=$THURBOX_SESSION_ID"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
@@ -3868,6 +3913,57 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+# thurbox's status hooks ride the agent's own launch ARGS, which thurbox
+# appends only when it builds the command line itself. Firstmate types the
+# harness into a shell instead, so without this the session reports no state
+# and never appears in `watch` (docs/thurbox-backend.md "Agent state and hook
+# coverage"). The adapter returns nothing for a harness thurbox does not
+# register, which is a normal outcome and never a spawn failure.
+THURBOXARGS=""
+CLAUDESETTINGS='{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'
+if [ "$BACKEND" = thurbox ]; then
+  # EMPTY args and a FAILED lookup are different answers and only one is worth
+  # a notice. thurbox delivers some agents' hooks through the launch args
+  # (claude) and others out of band by writing their own config (opencode, pi
+  # report full coverage with no args at all), so a registered agent with
+  # nothing to append still reports state normally. Only an agent thurbox does
+  # not know at all loses native state, and that is what the notice names.
+  if _tbx_out=$(fm_backend_thurbox_agent_launch_args "$HARNESS" 2>/dev/null); then
+    _tbx_want_settings_value=0
+    _tbx_settings_value=""
+    while IFS= read -r _tbx_arg; do
+      [ -n "$_tbx_arg" ] || continue
+      # claude's own template already carries a --settings flag
+      # (__CLAUDESETTINGS__), and claude's --settings is single-valued, so
+      # thurbox's --settings/<value> pair is pulled out of the appended args
+      # here and merged into that one flag below rather than typed as a
+      # second, silently-dropped occurrence.
+      if [ "$HARNESS" = claude ] && [ "$_tbx_want_settings_value" = 1 ]; then
+        _tbx_settings_value=$_tbx_arg
+        _tbx_want_settings_value=0
+        continue
+      fi
+      if [ "$HARNESS" = claude ] && [ "$_tbx_arg" = "--settings" ]; then
+        _tbx_want_settings_value=1
+        continue
+      fi
+      THURBOXARGS="$THURBOXARGS$(shell_quote "$_tbx_arg") "
+    done <<EOF
+$_tbx_out
+EOF
+    if [ -n "$_tbx_settings_value" ]; then
+      if _tbx_merged=$(fm_backend_thurbox_merge_claude_settings "$_tbx_settings_value" "$CLAUDESETTINGS"); then
+        CLAUDESETTINGS=$_tbx_merged
+      else
+        echo "notice: thurbox's claude settings at '$_tbx_settings_value' could not be read, so this task's session reports no native agent state; firstmate falls back to reading the pane" >&2
+      fi
+    fi
+  else
+    echo "notice: thurbox has no agents.toml entry for harness '$HARNESS', so this task's session reports no native agent state; firstmate falls back to reading the pane" >&2
+  fi
+fi
+LAUNCH=${LAUNCH//__THURBOXARGS__/$THURBOXARGS}
+LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$CLAUDESETTINGS")}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
