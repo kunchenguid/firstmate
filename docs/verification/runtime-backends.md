@@ -1801,3 +1801,29 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## SQLite WAL cross-process locking
+
+no-mistakes keeps its pipeline state in a SQLite WAL database at `~/.no-mistakes/state.sqlite` that its daemon holds open, so a host that cannot hand a WAL database to a second process has no working no-mistakes delivery mode.
+`bin/fm-bootstrap.sh` reports that host with one `VALIDATION_UNAVAILABLE: no-mistakes ...` line, taken from the real two-process probe in `bin/fm-sqlite-wal-probe.py`.
+`FM_LIVE_SQLITE_WAL=1 tests/fm-sqlite-wal-lock-live-e2e.test.sh` refreshes every measurement below and must be re-run after any host migration.
+
+Measured on 2026-09-12 on WSL1, kernel `4.4.0-22621-Microsoft`, root filesystem `wslfs`, with SQLite 3.37.2 through python3.
+
+| Condition | Result |
+| --- | --- |
+| One process, WAL | opens normally |
+| One process, WAL, recovering an orphaned `-wal` and `-shm` left by a killed writer | opens normally and checkpoints |
+| Second process, WAL, while the first still holds the database | `SQLITE_PROTOCOL` (15), surfaced as `locking protocol`, after about ten seconds of WAL-index recovery retries |
+| Second process, `journal_mode=delete` or `truncate`, same concurrency | opens in about 0.04s |
+| Second process, WAL, on `wslfs`, `tmpfs` (`/dev/shm`) and `TMPDIR` | identical `SQLITE_PROTOCOL` on all three |
+
+Three consequences follow from that table and are what the live guard keeps true.
+
+The fault is concurrent access, not corruption: the same database opens cleanly whenever no second process holds it, so a passing call means the daemon was down at that moment rather than that the host was repaired.
+The fault is kernel-level, not filesystem-level: every filesystem the host offers returns the same verdict, so relocating the no-mistakes data directory is not a remedy, and the guard fails loudly if that ever stops being true.
+WAL is the only affected journal mode, which is why a rollback-journal database on the same host is unaffected.
+
+The failure is also self-masking on a short timescale.
+SQLite retries WAL-index recovery for about ten seconds before returning `SQLITE_PROTOCOL`, so a holder that releases inside that window lets the second process through; a probe whose holder is short-lived will report success on a host that cannot actually share a WAL database.
+The probe therefore holds its database for the whole measurement, and `bin/fm-bootstrap.sh` bounds its own call at 3s against a healthy-host open of about 0.04s.
