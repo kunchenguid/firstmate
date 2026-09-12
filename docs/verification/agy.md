@@ -3,9 +3,9 @@
 This record owns dated empirical evidence for the worker-only Antigravity CLI adapter.
 The adapter reference at [`.agents/skills/harness-adapters/references/harness/agy.md`](../../.agents/skills/harness-adapters/references/harness/agy.md) owns the operating contract.
 
-## Current measurement
+## Historical measurement: Antigravity CLI 1.2.0
 
-The current measurement was taken on 2026-09-11 UTC on Linux with Antigravity CLI 1.2.0 from `~/.local/bin/agy`.
+The historical measurement was taken on 2026-09-11 UTC on Linux with Antigravity CLI 1.2.0 from `~/.local/bin/agy`.
 The verified scope is CREWMATE and SCOUT only.
 
 The active status row captured during the tool-running probe was:
@@ -25,6 +25,27 @@ The AGY inbox doorbell defers both `pending` and `unknown` composer verdicts and
 Typed AGY steering performs a final composer comparison after literal typing and before Enter; a mismatch withholds Enter, records the steer in the inbox, and reports that stray text may remain unsent in the pane.
 The remaining sub-second race between that final preflight and literal typing is shared with every typed harness path; any race text is left unsubmitted and the durable inbox record is the recovery copy.
 Raw commands whose basename is `agy` are recorded as `raw-agy`, so they remain unwired and do not receive the verified AGY control, composer, or inbox behavior.
+
+## Current measurement: Antigravity CLI 1.2.2
+
+The current live measurements were taken on 2026-09-12 UTC on Linux with Antigravity CLI 1.2.2 from `~/.local/bin/agy`.
+The binary had auto-updated from 1.2.0 to 1.2.2 during the marker verification, so the 1.2.0 measurements below remain historical evidence.
+
+Command:
+
+```text
+~/.local/bin/agy --version
+```
+
+Output:
+
+```text
+1.2.2
+```
+
+The AGY portion of the current composer-matrix guard passed for both a real idle composer and a real unsent draft.
+The measured boundary on 1.2.2 remained a 72-character U+2500 BOX DRAWINGS LIGHT HORIZONTAL row, with exactly two boundary rows per composer.
+The aggregate composer-matrix guard also exercises installed non-AGY harnesses and failed on their unrelated trust screens; that exact failure is retained below rather than being masked.
 
 Command:
 
@@ -155,6 +176,8 @@ These suites cover the shared classifier, generated hook lifecycle, stale-genera
 
 ## Live guards
 
+The 1.2.0 live-guard outputs below are historical evidence from 2026-09-11.
+
 Command:
 
 ```text
@@ -216,6 +239,67 @@ FM_TEST_END 2026-09-11T03:12:12Z tests/fm-send-inbox-doorbell-live-e2e.test.sh e
 ```
 
 The lifecycle guard proves canonical `fm-spawn` hook generation and brief submission, a real running tool, control-plane and data-plane Escape delivery, unconfirmed state handling, natural Stop idle and turn-end publication, exit, and teardown.
+
+### Current live-guard measurements: Antigravity CLI 1.2.2
+
+Marker and liveness command, run with the inherited marker removed:
+
+```text
+env -u ANTIGRAVITY_AGENT FM_HARNESS_LIVENESS_DRIFT=1 FM_HARNESS_LIVENESS_DRIFT_AGY_MARKER=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
+
+Output:
+
+```text
+ok - harness liveness: agy 1.2.2 classifies alive
+ok - harness marker: agy 1.2.2 exports ANTIGRAVITY_AGENT=1 and detects as agy from a tool process
+# checked 3 installed harness(es)
+FM_TEST_END 2026-09-12T08:51:36Z tests/fm-harness-liveness-drift-live-e2e.test.sh exit=0 duration_ms=17608 gate_skip=false
+```
+
+Composer-matrix command:
+
+```text
+env -u ANTIGRAVITY_AGENT FM_COMPOSER_MATRIX_LIVE=1 bin/fm-test-run.sh tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+Output:
+
+```text
+ok - agy (1.2.2): real idle > composer plus shortcuts footer classifies empty
+ok - agy (1.2.2): real unsent draft stays pending with styled and cursorless signals
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+not ok - claude (2.1.269 (Claude Code)): idle composer never classified empty (last verdict: pending)
+not ok - codex (codex-cli 0.153.4): idle composer never classified empty (last verdict: unknown)
+not ok - live composer-matrix guard observed failures above
+FM_TEST_END 2026-09-12T08:50:55Z tests/fm-composer-matrix-live-e2e.test.sh exit=1 duration_ms=110849 gate_skip=false
+```
+
+Inbox doorbell command, restricted to the AGY worker:
+
+```text
+env -u ANTIGRAVITY_AGENT FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=agy bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+Output:
+
+```text
+not ok - agy (1.2.2): doorbell not honored within 240s (acted=no acked=no)
+FM_TEST_END 2026-09-12T08:56:05Z tests/fm-send-inbox-doorbell-live-e2e.test.sh exit=1 duration_ms=262154 gate_skip=false
+```
+
+Canonical lifecycle command:
+
+```text
+env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+Output:
+
+```text
+not ok - agy (1.2.2): exit command failed
+FM_TEST_END 2026-09-12T08:59:53Z tests/fm-send-inbox-doorbell-live-e2e.test.sh exit=1 duration_ms=222299 gate_skip=false
+```
 
 ## Repository gates
 

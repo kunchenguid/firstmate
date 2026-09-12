@@ -17,7 +17,7 @@ Antigravity CLI `agy` is a verified worker adapter for CREWMATE and SCOUT tasks 
 - The inbox doorbell defers both pending and unknown agy composer verdicts and rings only after a proven empty result; the watcher records the deferral and retries.
 - Typed AGY steering compares the extracted composer with the literal text before Enter; a mismatch withholds Enter, records the steer in the inbox, and reports that stray text may remain unsent in the pane.
 - The remaining sub-second race between preflight and literal typing is shared with every typed harness path; race text stays unsubmitted and the durable inbox record is the recovery copy.
-- Raw launch commands are operator-controlled; any text containing `ANTIGRAVITY_AGENT` is rejected, and the marker is reserved for the canonical agy launch.
+- Assignment forms of `ANTIGRAVITY_AGENT` (`ANTIGRAVITY_AGENT=`, `export`, `declare`, or `typeset`) are refused in raw launch commands, a bare marker name used as an argument value is allowed, and the launch boundary scrubs the variable firstmate provides.
 - Raw commands whose basename is `agy` are recorded as `raw-agy`, remain unwired, and classify as unknown.
 - The exact current measurements and refresh commands are maintained in [`docs/verification/agy.md`](../../../../../docs/verification/agy.md).
 
