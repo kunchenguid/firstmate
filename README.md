@@ -85,7 +85,13 @@ git clone https://github.com/kunchenguid/firstmate
 cd firstmate
 ```
 
-Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
+Put Firstmate's command boundary first on `PATH`, then launch one of the co-primary harnesses; AGENTS.md takes over from there:
+
+```sh
+export PATH="$PWD/bin:$PATH"
+```
+
+This routes `no-mistakes` through Firstmate's argv-level ownership check: primary sessions retain status and recovery access, while pipeline-driving `axi run` and `axi respond` calls require the current task worker's launch id and private capability in the exact linked worktree recorded by that task's durable metadata.
 
 **Claude Code**
 
