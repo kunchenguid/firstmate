@@ -3460,7 +3460,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         refused_reads=$((refused_reads + 1))
         if [ "$refused_reads" -ge 2 ]; then
           treehouse_seen=1
-          wait_failure=printed-refusal
+          wait_failure='printed-refusal'
           break
         fi
         ;;
