@@ -122,6 +122,8 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# A record with no endpoint and no worktree closes record-only when it predates
+# spawn_gen or is a reportless scout, retaining that outcome as a backlog note.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -424,6 +426,11 @@ TEARDOWN_LEGACY_ACCEPTED=0
 TEARDOWN_LEGACY_ENDPOINT=
 TEARDOWN_LEGACY_RETAINED_STAMP=
 TEARDOWN_LEGACY_PRESTAMP_SIZE=0
+TEARDOWN_RECORD_ONLY=0
+TEARDOWN_RECORD_ONLY_REASON=
+TEARDOWN_RECORD_ONLY_NOTE=
+TEARDOWN_RECORD_ONLY_ENDPOINT=
+TEARDOWN_RECORD_ONLY_EMPTY_WORKTREE_REASON=
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
@@ -441,14 +448,10 @@ fi
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   if ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
     TEARDOWN_LEGACY_GEN_COUNT=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { count++ } END { print count + 0 }' "$META" 2>/dev/null || printf '0\n')
-    if [ "$TEARDOWN_LEGACY_GEN_COUNT" = 0 ] && [ "$LEGACY_RECORD_GIVEN" = 1 ]; then
-      # A record that predates the incarnation field: acceptance is gated later,
-      # once the recorded endpoint is known, so its state can be confirmed dead
-      # or agent-less before any cleanup decision is made.
+    if [ "$TEARDOWN_LEGACY_GEN_COUNT" = 0 ]; then
+      # A record that predates the incarnation field may still qualify for the
+      # record-only path once its endpoint and missing worktree are proven.
       TEARDOWN_LEGACY_PENDING=1
-    elif [ "$TEARDOWN_LEGACY_GEN_COUNT" = 0 ]; then
-      echo "error: task $ID's record has no spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR); refusing automatic teardown - relaunch the task to publish an unambiguous incarnation, then retry teardown, or pass --legacy-record once its recorded endpoint is confirmed dead or agent-less" >&2
-      exit 1
     else
       echo "error: task $ID's record has an unreadable spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR); refusing automatic teardown - fix the record, then retry teardown" >&2
       exit 1
@@ -491,6 +494,19 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
       exit 1
       ;;
   esac
+fi
+
+# An absent worktree field is also no local copy, but is normally rejected by
+# endpoint validation before the record-only gate. Reserve the alternate
+# endpoint validation below for an exact legacy or reportless-scout match;
+# duplicate worktree fields remain a hard refusal.
+TEARDOWN_WORKTREE_FIELD_COUNT=$(LC_ALL=C awk -F= '$1 == "worktree" { count++ } END { print count + 0 }' "$META" 2>/dev/null || printf '0\n')
+if [ "$TEARDOWN_WORKTREE_FIELD_COUNT" -le 1 ] && [ -z "$(fm_meta_get "$META" worktree)" ]; then
+  if [ "$TEARDOWN_LEGACY_PENDING" = 1 ]; then
+    TEARDOWN_RECORD_ONLY_EMPTY_WORKTREE_REASON="legacy-no-spawn_gen"
+  elif [ "$TEARDOWN_META_KIND" = scout ] && [ ! -f "$DATA/$ID/report.md" ]; then
+    TEARDOWN_RECORD_ONLY_EMPTY_WORKTREE_REASON="dead-scout-no-report"
+  fi
 fi
 
 REMOTE_HANDOFF_DIR_PRESENT=0
@@ -907,9 +923,44 @@ fi
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
-fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
-BACKEND=$FM_BACKEND_VALIDATED_BACKEND
-T=$FM_BACKEND_VALIDATED_TARGET
+if [ -n "$TEARDOWN_RECORD_ONLY_EMPTY_WORKTREE_REASON" ]; then
+  if [ "$TEARDOWN_BACKLOG_TRANSITION" != close ]; then
+    echo "REFUSED: record-only teardown for $ID is blocked by its captain-held backlog item; resolve that dependency before closing the record." >&2
+    exit 1
+  fi
+  TEARDOWN_RECORD_ONLY_ENDPOINT_META="$STATE/.$ID.record-only-endpoint.$$"
+  (umask 077; awk '$0 !~ /^worktree=/' "$META" > "$TEARDOWN_RECORD_ONLY_ENDPOINT_META") || {
+    echo "REFUSED: task $ID's record-only endpoint metadata could not be prepared; preserving task state." >&2
+    rm -f "$TEARDOWN_RECORD_ONLY_ENDPOINT_META"
+    exit 1
+  }
+  printf 'worktree=record-only-absent\n' >> "$TEARDOWN_RECORD_ONLY_ENDPOINT_META" || {
+    rm -f "$TEARDOWN_RECORD_ONLY_ENDPOINT_META"
+    exit 1
+  }
+  fm_backend_validate_task_endpoint "$TEARDOWN_RECORD_ONLY_ENDPOINT_META" "$ID"
+  TEARDOWN_RECORD_ONLY_ENDPOINT_VALIDATION_STATUS=$?
+  rm -f "$TEARDOWN_RECORD_ONLY_ENDPOINT_META"
+  [ "$TEARDOWN_RECORD_ONLY_ENDPOINT_VALIDATION_STATUS" -eq 0 ] || exit 1
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  T=$FM_BACKEND_VALIDATED_TARGET
+  TEARDOWN_RECORD_ONLY_ENDPOINT=$(fm_backend_agent_state "$BACKEND" "$T")
+  case "$TEARDOWN_RECORD_ONLY_ENDPOINT" in
+    dead|missing)
+      TEARDOWN_RECORD_ONLY=1
+      TEARDOWN_RECORD_ONLY_REASON=$TEARDOWN_RECORD_ONLY_EMPTY_WORKTREE_REASON
+      TEARDOWN_RECORD_ONLY_NOTE="closed: record only; no endpoint, no worktree; reason=$TEARDOWN_RECORD_ONLY_REASON"
+      ;;
+    *)
+      echo "REFUSED: task $ID has no recorded worktree and its endpoint reads '$TEARDOWN_RECORD_ONLY_ENDPOINT', not confidently dead or missing; preserving task state." >&2
+      exit 1
+      ;;
+  esac
+else
+  fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  T=$FM_BACKEND_VALIDATED_TARGET
+fi
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
@@ -956,30 +1007,35 @@ fi
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
-# A record accepted as a legacy incarnation (no spawn_gen, --legacy-record
-# given) may be torn down only when its recorded endpoint is confidently gone
-# or agent-less; only the recovery-grade classifier's dead and missing license
-# that, and every ambiguous, unreadable, or unverified endpoint state refuses
-# while the record is still intact. Acceptance resolves the incarnation token
-# here; the record itself is stamped only once every landed-work refusal has
-# passed, immediately before the close marker binds to it, so any refusal
-# leaves the record byte-identical.
-if [ "$TEARDOWN_LEGACY_PENDING" = 1 ]; then
-  TEARDOWN_LEGACY_ENDPOINT=$(fm_backend_agent_state "$BACKEND" "$T")
-  case "$TEARDOWN_LEGACY_ENDPOINT" in
-    dead|missing) ;;
-    *)
-      echo "REFUSED: task $ID's record predates spawn_gen and its recorded endpoint reads '$TEARDOWN_LEGACY_ENDPOINT', not confidently dead or agent-less; --legacy-record teardown is refused while an agent may still be bound to it. Nothing was changed." >&2
-      echo "Reconcile the endpoint first (bin/fm-crew-state.sh $ID), or relaunch the task to publish an unambiguous incarnation, then retry teardown." >&2
-      exit 1
-      ;;
-  esac
-  if [ -n "$TEARDOWN_LEGACY_RETAINED_STAMP" ]; then
-    TEARDOWN_META_SPAWN_GEN=$TEARDOWN_LEGACY_RETAINED_STAMP
-  else
-    TEARDOWN_META_SPAWN_GEN="legacy-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+# Record-only recovery is limited to the two cases that cannot hold unlanded
+# work: a pre-incarnation record with no local copy, and a reportless scout
+# whose scratch path is already gone. The endpoint classifier must positively
+# read dead or missing; uncertainty leaves the existing records intact.
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ] \
+  && { [ -z "$WT" ] || { [ ! -e "$WT" ] && [ ! -L "$WT" ]; }; }; then
+  if [ "$TEARDOWN_LEGACY_PENDING" = 1 ]; then
+    TEARDOWN_RECORD_ONLY_REASON="legacy-no-spawn_gen"
+  elif [ "$KIND" = scout ] && [ ! -f "$DATA/$ID/report.md" ]; then
+    TEARDOWN_RECORD_ONLY_REASON="dead-scout-no-report"
   fi
-  TEARDOWN_LEGACY_ACCEPTED=1
+  if [ -n "$TEARDOWN_RECORD_ONLY_REASON" ]; then
+    TEARDOWN_RECORD_ONLY_ENDPOINT=$(fm_backend_agent_state "$BACKEND" "$T")
+    case "$TEARDOWN_RECORD_ONLY_ENDPOINT" in
+      dead|missing)
+        TEARDOWN_RECORD_ONLY=1
+        TEARDOWN_RECORD_ONLY_NOTE="closed: record only; no endpoint, no worktree; reason=$TEARDOWN_RECORD_ONLY_REASON"
+        ;;
+    esac
+  fi
+fi
+
+# A legacy record that still has a local copy follows the existing explicit
+# recovery path after the slot-ownership check can determine whether its old
+# pool path was reassigned. Record-only never stamps a spawn generation.
+
+if [ "$TEARDOWN_RECORD_ONLY" = 1 ] && [ "$TEARDOWN_BACKLOG_TRANSITION" != close ]; then
+  echo "REFUSED: record-only teardown for $ID is blocked by its captain-held backlog item; resolve that dependency before closing the record." >&2
+  exit 1
 fi
 
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
@@ -1398,6 +1454,10 @@ BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
   BACKLOG_DONE_ARGS=()
+  if [ "$TEARDOWN_RECORD_ONLY" = 1 ]; then
+    BACKLOG_DONE_ARGS=(--note "$TEARDOWN_RECORD_ONLY_NOTE")
+    return 0
+  fi
   case "$KIND" in
     scout)
       data_relative=$(fm_backlog_data_relative "$DATA") || return 1
@@ -2174,6 +2234,30 @@ require_exclusive_task_worktree_slot() {
   local slot
   slot=$(teardown_live_slot_path) || return 0
   require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
+}
+
+# A legacy record may name a pool slot that has already been handed to a newer
+# recorded task. The task record is then the stale ownership claim, not a local
+# copy to inspect. Record-only cleanup removes only that stale record and never
+# invokes a path or endpoint mutation.
+teardown_record_only_reassigned_worktree() {
+  local slot state_dir other other_path other_slot
+  [ "$TEARDOWN_LEGACY_PENDING" = 1 ] || return 1
+  is_treehouse_pool_slot "$PROJ" "$WT" || return 1
+  slot=$(canonical_existing_dir "$WT") || return 1
+  collect_local_firstmate_states "$STATE" || return 1
+  for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
+    for other in "$state_dir"/*.meta; do
+      [ -f "$other" ] && [ ! -L "$other" ] || continue
+      [ "$other" != "$META" ] || continue
+      other_path=$(fm_meta_get "$other" worktree)
+      other_slot=$(canonical_existing_dir "$other_path") || continue
+      [ "$other_slot" = "$slot" ] || continue
+      fm_backlog_meta_spawn_gen "$other" "$state_dir" || continue
+      return 0
+    done
+  done
+  return 1
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -2969,7 +3053,44 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ] && teardown_record_only_reassigned_worktree; then
+  TEARDOWN_RECORD_ONLY_ENDPOINT=$(fm_backend_agent_state "$BACKEND" "$T")
+  case "$TEARDOWN_RECORD_ONLY_ENDPOINT" in
+    dead|missing)
+      TEARDOWN_RECORD_ONLY=1
+      TEARDOWN_RECORD_ONLY_REASON="legacy-no-spawn_gen"
+      TEARDOWN_RECORD_ONLY_NOTE="closed: record only; no endpoint, no worktree; reason=$TEARDOWN_RECORD_ONLY_REASON"
+      ;;
+  esac
+fi
+if [ "$TEARDOWN_LEGACY_PENDING" = 1 ] && [ "$TEARDOWN_RECORD_ONLY" != 1 ]; then
+  if [ "$LEGACY_RECORD_GIVEN" != 1 ]; then
+    echo "error: task $ID's record has no spawn_gen that identifies one exact incarnation ($FM_BACKLOG_TRANSITION_ERROR); refusing automatic teardown - relaunch the task to publish an unambiguous incarnation, then retry teardown, or pass --legacy-record once its recorded endpoint is confirmed dead or agent-less" >&2
+    exit 1
+  fi
+  TEARDOWN_LEGACY_ENDPOINT=$(fm_backend_agent_state "$BACKEND" "$T")
+  case "$TEARDOWN_LEGACY_ENDPOINT" in
+    dead|missing) ;;
+    *)
+      echo "REFUSED: task $ID's record predates spawn_gen and its recorded endpoint reads '$TEARDOWN_LEGACY_ENDPOINT', not confidently dead or agent-less; --legacy-record teardown is refused while an agent may still be bound to it. Nothing was changed." >&2
+      echo "Reconcile the endpoint first (bin/fm-crew-state.sh $ID), or relaunch the task to publish an unambiguous incarnation, then retry teardown." >&2
+      exit 1
+      ;;
+  esac
+  if [ -n "$TEARDOWN_LEGACY_RETAINED_STAMP" ]; then
+    TEARDOWN_META_SPAWN_GEN=$TEARDOWN_LEGACY_RETAINED_STAMP
+  else
+    TEARDOWN_META_SPAWN_GEN="legacy-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  fi
+  TEARDOWN_LEGACY_ACCEPTED=1
+fi
+if [ "$TEARDOWN_RECORD_ONLY" = 1 ] && [ "$TEARDOWN_BACKLOG_TRANSITION" != close ]; then
+  echo "REFUSED: record-only teardown for $ID is blocked by its captain-held backlog item; resolve that dependency before closing the record." >&2
+  exit 1
+fi
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ]; then
+  require_exclusive_task_worktree_slot || exit 1
+fi
 TEARDOWN_WORKTREE_OWNED=1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
@@ -3017,16 +3138,42 @@ fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   REPORT="$DATA/$ID/report.md"
-  if [ ! -f "$REPORT" ]; then
-    echo "REFUSED: scout task $ID has no report at $REPORT." >&2
-    echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
-    exit 1
-  fi
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null; then
-    echo "REFUSED: scout task $ID has not passed the captain-call completion gate." >&2
-    echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
-    exit 1
+  if [ "$TEARDOWN_RECORD_ONLY" = 1 ]; then
+    TEARDOWN_SCOUT_OPEN_DECISIONS=$(status_open_decisions "$STATE/$ID.status")
+    if [ -n "$TEARDOWN_SCOUT_OPEN_DECISIONS" ]; then
+      TEARDOWN_SCOUT_OPEN_KEY=${TEARDOWN_SCOUT_OPEN_DECISIONS%%$'\t'*}
+      TEARDOWN_SCOUT_OPEN_KEY=${TEARDOWN_SCOUT_OPEN_KEY%%$'\n'*}
+      echo "REFUSED: record-only scout task $ID still has open captain decision key $TEARDOWN_SCOUT_OPEN_KEY." >&2
+      exit 1
+    fi
+    # complete takes this same metadata lock to write its empty-inventory
+    # attestation. The task control lock remains held, so briefly releasing the
+    # metadata lock cannot admit another lifecycle action for this record.
+    fm_lock_release "$META_LOCK" || exit 1
+    META_LOCK_HELD=0
+    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+        FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" complete "$ID" --none >/dev/null; then
+      echo "REFUSED: record-only scout task $ID could not attest an empty captain-call inventory." >&2
+      exit 1
+    fi
+    fm_lock_acquire_wait "$META_LOCK" || exit 1
+    META_LOCK_HELD=1
+    fm_backlog_record_present "$META" "task record" "$STATE" || {
+      echo "REFUSED: record-only scout task $ID changed while attesting its captain-call inventory." >&2
+      exit 1
+    }
+  else
+    if [ ! -f "$REPORT" ]; then
+      echo "REFUSED: scout task $ID has no report at $REPORT." >&2
+      echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
+      exit 1
+    fi
+    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+        FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null; then
+      echo "REFUSED: scout task $ID has not passed the captain-call completion gate." >&2
+      echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -3078,7 +3225,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -3101,7 +3248,7 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ "$TEARDOWN_RECORD_ONLY" != 1 ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
@@ -3122,7 +3269,7 @@ HERDR_PRESENTATION_VERSION=
 HERDR_PRESENTATION_BOUND_WORKSPACE=
 HERDR_PRESENTATION_BOUND_TAB=
 HERDR_PRESENTATION_BOUND_PANE=
-if [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] \
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ "$TEARDOWN_WORKTREE_OWNED" = 1 ] \
    && [ "$BACKEND" = herdr ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   fm_backend_source herdr || true
@@ -3202,9 +3349,20 @@ teardown_legacy_stamp_rollback() {
   fi
   BACKLOG_CLOSED=1
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
-  if ! fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
+  TEARDOWN_MARKER_WRITE_OK=0
+  if [ "$TEARDOWN_RECORD_ONLY" = 1 ]; then
+    if fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
+        --record-only "$TEARDOWN_RECORD_ONLY_REASON" \
+        "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
+        "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
+      TEARDOWN_MARKER_WRITE_OK=1
+    fi
+  elif fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
       "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
       "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
+    TEARDOWN_MARKER_WRITE_OK=1
+  fi
+  if [ "$TEARDOWN_MARKER_WRITE_OK" != 1 ]; then
     if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ] \
        && teardown_legacy_stamp_rollback; then
       echo "error: the pending backlog $BACKLOG_TRANSITION for $ID could not be recorded ($FM_BACKLOG_TRANSITION_ERROR); the accepted legacy incarnation was rolled back, retaining every durable task record" >&2
@@ -3231,7 +3389,7 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] && [ "$TEARDOWN_RECORD_ONLY" != 1 ]; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
@@ -3277,10 +3435,12 @@ fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
-"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ]; then
+  "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
@@ -3298,7 +3458,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$ACCESS" != reader ]; then
+elif [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$ACCESS" != reader ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -3339,16 +3499,16 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
-elif [ "$BACKEND" = herdr ]; then
+elif [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ "$BACKEND" = herdr ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
-elif [ "$BACKEND" != orca ]; then
+elif [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
-if [ "$TEARDOWN_WORKTREE_OWNED" != 1 ] \
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ "$TEARDOWN_WORKTREE_OWNED" != 1 ] \
   && [ "$BACKEND" = herdr ] \
   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   if ! fm_backend_source herdr; then
@@ -3366,7 +3526,7 @@ elif [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
   fi
-elif [ "$BACKEND" = herdr ] \
+elif [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ "$BACKEND" = herdr ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
 fi
@@ -3376,7 +3536,7 @@ fi
 # the locked close. Only a structured not-found proves the pane gone; unknown
 # presence, missing or malformed endpoint identity, and missing confirmation
 # machinery all refuse.
-if [ "$BACKEND" = herdr ]; then
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ] && [ "$BACKEND" = herdr ]; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
     echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
@@ -3412,10 +3572,14 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
-fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ]; then
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+fi
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+if [ "$TEARDOWN_RECORD_ONLY" != 1 ]; then
+  [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
@@ -3483,7 +3647,9 @@ fi
 if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
-if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
+if [ "$TEARDOWN_RECORD_ONLY" = 1 ]; then
+  echo "teardown $ID complete ($TEARDOWN_RECORD_ONLY_NOTE)"
+elif [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window $T, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 else
   echo "teardown $ID complete (window $T, worktree $WT)"

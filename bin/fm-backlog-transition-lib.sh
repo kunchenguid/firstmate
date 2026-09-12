@@ -886,14 +886,15 @@ fm_backlog_close_marker_path() {  # <state-dir> <id>
 
 fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id> <state-dir>
   local marker=$1 authorized_data data_resolved expected_id=$3 state=$4
-  local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 mode=close line raw_bytes arg_value
+  local id='' data='' marker_spawn_gen='' record_only='' cleanup_incomplete=0 mode=close line raw_bytes arg_value
   local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
   local percent_tail percent_valid
-  local id_count=0 data_count=0 spawn_gen_count=0 cleanup_incomplete_count=0 mode_count=0
+  local id_count=0 data_count=0 spawn_gen_count=0 record_only_count=0 cleanup_incomplete_count=0 mode_count=0
   local args=()
   FM_BACKLOG_CLOSE_VALIDATED_ID=
   FM_BACKLOG_CLOSE_VALIDATED_DATA=
   FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN=
+  FM_BACKLOG_CLOSE_VALIDATED_RECORD_ONLY=
   FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE=0
   FM_BACKLOG_CLOSE_VALIDATED_MODE=close
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=()
@@ -911,6 +912,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
       id=*) id=${line#id=}; id_count=$((id_count + 1)) ;;
       data=*) data=${line#data=}; data_count=$((data_count + 1)) ;;
       spawn_gen=*) marker_spawn_gen=${line#spawn_gen=}; spawn_gen_count=$((spawn_gen_count + 1)) ;;
+      record_only=*) record_only=${line#record_only=}; record_only_count=$((record_only_count + 1)) ;;
       cleanup_incomplete=*) cleanup_incomplete=${line#cleanup_incomplete=}; cleanup_incomplete_count=$((cleanup_incomplete_count + 1)) ;;
       mode=*) mode=${line#mode=}; mode_count=$((mode_count + 1)) ;;
       arg=*) args+=("${line#arg=}") ;;
@@ -936,16 +938,27 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   esac
   if [ "$id_count" -ne 1 ] || [ "$id" != "$expected_id" ] \
      || [ "$data_count" -ne 1 ] || [ -z "$data" ] \
-     || [ "$spawn_gen_count" -ne 1 ]; then
+     || [ "$record_only_count" -gt 1 ]; then
     FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"
     return 1
   fi
-  case "$marker_spawn_gen" in
-    ''|.*|*[!A-Za-z0-9._-]*)
-      FM_BACKLOG_TRANSITION_ERROR="invalid spawn generation in pending-close record $marker"
-      return 1
-      ;;
-  esac
+  case "$record_only" in
+    '') [ "$record_only_count" -eq 0 ] && [ "$spawn_gen_count" -eq 1 ] ;;
+    legacy-no-spawn_gen) [ "$record_only_count" -eq 1 ] && [ "$spawn_gen_count" -eq 0 ] && [ "$mode" = close ] ;;
+    dead-scout-no-report) [ "$record_only_count" -eq 1 ] && [ "$spawn_gen_count" -eq 1 ] && [ "$mode" = close ] ;;
+    *) false ;;
+  esac || {
+    FM_BACKLOG_TRANSITION_ERROR="invalid record-only pending-close record $marker"
+    return 1
+  }
+  if [ "$spawn_gen_count" -eq 1 ]; then
+    case "$marker_spawn_gen" in
+      ''|.*|*[!A-Za-z0-9._-]*)
+        FM_BACKLOG_TRANSITION_ERROR="invalid spawn generation in pending-close record $marker"
+        return 1
+        ;;
+    esac
+  fi
   if [ "$cleanup_incomplete_count" -gt 1 ]; then
     FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"
     return 1
@@ -983,7 +996,14 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        --note)
+          case "$record_only" in
+            '') [ "${args[1]}" = "local%20main" ] ;;
+            legacy-no-spawn_gen) [ "${args[1]}" = 'closed: record only; no endpoint, no worktree; reason=legacy-no-spawn_gen' ] ;;
+            dead-scout-no-report) [ "${args[1]}" = 'closed: record only; no endpoint, no worktree; reason=dead-scout-no-report' ] ;;
+            *) false ;;
+          esac
+          ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -1051,6 +1071,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   FM_BACKLOG_CLOSE_VALIDATED_ID=$id
   FM_BACKLOG_CLOSE_VALIDATED_DATA=$data_resolved
   FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN=$marker_spawn_gen
+  FM_BACKLOG_CLOSE_VALIDATED_RECORD_ONLY=$record_only
   FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE=$cleanup_incomplete
   FM_BACKLOG_CLOSE_VALIDATED_MODE=$mode
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=("${args[@]+"${args[@]}"}")
@@ -1059,8 +1080,8 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
 # A leading `--retain` flag records the captain-held transition (`mode=retain`)
 # instead of a close; the remaining flags are the same completion links either
 # transition records.
-fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> <cleanup-incomplete: 0|1> [--retain] [flag...]
-  local tmp=$1 id=$2 data spawn_gen=$4 state=$5 cleanup_incomplete=$6 arg previous_arg=''
+fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> <cleanup-incomplete: 0|1> [--record-only <reason>] [--retain] [flag...]
+  local tmp=$1 id=$2 data spawn_gen=$4 state=$5 cleanup_incomplete=$6 arg previous_arg='' record_only=''
   local mode=close serialized_args=()
   data=$(fm_backlog_data_absolute "$3") || {
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $3"
@@ -1076,6 +1097,11 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     *) FM_BACKLOG_TRANSITION_ERROR="invalid pending-close cleanup state"; return 1 ;;
   esac
   shift 6
+  if [ "${1:-}" = --record-only ]; then
+    record_only=${2:-}
+    case "$record_only" in legacy-no-spawn_gen|dead-scout-no-report) ;; *) FM_BACKLOG_TRANSITION_ERROR="invalid record-only close reason"; return 1 ;; esac
+    shift 2
+  fi
   if [ "${1:-}" = --retain ]; then
     mode=retain
     shift
@@ -1091,7 +1117,8 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
   {
     printf 'id=%s\n' "$id"
     printf 'data=%s\n' "$data"
-    printf 'spawn_gen=%s\n' "$spawn_gen"
+    [ -z "$record_only" ] || printf 'record_only=%s\n' "$record_only"
+    [ "$record_only" = legacy-no-spawn_gen ] || printf 'spawn_gen=%s\n' "$spawn_gen"
     printf 'cleanup_incomplete=%s\n' "$cleanup_incomplete"
     [ "$mode" = close ] || printf 'mode=%s\n' "$mode"
     for arg in "${serialized_args[@]+"${serialized_args[@]}"}"; do
@@ -1103,7 +1130,7 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
 }
 
 # Record the exact close a teardown is about to perform.
-fm_backlog_close_marker_write() {  # <state-dir> <id> <data-dir> <spawn-gen> [flag...]
+fm_backlog_close_marker_write() {  # <state-dir> <id> <data-dir> <spawn-gen> [--record-only <reason>] [flag...]
   local state=$1 id=$2 data=$3 spawn_gen=$4 marker tmp
   fm_backlog_directory_present "$state" "state directory" || return 1
   shift 4
@@ -1114,7 +1141,7 @@ fm_backlog_close_marker_write() {  # <state-dir> <id> <data-dir> <spawn-gen> [fl
     || { rm -f "$tmp"; return 1; }
 }
 
-fm_backlog_close_marker_mark_cleanup_incomplete() {  # <state-dir> <marker-path> <id> <data-dir> <spawn-gen> [flag...]
+fm_backlog_close_marker_mark_cleanup_incomplete() {  # <state-dir> <marker-path> <id> <data-dir> <spawn-gen> [--record-only <reason>] [flag...]
   local state=$1 marker=$2 id=$3 data=$4 spawn_gen=$5 tmp
   shift 5
   tmp="$state/.$id.backlog-close.${BASHPID:-$$}"
@@ -1139,7 +1166,7 @@ fm_backlog_close_marker_clear() {  # <state-dir> <id>
 # any meta or backlog mutation.
 fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir>
   local state=$1 marker=$2 marker_name expected_id
-  local id data marker_spawn_gen meta meta_spawn_gen row_state cleanup_incomplete mode
+  local id data marker_spawn_gen marker_record_only meta meta_spawn_gen row_state cleanup_incomplete mode
   local args=() mode_flags=()
   FM_BACKLOG_CLOSE_REPLAY_RESULT=noop
   fm_backlog_directory_present "$state" "state directory" || return 1
@@ -1153,6 +1180,7 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   id=$FM_BACKLOG_CLOSE_VALIDATED_ID
   data=$FM_BACKLOG_CLOSE_VALIDATED_DATA
   marker_spawn_gen=$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN
+  marker_record_only=$FM_BACKLOG_CLOSE_VALIDATED_RECORD_ONLY
   cleanup_incomplete=$FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
   [ "$mode" = close ] || mode_flags=(--retain)
@@ -1166,16 +1194,27 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       FM_BACKLOG_TRANSITION_ERROR="unsafe interrupted task record at $meta"
       return 1
     fi
-    fm_backlog_meta_spawn_gen "$meta" "$state" || return 1
+    if [ "$marker_record_only" = legacy-no-spawn_gen ]; then
+      fm_backlog_meta_spawn_gen_optional "$meta" "$state" || return 1
+    else
+      fm_backlog_meta_spawn_gen "$meta" "$state" || return 1
+    fi
     meta_spawn_gen=$FM_BACKLOG_META_SPAWN_GEN
     if [ "$meta_spawn_gen" != "$marker_spawn_gen" ]; then
       fm_backlog_close_marker_remove "$marker" "$state" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
     fi
-    fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
-      "$marker_spawn_gen" "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \
-      || return 1
+    if [ -n "$marker_record_only" ]; then
+      fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
+        "$marker_spawn_gen" --record-only "$marker_record_only" \
+        "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \
+        || return 1
+    else
+      fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
+        "$marker_spawn_gen" "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \
+        || return 1
+    fi
     cleanup_incomplete=1
     fm_backlog_atomic_transition remove "$meta" "the interrupted task record" "$state" \
       || return 1

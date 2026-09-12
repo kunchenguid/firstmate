@@ -57,6 +57,8 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$ROOT/bin/fm-timeout-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -625,12 +627,21 @@ run_teardown() {
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
-  FM_ROOT_OVERRIDE="$ROOT" \
-  FM_STATE_OVERRIDE="$case_dir/state" \
-  FM_DATA_OVERRIDE="$case_dir/data" \
-  FM_CONFIG_OVERRIDE="$case_dir/config" \
-  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
-    "$TEARDOWN" task-x1 "$@"
+  if [ -n "${FM_TEARDOWN_TEST_TIMEOUT_SECS:-}" ]; then
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+      fm_run_timed "$FM_TEARDOWN_TEST_TIMEOUT_SECS" "$TEARDOWN" task-x1 "$@"
+  else
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+      "$TEARDOWN" task-x1 "$@"
+  fi
 }
 
 record_teardown_model_attempt() {
@@ -1518,6 +1529,239 @@ test_legacy_record_without_the_flag_refuses() {
   assert_present "$case_dir/state/task-x1.meta" \
     "legacy-noflag: the refusal removed the task record"
   pass "a record predating spawn_gen refuses teardown until --legacy-record is passed"
+}
+
+test_legacy_record_without_worktree_closes_record_only() {
+  local case_dir out row
+  case_dir=$(make_case legacy-record-only)
+  write_legacy_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  rm -rf "$case_dir/wt"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 1
+EOF
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tmux.log"
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/tmux"
+
+  out=$(run_teardown "$case_dir" 2>"$case_dir/stderr") \
+    || fail "legacy-record-only: teardown refused a missing legacy record: $(<"$case_dir/stderr")"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "legacy-record-only: teardown returned success with its backlog item still open"
+  row=$(tasks-axi show task-x1 --full --file "$case_dir/data/backlog.md")
+  printf '%s\n' "$row" | grep -Fq 'closed: record only; no endpoint, no worktree; reason=legacy-no-spawn_gen' \
+    || fail "legacy-record-only: the backlog row lost its record-only outcome note: $row"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-record-only: teardown left the legacy task record behind"
+  assert_absent "$case_dir/treehouse.log" \
+    "legacy-record-only: teardown touched the missing worktree"
+  ! grep -q 'kill-window' "$case_dir/tmux.log" 2>/dev/null \
+    || fail "legacy-record-only: teardown tried to kill an endpoint already proven gone"
+  printf '%s\n' "$out" | grep -Fq 'reason=legacy-no-spawn_gen' \
+    || fail "legacy-record-only: the completion line did not identify the record-only reason: $out"
+  pass "a legacy record with no endpoint or worktree closes record-only without inventing an incarnation"
+}
+
+test_legacy_record_only_marker_replays_after_close_failure() {
+  local case_dir marker real out rc
+  case_dir=$(make_case legacy-record-only-replay)
+  write_legacy_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  rm -rf "$case_dir/wt"
+  marker="$case_dir/state/task-x1.backlog-close"
+  real=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<EOF
+#!/usr/bin/env bash
+[ "\${1:-}" != done ] || exit 1
+exec "$real" "\$@"
+EOF
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "legacy-record-only-replay: failed close must retain the marker"
+  assert_present "$marker" "legacy-record-only-replay: teardown lost the pending marker"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-record-only-replay: teardown did not remove the completed task record"
+  grep -Fq 'record_only=legacy-no-spawn_gen' "$marker" \
+    || fail "legacy-record-only-replay: marker lost the record-only reason"
+  if grep -q '^spawn_gen=' "$marker"; then
+    fail "legacy-record-only-replay: legacy marker invented a spawn generation"
+  fi
+
+  rm -f "$case_dir/fakebin/tasks-axi"
+  out=$(FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    FM_BOOTSTRAP_NETWORK=skip PATH="$case_dir/fakebin:$PATH" "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
+    || fail "legacy-record-only-replay: session recovery did not replay the close: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "legacy-record-only-replay: replay left the backlog item open"
+  assert_absent "$marker" "legacy-record-only-replay: replay left the consumed marker"
+  pass "a failed record-only close replays through the normal pending-marker path"
+}
+
+test_legacy_record_without_a_worktree_field_closes_record_only() {
+  local case_dir out
+  case_dir=$(make_case legacy-record-only-no-worktree-field)
+  write_legacy_meta "$case_dir" no-mistakes ship
+  grep -v '^worktree=' "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.tmp"
+  mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 1
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  out=$(run_teardown "$case_dir" 2>"$case_dir/stderr") \
+    || fail "legacy-record-only-no-worktree-field: teardown refused an absent worktree identity: $(<"$case_dir/stderr")"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "legacy-record-only-no-worktree-field: teardown left the backlog item open"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-record-only-no-worktree-field: teardown left the legacy record behind"
+  assert_absent "$case_dir/treehouse.log" \
+    "legacy-record-only-no-worktree-field: teardown touched a nonexistent worktree"
+  printf '%s\n' "$out" | grep -Fq 'reason=legacy-no-spawn_gen' \
+    || fail "legacy-record-only-no-worktree-field: completion did not retain the record-only reason: $out"
+  pass "a legacy record with no worktree field closes record-only"
+}
+
+test_legacy_record_with_reassigned_slot_closes_record_only() {
+  local case_dir slot out
+  case_dir=$(make_case legacy-reassigned-slot-record-only)
+  slot="$case_dir/pool/slot/project"
+  mkdir -p "$case_dir/pool/slot"
+  git -C "$case_dir/project" worktree move "$case_dir/wt" "$slot"
+  printf '%s\n' '{}' > "$case_dir/pool/treehouse-state.json"
+  write_legacy_meta "$case_dir" no-mistakes ship
+  sed "s|^worktree=.*|worktree=$slot|" "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.tmp"
+  mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+  fm_write_meta "$case_dir/state/current-owner.meta" \
+    'window=firstmate:fm-current-owner' \
+    'endpoint_task_id=current-owner' \
+    "worktree=$slot" \
+    "project=$case_dir/project" \
+    'kind=ship' \
+    'spawn_gen=current-owner-x1'
+  seed_backlog_in_flight "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 1
+EOF
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+[ "\${1:-}" != kill-window ] || printf '%s\n' "\$*" >> "$case_dir/tmux.log"
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/tmux"
+
+  out=$(run_teardown "$case_dir" 2>"$case_dir/stderr") \
+    || fail "legacy-reassigned-slot-record-only: teardown refused a stale slot record: $(<"$case_dir/stderr")"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "legacy-reassigned-slot-record-only: teardown left the backlog item open"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-reassigned-slot-record-only: teardown left the stale record behind"
+  assert_present "$case_dir/state/current-owner.meta" \
+    "legacy-reassigned-slot-record-only: teardown touched the current slot owner"
+  assert_present "$slot/.git" \
+    "legacy-reassigned-slot-record-only: teardown touched the reassigned slot"
+  assert_absent "$case_dir/treehouse.log" \
+    "legacy-reassigned-slot-record-only: teardown returned the reassigned slot"
+  [ ! -s "$case_dir/tmux.log" ] \
+    || fail "legacy-reassigned-slot-record-only: teardown tried to mutate the dead endpoint"
+  printf '%s\n' "$out" | grep -Fq 'reason=legacy-no-spawn_gen' \
+    || fail "legacy-reassigned-slot-record-only: completion did not retain the record-only reason: $out"
+  pass "a legacy record whose pool slot is reassigned closes record-only without touching the current slot owner"
+}
+
+# Regression: this fixture previously self-deadlocked for over four hours when
+# teardown held task-x1's metadata lock while `complete task-x1 --none` tried to
+# take it for the empty captain-call attestation.
+test_reportless_scout_without_scratch_closes_record_only() {
+  local case_dir out row
+  case_dir=$(make_case reportless-scout-record-only)
+  write_meta "$case_dir" no-mistakes scout
+  seed_backlog_in_flight "$case_dir" scout
+  rm -rf "$case_dir/wt"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 1
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  out=$(FM_HOME="$case_dir" FM_TEARDOWN_TEST_TIMEOUT_SECS=20 \
+    run_teardown "$case_dir" 2>"$case_dir/stderr") \
+    || fail "reportless-scout-record-only: teardown did not complete within 20 seconds: $(<"$case_dir/stderr")"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "reportless-scout-record-only: teardown returned success with its backlog item still open"
+  row=$(tasks-axi show task-x1 --full --file "$case_dir/data/backlog.md")
+  printf '%s\n' "$row" | grep -Fq 'closed: record only; no endpoint, no worktree; reason=dead-scout-no-report' \
+    || fail "reportless-scout-record-only: the backlog row lost its record-only outcome note: $row"
+  assert_absent "$case_dir/data/task-x1/report.md" \
+    "reportless-scout-record-only: teardown fabricated a scout report"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "reportless-scout-record-only: teardown left the scout task record behind"
+  assert_absent "$case_dir/treehouse.log" \
+    "reportless-scout-record-only: teardown touched the missing scratch path"
+  printf '%s\n' "$out" | grep -Fq 'reason=dead-scout-no-report' \
+    || fail "reportless-scout-record-only: the completion line did not identify the record-only reason: $out"
+  pass "a dead reportless scout with no scratch closes record-only after an empty captain-call inventory"
+}
+
+test_reportless_scout_with_open_decision_refuses_record_only() {
+  local case_dir rc
+  case_dir=$(make_case reportless-scout-open-decision)
+  write_meta "$case_dir" no-mistakes scout
+  seed_backlog_in_flight "$case_dir" scout
+  rm -rf "$case_dir/wt"
+  printf '%s\n' 'needs-decision [key=missing-report]: decide whether to recreate the report' \
+    > "$case_dir/state/task-x1.status"
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "reportless-scout-open-decision: teardown must preserve captain decision"
+  grep -q 'open captain decision key missing-report' "$case_dir/stderr" \
+    || fail "reportless-scout-open-decision: the captain-call gate was bypassed"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "reportless-scout-open-decision: the refusal closed the backlog item"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "reportless-scout-open-decision: the refusal removed the scout task record"
+  pass "a record-only scout with an open captain decision remains open"
+}
+
+test_reportless_scout_with_scratch_refuses_record_only() {
+  local case_dir rc
+  case_dir=$(make_case reportless-scout-scratch-present)
+  write_meta "$case_dir" no-mistakes scout
+  seed_backlog_in_flight "$case_dir" scout
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "reportless-scout-scratch-present: teardown must refuse while scratch exists"
+  grep -q 'has no report' "$case_dir/stderr" \
+    || fail "reportless-scout-scratch-present: the refusal did not preserve the report gate"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "reportless-scout-scratch-present: the refusal closed the backlog item"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "reportless-scout-scratch-present: the refusal removed the scout task record"
+  pass "a reportless scout with scratch still present refuses record-only teardown"
 }
 
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead() {
@@ -4057,6 +4301,13 @@ test_dirty_worktree_refuses
 test_pi_extension_scratch_does_not_refuse_landed_worktree
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
+test_legacy_record_without_worktree_closes_record_only
+test_legacy_record_only_marker_replays_after_close_failure
+test_legacy_record_without_a_worktree_field_closes_record_only
+test_legacy_record_with_reassigned_slot_closes_record_only
+test_reportless_scout_without_scratch_closes_record_only
+test_reportless_scout_with_open_decision_refuses_record_only
+test_reportless_scout_with_scratch_refuses_record_only
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead
 test_legacy_record_teardown_refuses_unlanded_work
 test_legacy_record_teardown_refuses_an_ambiguous_endpoint
