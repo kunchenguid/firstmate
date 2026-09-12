@@ -61,19 +61,58 @@ make_named_shells() {  # <dir> -> echoes <bindir>
   printf '%s' "$dir"
 }
 
+# A deterministic parent chain for the depth boundary. The detector process is
+# entry one; its eighth successor is entry nine. Deriving every synthetic pid
+# from the captured detector pid keeps all nine entries distinct.
+make_omp_ancestry_fakebin() {  # <dir>
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+root=${FAKE_PS_ROOT_PID:?}
+pid=${!#}
+entry_nine=$((root + 8))
+case "$*" in
+  *"comm="*)
+    if [ "$pid" = "$entry_nine" ] && [ "${FAKE_OMP_AT_NINE:-0}" = 1 ]; then
+      printf '%s\n' omp
+    elif [ "$pid" = "$root" ] && [ -n "${FAKE_PS_FIRST_COMM:-}" ]; then
+      printf '%s\n' "$FAKE_PS_FIRST_COMM"
+    else
+      printf '%s\n' bash
+    fi
+    ;;
+  *"ppid="*)
+    if [ "$pid" -ge "$root" ] && [ "$pid" -lt "$entry_nine" ]; then
+      printf '%s\n' "$((pid + 1))"
+    elif [ "$pid" = "$entry_nine" ]; then
+      printf '%s\n' 1
+    else
+      exit 1
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s' "$fakebin"
+}
+
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
-  local bin out
+  local bin fakebin out
   bin=$(make_named_shells "$TMP_ROOT/named")
+  fakebin=$(make_omp_ancestry_fakebin "$TMP_ROOT/anchored-ancestry")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
   for decoy in ompd comp; do
-    # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+    # shellcheck disable=SC2016 # the quoted body captures the child shell's pid
     out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-      "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
+      FAKE_PS_FIRST_COMM="$decoy" PATH="$fakebin:$PATH" \
+      bash -c 'export FAKE_PS_ROOT_PID=$$; exec "$1"' _ "$HARNESS")
     [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
   done
   # The marker beats an inherited CLAUDECODE only under a real omp ancestor.
@@ -82,11 +121,28 @@ test_detection_anchored_name_and_marker_precedence() {
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
   # ...and is inert when it leaks into a worker with no omp ancestor.
-  # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+  # shellcheck disable=SC2016 # the quoted body captures the child shell's pid
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    bash -c '"$1"; :' _ "$HARNESS")
+    PATH="$fakebin:$PATH" bash -c 'export FAKE_PS_ROOT_PID=$$; exec "$1"' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
+}
+
+test_detection_reaches_omp_at_ancestry_entry_nine() {
+  local fakebin out
+  fakebin=$(make_omp_ancestry_fakebin "$TMP_ROOT/entry-nine")
+
+  # shellcheck disable=SC2016 # the quoted body captures the child shell's pid
+  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FAKE_OMP_AT_NINE=1 PATH="$fakebin:$PATH" bash -c 'export FAKE_PS_ROOT_PID=$$; exec "$1"' _ "$HARNESS")
+  [ "$out" = omp ] || fail "an omp process at ancestry entry nine must detect as omp, got '$out'"
+
+  # shellcheck disable=SC2016 # the quoted body captures the child shell's pid
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    FAKE_OMP_AT_NINE=1 PATH="$fakebin:$PATH" bash -c 'export FAKE_PS_ROOT_PID=$$; exec "$1"' _ "$HARNESS")
+  [ "$out" = omp ] || fail "FM_OMP_HARNESS must outrank CLAUDECODE when omp is at ancestry entry nine, got '$out'"
+
+  pass "fm-harness: native startup wrappers may place omp at ancestry entry nine"
 }
 
 test_lock_identity_and_liveness_classification() {
@@ -575,6 +631,7 @@ EOF
 }
 
 test_detection_anchored_name_and_marker_precedence
+test_detection_reaches_omp_at_ancestry_entry_nine
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers

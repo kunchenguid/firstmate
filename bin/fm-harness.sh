@@ -117,9 +117,10 @@ detect_own() {
   # by ancestry alone below. Do NOT promote MUSE_CURRENT_SESSION_LOG to a marker
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
-  # Layer 2: walk the parent chain and match the command name.
+  # Layer 2: walk the parent chain. Native omp startup wrappers can place its
+  # process at entry nine, so retain enough headroom for that verified shape.
   local pid=$$ comm args argv0
-  for _ in 1 2 3 4 5 6 7 8; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
     if fm_cursor_process_matches "$comm" '' "$argv0"; then
@@ -190,12 +191,13 @@ detect_own() {
   echo unknown
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
-# same anchored match as the ancestry walk in detect_own, kept separate so the
-# marker precedence above can demand real process evidence.
+# True when an exact `omp` process sits within sixteen ancestry entries. Native
+# omp startup wrappers can place it at entry nine. The same anchored match as
+# the ancestry walk in detect_own is kept separate so the marker precedence
+# above can demand real process evidence.
 ancestry_names_omp() {
   local pid=$$ comm
-  for _ in 1 2 3 4 5 6 7 8; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     [ "$(basename -- "$comm")" = omp ] && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
