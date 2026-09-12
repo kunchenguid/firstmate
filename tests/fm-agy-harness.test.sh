@@ -43,9 +43,12 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # A macOS host with the Antigravity IDE cask installed owns the name `agy` on
+  # PATH with a wrapper that execs the IDE binary, not the Antigravity CLI, so
+  # every fixture keeps that decoy on PATH: resolution must never pick it.
   cat > "$fakebin/agy" <<'SH'
-#!/usr/bin/env bash
-exit 0
+#!/bin/sh
+exec '/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity' "$@"
 SH
   chmod +x "$fakebin/agy"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
@@ -59,7 +62,12 @@ make_case() {
   proj="$dir/project"
   wt="$dir/worktree"
   fakebin=$(make_fakebin "$dir/fake")
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$home/.local/bin"
+  cat > "$home/.local/bin/agy" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$home/.local/bin/agy"
   printf '%s\n' manual > "$home/config/backlog-backend"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
@@ -105,7 +113,8 @@ EOF
   expect_code 0 "$rc" "agy spawn should succeed"
   assert_contains "$out" "spawned $id harness=agy" "agy spawn did not report success"
   launch=$(<"$dir/launch.log")
-  assert_contains "$launch" "$fakebin/agy" "agy launch did not use the resolved executable"
+  assert_contains "$launch" "$home/.local/bin/agy" "agy launch did not use the resolved executable"
+  assert_not_contains "$launch" "$fakebin/agy" "agy launch used the Antigravity IDE wrapper found on PATH"
   assert_contains "$launch" "--model 'gemini-3.8-flash-low'" "agy launch omitted the requested model"
   assert_contains "$launch" "--effort 'high'" "agy launch omitted the supported effort"
   assert_contains "$launch" '--dangerously-skip-permissions' "agy launch omitted permission bypass"
@@ -280,6 +289,23 @@ EOF
   pass "fm-teardown: a symlinked .agents parent is never followed out of the worktree"
 }
 
+test_spawn_refuses_when_only_the_ide_wrapper_is_installed() {
+  local rec dir home proj wt fakebin id out rc
+  id="agy-missing-cli-$$"
+  rec=$(make_case missing-cli "$id")
+  IFS='|' read -r dir home proj wt fakebin <<EOF
+$rec
+EOF
+  rm -f "$home/.local/bin/agy"
+  out=$(run_spawn "$dir" "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "agy spawn launched something other than the Antigravity CLI"$'\n'"$out"
+  assert_contains "$out" "$home/.local/bin/agy" "agy refusal did not name the Antigravity CLI install path"
+  assert_absent "$home/state/$id.meta" "a refused agy spawn still published a task record"
+  [ ! -s "$dir/launch.log" ] || fail "a refused agy spawn still delivered a launch command"$'\n'"$(<"$dir/launch.log")"
+  pass "fm-spawn: agy refuses when only the Antigravity IDE wrapper is on PATH"
+}
+
 test_teardown_leaves_a_non_agy_tasks_workspace_hooks() {
   local rec dir home proj wt fakebin id out rc owned
   id="claude-hooks-$$"
@@ -307,6 +333,7 @@ test_spawn_writes_hooks_and_resolves_launch_axes
 test_unsupported_effort_is_recorded_and_omitted
 test_secondmate_is_refused_and_control_is_verified
 test_teardown_removes_workspace_hooks
+test_spawn_refuses_when_only_the_ide_wrapper_is_installed
 test_teardown_leaves_a_non_agy_tasks_workspace_hooks
 test_unforced_teardown_removes_workspace_hooks
 test_unforced_teardown_still_refuses_real_worktree_work

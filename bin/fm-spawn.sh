@@ -1878,27 +1878,20 @@ resolve_rovo_binary() {
   return 1
 }
 
+# agy is resolved from its installer's path alone, never from PATH. The
+# Antigravity IDE cask owns the very same command name - /opt/homebrew/bin/agy
+# is a wrapper that execs the IDE binary - so a PATH lookup silently launches a
+# different program (or, once the cask is stale, nothing at all) while the spawn
+# reports success and the pane dies instantly. The Antigravity CLI this adapter
+# was verified against installs at $HOME/.local/bin/agy; anything else is
+# refused rather than launched on a guess.
 resolve_agy_binary() {
-  local candidate dir fallback
-  candidate=$(command -v agy 2>/dev/null || true)
-  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    case "$candidate" in
-      /*) printf '%s\n' "$candidate"; return 0 ;;
-      *)
-        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-        if [ -n "$dir" ]; then
-          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
-          return 0
-        fi
-        ;;
-    esac
-  fi
-  fallback="${HOME:-}/.local/bin/agy"
-  if [ -n "${HOME:-}" ] && [ -x "$fallback" ]; then
-    printf '%s\n' "$fallback"
+  local cli="${HOME:-}/.local/bin/agy"
+  if [ -n "${HOME:-}" ] && [ -x "$cli" ]; then
+    printf '%s\n' "$cli"
     return 0
   fi
-  echo "error: agy executable not found; searched PATH for 'agy' and fallback '$fallback'" >&2
+  echo "error: the Antigravity CLI is not executable at '$cli'; install agy there (an 'agy' on PATH may be the Antigravity IDE wrapper and is never used)" >&2
   return 1
 }
 

@@ -8,7 +8,7 @@ agy is not verified or supported as a primary or secondmate harness.
 
 | Fact | Value |
 |---|---|
-| Binary | `bin/fm-spawn.sh` resolves an executable named `agy` from `PATH`, then `$HOME/.local/bin/agy`, and refuses when neither is executable. |
+| Binary | `bin/fm-spawn.sh` resolves the Antigravity CLI only at `$HOME/.local/bin/agy` and refuses when it is not executable. `PATH` is never consulted: the Antigravity IDE cask installs a wrapper under the same `agy` name (`/opt/homebrew/bin/agy` execs the IDE binary), so a PATH lookup launches the wrong program - and a stale cask makes the pane die instantly while the spawn reports success. |
 | Launch | The canonical interactive launch is `agy --add-dir <worktree> --model <model> --dangerously-skip-permissions -i "<brief>"`, with the brief encoded by Firstmate's operational-input helper. |
 | One-shot mode | `-p` is headless one-shot mode and exits immediately, so it is never the worker launch path. |
 | Models | `--model <model>` is passed when a model is selected, while agy's installed catalog remains the authority because it is narrow and spans Gemini, Claude, and GPT-OSS variants. |
