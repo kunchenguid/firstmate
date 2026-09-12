@@ -185,6 +185,7 @@ EOF
 6. These ship instructions supersede the scout delivery rules and report-based Definition of done. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule.
 $PROMOTION_ASK_USER_BLOCK
 7. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or ship-time instructions.
+8. Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command - issues close through the PR body's \`closes #N\` on merge, and the project board is not used.
 EOF
   printf '\n'
   fm_dod_block "$MODE" "$ID"

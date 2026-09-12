@@ -501,6 +501,8 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command - issues close through
+   the PR body's \`closes #N\` on merge, and the project board is not used.
 
 $INBOX_SECTION
 
