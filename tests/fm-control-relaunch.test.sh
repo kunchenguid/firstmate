@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -384,6 +386,32 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# fm-control.sh relaunch rewrites metadata with control_relaunch_tx= after the
+# preserved pr= / pr_head= block. That used to fail the poll identity parse.
+test_relaunch_does_not_disarm_an_armed_merge_poll() {
+  local dir out rc url
+  dir=$(new_case poll-identity rl-poll)
+  add_ship_task "$dir" rl-poll claude
+  url=https://github.com/o/r/pull/10
+  {
+    printf '%s\n' "pr=$url"
+    printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
+  } >> "$dir/home/state/rl-poll.meta"
+  fm_pr_poll_prepare "$dir/home/state" rl-poll github "$url" github.com o/r 10 \
+    "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not prepare the armed poll before relaunch"
+  fm_pr_poll_publish_prepared || fail "could not publish the armed poll before relaunch"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl-poll "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the armed poll was not valid before relaunch"
+  out=$(run_control "$dir" rl-poll relaunch --note "keep the merge poll armed"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed with an armed merge poll"$'\n'"$out"
+  [ -n "$(meta_field "$dir" rl-poll control_relaunch_tx)" ] \
+    || fail "relaunch did not record control_relaunch_tx="
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl-poll "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "fm-control.sh relaunch disarmed the armed merge poll"
+  pass "fm-control relaunch: an armed merge poll stays bound after control_relaunch_tx="
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1561,6 +1589,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_does_not_disarm_an_armed_merge_poll
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
