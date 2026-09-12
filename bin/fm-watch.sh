@@ -63,6 +63,17 @@
 #                          for human inspection only. The separate busy-silent
 #                          guard is the sole bounded recovery path: it interrupts
 #                          once, never kills or relaunches the worker.
+#   check: soft-lock: <task> <signal>: <item>
+#                          a churning pane whose worker is looping on one
+#                          out-of-contract Definition-of-done attempt: the same
+#                          normalized failure line twice in the pane/status tail
+#                          (repeated-failure), or FM_SOFT_LOCK_TURNEND_MAX
+#                          turn-ends with no new status line
+#                          (turnend-no-status-verb). One recovery per episode,
+#                          claimed before any external call: an fm-control
+#                          interrupt, one fm-send steer to file the DoD blocker
+#                          with the exact output, this check wake, and one
+#                          liveness telemetry row.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -1344,6 +1355,140 @@ busy_silent_check() {  # <window> <task> <hash> <busy-flag>
   reason="check: busy-but-silent: $task busy ${age}s with no status event or pane bytes for ${BUSY_SILENT_SECS}s"
   fm_wake_append check "busy-silent:$task" "$reason" || exit 1
   wake "$reason"
+}
+
+# Soft-lock guard: a pane can keep churning - never stale, never silent - while
+# the worker loops on one Definition-of-done item it cannot tick, so every other
+# guard absorbs it as healthy. Two signals class that loop as a soft-lock:
+#   repeated-failure: the same failure line (normalized: lowercased, digits and
+#     punctuation folded) appears twice or more in the worker's recent pane
+#     output or status tail - the DoD contract (bin/fm-dod-lib.sh) caps any item
+#     at two attempts, so a second showing IS the out-of-contract loop;
+#   turnend-no-status-verb: SOFT_LOCK_TURNEND_MAX consecutive turn-end markers
+#     land with no new status line, so turns complete without the worker ever
+#     reporting a new verb.
+# One classification fires one recovery: the claim marker is written before any
+# external call (the busy-silent precedent, so a watcher restart can never send
+# a second interrupt), then an interrupt through fm-control, one steer through
+# fm-send telling the worker to file the DoD blocker with the exact output, one
+# check wake naming the task and item, and one liveness telemetry row. The claim
+# clears only when the worker moves its status or the task changes; a worker
+# that ignores the steer and loops on a DIFFERENT item without ever writing
+# status is not re-interrupted (one recovery per episode; the wedge paths remain
+# the backstop behind that deliberate ceiling).
+SOFT_LOCK_TURNEND_MAX=${FM_SOFT_LOCK_TURNEND_MAX:-3}
+case "$SOFT_LOCK_TURNEND_MAX" in ''|*[!0-9]*|0) SOFT_LOCK_TURNEND_MAX=3 ;; esac
+SOFT_LOCK_SEND_BIN=${FM_SEND_BIN:-$SCRIPT_DIR/fm-send.sh}
+
+soft_lock_repeated_failure() {  # <tail40> <status-file>: print the normalized failure line seen 2+ times
+  local tail40=$1 status=$2
+  {
+    printf '%s\n' "$tail40"
+    [ -f "$status" ] && tail -40 "$status"
+  } | awk '
+    {
+      norm = tolower($0)
+      if (norm !~ /error|failed|failure|fatal|panic|denied|not ok/) next
+      gsub(/[0-9]+/, "#", norm)
+      gsub(/[^a-z#]+/, " ", norm)
+      gsub(/^ +| +$/, "", norm)
+      if (length(norm) < 12) next
+      if (norm in seen) { print norm; exit }
+      seen[norm] = 1
+    }
+  '
+}
+
+soft_lock_turnend_signal() {  # <window-key> <task>: 0 once the no-new-verb turn-end count crosses
+  # ponytail: the local is named turnf, never turn - shellcheck then reparses
+  # the pre-existing ${base%.turn-ended} suffix trim above as arithmetic (SC2100).
+  local key=$1 task=$2 turnf marker cur_turn cur_verb m_turn m_verb m_count count
+  turnf="$STATE/$task.turn-ended"
+  marker="$STATE/.softlock-turn-$key"
+  [ -f "$turnf" ] || { rm -f "$marker"; return 1; }
+  cur_turn=$(stat_mtime "$turnf") || { rm -f "$marker"; return 1; }
+  cur_verb=$(last_status_line "$STATE/$task.status" 2>/dev/null | tr '\t' ' ')
+  m_turn=''; m_verb=''; m_count=0
+  if [ -f "$marker" ]; then
+    m_turn=$(cut -f1 "$marker")
+    m_verb=$(cut -f2 "$marker")
+    m_count=$(cut -f3 "$marker")
+  fi
+  case "$m_count" in ''|*[!0-9]*) m_count=0 ;; esac
+  [ "$cur_turn" != "$m_turn" ] || return 1
+  if [ -f "$marker" ] && [ "$cur_verb" = "$m_verb" ]; then
+    count=$((m_count + 1))
+  else
+    count=0
+  fi
+  printf '%s\t%s\t%s\n' "$cur_turn" "$cur_verb" "$count" > "$marker"
+  [ "$count" -ge "$SOFT_LOCK_TURNEND_MAX" ]
+}
+
+soft_lock_fire() {  # <window> <task> <hash> <signal> <item>
+  local win=$1 task=$2 hash=$3 signal=$4 item=$5 marker status reason steer
+  marker="$STATE/.softlock-$(window_key "$win")"
+  status="$STATE/$task.status"
+  busy_silent_write_marker "$marker" \
+    task="$task" hash="$hash" fired_at="$(date +%s)" signal="$signal" \
+    status_sig="$(stat_mtime "$status" 2>/dev/null || echo 0):$(busy_silent_status_size "$status" 2>/dev/null || echo 0)" || return 1
+  fm_telemetry_record liveness "{\"op\":\"soft-lock\",\"task\":\"$task\",\"signal\":\"$signal\"}"
+  if [ -x "$BUSY_SILENT_CONTROL_BIN" ]; then
+    "$BUSY_SILENT_CONTROL_BIN" "$task" interrupt >/dev/null 2>>"$TRIAGE_LOG" || \
+      triage_log "soft-lock interrupt was not confirmed: $task"
+  else
+    triage_log "soft-lock interrupt helper is unavailable: $BUSY_SILENT_CONTROL_BIN"
+  fi
+  steer="soft-lock detected: file the DoD blocker with the exact output - append 'blocked [key=dod-<item-slug>]: <exact failure output>' to your status file and stop; never retry that item a third time."
+  if [ -x "$SOFT_LOCK_SEND_BIN" ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SOFT_LOCK_SEND_BIN" "$task" "$steer" \
+      >/dev/null 2>>"$TRIAGE_LOG" || \
+      triage_log "soft-lock steer was not confirmed delivered: $task"
+  else
+    triage_log "soft-lock steer helper is unavailable: $SOFT_LOCK_SEND_BIN"
+  fi
+  reason="check: soft-lock: $task $signal: $item"
+  fm_wake_append check "soft-lock:$task" "$reason" || exit 1
+  wake "$reason"
+}
+
+# One recovery per soft-lock episode: while the claim marker stands and the
+# worker has not moved its status, the episode is already owned and the poll
+# returns 0 without re-detecting. A moved status (the blocker filing or any new
+# verb) or a task change clears the claim and the turn-end counter.
+soft_lock_check() {  # <window> <task> <hash> <tail40>
+  local win=$1 task=$2 hash=$3 tail40=$4 key marker status item verb sig
+  [ -n "$task" ] || return 1
+  key=$(window_key "$win")
+  marker="$STATE/.softlock-$key"
+  status="$STATE/$task.status"
+  if [ -L "$marker" ] || { [ -e "$marker" ] && [ ! -f "$marker" ]; }; then
+    triage_log "soft-lock marker is unsafe: $marker"
+    return 1
+  fi
+  if [ -f "$marker" ]; then
+    if [ "$(busy_silent_marker_value "$marker" task)" != "$task" ]; then
+      rm -f "$marker" "$STATE/.softlock-turn-$key"
+      return 1
+    fi
+    sig="$(stat_mtime "$status" 2>/dev/null || echo 0):$(busy_silent_status_size "$status" 2>/dev/null || echo 0)"
+    if [ "$sig" != "$(busy_silent_marker_value "$marker" status_sig)" ]; then
+      rm -f "$marker" "$STATE/.softlock-turn-$key"
+      return 1
+    fi
+    return 0
+  fi
+  item=$(soft_lock_repeated_failure "$tail40" "$status")
+  if [ -n "$item" ]; then
+    soft_lock_fire "$win" "$task" "$hash" repeated-failure "$item"
+    return 0
+  fi
+  if soft_lock_turnend_signal "$key" "$task"; then
+    verb=$(last_status_line "$status" 2>/dev/null)
+    soft_lock_fire "$win" "$task" "$hash" turnend-no-status-verb "$verb"
+    return 0
+  fi
+  return 1
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -2943,6 +3088,7 @@ EOF
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
     busy_silent_check "$w" "$task" "$h" "$busy_now" || true
+    soft_lock_check "$w" "$task" "$h" "$tail40" || true
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

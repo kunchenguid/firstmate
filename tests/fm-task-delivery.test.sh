@@ -412,6 +412,10 @@ STUB
     awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
     cmp -s "$brief_dod" "$delivered_dod" \
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
+    assert_grep "fails twice is a blocker, never a third attempt" "$brief_dod" \
+      "$mode: ship DoD did not carry the two-attempt blocker rule"
+    assert_grep "blocked [key=dod-<item-slug>]: <exact failure output>" "$brief_dod" \
+      "$mode: ship DoD did not name the dod-blocker status format"
   done
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"

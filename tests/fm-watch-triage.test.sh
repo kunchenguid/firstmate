@@ -3110,6 +3110,195 @@ SH
   pass "busy-silent requires old status plus unchanged pane bytes and interrupts once"
 }
 
+# Soft-lock guard (captain report 2026-09-12: a worker that cannot tick one DoD
+# item keeps looping on it for hours - the pane churns, so every liveness guard
+# absorbs it as healthy). bin/fm-dod-lib.sh caps any DoD item at two attempts,
+# so the watcher classes the out-of-contract loop as a soft-lock on either
+# signal - the same normalized failure line twice in the pane/status tail, or
+# SOFT_LOCK_TURNEND_MAX turn-ends with no new status line - and fires ONE
+# recovery: an fm-control interrupt, one steer to file the DoD blocker with the
+# exact output, one check wake naming the task and item, one liveness telemetry
+# row. The claim marker lands before any external call, so a watcher restart
+# can never send a second interrupt.
+
+soft_lock_fake_bins() {  # <dir>: install interrupt/steer recorders, echo nothing
+  cat > "$1/control" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$CONTROL_LOG"
+SH
+  cat > "$1/send" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SEND_LOG"
+SH
+  chmod +x "$1/control" "$1/send"
+}
+
+test_soft_lock_repeated_failure_interrupts_once() {
+  local dir state fakebin out capture window task sig pid
+  dir=$(make_case soft-lock-repeat); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-soft-lock-repeat"; task=soft-lock-repeat
+  soft_lock_fake_bins "$dir"
+  cat > "$capture" <<'EOF'
+$ bin/fm-lint.sh
+error: DoD item lint failed with exit code 1
+retrying the lint item
+error: DoD item lint failed with exit code 2
+EOF
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/$task.meta"
+  record_pi_busy "$state" "$task"
+  printf 'working: retrying the lint item\n' > "$state/$task.status"
+  sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONTROL_BIN="$dir/control" FM_SEND_BIN="$dir/send" \
+    CONTROL_LOG="$dir/control.log" SEND_LOG="$dir/send.log" \
+    FM_SOFT_LOCK_TURNEND_MAX=999999 \
+    FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a repeated failure line did not class as soft-lock: $(cat "$out")"; }
+  [ "$(grep -c "^$task interrupt$" "$dir/control.log" 2>/dev/null || true)" -eq 1 ] \
+    || fail "soft-lock did not interrupt through fm-control exactly once"
+  [ "$(grep -c "$task" "$dir/send.log" 2>/dev/null || true)" -eq 1 ] \
+    || fail "soft-lock did not send exactly one steer"
+  grep -F 'file the DoD blocker with the exact output' "$dir/send.log" >/dev/null \
+    || fail "soft-lock steer did not tell the worker to file the DoD blocker with the exact output"
+  grep -F "soft-lock:$task" "$state/.wake-queue" >/dev/null \
+    || fail "soft-lock did not queue a check wake naming the task"
+  grep -F 'repeated-failure: error dod item lint failed with exit code #' "$state/.wake-queue" >/dev/null \
+    || fail "soft-lock check wake did not name the normalized repeated line"
+  [ "$(grep -c '"op":"soft-lock"' "$dir/data/telemetry/liveness.jsonl" 2>/dev/null || true)" -eq 1 ] \
+    || fail "soft-lock did not record exactly one liveness telemetry row"
+  grep -F '"signal":"repeated-failure"' "$dir/data/telemetry/liveness.jsonl" >/dev/null \
+    || fail "soft-lock telemetry row did not name the signal"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the soft-lock wake"
+
+  # A claimed episode never re-interrupts: the status has not moved, so the
+  # marker owns the pane and the next watcher process stays in its absorb loop.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONTROL_BIN="$dir/control" FM_SEND_BIN="$dir/send" \
+    CONTROL_LOG="$dir/control.log" SEND_LOG="$dir/send.log" \
+    FM_SOFT_LOCK_TURNEND_MAX=999999 \
+    FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "claimed soft-lock watcher did not complete a cycle: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "claimed soft-lock watcher did not stay in its absorb loop: $(cat "$out")"; }
+  [ "$(grep -c "^$task interrupt$" "$dir/control.log" 2>/dev/null || true)" -eq 1 ] \
+    || fail "a claimed soft-lock episode re-interrupted"
+  [ "$(grep -c "$task" "$dir/send.log" 2>/dev/null || true)" -eq 1 ] \
+    || fail "a claimed soft-lock episode re-steered"
+  reap "$pid"
+
+  # Once the worker moves its status (the blocker filing or any new verb) the
+  # claim clears, so a later distinct loop earns its own one recovery.
+  printf 'blocked [key=dod-lint]: error: DoD item lint failed with exit code 2\n' > "$state/$task.status"
+  sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONTROL_BIN="$dir/control" FM_SEND_BIN="$dir/send" \
+    CONTROL_LOG="$dir/control.log" SEND_LOG="$dir/send.log" \
+    FM_SOFT_LOCK_TURNEND_MAX=999999 \
+    FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a fresh loop after the status moved did not class as a new soft-lock: $(cat "$out")"; }
+  [ "$(grep -c "^$task interrupt$" "$dir/control.log" 2>/dev/null || true)" -eq 2 ] \
+    || fail "a fresh soft-lock episode after the claim cleared did not interrupt again"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second soft-lock wake"
+  pass "soft-lock repeated-failure interrupts once per episode, steers once, wakes once, clears on a moved status"
+}
+
+test_soft_lock_turnend_without_new_status_verb() {
+  local dir state fakebin out capture window task sig pid now
+  dir=$(make_case soft-lock-turnend); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-soft-lock-turnend"; task=soft-lock-turnend
+  soft_lock_fake_bins "$dir"
+  printf 'working through the checklist\nstill working through the checklist\n' > "$capture"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/$task.meta"
+  record_pi_busy "$state" "$task"
+  printf 'working: on the third checklist item\n' > "$state/$task.status"
+  sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  now=$(date +%s)
+  : > "$state/$task.turn-ended"
+  set_mtime "$now" "$state/$task.turn-ended"
+  prime_turnend_seen "$state/$task.turn-ended"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONTROL_BIN="$dir/control" FM_SEND_BIN="$dir/send" \
+    CONTROL_LOG="$dir/control.log" SEND_LOG="$dir/send.log" \
+    FM_SOFT_LOCK_TURNEND_MAX=2 \
+    FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "turnend watcher did not complete its first cycle: $(cat "$out")"; }
+  [ ! -s "$dir/control.log" ] || fail "the first turn-end sighting counted as a no-verb repeat"
+  set_mtime "$((now + 10))" "$state/$task.turn-ended"
+  prime_turnend_seen "$state/$task.turn-ended"
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "turnend watcher did not complete its second cycle: $(cat "$out")"; }
+  [ ! -s "$dir/control.log" ] || fail "one no-verb turn-end below the cap still fired"
+  set_mtime "$((now + 20))" "$state/$task.turn-ended"
+  prime_turnend_seen "$state/$task.turn-ended"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "two no-verb turn-ends did not class as soft-lock: $(cat "$out")"; }
+  [ "$(grep -c "^$task interrupt$" "$dir/control.log" 2>/dev/null || true)" -eq 1 ] \
+    || fail "turnend soft-lock did not interrupt through fm-control exactly once"
+  [ "$(grep -c "$task" "$dir/send.log" 2>/dev/null || true)" -eq 1 ] \
+    || fail "turnend soft-lock did not send exactly one steer"
+  grep -F "soft-lock:$task" "$state/.wake-queue" >/dev/null \
+    || fail "turnend soft-lock did not queue a check wake naming the task"
+  grep -F 'turnend-no-status-verb: working: on the third checklist item' "$state/.wake-queue" >/dev/null \
+    || fail "turnend soft-lock check wake did not name the unchanged status verb"
+  grep -F '"signal":"turnend-no-status-verb"' "$dir/data/telemetry/liveness.jsonl" >/dev/null \
+    || fail "turnend soft-lock did not record its liveness telemetry row"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the turnend soft-lock wake"
+  pass "soft-lock turnend signal fires at the cap, never before it"
+}
+
+test_soft_lock_healthy_progressing_worker_not_classed() {
+  local dir state fakebin out capture window task sig pid
+  dir=$(make_case soft-lock-healthy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-soft-lock-healthy"; task=soft-lock-healthy
+  soft_lock_fake_bins "$dir"
+  cat > "$capture" <<'EOF'
+compiling module a
+tests passing: 41 ok
+one transient error: network flake retried successfully
+still working on item 2
+EOF
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/$task.meta"
+  record_pi_busy "$state" "$task"
+  printf 'working: compiling module a\n' > "$state/$task.status"
+  sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONTROL_BIN="$dir/control" FM_SEND_BIN="$dir/send" \
+    CONTROL_LOG="$dir/control.log" SEND_LOG="$dir/send.log" \
+    FM_SOFT_LOCK_TURNEND_MAX=2 \
+    FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "healthy watcher did not complete its first cycle: $(cat "$out")"; }
+  cat > "$capture" <<'EOF'
+compiling module b
+tests passing: 58 ok
+still working on item 2
+EOF
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "healthy watcher did not survive a progressing capture: $(cat "$out")"; }
+  printf 'working: compiling module b\n' > "$state/$task.status"
+  sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "healthy watcher did not survive a status update: $(cat "$out")"; }
+  [ ! -e "$dir/control.log" ] || fail "a healthy progressing worker was interrupted"
+  [ ! -e "$dir/send.log" ] || fail "a healthy progressing worker was steered"
+  if ls "$state"/.softlock-* >/dev/null 2>&1; then
+    fail "a healthy progressing worker left a soft-lock claim marker"
+  fi
+  [ "$(grep -c '"op":"soft-lock"' "$dir/data/telemetry/liveness.jsonl" 2>/dev/null || true)" -eq 0 ] \
+    || fail "a healthy progressing worker recorded soft-lock telemetry"
+  reap "$pid"
+  pass "soft-lock never classes a single failure line or ordinary progress"
+}
+
 test_busy_pane_below_turn_age_bound_is_absorbed() {
   local dir state fakebin out capture_file window key sig pid
   dir=$(make_case busy-below-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4951,6 +5140,9 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
 fi
 
 test_busy_silent_stalls_and_recovers_once
+test_soft_lock_repeated_failure_interrupts_once
+test_soft_lock_turnend_without_new_status_verb
+test_soft_lock_healthy_progressing_worker_not_classed
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure

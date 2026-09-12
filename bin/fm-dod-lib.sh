@@ -190,6 +190,15 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+# Retry cap carried by every generated ship Definition of done, all modes: a
+# worker that cannot tick one item after two attempts stops instead of looping
+# on it (the soft-lock circuit breaker bin/fm-watch.sh enforces from outside).
+fm_dod_retry_cap_block() {
+  cat <<'EOF'
+A single Definition-of-done item that fails twice is a blocker, never a third attempt: stop retrying that item and report `blocked [key=dod-<item-slug>]: <exact failure output>` on the status file.
+EOF
+}
+
 # Ship completion keeps a debrief in the disposable worktree until retirement
 # copies it home. Scout and secondmate definitions of done do not use this.
 fm_dod_debrief_block() {  # <task-id>
@@ -229,6 +238,7 @@ This task ships **direct-PR**: you raise the PR yourself, without the no-mistake
 The task is complete only when its PR is ready for review: CI is green and every review thread is resolved, never merely opened.
 When it is implemented and committed, publish only your task branch with \`git push <fork-remote> HEAD:refs/heads/fm/$id\` and open a PR with \`gh-axi\`.
 EOF
+      fm_dod_retry_cap_block
       fm_dod_pr_context_block "$id" || return 1
       fm_dod_debrief_block "$id"
       cat <<EOF
@@ -245,6 +255,7 @@ This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 EOF
+      fm_dod_retry_cap_block
       fm_dod_debrief_block "$id"
       cat <<EOF
 When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
@@ -284,6 +295,7 @@ Two firstmate-specific rules layer on top of that guidance:
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
 EOF
+      fm_dod_retry_cap_block
       fm_dod_pr_context_block "$id" || return 1
       fm_dod_debrief_block "$id"
       cat <<EOF
