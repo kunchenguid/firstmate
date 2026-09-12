@@ -386,6 +386,12 @@ test_argv_admission_via_commit_rejects_wrappers() {
     FM_PRIMARY_RESOURCE_ARGV_FILE="$argv" \
     run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 || rc=$?
   expect_code 1 "$rc" "node interpreter argv must be refused at commit"
+  printf 'claude\0--unknown-option\0old prompt' > "$argv"
+  rc=0
+  FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="fixture:agent" \
+    FM_PRIMARY_RESOURCE_ARGV_FILE="$argv" \
+    run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 || rc=$?
+  expect_code 1 "$rc" "unknown options must be refused at commit"
   # Honest happy path through commit: argv[0]=claude keeps flags.
   printf 'claude\0-c\0--dangerously-skip-permissions\0--verbose\0old prompt' > "$argv"
   install_helper_tmux
@@ -400,7 +406,26 @@ test_argv_admission_via_commit_rejects_wrappers() {
     "commit launch cmd must keep skip-permissions"
   assert_grep '--verbose' "$home/state/primary-resource/launch/$incident.cmd" \
     "commit launch cmd must keep --verbose after -c"
-  pass "argv admission via commit rejects wrappers and keeps claude flags"
+
+  home=$(make_main_home argvadm-codex)
+  write_codex_transcript "$home/tx.jsonl" 200000
+  bind_home "$home" codex sess-argv-codex "$home/tx.jsonl"
+  q=$(quota_json codex 50)
+  out=$(FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
+    run_pr "$home" check 2>/dev/null || true)
+  incident=${out##* }; incident=${incident%%$'\n'*}
+  write_stow_ok "$home/stow.md" "$incident" sess-argv-codex
+  argv="$home/argv"
+  printf 'codex\0-c\0model_reasoning_effort="high"\0--dangerously-bypass-approvals-and-sandbox\0old prompt' > "$argv"
+  rc=0
+  FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="fixture:agent" \
+    FM_PRIMARY_RESOURCE_ARGV_FILE="$argv" \
+    run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 || rc=$?
+  expect_code 0 "$rc" "Codex bypass argv must commit"
+  assert_grep '--dangerously-bypass-approvals-and-sandbox' \
+    "$home/state/primary-resource/launch/$incident.cmd" \
+    "Codex successor command must keep bypass flag"
+  pass "argv admission rejects unknown options and keeps spawned adapter flags"
 }
 
 test_arm_requires_python3() {

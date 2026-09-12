@@ -1174,7 +1174,7 @@ elif harness == "codex":
         "--remote-auth-token-env", "--local-provider",
         "--effort", "--sandbox",
     }
-    BOOL_KEEP = {"--oss", "--strict-config"}
+    BOOL_KEEP = {"--oss", "--strict-config", "--dangerously-bypass-approvals-and-sandbox"}
 else:
     sys.exit(1)
 
