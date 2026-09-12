@@ -373,6 +373,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/runpod-pod-watchdog.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/secondmate-parent-channel.md",
       "audience": "maintainer-architecture"
     },
