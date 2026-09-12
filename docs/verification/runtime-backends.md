@@ -1741,7 +1741,7 @@ Those absolute figures are specific to this host and Pi version; the guards asse
 
 ## Native Codex through Pi
 
-Verified on 2026-09-08 with Pi 0.85.1 and the installed `pi-codex-native` 0.2.1 adapter.
+Verified on 2026-09-09 with Pi 0.85.1, the ChatGPT.app Codex binary 0.153.4, the npm `@openai/codex` launcher 0.151.0, and the installed `pi-codex-native` 0.2.1 adapter.
 Run this token-free guard after updating Pi, Codex, or the adapter:
 
 ```sh
@@ -1751,7 +1751,13 @@ FM_PI_CODEX_NATIVE_LIVE=1 bash tests/fm-pi-codex-native.test.sh
 Observed result: `"result": "PASS"`.
 The guard runs the real Pi runtime, native adapter, three FirstMate primary extensions, native MCP transport, and FirstMate's durable outcome scripts in an isolated home.
 It verifies native `ultra` on initial and operational turns and after restart, startup operational input, watcher arming, a notification while main is idle, outcome read and one acknowledgement, refusal of a duplicate acknowledgement, and no reprocessing after restart.
-Its native App Server peer and watcher-close process are deterministic fixtures; it does not claim a real backend or a live model was tested by that command.
+The guard also runs full startup and shell ownership checks through the real Codex `command/exec` protocol, replaces that child under the same Pi process, and verifies the lock continues to name Pi.
+`FM_NATIVE_CODEX_BIN` selects the Codex executable for this probe; by default it mirrors the adapter's own resolution, the ChatGPT.app binary when installed and otherwise PATH `codex`.
+When PATH `codex` is the installed npm launcher and is not already that executable, the probe also runs through the launcher, whose `node .../@openai/codex/bin/codex.js app-server --stdio` process stays the vendor binary's parent; the guard records every Codex version it exercised.
+Model turns and watcher-close events use deterministic peers; this command does not verify a real fleet backend or live model.
+`tests/fm-session-lock-ancestry.test.sh` covers the direct native bridge, the one-hop npm launcher bridge and its rejection of other node scripts, other commands, gaps, and a second hop, real-process child replacement through both shapes, interactive Codex exclusion, outer-wrapper rejection, and a Claude session inside native Codex staying separate from the enclosing Pi.
+`tests/fm-pi-watch-extension.test.sh` covers watcher recovery and session replacement and verifies the watcher and turn-end guard extensions reject a lock held by an enclosing process; `tests/fm-pi-branch-extension.test.sh` verifies the supervision branch rejects a lock held by a sibling or an enclosing live process.
+The identity boundary is owned by `bin/fm-session-lock-lib.sh`; all three Pi extensions compare the lock with their own Pi PID.
 `tests/fm-busy-state.test.sh`, `tests/fm-busy-adapter-wiring.test.sh`, and `tests/fm-watch-triage.test.sh` cover separate progress notification, unchanged semantic busy state, rejection of a superseded worker's events, and progress refreshing the busy-age bound without fabricating a completed turn.
 
 ## Oh My Pi (omp)

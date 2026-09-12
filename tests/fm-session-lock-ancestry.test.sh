@@ -358,6 +358,165 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
   pass "session-lock e2e: a version-named session under a harness-named daemon keeps its own lock"
 }
 
+# Pin the native bridge without accepting a generic Codex session, a wrapper,
+# a non-harness gap, a lookalike Pi process, or any node process other than the
+# installed npm launcher running the same transport command, one hop deep.
+test_pi_native_owner() {
+  local dir fakebin shape got expected pids
+  dir="$TMP_ROOT/pi-native"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state" "$dir/bin" "$dir/lib/node_modules/@openai/codex/bin"
+  : > "$dir/lib/node_modules/@openai/codex/bin/codex.js"
+  : > "$dir/other.js"
+  ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$dir/bin/codex"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+field=$2 pid=$4
+vendor=/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex
+case "$FM_TEST_NATIVE_SHAPE" in npm*) via_launcher=1 ;; *) via_launcher=0 ;; esac
+case "$pid:$field" in
+  700:comm=)
+    if [ "$via_launcher" = 1 ]; then echo "$vendor"; else echo /Applications/ChatGPT.app/Contents/Resources/codex; fi ;;
+  700:args=)
+    case "$FM_TEST_NATIVE_SHAPE" in
+      interactive) echo 'codex exec task' ;;
+      npm*) echo "$vendor app-server --stdio" ;;
+      *) echo '/Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server --stdio' ;;
+    esac ;;
+  700:ppid=) if [ "$via_launcher" = 1 ]; then echo 750; else echo 800; fi ;;
+  750:comm=) echo node ;;
+  750:args=)
+    case "$FM_TEST_NATIVE_SHAPE" in
+      npm-other-script) echo "node $FM_TEST_NATIVE_DIR/other.js app-server --stdio" ;;
+      npm-other-command) echo "node $FM_TEST_NATIVE_DIR/bin/codex exec task" ;;
+      *) echo "node $FM_TEST_NATIVE_DIR/bin/codex app-server --stdio" ;;
+    esac ;;
+  750:ppid=) if [ "$FM_TEST_NATIVE_SHAPE" = npm-double ]; then echo 760; else echo 800; fi ;;
+  760:comm=) echo node ;;
+  760:args=) echo "node $FM_TEST_NATIVE_DIR/bin/codex app-server --stdio" ;;
+  760:ppid=) echo 800 ;;
+  800:comm=|800:args=)
+    case "$FM_TEST_NATIVE_SHAPE" in
+      gap|npm-gap) echo bash ;; lookalike) echo pi-helper ;; signed) echo pi-signed ;; *) echo pi ;;
+    esac ;;
+  800:ppid=) echo 900 ;;
+  900:comm=|900:args=) echo pi-signed ;;
+  900:ppid=) echo 1 ;;
+  *:comm=|*:args=) echo bash ;;
+  *:ppid=) echo 700 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  export FM_TEST_NATIVE_DIR="$dir"
+  for shape in native signed interactive gap lookalike npm npm-other-script npm-other-command npm-gap npm-double; do
+    expected=700
+    case "$shape" in native|signed|npm) expected=800 ;; esac
+    got=$(FM_TEST_NATIVE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') || fail "$shape: no owner"
+    [ "$got" = "$expected" ] || fail "$shape: owner $got, expected $expected"
+    pids=$(FM_TEST_NATIVE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pids')
+    [ "$pids" = "$expected" ] || fail "$shape: ownership set '$pids', expected only $expected"
+    printf '%s\n' "$expected" > "$dir/state/.lock"
+    FM_TEST_NATIVE_SHAPE="$shape" FM_NATIVE_STATE="$dir/state" lib_eval "$fakebin" 'fm_session_lock_owned_by_self "$FM_NATIVE_STATE"' || fail "$shape: shell rejected canonical owner"
+    for foreign in 750 900; do
+      printf '%s\n' "$foreign" > "$dir/state/.lock"
+      if FM_TEST_NATIVE_SHAPE="$shape" FM_NATIVE_STATE="$dir/state" lib_eval "$fakebin" 'fm_session_lock_owned_by_self "$FM_NATIVE_STATE"'; then
+        fail "$shape: accepted launcher, outer wrapper, or foreign session $foreign"
+      fi
+    done
+  done
+  unset FM_TEST_NATIVE_DIR
+  pass "Pi native owner: direct or one-hop npm-launched app-server bridge only; shell membership agrees"
+}
+
+# A Claude session running inside a native Codex child of Pi is reached first,
+# so it stays its own session: the bridge never promotes the enclosing Pi into
+# a Claude ancestry, and the Claude selection is what it was before the bridge.
+test_claude_inside_native_codex_keeps_its_own_session() {
+  local dir fakebin pids got
+  dir="$TMP_ROOT/claude-in-native"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+field=$2 pid=$4
+case "$pid:$field" in
+  600:comm=|600:args=) echo claude ;;
+  600:ppid=) echo 700 ;;
+  700:comm=) echo /Applications/ChatGPT.app/Contents/Resources/codex ;;
+  700:args=) echo '/Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server --stdio' ;;
+  700:ppid=) echo 800 ;;
+  800:comm=|800:args=) echo pi ;;
+  800:ppid=) echo 900 ;;
+  900:comm=|900:args=) echo pi-signed ;;
+  900:ppid=) echo 1 ;;
+  *:comm=|*:args=) echo bash ;;
+  *:ppid=) echo 600 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  pids=$(lib_eval "$fakebin" 'fm_harness_ancestry_pids' | tr '\n' ' ')
+  [ "$pids" = "600 700 " ] || fail "Claude inside native Codex: ownership set '$pids', expected '600 700 '"
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') || fail "Claude inside native Codex: no owner"
+  [ "$got" = 700 ] || fail "Claude inside native Codex: lock owner $got, expected the outermost Claude-run pid 700"
+  for own in 600 700; do
+    printf '%s\n' "$own" > "$dir/state/.lock"
+    FM_NATIVE_STATE="$dir/state" lib_eval "$fakebin" 'fm_session_lock_owned_by_self "$FM_NATIVE_STATE"' || fail "Claude inside native Codex: rejected its own ancestry pid $own"
+  done
+  printf '800\n' > "$dir/state/.lock"
+  if FM_NATIVE_STATE="$dir/state" lib_eval "$fakebin" 'fm_session_lock_owned_by_self "$FM_NATIVE_STATE"'; then
+    fail "Claude inside native Codex: the enclosing Pi entered the Claude session's ownership set"
+  fi
+  pass "a Claude session inside Pi's native Codex child stays separate from the enclosing Pi"
+}
+
+test_pi_native_real_processes() {
+  local dir out
+  dir="$TMP_ROOT/pi-native-processes"
+  mkdir -p "$dir/state" "$dir/bin" "$dir/lib/node_modules/@openai/codex/bin"
+  ln -s /bin/bash "$dir/pi"
+  ln -s /bin/bash "$dir/codex"
+  cat > "$dir/app-server" <<'SH'
+#!/usr/bin/env bash
+"$FM_NATIVE_ROOT/bin/fm-lock.sh" || exit
+. "$FM_NATIVE_ROOT/bin/fm-session-lock-lib.sh"
+fm_session_lock_owned_by_self "$FM_HOME/state" || exit
+[ "$(cat "$FM_HOME/state/.lock")" = "$FM_TEST_PI_PID" ] || exit 1
+printf '%s\n' "$$" >> "$FM_HOME/state/children"
+SH
+  # The installed npm launcher's shape: a node script reached through a bin
+  # symlink that spawns the vendor binary with its own arguments and stays its
+  # parent.
+  cat > "$dir/lib/node_modules/@openai/codex/bin/codex.js" <<'JS'
+#!/usr/bin/env node
+import { spawn } from "node:child_process";
+const child = spawn(process.env.FM_TEST_VENDOR_CODEX, process.argv.slice(2), { stdio: "inherit" });
+child.on("exit", (code, signal) => process.exit(signal ? 1 : code));
+JS
+  chmod +x "$dir/lib/node_modules/@openai/codex/bin/codex.js"
+  printf '{"type":"module"}\n' > "$dir/lib/node_modules/@openai/codex/package.json"
+  ln -s ../lib/node_modules/@openai/codex/bin/codex.js "$dir/bin/codex"
+  cat > "$dir/pi-session" <<'SH'
+#!/usr/bin/env bash
+cd "$FM_HOME" || exit 1
+export FM_TEST_PI_PID=$$ FM_TEST_VENDOR_CODEX="$FM_HOME/codex"
+./codex app-server --stdio || exit
+./codex app-server --stdio || exit
+expected=2
+if command -v node >/dev/null 2>&1; then
+  "$FM_HOME/bin/codex" app-server --stdio || exit
+  "$FM_HOME/bin/codex" app-server --stdio || exit
+  expected=4
+fi
+[ "$(cat state/.lock)" = "$$" ] || exit 1
+[ "$(sort -u state/children | wc -l | tr -d ' ')" = "$expected" ] || exit 1
+SH
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_NATIVE_ROOT="$ROOT" "$dir/pi" "$dir/pi-session" 2>&1) || fail "real Pi/native tree: $out"
+  pass "real Pi/native tree: lock acquisition and shell checks survive child replacement, direct and npm-launched"
+}
+
+test_pi_native_real_processes
+test_pi_native_owner
+test_claude_inside_native_codex_keeps_its_own_session
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
