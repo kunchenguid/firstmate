@@ -7,7 +7,7 @@
 # at check and commit, secondmate no-op, unsupported-backend alert, commit
 # revalidation, structured stow attestation, argv admission via commit,
 # stranded-helper reconciliation, route-gateway refusal, per-window quota
-# episodes, Herdr alert-only (no terminal), and a live isolated tmux
+# episodes, Herdr handover guards, and a live isolated tmux
 # (-L private socket) exit->shell->successor path (skipped when tmux is absent).
 set -u
 
@@ -737,6 +737,7 @@ EOF
   # against FM_CHECK_TIMEOUT (8 here) instead: comfortably below the watcher's
   # kill, and still well under the 5s the stub would cost if the bound failed.
   [ "$elapsed" -lt 8 ] || fail "quota-axi must honor the bounded budget (took ${elapsed}s)"
+  rm -f "$FAKEBIN/quota-axi"
   pass "quota-axi bounded and always fresh"
 }
 
@@ -1031,6 +1032,122 @@ EOF
   pass "Herdr proposes a handover (no alert-only narrowing)"
 }
 
+test_herdr_helper_proves_occupant_and_closes_workspace() {
+  local home incident mode calls state agent agent_pid stage reason
+  for mode in unreadable wrong-pane wrong-pid; do
+    home=$(make_main_home "herdr-occupant-$mode")
+    incident="herdr-occupant-$mode"
+    calls="$home/herdr-calls"
+    state="$home/herdr-state"
+    mkdir -p "$home/state/primary-resource/receipts" "$home/state/primary-resource/launch" \
+      "$home/state/primary-resource/outcomes" "$home/state/primary-resource/helper-ready" "$state"
+    jq -nc --argjson p "$$" \
+      '{version:1, harness:"codex", pid:$p, sessionId:"herdr", transcriptPath:"/dev/null", boundAt:1}' \
+      > "$home/state/primary-resource/binding.json"
+    jq -nc --arg id "$incident" \
+      '{version:1, incidentId:$id, action:"context", sourceHarness:"codex", destinationHarness:"codex"}' \
+      > "$home/state/primary-resource/receipts/$incident.json"
+    jq -nc --arg id "$incident" \
+      '{version:1, incidentId:$id, stage:"waiting-idle", reason:"helper-launched", helperEndpoint:"herdr:sess:helper:p1:workspace"}' \
+      > "$home/state/primary-resource/outcomes/$incident.json"
+    printf 'true\n' > "$home/state/primary-resource/launch/$incident.cmd"
+    printf 'idle\n' > "$home/busy"
+    cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$calls'
+case "\$*" in
+  *"pane process-info"*)
+    case '$mode' in
+      unreadable) exit 1 ;;
+      wrong-pane) printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"other","shell_pid":1,"foreground_processes":[{"pid":999999,"name":"codex","argv0":"codex"}]}}}' ;;
+      wrong-pid) printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"p0","shell_pid":1,"foreground_processes":[{"pid":999999,"name":"codex","argv0":"codex"}]}}}' ;;
+    esac
+    ;;
+  *) printf '%s\n' '{"result":{}}' ;;
+esac
+EOF
+    chmod +x "$FAKEBIN/herdr"
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_SUPERVISOR_TARGET="sess:p0" FM_SUPERVISOR_BACKEND=herdr \
+      FM_PRIMARY_RESOURCE_BUSY_STATE_FILE="$home/busy" \
+      PATH="$FAKEBIN:$PATH" \
+      "$PR" helper "$incident" >/dev/null 2>&1 || true
+    stage=$(jq -r .stage "$home/state/primary-resource/outcomes/$incident.json")
+    reason=$(jq -r .reason "$home/state/primary-resource/outcomes/$incident.json")
+    assert_equals "failed" "$stage" "$mode Herdr proof must fail closed"
+    assert_equals "occupant-changed" "$reason" "$mode must not send exit text"
+    assert_grep 'pane close helper:p1' "$calls" "$mode must close the recorded helper pane"
+    if grep -qE 'pane (send-text|send-keys)' "$calls"; then
+      fail "$mode sent text despite an unproven occupant"
+    fi
+  done
+
+  home=$(make_main_home herdr-helper-success)
+  incident=herdr-helper-success
+  calls="$home/herdr-calls"
+  state="$home/herdr-state"
+  agent="$home/codex"
+  cp "$(command -v sleep)" "$agent"
+  "$agent" 30 &
+  agent_pid=$!
+  mkdir -p "$home/state/primary-resource/receipts" "$home/state/primary-resource/launch" \
+    "$home/state/primary-resource/outcomes" "$home/state/primary-resource/helper-ready" "$state"
+  jq -nc --argjson p "$agent_pid" \
+    '{version:1, harness:"codex", pid:$p, sessionId:"herdr", transcriptPath:"/dev/null", boundAt:1}' \
+    > "$home/state/primary-resource/binding.json"
+  jq -nc --arg id "$incident" \
+    '{version:1, incidentId:$id, action:"context", sourceHarness:"codex", destinationHarness:"codex"}' \
+    > "$home/state/primary-resource/receipts/$incident.json"
+  jq -nc --arg id "$incident" \
+    '{version:1, incidentId:$id, stage:"waiting-idle", reason:"helper-launched", helperEndpoint:"herdr:sess:helper:p1:workspace"}' \
+    > "$home/state/primary-resource/outcomes/$incident.json"
+  printf 'true\n' > "$home/state/primary-resource/launch/$incident.cmd"
+  printf 'idle\n' > "$home/busy"
+  cat > "$FAKEBIN/herdr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$calls'
+if [[ "\$*" == *"pane process-info"* ]]; then
+  if [ -f '$state/launched' ]; then
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"p0","shell_pid":$$,"foreground_processes":[{"pid":777777,"name":"codex","argv0":"codex"}]}}}'
+  elif [ -f '$state/exited' ]; then
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"p0","shell_pid":$$,"foreground_processes":[]}}}'
+  else
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"p0","shell_pid":$$,"foreground_processes":[{"pid":$agent_pid,"name":"codex","argv0":"$agent"}]}}}'
+  fi
+elif [[ "\$*" == *"status --json"* ]]; then
+  printf '%s\n' '{"server":{"running":true}}'
+elif [[ "\$*" == *"pane get"* ]]; then
+  printf '%s\n' '{"result":{"pane":{"pane_id":"p0"}}}'
+elif [[ "\$*" == *"agent get"* ]]; then
+  printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}'
+elif [[ "\$*" == *"pane send-text"* ]]; then
+  if [[ "\$*" == *'/quit'* ]]; then
+    kill '$agent_pid' 2>/dev/null || true
+    touch '$state/exited'
+  else
+    touch '$state/launched'
+  fi
+  printf '%s\n' '{"result":{}}'
+else
+  printf '%s\n' '{"result":{}}'
+fi
+EOF
+  chmod +x "$FAKEBIN/herdr"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_SUPERVISOR_TARGET="sess:p0" FM_SUPERVISOR_BACKEND=herdr \
+    FM_PRIMARY_RESOURCE_BUSY_STATE_FILE="$home/busy" \
+    FM_PRIMARY_RESOURCE_HELPER_WAIT_SECS=3 \
+    PATH="$FAKEBIN:$PATH" \
+    "$PR" helper "$incident" >/dev/null 2>&1 || true
+  wait "$agent_pid" 2>/dev/null || true
+  stage=$(jq -r .stage "$home/state/primary-resource/outcomes/$incident.json")
+  reason=$(jq -r .reason "$home/state/primary-resource/outcomes/$incident.json")
+  assert_equals "started" "$stage" "Herdr helper must record a live successor"
+  assert_equals "successor-alive" "$reason" "Herdr helper must complete its transaction"
+  assert_grep 'pane close helper:p1' "$calls" "successful helper must close the recorded helper pane"
+  pass "Herdr occupant proof and helper workspace cleanup"
+}
+
 # Finding 10: live tmux with classifier-recognized agent identity.
 test_live_tmux_helper_exit_shell_successor() {
   if ! command -v tmux >/dev/null 2>&1; then
@@ -1178,6 +1295,7 @@ test_secondmate_noop
 test_unsupported_backend_alert
 test_malformed_context_via_check
 test_herdr_handover_lifecycle
+test_herdr_helper_proves_occupant_and_closes_workspace
 test_live_tmux_helper_exit_shell_successor
 test_bootstrap_arm_failure_diagnostic
 

@@ -32,11 +32,10 @@
 #     cannot lose the action
 #   receipts/<incidentId>.json  (immutable once created; no-clobber hard link)
 #     {version, incidentId, action, sourceHarness, sourceProvider,
-#      destinationHarness, destinationProvider, stowReceiptPath, reservedAt,
-#      helperEndpoint}
+#      destinationHarness, destinationProvider, stowReceiptPath, reservedAt}
 #   outcomes/<incidentId>.json
 #     {version, incidentId, stage: waiting-idle|exiting|launching|started|failed,
-#      reason, updatedAt}
+#      reason, helperEndpoint, updatedAt}
 #   launch/<incidentId>.argv  private NUL-delimited argv; deleted after attempt
 #   helper-ready/<incidentId> helper acknowledgement marker
 #   .lock                     directory lock via fm_lock_*
@@ -51,9 +50,8 @@
 #   receipt        fields above; outcome stage is a separate file
 #
 # Main home only: observe/arm/check are no-ops in a secondmate home and in task
-# worktrees. Terminal handover is tmux-only. Herdr is alert-only until a guarded
-# live lab proves the full exit->shell->successor transaction. Other backends
-# alert. Requires python3 (preflighted at arm). The helper never uses shell `&`;
+# worktrees. Terminal handover supports tmux and Herdr; other backends alert.
+# Requires python3 (preflighted at arm). The helper never uses shell `&`;
 # it runs in a backend-owned terminal the way bin/fm-afk-launch.sh does, waits
 # bounded for the primary pane to go idle, proves the pane occupant still matches
 # the bound source pid/harness before sending exit once via
@@ -1081,16 +1079,41 @@ action_check() {
 
 # --- commit -------------------------------------------------------------------
 
-pr_outcome_write() {  # <incident> <stage> <reason>
-  local id=$1 stage=$2 reason=$3
+pr_helper_endpoint_close() {  # <endpoint>
+  local endpoint=$1 rest session pane workspace
+  case "$endpoint" in
+    herdr:*:*:*) ;;
+    *) return 0 ;;
+  esac
+  rest=${endpoint#herdr:}
+  session=${rest%%:*}
+  rest=${rest#*:}
+  workspace=${rest##*:}
+  pane=${rest%:*}
+  [ -n "$session" ] && [ -n "$pane" ] && [ -n "$workspace" ] || return 1
+  fm_backend_source herdr 2>/dev/null || return 1
+  fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1
+}
+
+pr_outcome_write() {  # <incident> <stage> <reason> [<helper-endpoint>]
+  local id=$1 stage=$2 reason=$3 endpoint=${4:-} existing
   pr_ensure_dir || return 1
+  if [ -z "$endpoint" ] && [ -f "$PR_DIR/outcomes/$id.json" ]; then
+    existing=$(jq -r '.helperEndpoint // empty' "$PR_DIR/outcomes/$id.json" 2>/dev/null || true)
+    endpoint=$existing
+  fi
   pr_write_json_atomic "$PR_DIR/outcomes/$id.json" "$(jq -nc \
     --argjson v "$SCHEMA_VERSION" \
     --arg id "$id" \
     --arg stage "$stage" \
     --arg reason "$reason" \
+    --arg endpoint "$endpoint" \
     --argjson t "$(pr_now)" \
-    '{version:$v, incidentId:$id, stage:$stage, reason:$reason, updatedAt:$t}')"
+    '{version:$v, incidentId:$id, stage:$stage, reason:$reason, updatedAt:$t}
+     + if $endpoint == "" then {} else {helperEndpoint:$endpoint} end')" || return 1
+  case "$stage" in
+    started|failed) pr_helper_endpoint_close "$endpoint" || true ;;
+  esac
 }
 
 pr_capture_argv() {  # <pid> <dest>
@@ -1473,12 +1496,7 @@ action_commit() {
     pr_lock_release
     printf 'fm-primary-resource: cannot discover supervisor backend\n' >&2; return 1; }
   case "$backend" in
-    tmux) ;;
-    herdr)
-      pr_lock_release
-      printf 'fm-primary-resource: Herdr terminal handover unverified (live proof missing)\n' >&2
-      return 1
-      ;;
+    tmux|herdr) ;;
     *)
       pr_lock_release
       printf 'fm-primary-resource: unsupported backend %s\n' "$backend" >&2
@@ -1698,12 +1716,12 @@ pr_pane_occupant_matches() {  # <backend> <target> <expected-pid> <expected-harn
       if [ "$(fm_backend_herdr_pane_process_state "$session" "$pane" 2>/dev/null || true)" != agent ]; then
         return 1
       fi
-      # Exact pid match via process-info when available.
-      info=$(fm_backend_herdr_cli "$session" pane process-info "$pane" 2>/dev/null || true)
-      if [ -n "$info" ]; then
-        printf '%s' "$info" | jq -e --argjson p "$expected_pid" \
-          '[.. | objects | .pid? // empty] | index($p) != null' >/dev/null 2>&1 || return 1
-      fi
+      info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+      printf '%s' "$info" | jq -e --arg pane "$pane" --argjson p "$expected_pid" '
+        .result.type == "pane_process_info"
+        and .result.process_info.pane_id == $pane
+        and ([.result.process_info | .. | objects | .pid? // empty] | index($p) != null)
+      ' >/dev/null 2>&1 || return 1
       ;;
     *) return 1 ;;
   esac
