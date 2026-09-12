@@ -332,6 +332,10 @@ provider_for_harness() {
     kimi)         printf 'kimi\n' ;;
     cursor)       printf 'cursor\n' ;;
     muse)         printf 'meta\n' ;;
+    # agy-cli-manager ~/.venv/bin/agy-cli-manager refresh-usage --json reports
+    # short_usage_value and weekly_usage_value as percent remaining, matching
+    # this helper's quota-axi snapshot convention without inversion.
+    agy)          printf 'agy\n' ;;
     *)            return 1 ;;
   esac
 }
