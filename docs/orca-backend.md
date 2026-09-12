@@ -36,12 +36,15 @@ The normal isolation and unlanded-work refusal rules still apply.
 backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
-orca_worktree_id=<orca worktree id>
+orca_worktree_id=<safe opaque atom>::<absolute Orca worktree path>
 worktree=<absolute Orca worktree path>
 ```
 
 `window=` remains the caller-facing Firstmate alias.
-`terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+`orca_worktree_id=` is one composite identity whose left half follows Firstmate's shell-safe opaque-atom grammar and whose right half is the absolute worktree path.
+Exactly one `::` separator is required; bare atoms, empty halves, relative paths, extra separators, and shell command metacharacters other than ASCII space in the path are refused before operation or cleanup dispatch.
+ASCII spaces remain valid path characters, and every consumer preserves the complete composite as one quoted argument.
+`terminal=` and the composite `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
 
 ## Current lifecycle and safety
 
@@ -78,6 +81,8 @@ It never raw-deletes an Orca worktree.
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-control.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
