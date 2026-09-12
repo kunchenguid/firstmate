@@ -164,11 +164,8 @@ Its header is the single owner of composed commands, ordering, and digest conten
 Do not reimplement it by separately running its lock, bootstrap, initial wake-drain, or deferred-network components.
 Run-tier harness surfaces run this command for you at session open while the rest only nudge it, so confirm the digest is present in this session and run it yourself when it is not; `docs/sessionstart-nudge.md` owns adapter tiers, source routing, and compatibility.
 
-When Codex must run startup itself, run it from within the Codex session outside the sandbox through the normal approval mechanism, because session-lock identification requires `ps` access to the session's process ancestry.
-
-Keep sandboxing and on-request approvals enabled for ordinary work; `--yolo` is not required for Firstmate startup.
-
-If startup already ran, diagnose its failure rather than repeating the session-start command; blocked process inspection can produce `cannot locate harness process in ancestry` without proving that the harness is unsupported or another session holds the lock.
+When manual Codex startup needs process ancestry access, use normal approval to run it outside the sandbox; keep sandboxing enabled for ordinary work.
+If startup already ran, diagnose rather than repeat it.
 
 Read the complete digest once and trust it as this turn's startup and recovery input.
 If the harness shows only a preview and persists the full output to a file, read that file before acting.
