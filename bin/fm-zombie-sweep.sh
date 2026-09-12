@@ -32,6 +32,8 @@ TEARDOWN_BIN="${FM_TEARDOWN_BIN:-$SCRIPT_DIR/fm-teardown.sh}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 usage() {
   sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -121,18 +123,19 @@ repair_missing_status() {
 # --- live agent + retire classes ------------------------------------------
 
 agent_gone() {  # <meta> <id>
-  local meta=$1 id=$2 window backend
+  local meta=$1 id=$2 backend target state
   if [ -n "${FM_ZOMBIE_LIVE_IDS:-}" ]; then
     case " $FM_ZOMBIE_LIVE_IDS " in
       *" $id "*) return 1 ;;
       *) return 0 ;;
     esac
   fi
-  window=$(meta_field "$meta" window)
   backend=$(meta_field "$meta" backend)
-  [ -n "$window" ] || return 0
-  [ "$backend" = herdr ] || return 0
-  return 1
+  [ "$backend" = herdr ] || return 1
+  fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1 || return 1
+  target=$FM_BACKEND_VALIDATED_TARGET
+  state=$(fm_backend_agent_state herdr "$target")
+  case "$state" in dead|missing) return 0 ;; *) return 1 ;; esac
 }
 
 classify_idle() {  # <id> <meta> -> merged|report|worktree-gone|unlanded|skip
@@ -169,15 +172,18 @@ classify_idle() {  # <id> <meta> -> merged|report|worktree-gone|unlanded|skip
 }
 
 close_herdr_if_needed() {  # <id> <meta>
-  local id=$1 meta=$2 backend
+  local id=$1 meta=$2 backend target
   backend=$(meta_field "$meta" backend)
   [ "$backend" = herdr ] || return 0
+  fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1 || return 0
+  target=$FM_BACKEND_VALIDATED_TARGET
   PANES=$((PANES + 1))
   report "pane-close: $id"
-  if [ "$APPLY" -eq 1 ]; then
-    if [ -n "${FM_ZOMBIE_KILL_BIN:-}" ]; then
-      "$FM_ZOMBIE_KILL_BIN" "$id" || true
-    fi
+  [ "$APPLY" -eq 1 ] || return 0
+  if [ -n "${FM_ZOMBIE_KILL_BIN:-}" ]; then
+    "$FM_ZOMBIE_KILL_BIN" "$id" || true
+  elif fm_backend_source herdr; then
+    fm_backend_herdr_kill "$target"
   fi
 }
 

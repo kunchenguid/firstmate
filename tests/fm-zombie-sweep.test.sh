@@ -32,6 +32,14 @@ SH
   chmod +x "$1/fake-teardown.sh"
 }
 
+install_pane_close() {  # <dir>
+  cat > "$1/fake-pane-close.sh" <<SH
+#!/usr/bin/env bash
+printf 'close %s\n' "\$1" >> "$1/pane-close.log"
+SH
+  chmod +x "$1/fake-pane-close.sh"
+}
+
 test_lock_gc_removes_dead_owner_only_on_apply() {
   local dir out owner lock
   dir="$TMP_ROOT/locks"
@@ -83,6 +91,21 @@ test_missing_status_gets_paused_line() {
   pass "a meta with no status gets one paused line on --apply"
 }
 
+test_gone_nonterminal_herdr_pane_closes() {
+  local dir out
+  dir="$TMP_ROOT/gone-pane"
+  seed "$dir"
+  install_pane_close "$dir"
+  mkdir -p "$dir/project" "$dir/worktree"
+  printf 'kind=ship\nbackend=herdr\nwindow=gone:pane\nendpoint_task_id=gone-pane\nherdr_session=gone\nherdr_workspace_id=w1\nherdr_tab_id=t1\nherdr_pane_id=pane\nworktree=%s/worktree\nproject=%s/project\n' "$dir" "$dir" > "$dir/home/state/gone-pane.meta"
+  printf 'working: endpoint disappeared\n' > "$dir/home/state/gone-pane.status"
+  out=$(FM_ZOMBIE_LIVE_IDS=other FM_ZOMBIE_KILL_BIN="$dir/fake-pane-close.sh" run_sweep "$dir" --apply) \
+    || fail "gone-pane sweep failed: $out"
+  assert_contains "$out" "pane-close: gone-pane" "nonterminal gone endpoint did not request pane close"
+  grep -qx 'close gone-pane' "$dir/pane-close.log" || fail "pane close did not target the exact gone record"
+  pass "a nonterminal Herdr record with a gone endpoint closes its own pane"
+}
+
 test_classes_and_summary_count() {
   local dir out
   dir="$TMP_ROOT/classes"
@@ -122,4 +145,5 @@ test_classes_and_summary_count() {
 test_lock_gc_removes_dead_owner_only_on_apply
 test_lock_gc_keeps_live_owner_and_pidless
 test_missing_status_gets_paused_line
+test_gone_nonterminal_herdr_pane_closes
 test_classes_and_summary_count

@@ -393,6 +393,7 @@ test_crew_is_provably_working_classifier() {
 # blocker.
 test_status_is_paused_classifier() {
   status_is_paused 'paused: holding for the upstream release' || fail "paused verb not recognized"
+  status_is_paused 'parked: holding for the upstream release' || fail "parked verb not recognized as a declared wait"
   status_is_paused '  paused:   waiting on a rate-limit reset' || fail "leading-space paused verb not recognized"
   status_is_paused 'blocked: the build is paused upstream' && fail "a blocked line mentioning paused false-matched"
   status_is_paused 'working: paused the animation loop' && fail "a working line mentioning paused false-matched"
@@ -401,6 +402,7 @@ test_status_is_paused_classifier() {
   # A pause is deliberately NOT captain-relevant: it is a stop-nagging signal, not
   # work to keep surfacing.
   status_is_captain_relevant 'paused: holding for the upstream release' && fail "paused is captain-relevant (should not be)"
+  status_is_captain_relevant 'parked: holding for the upstream release' && fail "parked is captain-relevant (should not be)"
   status_is_paused_or_captain_held 'paused: holding for the upstream release' \
     || fail "declared pause not recognized by the bounded-idle classifier"
   status_is_paused_or_captain_held 'captain-held [key=route]: tracked by task-decision-route' \
@@ -2290,6 +2292,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
   local sig round wakes bare text throttle replacement
   for spec in \
     'paused-pipeline-churn|paused: waiting on the validation run to finish' \
+    'parked-pipeline-churn|parked: waiting on the validation run to finish' \
     'captain-held-churn|captain-held [key=route]: awaiting the captain on the routing call'
   do
     name=${spec%%|*}; status_line=${spec#*|}
@@ -2334,6 +2337,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     # for nearly the whole old cadence window.
     case "$name" in
       paused-pipeline-churn) replacement='paused: waiting on the replacement validation run' ;;
+      parked-pipeline-churn) replacement='parked: waiting on the replacement validation run' ;;
       captain-held-churn) replacement='captain-held [key=release]: awaiting the captain on the release call' ;;
     esac
     printf '%s\n' "$replacement" >> "$statusf"
