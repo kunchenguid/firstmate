@@ -44,6 +44,12 @@
 # its own Codex login, so an openai-codex candidate reads as unknown quota here
 # and is never selected on this host; its runway is disclosed uncertainty for
 # the agent-side gates, not measured headroom.
+#
+# agy (Google Antigravity) is a verified harness with no quota-axi provider
+# family of its own - its catalog spans several vendors and no snapshot row
+# measures it - so an agy candidate is disclosed on stderr and read as unknown
+# quota rather than refused. It stays eligible for the agent-side gates and is
+# never selected here, and the candidates ranked after it are still evaluated.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -373,6 +379,7 @@ for c in "${CANDIDATES[@]}"; do
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
   provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
     omp) die "omp quota mapping covers only the openai-codex and claude-bridge prefixes: $model" ;;
+    agy) echo "note: agy has no quota-axi provider family, so its headroom is unknown here and this helper never selects it" >&2 ;;
     *) die "unknown harness: $harness" ;;
   esac
 done

@@ -551,11 +551,17 @@ fi
 [ "$out" = "none" ] || fail "exhausted Meta quota returned: $out"
 ok "Muse uses Meta quota"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:default 2>&1); then
+if out=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:default 2>/dev/null); then
   fail "agy unexpectedly dispatched without quota evidence"
 fi
-[ "$err" = "error: unknown harness: agy" ] || fail "agy without a quota mapping returned: $err"
-ok "agy has no quota mapping and is refused loudly"
+[ "$out" = "none" ] || fail "agy without a quota mapping returned: $out"
+ok "agy reads as unknown quota and is never selected"
+
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:default --candidate claude:claude-3-5-sonnet 2>/dev/null) \
+  || fail "an agy candidate aborted the whole selection instead of being skipped"
+[ "$out" = "claude claude-3-5-sonnet" ] \
+  || fail "candidate after agy was not ranked, returned: $out"
+ok "a leading agy candidate is skipped and later candidates are still ranked"
 
 jq '.providers += [.providers[] | select(.provider == "claude")]' "$LAB/captured.json" > "$DUPLICATE"
 if err=$(call_choose --snapshot "$DUPLICATE" --candidate claude:default 2>&1); then

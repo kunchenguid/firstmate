@@ -194,6 +194,45 @@ EOF
   pass "fm-teardown: agy removes its task-local hooks file"
 }
 
+test_unforced_teardown_removes_workspace_hooks() {
+  local rec dir home proj wt fakebin id out rc
+  id="agy-unforced-$$"
+  rec=$(make_case unforced "$id")
+  IFS='|' read -r dir home proj wt fakebin <<EOF
+$rec
+EOF
+  git -C "$proj" fetch -q origin
+  out=$(run_spawn "$dir" "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off) \
+    || fail "agy spawn for the unforced teardown test failed"$'\n'"$out"
+  assert_present "$wt/.agents/hooks.json" "agy unforced teardown fixture did not have a hooks file"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    PATH="$fakebin:$BASE_PATH" "$TEARDOWN" "$id" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "agy teardown without --force should not be blocked by its own hooks file"$'\n'"$out"
+  assert_absent "$wt/.agents/hooks.json" "agy workspace hooks survived an unforced teardown"
+  pass "fm-teardown: agy's own hooks file never blocks an unforced teardown"
+}
+
+test_unforced_teardown_still_refuses_real_worktree_work() {
+  local rec dir home proj wt fakebin id out rc
+  id="agy-dirty-$$"
+  rec=$(make_case unforced-dirty "$id")
+  IFS='|' read -r dir home proj wt fakebin <<EOF
+$rec
+EOF
+  git -C "$proj" fetch -q origin
+  out=$(run_spawn "$dir" "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off) \
+    || fail "agy spawn for the dirty teardown test failed"$'\n'"$out"
+  printf 'crew work\n' > "$wt/.agents/notes.md"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    PATH="$fakebin:$BASE_PATH" "$TEARDOWN" "$id" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "unforced teardown discarded uncommitted crewmate work beside agy's hooks file"
+  assert_contains "$out" "has uncommitted changes" "agy dirty refusal did not name the uncommitted work"
+  assert_present "$wt/.agents/notes.md" "crewmate work was removed despite the refusal"
+  pass "fm-teardown: the agy hooks exemption does not hide other uncommitted work"
+}
+
 test_teardown_leaves_a_non_agy_tasks_workspace_hooks() {
   local rec dir home proj wt fakebin id out rc owned
   id="claude-hooks-$$"
@@ -222,3 +261,5 @@ test_unsupported_effort_is_recorded_and_omitted
 test_secondmate_is_refused_and_control_is_key_based
 test_teardown_removes_workspace_hooks
 test_teardown_leaves_a_non_agy_tasks_workspace_hooks
+test_unforced_teardown_removes_workspace_hooks
+test_unforced_teardown_still_refuses_real_worktree_work
