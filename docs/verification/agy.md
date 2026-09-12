@@ -30,9 +30,9 @@ Raw commands whose basename is `agy` are recorded as `raw-agy`, so they remain u
 
 The current live measurements were taken on 2026-09-12 UTC on Linux with Antigravity CLI 1.2.2 from `~/.local/bin/agy`.
 The binary had auto-updated from 1.2.0 to 1.2.2 during the marker verification, and the 1.2.0 measurements are kept in the historical section above.
-The no-mistakes pipeline sandbox cannot execute the aggregate prompt-submitting matrix for Claude and Codex because it has no signed-in sessions.
-An earlier sandbox lifecycle attempt also lacked usable worktree-pool metadata, but the branch-normalized fixture now permits the AGY lifecycle guard to run against its local clone.
-The passing 1.2.2 live-guard lines below are from firstmate's own 2026-09-12 runs, while the direct AGY composer-clear measurement is reproduced here against the real binary.
+The no-mistakes pipeline sandbox cannot execute the credentialed live guards because it has no worktree pool or signed-in sessions.
+The passing 1.2.2 live-guard lines below are from firstmate's own 2026-09-12 runs; the lifecycle guard's newly folded doorbell assertions remain in the executable guard for a credentialed rerun.
+The direct AGY composer-clear measurement is reproduced here against the real binary.
 
 Command:
 
@@ -269,19 +269,27 @@ ok - strict posture live: a blank shell row classifies unknown and injection def
 Firstmate's 2026-09-12 run supplied all five passing lines above.
 
 The standalone inbox-doorbell guard was not rerun separately after the fixture correction.
-The canonical lifecycle guard below includes the AGY doorbell acted-and-acked step in the passing run.
+The canonical lifecycle guard below now contains the AGY doorbell acted-and-acked assertion, but the recorded run predates that assertion.
 
 ```text
 env -u ANTIGRAVITY_AGENT FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=agy bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
 
-Canonical lifecycle command, run in this worktree after the lifecycle fixture fix:
+Canonical lifecycle command, to run after the lifecycle doorbell assertion fix:
 
 ```text
-env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
+env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 FM_AGY_LIFECYCLE_TMUX_WIDTH=220 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
 
-Output from the 2026-09-12 run:
+Narrow-pane lifecycle command:
+
+```text
+env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 FM_AGY_LIFECYCLE_TMUX_WIDTH=80 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+The no-mistakes pipeline sandbox cannot execute these credentialed post-fix lifecycle runs because it has no worktree pool or signed-in AGY session; the doorbell assertions are left in the executable guard for firstmate to run at both widths.
+
+Output from firstmate's 2026-09-12 pre-doorbell-assertion lifecycle run:
 
 ```text
 ok - agy (1.2.2): canonical spawn, hooks, control/data interrupts, Stop, exit, and teardown passed
@@ -291,7 +299,7 @@ FM_TEST_SUMMARY_FAMILY family=live-harness-optin count=1 duration_ms=209834 fail
 FM_TEST_SLOWEST rank=1 script=tests/fm-send-inbox-doorbell-live-e2e.test.sh duration_ms=209834
 ```
 
-The passing lifecycle line includes spawn, hooks, doorbell acted-and-acked, both interrupts, exit after clearing the pending composer, and teardown.
+The recorded lifecycle line covers spawn, hooks, both interrupts, exit after clearing the pending composer, and teardown; the post-fix run must additionally prove doorbell acted-and-acknowledged behavior.
 
 Real-binary composer-clear measurement, run on 2026-09-12 against AGY 1.2.2.
 The trust dialog was accepted before the composer probes.

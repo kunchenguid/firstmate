@@ -42,6 +42,7 @@ SESSION="inboxlive"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-inbox-live.XXXXXX")
 LAB=$(cd "$LAB" && pwd)
 TIMEOUT=${FM_SEND_INBOX_LIVE_TIMEOUT:-240}
+LIFECYCLE_TMUX_WIDTH=${FM_AGY_LIFECYCLE_TMUX_WIDTH:-220}
 CHECKED=0
 FAILED=0
 
@@ -70,7 +71,7 @@ PATH="$SHIM_DIR:$PATH"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-task-inbox-lib.sh"
 
-tmux -L "$SOCKET" new-session -d -s "$SESSION" -x 220 -y 50 -c "$ROOT"
+tmux -L "$SOCKET" new-session -d -s "$SESSION" -x "$LIFECYCLE_TMUX_WIDTH" -y 50 -c "$ROOT"
 
 harness_version() {  # <binary>
   "$1" --version 2>/dev/null | head -1 || printf 'version-unknown'
@@ -209,6 +210,7 @@ fi
 
 run_agy_canonical_lifecycle() (
   local task="live-agy-lifecycle-$$" lab project home status target version stable_verdict stable_count draft_landed content note_line
+  local doorbell_record doorbell_acted doorbell_brief doorbell_ring_rc=0
   local spawned=0 state capture busy=0 turn_end=0 verdict=unknown trust_seen=0
   [ "${FM_AGY_LIFECYCLE_LIVE_E2E:-}" = 1 ] || return 0
   die() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
@@ -284,6 +286,28 @@ EOF
     sleep 1
   done
   [ "$verdict" = empty ] || die "agy ($version): control interrupt did not return to a proven empty composer"
+  . "$ROOT/bin/fm-backend.sh"
+  doorbell_acted="$lab/AGY_DOORBELL_ACTED"
+  doorbell_brief="Run the exact shell command \`touch $doorbell_acted\` once, then stop."
+  FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-send.sh" "$task" "$doorbell_brief" >/dev/null 2>&1 \
+    || die "agy ($version): doorbell steer could not be recorded"
+  doorbell_record="$state/$task.inbox/001.msg"
+  [ -f "$doorbell_record" ] || [ -f "$state/$task.inbox/handled/001.msg" ] \
+    || die "agy ($version): doorbell steer left no durable inbox record"
+  fm_task_inbox_ring tmux "$target" "$doorbell_record" "fm-$task" || doorbell_ring_rc=$?
+  if [ "$doorbell_ring_rc" -gt 1 ] && [ ! -f "$state/$task.inbox/handled/001.msg" ]; then
+    die "agy ($version): explicit doorbell ring failed"
+  fi
+  for _ in $(seq 1 120); do
+    if [ -e "$doorbell_acted" ] && [ -f "$state/$task.inbox/handled/001.msg" ]; then
+      break
+    fi
+    sleep 1
+  done
+  [ -e "$doorbell_acted" ] || die "agy ($version): doorbell instruction was not acted on"
+  [ -f "$state/$task.inbox/handled/001.msg" ] \
+    || die "agy ($version): doorbell instruction was not acknowledged"
   rm -f "$state/$task.progress"
   lifecycle_progress_brief='Run the exact shell command "printf AGY_TOOL_PROGRESS" once, then stop.'
   FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -377,7 +401,7 @@ EOF
     "$ROOT/bin/fm-teardown.sh" "$task" 2>&1) || teardown_rc=$?
   [ "$teardown_rc" -eq 0 ] || die "agy ($version): teardown failed: $teardown_out"
   [ ! -e "$state/$task.agy-hooks" ] || die "agy ($version): teardown left private hooks behind"
-  pass "agy ($version): canonical spawn, hooks, control/data interrupts, Stop, exit, and teardown passed"
+  pass "agy ($version): canonical spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown passed"
 )
 
 run_agy_canonical_lifecycle || exit 1

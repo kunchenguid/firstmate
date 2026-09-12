@@ -1805,7 +1805,9 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 ## Antigravity CLI (`agy`) worker adapter
 
 On 2026-09-12, Antigravity CLI 1.2.2 passed the worker-only liveness, marker, composer, and composer-clear measurements on Linux.
-The current AGY doorbell and canonical lifecycle guards remain unresolved in this environment, with their exact results recorded in [`docs/verification/agy.md`](agy.md).
+The 1.2.2 composer-matrix and liveness/marker evidence is recorded in [`docs/verification/agy.md`](agy.md); the canonical lifecycle guard now contains the AGY doorbell acted-and-acknowledged checks.
+The standalone inbox-doorbell guard was not rerun separately, and the post-fix canonical lifecycle guard still needs a credentialed run at its default and narrow widths.
+The no-mistakes pipeline sandbox cannot execute those credentialed live AGY guards, so the recorded pre-fix lifecycle lines are firstmate's 2026-09-12 measurements.
 The adapter is CREWMATE and SCOUT only, and `bin/fm-spawn.sh` refuses its secondmate path because no primary supervision protocol is verified.
 The detailed dated commands and exact outputs are maintained in [`docs/verification/agy.md`](agy.md).
-Refresh the evidence with `FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh`, `FM_COMPOSER_MATRIX_LIVE=1 bin/fm-test-run.sh tests/fm-composer-matrix-live-e2e.test.sh`, and `FM_AGY_LIFECYCLE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh`.
+Refresh the evidence with `env -u ANTIGRAVITY_AGENT FM_HARNESS_LIVENESS_DRIFT=1 FM_HARNESS_LIVENESS_DRIFT_AGY_MARKER=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh`, `env -u ANTIGRAVITY_AGENT FM_COMPOSER_MATRIX_LIVE=1 bin/fm-test-run.sh tests/fm-composer-matrix-live-e2e.test.sh`, and `env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh`.
