@@ -290,6 +290,23 @@ ok - cursor primary: an away-mode escalation is delivered, confirmed, and proces
 The live run proved that session start acquires the fleet lock through Cursor's structural process identity in `bin/fm-cursor-lib.sh`; `tests/fm-session-lock-ancestry.test.sh` pins the same ancestry path portably.
 It also proved that Cursor's `autoarm` supervision model lets the mid-turn pull guard accept a fresh beacon after the between-turn watcher closes; `tests/fm-guard-stale-banner.test.sh` pins that model-aware verdict.
 The baton is claimed only by the next `stop`, so an actionable close before that claim can still produce one real follow-up from the sole existing park; durable wake handling is idempotent, and any older park still running after the claim stands down.
+
+### Cursor IDE chat primary lock identity, 2026-09-11
+
+Cursor Agent CLI identity alone does not cover a Firstmate primary running inside Cursor IDE chat.
+On macOS, agent tool shells are parented by a workspace-scoped Plugin helper, not by `cursor-agent` and not by the shared top-level `Cursor.app` process:
+
+```text
+tool shell
+  -> Cursor Helper (Plugin): extension-host <workspace> [n-m]
+  -> /Applications/Cursor.app/Contents/MacOS/Cursor
+```
+
+`bin/fm-cursor-lib.sh` therefore also accepts that extension-host label as Cursor process identity for the fleet lock and harness ancestry walk.
+Matching the top-level `Cursor.app` binary is refused: that pid is shared across windows in one install, so two Firstmate homes would falsely share one lock owner.
+`tests/fm-cursor-harness.test.sh` and `tests/fm-session-lock-ancestry.test.sh` pin the positive extension-host shapes and the Cursor.app / bare-extension-host / VS Code Plugin negatives.
+Live check from this IDE session after the change: `fm_harness_ancestry_pid` resolves to the extension-host pid and `fm_session_lock_owned_by_self` accepts a lock naming that pid.
+
 Cursor's `beforeSubmitPrompt` step could close that exact window because it fires once on a real captain message and not on hook-driven follow-ups, but registering it is deliberately deferred alongside `preCompact`.
 
 Away-mode delivery needed no daemon change once the composer reader was correct for Cursor; [`runtime-backends.md`](runtime-backends.md#composer) owns that evidence.
