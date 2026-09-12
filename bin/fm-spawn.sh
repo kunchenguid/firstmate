@@ -2336,6 +2336,10 @@ fi
 if [ "$KIND" != secondmate ]; then
   RECORDED_CREW_BRANCH=$(fm_brief_crew_branch "$BRIEF")
   if [ -n "$RECORDED_CREW_BRANCH" ]; then
+    if [ -n "${BASE_BRANCH:-}" ] && [ "$RECORDED_CREW_BRANCH" = "$BASE_BRANCH" ]; then
+      echo "error: $BRIEF records crew branch $RECORDED_CREW_BRANCH, which is the requested base branch; refusing to launch" >&2
+      exit 1
+    fi
     CURRENT_DEFAULT_BRANCH=$(default_branch "$PROJ_ABS" || true)
     if [ -n "$CURRENT_DEFAULT_BRANCH" ] && [ "$RECORDED_CREW_BRANCH" = "$CURRENT_DEFAULT_BRANCH" ]; then
       echo "error: $BRIEF records crew branch $RECORDED_CREW_BRANCH, which is the project default branch; refusing to launch" >&2

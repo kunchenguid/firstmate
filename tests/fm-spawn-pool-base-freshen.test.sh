@@ -102,6 +102,25 @@ test_custom_crew_branch_never_targets_default() {
   pass "spawn refuses a custom crew branch equal to the project default"
 }
 
+test_custom_crew_branch_never_targets_requested_base() {
+  local rec id out status
+  id='pool-crew-base-collision-r1'
+  rec=$(make_case crew-base-collision "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" branch develop "$INITIAL_SHA"
+  git -C "$PROJECT_DIR" push --quiet origin refs/heads/develop:refs/heads/develop
+  scaffold_ship_brief "$id" direct-PR '' develop
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch develop)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a custom crew branch equal to the requested base"
+  assert_contains "$out" "which is the requested base branch" \
+    "requested-base crew collision did not explain the unsafe target"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "requested-base crew collision published task metadata"
+  pass "spawn refuses a custom crew branch equal to the requested base"
+}
+
 scaffold_scout_brief() {
   local id=$1 base_branch=${2:-}
   local -a args=("$id" test-project --scout)
@@ -1171,6 +1190,7 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool
+test_custom_crew_branch_never_targets_requested_base
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
