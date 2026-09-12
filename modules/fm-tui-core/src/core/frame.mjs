@@ -1,6 +1,6 @@
 // Coordinates are terminal cells. Trusted sprites must use single-cell glyphs.
 export const clean = value => String(value ?? '').replace(/[^\x20-\x7e]/g, '?');
-const palette = [39, 141, 245, 222, 115, 174];
+export const palette = [39, 141, 245, 222, 115, 174];
 export function buffer(width, height) {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 2 || width > 300 || height < 1 || height > 1000) throw Error('Invalid viewport');
   return Array.from({ length: height }, () => Array.from({ length: width }, () => [' ', 0]));

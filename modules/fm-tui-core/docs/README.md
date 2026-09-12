@@ -3,7 +3,7 @@
 ## Usage
 
 `npm --prefix modules/fm-tui-core run run` runs the dependency-free executable checks on Node 20 or newer.
-Import `buffer`, `put`, `sprite`, `ticker`, `plain`, `diff`, `display`, and `terminal` from `src/index.mjs`.
+Import `buffer`, `put`, `sprite`, `ticker`, `plain`, `diff`, `display`, `terminal`, and the table primitives (`left`, `pace`, `fit`, `label`, `header`, `footer`, `row`, `reset`, `unavailable`) from `src/index.mjs`.
 For example: `const view = display(terminal(), { clean: true }); view.draw(buffer(80, 24)); view.close();`.
 
 ## Layout
@@ -25,6 +25,7 @@ A non-animated display writes exactly one static frame without escape sequences;
 ## Limits
 
 Buffers contain `[character, paletteIndex]` cells and reserve the last column against autowrap; viewports are bounded to 300 columns and 1000 rows.
+Table primitives (`left`, `pace`, `header`, `footer`, `row`) return fixed-width strings for that writable width, with Unicode and ASCII glyph sets and no escape sequences.
 The six-color palette, clipped row-array sprites, and caller-driven ticker need no framework or asset loader.
 Sprite rows are trusted source assets using single-cell glyphs; use `clean` for external strings before putting them in a buffer.
 `clean` removes terminal controls but does not redact credentials; callers must not pass secrets to the view.
@@ -33,5 +34,5 @@ Animated output changes only differing cells, never clears the whole screen, and
 ## Verification
 
 `bin/fm-test-run.sh tests/fm-modules.test.sh` exercises both shared libraries and their actual process-event composition.
-Core tests cover clipping, 24-frame continuity, 100x30/80x24 output and color suppression; fake-backed display tests cover quiet mode, reused buffers, empty-write suppression and exit restoration.
+Core tests cover clipping, 24-frame continuity, 100x30/80x24 output and color suppression, plus the 10-cell remaining bar fixture and golden frames at 80 and 120 columns; fake-backed display tests cover quiet mode, reused buffers, empty-write suppression and exit restoration.
 Stream adapter tests check TTY capability and environment handling without depending on vendor-specific terminal output.
