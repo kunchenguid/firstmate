@@ -2168,26 +2168,36 @@ test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace() {
 }
 
 test_hook_no_afk_ignores_poll_derived_grace() {
-  local dir pid out status beat
-  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-no-afk-poll-grace")
-  rm -f "$dir/state/.afk"
+  local dir pid identity out status beat fresh_out fresh_status restored_out restored_status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-no-afk-poll-grace")
+  : > "$dir/state/task1.meta"
   sleep 60 &
   pid=$!
-  record_daemon_lock "$dir" "$pid" || {
+  identity=$(watcher_identity "$dir" "$pid") || {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
-    fail "could not identify live daemon holder"
+    fail "could not identify live watcher holder"
   }
-  # 400s would be within the poll-derived grace the away-mode branch would
-  # accept, but away mode is off here, so the strict watcher predicate and its
-  # flat default govern instead - old behavior, unaffected by FM_POLL.
+  record_watcher_lock "$dir" "$pid" "$identity"
+  # A fresh beacon must allow this same live watcher before age is varied;
+  # otherwise missing ownership could make the stale-beacon assertion vacuous.
+  touch "$dir/state/.last-watcher-beat"
+  fresh_out=$(FM_GUARD_GRACE='' FM_POLL=600 run_hook "$dir" false); fresh_status=$?
+  # 400s fits the away-mode poll-derived grace (660s at FM_POLL=600), but
+  # exceeds the normal 300s default. With away mode off, only age must block.
   beat=$(( $(date +%s) - 400 ))
   fm_touch_epoch "$beat" "$dir/state/.last-watcher-beat"
   out=$(FM_GUARD_GRACE='' FM_POLL=600 run_hook "$dir" false); status=$?
+  touch "$dir/state/.last-watcher-beat"
+  restored_out=$(FM_GUARD_GRACE='' FM_POLL=600 run_hook "$dir" false); restored_status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  expect_code 0 "$fresh_status" "without .afk, a live watcher with a fresh beacon must allow before aging"
+  [ -z "$fresh_out" ] || fail "fresh watcher control produced a block banner: $fresh_out"
   expect_code 2 "$status" "without .afk, FM_POLL must not widen the strict watcher predicate's grace"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  expect_code 0 "$restored_status" "refreshing only the beacon must restore the same watcher's healthy verdict"
+  [ -z "$restored_out" ] || fail "refreshed watcher control produced a block banner: $restored_out"
   pass "fm-turnend-guard: with away mode off, the poll-derived grace never applies"
 }
 
