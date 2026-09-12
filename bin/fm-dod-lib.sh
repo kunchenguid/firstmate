@@ -12,15 +12,19 @@
 # line that bin/fm-spawn.sh checks a ship brief against.
 # The no-mistakes block states two fixed `done:` forms rather than a free-form
 # summary, because five workers reported `done:` on a green LOCAL suite without
-# ever starting the pipeline. Only the second form is a ready signal, and
-# bin/fm-inactive-reconcile.sh parses it anchored as `done: PR <url>[ checks
-# green]`; bin/fm-brief.sh restates both forms in the status protocol, which is
-# where the worker actually composes the line.
+# ever starting the pipeline. Only the second form is a ready signal, and two
+# consumers read it: bin/fm-inactive-reconcile.sh extracts the PR only from an
+# anchored `done: PR <url>[ checks green]` line, and bin/fm-crew-state.sh reads
+# CI-ready only when the note carries both `PR` and `checks green`, so reshaping
+# that form silently loses PR extraction or the ci-ready classification.
+# bin/fm-brief.sh restates both forms in the status protocol, which is where the
+# worker actually composes the line.
 # FM_DONE_FORM_COMMITTED and FM_DONE_FORM_CI_GREEN below are the single owner of
 # those two literals. Every site that spells one - the Definition of done here,
 # its closing CI-ready sentence, and the status-protocol restatement in
 # bin/fm-brief.sh - renders it from these, so no copy can drift and leave one
-# generated brief stating two different sets of valid forms.
+# generated brief stating two different sets of valid forms;
+# tests/fm-brief.test.sh pins that agreement.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
