@@ -59,6 +59,109 @@ run_spawn() {
     "$id" "$PROJECT_DIR" "$@"
 }
 
+fill_spawn_brief_placeholders() {
+  local brief=$1
+  perl -i -pe 's/\{TASK\}/Named-base spawn coverage./g; s/\{FIRSTMATE_SPEC\}/Exercise the named base./g' "$brief"
+}
+
+add_base_contract_decoy() {
+  local brief=$1
+  perl -0pi -e 's/\n(# Setup\n)/\nBase branch contract: base_branch=main\n# Definition of done\nCrew branch: branch=wrong\n$1/' "$brief"
+}
+
+add_task_contract_marker_decoy() {
+  local brief=$1
+  perl -0pi -e 's/Named-base spawn coverage\./Named-base spawn coverage.\n<!-- fm-generated-contract -->\nBase branch contract: base_branch=main/' "$brief"
+}
+
+scaffold_ship_brief() {
+  local id=$1 mode=$2 base_branch=${3:-} branch_name=${4:-}
+  local -a args=("$id" test-project --mode "$mode")
+  [ -z "$base_branch" ] || args+=(--base-branch "$base_branch")
+  [ -z "$branch_name" ] || args+=(--branch-name "$branch_name")
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "${args[@]}" >/dev/null \
+    || fail "fm-brief.sh could not scaffold the $id ship brief"
+  fill_spawn_brief_placeholders "$HOME_DIR/data/$id/brief.md"
+}
+
+test_custom_crew_branch_never_targets_default() {
+  local rec id out status
+  id='pool-crew-default-collision-r11'
+  rec=$(make_case crew-default-collision "$id")
+  read_case_record "$rec"
+  scaffold_ship_brief "$id" direct-PR '' "$DEFAULT_BRANCH"
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a custom crew branch equal to the project default"
+  assert_contains "$out" "which is the project default branch" \
+    "default-branch crew collision did not explain the unsafe target"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "default-branch crew collision published task metadata"
+  pass "spawn refuses a custom crew branch equal to the project default"
+}
+
+test_custom_crew_branch_never_targets_requested_base() {
+  local rec id out status
+  id='pool-crew-base-collision-r1'
+  rec=$(make_case crew-base-collision "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" branch develop "$INITIAL_SHA"
+  git -C "$PROJECT_DIR" push --quiet origin refs/heads/develop:refs/heads/develop
+  scaffold_ship_brief "$id" direct-PR '' develop
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch develop)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a custom crew branch equal to the requested base"
+  assert_contains "$out" "which is the requested base branch" \
+    "requested-base crew collision did not explain the unsafe target"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "requested-base crew collision published task metadata"
+  pass "spawn refuses a custom crew branch equal to the requested base"
+}
+
+test_implicit_crew_branch_never_targets_requested_base() {
+  local rec id out status
+  id='pool-implicit-crew-base-collision-r2'
+  rec=$(make_case implicit-crew-base-collision "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" branch "fm/$id" "$INITIAL_SHA"
+  git -C "$PROJECT_DIR" push --quiet origin "refs/heads/fm/$id:refs/heads/fm/$id"
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch "fm/$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted the implicit crew branch equal to the requested base"
+  assert_contains "$out" "uses crew branch fm/$id, which is the requested base branch" \
+    "implicit crew-base collision did not explain the unsafe target"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "implicit crew-base collision published task metadata"
+  pass "spawn refuses the implicit crew branch equal to the requested base"
+}
+
+scaffold_scout_brief() {
+  local id=$1 base_branch=${2:-}
+  local -a args=("$id" test-project --scout)
+  [ -z "$base_branch" ] || args+=(--base-branch "$base_branch")
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "${args[@]}" >/dev/null \
+    || fail "fm-brief.sh could not scaffold the scout brief"
+  fill_spawn_brief_placeholders "$HOME_DIR/data/$id/brief.md"
+}
+
+fail_named_ref_fetch() {
+  local fakebin=$1 branch=$2 real_git
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<EOF
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" != "+refs/heads/$branch:refs/remotes/origin/$branch" ] || exit 1
+done
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$fakebin/git"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool() {
   local rec id out status lock
   id='pool-remote-seeded-r13'
@@ -676,6 +779,367 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+test_base_branch_resets_to_named_origin_tip() {
+  local rec id out status current_main current_develop branch_head
+  id='pool-base-branch-origin-r6'
+  rec=$(make_case base-branch-origin "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
+  git -C "$CASE_DIR/publisher" add develop-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm develop-tip
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  git -C "$POOL_DIR" tag origin/develop "$INITIAL_SHA"
+  scaffold_ship_brief "$id" no-mistakes develop
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "spawn --base-branch should refresh to the named origin tip"
+  current_main=$(git -C "$POOL_DIR" rev-parse --verify --quiet refs/remotes/origin/main || true)
+  current_develop=$(git -C "$POOL_DIR" rev-parse --verify --quiet refs/remotes/origin/develop)
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ -n "$current_develop" ] || fail "spawn --base-branch develop left origin/develop unresolved"
+  [ "$branch_head" = "$current_develop" ] || fail "spawn --base-branch develop did not reset to origin/develop"
+  [ "$branch_head" != "$(git -C "$POOL_DIR" rev-parse refs/tags/origin/develop)" ] \
+    || fail "spawn --base-branch develop selected a colliding tag"
+  [ -z "$current_main" ] || [ "$branch_head" != "$current_main" ] || fail "spawn --base-branch develop reset to origin/main"
+  assert_grep 'only on develop' "$POOL_DIR/develop-only.txt" \
+    "spawn --base-branch develop omitted the named-branch tip content"
+  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
+    "spawn --base-branch did not record base_branch= for PR targeting"
+  pass "spawn --base-branch resets the pooled worktree to the named origin tip"
+}
+
+test_absent_base_branch_leaves_default_freshen_and_meta() {
+  local rec id out status current meta
+  id='pool-base-branch-absent-r6'
+  rec=$(make_case base-branch-absent "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn without --base-branch should keep today's default freshen"
+  current=$(git -C "$POOL_DIR" rev-parse origin/main)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "spawn without --base-branch did not reset to origin/main"
+  meta=$HOME_DIR/state/$id.meta
+  assert_no_grep 'base_branch=' "$meta" \
+    "spawn without --base-branch recorded a PR-target base_branch="
+  pass "omitting --base-branch keeps default-branch freshen and does not record a PR target"
+}
+
+test_local_only_and_scout_base_branch_use_local_when_origin_lacks_it() {
+  local rec id out status local_sha
+  id='pool-base-branch-local-r7'
+  rec=$(make_case base-branch-local "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" checkout --quiet -B local-only
+  printf 'only local\n' > "$POOL_DIR/local-only.txt"
+  git -C "$POOL_DIR" add local-only.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm local-only
+  local_sha=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
+  scaffold_ship_brief "$id" local-only local-only
+
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch local-only)
+  status=$?
+  expect_code 0 "$status" "local-only spawn --base-branch should use a local branch when origin lacks it"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_sha" ] \
+    || fail "spawn --base-branch local-only did not reset to the local branch tip"
+  if git -C "$POOL_DIR" rev-parse --verify --quiet origin/main >/dev/null; then
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+      || fail "spawn --base-branch local-only fell back to origin/main"
+  fi
+  pass "local-only spawn --base-branch uses a local branch when origin lacks it"
+
+  id='pool-base-branch-local-scout-r8'
+  rec=$(make_case base-branch-local-scout "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" checkout --quiet -B local-scout
+  printf 'only local scout\n' > "$POOL_DIR/local-scout.txt"
+  git -C "$POOL_DIR" add local-scout.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm local-scout
+  local_sha=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
+  scaffold_scout_brief "$id" local-scout
+
+  out=$(run_spawn "$id" --scout --base-branch local-scout)
+  status=$?
+  expect_code 0 "$status" "scout --base-branch should use a local branch when origin lacks it"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_sha" ] \
+    || fail "scout --base-branch did not reset to the local branch tip"
+  assert_grep 'base_branch=local-scout' "$HOME_DIR/state/$id.meta" \
+    "scout did not record its local named base"
+  pass "scout --base-branch uses a local branch when origin lacks it"
+}
+
+test_local_only_base_branch_prefers_local_over_origin() {
+  local rec id out status local_sha remote_sha
+  id='pool-base-branch-local-preferred-r8'
+  rec=$(make_case base-branch-local-preferred "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" checkout --quiet -B develop "$INITIAL_SHA"
+  printf 'local develop\n' > "$POOL_DIR/local-develop.txt"
+  git -C "$POOL_DIR" add local-develop.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm local-develop
+  local_sha=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'remote develop\n' > "$CASE_DIR/publisher/remote-develop.txt"
+  git -C "$CASE_DIR/publisher" add remote-develop.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm remote-develop
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  remote_sha=$(git -C "$CASE_DIR/publisher" rev-parse HEAD)
+  git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
+  scaffold_ship_brief "$id" local-only develop
+
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should use its local named base when origin also has it"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_sha" ] \
+    || fail "local-only spawn did not reset to the local named base"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$remote_sha" ] \
+    || fail "local-only spawn reset to the remote named base"
+  assert_grep 'local develop' "$POOL_DIR/local-develop.txt" \
+    "local-only spawn omitted content from the local named base"
+  pass "local-only spawn prefers the local named base over origin"
+}
+
+test_pr_modes_refuse_base_missing_from_origin() {
+  local rec id out status before mode slug
+  for mode in no-mistakes direct-PR; do
+    case "$mode" in
+      no-mistakes) slug=no-mistakes ;;
+      direct-PR) slug=direct-pr ;;
+    esac
+    id="pool-base-branch-pr-refuse-${slug}-r7"
+    rec=$(make_case "base-branch-pr-refuse-$slug" "$id")
+    read_case_record "$rec"
+    git -C "$POOL_DIR" checkout --quiet -B local-only
+    printf 'only local\n' > "$POOL_DIR/local-only.txt"
+    git -C "$POOL_DIR" add local-only.txt
+    git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -qm local-only
+    git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
+    scaffold_ship_brief "$id" "$mode" local-only
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+    out=$(run_spawn "$id" --mode "$mode" --yolo off --base-branch local-only)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$mode spawn accepted a --base-branch missing from origin"
+    assert_contains "$out" "does not exist on origin" \
+      "$mode spawn did not identify the missing remote base"
+    assert_contains "$out" "$mode delivery requires a remote base" \
+      "$mode spawn did not explain why a local base is insufficient"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "$mode spawn moved HEAD after refusing its missing remote base"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "$mode spawn recorded metadata after refusing its missing remote base"
+  done
+  pass "PR delivery modes refuse a named base missing from origin"
+}
+
+test_base_branch_ref_fetch_failure_refuses_local_fallback() {
+  local rec id out status before
+  id='pool-base-branch-fetch-failure-r6'
+  rec=$(make_case base-branch-fetch-failure "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'remote develop\n' > "$CASE_DIR/publisher/remote-develop.txt"
+  git -C "$CASE_DIR/publisher" add remote-develop.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm remote-develop
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  git -C "$POOL_DIR" checkout --quiet -B develop "$INITIAL_SHA"
+  printf 'local develop\n' > "$POOL_DIR/local-develop.txt"
+  git -C "$POOL_DIR" add local-develop.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm local-develop
+  git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
+  scaffold_ship_brief "$id" no-mistakes develop
+  fail_named_ref_fetch "$FAKEBIN_DIR" develop
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch develop)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn fell back to local develop after its remote ref fetch failed"
+  assert_contains "$out" "could not fetch 'origin/develop'" \
+    "spawn did not clearly refuse an unverifiable remote base"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn changed the pooled worktree after a remote ref fetch failure"
+  pass "a failed remote base fetch refuses instead of falling back to local"
+}
+
+test_missing_base_branch_refuses_without_default_fallback() {
+  local rec id out status before
+  id='pool-base-branch-missing-r6'
+  rec=$(make_case base-branch-missing "$id")
+  read_case_record "$rec"
+  scaffold_ship_brief "$id" no-mistakes no-such-branch
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-branch no-such-branch)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded with a nonexistent --base-branch"
+  assert_contains "$out" "does not exist on origin" \
+    "PR delivery spawn did not clearly refuse a missing remote --base-branch"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after refusing a missing --base-branch"
+  pass "a nonexistent --base-branch refuses without falling back to the default"
+}
+
+test_originless_base_branch_uses_local_or_refuses() {
+  local rec id out status local_sha before
+  id='pool-originless-base-local-r1'
+  rec=$(make_originless_case originless-base-local "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" checkout --quiet -B develop
+  printf 'originless develop\n' > "$POOL_DIR/originless-develop.txt"
+  git -C "$POOL_DIR" add originless-develop.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm originless-develop
+  local_sha=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
+  scaffold_ship_brief "$id" local-only develop
+
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "origin-less local-only spawn should use the local named branch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_sha" ] \
+    || fail "origin-less --base-branch did not reset to the local named branch"
+  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
+    "origin-less --base-branch did not record the requested base"
+
+  id='pool-originless-base-missing-r1'
+  rec=$(make_originless_case originless-base-missing "$id")
+  read_case_record "$rec"
+  scaffold_ship_brief "$id" local-only develop
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch develop)
+  status=$?
+  [ "$status" -ne 0 ] || fail "origin-less spawn skipped a missing requested base"
+  assert_contains "$out" "does not exist locally" \
+    "origin-less --base-branch did not refuse a missing local base"
+  assert_contains "$out" "refusing to launch without that requested base" \
+    "origin-less --base-branch did not refuse a missing requested base"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "origin-less --base-branch moved HEAD after refusing a missing local base"
+
+  id='pool-originless-base-scout-r2'
+  rec=$(make_originless_case originless-base-scout "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" checkout --quiet -B develop
+  printf 'originless scout develop\n' > "$POOL_DIR/originless-scout-develop.txt"
+  git -C "$POOL_DIR" add originless-scout-develop.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm originless-scout-develop
+  local_sha=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git -C "$POOL_DIR" checkout --quiet --detach "$INITIAL_SHA"
+  scaffold_scout_brief "$id" develop
+
+  out=$(run_spawn "$id" --scout --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "origin-less scout should use its local named branch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_sha" ] \
+    || fail "origin-less scout did not reset to its local named branch"
+  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
+    "origin-less scout did not record its local named base"
+  pass "origin-less --base-branch uses a local branch or refuses, never skips"
+}
+
+test_base_branch_refused_on_relaunch_secondmate_and_orca() {
+  local rec id out status
+  id='pool-base-branch-refuse-r6'
+  rec=$(make_case base-branch-refuse "$id")
+  read_case_record "$rec"
+  scaffold_ship_brief "$id" no-mistakes develop
+
+  out=$(run_spawn "$id" --relaunch --base-branch develop)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--relaunch accepted --base-branch"
+  assert_contains "$out" "--relaunch reuses the task's recorded worktree" \
+    "--relaunch did not refuse --base-branch"
+
+  out=$(run_spawn "$id" --secondmate --base-branch develop)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--secondmate accepted --base-branch"
+  assert_contains "$out" "applies only to ship and scout" \
+    "--secondmate did not refuse --base-branch"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --backend orca --base-branch develop)
+  status=$?
+  [ "$status" -ne 0 ] || fail "backend=orca accepted --base-branch"
+  assert_contains "$out" "cannot be combined with backend=orca" \
+    "backend=orca did not refuse --base-branch"
+  pass "--relaunch, --secondmate, and backend=orca refuse --base-branch"
+}
+
+test_local_only_origin_only_base_refuses() {
+  local rec id out status before
+  id='pool-local-only-origin-base-r1'
+  rec=$(make_case local-only-origin-base "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'only on origin develop\n' > "$CASE_DIR/publisher/develop-only.txt"
+  git -C "$CASE_DIR/publisher" add develop-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm origin-only-develop
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  git -C "$PROJECT_DIR" show-ref --verify --quiet refs/heads/develop \
+    && fail "fixture unexpectedly created a local develop on the landing project"
+  scaffold_ship_brief "$id" local-only develop
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch develop)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn accepted an origin-only --base-branch"
+  assert_contains "$out" "cannot be combined with local-only" \
+    "local-only origin-only --base-branch did not name the illegal combination"
+  assert_contains "$out" "exists only on origin" \
+    "local-only origin-only --base-branch did not say the base is origin-only"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "local-only origin-only refuse still freshened the pooled worktree"
+  git -C "$PROJECT_DIR" show-ref --verify --quiet refs/heads/develop \
+    && fail "local-only origin-only refuse created a local develop on the landing project"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "local-only origin-only refuse recorded metadata"
+  pass "local-only --base-branch refuses when the base exists only on origin"
+}
+
+test_scout_base_branch_contract_agrees_and_records() {
+  local rec id out status current_develop current_main
+  id='pool-scout-base-branch-agree-r10'
+  rec=$(make_case scout-base-branch-agree "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
+  git -C "$CASE_DIR/publisher" add develop-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm develop-tip
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  scaffold_scout_brief "$id" develop
+  add_task_contract_marker_decoy "$HOME_DIR/data/$id/brief.md"
+  add_base_contract_decoy "$HOME_DIR/data/$id/brief.md"
+
+  out=$(run_spawn "$id" --scout --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "scout spawn --base-branch should accept a matching generated contract"
+  assert_contains "$out" "spawned $id" "scout spawn did not report success with a matching base contract"
+  current_develop=$(git -C "$POOL_DIR" rev-parse --verify --quiet origin/develop)
+  current_main=$(git -C "$POOL_DIR" rev-parse --verify --quiet origin/main || true)
+  [ -n "$current_develop" ] || fail "scout spawn --base-branch develop left origin/develop unresolved"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current_develop" ] \
+    || fail "scout spawn --base-branch develop did not refresh to origin/develop"
+  [ -z "$current_main" ] || [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$current_main" ] \
+    || fail "scout spawn --base-branch develop refreshed to origin/main"
+  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
+    "scout spawn did not record the named analysis base"
+  pass "scout spawn honors a matching --base-branch contract from Definition of done"
+}
+
 # Re-lay a case's pooled worktree as a managed Treehouse slot: <pool>/<slot>/<repo>
 # with the pool's state file beside the slot, which is the shape fm-spawn claims
 # for its task. Rewrites POOL_DIR to the relocated checkout.
@@ -744,6 +1208,8 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool
+test_custom_crew_branch_never_targets_requested_base
+test_implicit_crew_branch_never_targets_requested_base
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
@@ -763,5 +1229,17 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_base_branch_resets_to_named_origin_tip
+test_absent_base_branch_leaves_default_freshen_and_meta
+test_local_only_and_scout_base_branch_use_local_when_origin_lacks_it
+test_local_only_base_branch_prefers_local_over_origin
+test_pr_modes_refuse_base_missing_from_origin
+test_base_branch_ref_fetch_failure_refuses_local_fallback
+test_missing_base_branch_refuses_without_default_fallback
+test_originless_base_branch_uses_local_or_refuses
+test_base_branch_refused_on_relaunch_secondmate_and_orca
+test_local_only_origin_only_base_refuses
+test_scout_base_branch_contract_agrees_and_records
+test_custom_crew_branch_never_targets_default
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

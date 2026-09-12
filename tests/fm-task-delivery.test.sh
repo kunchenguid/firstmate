@@ -51,12 +51,27 @@ write_brief() {  # <home> <id> [<recorded-mode>]
   } > "$home/data/$id/brief.md"
 }
 
+write_base_contract() {  # <brief> <base-branch>
+  local brief=$1 base=$2
+  cat >> "$brief" <<EOF
+<!-- fm-generated-contract-boundary -->
+<!-- fm-generated-contract -->
+# Definition of done
+Base branch contract: base_branch=$base
+<!-- fm-generated-contract-end -->
+EOF
+}
+
 fill_brief_subsections() {  # <file> <intent> <spec>
   local file=$1 intent=$2 spec=$3 content
   content=$(cat "$file")
   content=${content//'{TASK}'/$intent}
   content=${content//'{FIRSTMATE_SPEC}'/$spec}
   printf '%s\n' "$content" > "$file"
+}
+
+extract_dod_contract() {  # <generated-public-output>
+  awk '/^# Definition of done$/ { emit=1 } emit && $0 !~ /^<!-- fm-generated-contract/ { print }' "$1"
 }
 
 run_spawn() {  # <home> <fakebin> <spawn-args...>
@@ -154,6 +169,44 @@ EOF
   assert_contains "$out" "records no delivery contract line" "a legacy brief did not warn about its missing contract"
   assert_not_contains "$out" "delivery mismatch" "a legacy brief was treated as a mismatch"
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
+}
+
+# The brief's Base branch contract is a spawn-time agreement check only.
+# Metadata remains the source of truth after launch.
+test_spawn_refuses_a_brief_base_mismatch() {
+  local rec home proj fakebin out status
+  rec=$(make_home base-agreement)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" base-mismatch-e1 no-mistakes
+  write_base_contract "$home/data/base-mismatch-e1/brief.md" develop
+  out=$(run_spawn "$home" "$fakebin" base-mismatch-e1 "$proj" claude --mode no-mistakes --yolo off --base-branch release)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a brief/spawn base mismatch should exit non-zero"
+  assert_contains "$out" "base mismatch for base-mismatch-e1" "base mismatch refusal did not name the task"
+  assert_contains "$out" "the brief says base_branch=develop but this spawn passed --base-branch release" \
+    "base mismatch refusal did not show both sides of the disagreement"
+  assert_absent "$home/state/base-mismatch-e1.meta" "mismatched base spawn wrote task metadata"
+
+  write_brief "$home" base-omitted-e2 no-mistakes
+  write_base_contract "$home/data/base-omitted-e2/brief.md" develop
+  out=$(run_spawn "$home" "$fakebin" base-omitted-e2 "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a brief with a recorded base and no --base-branch should exit non-zero"
+  assert_contains "$out" "the brief says base_branch=develop but this spawn passed no --base-branch" \
+    "omitted-flag base mismatch did not name both values"
+  assert_absent "$home/state/base-omitted-e2.meta" "omitted-flag base mismatch wrote task metadata"
+
+  write_brief "$home" base-agree-e3 no-mistakes
+  write_base_contract "$home/data/base-agree-e3/brief.md" develop
+  out=$(run_spawn "$home" "$fakebin" base-agree-e3 "$proj" claude --mode no-mistakes --yolo off --base-branch develop)
+  assert_not_contains "$out" "base mismatch" "an agreeing base was reported as a mismatch"
+
+  write_brief "$home" base-legacy-e4 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" base-legacy-e4 "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "base mismatch" "a brief with no base contract was treated as a mismatch"
+  pass "fm-spawn: the brief's recorded base and the spawn's --base-branch must agree"
 }
 
 # The registry is the captain's standing posture, so dropping below its rigor is
@@ -308,6 +361,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
   local home meta out sendroot payload mode id brief_dod delivered_dod
+  local named_proj origin_only local_only_proj status stale_remote_sha
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -363,11 +417,96 @@ STUB
       || fail "$mode: ordinary ship brief generation should succeed"
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
     delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
-    awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$brief_dod"
-    awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
+    extract_dod_contract "$home/data/$id/brief.md" > "$brief_dod"
+    extract_dod_contract "$payload" > "$delivered_dod"
     cmp -s "$brief_dod" "$delivered_dod" \
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
   done
+
+  named_proj="$TMP_ROOT/promote-dod/named-base-proj"
+  git init -q "$named_proj"
+  git -C "$named_proj" -c user.email=t@t -c user.name=t commit --allow-empty -qm init
+  git -C "$named_proj" branch develop
+  git init -q --bare "$named_proj.origin.git"
+  git -C "$named_proj" remote add origin "$named_proj.origin.git"
+  git -C "$named_proj" push -q origin develop
+  git -C "$named_proj" fetch -q origin
+  for mode in no-mistakes direct-PR local-only; do
+    id="promote-named-base-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+    meta="$home/state/$id.meta"
+    printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=develop\n' \
+      "$id" "$named_proj" "$named_proj" > "$meta"
+    FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout --base-branch develop >/dev/null 2>&1 \
+      || fail "$mode: named-base scout brief generation should succeed"
+    fill_brief_subsections "$home/data/$id/brief.md" \
+      "Ship the named-base change." "Preserve the selected base."
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off >/dev/null 2>&1 \
+      || fail "$mode: named-base promotion should succeed"
+    payload="$home/data/$id/ship-instructions.md"
+    if [ "$mode" = local-only ]; then
+      assert_grep "Return to a clean \`develop\` base" "$payload" \
+        "local-only promotion did not select the local recorded base"
+    else
+      assert_grep "Return to a clean \`origin/develop\` base" "$payload" \
+        "$mode promotion did not select the remote recorded base"
+    fi
+  done
+
+  stale_remote_sha=$(git -C "$named_proj" rev-parse refs/remotes/origin/develop)
+  git -C "$named_proj" push -q origin --delete develop
+  git -C "$named_proj" update-ref refs/remotes/origin/develop "$stale_remote_sha"
+  id=promote-stale-remote-base
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=develop\n' \
+    "$id" "$named_proj" "$named_proj" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout --base-branch develop >/dev/null 2>&1 \
+    || fail "stale-remote-base scout brief generation should succeed"
+  fill_brief_subsections "$home/data/$id/brief.md" "Reject stale remote." "Require live base."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted a deleted recorded remote base from a stale tracking ref"
+  assert_contains "$out" "requires recorded base 'develop' on origin" \
+    "promotion did not revalidate the recorded remote base"
+  assert_grep 'kind=scout' "$home/state/$id.meta" \
+    "stale remote-base refusal still flipped the task kind"
+
+  origin_only="$TMP_ROOT/promote-dod/origin-only-proj"
+  git init -q "$origin_only"
+  git -C "$origin_only" -c user.email=t@t -c user.name=t commit --allow-empty -qm init
+  git init -q --bare "$origin_only.origin.git"
+  git -C "$origin_only" remote add origin "$origin_only.origin.git"
+  git -C "$origin_only" branch develop
+  git -C "$origin_only" push -q origin develop
+  git -C "$origin_only" branch -D develop
+  git -C "$origin_only" fetch -q origin
+  id=promote-origin-only-local
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=develop\n' \
+    "$id" "$origin_only" "$origin_only" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout --base-branch develop >/dev/null 2>&1 \
+    || fail "origin-only scout brief generation should succeed"
+  fill_brief_subsections "$home/data/$id/brief.md" "Promote origin-only." "Refuse local-only."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode local-only --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only promotion accepted an origin-only recorded base"
+  assert_contains "$out" "exists only on origin" \
+    "local-only promotion of an origin-only base did not name the missing local branch"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "refused origin-only local promotion still flipped kind"
+
+  local_only_proj="$TMP_ROOT/promote-dod/local-only-proj"
+  git init -q "$local_only_proj"
+  git -C "$local_only_proj" -c user.email=t@t -c user.name=t commit --allow-empty -qm init
+  git -C "$local_only_proj" branch develop
+  id=promote-local-only-pr
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=develop\n' \
+    "$id" "$local_only_proj" "$local_only_proj" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout --base-branch develop >/dev/null 2>&1 \
+    || fail "local-only scout brief generation should succeed"
+  fill_brief_subsections "$home/data/$id/brief.md" "Promote local-only." "Refuse PR mode."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "no-mistakes promotion accepted a local-only recorded base"
+  assert_contains "$out" "on origin" \
+    "PR-mode promotion of a local-only base did not require the remote base"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "refused local-only PR promotion still flipped kind"
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
   assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
@@ -794,6 +933,7 @@ test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
+test_spawn_refuses_a_brief_base_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract

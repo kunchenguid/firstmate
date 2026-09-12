@@ -418,30 +418,19 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def strip_title_artifacts:
       sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
-      | sub("[[:space:]]+-[[:space:]]+local main$"; "")
-      | sub("[[:space:]]+local main$"; "")
       | sub("[[:space:]]+-[[:space:]]*$"; "");
-    def clean_title:
+    def strip_local_title_artifact:
+      sub("[[:space:]]+-[[:space:]]+local-landing:[^[:space:]]+$"; "")
+      | sub("[[:space:]]+-[[:space:]]+local main$"; "");
+    def clean_title($is_local_landing):
       strip_trailing_metadata
       | strip_title_artifacts
+      | if $is_local_landing then strip_local_title_artifact else . end
       | gsub("[[:space:]]+"; " ")
       | trim;
-    def title_of($rest):
-      $rest
-      | gsub(wrapped_url_pattern; "")
-      | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
-      | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
-      | clean_title;
     def blocked_by_ids($rest):
       [ $rest | scan("blocked-by:[[:space:]]+(?<id>[^[:space:])]+)") | .[0] ]
       | reduce .[] as $id ([]; if index($id) == null then . + [$id] else . end);
-    def blocked_reason($rest):
-      cap($rest; ".*blocked-by:[[:space:]]*[^[:space:])]+[[:space:]]+-[[:space:]]*(?<v>.*)$") as $reason
-      | if $reason == null then null
-        else ($reason | clean_title | if . == "" then null else . end)
-        end;
-    def local_note($rest):
-      cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
     def completion($rest):
       (metadata_word($rest; "merged")) as $merged
       | (metadata_word($rest; "reported")) as $reported
@@ -450,6 +439,25 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         elif $reported != null then {verb:"reported",date:$reported}
         elif $done != null then {verb:"done",date:$done}
         else {verb:null,date:null} end;
+    def local_note($rest):
+      if (completion($rest).verb == "done") then
+        (cap(($rest | strip_trailing_metadata); ".*[[:space:]]+-[[:space:]]+local-landing:(?<v>[^[:space:]]+)$") as $explicit
+         | if $explicit == null then
+             cap(($rest | strip_trailing_metadata); ".*[[:space:]]+-[[:space:]]+local (?<v>main)$")
+           else $explicit end) as $base
+        | if $base == null then null else "local " + $base end
+      else null end;
+    def title_of($rest):
+      $rest
+      | gsub(wrapped_url_pattern; "")
+      | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
+      | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
+      | clean_title(local_note($rest) != null);
+    def blocked_reason($rest):
+      cap($rest; ".*blocked-by:[[:space:]]*[^[:space:])]+[[:space:]]+-[[:space:]]*(?<v>.*)$") as $reason
+      | if $reason == null then null
+        else ($reason | clean_title(false) | if . == "" then null else . end)
+        end;
     def row_match($line):
       (($line | capture("^[-*][[:space:]]+\\[(?<check>[ xX])\\][[:space:]]+(?<id>[^[:space:]]+)[[:space:]]+-[[:space:]]+(?<rest>.*)$")?) //
        (($line | capture("^[-*][[:space:]]+\\*\\*(?<id>[^*]+)\\*\\*[[:space:]]+-[[:space:]]+(?<rest>.*)$")?)
@@ -513,11 +521,14 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         if (.body_lines | length) > 0 then
           .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
           | .local_note = (.local_note
-              // (if any(.body_lines[];
-                    test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
-                  then null
-                  else cap(.body_lines[-1]; "^(?<v>local main)$")
-                  end))
+              // (cap(.body_lines[-1]; "^(?<v>local-landing:[^[:space:]]+)$") as $explicit
+                  | if $explicit != null and (.completion.verb == "done") then
+                      "local " + ($explicit | sub("^local-landing:"; ""))
+                    elif any(.body_lines[];
+                          test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
+                    then null
+                    else cap(.body_lines[-1]; "^(?<v>local main)$")
+                    end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | .records as $records

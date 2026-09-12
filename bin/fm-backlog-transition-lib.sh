@@ -992,7 +992,13 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        --note)
+          case "${args[1]}" in
+            local%20main) true ;;
+            local-landing:*) git check-ref-format --branch "${args[1]#local-landing:}" >/dev/null 2>&1 ;;
+            *) false ;;
+          esac
+          ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -1090,8 +1096,8 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     shift
   fi
   for arg in "$@"; do
-    if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
-      serialized_args+=("local%20main")
+    if [ "$previous_arg" = --note ] && [ "$arg" = 'local main' ]; then
+      serialized_args+=(local%20main)
     else
       serialized_args+=("$arg")
     fi
@@ -1167,7 +1173,9 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
-    args[1]="local main"
+    case "${args[1]}" in
+      local%20*) args[1]="local ${args[1]#local%20}" ;;
+    esac
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then

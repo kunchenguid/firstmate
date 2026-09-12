@@ -8,7 +8,7 @@
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
-# completion links (the PR, the report path, a local-main note) live only in the
+# completion links (the PR, the report path, or a local-landing note) live only in the
 # record being removed, the intended transition is recorded in
 # state/<id>.backlog-close first, so a process killed between the halves leaves
 # the next session start enough to finish it; a landed close removes that record.
@@ -40,9 +40,9 @@
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# already present in the up-to-date recorded landing base or default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
+# on a remote yet the change is fully in the landing base.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
@@ -59,9 +59,10 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
-# local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge after configured approval) as a fallback
-# for the common case where there is no remote at all.
+# local-only projects additionally accept work merged into the local landing
+# base (the recorded base, or the default branch when none is recorded; firstmate
+# performs that merge after configured approval) as a fallback for the common
+# case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -1356,17 +1357,23 @@ pr_is_merged() {
   return 0
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# Is the branch's content already present in the up-to-date recorded landing
+# base (or the default branch when none is recorded)? Fetches first, then 3-way
+# merges that base with HEAD: when HEAD introduces nothing the base does not
+# already contain (e.g. its change landed via squash) the merged tree equals the
+# base's tree. This isolates branch-only changes, so unrelated commits the base
+# gained past the merge-base do not count as "added". Returns non-zero when
+# inconclusive (no base ref, or a merge conflict), so the caller refuses rather
+# than guesses.
 content_in_default() {
   local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+  name=$(meta_value "$META" base_branch || true)
+  if [ -z "$name" ]; then
+    name=$(default_branch) || return 1
+  fi
+  if [ "$MODE" = local-only ] && git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+    ref="refs/heads/$name"
+  elif git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
@@ -1384,8 +1391,8 @@ content_in_default() {
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# recorded landing base or default branch (fallback, which also covers the no-PR
+# and gh-error paths). False only for genuinely unlanded work.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
@@ -1393,7 +1400,7 @@ work_is_landed() {
 }
 
 # The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
+# deliverable is its report, a local-only ship lands on its recorded base, and every
 # other ship carries the PR recorded on its own record.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
@@ -1406,7 +1413,10 @@ backlog_done_args() {
       ;;
     *)
       if [ "$MODE" = local-only ]; then
-        BACKLOG_DONE_ARGS=(--note "local main")
+        local landing_base
+        landing_base=$(meta_value "$META" base_branch || true)
+        [ -n "$landing_base" ] || landing_base=main
+        BACKLOG_DONE_ARGS=(--note "local-landing:$landing_base")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
       fi
@@ -1656,7 +1666,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed landing_base unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1684,21 +1694,29 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
+    landing_base=$(meta_value "$META" base_branch || true)
+    if [ -z "$landing_base" ]; then
+      landing_base=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+    fi
+    if ! git -C "$WT" show-ref --verify --quiet "refs/heads/$landing_base"; then
+      echo "REFUSED: cannot inspect worktree $WT for commits not on $landing_base: refs/heads/$landing_base is missing." >&2
+      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "refs/heads/$landing_base" -- 2>/dev/null); then
+      if worktree_safety_blocked_by_lock "commits not on $landing_base"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
-      echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
+      echo "REFUSED: cannot inspect worktree $WT for commits not on $landing_base." >&2
       echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
+      echo "REFUSED: local-only worktree $WT has work not yet merged into $landing_base and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$landing_base" "$unmerged" >&2
+      echo "Merge the branch into local $landing_base first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   elif [ -n "$dirty" ]; then

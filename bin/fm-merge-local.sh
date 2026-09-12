@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
-# project's default branch to the crewmate's fm/<id> branch.
+# landing branch to the crewmate's recorded branch.
+# The crew branch is the last `Crew branch: branch=<name>` in
+# data/<id>/brief.md (written by bin/fm-brief.sh --branch-name). The landing
+# branch is state/<id>.meta's base_branch=. Missing values retain the historical
+# fm/<id> crew branch and default landing branch.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -21,6 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
@@ -45,6 +50,8 @@ META="$STATE/$ID.meta"
 # record, because the wrong actor is refused for its role whatever it says.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-brief-contract-lib.sh
+. "$SCRIPT_DIR/fm-brief-contract-lib.sh"
 fm_lease_forbid_branch "local-only landing (fm-merge-local)"
 
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -90,28 +97,58 @@ default_branch() {
   return 1
 }
 
+BRIEF="$DATA/$ID/brief.md"
 BRANCH="fm/$ID"
-git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
+if [ -f "$BRIEF" ]; then
+  recorded_branch=$(fm_brief_crew_branch "$BRIEF")
+  if [ -n "$recorded_branch" ]; then
+    git check-ref-format --branch "$recorded_branch" >/dev/null 2>&1 || {
+      echo "error: $BRIEF records an invalid crew branch: $recorded_branch" >&2
+      exit 1
+    }
+    BRANCH=$recorded_branch
+  fi
+fi
+BRANCH_REF="refs/heads/$BRANCH"
+git -C "$PROJ" rev-parse --verify --quiet "$BRANCH_REF" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+recorded_base=$(grep '^base_branch=' "$META" | tail -n 1 | cut -d= -f2- || true)
+if [ -n "$recorded_base" ]; then
+  git check-ref-format --branch "$recorded_base" >/dev/null 2>&1 || {
+    echo "error: $META records an invalid base branch: $recorded_base" >&2
+    exit 1
+  }
+  TARGET=$recorded_base
+  DEFAULT=$(default_branch || true)
+else
+  DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+  TARGET=$DEFAULT
+fi
+TARGET_REF="refs/heads/$TARGET"
+git -C "$PROJ" rev-parse --verify --quiet "$TARGET_REF" >/dev/null || { echo "error: landing branch $TARGET does not exist in $PROJ" >&2; exit 1; }
 
-# The project's main checkout must be on its default branch and clean, so the
-# fast-forward lands predictably (firstmate never writes here otherwise).
+# The project's main checkout must stay on its default branch unless it is
+# already on the landing target. firstmate never writes here otherwise.
 cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
-[ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
+if [ "$cur" != "$TARGET" ] && { [ -z "$DEFAULT" ] || [ "$cur" != "$DEFAULT" ]; }; then
+  echo "error: $PROJ is on '$cur', expected default branch '${DEFAULT:-unresolved}' or landing branch '$TARGET'; cannot merge safely" >&2
+  exit 1
+fi
 if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
   echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
   exit 1
 fi
 
-# Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
-if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
-  echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
-  echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
+# Clean fast-forward only: TARGET must be an ancestor of BRANCH.
+branch_sha=$(git -C "$PROJ" rev-parse "$BRANCH_REF")
+target_sha=$(git -C "$PROJ" rev-parse "$TARGET_REF")
+if ! git -C "$PROJ" merge-base --is-ancestor "$target_sha" "$branch_sha"; then
+  echo "REFUSED: $BRANCH is not a fast-forward of $TARGET (it has diverged)." >&2
+  echo "Have the crewmate rebase $BRANCH onto $TARGET, then retry." >&2
   exit 1
 fi
 
-before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+before=$(git -C "$PROJ" rev-parse --short "$target_sha")
 hold_status=0
 FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
   "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" --distinguish-absent || hold_status=$?
@@ -127,9 +164,20 @@ case "$hold_status" in
     ;;
 esac
 merge_status=0
-git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null || merge_status=$?
+if [ "$cur" = "$TARGET" ]; then
+  git -C "$PROJ" merge --ff-only "$branch_sha" >/dev/null || merge_status=$?
+else
+  target_worktree=$(git -C "$PROJ" for-each-ref --format='%(worktreepath)' "$TARGET_REF")
+  if [ -n "$target_worktree" ]; then
+    echo "error: $TARGET is checked out in $target_worktree; refusing to update-ref it" >&2
+    exit 1
+  fi
+  # Stay on the default checkout and fast-forward the named base in place.
+  git -C "$PROJ" update-ref -m "fm-merge-local: fast-forward $TARGET to $BRANCH" \
+    "$TARGET_REF" "$branch_sha" "$target_sha" || merge_status=$?
+fi
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
-after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
-echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+after=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
+echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"
