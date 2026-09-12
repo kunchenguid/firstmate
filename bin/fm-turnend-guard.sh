@@ -72,6 +72,30 @@
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
 #      fail-open only for an already verified failure episode.
+#
+# Two further bounds keep --claude mode from blocking a session indefinitely
+# (2026-09-12: a lock-refused session was blocked on every turn for ~30 turns,
+# because the auto-arm is inert by contract when this session does not hold
+# state/.lock, so the epoch ledger never advanced and the budget above never
+# counted). Neither weakens the ordinary contract: the ordinary path still
+# blocks and still needs a verified failure episode for its attended fail-open.
+#   - LOCK-REFUSED STAND-DOWN: when state/.lock names a LIVE harness process
+#     outside this session's ancestry (bin/fm-session-lock-lib.sh), this session
+#     is read-only by the session-start contract and may not arm, steer, or
+#     repair supervision, and its Stop auto-arm exits without claiming. The
+#     guard blocks exactly once per (session, lock owner) with the owner evidence
+#     so the model reports it, then allows every later stop while that owner
+#     holds the lock, printing the evidence as a systemMessage each time. A
+#     stale (dead) owner, a missing lock, or a malformed lock is NOT this case:
+#     those remain recoverable by the auto-arm or the model and keep the
+#     ordinary path.
+#   - BLOCK CEILING: FM_CLAUDE_TURNEND_BLOCK_CEILING (default 6, always above the
+#     budget) bounds blocked stops per session between positive recoveries,
+#     counted across every epoch. Once reached, the stop is allowed with a loud
+#     systemMessage naming the supervision need and the count, and every later
+#     stop stays allowed (and loud) until positive watcher recovery resets the
+#     budget file, so a broken or unregistered Stop hook can wedge a session for
+#     at most the ceiling, never indefinitely.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,9 +110,14 @@ CURSOR_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
+BLOCK_CEILING=${FM_CLAUDE_TURNEND_BLOCK_CEILING:-6}
 case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
+case "$BLOCK_CEILING" in ''|*[!0-9]*|0) BLOCK_CEILING=6 ;; esac
+# The ceiling is an outer bound on the budget's bounded progression, never a
+# way to shorten it.
+[ "$BLOCK_CEILING" -gt "$BLOCK_BUDGET" ] || BLOCK_CEILING=$((BLOCK_BUDGET + 3))
 
 for arg in "$@"; do
   case "$arg" in
@@ -167,6 +196,37 @@ budget_reset() {
   rm -f "$BUDGET_FILE" 2>/dev/null || true
   fm_lock_release "$BUDGET_LOCK"
 }
+# The budget file is key=value lines: session, count, and epoch on lines 1-3
+# (the classic record), then blocks (blocked stops this session since the last
+# positive recovery, every epoch) and refused_owner (the live foreign lock
+# holder this session already blocked once for). Callers hold BUDGET_LOCK.
+budget_key() {  # <key>
+  sed -n "s/^$1=//p" "$BUDGET_FILE" 2>/dev/null | head -1
+}
+budget_numeric() {  # <value>
+  case "$1" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac
+}
+budget_write() {  # <count> <epoch> <blocks> [refused-owner]
+  local tmp="$BUDGET_FILE.tmp.$$"
+  if ! {
+      printf 'session=%s\ncount=%s\nepoch=%s\nblocks=%s\n' "$SESSION_ID" "$1" "$2" "$3"
+      [ -z "${4:-}" ] || printf 'refused_owner=%s\n' "$4"
+    } > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$BUDGET_FILE" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+}
+need_desc() {
+  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
+    printf '%s task(s) in flight' "$FM_SUP_IN_FLIGHT"
+  elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
+    printf '%s process-event source(s) registered' "$FM_SUP_SOURCES"
+  else
+    printf 'X-mode relay polling active'
+  fi
+}
 
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
@@ -198,8 +258,26 @@ if [ "$FM_SUP_WATCHER_FRESH" = true ] && fm_afk_daemon_owns_supervision "$STATE"
   allow_supervised_stop
 fi
 
+# Count this blocked stop toward the session's block ceiling. Best effort: a
+# contended budget lock skips the count rather than delaying the block, and a
+# record from another session is left for budget_account_current_epoch to
+# replace.
+budget_record_block() {
+  local count epoch blocks
+  [ "$CLAUDE_MODE" -eq 1 ] || return 0
+  fm_lock_try_acquire "$BUDGET_LOCK" || return 0
+  if [ "$(budget_key session)" = "$SESSION_ID" ]; then
+    count=$(budget_numeric "$(budget_key count)")
+    epoch=$(budget_key epoch)
+    blocks=$(budget_numeric "$(budget_key blocks)")
+    budget_write "$count" "$epoch" "$((blocks + 1))" "$(budget_key refused_owner)" || true
+  fi
+  fm_lock_release "$BUDGET_LOCK"
+}
+
 block_stop() {
   local afk x_mode reason rule
+  budget_record_block
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
@@ -234,13 +312,18 @@ fi
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
+# Session-lock identity is needed only on this path (the lock-refused
+# stand-down below), so the other harness adapters' fixtures need not carry it.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 budget_account_current_epoch() {
-  local current_epoch outcome old_session old_count old_epoch tmp initialized
+  local current_epoch outcome old_session old_count old_epoch old_blocks initialized
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
   current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   initialized=0
   COUNT=0
+  old_blocks=0
   if [ -f "$BUDGET_FILE" ]; then
     old_session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
     old_count=$(sed -n '2s/^count=//p' "$BUDGET_FILE" 2>/dev/null || true)
@@ -250,6 +333,7 @@ budget_account_current_epoch() {
     esac
     if [ "$old_session" = "$SESSION_ID" ]; then
       COUNT=$old_count
+      old_blocks=$(budget_numeric "$(budget_key blocks)")
       if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ]; then
         :
       else
@@ -270,14 +354,12 @@ budget_account_current_epoch() {
       *) COUNT=1 ;;
     esac
   fi
-  tmp="$BUDGET_FILE.tmp.$$"
-  if ! printf 'session=%s\ncount=%s\nepoch=%s\n' "$SESSION_ID" "$COUNT" "$current_epoch" > "$tmp" 2>/dev/null \
-    || ! mv -f "$tmp" "$BUDGET_FILE" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null || true
+  # The refused_owner line is deliberately dropped here: this is the ordinary
+  # path, so any earlier foreign lock holder is gone.
+  if ! budget_write "$COUNT" "$current_epoch" "$old_blocks"; then
     fm_lock_release "$BUDGET_LOCK"
     return 1
   fi
-  rm -f "$tmp" 2>/dev/null || true
   BUDGET_INITIALIZED_FAILURE=$initialized
   fm_lock_release "$BUDGET_LOCK"
   return 0
@@ -421,6 +503,77 @@ failure_episode_verified() {
   esac
 }
 
+# --- lock-refused stand-down ---------------------------------------------------
+# True (and sets LOCK_REFUSED_PID / LOCK_REFUSED_ALLOW) only when state/.lock
+# names a live harness process that is not in this session's own ancestry: the
+# session-start contract makes this session read-only, so it must not arm,
+# steer, or repair supervision, and bin/fm-claude-stop-autoarm.sh exits without
+# claiming on the same evidence. Waiting for a claim here would wait forever.
+# LOCK_REFUSED_ALLOW=0 on the first sight of an owner in this session (block
+# once with the evidence so the model reports it), 1 on every later stop while
+# the same owner holds the lock (allow, with the evidence as a systemMessage).
+# A new owner pid starts over. A dead owner, missing lock, or malformed lock
+# returns 1 and keeps the ordinary path, which the auto-arm can still recover.
+LOCK_REFUSED_PID=
+LOCK_REFUSED_ALLOW=0
+lock_refused_stand_down() {
+  local lock_pid count epoch blocks
+  fm_session_lock_owned_by_self "$STATE" && return 1
+  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$lock_pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_harness_pid_alive "$lock_pid" || return 1
+  LOCK_REFUSED_PID=$lock_pid
+  fm_lock_try_acquire "$BUDGET_LOCK" || return 1
+  if [ "$(budget_key session)" = "$SESSION_ID" ]; then
+    if [ "$(budget_key refused_owner)" = "$lock_pid" ]; then
+      fm_lock_release "$BUDGET_LOCK"
+      LOCK_REFUSED_ALLOW=1
+      return 0
+    fi
+    count=$(budget_numeric "$(budget_key count)")
+    epoch=$(budget_key epoch)
+    blocks=$(budget_numeric "$(budget_key blocks)")
+  else
+    count=0
+    epoch=
+    blocks=0
+  fi
+  if ! budget_write "$count" "$epoch" "$((blocks + 1))" "$lock_pid"; then
+    fm_lock_release "$BUDGET_LOCK"
+    return 1
+  fi
+  fm_lock_release "$BUDGET_LOCK"
+  LOCK_REFUSED_ALLOW=0
+  return 0
+}
+
+block_stop_lock_refused() {
+  local rule
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$rule"
+    printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF, AND THIS SESSION CANNOT REPAIR IT\n'
+    printf '●  %s, but no live watcher holds this home lock (last beat: %s).\n' "$(need_desc)" "$FM_SUP_BEACON_DESC"
+    printf '●  Another live session (harness pid %s) holds the home session lock, so this session is read-only: the Stop-owned auto-arm is inert here by contract, and this session must not arm, steer, or repair supervision.\n' "$LOCK_REFUSED_PID"
+    printf '●  Report this to the captain now - supervision belongs to the session holding the lock (bin/fm-lock.sh status names it). This block happens once; the next stop is allowed while that session holds the lock.\n'
+    printf '●%s\n' "$rule"
+  } >&2
+  exit 2
+}
+
+if lock_refused_stand_down; then
+  # The owning session's own auto-arm may have just brought a watcher up.
+  if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+    allow_supervised_stop
+  fi
+  if [ "$LOCK_REFUSED_ALLOW" -eq 1 ]; then
+    printf '{"systemMessage":"FIRSTMATE: this session is read-only for supervision - another live session (harness pid %s) holds the home lock while %s and no watcher beacon is fresh (last beat: %s). Supervision belongs to that session; this one cannot arm or repair it, so the turn is allowed. Run bin/fm-lock.sh status to see the owner."}\n' \
+    "$LOCK_REFUSED_PID" "$(need_desc)" "$FM_SUP_BEACON_DESC"
+    exit 0
+  fi
+  block_stop_lock_refused
+fi
+
 i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
@@ -445,15 +598,26 @@ budget_account_current_epoch || block_stop
 terminal_fail_open
 terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then
-  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
-    NEED_DESC="$FM_SUP_IN_FLIGHT task(s) in flight"
-  elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
-    NEED_DESC="$FM_SUP_SOURCES process-event source(s) registered"
-  else
-    NEED_DESC="X-mode relay polling active"
-  fi
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$(need_desc)"
   exit 0
 fi
 [ "$terminal_status" -eq 2 ] && exit 0
+
+# --- block ceiling --------------------------------------------------------------
+# The ordinary budget above only advances when the auto-arm ledger does, so a
+# Stop hook that never runs (unregistered, parked, crashing before its claim)
+# would otherwise re-block this session on every turn forever. Once this
+# session has been blocked BLOCK_CEILING times since its last positive
+# recovery, allow the stop loudly instead; positive watcher recovery resets the
+# budget file and with it this ceiling.
+BLOCKS_SO_FAR=0
+if fm_lock_try_acquire "$BUDGET_LOCK"; then
+  [ "$(budget_key session)" != "$SESSION_ID" ] || BLOCKS_SO_FAR=$(budget_numeric "$(budget_key blocks)")
+  fm_lock_release "$BUDGET_LOCK"
+fi
+if [ "$BLOCKS_SO_FAR" -ge "$BLOCK_CEILING" ]; then
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS NOT RUNNING: %s, and this session'"'"'s turn end was blocked %s times without the Stop-owned auto-arm ever establishing a watcher (last beat: %s). The turn is allowed so the session cannot wedge; keep it attended and diagnose the Stop-hook registration and watcher startup before relying on unattended supervision."}\n' \
+    "$(need_desc)" "$BLOCKS_SO_FAR" "$FM_SUP_BEACON_DESC"
+  exit 0
+fi
 block_stop

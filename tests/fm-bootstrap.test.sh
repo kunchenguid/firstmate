@@ -301,7 +301,7 @@ treehouse --lease support is accepted silently^1^0.2.4^1^manual^empty^^
 treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
 compatible tasks-axi is silent by default^1^0.2.4^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+incompatible tasks-axi is required by default^1^0.1.0^1^-^grep^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without archive-body is required by default^1^0.2.4:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without multi-id mv is required by default^1^0.2.4:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 missing quota-axi is required by default^1^0.2.4^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
@@ -404,10 +404,10 @@ ROWS
 }
 
 test_tasks_axi_min_version() {
-  local label version mode case_dir fakebin out missing n archive_body multi_id
+  local label version mode evidence case_dir fakebin out missing n archive_body multi_id
   missing='MISSING: tasks-axi (install: npm install -g tasks-axi)'
   n=0
-  while IFS='^' read -r label version mode; do
+  while IFS='^' read -r label version mode evidence; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/tasks-axi-$n"
@@ -435,20 +435,104 @@ test_tasks_axi_min_version() {
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
       missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
+        # A build below the floor is named with its path and version so the
+        # upgrade request points at the exact install that failed; a build at
+        # the floor that only fails the feature probe has no floor evidence to
+        # add, so the MISSING line stands alone exactly as before.
+        if [ -n "$evidence" ]; then
+          [ "$out" = "$missing
+BOOTSTRAP_INFO: tasks-axi floor 0.2.4 unmet by every PATH candidate: $fakebin/tasks-axi $evidence" ] \
+            || fail "$label: expected the MISSING line plus floor evidence, got: $out"
+        else
+          [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out"
+        fi
+        ;;
     esac
   done <<'ROWS'
-minimum tasks-axi version is accepted^0.2.4^empty
-newer tasks-axi patch is accepted^0.2.5^empty
-newer tasks-axi minor is accepted^0.3.0^empty
-newer tasks-axi major is accepted^1.0.0^empty
-older tasks-axi with features reports an upgrade^0.1.1^missing
-the patch just below the floor reports an upgrade^0.2.3^missing
-unparseable tasks-axi version reports an upgrade^tasks-axi development build^missing
-tasks-axi at floor without archive-body reports an upgrade^0.2.4:noarchive^missing
-tasks-axi at floor without multi-id reports an upgrade^0.2.4:nomulti^missing
+minimum tasks-axi version is accepted^0.2.4^empty^
+newer tasks-axi patch is accepted^0.2.5^empty^
+newer tasks-axi minor is accepted^0.3.0^empty^
+newer tasks-axi major is accepted^1.0.0^empty^
+older tasks-axi with features reports an upgrade^0.1.1^missing^0.1.1
+the patch just below the floor reports an upgrade^0.2.3^missing^0.2.3
+unparseable tasks-axi version reports an upgrade^tasks-axi development build^missing^unparseable
+tasks-axi at floor without archive-body reports an upgrade^0.2.4:noarchive^missing^
+tasks-axi at floor without multi-id reports an upgrade^0.2.4:nomulti^missing^
 ROWS
   pass "bootstrap enforces tasks-axi minimum version"
+}
+
+# Two installs at once: a stale build first on PATH and a compatible one after
+# it, the exact layout a login shell versus an interactive rc file produces.
+# Bootstrap must select the compatible build, report that it did so with both
+# paths and versions, and never say tasks-axi is missing.
+test_tasks_axi_resolves_past_a_stale_path_first_install() {
+  local case_dir fakebin stale out
+  case_dir="$TMP_ROOT/tasks-axi-path-order"
+  mkdir -p "$case_dir/home"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  stale="$case_dir/stalebin"
+  mkdir -p "$stale"
+  add_tasks_axi "$stale" 0.2.3
+  out=$(PATH="$stale:$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "BOOTSTRAP_INFO: tasks-axi resolved $fakebin/tasks-axi (0.2.4) because PATH-first $stale/tasks-axi reports 0.2.3 below floor 0.2.4; firstmate scripts and spawned crew use the resolved build" ] \
+    || fail "bootstrap did not report the resolution past the stale PATH-first build: $out"
+  out=$(PATH="$stale:$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_VERBOSE_FACTS=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "BOOTSTRAP_INFO: tasks-axi available: $fakebin/tasks-axi (0.2.4)" "the verbose availability fact must name the resolved path and version"
+  assert_not_contains "$out" "MISSING: tasks-axi" "a compatible build later on PATH must not be reported missing"
+  pass "bootstrap resolves tasks-axi past a stale PATH-first install and reports both builds"
+}
+
+# The library-level contract behind that: one build for the whole process
+# tree, chosen by the floor rather than PATH order, exported to children, an
+# exported FM_TASKS_AXI_BIN honored while it meets the floor and dropped when it
+# does not, and no PATH change at all when nothing meets the floor.
+test_tasks_axi_lib_resolution_is_deterministic() {
+  local case_dir good stale lib out
+  case_dir="$TMP_ROOT/tasks-axi-lib-resolve"
+  good="$case_dir/goodbin"
+  stale="$case_dir/stalebin"
+  mkdir -p "$good" "$stale"
+  add_tasks_axi "$good" 0.2.5
+  add_tasks_axi "$stale" 0.2.3
+  lib="$ROOT/bin/fm-tasks-axi-lib.sh"
+  out=$(PATH="$stale:$good:$BASE_PATH" bash -c '. "$1"; printf "%s|%s|%s|%s|%s\n" "$FM_TASKS_AXI_RESOLVED_FROM" "$FM_TASKS_AXI_BIN" "$FM_TASKS_AXI_RESOLVED_VERSION" "$(command -v tasks-axi)" "$(bash -c "command -v tasks-axi")"' _ "$lib")
+  [ "$out" = "path-later|$good/tasks-axi|0.2.5|$good/tasks-axi|$good/tasks-axi" ] \
+    || fail "stale-first PATH must resolve to the later compatible build for the process and its children: $out"
+  out=$(PATH="$stale:$good:$BASE_PATH" bash -c '. "$1"; printf "%s|%s\n" "$FM_TASKS_AXI_PATH_FIRST" "$FM_TASKS_AXI_REJECTED"' _ "$lib")
+  [ "$out" = "$stale/tasks-axi|$stale/tasks-axi 0.2.3" ] \
+    || fail "the rejected PATH-first build must be recorded with its version: $out"
+  out=$(PATH="$good:$stale:$BASE_PATH" bash -c '. "$1"; printf "%s|%s|%s\n" "$FM_TASKS_AXI_RESOLVED_FROM" "$FM_TASKS_AXI_BIN" "${PATH%%:*}"' _ "$lib")
+  [ "$out" = "path-first|$good/tasks-axi|$good" ] \
+    || fail "a compatible PATH-first build must be kept without touching PATH: $out"
+  out=$(PATH="$stale:$BASE_PATH" FM_TASKS_AXI_BIN="$good/tasks-axi" bash -c '. "$1"; printf "%s|%s|%s\n" "$FM_TASKS_AXI_RESOLVED_FROM" "$FM_TASKS_AXI_BIN" "$(command -v tasks-axi)"' _ "$lib")
+  [ "$out" = "env|$good/tasks-axi|$good/tasks-axi" ] \
+    || fail "an exported compatible FM_TASKS_AXI_BIN must be honored ahead of PATH: $out"
+  out=$(PATH="$good:$BASE_PATH" FM_TASKS_AXI_BIN="$case_dir/removed/tasks-axi" bash -c '. "$1"; printf "%s|%s\n" "$FM_TASKS_AXI_RESOLVED_FROM" "$FM_TASKS_AXI_BIN"' _ "$lib")
+  [ "$out" = "path-first|$good/tasks-axi" ] \
+    || fail "an exported FM_TASKS_AXI_BIN that no longer exists must be dropped and re-resolved: $out"
+  # One session start must cost one probe: the parent probes and hands its
+  # evidence down, the child trusts the exported build, reports the parent's
+  # evidence (so bootstrap's digest line survives the hop), and probes nothing.
+  # The grandchild sees the build but not the evidence, which never leaks past
+  # one hop.
+  : > "$case_dir/probes.log"
+  cat > "$good/tasks-axi" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" != --version ] || { printf 'probe\n' >> '$case_dir/probes.log'; printf '0.2.5\n'; exit 0; }
+exit 0
+SH
+  out=$(PATH="$stale:$good:$BASE_PATH" bash -c '. "$1"; bash -c ". \"\$1\"; printf \"%s|%s|%s|%s|%s|\" \"\$FM_TASKS_AXI_RESOLVED_FROM\" \"\$FM_TASKS_AXI_BIN\" \"\$FM_TASKS_AXI_RESOLVED_VERSION\" \"\$FM_TASKS_AXI_PATH_FIRST_VERSION\" \"\${FM_TASKS_AXI_RESOLUTION-unset}\"; bash -c \"printf %s \\\"\\\${FM_TASKS_AXI_RESOLUTION-unset}\\\"\"" _ "$1"' _ "$lib")
+  [ "$out" = "path-later|$good/tasks-axi|0.2.5|0.2.3|unset|unset" ] \
+    || fail "the child must inherit the parent's build and evidence without a leak past one hop: $out"
+  [ "$(grep -c probe "$case_dir/probes.log")" = 1 ] \
+    || fail "a parent-child hop must cost exactly one version probe, got $(grep -c probe "$case_dir/probes.log")"
+  out=$(PATH="$stale:$BASE_PATH" bash -c '. "$1"; printf "%s|%s|%s|%s|" "$FM_TASKS_AXI_RESOLVED_FROM" "${FM_TASKS_AXI_BIN-unset}" "${PATH%%:*}" "$FM_TASKS_AXI_REJECTED"; fm_tasks_axi_compatible && printf "compatible" || printf "incompatible"' _ "$lib")
+  [ "$out" = "none|unset|$stale|$stale/tasks-axi 0.2.3|incompatible" ] \
+    || fail "with nothing at the floor the library must leave PATH alone and stay incompatible: $out"
+  pass "fm-tasks-axi-lib.sh resolves one compatible build deterministically for the process tree"
 }
 
 # These rows exercise the real bootstrap check with a fake quota-axi answering
@@ -1153,6 +1237,8 @@ test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
 test_tasks_axi_min_version
+test_tasks_axi_resolves_past_a_stale_path_first_install
+test_tasks_axi_lib_resolution_is_deterministic
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected

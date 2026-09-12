@@ -117,6 +117,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -1751,6 +1753,172 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+# --- lock-refused stand-down and block ceiling --------------------------------
+#
+# A session that does not hold state/.lock is read-only by the session-start
+# contract, and bin/fm-claude-stop-autoarm.sh exits without claiming on that
+# same evidence, so the cooperative path above would block such a session on
+# every turn forever (2026-09-12: ~30 blocked turns). The guard must block ONCE
+# per lock owner with the owner evidence, then allow while that owner holds the
+# lock; a dead owner is stale, not refused, and keeps the ordinary path. And
+# whatever the cause, blocked stops per session are bounded by the ceiling.
+
+# A live process whose command name reads as a harness: a bash symlink named
+# fake-claude, kept in a shell loop so the symlink name stays on the process.
+start_fake_harness() {  # <dir>
+  ln -sf /bin/bash "$1/fake-claude"
+  # Detach stdio: callers capture this function's output, and a child holding
+  # the captured pipe open would never let that capture finish.
+  "$1/fake-claude" -c 'while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
+stop_fake_harness() {  # <pid>
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+budget_line() {  # <dir> <key>
+  sed -n "s/^$2=//p" "$1/state/.turnend-claude-blocks" 2>/dev/null | head -1
+}
+
+test_hook_claude_mode_lock_refused_blocks_once_then_allows() {
+  local dir owner out status started elapsed
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-lock-refused")
+  : > "$dir/state/task1.meta"
+  owner=$(start_fake_harness "$dir")
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  started=$(date +%s)
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "the first stop under a live foreign lock owner must block once with the evidence"
+  assert_contains "$out" "THIS SESSION CANNOT REPAIR IT" "lock-refused block must say this session cannot repair supervision"
+  assert_contains "$out" "harness pid $owner" "lock-refused block must name the live lock owner"
+  assert_contains "$out" "Report this to the captain now" "lock-refused block must route the model to the captain"
+  assert_not_contains "$out" "Stop-owned auto-arm did not claim" "lock-refused block must not use the ordinary repair banner"
+  [ "$(budget_line "$dir" refused_owner)" = "$owner" ] || fail "lock-refused block did not record the owner it blocked for"
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "the next stop under the same live owner must be allowed"
+  assert_contains "$out" 'systemMessage' "lock-refused allow must carry the evidence as a systemMessage"
+  assert_contains "$out" "read-only for supervision" "lock-refused allow must explain the read-only posture"
+  assert_contains "$out" "harness pid $owner" "lock-refused allow must name the live lock owner"
+  out=$(run_hook_claude "$dir" true); status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 0 "$status" "every later stop under the same live owner stays allowed"
+  [ "$(budget_line "$dir" blocks)" = 1 ] || fail "allowed lock-refused stops must not count as blocks, got $(budget_line "$dir" blocks)"
+  [ "$elapsed" -le 5 ] || fail "lock-refused handling must not wait for an auto-arm claim (took ${elapsed}s for three stops)"
+  stop_fake_harness "$owner"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a dead lock owner is stale, not refused: the ordinary path must block again"
+  assert_contains "$out" "Stop-owned auto-arm did not claim" "the stale-owner block must use the ordinary repair banner"
+  assert_not_contains "$out" "CANNOT REPAIR IT" "a stale owner must not be reported as a live foreign owner"
+  [ -z "$(budget_line "$dir" refused_owner)" ] || fail "the ordinary path must drop the refused-owner record"
+  pass "fm-turnend-guard --claude: a live foreign lock owner blocks once with evidence, then allows; a dead owner is ordinary"
+}
+
+test_hook_claude_mode_lock_refused_new_owner_blocks_once_more() {
+  local dir first second out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-lock-refused-owners")
+  : > "$dir/state/task1.meta"
+  first=$(start_fake_harness "$dir")
+  printf '%s\n' "$first" > "$dir/state/.lock"
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "first owner must block once"
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "first owner must then allow"
+  stop_fake_harness "$first"
+  second=$(start_fake_harness "$dir")
+  printf '%s\n' "$second" > "$dir/state/.lock"
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a different live owner must block once more"
+  assert_contains "$out" "harness pid $second" "the new owner's block must name the new owner"
+  [ "$(budget_line "$dir" refused_owner)" = "$second" ] || fail "the refused-owner record did not move to the new owner"
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "the new owner must then allow"
+  assert_contains "$out" "harness pid $second" "the allow must name the current owner"
+  stop_fake_harness "$second"
+  pass "fm-turnend-guard --claude: each new live lock owner gets exactly one evidence block"
+}
+
+test_hook_claude_mode_lock_refused_healthy_watcher_still_allows_silently() {
+  local dir owner watcher identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-lock-refused-healthy")
+  : > "$dir/state/task1.meta"
+  owner=$(start_fake_harness "$dir")
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  sleep 60 &
+  watcher=$!
+  identity=$(watcher_identity "$dir" "$watcher") || {
+    stop_fake_harness "$owner"
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    fail "could not identify the live watcher holder"
+  }
+  record_watcher_lock "$dir" "$watcher" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  stop_fake_harness "$owner"
+  expect_code 0 "$status" "a healthy watcher owned by the lock-holding session must allow a read-only session's stop"
+  [ -z "$out" ] || fail "a healthy watcher must allow silently under a foreign lock owner: $out"
+  assert_absent "$dir/state/.turnend-claude-blocks" "a healthy watcher must not leave a lock-refused record"
+  pass "fm-turnend-guard --claude: supervision proven healthy allows a read-only session silently"
+}
+
+test_hook_claude_mode_block_ceiling_allows_loudly_then_resets() {
+  local dir out status i pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-ceiling")
+  : > "$dir/state/task1.meta"
+  for i in 1 2 3 4 5 6; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+    expect_code 2 "$status" "blocked stop $i must still block below the ceiling"
+    assert_not_contains "$out" 'systemMessage' "blocked stop $i must not fail open below the ceiling"
+  done
+  [ "$(budget_line "$dir" blocks)" = 6 ] || fail "six blocked stops must be recorded, got $(budget_line "$dir" blocks)"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "the stop after the ceiling must be allowed"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS NOT RUNNING' "the ceiling allow must be loud"
+  assert_contains "$out" 'blocked 6 times' "the ceiling allow must report the block count"
+  assert_contains "$out" 'diagnose the Stop-hook registration' "the ceiling allow must direct diagnosis at the hook"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "the ceiling must not consume the verified-failure attended alarm"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "every later stop past the ceiling stays allowed until recovery"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS NOT RUNNING' "later stops past the ceiling stay loud"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$dir/state/.watch.lock"
+  expect_code 0 "$status" "positive recovery must allow"
+  assert_absent "$dir/state/.turnend-claude-blocks" "positive recovery must reset the ceiling count with the budget"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "after recovery an unhealthy stop must block again from a fresh count"
+  [ "$(budget_line "$dir" blocks)" = 1 ] || fail "the post-recovery count must restart at 1, got $(budget_line "$dir" blocks)"
+  pass "fm-turnend-guard --claude: the block ceiling bounds blocked stops per session, loudly, and recovery resets it"
+}
+
+test_hook_claude_mode_block_ceiling_never_undercuts_budget() {
+  local dir out status i
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-ceiling-floor")
+  : > "$dir/state/task1.meta"
+  for i in 1 2 3 4 5 6; do
+    out=$(FM_CLAUDE_TURNEND_BLOCK_CEILING=1 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+    expect_code 2 "$status" "a ceiling configured at or below the budget must be raised above it (stop $i)"
+  done
+  out=$(FM_CLAUDE_TURNEND_BLOCK_CEILING=1 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "the raised ceiling must still allow eventually"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS NOT RUNNING' "the raised ceiling allow must be loud"
+  pass "fm-turnend-guard --claude: the ceiling can never shorten the bounded budget progression"
+}
+
 # --- AWAY MODE: the daemon owns supervision ----------------------------------
 #
 # While state/.afk exists, bin/fm-supervise-daemon.sh owns supervision and runs
@@ -1971,6 +2139,11 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+test_hook_claude_mode_lock_refused_blocks_once_then_allows
+test_hook_claude_mode_lock_refused_new_owner_blocks_once_more
+test_hook_claude_mode_lock_refused_healthy_watcher_still_allows_silently
+test_hook_claude_mode_block_ceiling_allows_loudly_then_resets
+test_hook_claude_mode_block_ceiling_never_undercuts_budget
 test_hook_away_daemon_allows_between_watcher_cycles
 test_hook_away_daemon_allows_over_dead_watcher_lock
 test_hook_away_mode_blocks_without_any_supervisor

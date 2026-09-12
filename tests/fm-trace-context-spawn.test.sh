@@ -288,6 +288,38 @@ test_enabled_records_and_injects_identical_carrier_before_launch() {
   pass "enabled: one resolved carrier is recorded in meta and the identical TRACEPARENT is exported before launch"
 }
 
+# The pane shell is interactive and its rc files may reorder PATH, so the spawn
+# pins the tasks-axi build it resolved (bin/fm-tasks-axi-lib.sh) into the pane
+# on the same pre-launch channel as GOTMPDIR, before the launch literal.
+test_spawn_pins_resolved_tasks_axi_into_the_pane() {
+  local rec out status pl gl ll
+  rec=$(make_spawn_case tc-taxi)
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '0.2.5\n' ;;
+  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
+  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/tasks-axi"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn with a compatible fake tasks-axi should succeed"
+  assert_contains "$out" "spawned $CASE_ID" "spawn should report success"
+  pl=$(grep -n "^export FM_TASKS_AXI_BIN='$FAKEBIN_DIR/tasks-axi' PATH='$FAKEBIN_DIR':\"\$PATH\"\$" "$LAUNCH_LOG" | tail -1 | cut -d: -f1)
+  gl=$(grep -n '^export GOTMPDIR=' "$LAUNCH_LOG" | tail -1 | cut -d: -f1)
+  ll=$(grep -n 'claude' "$LAUNCH_LOG" | tail -1 | cut -d: -f1)
+  [ -n "$pl" ] || fail "spawn did not pin the resolved tasks-axi build into the pane; launch log: $(cat "$LAUNCH_LOG")"
+  [ -n "$gl" ] && [ -n "$ll" ] || fail "launch log missing GOTMPDIR/launch lines"
+  [ "$pl" -gt "$gl" ] || fail "the tasks-axi pin must ride the GOTMPDIR pre-launch site (gotmp=$gl pin=$pl)"
+  [ "$pl" -lt "$ll" ] || fail "the tasks-axi pin must be sent before the launch literal (pin=$pl launch=$ll)"
+  pass "spawn pins the resolved tasks-axi build and PATH prefix into the pane before launch"
+}
+
 test_disabled_writes_and_injects_neither() {
   local rec out status meta
   rec=$(make_spawn_case tc-off)
@@ -587,6 +619,7 @@ test_secondmate_carrier_and_snapshot_share_one_decision() {
 }
 
 test_enabled_records_and_injects_identical_carrier_before_launch
+test_spawn_pins_resolved_tasks_axi_into_the_pane
 test_disabled_writes_and_injects_neither
 test_failed_delivery_omits_metadata_and_still_launches
 test_unsafe_delivery_refuses_to_append_launch

@@ -1433,6 +1433,27 @@ detect_local_tools() {
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
   fi
+  tasks_axi_resolution_facts
+}
+
+# Preflight evidence for WHICH tasks-axi build this home resolved
+# (bin/fm-tasks-axi-lib.sh owns the resolution). Silent in the trivial case
+# where the build first on PATH meets the floor, so a clean home stays quiet.
+# It always prints when the answer differs from PATH order, because that is
+# the operator's PATH being misordered rather than a routine confirmation, and
+# it names every rejected candidate under a MISSING report so a floor failure
+# shows the exact path and version that failed it.
+tasks_axi_resolution_facts() {
+  local rejected
+  rejected=$(printf '%s' "$FM_TASKS_AXI_REJECTED" | tr '\n' ',' | sed 's/,/, /g')
+  case "$FM_TASKS_AXI_RESOLVED_FROM" in
+    path-later)
+      echo "BOOTSTRAP_INFO: tasks-axi resolved ${FM_TASKS_AXI_BIN} (${FM_TASKS_AXI_RESOLVED_VERSION}) because PATH-first ${FM_TASKS_AXI_PATH_FIRST} reports ${FM_TASKS_AXI_PATH_FIRST_VERSION:-an unparseable version} below floor ${FM_TASKS_AXI_MIN}; firstmate scripts and spawned crew use the resolved build"
+      ;;
+    none)
+      [ -z "$rejected" ] || echo "BOOTSTRAP_INFO: tasks-axi floor ${FM_TASKS_AXI_MIN} unmet by every PATH candidate: ${rejected}"
+      ;;
+  esac
 }
 
 detect_local_config() {
@@ -1464,7 +1485,7 @@ detect_local_config() {
   crew_dispatch_validate
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
-    echo "BOOTSTRAP_INFO: tasks-axi available"
+    echo "BOOTSTRAP_INFO: tasks-axi available: ${FM_TASKS_AXI_BIN:-$(command -v tasks-axi)} (${FM_TASKS_AXI_RESOLVED_VERSION:-unknown})"
   fi
   detect_home_summary_publication
 }
