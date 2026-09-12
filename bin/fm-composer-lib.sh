@@ -1407,7 +1407,6 @@ EOF
         fi
         ;;
     esac
-    fm_composer_normalize_spaces_var content
     fm_composer_normalize_trim_var content
     # A styled agent-glyph placeholder disappears above when ghost stripping
     # proves it is furniture. If the same placeholder-looking bytes survive
@@ -1430,7 +1429,7 @@ EOF
     joined="${joined}${joined:+ }$content"
     row=$((row + 1))
   done
-  printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
+  printf '%s' "$joined"
 }
 
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity] [harness]

@@ -324,7 +324,7 @@ busy_verdict() {
 }
 
 prepare_agy_exit_composer() {
-  local verdict draft
+  local verdict draft elapsed=0
   verdict=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" agy) || verdict=unknown
   case "$verdict" in
     empty)
@@ -338,7 +338,13 @@ prepare_agy_exit_composer() {
         || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:pending; backend $BACKEND cannot deliver AGY's measured composer-clear key C-u"
       fm_backend_send_key "$BACKEND" "$T" C-u "$LABEL" \
         || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:pending; C-u did not reach the composer"
-      verdict=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" agy) || verdict=unknown
+      while :; do
+        verdict=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" agy) || verdict=unknown
+        [ "$verdict" = empty ] && break
+        awk -v e="$elapsed" 'BEGIN{exit !(e < 5)}' || break
+        sleep 0.25
+        elapsed=$(awk -v e="$elapsed" 'BEGIN{printf "%.3f", e + 0.25}')
+      done
       [ "$verdict" = empty ] \
         || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:${verdict}; C-u did not clear the composer"
       ;;

@@ -115,7 +115,11 @@ case "${1:-}" in
         printf 'zsh' > "$D/command"
       fi
       if [ "$payload" = C-u ] && [ -n "${FM_FAKE_CLEAR_COMPOSER:-}" ]; then
-        printf '────────────────\n>\n────────────────\n? for shortcuts\n' > "$D/pane"
+        if [ -n "${FM_FAKE_CLEAR_DELAY:-}" ]; then
+          printf '%s' "$FM_FAKE_CLEAR_DELAY" > "$D/clear-delay"
+        else
+          printf '────────────────\n>\n────────────────\n? for shortcuts\n' > "$D/pane"
+        fi
       fi
       if [ "$payload" = Escape ] && [ -n "${FM_FAKE_MUSE_LOG:-}" ]; then
         if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ]; then
@@ -136,6 +140,15 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
+    if [ -f "$D/clear-delay" ]; then
+      remaining=$(cat "$D/clear-delay")
+      if [ "$remaining" -le 0 ]; then
+        rm -f "$D/clear-delay"
+        printf '────────────────\n>\n────────────────\n? for shortcuts\n' > "$D/pane"
+      else
+        printf '%s' "$((remaining - 1))" > "$D/clear-delay"
+      fi
+    fi
     if [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
     exit 0 ;;
   list-windows)
@@ -209,6 +222,7 @@ run_control() {
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
     FM_FAKE_CLEAR_COMPOSER="${FM_FAKE_CLEAR_COMPOSER:-}" \
+    FM_FAKE_CLEAR_DELAY="${FM_FAKE_CLEAR_DELAY:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -849,7 +863,7 @@ test_agy_exit_clears_pending_composer() {
   add_task "$dir" t1 agy
   alive_as "$dir" agy
   printf '────────────────\n> draft\n────────────────\n? for shortcuts\n' > "$dir/fake/pane"
-  out=$(FM_FAKE_AGY_LIVE_COMPOSER=1 FM_FAKE_CLEAR_COMPOSER=1 run_control "$dir" t1 exit); rc=$?
+  out=$(FM_FAKE_AGY_LIVE_COMPOSER=1 FM_FAKE_CLEAR_COMPOSER=1 FM_FAKE_CLEAR_DELAY=2 run_control "$dir" t1 exit); rc=$?
   expect_code 0 "$rc" "exit should clear an AGY pending composer"$'\n'"$out"
   [ "$(keys_sent "$dir")" = C-u ] || fail "pending AGY exit should clear with C-u"
   [ "$(literals "$dir")" = /quit ] || fail "pending AGY exit should type /quit after clearing"

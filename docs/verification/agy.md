@@ -299,13 +299,48 @@ FM_TEST_END 2026-09-12T10:46:45Z tests/fm-send-inbox-doorbell-live-e2e.test.sh e
 
 The lifecycle guard reached no AGY lifecycle step on this run because the external Treehouse pool rejected its stale origin metadata before spawn.
 
-Real-binary composer-clear measurement, run on 2026-09-12 against AGY 1.2.2:
+Real-binary composer-clear measurement, run on 2026-09-12 against AGY 1.2.2.
+The trust dialog was accepted before the composer probes.
 
 ```text
+env -u ANTIGRAVITY_AGENT bash -c '
+set -eu
+lab=$(mktemp -d)
+export TMUX_TMPDIR="$lab"
+trap '\''tmux kill-server >/dev/null 2>&1 || true; rm -rf "$lab"'\'' EXIT
+. bin/fm-tmux-lib.sh
+version=$(agy --version 2>/dev/null | head -1)
 tmux new-session -d -s agyclear -x 220 -y 50 -c "$PWD" -- agy --dangerously-skip-permissions --effort low
-tmux send-keys -t agyclear:0 -l AGY_CTRL_U_MEASURED_DRAFT
+for _ in $(seq 1 60); do
+  screen=$(tmux capture-pane -p -t agyclear:0 2>/dev/null || true)
+  if printf '%s\n' "$screen" | grep -qi '\''Do you trust'\''; then
+    tmux send-keys -t agyclear:0 Enter
+  fi
+  state=$(fm_tmux_composer_state agyclear:0 agy || true)
+  [ "$state" = empty ] && break
+  sleep 1
+done
+[ "$state" = empty ]
+draft=$(printf '\''AGY_CTRL_U_MEASURED_DRAFT_%.0s'\'' $(seq 1 20))
+tmux send-keys -t agyclear:0 -l "$draft"
+for _ in $(seq 1 20); do
+  screen=$(fm_tmux_composer_capture agyclear:0)
+  printf '%s\n' "$screen" | grep -Fq AGY_CTRL_U_MEASURED_DRAFT && break
+  sleep 1
+done
+printf '\''version=%s\n'\'' "$version"
+printf '\''before_clear=%s\n'\'' "$(fm_tmux_composer_state agyclear:0 agy)"
 tmux send-keys -t agyclear:0 C-u
-fm_tmux_composer_state agyclear:0 agy
+after=unknown
+for _ in $(seq 1 20); do
+  after=$(fm_tmux_composer_state agyclear:0 agy || true)
+  [ "$after" = empty ] && break
+  sleep 0.25
+done
+printf '\''clear_key=C-u\n'\''
+printf '\''after_clear=%s\n'\'' "$after"
+[ "$after" = empty ]
+'
 ```
 
 Output:
@@ -318,6 +353,8 @@ after_clear=empty
 ```
 
 C-u is the measured AGY composer-clear key and the pending-to-empty transition passed in the isolated tmux lab.
+The measured draft was one long line that wrapped across the composer, rather than a literal newline between input lines.
+Escape does not clear the composer, and C-c does not clear it and arms AGY's double-press exit warning.
 
 ## Repository gates
 

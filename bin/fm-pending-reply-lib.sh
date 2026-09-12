@@ -793,13 +793,7 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
   esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
     || { printf 'unknown'; return 0; }
-  if [ "$harness" = agy ]; then
-    if printf '%s' "$tail40" | fm_busy_lines_match "$harness"; then
-      printf 'busy'
-    else
-      printf 'fallback-idle'
-    fi
-  elif printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+  if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
     | fm_busy_lines_match "$harness"; then
     printf 'busy'
   else

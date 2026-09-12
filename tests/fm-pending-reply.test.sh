@@ -984,20 +984,6 @@ test_unknown_backend_state_uses_capture_fallback() {
   pass "tmux and zellij unknown states use bounded capture fallback"
 }
 
-test_capture_fallback_keeps_harness_specific_depth() (
-  local capture
-  fm_backend_busy_state() { printf 'unknown'; }
-  fm_backend_capture() { printf '%s' "$capture"; }
-  FM_BUSY_REGEX='^synthetic-busy$'
-  capture=$(printf 'synthetic-busy\n%s' "$(printf 'idle\n%.0s' 1 2 3 4 5 6)")
-  [ "$(fm_pending_reply_backend_observation tmux session:fm-hibit '' pi)" = fallback-idle ] \
-    || fail "a non-AGY stale busy line outside the narrow tail was treated as busy"
-  capture=$(printf 'synthetic-busy\n%s' "$(printf 'idle\n%.0s' 1 2 3 4 5 6)")
-  [ "$(fm_pending_reply_backend_observation tmux session:fm-hibit '' agy)" = busy ] \
-    || fail "the AGY deep capture did not observe its busy footer"
-  pass "pending replies keep the narrow non-AGY fallback and deep AGY capture"
-)
-
 test_kimi_capture_fallback_uses_recorded_harness() (
   local home state corr rec sm_home
   home=$(setup_parent kimi-fallback)
@@ -1611,7 +1597,6 @@ test_document_pointer_resolves
 test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
-test_capture_fallback_keeps_harness_specific_depth
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task

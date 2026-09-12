@@ -778,6 +778,10 @@ test_agy_prompt_preserves_structural_draft_rows() {
     extract=$(fm_composer_extract_selected_content "$caps" "$screen" '' agy)
     [ "$extract" = 'first > second' ] \
       || fail "agy draft rows beginning with > were not preserved, got '$extract'"
+    screen=$'────────────────\n> foo  bar\n────────────────\nClaude Sonnet 4.6 · low'
+    extract=$(fm_composer_extract_selected_content "$caps" "$screen" '' agy)
+    [ "$extract" = 'foo  bar' ] \
+      || fail "agy extraction collapsed significant interior spaces, got '$extract'"
     screen=$'────────────────\n> run this:\n$ make test\n────────────────\nGPT-OSS 120B · medium'
     if [ "$caps" = "$CAPS_TMUX" ]; then
       out=$(fm_composer_classify_screen "$caps" "$screen" 1 '' agy)
