@@ -1953,22 +1953,10 @@ effort_flag_for_harness() {
       esac
       ;;
     muse)
-      # Muse Code 1.1.1 --reasoning-effort accepts none|minimal|low|medium|high|
-      # xhigh|max|ultra and defaults to high, so the shared vocabulary maps
-      # straight across and max is passed LITERALLY. max is gated on an active
-      # Muse Code subscription and muse otherwise refuses it with a 400, so the
-      # launcher passes what was asked and lets muse report the entitlement
-      # rather than substituting a level nobody chose. ultra is not muse's
-      # max-class level despite sorting above it: muse closes the
-      # ultra_reasoning_effort gate and silently downgrades ultra to xhigh, so
-      # mapping max onto ultra would quietly deliver xhigh. ultra is also
-      # unreachable here, because a non-pi harness cannot carry --effort ultra
-      # past validate-native-effort. max stays an EXPLICIT captain choice, never
-      # a fallback, because AGENTS.md section 4 forbids selecting max without
-      # captain preference and the omitted effort here leaves muse on its own
-      # high default. muse's extra none/minimal levels sit below firstmate's
-      # shared vocabulary and are deliberately unreachable rather than remapped
-      # onto low.
+      # Preserve the requested level: substituting ultra for max silently
+      # delivers xhigh on Muse Code 1.1.1. Let Muse refuse missing entitlement
+      # rather than selecting a fallback. The operating contract is owned by
+      # .agents/skills/harness-adapters/references/harness/muse.md.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
       esac
