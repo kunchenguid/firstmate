@@ -775,9 +775,10 @@ record_note() {
         echo "This task was relaunched. Continue from here; the local copy and every"
         echo "uncommitted change are exactly as the previous worker left them."
         echo
-        echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
-        echo "each message in numeric order, then mv each handled file into"
-        echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
+        echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, read"
+        echo "each in numeric order, then mv it into $STATE/$ID.inbox/handled/ once read -"
+        echo "that only confirms receipt, so track and finish any requested work yourself,"
+        echo "on its own schedule. A steer sent before the relaunch survives there."
         echo
         printf '%s\n' "$NOTE"
       } >> "$RELAUNCH_BRIEF" \

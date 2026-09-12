@@ -166,6 +166,10 @@ test_write_is_durable_and_exact() {
   assert_contains "$doorbell" "numeric order" "doorbell should require ordered processing"
   assert_contains "$doorbell" "'$state/t1.inbox'/handled/" "doorbell should quote and name the handled dir"
   assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be self-describing"
+  assert_contains "$doorbell" "only confirms receipt" \
+    "doorbell should say the move confirms receipt, not completion of requested work"
+  assert_contains "$doorbell" "track and finish any work it asks for on your own schedule" \
+    "doorbell should tell the worker to track outstanding work itself rather than delaying the move"
   case "$doorbell" in
     *$'\n'*) fail "the doorbell must be a single line" ;;
   esac
