@@ -41,8 +41,8 @@ test_empty_drain_is_silent() {
   pass "empty drain succeeds silently"
 }
 
-test_acknowledgement_rearms_an_unheld_watcher_once() {
-  local dir home state fakebin out err ackout ackerr ackpid watcher_pid status rearmed
+test_acknowledgement_rearms_an_unheld_watcher_without_waiting() {
+  local dir home state fakebin out err ackout ackerr ackpid watcher_pid rearmed
   dir=$(make_case ack-rearm-unheld)
   home="$dir/home"
   state="$home/state"
@@ -75,13 +75,21 @@ test_acknowledgement_rearms_an_unheld_watcher_once() {
     fail "acknowledgement left no live watcher: $(cat "$ackout") $(cat "$ackerr")"
   }
 
-  printf 'done: ends the acknowledgement-owned watcher cycle\n' > "$state/after-ack.status"
-  wait_for_exit "$ackpid" 120
-  status=$?
-  expect_code 0 "$status" "acknowledgement-owned watcher cycle must report its actionable wake"
+  sleep 0.2
+  ack_waited=false
+  is_live_non_zombie "$ackpid" && ack_waited=true
+
+  printf 'done: ends the detached watcher cycle\n' > "$state/after-ack.status"
+  wait_for_exit "$ackpid" 120 >/dev/null || fail "acknowledgement did not finish after the watcher wake"
+  i=0
+  while [ "$i" -lt 40 ] && [ ! -e "$state/.watch-cycle-exits.log" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$ack_waited" = false ] || fail "acknowledgement waited for its re-armed watcher instead of returning"
   rearmed=$(rg -c -F -- 'origin=ack-rearm' "$state/.watch-cycle-exits.log")
   [ "$rearmed" -eq 1 ] || fail "acknowledgement re-arm ledger count was $rearmed, expected one"
-  pass "wake drain: acknowledgement re-arms one watcher when no watcher is live"
+  pass "wake drain: acknowledgement returns after starting one unheld watcher"
 }
 
 test_acknowledgement_does_not_rearm_a_live_watcher() {
@@ -119,5 +127,5 @@ test_acknowledgement_does_not_rearm_a_live_watcher() {
 
 test_drain_consumes_and_deduplicates_wakes
 test_empty_drain_is_silent
-test_acknowledgement_rearms_an_unheld_watcher_once
+test_acknowledgement_rearms_an_unheld_watcher_without_waiting
 test_acknowledgement_does_not_rearm_a_live_watcher
