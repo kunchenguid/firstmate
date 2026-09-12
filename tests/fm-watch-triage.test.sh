@@ -174,7 +174,22 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+# Teardown only: callers have finished all assertions about this watcher.
+# fm-watch.sh can defer TERM while foreground work unwinds, so bound its grace
+# period and then escalate to KILL to keep test teardown deterministic.
+reap() {
+  local pid=$1 i=0
+  kill "$pid" 2>/dev/null || true
+  # 100 ticks matches the wait_for_exit budget documented above: far longer than
+  # a healthy watcher needs to honour TERM, short enough to stay bounded.
+  while [ "$i" -lt 100 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
