@@ -22,7 +22,7 @@ READY="$ROOT/bin/fm-claude-ready.sh"
 # run_ready <config-dir> [project]: check against an isolated Claude config.
 run_ready() {
   local config=$1 project=${2:-}
-  CLAUDE_CONFIG_DIR="$config" FM_CLAUDE_BYPASS_READY= "$READY" check "$project" 2>&1
+  CLAUDE_CONFIG_DIR="$config" FM_CLAUDE_BYPASS_READY='' "$READY" check "$project" 2>&1
 }
 
 # Machine-wide managed settings could record the acceptance for every case
@@ -35,12 +35,13 @@ managed_settings_already_ready() {
 }
 
 test_unaccepted_machine_is_refused_with_the_setup_command() {
-  local config out
+  local config out status
   config="$TMP_ROOT/unaccepted/claude-config"
   mkdir -p "$config"
 
   out=$(run_ready "$config")
-  [ "$?" -ne 0 ] || fail "an unprovisioned machine reported ready: $out"
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unprovisioned machine reported ready: $out"
   assert_contains "$out" "has not accepted Claude Code's bypass-permissions confirmation" \
     "the refusal did not say what is missing"
   assert_contains "$out" "claude --dangerously-skip-permissions" \
@@ -49,25 +50,27 @@ test_unaccepted_machine_is_refused_with_the_setup_command() {
 }
 
 test_accepted_machine_is_ready() {
-  local config out
+  local config out status
   config="$TMP_ROOT/accepted/claude-config"
   mkdir -p "$config"
   printf '{"skipDangerousModePermissionPrompt":true}\n' > "$config/settings.json"
 
   out=$(run_ready "$config")
-  expect_code 0 "$?" "an accepted machine was refused: $out"
+  status=$?
+  expect_code 0 "$status" "an accepted machine was refused: $out"
   assert_contains "$out" "ready:" "the accepted machine did not report readiness"
   pass "fm-claude-ready.sh: a machine that accepted the confirmation reads as ready"
 }
 
 test_unparseable_settings_do_not_read_as_accepted() {
-  local config out
+  local config out status
   config="$TMP_ROOT/corrupt/claude-config"
   mkdir -p "$config"
   printf 'skipDangerousModePermissionPrompt: true\n' > "$config/settings.json"
 
   out=$(run_ready "$config")
-  [ "$?" -ne 0 ] || fail "settings that are not JSON were read as acceptance: $out"
+  status=$?
+  [ "$status" -ne 0 ] || fail "settings that are not JSON were read as acceptance: $out"
   pass "fm-claude-ready.sh: settings that are not JSON never read as acceptance"
 }
 
@@ -103,7 +106,7 @@ SH
 # before allocating an endpoint, instead of launching a worker that stops on
 # the dialog and is escalated as wedged.
 test_claude_spawn_refuses_before_allocating_an_endpoint() {
-  local case_dir home proj wt config fakebin log id out
+  local case_dir home proj wt config fakebin log id out status
   case_dir="$TMP_ROOT/spawn-refusal"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -128,7 +131,8 @@ test_claude_spawn_refuses_before_allocating_an_endpoint() {
     FM_FAKE_WINDOW_LOG="$log" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" claude \
     --mode no-mistakes --yolo off)
-  [ "$?" -ne 0 ] || fail "a claude spawn on an unprovisioned machine reported success: $out"
+  status=$?
+  [ "$status" -ne 0 ] || fail "a claude spawn on an unprovisioned machine reported success: $out"
   assert_contains "$out" "claude --dangerously-skip-permissions" \
     "the refused spawn did not carry the setup command"
   assert_absent "$home/state/$id.meta" "a refused spawn published a task record"
