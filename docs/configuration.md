@@ -25,6 +25,14 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Fork sync (upstream remote)
+
+`bin/fm-fork-sync.sh` is opt-in, gated entirely on git remote topology, and adds no config file of its own.
+A home with only a single `origin` remote sees no behavior change.
+A home whose primary checkout also has a distinct `upstream` remote configured - the fork workflow from [`CONTRIBUTING.md`](../CONTRIBUTING.md#workflow), with `origin` as your fork and push target and `upstream` as the real upstream - gets that fork's default branch kept current from `upstream`, and the local checkout fast-forwarded to match when it is safe, launched detached and best-effort from `bin/fm-sessionstart-nudge.sh` on every native session start so it can never block or delay the nudge.
+It only ever fast-forwards, never force-pushes, and only ever touches the primary checkout itself, never a project clone, task worktree, or secondmate home.
+The script's own header owns the exact gating, safety, and fast-forward mechanics.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.

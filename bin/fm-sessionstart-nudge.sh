@@ -37,6 +37,15 @@ lock_is_in_ancestry() {
 }
 
 lock_is_in_ancestry && exit 0
+
+# Best-effort, non-blocking fork sync: launched detached in the background so
+# it can never delay or fail this nudge. See bin/fm-fork-sync.sh for the full
+# gating and safety contract; it is a no-op unless this checkout has a fork's
+# remote topology.
+if [ -x "$SCRIPT_DIR/fm-fork-sync.sh" ]; then
+  ( FM_ROOT_OVERRIDE="$FM_ROOT" nohup "$SCRIPT_DIR/fm-fork-sync.sh" >/dev/null 2>&1 & ) 2>/dev/null
+fi
+
 nudge=
 fm_operational_input_encode session-start \
   "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \
