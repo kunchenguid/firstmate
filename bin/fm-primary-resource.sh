@@ -15,8 +15,9 @@
 #   context: 175000 input-context tokens (Claude usage sum or Codex input_tokens)
 #   quota:   97 percent used (100 - percentRemaining) on a session or weekly
 #            window of the primary's provider
-# When both triggers apply, quota wins. Unknown/unsupported/malformed context
-# alerts only and never closes the session. One automatic action per incident:
+# When both triggers apply, quota wins. Only Claude and Codex have verified
+# reliable context adapters; every other adapter is alert-only and never closes
+# the session. One automatic action per incident:
 # a receipt created no-clobber before any terminal action; check never
 # re-proposes an incident that already has a receipt; commit refuses one; failed
 # receipts are never deleted.
@@ -82,7 +83,6 @@
 #   FM_PRIMARY_RESOURCE_NOW                fixed epoch seconds
 #   FM_PRIMARY_RESOURCE_HELPER_WAIT_SECS   bound helper idle waits (default 30)
 #   FM_PRIMARY_RESOURCE_RECONCILE_SECS     stranded-helper alert bound (default 120)
-#   FM_PRIMARY_RESOURCE_SKIP_HELPER=1      commit reserves but does not launch
 #   FM_PRIMARY_RESOURCE_BUSY_STATE_FILE    override busy|idle|unknown for helper
 #   FM_PRIMARY_RESOURCE_QUOTA_INTERVAL     gate live quota-axi re-reads (default 60)
 #   FM_PRIMARY_RESOURCE_ROUTE_ENV_FILE     inject NUL-delimited environ for route checks
@@ -569,10 +569,8 @@ pr_read_context_codex() {  # <transcript>
       elif ($line.type != "event_msg" and $line.type != "token_count"
             and (($line.payload.type // "") != "token_count")
             and ($line.type != "token_count")) then .
-      elif (($line.payload.info.last_token_usage // $line.payload.last_token_usage // null) | type) != "object"
-           and (($line.payload // null) | type) == "object"
-           and (($line.payload.info // null) | type) == "object" then
-        (($line.payload.info.last_token_usage // null) as $ltu
+      elif (($line.payload.info.last_token_usage // $line.payload.last_token_usage // null) | type) == "object" then
+        (($line.payload.info.last_token_usage // $line.payload.last_token_usage) as $ltu
          | if ($ltu | type) != "object" then
              {tokens:null, reliability:"unknown", reason:"malformed-usage"}
            elif (($ltu.input_tokens | type) != "number") then
@@ -932,8 +930,13 @@ action_check() {
 
   if [ ! -f "$PR_DIR/binding.json" ]; then
     generation="unbound"
+    harness=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+    case "$harness" in
+      claude|codex) line="context unavailable (no binding yet)" ;;
+      *) line="adapter $harness is alert-only (only Claude and Codex have reliable context readings)" ;;
+    esac
     if pr_alert_once "$generation" "context-unavailable" \
-      "primary-resource alert: context unavailable (no binding yet); session kept"; then
+      "primary-resource alert: $line; session kept"; then
       :
     fi
     return 0
@@ -1565,12 +1568,6 @@ EOF
   fi
 
   pr_outcome_write "$incident" "waiting-idle" "reserved" || true
-
-  if [ "${FM_PRIMARY_RESOURCE_SKIP_HELPER:-0}" = 1 ]; then
-    pr_lock_release
-    printf '%s\n' "$incident"
-    return 0
-  fi
 
   if ! helper_endpoint=$(pr_launch_helper "$incident" "$target" "$backend"); then
     pr_outcome_write "$incident" "failed" "helper-launch-failed" || true

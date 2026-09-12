@@ -17,6 +17,7 @@ metadata:
 Handle a main-session resource-protection wake from `bin/fm-primary-resource.sh`.
 The script owns thresholds, incident identity, receipts, and the helper lifecycle.
 This skill owns only the primary agent's stow-and-commit turn, and captain-facing alert wording.
+Only Claude and Codex have verified reliable context adapters; every other adapter is alert-only.
 
 ## Handover wake (`primary-resource context <id>` or `primary-resource quota <id>`)
 

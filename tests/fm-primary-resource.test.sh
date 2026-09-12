@@ -32,8 +32,23 @@ run_pr() {
   shift
   env FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_PRIMARY_RESOURCE_FORCE_OWNER=1 \
+    FM_SUPERVISOR_TARGET="${FM_SUPERVISOR_TARGET:-fixture:agent}" \
+    FM_SUPERVISOR_BACKEND="${FM_SUPERVISOR_BACKEND:-tmux}" \
     PATH="$FAKEBIN:$PATH" \
     "$PR" "$@"
+}
+
+install_helper_tmux() {
+  cat > "$FAKEBIN/tmux" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = new-session ]; then
+  command="${!#}"
+  bash -c "$command" >/dev/null 2>&1 &
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "$FAKEBIN/tmux"
 }
 
 make_main_home() {
@@ -60,6 +75,13 @@ write_claude_transcript() {
   jq -nc --argjson t "$tokens" \
     '{type:"assistant", isSidechain:false, message:{usage:{input_tokens:$t, cache_creation_input_tokens:0, cache_read_input_tokens:0}}}' \
     > "$path"
+}
+
+write_codex_transcript() {
+  local path=$1 tokens=$2
+  mkdir -p "$(dirname -- "$path")"
+  jq -nc --argjson t "$tokens" \
+    '{type:"event_msg", payload:{info:{last_token_usage:{input_tokens:$t}}}}' > "$path"
 }
 
 write_malformed_transcript() {
@@ -226,6 +248,33 @@ test_observe_stdin_no_args_writes_binding() {
   pass "observe stdin with no args writes binding"
 }
 
+test_unsupported_adapter_stays_alert_only() {
+  local home tx out
+  home=$(make_main_home pi-alert)
+  tx="$home/tx.jsonl"
+  printf '%s\n' '{"stop_hook_active":false}' | PI_CODING_AGENT=true \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_PRIMARY_RESOURCE_FORCE_OWNER=1 "$PR" observe
+  assert_absent "$home/state/primary-resource/binding.json" "pi payload without a session id must not bind"
+  out=$(PI_CODING_AGENT=true FM_PRIMARY_RESOURCE_QUOTA_JSON="$(quota_json claude 50)" \
+    FM_SUPERVISOR_BACKEND=tmux run_pr "$home" check 2>&1 || true)
+  assert_contains "$out" "adapter pi is alert-only" "unsupported adapter must explain its alert-only status"
+  if find "$home/state/primary-resource/proposals" -type f -print -quit | grep -q .; then
+    fail "unsupported adapter must not propose handover"
+  fi
+
+  write_codex_transcript "$tx" 175000
+  printf '%s\n' "{\"session_id\":\"codex-sess\",\"transcript_path\":\"$tx\",\"harness\":\"codex\"}" \
+    | FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_PRIMARY_RESOURCE_FORCE_OWNER=1 "$PR" observe
+  assert_equals "codex" "$(jq -r .harness "$home/state/primary-resource/binding.json")" \
+    "codex must retain a supported binding"
+  out=$(FM_PRIMARY_RESOURCE_QUOTA_JSON="$(quota_json codex 50)" FM_SUPERVISOR_BACKEND=tmux \
+    run_pr "$home" check 2>&1 || true)
+  assert_contains "$out" "primary-resource context" "codex must still propose at the reliable context threshold"
+  pass "unsupported adapters alert only while codex remains eligible"
+}
+
 test_check_lock_pid_mismatch_alert() {
   local home tx q out
   home=$(make_main_home lock-mismatch)
@@ -268,7 +317,6 @@ test_commit_revalidates_and_refuses_stale() {
   rc=0
   FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
     FM_PRIMARY_RESOURCE_ARGV_FILE="$home/argv" \
-    FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
     run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 || rc=$?
   expect_code 1 "$rc" "commit must refuse when context no longer warrants action"
   assert_absent "$home/state/primary-resource/receipts/$incident.json" \
@@ -290,26 +338,22 @@ test_stow_attestation_rejects_negative_prose() {
   printf 'not reset-safe\nthis is NOT safe to reset\n' > "$home/bad.md"
   rc=0
   FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
-    FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
     run_pr "$home" commit "$incident" --stow-receipt "$home/bad.md" >/dev/null 2>&1 || rc=$?
   expect_code 1 "$rc" "substring 'not reset-safe' must not pass"
   printf 'reset-safe: no\n' > "$home/bad2.md"
   rc=0
   FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
-    FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
     run_pr "$home" commit "$incident" --stow-receipt "$home/bad2.md" >/dev/null 2>&1 || rc=$?
   expect_code 1 "$rc" "reset-safe: no must not pass"
   write_stow_ok "$home/ok.md" "$incident" "wrong-gen"
   rc=0
   FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
-    FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
     run_pr "$home" commit "$incident" --stow-receipt "$home/ok.md" >/dev/null 2>&1 || rc=$?
   expect_code 1 "$rc" "wrong generation must not pass"
   write_stow_ok "$home/ok.md" "$incident" "$gen"
   ln -sfn "$home/ok.md" "$home/link.md"
   rc=0
   FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
-    FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
     run_pr "$home" commit "$incident" --stow-receipt "$home/link.md" >/dev/null 2>&1 || rc=$?
   expect_code 1 "$rc" "symlink attestation must be rejected"
   pass "stow attestation rejects negative/mismatched/symlink"
@@ -331,7 +375,7 @@ test_argv_admission_via_commit_rejects_wrappers() {
   printf 'env\0FOO=bar\0claude\0--verbose\0old prompt' > "$argv"
   rc=0
   err=$(FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="fixture:agent" \
-    FM_PRIMARY_RESOURCE_ARGV_FILE="$argv" FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
+    FM_PRIMARY_RESOURCE_ARGV_FILE="$argv" \
     run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" 2>&1) || rc=$?
   expect_code 1 "$rc" "env wrapper argv must be refused at commit"
   assert_contains "$err" "unparseable launch argv" "wrapper refusal must be actionable"
@@ -339,14 +383,15 @@ test_argv_admission_via_commit_rejects_wrappers() {
   printf 'node\0/opt/claude/cli.js\0--verbose\0old prompt' > "$argv"
   rc=0
   FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="fixture:agent" \
-    FM_PRIMARY_RESOURCE_ARGV_FILE="$argv" FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
+    FM_PRIMARY_RESOURCE_ARGV_FILE="$argv" \
     run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 || rc=$?
   expect_code 1 "$rc" "node interpreter argv must be refused at commit"
   # Honest happy path through commit: argv[0]=claude keeps flags.
   printf 'claude\0-c\0--dangerously-skip-permissions\0--verbose\0old prompt' > "$argv"
+  install_helper_tmux
   rc=0
   FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="fixture:agent" \
-    FM_PRIMARY_RESOURCE_ARGV_FILE="$argv" FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
+    FM_PRIMARY_RESOURCE_ARGV_FILE="$argv" \
     run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 || rc=$?
   expect_code 0 "$rc" "harness argv[0]=claude must commit"
   assert_present "$home/state/primary-resource/receipts/$incident.json"
@@ -550,11 +595,11 @@ test_commit_endpoint_on_outcome_not_receipt() {
   write_stow_ok "$home/stow.md" "$incident" "$gen"
   printf '#!/usr/bin/env bash\necho ok\n' > "$FAKEBIN/codex"
   chmod +x "$FAKEBIN/codex"
+  install_helper_tmux
   rc=0
   FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
-    FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
     run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 || rc=$?
-  expect_code 0 "$rc" "quota commit with skip-helper must succeed"
+  expect_code 0 "$rc" "quota commit must launch its helper"
   assert_present "$home/state/primary-resource/receipts/$incident.json"
   if jq -e 'has("helperEndpoint")' "$home/state/primary-resource/receipts/$incident.json" >/dev/null; then
     fail "immutable receipt must not carry helperEndpoint"
@@ -595,8 +640,8 @@ test_quota_episode_blocks_second_window() {
   write_stow_ok "$home/stow.md" "$incident" "sess-ep2"
   printf '#!/usr/bin/env bash\necho ok\n' > "$FAKEBIN/codex"
   chmod +x "$FAKEBIN/codex"
+  install_helper_tmux
   FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
-    FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
     run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 \
     || fail "first quota commit must succeed"
   assert_present "$home/state/primary-resource/episodes/claude" "episode must open"
@@ -679,13 +724,14 @@ test_duplicate_incident_check_and_commit() {
   # Second check may re-print the same wake until receipt exists; allow either.
   write_stow_ok "$home/stow.md" "$incident" "$gen"
   printf 'claude\0--verbose\0old' > "$home/argv"
+  install_helper_tmux
   FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
-    FM_PRIMARY_RESOURCE_ARGV_FILE="$home/argv" FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
+    FM_PRIMARY_RESOURCE_ARGV_FILE="$home/argv" \
     run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 \
     || fail "first commit must succeed"
   rc=0
   FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
-    FM_PRIMARY_RESOURCE_ARGV_FILE="$home/argv" FM_PRIMARY_RESOURCE_SKIP_HELPER=1 \
+    FM_PRIMARY_RESOURCE_ARGV_FILE="$home/argv" \
     run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 || rc=$?
   expect_code 1 "$rc" "duplicate commit must refuse"
   out=$(FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
@@ -873,7 +919,7 @@ EOF
 
 # Finding 9: bootstrap emits PRIMARY_RESOURCE: (not MISSING:) when arm fails.
 test_bootstrap_arm_failure_diagnostic() {
-  local home out
+  local home out rc=0
   home=$(make_main_home bootstrap-arm)
   cat > "$FAKEBIN/python3" <<'EOF'
 #!/usr/bin/env bash
@@ -881,8 +927,9 @@ exit 127
 EOF
   chmod +x "$FAKEBIN/python3"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
-    FM_BOOTSTRAP_DETECT_ONLY=1 PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
+    FM_BOOTSTRAP_NETWORK=skip PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-bootstrap.sh" 2>&1) || rc=$?
   rm -f "$FAKEBIN/python3"
+  expect_code 0 "$rc" "bootstrap arm failure must remain non-fatal"
   assert_contains "$out" "PRIMARY_RESOURCE: not armed" \
     "bootstrap must emit a PRIMARY_RESOURCE arm-failure diagnostic"
   case "$out" in
@@ -899,6 +946,7 @@ test_check_quota_wins_both
 test_quota_five_hour_schema_variants
 test_observe_wrong_session_and_non_owner
 test_observe_stdin_no_args_writes_binding
+test_unsupported_adapter_stays_alert_only
 test_check_lock_pid_mismatch_alert
 test_commit_revalidates_and_refuses_stale
 test_stow_attestation_rejects_negative_prose
