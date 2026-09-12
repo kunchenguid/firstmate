@@ -31,6 +31,10 @@ unset NO_MISTAKES_GATE
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 RUN="$ROOT/bin/fm-sessionstart-run.sh"
+# Exported so run_hook still resolves it when fm_run_dir_readonly runs the
+# function as a child of setpriv's fresh `bash -c`, which only inherits
+# the environment, not this script's plain shell variables.
+export RUN
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
@@ -178,6 +182,8 @@ EOF
 # PATH keeps every bootstrap probe fast and hermetic - it reports missing tools
 # instead of reaching the host's real gh/tmux/tasks-axi.
 RUN_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+# Exported for the same reason as RUN above.
+export RUN_PATH
 
 make_run_primary() {
   local dir=$1
@@ -193,6 +199,9 @@ run_hook() {  # <root> [args...]
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
 }
+# Exported so fm_run_dir_readonly's inner setpriv `bash -c` can resolve it
+# as a function rather than an external command.
+export -f run_hook
 
 run_hook_pi() {  # <root> [args...]
   local root=$1
@@ -1006,9 +1015,7 @@ test_run_gate_and_scope_are_silent() {
 test_run_reports_a_failed_session_start_as_digest_text() {
   local root="$TMP_ROOT/run-unwritable" out status=0
   make_run_primary "$root"
-  chmod 0500 "$root/state"
-  out=$(run_hook "$root" --source startup </dev/null) || status=$?
-  chmod 0700 "$root/state"
+  out=$(fm_run_dir_readonly "$root/state" run_hook "$root" --source startup </dev/null) || status=$?
   expect_code 0 "$status" "run wrapper with an unwritable state directory"
   assert_contains "$out" "READ-ONLY SESSION" "a failed lock did not reach the agent as digest text"
   pass "run wrapper: a session start that cannot take the lock still opens the session and says so"
