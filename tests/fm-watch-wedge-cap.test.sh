@@ -254,10 +254,13 @@ test_wedge_cap_marker_write_after_durable_wake_v13() {
   n=1
   while [ "$n" -le "$max" ]; do
     if [ "$n" -eq "$max" ]; then
-      # Lock the queue directory so fm_wake_append (which is the LAST
-      # step before the per-hash + window-scoped marker writes in v12)
-      # fails. The v13 fix asserts: NO marker is written when
-      # fm_wake_append fails.
+      # Make fm_wake_append (the LAST step before the per-hash +
+      # window-scoped marker writes in v12) fail on the firing round:
+      # remove the queue file and lock the queue directory, so the
+      # append's create cannot succeed (appending to the pre-existing
+      # writable file would succeed even under a read-only parent). The
+      # v13 fix asserts: NO marker is written when fm_wake_append fails.
+      rm -f "$dir/queue-parent/queue"
       chmod 0555 "$dir/queue-parent"
     fi
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
@@ -267,8 +270,17 @@ test_wedge_cap_marker_write_after_durable_wake_v13() {
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max \
       FM_WAKE_QUEUE="$dir/queue-parent/queue" "$WATCH" > "$out" &
     pid=$!
-    if ! wait_for_exit "$pid" 100; then
-      reap "$pid"; fail "round $n watch failed: $(cat "$out")"
+    set +e
+    wait "$pid" 2>/dev/null
+    round_status=$?
+    if [ "$n" -eq "$max" ]; then
+      # Round max is expected to exit 1: v13 writes no marker when
+      # fm_wake_append fails and exits 1 so the next poll retries the
+      # cap from scratch. Other rounds must exit 0 or the watcher
+      # logic regressed.
+      [ "$round_status" -eq 1 ] || fail "round max expected exit 1 (v13 no-marker append-failure path), got $round_status: $(cat "$out")"
+    else
+      [ "$round_status" -eq 0 ] || fail "round $n watch failed with exit $round_status: $(cat "$out")"
     fi
     if [ "$n" -lt "$max" ]; then
       ack_stopped_cycle "$state" || fail "round $n ack failed"
@@ -1027,7 +1039,7 @@ test_wedge_cap_holds_within_horizon() {
   pass "the cap is honored within FM_CAP_HORIZON_SECS - no additional terminal wakes fire"
 }
 
-test_wedge_cap_hash_change_invalidates_marker() {
+test_wedge_cap_window_marker_silences_fresh_hash() {
   local dir state fakebin out capture_file window key pane_hash_old pane_hash_new sig pid max marker
   dir=$(make_case wedge-cap-hash-change); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
@@ -1318,7 +1330,7 @@ test_wedge_cap_suppresses_subsequent_polls_for_same_hash
 test_wedge_cap_persists_across_pause_class_transitions
 test_wedge_cap_expires_after_horizon
 test_wedge_cap_holds_within_horizon
-test_wedge_cap_hash_change_invalidates_marker
+test_wedge_cap_window_marker_silences_fresh_hash
 test_wedge_cap_escalation_counter_resets_on_cap_fire
 test_wedge_cap_marker_write_after_durable_wake_v13
 test_wedge_cap_failed_window_marker_rolls_back_per_hash_v13

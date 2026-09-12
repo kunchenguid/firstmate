@@ -63,14 +63,15 @@
 #                          tool process. Past FM_WEDGE_MAX_ESCALATIONS
 #                          consecutive wedge escalations on the same (window, hash),
 #                          the watcher emits one terminal "PERMANENTLY-WEDGED"
-#                          wake and writes STATE/.wedge-permanent-<key>-<hash12>;
-#                          subsequent polls for that hash short-circuit until
-#                          FM_CAP_HORIZON_SECS elapse, the pane hash changes, or
-#                          the operator manually removes the marker. v12 also
-#                          writes a window-scoped STATE/.wedge-permanent-<key>
-#                          marker that silences ALL hashes for the window until
-#                          FM_CAP_HORIZON_SECS elapses or the operator manually
-#                          removes it (so a busy pane churning its rendered
+#                          wake and writes BOTH markers:
+#                          STATE/.wedge-permanent-<key>-<hash12> (per-hash, v2)
+#                          and STATE/.wedge-permanent-<key> (window-scoped,
+#                          v12). The window-scoped marker silences ALL hashes
+#                          for the window, so a pane hash change alone does
+#                          NOT re-engage while it stands; every subsequent
+#                          poll short-circuits until FM_CAP_HORIZON_SECS
+#                          elapse or the operator manually removes both
+#                          markers (so a busy pane churning its rendered
 #                          hash on every poll cannot rebuild the escalation
 #                          counter per fresh hash and re-fire). v13 inverts the
 #                          ordering so the durable wake row is queued BEFORE
@@ -931,11 +932,12 @@ clear_write_tracking() {  # <window-key>
 # a stale-hash to prevent LLM-supervised unattended loops from hammering paid
 # API quotas when the demand-deep-inspection marker is read but not acted on.
 # Once the count reaches this threshold, wedge_timer_check emits ONE terminal
-# wake ("PERMANENTLY-WEDGED") and writes STATE/.wedge-permanent-<key>-<hash12>,
-# then stops sending further wakes for THIS (window, hash) until one of three
-# exit conditions: FM_CAP_HORIZON_SECS elapses since the marker timestamp, the
-# pane hash changes (different key naturally invalidates the marker), or the
-# operator manually removes the marker. Default 10 escalations is
+# wake ("PERMANENTLY-WEDGED") and writes BOTH STATE/.wedge-permanent-<key>
+# (window-scoped, v12) and STATE/.wedge-permanent-<key>-<hash12> (per-hash),
+# then stops sending further wakes for this WINDOW until FM_CAP_HORIZON_SECS
+# elapses since the window marker timestamp or the operator manually removes
+# both markers - a pane hash change alone does not re-engage while the
+# window-scoped marker stands. Default 10 escalations is
 # roughly 10 * STALE_ESCALATE_SECS (default 240s) = ~40 minutes of unattended
 # signaling before the cap kicks in - enough for any human or smart supervisor
 # to act, short enough to bound the burn. Tracked for revert: see
@@ -2741,9 +2743,10 @@ EOF
                 # v9 (2026-08-25): the cap marker is keyed on (window, hash) and
                 # bounded by FM_CAP_HORIZON_SECS (the marker file's timestamp is
                 # checked at the top of wedge_timer_check). No auto-lift on
-                # recovery is needed - a genuine recovery is observable via
-                # hash change (different key), and a stale cap expires after
-                # the horizon. pause_state_class=working can be a steady state
+                # recovery is needed - a stale cap expires after the horizon
+                # (v12: the window-scoped marker silences fresh hashes too, so
+                # a hash change alone does not re-engage before expiry).
+                # pause_state_class=working can be a steady state
                 # during a wedge (the worker is doing things but the pane is
                 # static), so it is NOT a recovery signal - the v6/v7 lift
                 # sites on this verdict over-corrected and let the cap cycle.
