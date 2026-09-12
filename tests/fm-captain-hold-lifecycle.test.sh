@@ -1118,6 +1118,41 @@ EOF
   pass "a deferred captain call leaves the live Captain's Call until its date and stays answerable"
 }
 
+test_park_is_state_not_a_current_human_decision() {
+  local home snap json show
+  home=$(make_home park-state)
+  run_captain "$home" hold sample-live-ask --title "Choose the sample cut" \
+    --reason "captain cut choice pending" --repo sample >/dev/null \
+    || fail "could not hold the live ask"
+  run_captain "$home" hold sample-parked --title "Do not send the sample note" \
+    --reason "parked without a live ask" --repo sample --park >/dev/null \
+    || fail "could not park a held item"
+  run_captain "$home" hold sample-standby --title "Public proof stays standby" \
+    --reason "standby without a live ask" --repo sample --park >/dev/null \
+    || fail "could not park a standby item"
+  show=$(tasks_in "$home" show sample-parked --full)
+  assert_contains "$show" "hold_kind: parked" "park did not record hold_kind parked"
+  assert_not_contains "$show" "Captain hold set:" "a parked item received a live-ask stamp"
+  snap=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_SNAPSHOT_NOW=2026-07-14T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed after park"
+  printf '%s' "$snap" | jq -e '
+    ([.backlog.records[] | select(.id == "sample-live-ask")][0].captain_actionable == true)
+      and ([.backlog.records[] | select(.id == "sample-parked")][0]
+           | .hold_kind == "parked" and .captain_actionable == false and .hold_bucket == null)
+      and ([.backlog.records[] | select(.id == "sample-standby")][0]
+           | .hold_kind == "parked" and .captain_actionable == false and .hold_bucket == null)
+  ' >/dev/null || fail "parked or standby state was classified as a current human decision: $snap"
+  json=$(run_bearings "$home") || fail "Bearings failed with parked state"
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.id == "sample-live-ask"))
+      and (.decisions_open | any(.id == "sample-parked") | not)
+      and (.decisions_open | any(.id == "sample-standby") | not)
+  ' >/dev/null || fail "a parked or standby item appeared as a current human decision: $json"
+  pass "parked or standby state is not a current human decision without a live ask"
+}
+
 # The recorded-answer guard survives an out-of-band close: a bare tasks-axi done
 # fails verify until answer records the captain's word, and an ordinary finished
 # task can never be dressed up as an answered captain call.
@@ -3858,6 +3893,7 @@ test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
+test_park_is_state_not_a_current_human_decision
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds

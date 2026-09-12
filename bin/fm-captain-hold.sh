@@ -21,7 +21,8 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] \
+#     [--until YYYY-MM-DD] [--park]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -46,6 +47,11 @@
 # A task already closed is refused rather than reopened. `--until` records the
 # captain's own deferral date through `tasks-axi hold --until`, so a "revisit
 # later" answer is stored as a date instead of a live card.
+# `--park` records parked or standby state through `tasks-axi hold --kind parked`
+# rather than `--kind captain`: it is not a live captain call, does not receive a
+# hold-set stamp or a parent needs-decision event, and is not captain_actionable.
+# An optional `--until` on `--park` is a date gate on that work, not a deferred
+# live ask. A live ask still uses `hold` without `--park`.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -819,7 +825,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how>"
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 park=0 hold_kind_flag=captain
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -829,6 +835,7 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --park) park=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -859,7 +866,7 @@ command_hold() {
       || fail "task $id is already closed; a new captain call needs its own task"
     existing_hold_kind=$(show_field_value "$show" hold_kind)
     existing_held=$(show_field_value "$show" held)
-    if [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
+    if [ "$park" = 0 ] && [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
       preserve_hold_set=1
     fi
     if [ -n "$title" ]; then
@@ -885,29 +892,35 @@ command_hold() {
         || fail "could not create task $id"
     fi
   fi
-  # Publish the timestamp before the captain-hold annotation. A concurrent
-  # snapshot may see the harmless stamp by itself, but can never see a newly
-  # held task without the timestamp that defines this hold lifecycle's age.
-  task_show_or_fail "$id" "task $id disappeared before recording its hold-set stamp"
-  write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set"
-  task_show_or_fail "$id" "task $id disappeared while recording its hold-set stamp"
-  [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
-    || fail "task $id did not retain its hold-set stamp"
-  if [ -n "$until" ]; then
-    tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
-      || fail "could not hold task $id for the captain"
+  if [ "$park" = 1 ]; then
+    hold_kind_flag=parked
   else
-    tasks_axi hold "$id" --reason "$reason" --kind captain >/dev/null \
-      || fail "could not hold task $id for the captain"
+    # Publish the timestamp before the captain-hold annotation. A concurrent
+    # snapshot may see the harmless stamp by itself, but can never see a newly
+    # held task without the timestamp that defines this hold lifecycle's age.
+    task_show_or_fail "$id" "task $id disappeared before recording its hold-set stamp"
+    write_hold_set_stamp "$id" "$(show_field "$show" body)" "$hold_set" "$preserve_hold_set"
+    task_show_or_fail "$id" "task $id disappeared while recording its hold-set stamp"
+    [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
+      || fail "task $id did not retain its hold-set stamp"
+  fi
+  if [ -n "$until" ]; then
+    tasks_axi hold "$id" --reason "$reason" --kind "$hold_kind_flag" --until "$until" >/dev/null \
+      || fail "could not hold task $id"
+  else
+    tasks_axi hold "$id" --reason "$reason" --kind "$hold_kind_flag" >/dev/null \
+      || fail "could not hold task $id"
   fi
   task_show "$id" || fail "task $id disappeared while holding it"
   show=$TASK_SHOW_OUTPUT
   hold_kind=$(show_field_value "$show" hold_kind)
-  [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
-  occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
-  [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
-    || fail "task $id lost its hold-set stamp while being held"
-  publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  [ "$hold_kind" = "$hold_kind_flag" ] || fail "task $id did not retain its $hold_kind_flag hold"
+  if [ "$park" = 0 ]; then
+    occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
+    [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
+      || fail "task $id lost its hold-set stamp while being held"
+    publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  fi
   printf '%s\n' "$id"
 }
 

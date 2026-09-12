@@ -36,7 +36,8 @@
 #     when hold_until is still in the future, else "aged" when an undated hold
 #     is at least FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS old (default 14; legacy
 #     unstamped holds fall back to `since`), else "live". A non-captain or Done
-#     row carries null.
+#     row carries null, including parked or standby holds recorded with
+#     hold_kind parked.
 #     captain_actionable means "waiting on the captain now" and is exactly
 #     hold_bucket == "live".
 #     hold_age_days is the hold's age when computable, else null.
