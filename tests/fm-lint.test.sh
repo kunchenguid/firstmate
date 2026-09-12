@@ -151,6 +151,7 @@ pinned_ready() {
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
 }
 
+# --- tasks-axi interface boundary -------------------------------------------
 test_help_reports_the_complete_interface() {
   local help
   help=$("$LINT" --help) || fail "fm-lint.sh --help failed"
@@ -1056,7 +1057,12 @@ SH
     '$"bd" close fm-example' \
     "\$'\\x62\\x64' close fm-example" \
     "\$'\\142\\144' close fm-example" \
-    "b\$'\\x64' close fm-example"
+    "b\$'\\x64' close fm-example" \
+    'sudo bd close fm-example' \
+    'time bd list' \
+    'xargs bd show fm-example' \
+    'nohup bd ready --json' \
+    'timeout bd close fm-example'
   do
     printf '#!/usr/bin/env bash\n%s\n' "$invocation" > "$tmp/repo/bin/direct-beads.sh"
     rc=0
