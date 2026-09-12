@@ -316,6 +316,21 @@ EOF
   fi
   [ -f "$doorbell_inbox/handled/001.msg" ] \
     || die "agy ($version): doorbell instruction was not acknowledged"
+  # The inbox acknowledgement can precede AGY's Stop hook and leave the
+  # worker busy while the next doorbell is typed into its composer.
+  ready=0
+  for _ in $(seq 1 120); do
+    if grep -Fq 'state=idle' "$state/$task.busy-state" 2>/dev/null; then
+      verdict=$(TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+        bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state "$2" agy' _ "$ROOT" "$target" 2>/dev/null || true)
+      if [ "$verdict" = empty ]; then
+        ready=1
+        break
+      fi
+    fi
+    sleep 1
+  done
+  [ "$ready" -eq 1 ] || die "agy ($version): doorbell turn did not return to an idle empty composer"
   lifecycle_tool_brief="Run the exact shell command \`sleep 60\` and wait for it to finish. Do not run any other command."
   FM_SEND_SETTLE=0 TMUX_TMPDIR="$lab/tmux" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-send.sh" "$task" \
