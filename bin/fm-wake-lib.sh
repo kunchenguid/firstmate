@@ -1155,6 +1155,10 @@ fm_task_set_lock_path() {  # <state-dir>
 #
 # Everything else still fails closed: an unreadable or malformed binding, an
 # unreachable local parent, a cycle, and a chain deeper than the bound.
+# Failures normally leave stdout empty. With --print-unresolved-parent as the
+# second argument, an unenterable recorded local parent is printed on stdout
+# for the caller's diagnostic, but the status remains nonzero. Callers must
+# check that status before treating any output as a resolved root home.
 fm_firstmate_root_home() {
   local home=${1:-$FM_HOME} marker parent seen="|" depth=0
   home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
@@ -1170,7 +1174,10 @@ fm_firstmate_root_home() {
       remote) break ;;
       *) return 1 ;;
     esac
-    parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 1
+    parent=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || {
+      [ "${2:-}" != --print-unresolved-parent ] || printf '%s\n' "$FM_SECONDMATE_PARENT_HOME"
+      return 1
+    }
     case "$seen" in *"|$parent|"*) return 1 ;; esac
     seen="$seen$home|"
     home=$parent
@@ -1178,6 +1185,10 @@ fm_firstmate_root_home() {
     [ "$depth" -le 64 ] || return 1
   done
   printf '%s\n' "$home"
+}
+
+_fm_treehouse_lock_named() {  # <what-could-not-be-resolved> <path>
+  printf 'fm_treehouse_project_lock_path: %s: %s\n' "$1" "$2" >&2
 }
 
 # The one lock serializing Treehouse slot allocation and return for a project.
@@ -1188,25 +1199,74 @@ fm_firstmate_root_home() {
 # derives the identical path. Its identity is the project's resolved origin, so
 # separate clones of one origin share a single lock; an origin-less local-only
 # project falls back to its own worktree top instead of failing to resolve.
+#
+# Refusals leave stdout empty and name the failed resource on stderr, which
+# reaches the operator alongside the caller's context line even when stdout
+# is captured as the lock path. An unenterable recorded local parent is named
+# instead of the existing child home; other root-resolution failures name
+# FM_HOME. Success prints only the lock path, without a diagnostic.
+# The shared lock anchor remains <local-root-home>/state regardless of
+# FM_STATE_OVERRIDE. A missing home or root state directory remains a refusal;
+# resolving this lock must not create either directory to satisfy the guard.
+# tests/fm-treehouse-lock-naming.test.sh covers these diagnostic and refusal
+# invariants through the library interface and a spawn refusal.
 fm_treehouse_project_lock_path() {  # <project-dir>
-  local project=$1 root origin identity hash top
-  [ -d "$project" ] || return 1
-  root=$(fm_firstmate_root_home "$FM_HOME") || return 1
+  local project=$1 root origin identity hash top resolved
+  [ -d "$project" ] || {
+    _fm_treehouse_lock_named "project directory does not exist" "$project"
+    return 1
+  }
+  root=$(fm_firstmate_root_home "$FM_HOME" --print-unresolved-parent) || {
+    if [ -n "$root" ]; then
+      _fm_treehouse_lock_named "cannot resolve the recorded parent firstmate home" "$root"
+    else
+      _fm_treehouse_lock_named "cannot resolve the root firstmate home from FM_HOME" "$FM_HOME"
+    fi
+    return 1
+  }
   origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
   if [ -n "$origin" ]; then
     case "$origin" in
-      /*) [ ! -d "$origin" ] || origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 1 ;;
+      /*)
+        if [ -d "$origin" ]; then
+          resolved=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || {
+            _fm_treehouse_lock_named "project origin directory cannot be entered" "$origin"
+            return 1
+          }
+          origin=$resolved
+        fi
+        ;;
       *://*|*:* ) ;;
-      *) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
+      *)
+        if [ -d "$project/$origin" ]; then
+          resolved=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || {
+            _fm_treehouse_lock_named "project origin directory cannot be entered" "$project/$origin"
+            return 1
+          }
+          origin=$resolved
+        fi
+        ;;
     esac
     identity=$origin
   else
-    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
-    top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
-    identity=$top
+    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || {
+      _fm_treehouse_lock_named "project has no origin and is not inside a git worktree" "$project"
+      return 1
+    }
+    resolved=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || {
+      _fm_treehouse_lock_named "project worktree top cannot be entered" "$top"
+      return 1
+    }
+    identity=$resolved
   fi
-  hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
-  [ -d "$root/state" ] || return 1
+  hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || {
+    _fm_treehouse_lock_named "cannot hash the project lock identity, so git is unusable here" "$project"
+    return 1
+  }
+  [ -d "$root/state" ] || {
+    _fm_treehouse_lock_named "the root firstmate home has no state directory" "$root/state"
+    return 1
+  }
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
