@@ -280,7 +280,7 @@ After seeding a secondmate, `fm-backlog-handoff.sh` validates the fleet-specific
 The [`fm-backlog-handoff.sh`](../bin/fm-backlog-handoff.sh) header owns route-specific wake outcomes, remote outbox release after receipt, and stable wake-correlation retry behavior.
 `tests/fm-backlog-handoff.test.sh` and `tests/fm-remote-backlog-handoff.test.sh` pin the local and remote delivery boundaries.
 An unreachable remote host is unknown rather than dead, preserves its route and durable work, and is never failed over or relaunched locally.
-Idle secondmate panes are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
+Idle secondmate panes are healthy; teardown is explicit, retirement takes per-target authority naming the exact home (`--retire-secondmate <id>`, which `--force` never substitutes for; see the teardown ownership paragraph in the lifecycle section), and teardown refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
 
 Secondmate homes converge conservatively to the primary's version and declared inherited local material at launch and during locked session start.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the full guarded sync, propagation, nudge, and mid-session local-material push contract.
@@ -343,6 +343,7 @@ A slot's own owner claim, written by the spawn that takes it under the allocatio
 Allocation and return serialize on one project lock per machine-local Firstmate tree: every home reachable through local parent links shares that lock, and a home seeded from another machine anchors its own, because a lock taken on this filesystem is neither held nor observable across that boundary.
 Before the worktree is returned, teardown concludes the task's own no-mistakes run when it is parked at a gate, including a run whose head the task copy cannot resolve - the shared runs-ledger continuation proof is the only recognition for that case, so cleanup never orphans a parked run the pipeline advanced past the submitted head.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, slot-ownership proof, PR-discovery fallback, pre-teardown run conclusion, and stale-lock recovery procedure; [`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) and [`tests/fm-secondmate-safety.test.sh`](../tests/fm-secondmate-safety.test.sh) pin the slot-collision boundary.
+It also owns the per-target authority a `kind=secondmate` retirement takes and the one-target-per-invocation rule, so a cleanup list can never retire a persistent home as a side effect; `bin/fm-fleet-view.sh --cleanup-candidates` is the kind-labeled report those targets are chosen from.
 
 ## Optional Relay
 

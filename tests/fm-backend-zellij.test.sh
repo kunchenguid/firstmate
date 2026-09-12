@@ -900,7 +900,7 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ROOT_OVERRIDE="$ROOT" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
-    "$ROOT/bin/fm-teardown.sh" smz --force 2>&1 )
+    "$ROOT/bin/fm-teardown.sh" smz --force --retire-secondmate smz 2>&1 )
   status=$?
   expect_code 0 "$status" "fm-teardown should force-retire a secondmate with a zellij child: $out"
   assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''4' \
