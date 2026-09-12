@@ -426,6 +426,14 @@ function isOperationalUserText(text: string): boolean {
   return classifyFirstmateOperationalText(text) !== undefined;
 }
 
+// The branch may inspect watcher state, but only main owns repair. Refuse the
+// demonstrated direct restart shape before Pi spawns a shell; failure alarms
+// already reject branch dispatch and therefore reach main.
+function branchCommandDirectlyRestartsWatcher(command: string): boolean {
+  return command.includes("fm-watch-arm.sh") &&
+    command.split(/[\s;&|()'"`]+/).includes("--restart");
+}
+
 function capMirrorText(text: string): string {
   if (text.length <= MIRROR_MESSAGE_CAP) return text;
   const headLength = Math.ceil(MIRROR_MESSAGE_CAP / 2);
@@ -1285,6 +1293,9 @@ export default function (pi: ExtensionAPI) {
         // rather than quietly granted.
         if (activatedGeneration !== branchGeneration || !generationOwnsLockSync(branchGeneration)) {
           throw new Error("bash refused: supervision session was replaced or lost lock ownership");
+        }
+        if (branchCommandDirectlyRestartsWatcher(context.command)) {
+          throw new Error("bash refused: watcher restart is main-owned; report the watcher failure to main instead");
         }
         return {
           ...context,

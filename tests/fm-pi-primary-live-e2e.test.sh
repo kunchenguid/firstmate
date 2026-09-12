@@ -305,7 +305,7 @@ sleep 0.2
 
 : > "$HOME_DIR/state/pi-e2e.meta"
 send_prompt "Start supervision with fm_watch_arm_pi and never use bash to arm supervision. After the watcher wake arrives, run bin/fm-wake-drain.sh and reply exactly HANDLED."
-wait_for_text "watcher: started Pi extension arm child 1" || fail "Pi did not render the initial watcher tool result"
+wait_for_text "watcher: spawned Pi extension arm child 1" || fail "Pi did not render the initial watcher tool result"
 
 printf 'done: pi live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
 i=0
