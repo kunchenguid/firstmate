@@ -880,7 +880,7 @@ test_scout_and_secondmate_scaffold() {
 }
 
 test_worker_role_scope() {
-  local kind home brief
+  local kind home brief intro
   home="$TMP_ROOT/worker-role"
   for kind in no-mistakes direct-PR local-only scout; do
     if [ "$kind" = scout ]; then
@@ -889,6 +889,11 @@ test_worker_role_scope() {
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$kind" arbitrary-project-name --mode "$kind" >/dev/null || fail "$kind scaffold failed"
     fi
     brief="$home/data/$kind/brief.md"
+    IFS= read -r intro < "$brief"
+    [ "${#intro}" -le 75 ] || fail "$kind repeats verbose identity boilerplate"
+    assert_contains "$intro" 'crewmate' "$kind lost worker role selection"
+    assert_contains "$intro" 'firstmate' "$kind lost its supervisor"
+    assert_contains "$intro" 'do not wait for a human' "$kind lost autonomous execution"
     assert_no_grep '# Current worker role contract' "$brief" "$kind scaffolded a second owner of the role scope fm-spawn.sh delivers"
   done
   FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
@@ -901,6 +906,43 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
+test_worker_role_output_budget() {
+  local role
+  # Exercise the public emitter, not its implementation-source bytes.
+  role=$( . "$ROOT/bin/fm-dod-lib.sh"; fm_brief_worker_role)
+  [ "${#role}" -le 700 ] || fail "worker role overlay exceeds the 700-character consumed-output budget"
+  assert_contains "$role" 'When this task works on Firstmate itself' 'role exception lost its scope'
+  assert_contains "$role" 'supersedes' 'legacy role instructions no longer superseded'
+  assert_contains "$role" 'follow this brief instead of that supervisor contract' 'worker lost authority'
+  assert_contains "$role" 'do not adopt the supervisor identity, delegate the task, run fleet supervision, or address the captain' 'worker lost supervisor boundary'
+  assert_contains "$role" 'safety and authority boundaries' 'brief safeguards were displaced'
+  assert_contains "$role" 'CONTRIBUTING.md' 'contributor guidance was displaced'
+  assert_contains "$role" 'firstmate-coding-guidelines' 'Firstmate coding guidance was displaced'
+  assert_contains "$role" 'Other projects retain their own instructions unchanged' 'project guidance was displaced'
+  pass 'fm-brief: bounded worker role output retains authority and instruction boundaries'
+}
+
+test_existing_briefs_are_not_migrated() {
+  local kind home brief out rc
+  home="$TMP_ROOT/no-migration"
+  for kind in no-mistakes direct-PR local-only scout secondmate; do
+    mkdir -p "$home/data/$kind"
+    brief="$home/data/$kind/brief.md"
+    printf '# Authored legacy brief\nKeep this role, intent, status path and handoff verbatim.\n' > "$brief"
+    cp "$brief" "$home/before"
+    case "$kind" in
+      scout) out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$kind" sample-project --scout 2>&1); rc=$? ;;
+      secondmate) out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$kind" --secondmate --no-projects 2>&1); rc=$? ;;
+      *) out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$kind" sample-project --mode "$kind" 2>&1); rc=$? ;;
+    esac
+    expect_code 1 "$rc" "$kind must refuse an existing authored brief: $out"
+    cmp -s "$home/before" "$brief" || fail "$kind silently migrated an authored brief"
+  done
+  pass 'fm-brief: existing worker briefs and supervisor charters remain byte-identical'
+}
+
+test_existing_briefs_are_not_migrated
+test_worker_role_output_budget
 test_worker_role_scope
 test_script_parses
 test_no_heredoc_in_command_substitution
