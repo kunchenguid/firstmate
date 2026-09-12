@@ -219,31 +219,46 @@ fi
 # every other check on this page uses, so a daemon that is genuinely still
 # cycling - just slower than a fixed 300s window - is not misread as down.
 AFK_GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
-if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
-  && fm_afk_daemon_owns_supervision "$STATE"; then
+AFK_BEACON_FRESH=0
+[ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] && AFK_BEACON_FRESH=1
+AFK_DAEMON_OWNS=0
+fm_afk_daemon_owns_supervision "$STATE" && AFK_DAEMON_OWNS=1
+if [ "$AFK_BEACON_FRESH" -eq 1 ] && [ "$AFK_DAEMON_OWNS" -eq 1 ]; then
   allow_supervised_stop
 fi
 
 block_stop() {
-  local afk x_mode reason rule
+  local afk x_mode reason rule watcher_desc
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
   reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
+  # In away mode the daemon, not a watcher, is the supervision owner, and the
+  # two ways it can fail need different recovery: a gone daemon pid needs a
+  # relaunch (kunchenguid/firstmate#3930), while a live daemon with a stale
+  # beacon means its watcher child is stuck and the daemon itself needs
+  # inspection. Outside away mode "no live watcher" remains exact as before.
+  if [ "$afk" -eq 1 ] && [ "$AFK_DAEMON_OWNS" -ne 1 ]; then
+    watcher_desc="away-mode daemon pid gone (recorded lock does not name a live, identity-matched process) - relaunch with bin/fm-afk-launch.sh start (or start-native)"
+  elif [ "$afk" -eq 1 ] && [ "$AFK_BEACON_FRESH" -ne 1 ]; then
+    watcher_desc="away-mode beacon stale (last beat: ${FM_SUP_BEACON_DESC}) - the daemon still holds its lock but its watcher child has not ticked within ${AFK_GRACE}s; inspect the daemon before relaunching"
+  else
+    watcher_desc="no live watcher holds this home lock (last beat: ${FM_SUP_BEACON_DESC})"
+  fi
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
     printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
     if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
-      printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+      printf '●  %s task(s) in flight, but %s.\n' "$FM_SUP_IN_FLIGHT" "$watcher_desc"
     elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
-      printf '●  %s process-event source(s) registered, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_SOURCES" "$FM_SUP_BEACON_DESC"
+      printf '●  %s process-event source(s) registered, but %s.\n' "$FM_SUP_SOURCES" "$watcher_desc"
     elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
-      printf '●  %s registered custom check(s), but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_CHECKS" "$FM_SUP_BEACON_DESC"
+      printf '●  %s registered custom check(s), but %s.\n' "$FM_SUP_CHECKS" "$watcher_desc"
     else
-      printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
+      printf '●  X-mode relay polling needs supervision, but %s.\n' "$watcher_desc"
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'

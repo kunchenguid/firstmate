@@ -387,6 +387,67 @@ unit_mode_garbage_and_legacy_content_reads_away() {
 }
 
 # ---------------------------------------------------------------------------
+# UNIT 2b: a DEAD recorded daemon (pid no longer alive, .afk still present)
+# must be reconciled and relaunched by a single `start`/`start-native` call,
+# never refused as "daemon already running" - recovery must not require
+# `stop` first (kunchenguid/firstmate#3930).
+# ---------------------------------------------------------------------------
+unit_dead_pid_recovery_native() {
+  local st dead_pid lock out status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-dead-native.XXXXXX")
+  mkdir -p "$st/state"
+  confirm_posture "$st" || fail "dead-pid recovery (native): could not confirm fixture posture"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  sleep 600 &
+  dead_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$dead_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$dead_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+  kill "$dead_pid" 2>/dev/null || true
+  wait "$dead_pid" 2>/dev/null || true
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  status=$?
+  if [ "$status" -eq 0 ] && [ -e "$st/state/.afk" ] \
+    && ! printf '%s\n' "$out" | grep -F "already running" >/dev/null; then
+    pass "dead-pid recovery (native): a dead recorded daemon is reconciled without a prior stop"
+  else
+    fail "dead-pid recovery (native): start-native refused or reported already-running ($out)"
+  fi
+  rm -rf "$st"
+}
+
+unit_dead_pid_recovery_terminal() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (dead-pid recovery terminal)"; return 0; }
+  local st dead_pid lock out status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-dead-terminal.XXXXXX")
+  mkdir -p "$st/state"
+  confirm_posture "$st" || fail "dead-pid recovery (terminal): could not confirm fixture posture"
+  sleep 600 &
+  dead_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$dead_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$dead_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+  kill "$dead_pid" 2>/dev/null || true
+  wait "$dead_pid" 2>/dev/null || true
+  # No .afk-daemon-terminal record exists here, mirroring a dead daemon whose
+  # terminal record was never written (or already reconciled away) - the
+  # reconcile path must still recognize the dead lock and relaunch cleanly.
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="fake:0" \
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start 2>&1)
+  status=$?
+  if [ "$status" -eq 0 ] && [ -e "$st/state/.afk" ] \
+    && ! printf '%s\n' "$out" | grep -F "already running" >/dev/null; then
+    pass "dead-pid recovery (terminal): a dead recorded daemon is reconciled without a prior stop"
+  else
+    fail "dead-pid recovery (terminal): start refused or reported already-running ($out)"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
 # UNIT 3: exit ordering - fm_afk_launch_stop SIGTERMs the daemon WHILE .afk is
 # still present (so its flush is not a no-op), and clears .afk last.
 # ---------------------------------------------------------------------------
@@ -1197,6 +1258,8 @@ unit_mode_explicit_write
 unit_mode_fresh_defaults_away
 unit_mode_refresh_preserves_quiet
 unit_mode_garbage_and_legacy_content_reads_away
+unit_dead_pid_recovery_native
+unit_dead_pid_recovery_terminal
 unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
