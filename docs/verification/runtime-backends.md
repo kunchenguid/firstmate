@@ -1739,6 +1739,33 @@ The same guard against the pre-change extension in the same lab measured a 676.9
 Measured through the same real `fm_branch_report` tool and real `bin/` scripts with a 1 ms interval timer, the largest single block of the JavaScript thread fell from 273 ms to 2.0 ms for a routine outcome, from 286 ms to 2.0 ms for a captain outcome, and from 134 ms to 1.9 ms for main's acknowledgement, against a 1.3-2.2 ms idle-loop floor.
 Those absolute figures are specific to this host and Pi version; the guards assert the relationship (delivery must stay in the class of the same machine's own floor) rather than a remembered millisecond number.
 
+### 2026-09-11 processing notification and error boundaries
+
+Verified on macOS 26.6.2 arm64, Node v24.13.1, with the installed npm Pi SDK 0.84.3 and task-local TypeScript 5.9.3.
+The commands below ran under `env -i` with isolated `HOME`, `TMPDIR` and `FM_HOME`, `PI_OFFLINE=1`, `PI_TELEMETRY=0`, and no inherited credentials or endpoint settings.
+The live processing probe substitutes a deterministic stream function in the real `AgentSession`, then exercises the registered acknowledgement tool through the real `pi-agent-core` executor; no provider request leaves the process.
+
+```sh
+bash bin/fm-test-run.sh --jobs 1 --per-script-timeout-secs 180 tests/fm-pi-primary-types.test.sh tests/fm-pi-branch-extension.test.sh
+bash bin/fm-test-run.sh --jobs 1 --per-script-timeout-secs 180 tests/fm-branch-supervision.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bash bin/fm-test-run.sh --jobs 1 --per-script-timeout-secs 180 tests/fm-pi-branch-live-e2e.test.sh
+```
+
+```text
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.3
+ok - new captain outcomes reactivate idle nextTurn delivery; in-flight grants, retries, stale copies, replacement and durable rows remain guarded
+ok - the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and migrates delivered history once
+ok - real Pi SDK 0.84.3 actively delivers new idle outcomes, filters stale queued requests, and flags refused acknowledgements as tool errors without advancing the store
+```
+
+The portable suite's existing stock-render comparison explicitly skips below its Pi 0.84.4 floor; its processing cases and the real-SDK processing guard run and pass on 0.84.3.
+The real guard also verifies a follow-up consumed inside an already-running main retains its retry boundary without another `agent_start`, and that old next-prompt copies remain in the transcript but not the next provider context.
+Reinstating the old pending-request condition makes the portable arrival case fail with `new captain row stranded behind idle nextTurn`; reinstating a returned `isError` refusal makes the real executor case fail with `false !== true`.
+Pi and Pi-signed select the same extension integration (`bin/fm-session-start.sh`'s Pi-family branch), and native tool discovery preserves the identical guarded execute callback (`.pi/extensions/lib/fm-native-contract.ts`, pinned by the portable processing test).
+This is importable-SDK evidence, not a new signed-binary TUI or native-provider certification.
+No runtime backend or non-Pi adapter loads this processing implementation, and the store/lease regression preserves the non-Pi-home behavior; no backend lifecycle or watcher-continuity behavior changes here.
+The processing contract remains owned by [Pi supervision branch](../pi-supervision-branch.md#two-stage-noise-filter).
+
 ## Native Codex through Pi
 
 Verified on 2026-09-08 with Pi 0.85.1 and the installed `pi-codex-native` 0.2.1 adapter.

@@ -629,8 +629,9 @@ export default function (pi: ExtensionAPI) {
   // queued for the captain's next prompt. The durable truth is the store's
   // processed marker; this only paces re-presentation and resets with the
   // session generation.
-  type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
+  type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean; requestId: string };
   let processing: ProcessingState | null = null;
+  let processingRun: ProcessingState | null = null;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -1020,6 +1021,14 @@ export default function (pi: ExtensionAPI) {
   // prompt instead, once per run, and a session replacement starts the
   // triggered budget over. Nothing here advances the processed marker: only
   // fm_branch_processed does, keyed to the sequence main acknowledges.
+  function processingPresentationPending(sequences: string): boolean {
+    // nextTurn alone cannot start a run. Only NEW membership may replace that
+    // idle copy; a triggered/consumed request retains its exact grant until
+    // its run settles, even when more outcomes arrive in the meantime.
+    return Boolean(processing?.pending &&
+      (!processing.nextTurnQueued || mainStreaming || processing.sequences === sequences));
+  }
+
   async function presentUnprocessedOutcomes(expectedGeneration: number): Promise<boolean> {
     const rows = await readUnprocessedOutcomes(expectedGeneration);
     if (rows === null) return false;
@@ -1029,7 +1038,7 @@ export default function (pi: ExtensionAPI) {
     }
     const through = rows[rows.length - 1].seq;
     const sequences = rows.map((row) => row.seq).join(",");
-    if (processing?.pending) return true;
+    if (processingPresentationPending(sequences)) return true;
     // Encoding the request body shells out, so it is done before the volatile
     // processing state is touched: the queue keeps another delivery out, but
     // main's own agent_start still runs during that await and clears
@@ -1037,14 +1046,19 @@ export default function (pi: ExtensionAPI) {
     // on after it.
     const content = await processingRequestInput(rows);
     if (!(await generationOwnsLock(expectedGeneration))) return false;
-    if (processing?.pending) return true;
+    if (processingPresentationPending(sequences)) return true;
     if (!processing || processing.sequences !== sequences) {
-      processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false };
+      processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false, requestId: "" };
     }
     // A presentation already sent is consumed by the run it joins or opens;
     // until that run settles, sending a widened or identical copy would hand
     // overlapping requests to the same run.
-    const message = { customType: PROCESSING_MESSAGE_TYPE, content, display: false };
+    if (processing.triggered >= PROCESSING_TRIGGERED_ATTEMPTS && processing.nextTurnQueued) return true;
+    processing.requestId = randomUUID();
+    const message = {
+      customType: PROCESSING_MESSAGE_TYPE, content, display: false,
+      details: { processingRequestId: processing.requestId },
+    };
     if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
       processing.triggered += 1;
       processing.pending = true;
@@ -1564,6 +1578,9 @@ ${context.command}
   // synchronous read it replaces did. The generation is captured before that
   // await so a session replaced while it runs cannot be staged into.
   pi.on?.("before_agent_start", async (event, ctx) => {
+    // Pi has already pulled nextTurn messages into this prompt. Do not widen
+    // their grant while the awaited ownership check yields before agent_start.
+    if (processing) processing.nextTurnQueued = false;
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;
     const promptGeneration = generation;
@@ -1583,14 +1600,37 @@ ${context.command}
     mirrorCollection.stagedCaptain = { file, index, text: prompt };
   });
 
+  // Pi has no remove-nextTurn API. A superseded idle copy may still join a
+  // later prompt, so exclude obsolete/duplicate requests from MODEL context,
+  // not the durable transcript. Only the current request can convey a grant.
+  pi.on?.("context", (event) => {
+    let included = false;
+    return { messages: event.messages.filter((message) => {
+      if (message.role !== "custom" || message.customType !== PROCESSING_MESSAGE_TYPE) return true;
+      const id = (message.details as { processingRequestId?: unknown } | undefined)?.processingRequestId;
+      if (!processing || id !== processing.requestId || included) return false;
+      included = true;
+      return true;
+    }) };
+  });
+
   pi.on?.("agent_start", () => {
     mainStreaming = true;
-    // Pi delivers a queued nextTurn copy with the prompt that starts this run,
-    // so a fresh copy may be queued again once this run settles unacknowledged.
+    processingRun = processing;
     if (processing) processing.nextTurnQueued = false;
   });
   pi.on?.("agent_end", () => {
     mainStreaming = false;
+  });
+  pi.on?.("message_start", (event) => {
+    // A follow-up sent while main is busy joins the SAME run: Pi emits its
+    // message_start, not another agent_start. Bind settlement to consumption
+    // of the current request, never to an obsolete nextTurn copy.
+    const message = event.message;
+    if (message.role !== "custom" || message.customType !== PROCESSING_MESSAGE_TYPE || !processing) return;
+    if ((message.details as { processingRequestId?: unknown } | undefined)?.processingRequestId !== processing.requestId) return;
+    processingRun = processing;
+    processing.nextTurnQueued = false;
   });
   // The run boundary is where an ignored processing request is detected: every
   // presentation sent before this point has been consumed by the run that just
@@ -1600,7 +1640,10 @@ ${context.command}
   // reply that only paraphrased it - and is presented again.
   pi.on?.("agent_settled", async () => {
     mainStreaming = false;
-    if (processing) processing.pending = false;
+    // A new request sent after this run acknowledged its old one is still
+    // pending. An unrelated/duplicate settled event must not spend its retry.
+    if (processing && processing === processingRun) processing.pending = false;
+    processingRun = null;
     const settledGeneration = generation;
     await enqueueDelivery(async () => {
       if (!(await actingAsOwner(settledGeneration))) return;
@@ -1707,6 +1750,7 @@ ${context.command}
     shuttingDown = true;
     generation += 1;
     processing = null;
+    processingRun = null;
     pendingMirror.length = 0;
     currentMainSession = null;
     mirrorCollection.collectAnchor = null;
@@ -2156,11 +2200,7 @@ ${context.command}
       const raw = (params as { through?: unknown }).through;
       const through = typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 ? raw : null;
       if (through === null) {
-        return {
-          content: [{ type: "text", text: "acknowledgement refused: through must be a positive outcome sequence number" }],
-          details: undefined,
-          isError: true,
-        };
+        throw new Error("acknowledgement refused: through must be a positive outcome sequence number");
       }
       // One queued unit, for the same reason the report tool is one: the
       // acknowledgement must not be interleaved with a delivery that is still
@@ -2168,26 +2208,14 @@ ${context.command}
       const acknowledgedGeneration = generation;
       return enqueueDelivery(async () => {
         if (!(await actingAsOwner(acknowledgedGeneration))) {
-          return {
-            content: [{ type: "text", text: "acknowledgement refused: this session does not own the fleet lock" }],
-            details: undefined,
-            isError: true,
-          };
+          throw new Error("acknowledgement refused: this session does not own the fleet lock");
         }
         if (!processing || through > processing.through) {
-          return {
-            content: [{ type: "text", text: `acknowledgement refused: seq ${through} was not listed in the active processing request` }],
-            details: undefined,
-            isError: true,
-          };
+          throw new Error(`acknowledgement refused: seq ${through} was not listed in the active processing request`);
         }
         const marked = await runOutcomeScript(["mark-processed", "--through", String(through)]);
         if (!marked.ok) {
-          return {
-            content: [{ type: "text", text: `acknowledgement refused: ${marked.detail}` }],
-            details: undefined,
-            isError: true,
-          };
+          throw new Error(`acknowledgement refused: ${marked.detail}`);
         }
         const remaining = await readUnprocessedOutcomes(acknowledgedGeneration);
         if (remaining !== null && remaining.length === 0) processing = null;
