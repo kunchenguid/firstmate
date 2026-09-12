@@ -43,10 +43,10 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 # Stub tmux: logs literal typed text to FM_SEND_LOG and lets the submit and
 # composer paths reach clean verdicts. FM_FAKE_TMUX_COMPOSER=pending renders a
 # composer visibly holding text; FM_FAKE_TMUX_SEND_FAIL=1 fails send-keys.
-make_stubs() {  # <dir> -> echoes fakebin dir
+make_stubs() { # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/tmux" <<'SH'
+  cat >"$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
@@ -80,7 +80,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  cat > "$fb/sleep" <<'SH'
+  cat >"$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
@@ -88,7 +88,7 @@ SH
   printf '%s\n' "$fb"
 }
 
-setup_case() {  # <name> [harness] -> echoes case dir with home/state + t1 meta
+setup_case() { # <name> [harness] -> echoes case dir with home/state + t1 meta
   local name=$1 harness=${2:-claude} dir
   dir="$TMP_ROOT/$name"
   mkdir -p "$dir/home/state"
@@ -97,7 +97,7 @@ setup_case() {  # <name> [harness] -> echoes case dir with home/state + t1 meta
   printf '%s\n' "$dir"
 }
 
-run_send() {  # <case-dir> <err-file> [env...] -- <fm-send args...>
+run_send() { # <case-dir> <err-file> [env...] -- <fm-send args...>
   local dir=$1 err=$2
   shift 2
   local envs=()
@@ -106,21 +106,23 @@ run_send() {  # <case-dir> <err-file> [env...] -- <fm-send args...>
     shift
   done
   shift
-  : > "$dir/send.log"
+  : >"$dir/send.log"
   env PATH="$dir/fakebin:$PATH" \
     FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" FM_SEND_LOG="$dir/send.log" \
     FM_SEND_SETTLE=0 ${envs[@]+"${envs[@]}"} \
     "$SEND" "$@" >/dev/null 2>"$err"
 }
 
-record_body() {  # <record>
+record_body() { # <record>
   bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$2"
 }
 
 test_text_steer_rides_inbox() {
   local dir err rc rec body typed
-  dir=$(setup_case rides); err="$dir/send.err"
-  run_send "$dir" "$err" -- t1 "please rebase onto main"; rc=$?
+  dir=$(setup_case rides)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 "please rebase onto main"
+  rc=$?
   expect_code 0 "$rc" "an inbox-plane steer should exit 0 at enqueue"
   rec="$dir/home/state/t1.inbox/001.msg"
   [ -f "$rec" ] || fail "the steer was not durably recorded at $rec"
@@ -130,47 +132,52 @@ test_text_steer_rides_inbox() {
   assert_contains "$typed" "Firstmate instruction waiting: list '$dir/home/state/t1.inbox'/*.msg" \
     "the doorbell should direct the worker to drain the inbox"
   case "$typed" in
-    *"please rebase onto main"*) fail "the payload must never be typed:"$'\n'"$typed" ;;
+  *"please rebase onto main"*) fail "the payload must never be typed:"$'\n'"$typed" ;;
   esac
   pass "fm-send inbox: the payload is recorded durably and only the doorbell is typed"
 }
 
 test_multiline_steer_is_legal() {
   local dir err rc body
-  dir=$(setup_case multiline); err="$dir/send.err"
-  run_send "$dir" "$err" -- t1 $'first line\nsecond line\nthird: with punctuation'; rc=$?
+  dir=$(setup_case multiline)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 $'first line\nsecond line\nthird: with punctuation'
+  rc=$?
   expect_code 0 "$rc" "a multi-line steer should succeed"
   body=$(record_body _ "$dir/home/state/t1.inbox/001.msg")
-  [ "$body" = $'first line\nsecond line\nthird: with punctuation' ] \
-    || fail "the multi-line body did not round-trip:"$'\n'"$body"
+  [ "$body" = $'first line\nsecond line\nthird: with punctuation' ] ||
+    fail "the multi-line body did not round-trip:"$'\n'"$body"
   case "$(cat "$dir/send.log")" in
-    *"second line"*) fail "a payload line leaked onto the typed channel" ;;
+  *"second line"*) fail "a payload line leaked onto the typed channel" ;;
   esac
   pass "fm-send inbox: newlines are legal and the terminal can no longer truncate a steer"
 }
 
 test_resend_enqueues_new_sequence() {
   local dir err doorbells typed
-  dir=$(setup_case resend); err="$dir/send.err"
+  dir=$(setup_case resend)
+  err="$dir/send.err"
   run_send "$dir" "$err" -- t1 "check the CI result" || fail "first send failed"
   run_send "$dir" "$err" -- t1 "check the CI result" || fail "second send failed"
-  [ -f "$dir/home/state/t1.inbox/001.msg" ] && [ -f "$dir/home/state/t1.inbox/002.msg" ] \
-    || fail "a re-send should enqueue a new sequence:"$'\n'"$(ls "$dir/home/state/t1.inbox")"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] && [ -f "$dir/home/state/t1.inbox/002.msg" ] ||
+    fail "a re-send should enqueue a new sequence:"$'\n'"$(ls "$dir/home/state/t1.inbox")"
   doorbells=$(grep -cF 'Firstmate instruction waiting' "$dir/send.log" || true)
   [ "$doorbells" = 1 ] || fail "each send rings once (the log is truncated per send), got $doorbells"
   typed=$(cat "$dir/send.log")
   assert_contains "$typed" "numeric order" \
     "a newer record's doorbell should preserve inbox sequence ordering"
   case "$typed" in
-    *"check the CI result"*) fail "a re-send typed the payload" ;;
+  *"check the CI result"*) fail "a re-send typed the payload" ;;
   esac
   pass "fm-send inbox: a re-send is a new durable record, never a retyped payload"
 }
 
 test_pending_composer_skips_ring_advisorily() {
   local dir err rc
-  dir=$(setup_case pendingskip); err="$dir/send.err"
-  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- t1 "steer past a stuck composer"; rc=$?
+  dir=$(setup_case pendingskip)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- t1 "steer past a stuck composer"
+  rc=$?
   expect_code 0 "$rc" "a skipped ring is still a sent steer"
   [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the steer was not recorded"
   [ ! -s "$dir/send.log" ] || fail "a visibly pending composer should skip the ring:"$'\n'"$(cat "$dir/send.log")"
@@ -181,8 +188,10 @@ test_pending_composer_skips_ring_advisorily() {
 
 test_failed_ring_is_still_sent() {
   local dir err rc
-  dir=$(setup_case ringfail); err="$dir/send.err"
-  run_send "$dir" "$err" FM_FAKE_TMUX_SEND_FAIL=1 -- t1 "steer into a dead pane"; rc=$?
+  dir=$(setup_case ringfail)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_SEND_FAIL=1 -- t1 "steer into a dead pane"
+  rc=$?
   expect_code 0 "$rc" "a failed doorbell must not fail the send"
   [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the steer was not recorded"
   assert_contains "$(cat "$err")" "watcher will re-ring" \
@@ -193,40 +202,45 @@ test_failed_ring_is_still_sent() {
 test_harness_invocations_stay_typed() {
   local dir err typed
   # A slash command must reach the harness's own parser, on any harness.
-  dir=$(setup_case slash); err="$dir/send.err"
+  dir=$(setup_case slash)
+  err="$dir/send.err"
   run_send "$dir" "$err" -- t1 "/no-mistakes" || fail "a slash send should succeed"
   typed=$(cat "$dir/send.log")
   assert_contains "$typed" "/no-mistakes" "the slash command should be typed literally"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "a slash command must not be routed to the inbox"
   # A codex `$<skill>` invocation likewise stays typed.
-  dir=$(setup_case codexskill codex); err="$dir/send.err"
+  dir=$(setup_case codexskill codex)
+  err="$dir/send.err"
   run_send "$dir" "$err" -- t1 '$no-mistakes' || fail "a codex \$skill send should succeed"
   assert_contains "$(cat "$dir/send.log")" '$no-mistakes' "the codex \$skill should be typed literally"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "a codex \$skill must not be routed to the inbox"
   # The same `$` message to a non-codex harness is plain text: inbox plane.
-  dir=$(setup_case dollartext claude); err="$dir/send.err"
+  dir=$(setup_case dollartext claude)
+  err="$dir/send.err"
   run_send "$dir" "$err" -- t1 '$5/month is cheap' || fail "a claude \$-text send should succeed"
   [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "a non-codex \$-message should ride the inbox"
   case "$(cat "$dir/send.log")" in
-    *'$5/month'*) fail "a non-codex \$-message payload was typed" ;;
+  *'$5/month'*) fail "a non-codex \$-message payload was typed" ;;
   esac
   pass "fm-send planes: slash and codex \$skill invocations stay typed; plain \$-text rides the inbox"
 }
 
 test_explicit_target_stays_typed() {
   local dir err
-  dir=$(setup_case explicit); err="$dir/send.err"
+  dir=$(setup_case explicit)
+  err="$dir/send.err"
   run_send "$dir" "$err" -- sess:win "hello there" || fail "an explicit-target send should succeed"
   assert_contains "$(cat "$dir/send.log")" "hello there" \
     "an explicit backend target should receive the literal text"
-  [ -z "$(find "$dir/home/state" -maxdepth 1 -name '*.inbox' -print 2>/dev/null)" ] \
-    || fail "an explicit target has no task record here and must not grow an inbox"
+  [ -z "$(find "$dir/home/state" -maxdepth 1 -name '*.inbox' -print 2>/dev/null)" ] ||
+    fail "an explicit target has no task record here and must not grow an inbox"
   pass "fm-send planes: an explicit backend target keeps the typed plane"
 }
 
 test_key_path_never_touches_inbox() {
   local dir err
-  dir=$(setup_case keypath); err="$dir/send.err"
+  dir=$(setup_case keypath)
+  err="$dir/send.err"
   run_send "$dir" "$err" -- t1 --key Enter || fail "a --key send should succeed"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "the --key path must never write an inbox record"
   pass "fm-send planes: the --key lifecycle path never touches the inbox"
@@ -234,14 +248,15 @@ test_key_path_never_touches_inbox() {
 
 test_secondmate_marker_and_enqueue_delivery() {
   local dir err body corr pr_rec delivered
-  dir=$(setup_case secondmate); err="$dir/send.err"
+  dir=$(setup_case secondmate)
+  err="$dir/send.err"
   fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
-  run_send "$dir" "$err" -- fm-domain "please summarize fleet health" \
-    || fail "a secondmate steer should succeed"
+  run_send "$dir" "$err" -- fm-domain "please summarize fleet health" ||
+    fail "a secondmate steer should succeed"
   body=$(record_body _ "$dir/home/state/domain.inbox/001.msg")
   case "$body" in
-    "$FM_FROMFIRST_MARK"corr=*) : ;;
-    *) fail "the recorded body lost the from-firstmate marker/corr framing:"$'\n'"$body" ;;
+  "$FM_FROMFIRST_MARK"corr=*) : ;;
+  *) fail "the recorded body lost the from-firstmate marker/corr framing:"$'\n'"$body" ;;
   esac
   corr=$(printf '%s' "$body" | grep -oE 'corr=[a-f0-9]{16}' | head -1 | cut -d= -f2)
   [ -n "$corr" ] || fail "no corr token in the recorded body"
@@ -250,16 +265,17 @@ test_secondmate_marker_and_enqueue_delivery() {
   delivered=$(grep '^delivered_epoch=' "$pr_rec" | cut -d= -f2)
   [ -n "$delivered" ] || fail "enqueue IS delivery: delivered_epoch should be set at enqueue time:"$'\n'"$(cat "$pr_rec")"
   case "$(cat "$dir/send.log")" in
-    *"summarize fleet health"*) fail "the marked payload was typed" ;;
+  *"summarize fleet health"*) fail "the marked payload was typed" ;;
   esac
   pass "fm-send inbox: a secondmate steer records marker+corr in the body and is delivered at enqueue"
 }
 
 test_post_enqueue_bookkeeping_failure_is_not_retryable() {
   local dir err rc rec body
-  dir=$(setup_case bookkeeping-failure); err="$dir/send.err"
+  dir=$(setup_case bookkeeping-failure)
+  err="$dir/send.err"
   fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
-  cat > "$dir/fakebin/mv" <<'SH'
+  cat >"$dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 set -u
 source_arg=${@: -2:1}
@@ -274,7 +290,8 @@ exec /bin/mv "$@"
 SH
   chmod +x "$dir/fakebin/mv"
 
-  run_send "$dir" "$err" FM_FAIL_DELIVERY_CONFIRM=1 -- domain "durable once"; rc=$?
+  run_send "$dir" "$err" FM_FAIL_DELIVERY_CONFIRM=1 -- domain "durable once"
+  rc=$?
   # The durable record IS the delivery: even with the commit AND its recovery
   # marker both lost, the steer was delivered, so fm-send must not signal a
   # status that invites a resend (a nonzero would make automated callers
@@ -283,12 +300,12 @@ SH
   expect_code 0 "$rc" "a delivered steer must not report a resend-inviting failure over lost bookkeeping"
   rec="$dir/home/state/domain.inbox/001.msg"
   [ -f "$rec" ] || fail "bookkeeping failure test did not durably enqueue the steer"
-  [ "$(find "$dir/home/state/domain.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
-    || fail "the delivered steer was duplicated:"$'\n'"$(ls "$dir/home/state/domain.inbox")"
+  [ "$(find "$dir/home/state/domain.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 1 ] ||
+    fail "the delivered steer was duplicated:"$'\n'"$(ls "$dir/home/state/domain.inbox")"
   body=$(record_body _ "$rec")
   case "$body" in
-    "$FM_FROMFIRST_MARK"corr=*) : ;;
-    *) fail "bookkeeping failure test lost the secondmate marker: $body" ;;
+  "$FM_FROMFIRST_MARK"corr=*) : ;;
+  *) fail "bookkeeping failure test lost the secondmate marker: $body" ;;
   esac
   assert_contains "$(cat "$err")" "reply-tracking-degraded" \
     "lost bookkeeping should surface as its own distinct degraded condition"
@@ -301,7 +318,8 @@ SH
 
 test_meta_lock_contention_fails_bounded() {
   local dir err rc holder marker lock i
-  dir=$(setup_case meta-lock); err="$dir/send.err"
+  dir=$(setup_case meta-lock)
+  err="$dir/send.err"
   marker="$dir/meta-lock-held"
   lock="$dir/home/state/.meta-t1.lock"
   bash -c '
@@ -316,9 +334,14 @@ test_meta_lock_contention_fails_bounded() {
     sleep 0.05
     i=$((i + 1))
   done
-  [ -e "$marker" ] || { kill "$holder" 2>/dev/null; fail "the metadata lock holder did not start"; }
-  run_send "$dir" "$err" FM_TASK_INBOX_LOCK_WAIT_SECS=0 -- t1 "must not hang"; rc=$?
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  [ -e "$marker" ] || {
+    kill "$holder" 2>/dev/null
+    fail "the metadata lock holder did not start"
+  }
+  run_send "$dir" "$err" FM_TASK_INBOX_LOCK_WAIT_SECS=0 -- t1 "must not hang"
+  rc=$?
+  kill "$holder" 2>/dev/null
+  wait "$holder" 2>/dev/null
   [ "$rc" -ne 0 ] || fail "metadata lock contention should fail after the bounded wait"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "a lock refusal must not enqueue a record"
   assert_contains "$(cat "$err")" "metadata could not be locked" \
@@ -328,16 +351,18 @@ test_meta_lock_contention_fails_bounded() {
 
 test_unwritable_inbox_fails_loudly() {
   local dir err rc
-  dir=$(setup_case unwritable); err="$dir/send.err"
+  dir=$(setup_case unwritable)
+  err="$dir/send.err"
   fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
-  : > "$dir/home/state/domain.inbox"   # a FILE where the inbox dir must go
-  run_send "$dir" "$err" -- fm-domain "this cannot be recorded"; rc=$?
+  : >"$dir/home/state/domain.inbox" # a FILE where the inbox dir must go
+  run_send "$dir" "$err" -- fm-domain "this cannot be recorded"
+  rc=$?
   [ "$rc" -ne 0 ] || fail "an unwritable inbox must fail the send"
   assert_contains "$(cat "$err")" "inbox record could not be written" \
     "the failure should name the unwritable inbox"
   [ ! -s "$dir/send.log" ] || fail "a failed enqueue still typed something:"$'\n'"$(cat "$dir/send.log")"
-  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] \
-    || fail "a failed enqueue should discard the just-created pending-reply expectation"
+  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] ||
+    fail "a failed enqueue should discard the just-created pending-reply expectation"
   pass "fm-send inbox: an unwritable record is a loud local failure that leaves no false expectation"
 }
 
@@ -346,35 +371,42 @@ test_empty_message_refused() {
   # The lived defect: an empty marked secondmate steer used to deliver a
   # marker+corr record with no body and mint a pending-reply expectation the
   # parent could never see resolved.
-  dir=$(setup_case empty-marked); err="$dir/send.err"
+  dir=$(setup_case empty-marked)
+  err="$dir/send.err"
   fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
-  run_send "$dir" "$err" -- fm-domain; rc=$?
+  run_send "$dir" "$err" -- fm-domain
+  rc=$?
   [ "$rc" -ne 0 ] || fail "an empty secondmate steer should refuse"
   assert_contains "$(cat "$err")" "nonempty message" \
     "the empty-message refusal should be explicit"
   [ ! -d "$dir/home/state/domain.inbox" ] || fail "an empty steer still wrote an inbox record"
-  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] \
-    || fail "an empty steer still minted a pending-reply expectation"
+  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] ||
+    fail "an empty steer still minted a pending-reply expectation"
   [ ! -s "$dir/send.log" ] || fail "an empty steer still typed something:"$'\n'"$(cat "$dir/send.log")"
 
   # An explicit empty-string argument is the same refusal.
-  dir=$(setup_case empty-string-arg); err="$dir/send.err"
-  run_send "$dir" "$err" -- t1 ""; rc=$?
+  dir=$(setup_case empty-string-arg)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 ""
+  rc=$?
   [ "$rc" -ne 0 ] || fail "an explicit empty-string message should refuse"
   assert_contains "$(cat "$err")" "nonempty message" \
     "the empty-string refusal should be explicit"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "an empty-string steer still wrote an inbox record"
 
   # A whitespace-only message is equally contentless and refuses.
-  dir=$(setup_case whitespace-only); err="$dir/send.err"
-  run_send "$dir" "$err" -- t1 "   "; rc=$?
+  dir=$(setup_case whitespace-only)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 "   "
+  rc=$?
   [ "$rc" -ne 0 ] || fail "a whitespace-only message should refuse"
   assert_contains "$(cat "$err")" "nonempty message" \
     "the whitespace-only refusal should be explicit"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "a whitespace-only steer still wrote an inbox record"
 
   # The --key lifecycle path is unaffected: it takes no text at all.
-  dir=$(setup_case keypath-after-refusal); err="$dir/send.err"
+  dir=$(setup_case keypath-after-refusal)
+  err="$dir/send.err"
   run_send "$dir" "$err" -- t1 --key Enter || fail "a --key send should still succeed"
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
