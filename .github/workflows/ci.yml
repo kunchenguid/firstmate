@@ -96,6 +96,7 @@ jobs:
         run: |
           bin/fm-test-run.sh \
             tests/fm-spawn-dispatch-profile.test.sh \
+            tests/fm-spawn-meta-header.test.sh \
             tests/fm-spawn-pool-base-freshen.test.sh \
             tests/fm-spawn-worktree-settle.test.sh
 

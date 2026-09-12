@@ -313,6 +313,71 @@ EOF
   pass "spawn preserves corrupt pipeline bytes after the owner refusal"
 }
 
+test_delivery_modes_stand_down_no_mistakes() {
+  local mode case_dir home project worktree fakebin id launch_log path_log resolved_log real_hit
+  local launch out rc resolved shim effective invoke
+  for mode in direct-PR local-only no-mistakes; do
+    case_dir="$TMP_ROOT/no-mistakes-$mode"
+    home="$case_dir/home"
+    project="$case_dir/project"
+    worktree="$case_dir/worktree"
+    id="no-mistakes-$mode-z1"
+    launch_log="$case_dir/launch.log"
+    path_log="$case_dir/path.log"
+    resolved_log="$case_dir/resolved.log"
+    real_hit="$case_dir/real-hit"
+    fm_test_spawn_home "$home" codex
+    fm_test_spawn_brief "$home" "$id"
+    fakebin=$(make_spawn_fakebin "$case_dir/fake")
+    fm_test_write_active_treehouse_fake "$fakebin" "$worktree"
+    fm_git_worktree "$project" "$worktree" "pool-$mode"
+    cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$PATH" > "$FM_FAKE_PATH_LOG"
+command -v no-mistakes > "$FM_FAKE_RESOLVED_LOG"
+[ "${FM_FAKE_INVOKE_NO_MISTAKES:-0}" = 1 ] || exit 0
+exec no-mistakes
+SH
+    cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'no-mistakes version v1.46.0 (fake)'
+  exit 0
+fi
+: > "$FM_FAKE_REAL_HIT"
+exit 73
+SH
+    chmod +x "$fakebin/codex" "$fakebin/no-mistakes"
+
+    out=$(FM_FAKE_LAUNCH_LOG="$launch_log" fm_test_run_spawn "$home" "$worktree" "$fakebin" \
+      "$id" "$project" codex --mode "$mode" --yolo off) || fail "spawn failed for $mode: $out"
+    launch=$(<"$launch_log")
+    invoke=1
+    [ "$mode" != no-mistakes ] || invoke=0
+    rc=0
+    out=$(PATH="$fakebin:$PATH" FM_FAKE_PATH_LOG="$path_log" FM_FAKE_RESOLVED_LOG="$resolved_log" \
+      FM_FAKE_REAL_HIT="$real_hit" FM_FAKE_INVOKE_NO_MISTAKES="$invoke" /bin/sh -c "$launch" 2>&1) || rc=$?
+    resolved=$(<"$resolved_log")
+    if [ "$mode" = no-mistakes ]; then
+      expect_code 0 "$rc" "no-mistakes launch should keep the real binary reachable: $out"
+      [ "$resolved" = "$fakebin/no-mistakes" ] \
+        || fail "no-mistakes launch resolved '$resolved' instead of the real binary"
+      continue
+    fi
+    expect_code 2 "$rc" "$mode launch should refuse no-mistakes: $out"
+    shim=$(dirname "$resolved")
+    effective=$(<"$path_log")
+    case "$effective" in "$shim":*) ;; *) fail "$mode shim was not first on PATH: $effective" ;; esac
+    assert_contains "$out" "no-mistakes is stood down for $mode delivery (repository owner 09-03/09-07); use the direct path" \
+      "$mode wrapper did not explain the refusal"
+    [ ! -e "$real_hit" ] || fail "$mode launch reached the real no-mistakes binary"
+    jq -e --arg mode "$mode" 'select(.op == "no-mistakes-refused" and .mode == $mode)' \
+      "$home/data/telemetry/checks.jsonl" >/dev/null \
+      || fail "$mode refusal did not reach checks telemetry"
+  done
+  pass "direct delivery launches put a refusing no-mistakes shim first while no-mistakes launches keep the real binary"
+}
+
 test_spawn_header_names_base_meta_keys
 test_spawn_header_names_routing_and_remote_meta_keys
 test_spawn_publishes_dispatched_pipeline_record
@@ -322,3 +387,4 @@ test_spawn_reclaims_stale_owner_lock_and_preserves_temp
 test_spawn_recovers_an_interrupted_owner_on_relaunch
 test_spawn_publishes_phase_timings
 test_spawn_refuses_corrupt_pipeline_record_without_changing_bytes
+test_delivery_modes_stand_down_no_mistakes

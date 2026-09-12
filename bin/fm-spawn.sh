@@ -33,6 +33,8 @@
 #   when every configured reviewer is blocked. The explicit
 #   --allow-no-mistakes-without-reviewer-quota flag records a captain-authorized
 #   exception in the invocation and is valid only for a no-mistakes ship.
+#   direct-PR and local-only launches prepend a task-scoped PATH shim that logs
+#   and refuses no-mistakes instead of relying on the worker brief alone.
 #        fm-spawn.sh <task-id> --relaunch [--resume-session <codex-session-id>] [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
@@ -219,8 +221,8 @@
 #   (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|cursor-agent)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. That command is sent byte-for-byte, so the launch-scoped Git
-#   co-author sanitizer used by ordinary worker templates does not wrap it.
+#   new adapters. That command skips the launch-scoped Git co-author sanitizer
+#   used by ordinary worker templates, but delivery-mode safety wrappers remain.
 #   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
@@ -4885,6 +4887,40 @@ install_agent_coauthor_sanitizer() {
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+
+install_no_mistakes_stand_down_shim() {
+  local dir="$STATE_REAL/$ID.no-mistakes-shim" wrapper tmp message payload
+  case "$MODE" in direct-PR|local-only) ;; *) return 0 ;; esac
+  wrapper="$dir/no-mistakes"
+  if [ -L "$dir" ] || ! mkdir -p -- "$dir" || [ ! -d "$dir" ] || [ -L "$dir" ] \
+    || ! chmod 700 "$dir" || [ -L "$wrapper" ]; then
+    echo "error: no-mistakes delivery guard installation failed; refusing worker launch" >&2
+    return 1
+  fi
+  tmp="$dir/.no-mistakes.${BASHPID:-$$}"
+  if [ -e "$tmp" ] || [ -L "$tmp" ]; then
+    echo "error: no-mistakes delivery guard installation found unsafe temporary path; refusing worker launch" >&2
+    return 1
+  fi
+  message="no-mistakes is stood down for $MODE delivery (repository owner 09-03/09-07); use the direct path"
+  payload=$(jq -cn --arg mode "$MODE" '{op:"no-mistakes-refused",mode:$mode}') || return 1
+  if ! {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf 'FM_HOME=%s\n' "$(shell_quote "$FM_HOME")"
+    printf 'FM_DATA_OVERRIDE=%s\n' "$(shell_quote "$DATA")"
+    printf 'ID=%s\n' "$(shell_quote "$ID")"
+    printf '. %s\n' "$(shell_quote "$SCRIPT_DIR/fm-telemetry-lib.sh")"
+    printf 'fm_telemetry_record checks %s\n' "$(shell_quote "$payload")"
+    printf 'printf %s >&2\n' "$(shell_quote "$message")"
+    printf '%s\n' 'exit 2'
+  } > "$tmp" || ! chmod 700 "$tmp" || ! mv -f -- "$tmp" "$wrapper"; then
+    rm -f -- "$tmp"
+    echo "error: no-mistakes delivery guard installation failed; refusing worker launch" >&2
+    return 1
+  fi
+  LAUNCH="PATH=$(shell_quote "$dir"):\$PATH $LAUNCH"
+}
+
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -5744,6 +5780,7 @@ fi
 if [ "${NM_HOME_BOUND:-0}" = 1 ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   LAUNCH="NM_HOME=$(shell_quote "$NM_HOME") $LAUNCH"
 fi
+install_no_mistakes_stand_down_shim || exit 1
 if [ "$ACCESS" = reader ]; then
   LAUNCH=$(reader_confine_launch "$LAUNCH") || {
     echo "error: reader process confinement could not wrap the launch command; refusing to launch" >&2
