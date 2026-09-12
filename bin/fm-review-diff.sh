@@ -3,7 +3,10 @@
 #
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# the default branch, and compares against the local default branch when there is
+# no origin or when bin/fm-pool-base-lib.sh reports that this task lands its
+# approved work there, which is how a local-only task carries work landed by
+# bin/fm-merge-local.sh.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -18,6 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-pool-base-lib.sh
+. "$SCRIPT_DIR/fm-pool-base-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -44,6 +49,7 @@ META="$STATE/$ID.meta"
 
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
+TASK_MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$WT" ] || { echo "error: meta for task $ID is missing worktree=" >&2; exit 1; }
 [ -n "$PROJ" ] || { echo "error: meta for task $ID is missing project=" >&2; exit 1; }
 [ -d "$WT" ] || { echo "error: worktree for task $ID is missing: $WT" >&2; exit 1; }
@@ -138,8 +144,20 @@ if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
   BASE="origin/$DEFAULT"
+  # Reviewing against origin a task whose approved work lands locally would
+  # report that landed work as part of the branch's own change, so the base
+  # follows the landed work by the same rule the pooled base does
+  # (fm_pool_base_prefers_local_default in bin/fm-pool-base-lib.sh).
+  # Both the decision and the diff read refs/heads/<default>: a bare <default>
+  # resolves a same-named tag first, which would diff a commit the decision was
+  # never made about.
+  ORIGIN_TIP=$(git -C "$WT" rev-parse --verify --quiet "origin/$DEFAULT^{commit}" 2>/dev/null || true)
+  LOCAL_TIP=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" 2>/dev/null || true)
+  if fm_pool_base_prefers_local_default "$WT" "$TASK_MODE" "$ORIGIN_TIP" "$LOCAL_TIP"; then
+    BASE="refs/heads/$DEFAULT"
+  fi
 else
-  BASE="$DEFAULT"
+  BASE="refs/heads/$DEFAULT"
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }

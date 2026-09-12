@@ -200,13 +200,25 @@
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
-#   task worktree. When an origin configuration is detected, spawn fetches it,
-#   resolves the current remote default branch, and resets to its tip. When none
-#   is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   task worktree, which spawn then moves onto the base the task must start
+#   from. When an origin configuration is detected, spawn fetches it, resolves
+#   the current remote default branch, and starts from its tip - except for a
+#   `mode=local-only` task, whose approved work bin/fm-merge-local.sh lands on
+#   the LOCAL default branch and never pushes, so that branch wins when it
+#   strictly contains origin's tip (bin/fm-pool-base-lib.sh owns that rule,
+#   including the known limit that a scout, which records no mode, keeps origin
+#   there). When no origin is detected there is nothing else that could be
+#   authoritative, so spawn starts from refs/heads/<default> in every mode.
+#   Either way HEAD is detached onto that base, so a slot handed back on a
+#   branch never has that branch dragged along with it. Relaunch reuses the
+#   recorded worktree without fetching or resetting its base. An unreachable
+#   detected origin, a default branch that cannot be determined, or a non-clean
+#   worktree refuses a fresh spawn rather than risking a PR based on stale
+#   history or discarding local work. That middle refusal carries a known limit:
+#   an origin-less repository whose default branch is named anything other than
+#   main or master is not supported by this path, because default_branch in
+#   bin/fm-ff-lib.sh is its single owner and answers from origin/HEAD, main, or
+#   master only (freshen_spawn_worktree_base states why that belongs there).
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -464,6 +476,8 @@ if [ -e "$STATE" ] || [ -L "$STATE" ]; then
 fi
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-pool-base-lib.sh
+. "$SCRIPT_DIR/fm-pool-base-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
@@ -2581,8 +2595,27 @@ spawn_worktree_has_origin_config() {  # <worktree>
   return 1
 }
 
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+# Refresh a pooled worktree onto the base the next task must start from.
+#
+# A pooled slot is allocated once and reused, so whatever landed since it was
+# allocated is missing from it. Which ref carries that landed work depends on how
+# the project lands it; fm_pool_base_prefers_local_default in
+# bin/fm-pool-base-lib.sh owns that rule and states its reasoning in full.
+#
+# A worktree with no origin configured is the one shape that rule does not
+# decide: there is no origin to be authoritative, so refs/heads/<default> is the
+# only base there, whatever this task's delivery mode.
+#
+# default_branch in bin/fm-ff-lib.sh is the single owner of which branch that is,
+# as it is for every other consumer. KNOWN LIMIT: it answers from origin/HEAD,
+# main, or master only, so an origin-less repository whose default branch carries
+# any other name is not supported by this path and the spawn refuses rather than
+# guessing. bin/fm-merge-local.sh refuses such a project at approval for the same
+# reason, so accepting one here would only launch a task that can never land. If
+# that support is ever wanted, it belongs in default_branch, where every consumer
+# gains it at once, and not here.
+freshen_spawn_worktree_base() {  # <worktree> <task-mode>
+  local worktree=$1 mode=$2 default target expected status local_ref local_commit
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2596,7 +2629,17 @@ freshen_spawn_worktree_base() {  # <worktree>
     return 1
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
-    return 0
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine the default branch for pooled worktree '$worktree', which has no origin; refusing to launch from an unverified base" >&2
+      return 1
+    }
+    target="refs/heads/$default"
+    expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+      echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from an unverified base" >&2
+      return 1
+    }
+    reset_spawn_worktree_base "$worktree" "$target" "$expected"
+    return
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -2619,7 +2662,24 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+  local_ref="refs/heads/$default"
+  local_commit=$(git -C "$worktree" rev-parse --verify --quiet "$local_ref^{commit}" 2>/dev/null || true)
+  if fm_pool_base_prefers_local_default "$worktree" "$mode" "$expected" "$local_commit"; then
+    target=$local_ref
+    expected=$local_commit
+  fi
+  reset_spawn_worktree_base "$worktree" "$target" "$expected"
+}
+
+# HEAD is DETACHED onto the base rather than reset in place. treehouse is an
+# external pool and nothing here can prove a returned slot is not still sitting
+# on some previous task's branch; `reset --hard` would move that branch ref, and
+# in an origin-less repository those commits exist nowhere else. Detaching moves
+# only this worktree, so a branch this gate does not own is left exactly where it
+# was, and the crew branch is cut from the detached base as before.
+reset_spawn_worktree_base() {  # <worktree> <target> <expected-commit>
+  local worktree=$1 target=$2 expected=$3 actual
+  if ! git -C "$worktree" checkout --quiet --force --detach "$target" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -3358,7 +3418,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "${MODE:-}" || exit 1
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,

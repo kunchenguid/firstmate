@@ -1492,6 +1492,14 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       ;;
+    bin/fm-pool-base-lib.sh)
+      # The shared base rule. Its spawn-side proof is a standalone suite, so it
+      # is named directly; bin/fm-review-diff.sh's base selection is pr-forge.
+      printf '%s\n' "__script__:fm-spawn-pool-base-freshen.test.sh"
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' pr-forge
+      ;;
     bin/fm-task-inbox-lib.sh)
       # The steering-inbox record/doorbell/ladder owner: fm-send's data plane
       # (backend-dispatch), the watcher's re-ring check (watcher-wake-lock),
