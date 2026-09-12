@@ -1797,9 +1797,7 @@ case "$ARG3" in
     RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
-    if [[ "$LAUNCH" =~ ANTIGRAVITY_AGENT= ]] \
-       || [[ "$LAUNCH" =~ (^|[[:space:];])export[[:space:]]+ANTIGRAVITY_AGENT([[:space:];]|$) ]] \
-       || [[ "$LAUNCH" =~ (^|[[:space:];])(declare|typeset)([[:space:]]+-[[:alpha:]]+)?[[:space:]]+ANTIGRAVITY_AGENT[[:space:]]*= ]]; then
+    if [[ "$LAUNCH" =~ ANTIGRAVITY_AGENT[[:space:]]*[+]?= ]]; then
       echo "error: raw launch cannot assign reserved marker ANTIGRAVITY_AGENT" >&2
       exit 1
     fi
