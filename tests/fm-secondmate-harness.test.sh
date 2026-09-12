@@ -77,6 +77,12 @@ export FM_BACKEND=tmux
 BLIND_BIN=$(fm_fakebin "$TMP_ROOT/blind-ancestry")
 fm_fake_blind_ancestry "$BLIND_BIN"
 
+# Every claude launch pre-registers workspace trust for the directory it starts
+# in, and for a secondmate that directory is the home (bin/fm-claude-trust.sh).
+# Several cases here resolve claude, so every spawn below pins a throwaway HOME
+# with an empty CLAUDE_CONFIG_DIR and puts node on the spawn's PATH; without the
+# first, this suite would write the developer's real ~/.claude.json.
+
 # ===========================================================================
 # A) fm-harness.sh secondmate resolution + fallback (deterministic detect_own)
 # ===========================================================================
