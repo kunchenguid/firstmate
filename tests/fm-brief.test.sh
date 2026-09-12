@@ -441,6 +441,47 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The standing test-discipline section must reach every ship delivery mode
+# exactly once, sit between the numbered Rules list and the inbox section, and
+# never reach the scout scaffold (a scout's deliverable is a report, not tests).
+test_ship_test_discipline_section() {
+  local home id brief mode rules_line discipline_line inbox_line count
+  home="$TMP_ROOT/test-discipline-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-discipline-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$mode brief was not scaffolded"
+    assert_grep "# Test discipline" "$brief" "$mode brief is missing the test-discipline section header"
+    assert_grep "not every code path you happen to touch along the way" "$brief" \
+      "$mode brief lost the acceptance-criteria-first framing"
+    assert_grep "treat that list as a ceiling, not a floor" "$brief" \
+      "$mode brief lost the ceiling-not-a-floor guidance for a task's own named test list"
+    assert_grep "Be especially sparing early in a package's life" "$brief" \
+      "$mode brief lost the early-in-a-package's-life guidance"
+
+    count=$(grep -c "^# Test discipline$" "$brief")
+    assert_equals "1" "$count" "$mode brief must render the test-discipline section exactly once"
+
+    rules_line=$(grep -n "^# Rules$" "$brief" | cut -d: -f1)
+    discipline_line=$(grep -n "^# Test discipline$" "$brief" | cut -d: -f1)
+    inbox_line=$(grep -n "^# Firstmate instruction inbox$" "$brief" | cut -d: -f1)
+    [ "$rules_line" -lt "$discipline_line" ] \
+      || fail "$mode brief's test-discipline section must come after the Rules section"
+    [ "$discipline_line" -lt "$inbox_line" ] \
+      || fail "$mode brief's test-discipline section must come before the inbox section"
+  done
+
+  id="brief-discipline-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_no_grep "# Test discipline" "$brief" \
+    "scout brief must not carry the ship-only test-discipline section"
+  pass "fm-brief.sh: every ship delivery mode renders the test-discipline section once, in place, and scouts never receive it"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -913,6 +954,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_ship_test_discipline_section
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
