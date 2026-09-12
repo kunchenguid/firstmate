@@ -48,7 +48,7 @@ The clear is refused before anything is sent when the recorded backend cannot de
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**
-It is not deterministic across the verified adapters: codex, grok, and gemini resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, and kimi have no verified pane-resume contract.
+It is not deterministic across the verified adapters: codex, grok, gemini, and agy resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, and kimi have no verified pane-resume contract.
 `relaunch` covers the same need on every adapter, because the brief on disk - not a harness-private session - is the durable instruction.
 
 ## Transactional relaunch
@@ -114,11 +114,11 @@ Backend capability comes from each adapter's real surface, not from a policy cho
 | cmux | yes | yes | yes | yes | no |
 | orca | no | yes | yes | no | no |
 
-Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh` and are exercised for every verified harness by `tests/fm-control.test.sh`.
+Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh`; `tests/fm-control.test.sh` exercises them across its stubbed adapter set, and the adapters outside that set (gemini, rovo, and agy) have their rows pinned by their own harness suites.
 The empirical basis for each adapter's value is the `harness-adapters` skill's verification record for that adapter.
 
 ## Verification
 
-- `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
+- `tests/fm-control.test.sh` - the adapter contract across its stubbed harness set, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider; the gemini, rovo, and agy rows are pinned by their own harness suites.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

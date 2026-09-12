@@ -40,6 +40,9 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # omp (Oh My Pi) is anchored for the same reason as muse: its live process
     # name is the bare word `omp` (verified, omp 18.1.11) and a glob would claim
     # unrelated commands such as ompd or comp.
+    # agy (Antigravity) is anchored the same way: its live process name is the
+    # bare word `agy` (verified, Antigravity CLI 1.2.0) and a glob would claim
+    # unrelated commands such as magyar or agyw.
     *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp|agy) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)

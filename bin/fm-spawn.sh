@@ -296,6 +296,10 @@
 # only after a TUI readiness gate, then a delivery-confirmation gate - the same
 # launch-then-send shape as kimi. Its busy state is a screen-scrape fallback like
 # grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
+# agy installs no hook and writes no per-task sidecar either: no settings or hook
+# configuration is verified and nothing is written into ~/.gemini, so its busy
+# state stays unknown. agy is crewmate/scout only and is refused for
+# --secondmate, like muse.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -1694,7 +1698,7 @@ case "$ARG3" in
     ;;
 esac
 
-# muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -1702,8 +1706,9 @@ esac
 # supervision path. muse has none either, and its
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
+# (muse 0.1.0-R708.1). agy has none either: no turn-end hook or settings
+# configuration is verified for it. Refusing here keeps that gap loud instead
+# of standing up a secondmate whose supervision cycle could never be armed.
 if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1

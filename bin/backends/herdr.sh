@@ -3045,8 +3045,8 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 }
 
 # fm_backend_herdr_composer_identity: the native agent identity/state probe
-# backing the shared classifier's separated (pi) shape - the genuine herdr
-# primitive no other backend has natively.
+# backing the shared classifier's separated-pair shape (pi and agy) - the
+# genuine herdr primitive no other backend has natively.
 fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   fm_backend_herdr_parse_target "$1" || return 1
   fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
