@@ -104,7 +104,7 @@ Claude Code and Codex both expose `PreCompact` and `PostCompact` hook events, an
 A manual compaction is gated once with a visible `/stow` instruction - Claude blocks through the documented PreCompact exit 2 and Codex through `{"continue": false}` - and the retry always passes, so the gate can ask but never wedge.
 An automatic compaction is never blocked, because blocking an error-recovery auto-compaction fails the in-flight request on Claude Code; Codex alone receives a non-blocking `systemMessage` advisory there, Claude discards PreCompact `systemMessage` fields.
 The gate stands down for a no-mistakes gate agent, an unmarked worktree, and a foreign-host payload through the same eligibility owners as the session-open wrappers.
-The `PostCompact` half needs no registration of its own: both harnesses discard PostCompact hook stdout, so a PostCompact runner would burn a digest no one sees; the model-visible post-compaction restart is the tracked `SessionStart` hook delivering the digest for a compacted open.
+`bin/fm-postcompact-start.sh` is the tracked `PostCompact` registration for both harnesses. It runs the compact-source session-start path even though hook stdout is not model-visible; the tracked `SessionStart` hook remains the delivery channel for its digest.
 Claude reports that open as source `compact`, while `codex exec` rehydrates a compacted thread as an ordinary resume and restores the helm through the nudge path the resume routing already owns; the live guard asserts the session-open channel survives a real compaction on each surface.
 
 ## Regression coverage
