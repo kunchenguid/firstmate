@@ -947,9 +947,10 @@ export default function (pi: ExtensionAPI) {
       }
       if (replacement.ok) {
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
-        if (!(await retireArm(successorChild))) {
+        if (successorChild && !(await retireArm(successorChild))) {
           return {
             failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`,
+            armChild: successorChild,
           };
         }
       } else {
