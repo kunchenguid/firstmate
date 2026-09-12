@@ -7,7 +7,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-ensure-agents-md)
 
-# Public contract: CLAUDE.md is this exact two-line pointer, never a symlink.
+# Default public contract: CLAUDE.md is this exact two-line pointer.
 assert_claude_pointer() {
   local path=$1
   [ -e "$path" ] || fail "CLAUDE.md is missing"
@@ -24,6 +24,16 @@ write_fixture_claude_pointer() {
 <!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
 @AGENTS.md
 EOF
+}
+
+test_help_documents_symlink_opt_in() {
+  local out
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" --help 2>&1) \
+    || fail "fm-ensure-agents-md.sh --help failed"
+  assert_contains "$out" "second line immediately" "help does not require exact second-line placement"
+  assert_contains "$out" "<!-- firstmate:keep-claude-symlink -->" "help omits the symlink opt-in mark"
+  assert_contains "$out" "symlink to any other target remains a conflict" "help weakens wrong-target refusal"
+  pass "fm-ensure-agents-md.sh: help owns the symlink opt-in contract"
 }
 
 test_created_agents_md_includes_self_governance() {
@@ -151,6 +161,64 @@ test_correct_symlink_migrates_to_pointer_without_clobbering_agents() {
   cmp -s "$repo/.claude-after-first" "$repo/CLAUDE.md" \
     || fail "post-migration re-run modified CLAUDE.md"
   pass "fm-ensure-agents-md.sh: correct symlink migrates to pointer without clobbering AGENTS.md"
+}
+
+test_marked_correct_symlink_is_retained_byte_stably() {
+  local repo eol out run
+  for eol in $'\n' $'\r\n'; do
+    repo=$(mktemp -d "$TMP_ROOT/retained-symlink.XXXXXX")
+    printf '%s%s' \
+      '<!-- firstmate:maintained-by-project -->' "$eol" \
+      '<!-- firstmate:keep-claude-symlink -->' "$eol" \
+      '# Project memory' "$eol" \
+      'Keep this payload byte-identical.' "$eol" > "$repo/AGENTS.md"
+    ln -s AGENTS.md "$repo/CLAUDE.md"
+    cp "$repo/AGENTS.md" "$repo/.agents-before"
+    for run in 1 2; do
+      out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+        || fail "ensure failed for retained symlink ($run)"
+      assert_contains "$out" "unchanged:" "retained symlink run $run did not report unchanged"
+      cmp -s "$repo/.agents-before" "$repo/AGENTS.md" \
+        || fail "retained symlink run $run modified AGENTS.md"
+      [ -L "$repo/CLAUDE.md" ] || fail "retained symlink run $run replaced CLAUDE.md"
+      [ "$(readlink "$repo/CLAUDE.md")" = "AGENTS.md" ] \
+        || fail "retained symlink run $run changed CLAUDE.md's target"
+    done
+  done
+  pass "fm-ensure-agents-md.sh: exact LF and CRLF opt-ins retain a correct symlink byte-stably"
+}
+
+test_missing_or_misplaced_symlink_mark_uses_pointer_default() {
+  local repo eol placement
+  for eol in $'\n' $'\r\n'; do
+    for placement in missing third first; do
+      repo=$(mktemp -d "$TMP_ROOT/non-opted-symlink-$placement.XXXXXX")
+      case "$placement" in
+        missing)
+          printf '%s%s' \
+            '<!-- firstmate:maintained-by-project -->' "$eol" \
+            '# Project memory' "$eol" > "$repo/AGENTS.md"
+          ;;
+        third)
+          printf '%s%s' \
+            '<!-- firstmate:maintained-by-project -->' "$eol" \
+            '# Project memory' "$eol" \
+            '<!-- firstmate:keep-claude-symlink -->' "$eol" > "$repo/AGENTS.md"
+          ;;
+        first)
+          printf '%s%s' \
+            '<!-- firstmate:keep-claude-symlink -->' "$eol" \
+            '<!-- firstmate:maintained-by-project -->' "$eol" \
+            '# Project memory' "$eol" > "$repo/AGENTS.md"
+          ;;
+      esac
+      ln -s AGENTS.md "$repo/CLAUDE.md"
+      "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+        || fail "ensure failed for $placement symlink opt-in"
+      assert_claude_pointer "$repo/CLAUDE.md"
+    done
+  done
+  pass "fm-ensure-agents-md.sh: missing and misplaced symlink opt-ins keep pointer conversion"
 }
 
 test_existing_agents_md_without_claude_gains_section_and_pointer() {
@@ -371,7 +439,10 @@ test_wrong_target_symlink_is_refused() {
   local repo out rc
   repo="$TMP_ROOT/wrong-target-project"
   mkdir -p "$repo"
-  printf '# Agents memory\n' > "$repo/AGENTS.md"
+  printf '%s\n' \
+    '<!-- firstmate:maintained-by-project -->' \
+    '<!-- firstmate:keep-claude-symlink -->' \
+    '# Agents memory' > "$repo/AGENTS.md"
   printf '# other\n' > "$repo/OTHER.md"
   ln -s OTHER.md "$repo/CLAUDE.md"
   cp "$repo/AGENTS.md" "$repo/.agents-before"
@@ -415,12 +486,15 @@ test_lowercase_agents_md_refuses_case_fragile_pointer() {
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
 
+test_help_documents_symlink_opt_in
 test_created_agents_md_includes_self_governance
 test_fresh_setup_writes_real_claude_pointer
 test_promoted_claude_md_includes_self_governance
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
 test_existing_agents_md_with_symlink_gains_self_governance
 test_correct_symlink_migrates_to_pointer_without_clobbering_agents
+test_marked_correct_symlink_is_retained_byte_stably
+test_missing_or_misplaced_symlink_mark_uses_pointer_default
 test_existing_agents_md_without_claude_gains_section_and_pointer
 test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
