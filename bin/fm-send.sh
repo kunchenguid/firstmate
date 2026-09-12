@@ -42,8 +42,9 @@
 # because a resend-inviting status there would duplicate a delivered
 # instruction. There is no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -
-# "was the message acted on" is, and that is answered asynchronously for an
-# ordinary record by the worker's acknowledgement move into handled/. The
+# "did the message reach the worker" is, and that is answered asynchronously
+# for an ordinary record by the worker's acknowledgement move into handled/,
+# which confirms receipt and never waits on the work the record asks for. The
 # watcher re-rings an unacknowledged message while its endpoint remains
 # available, escalates after the bounded ladder, and instead routes a positively
 # dead or missing endpoint directly to recovery without typing. An explicit

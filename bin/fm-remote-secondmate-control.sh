@@ -282,8 +282,9 @@ cmd_send() {
   fm_lock_release "$meta_lock"
   case "$rec" in
     */handled/*)
-      # The dedup landed on a record the worker already acknowledged: the
-      # steer was delivered and acted on, so there is nothing to announce.
+      # The dedup landed on a record the worker already acknowledged, so this
+      # leg is a repeat of a transport whose steer already reached the worker;
+      # re-ringing it would only doorbell a record that is no longer waiting.
       printf 'notice: this steer was already delivered and acknowledged at %s; nothing re-rung\n' "$rec" >&2
       return 0
       ;;
