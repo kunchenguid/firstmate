@@ -44,9 +44,10 @@ make_case() {
   printf '%s\n' "$case_dir"
 }
 
-# A task carries its own delivery mode in state/<id>.meta. The registered posture
-# below only answers for a scout, which records no mode, and these cases register
-# it the same way the captain does rather than asserting on how it is resolved.
+# The review base follows the TASK's delivery mode in state/<id>.meta, never the
+# captain's registered posture for the project. These cases write that posture
+# the same way the captain does and set it to disagree with the task, so a
+# registry-keyed answer could not pass.
 register_project_mode() {  # <case_dir> <mode>
   printf -- '- project [%s] - review base fixture (added 2026-09-11)\n' "$2" \
     > "$1/data/projects.md"
@@ -180,9 +181,11 @@ test_pr_delivered_task_keeps_the_origin_review_base() {
   pass "fm-review-diff keeps the origin base for a PR-delivered task on a local-only project"
 }
 
-# A scout records no delivery mode, so the registered posture is the only answer
-# available and the review base follows it.
-test_task_without_a_recorded_mode_follows_the_registry() {
+# A scout records no delivery mode, opens no PR and lands nothing, so no task
+# fact says its work lands locally and origin stays the review base - on a
+# project registered local-only included, which is the known limit
+# bin/fm-pool-base-lib.sh records rather than closing from the registry.
+test_task_without_a_recorded_mode_keeps_the_origin_review_base() {
   local case_dir out registered
   for registered in local-only no-mistakes; do
     case_dir=$(make_case "no-recorded-mode-$registered")
@@ -194,20 +197,13 @@ test_task_without_a_recorded_mode_follows_the_registry() {
 
     out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
-    if [ "$registered" = local-only ]; then
-      assert_contains "$out" 'diff base: main' \
-        "no recorded mode: a local-only project's review base should follow the landed work"
-      assert_not_contains "$out" 'landed-locally.txt' \
-        "no recorded mode: locally landed work was reported as part of the branch"
-    else
-      assert_contains "$out" 'diff base: origin/main' \
-        "no recorded mode: a $registered project's review base should stay origin"
-      assert_contains "$out" 'landed-locally.txt' \
-        "no recorded mode: a $registered project's review hid the unpushed local commits"
-    fi
+    assert_contains "$out" 'diff base: origin/main' \
+      "no recorded mode: origin must stay the review base on a $registered project"
+    assert_contains "$out" 'landed-locally.txt' \
+      "no recorded mode: the review against origin hid the unpushed local commits"
     assert_contains "$out" '+branch work' "no recorded mode: the branch's own change should still show"
   done
-  pass "fm-review-diff falls back to the registered posture when a task records no delivery mode"
+  pass "fm-review-diff keeps the origin base for a task that records no delivery mode"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local() {
@@ -312,4 +308,4 @@ test_unreachable_pr_head_falls_back_with_warning
 test_local_default_ahead_of_origin_is_the_review_base
 test_local_default_behind_origin_keeps_origin_review_base
 test_pr_delivered_task_keeps_the_origin_review_base
-test_task_without_a_recorded_mode_follows_the_registry
+test_task_without_a_recorded_mode_keeps_the_origin_review_base

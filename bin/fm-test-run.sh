@@ -1491,9 +1491,9 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       ;;
     bin/fm-pool-base-lib.sh)
-      # The shared base rule, sourced by bin/fm-spawn.sh's pooled-worktree
-      # refresh (backend-dispatch) and bin/fm-review-diff.sh's base selection
-      # (pr-forge).
+      # The shared base rule. Its spawn-side proof is a standalone suite, so it
+      # is named directly; bin/fm-review-diff.sh's base selection is pr-forge.
+      printf '%s\n' "__script__:fm-spawn-pool-base-freshen.test.sh"
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
@@ -1522,17 +1522,9 @@ families_for_changed_path() {
     bin/fm-captain-hold.sh|bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-vendor-auth-probe.sh|\
-    bin/fm-primary-scope-lib.sh|bin/fm-promote.sh|\
+    bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
-      ;;
-    bin/fm-project-mode.sh)
-      # Its registered-posture answer is also the scout fallback
-      # bin/fm-pool-base-lib.sh reads, so a change to its stdout shape reaches
-      # the pooled base (backend-dispatch) and the review base (pr-forge).
-      printf '%s\n' pure-contract-unit
-      printf '%s\n' backend-dispatch
-      printf '%s\n' pr-forge
       ;;
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit

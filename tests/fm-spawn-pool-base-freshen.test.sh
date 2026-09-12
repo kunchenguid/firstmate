@@ -836,10 +836,10 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
 # that shape - origin's tip is real, the local branch carries it plus landed work -
 # and prove the next pooled spawn starts from the landed work rather than from a
 # base that would read as a revert of it.
-# A ship task carries its own delivery mode on the spawn command line. The
-# registered posture below only answers for a scout, which records no mode, and
-# these fixtures register it the same way the captain does - a line in the home's
-# own data/projects.md - rather than asserting on the resolution itself.
+# The base follows the TASK's delivery mode, never the captain's registered
+# posture for the project. These fixtures write that posture the same way the
+# captain does - a line in the home's own data/projects.md - and set it to
+# disagree with the task, so a registry-keyed answer could not pass.
 register_project_mode() {  # <mode>
   local mode=$1
   printf -- '- %s [%s] - pooled base fixture (added 2026-09-11)\n' \
@@ -922,9 +922,12 @@ test_pr_delivered_task_keeps_origin_on_a_local_only_project() {
   pass "a PR-delivered task keeps origin even on a project registered local-only"
 }
 
-# A scout records no delivery mode, so there is no task fact to read and the
-# registered posture is the only answer available.
-test_scout_without_a_recorded_mode_follows_the_registry() {
+# A scout records no delivery mode, opens no PR and lands nothing, so no task
+# fact says its work lands locally and origin stays authoritative - including on
+# a project the captain registered local-only, where the base it reads is
+# therefore missing the locally landed commits. That is the pre-existing gap for
+# scouts, deliberately not closed from the registry (bin/fm-pool-base-lib.sh).
+test_task_without_a_recorded_mode_keeps_origin() {
   local rec id out status landed origin_tip registered
   for registered in local-only no-mistakes; do
     id="pool-scout-$registered-r1"
@@ -941,15 +944,12 @@ test_scout_without_a_recorded_mode_follows_the_registry() {
     expect_code 0 "$status" "a scout should launch on a $registered project"$'\n'"$out"
     [ -z "$(grep '^mode=' "$HOME_DIR/state/$id.meta" || true)" ] \
       || fail "fixture assumed a scout records no delivery mode, but it recorded one"
-    if [ "$registered" = local-only ]; then
-      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$landed" ] \
-        || fail "a scout on a local-only project did not start from the locally landed work"
-    else
-      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$origin_tip" ] \
-        || fail "a scout on a $registered project adopted an unpushed local default branch"
-    fi
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$origin_tip" ] \
+      || fail "a task with no recorded mode adopted the local default branch on a $registered project"
+    [ ! -e "$POOL_DIR/landed-locally.txt" ] \
+      || fail "a task with no recorded mode swept unpushed local commits into its base"
   done
-  pass "a scout with no recorded delivery mode follows the project's registered posture"
+  pass "a task with no recorded delivery mode keeps origin authoritative in every registered posture"
 }
 
 test_local_default_equal_to_origin_keeps_origin() {
@@ -1042,7 +1042,7 @@ test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_local_default_ahead_of_origin_wins
 test_pr_delivered_task_keeps_origin_on_a_local_only_project
-test_scout_without_a_recorded_mode_follows_the_registry
+test_task_without_a_recorded_mode_keeps_origin
 test_local_default_equal_to_origin_keeps_origin
 test_local_default_behind_origin_keeps_origin
 test_local_default_diverged_from_origin_keeps_origin

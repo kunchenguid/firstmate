@@ -150,7 +150,7 @@ if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # (fm_pool_base_prefers_local_default in bin/fm-pool-base-lib.sh).
   ORIGIN_TIP=$(git -C "$WT" rev-parse --verify --quiet "origin/$DEFAULT^{commit}" 2>/dev/null || true)
   LOCAL_TIP=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" 2>/dev/null || true)
-  if fm_pool_base_prefers_local_default "$WT" "$PROJ" "$TASK_MODE" "$ORIGIN_TIP" "$LOCAL_TIP"; then
+  if fm_pool_base_prefers_local_default "$WT" "$TASK_MODE" "$ORIGIN_TIP" "$LOCAL_TIP"; then
     BASE="$DEFAULT"
   fi
 else

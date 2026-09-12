@@ -25,37 +25,26 @@
 # the locally landed work, and nothing can be lost by starting there. Equal
 # means the same commit and origin stands. Behind or diverged both keep origin
 # authoritative, because a local branch that does not contain origin's tip is
-# not something to silently build on. A mode that does not resolve keeps origin
-# too, so the answer is never a guess.
+# not something to silently build on.
+#
+# A task that records no delivery mode at all - a scout, which opens no PR and
+# lands nothing - keeps origin authoritative too. KNOWN LIMIT, accepted
+# deliberately: on an origin-backed `local-only` project a scout therefore reads
+# a base missing the locally landed commits. That is what every task did before
+# this change, so it is a gap this change does not close rather than one it
+# opens, and closing it would mean deciding a task question from the project
+# registry, which the paragraph above rules out. It does not arise without an
+# origin, where the local default branch is the base in every mode.
 #
 # A project with no origin at all is not decided here: there is no origin to be
 # authoritative, so its local default branch is the only base, in every mode.
 
-FM_POOL_BASE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# 0 when work delivered this way lands on the LOCAL default branch.
-#
-# A scout records no delivery mode: it opens no PR and lands nothing, so no task
-# fact exists to read and the captain's registered posture for the project is
-# the best available answer for where that project's work lands.
-# bin/fm-project-mode.sh owns that registry read, including its fallback to
-# no-mistakes for an unknown project or an unknown mode.
-fm_pool_base_lands_locally() {  # <project-path> <task-mode>
-  local project=$1 mode=$2
-  if [ -z "$mode" ]; then
-    mode=$(FM_HOME="${FM_HOME:-}" FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-}" \
-      "$FM_POOL_BASE_LIB_DIR/fm-project-mode.sh" "$(basename "$project")" 2>/dev/null \
-      | cut -d' ' -f1) || return 1
-  fi
-  [ "$mode" = local-only ]
-}
-
 # 0 when the local default branch, not origin, carries this task's landed work
 # and is therefore the base to use.
-fm_pool_base_prefers_local_default() {  # <repo> <project-path> <task-mode> <origin-commit> <local-commit>
-  local repo=$1 project=$2 mode=$3 origin_commit=$4 local_commit=$5
+fm_pool_base_prefers_local_default() {  # <repo> <task-mode> <origin-commit> <local-commit>
+  local repo=$1 mode=$2 origin_commit=$3 local_commit=$4
+  [ "$mode" = local-only ] || return 1
   [ -n "$origin_commit" ] && [ -n "$local_commit" ] || return 1
   [ "$origin_commit" != "$local_commit" ] || return 1
-  fm_pool_base_lands_locally "$project" "$mode" || return 1
   git -C "$repo" merge-base --is-ancestor "$origin_commit" "$local_commit" 2>/dev/null
 }
