@@ -6,7 +6,7 @@
 # built entirely from vendor-rendered signals, so per
 # .agents/skills/firstmate-coding-guidelines it must be proven against the
 # REAL harnesses: a stub can only confirm the assumption already written into
-# the stub. This guard launches every INSTALLED verified harness idle in an
+# the stub. Default mode launches every INSTALLED verified harness idle in an
 # isolated tmux server and requires the real fm_tmux_composer_state to reach
 # `empty`, failing loudly with the harness name and version. It also proves:
 #   - the strict blank-row posture live: a plain shell pane with a blank
@@ -16,21 +16,69 @@
 #     report a delivered send, and a real claude-in-zellij `dump-screen
 #     --ansi` capture must classify empty through the zellij thin adapter.
 #
-# Run explicitly with FM_COMPOSER_MATRIX_LIVE=1. No prompt is ever submitted
-# to any harness, so no model tokens are spent. An absent harness is reported
-# explicitly and skipped; a run that verified nothing fails rather than
-# passing vacuously. Refresh docs/verification/runtime-backends.md ("Composer
-# classification matrix") from this guard's output after any harness upgrade.
+# Run default mode with FM_COMPOSER_MATRIX_LIVE=1. No prompt is submitted, so no
+# model tokens are spent. An absent harness is reported and skipped; a run that
+# verified nothing fails. Refresh docs/verification/runtime-backends.md
+# ("Composer classification matrix") from this guard after a harness upgrade.
 #
-# Folder trust: harnesses are launched with the repo root as cwd, which the
-# operator's machine has normally already trusted; a trust dialog is a real
-# unreadable-composer state and correctly fails that harness's check.
+# Codex-animation-only mode instead reuses prepared idle and draft Herdr panes.
+# A nonempty FM_COMPOSER_CODEX_LAB_SESSION selects it; FM_COMPOSER_CODEX_LIVE=1
+# opts in, and the verification record owns the complete command and pane inputs.
+#
+# In default mode, harnesses launch with the repo root as cwd, which the
+# operator's machine has normally trusted; a trust dialog is an unreadable
+# composer state and correctly fails that harness's check.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# A prepared guarded Herdr lab can refresh the Codex animation evidence
+# without needing tmux or provisioning any pane in the operator session.
+# Supply two real panes: animated idle and animated draft.
+if [ -n "${FM_COMPOSER_CODEX_LAB_SESSION:-}" ]; then
+  fm_live_gate opt-in FM_COMPOSER_CODEX_LIVE herdr codex
+  . "$ROOT/bin/fm-composer-lib.sh"
+  codex_composer_region() {
+    local region_screen=$1 region_plain region_row
+    region_plain=$(printf '%s\n' "$region_screen" | fm_composer_strip_ansi)
+    _fm_composer_scan_screen "$region_plain" ''
+    region_row=$FM_COMPOSER_SCAN_BARE_ROW
+    [ "$region_row" -ge 1 ] || return 1
+    printf '%s\n' "$region_screen" | sed -n "$((region_row)), $((region_row + 2))p"
+  }
+  lab_helper=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+  version=$(codex --version)
+  for case_name in IDLE TYPED; do
+    pane_var="FM_COMPOSER_CODEX_LAB_$case_name"
+    pane=${!pane_var:-}
+    [ -n "$pane" ] || fail "$version: missing $pane_var for the prepared lab"
+    screen=$("$lab_helper" run "$FM_COMPOSER_CODEX_LAB_SESSION" pane read "$pane" --source visible --format ansi) \
+      || fail "$version: cannot capture $case_name"
+    [ -n "$screen" ] || fail "$version: empty $case_name capture"
+    case "$case_name" in IDLE) expected=empty ;; *) expected=pending ;; esac
+    actual=$(fm_composer_classify_screen styled=1 "$screen")
+    [ "$actual" = "$expected" ] || fail "$version: $case_name expected $expected, got $actual"
+    if [ "$case_name" = IDLE ]; then
+      screen_region=$(codex_composer_region "$screen") \
+        || fail "$version: cannot isolate the first idle composer region"
+      sleep 0.2
+      next_screen=$("$lab_helper" run "$FM_COMPOSER_CODEX_LAB_SESSION" pane read "$pane" --source visible --format ansi) \
+        || fail "$version: cannot recapture IDLE"
+      [ -n "$next_screen" ] || fail "$version: empty IDLE recapture"
+      next_actual=$(fm_composer_classify_screen styled=1 "$next_screen")
+      [ "$next_actual" = empty ] || fail "$version: IDLE recapture expected empty, got $next_actual"
+      next_region=$(codex_composer_region "$next_screen") \
+        || fail "$version: cannot isolate the second idle composer region"
+      [ "$screen_region" != "$next_region" ] \
+        || fail "$version: idle composer animation is absent; live case would be vacuous"
+    fi
+    pass "$version: real Codex $case_name composer classifies $expected"
+  done
+  exit 0
+fi
 
 fm_live_gate opt-in FM_COMPOSER_MATRIX_LIVE tmux
 

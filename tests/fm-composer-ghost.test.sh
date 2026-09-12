@@ -3,9 +3,9 @@
 #
 # A harness fills an otherwise-empty composer with de-emphasised ghost text that a
 # plain pane capture cannot tell apart from human input, so the composer reader
-# saw an idle pane as holding pending input. Two rendering styles are covered by
-# the one shared ANSI-aware owner (fm_composer_strip_ghost, bin/fm-composer-lib.sh,
-# reached here through the fm_tmux_strip_ghost thin adapter):
+# saw an idle pane as holding pending input. The default extractor covers two
+# styles through the one shared ANSI-aware owner (fm_composer_strip_ghost,
+# bin/fm-composer-lib.sh, reached through the fm_tmux_strip_ghost thin adapter):
 #   - DIM/FAINT (SGR 2): claude's rotating prompt suggestion, codex's idle tip.
 #   - a dark/muted TRUECOLOR foreground: grok's placeholder/hint text.
 # These tests pin:
@@ -16,6 +16,8 @@
 #   3. The tmux reader structurally scans every row of a multi-row composer.
 #   4. The human/LLM-facing capture path (fm-peek.sh) stays PLAIN - no escape codes
 #      ever reach firstmate's context.
+#   5. Exact three-row Codex animation is stripped while normal input, including
+#      typed braille and RGB text, remains pending and extractable.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -79,6 +81,64 @@ exit 1
 SH
   chmod +x "$fb/tmux"
   printf '%s\n' "$fb"
+}
+
+# Real Codex 0.154.0 captures, 2026-09-10: gpt-6-astra high in the guarded
+# Herdr lab, with OSC 10/11 palette replies supplied by a PTY relay.
+# Fixtures retain the composer and padding, with ESC/CR losslessly escaped.
+# typed-animation contains actual input, including braille characters that must
+# never be treated as decoration.
+test_codex_animation_captures() {
+  local fixture screen expected expected_content caps actual extracted
+  for fixture in idle typed-animation; do
+    screen=$(printf '%b' "$(cat "$ROOT/tests/fixtures/codex-animation/$fixture.capture")")
+    case "$fixture" in
+      idle) expected=empty; expected_content='' ;;
+      *) expected=pending; expected_content='preserve this draft ⠁ ⢀ ⠈ ⠂' ;;
+    esac
+    # Herdr/Zellij have styling; tmux also supplies the actual composer row.
+    for caps in styled=1 "$(printf 'styled=1\ncursor=1')"; do
+      actual=$(fm_composer_classify_screen "$caps" "$screen" 2)
+      [ "$actual" = "$expected" ] || fail "Codex $fixture: expected $expected, got $actual"
+    done
+    # Orca/cmux cannot prove decoration without styling.
+    actual=$(fm_composer_classify_screen styled=0 "$(printf '%s\n' "$screen" | fm_composer_strip_ansi)")
+    [ "$actual" != empty ] || fail "Codex $fixture: unstyled capture lost its safety guard"
+    extracted=$(fm_composer_extract_selected_content styled=1 "$screen")
+    [ "$extracted" = "$expected_content" ] \
+      || fail "Codex $fixture: expected extracted '$expected_content', got '$extracted'"
+  done
+  pass "real Codex animation is empty only with its styled placeholder; typed braille remains pending"
+}
+
+test_codex_plain_draft_is_pending() {
+  local screen actual
+  screen=$(printf '\033[48;2;65;69;76m \033[0m\n\033[1;48;2;65;69;76m%s\033[0m\033[48;2;65;69;76m preserve this draft \033[0m\n\033[48;2;65;69;76m \033[0m' \
+    "$FM_COMPOSER_CODEX_PROMPT_GLYPH")
+  actual=$(fm_composer_classify_screen "$(printf 'styled=1\ncursor=1')" "$screen" 1)
+  [ "$actual" = pending ] \
+    || fail "Codex plain typed draft: expected pending, got '$actual'"
+  pass "Codex plain typed draft remains pending"
+}
+
+test_codex_animation_preserves_typed_braille_and_rgb_text() {
+  local screen rgb_screen rgb actual extracted
+  screen=$(printf '%b' "$(cat "$ROOT/tests/fixtures/codex-animation/typed-animation.capture")")
+  screen=${screen/" preserve this draft "/}
+  actual=$(fm_composer_classify_screen "$(printf 'styled=1\ncursor=1')" "$screen" 2)
+  [ "$actual" = pending ] || fail "Codex typed braille: expected pending, got '$actual'"
+  extracted=$(fm_composer_extract_selected_content styled=1 "$screen")
+  [ "$extracted" = '⠁ ⢀ ⠈ ⠂' ] \
+    || fail "Codex typed braille: expected exact typed glyphs, got '$extracted'"
+
+  rgb=$'\033[38;2;143;147;156mRGB!?\033[39m'
+  rgb_screen=${screen/"⠁ ⢀ ⠈ ⠂"/"$rgb"}
+  actual=$(fm_composer_classify_screen "$(printf 'styled=1\ncursor=1')" "$rgb_screen" 2)
+  [ "$actual" = pending ] || fail "Codex RGB text: expected pending, got '$actual'"
+  extracted=$(fm_composer_extract_selected_content styled=1 "$rgb_screen")
+  [ "$extracted" = 'RGB!?' ] \
+    || fail "Codex RGB text: expected letters and symbols intact, got '$extracted'"
+  pass "Codex animation normalization preserves typed braille and RGB letters and symbols"
 }
 
 # --- fm_tmux_strip_ghost (pure) ---------------------------------------------
@@ -680,6 +740,10 @@ test_peek_output_is_escape_free() {
   esac
   pass "fm-peek output is escape-free (no raw -e bytes reach firstmate context)"
 }
+
+test_codex_animation_captures
+test_codex_plain_draft_is_pending
+test_codex_animation_preserves_typed_braille_and_rgb_text
 
 test_strip_ghost_drops_dim_keeps_normal
 test_strip_ghost_handles_combined_and_boundary_codes

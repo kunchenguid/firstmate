@@ -347,6 +347,21 @@ The composer-classification record below observes the same gate from the other s
 
 ## Composer classification matrix
 
+The retained 2026-09-10 command below re-read two already-prepared panes through the Herdr lab helper and classified their visible surfaces without launching or closing panes.
+The PTY-relay and pane-preparation commands were not captured, so this record does not independently reproduce the OSC 10/11 animation setup or bind those panes to the reported Codex model and version:
+
+```sh
+FM_COMPOSER_CODEX_LIVE=1 FM_COMPOSER_CODEX_LAB_SESSION="$HERDR_LAB_SESSION" FM_COMPOSER_CODEX_LAB_IDLE="$IDLE_PANE" FM_COMPOSER_CODEX_LAB_TYPED="$HIGH_PANE" HERDR_LAB_HELPER="$HERDR_LAB_HELPER" bin/fm-test-run.sh tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+```text
+ok - codex-cli 0.154.0: real Codex IDLE composer classifies empty
+ok - codex-cli 0.154.0: real Codex TYPED composer classifies pending
+```
+
+The portable capture regression is `tests/fm-composer-ghost.test.sh`; removing the classifier change fails with `Codex idle: expected empty, got pending`.
+This refresh covers Codex animation only; the historical multi-harness matrix below retains its original version bounds.
+
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
 The live half of that guarantee was verified on 2026-08-10 from an already-trusted checkout at the branch's final validated head, against every installed harness then covered by the empty-composer matrix on tmux 3.6a, macOS arm64, on an isolated private socket, with no prompt submitted to any harness.
 An earlier untrusted-worktree run left Claude, Grok, and Muse unverified because the guard treats first-launch trust dialogs as an unreadable-composer state and never confirms them; this trusted-checkout rerun supersedes those missing results.
