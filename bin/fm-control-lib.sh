@@ -176,21 +176,24 @@ fm_control_interrupt_ack_source() {  # <harness>
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini) printf '/quit' ;;
-    agy) printf 'C-d' ;;
+    # agy exposes /quit as an alias of /exit and leaves on one submitted Enter.
+    # Its Ctrl+D key needs a second confirming press ("press ctrl+d again to
+    # exit" on agy 1.2.1), which no single-key delivery can satisfy, so the
+    # composer command every other adapter uses is the deterministic exit.
+    codex|pi|pi-signed|omp|gemini|agy) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
 
 # Which named keys a backend adapter can deliver. Every session provider
 # normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
-# exposes only an interrupt and an Enter, so it can deliver neither Escape,
-# Ctrl+D, nor Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key).
+# exposes only an interrupt and an Enter, so it can deliver neither Escape nor
+# Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key).
 fm_control_backend_supports_key() {  # <backend> <key>
   local backend=${1-} key=${2-}
   case "$backend" in
     tmux|herdr|zellij|cmux)
-      case "$key" in Escape|Enter|C-c|C-d|C-u) return 0 ;; esac
+      case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
       ;;
     orca)
       case "$key" in Enter|C-c) return 0 ;; esac

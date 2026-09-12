@@ -109,6 +109,10 @@ EOF
   assert_contains "$launch" "--model 'gemini-3.8-flash-low'" "agy launch omitted the requested model"
   assert_contains "$launch" "--effort 'high'" "agy launch omitted the supported effort"
   assert_contains "$launch" '--dangerously-skip-permissions' "agy launch omitted permission bypass"
+  # Without --add-dir, real agy 1.2.1 runs every tool in its own scratch
+  # directory and never fires the worktree's .agents/hooks.json, and it stops
+  # on an interactive trust dialog before reading the brief.
+  assert_contains "$launch" "--add-dir '$wt'" "agy launch did not bind the task worktree as its workspace"
   assert_contains "$launch" ' -i ' "agy launch did not use interactive prompt mode"
   assert_contains "$launch" 'encode launch-brief' "agy launch did not use the canonical brief encoder"
   assert_not_contains "$launch" ' -p ' "agy launch used one-shot print mode"
@@ -154,7 +158,7 @@ EOF
   pass "fm-spawn: agy records unsupported effort while omitting it from the CLI"
 }
 
-test_secondmate_is_refused_and_control_is_key_based() {
+test_secondmate_is_refused_and_control_is_verified() {
   local rec dir home proj wt fakebin id out rc
   id="agy-secondmate-$$"
   rec=$(make_case secondmate "$id")
@@ -168,11 +172,11 @@ EOF
   [ "$(fm_control_harness_family agy)" = agy ] || fail "agy recorded family did not resolve"
   fm_control_harness_family agyd && fail "an agy-containing command must not claim the agy adapter family"
   [ "$(fm_control_interrupt_key agy)" = C-c ] || fail "agy interrupt key was not Ctrl+C"
-  [ "$(fm_control_exit_command agy)" = C-d ] || fail "agy exit command was not Ctrl+D"
+  [ "$(fm_control_exit_command agy)" = /quit ] || fail "agy exit command was not /quit"
   fm_control_harness_supports_kind agy ship || fail "agy should support ship tasks"
   fm_control_harness_supports_kind agy scout || fail "agy should support scout tasks"
   fm_control_harness_supports_kind agy secondmate && fail "agy should not support secondmates"
-  pass "agy is scoped to crewmate/scout control and uses a native exit key"
+  pass "agy is scoped to crewmate/scout control and exits through its /quit command"
 }
 
 test_teardown_removes_workspace_hooks() {
@@ -301,7 +305,7 @@ EOF
 
 test_spawn_writes_hooks_and_resolves_launch_axes
 test_unsupported_effort_is_recorded_and_omitted
-test_secondmate_is_refused_and_control_is_key_based
+test_secondmate_is_refused_and_control_is_verified
 test_teardown_removes_workspace_hooks
 test_teardown_leaves_a_non_agy_tasks_workspace_hooks
 test_unforced_teardown_removes_workspace_hooks

@@ -1601,7 +1601,17 @@ launch_template() {
     # survives the initial turn for firstmate steering; -p is one-shot.
     # The workspace-local hooks file is written below because agy has no
     # external settings-path override for task-specific hooks.
-    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI __AGYBIN__ __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions -i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # --add-dir is load-bearing and NOT redundant with the pane's cwd (verified
+    # on agy 1.2.1): launched with cwd alone, agy renders the worktree as the
+    # accessed workspace but runs every tool in ~/.gemini/antigravity-cli/scratch,
+    # so the task worktree never receives the work and its .agents/hooks.json
+    # never fires. It also gates a fresh folder behind an interactive "Do you
+    # trust the contents of this project?" dialog that would wedge an unattended
+    # spawn. Passing the worktree with --add-dir binds the workspace, runs tools
+    # and hooks inside it, and admits the folder without the dialog and without
+    # appending the disposable path to the machine-global trustedWorkspaces list
+    # in ~/.gemini/antigravity-cli/settings.json that answering the dialog writes.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI __AGYBIN__ --add-dir __WORKTREE__ __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions -i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
