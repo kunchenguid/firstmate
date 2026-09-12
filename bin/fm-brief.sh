@@ -434,15 +434,27 @@ case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    RULE4_DONE=""
     ;;
   local-only)
     SETUP2=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE4_DONE=""
     ;;
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
+    # The status protocol is where a worker composes its `done:` line, so the
+    # two valid forms are restated at that exact moment. Five no-mistakes tasks
+    # reported `done:` on a green LOCAL suite, never having started the
+    # pipeline; the Definition of done owns the forms, this is the one
+    # deliberate reinforcement at the point of the mistake.
+    RULE4_DONE="
+   For this task \`done:\` has exactly two valid forms, both fixed by Definition of done:
+   \`done: implementation committed, not yet validated\`, then \`done: PR {url} checks green\`.
+   A green local suite is neither: if the \`done:\` line you are about to write reports your own
+   tests, lint, typecheck or build passing, it is the wrong line."
     ;;
 esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
@@ -476,7 +488,7 @@ $RULE1
    firstmate reads your pane for that.
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
-   copies that URL from your line rather than assembling one.
+   copies that URL from your line rather than assembling one.$RULE4_DONE
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a

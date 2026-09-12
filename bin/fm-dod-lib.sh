@@ -10,6 +10,12 @@
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
+# The no-mistakes block states two fixed `done:` forms rather than a free-form
+# summary, because five workers reported `done:` on a green LOCAL suite without
+# ever starting the pipeline. Only the second form is a ready signal, and
+# bin/fm-inactive-reconcile.sh parses it anchored as `done: PR <url>[ checks
+# green]`; bin/fm-brief.sh restates both forms in the status protocol, which is
+# where the worker actually composes the line.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -218,9 +224,10 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+A green local suite - your own tests, lint, typecheck, build, budget - is where validation STARTS, not the finish; this task is not done until the no-mistakes pipeline has raised a PR and CI is green on it.
+So \`done:\` has exactly two valid forms here, in this order, and no others:
+1. \`done: implementation committed, not yet validated\` - that literal line, never a summary of your own results. Append it once the work is committed, then stop; firstmate replies by instructing you to run /no-mistakes.
+2. \`done: PR {url} checks green\` - the finish, reachable only through the pipeline.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -245,7 +252,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green, append form 2 above and stop. That is the CI-ready return point: do not keep monitoring in the background until merge. You are finished.
 EOF
       ;;
     *)

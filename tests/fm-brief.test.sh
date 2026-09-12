@@ -260,7 +260,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "firstmate replies by instructing you to run /no-mistakes" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -370,6 +370,50 @@ test_no_mistakes_dod_wording() {
   assert_no_grep "no-mistakes refuses" "$brief" \
     "no-mistakes DOD must not claim the tool itself refuses --yes"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
+}
+
+# Five no-mistakes workers reported `done:` on a green LOCAL suite, never having
+# started the pipeline. The status protocol is where a worker composes that line,
+# so the two valid `done:` forms must be legible at that exact point, and the
+# terminal one must carry the PR URL. This is mode-conditional: direct-PR and
+# local-only own their own ready signals and must not inherit the pipeline forms.
+test_no_mistakes_done_forms_are_stated_in_the_status_protocol() {
+  local home id brief protocol mode
+  home="$TMP_ROOT/done-forms-home"
+  mkdir -p "$home/data"
+  id="brief-done-forms-b1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  # Rule 4 only, not the whole brief: proximity to the composed line is the fix.
+  protocol=$(awk '/^4\. Report status by appending one line:/,/^5\. /' "$brief")
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and {url} must stay literal
+  case "$protocol" in
+    *'`done: PR {url} checks green`'*) ;;
+    *) fail "the no-mistakes status protocol does not carry the PR-URL done form" ;;
+  esac
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and {url} must stay literal
+  case "$protocol" in
+    *'`done: implementation committed, not yet validated`'*) ;;
+    *) fail "the no-mistakes status protocol does not carry the pre-validation done form" ;;
+  esac
+  case "$protocol" in
+    *"A green local suite is neither"*) ;;
+    *) fail "the no-mistakes status protocol does not rule out a green local suite" ;;
+  esac
+
+  for mode in direct-PR local-only; do
+    id="brief-done-forms-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    protocol=$(awk '/^4\. Report status by appending one line:/,/^5\. /' "$home/data/$id/brief.md")
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks and {url} must stay literal
+    case "$protocol" in
+      *'`done: PR {url} checks green`'*)
+        fail "$mode inherited the no-mistakes done forms in its status protocol" ;;
+    esac
+  done
+  pass "fm-brief.sh: the no-mistakes status protocol states both done forms where the line is written"
 }
 
 test_ask_user_escalation_format() {
@@ -911,6 +955,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_done_forms_are_stated_in_the_status_protocol
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
