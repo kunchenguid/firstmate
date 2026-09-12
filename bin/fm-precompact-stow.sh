@@ -122,11 +122,26 @@ marker_age() {  # <file>
   echo $(( $(date +%s) - marker ))
 }
 
+run_marker_age() {  # <file>
+  local mtime
+  if [ "$(uname)" = Darwin ]; then
+    mtime=$(/usr/bin/stat -f %m "$1" 2>/dev/null) || return 1
+  else
+    mtime=$(stat -c %Y "$1" 2>/dev/null) || return 1
+  fi
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  echo $(( $(date +%s) - mtime ))
+}
+
 run_pid_is_live() {
-  local pid
+  local pid bound age
   pid=$(cat "$RUN_FILE" 2>/dev/null) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null
+  kill -0 "$pid" 2>/dev/null || return 1
+  bound=$RUN_SECS
+  case "$bound" in ''|*[!0-9]*|0) bound=900 ;; esac
+  age=$(run_marker_age "$RUN_FILE") || return 1
+  [ "$age" -le $(( bound + 300 )) ]
 }
 
 run_agent_pass() {

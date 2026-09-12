@@ -1153,6 +1153,33 @@ SH
   pass "pre-compact runner: a still-running stow pass is not stacked onto"
 }
 
+test_precompact_gate_stale_run_marker_rearms_despite_pid_reuse() {
+  local root="$TMP_ROOT/gate-stale-run" sleeper status=0 back
+  make_run_primary "$root"
+  make_stub_agent "$root"
+  export FM_PRECOMPACT_STOW_AGENT="$root/stubbin/stub-agent" \
+    STOW_CALLS_FILE="$root/stow-calls" FM_PRECOMPACT_STOW_RUN_SECS=1
+  sleeper="$root/stubbin/sleeper"
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$sleeper"
+  chmod +x "$sleeper"
+  "$sleeper" & sleeper=$!
+  printf '%s\n' "$sleeper" > "$root/state/.precompact-stow-run"
+  back=$(( $(date +%s) - 3600 ))
+  if [ "$(uname)" = Darwin ]; then
+    touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$root/state/.precompact-stow-run"
+  else
+    touch -m -d "@$back" "$root/state/.precompact-stow-run"
+  fi
+  printf '{"trigger":"manual"}' | run_gate "$root" --claude >/dev/null 2>&1 || status=$?
+  expect_code 0 "$status" "a stale live-run marker must never block compaction"
+  wait_for_stub_calls "$root" 1 \
+    || fail "an orphaned run marker past the pass bound silenced stow because its pid was reused"
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  unset FM_PRECOMPACT_STOW_AGENT STOW_CALLS_FILE FM_PRECOMPACT_STOW_RUN_SECS
+  pass "pre-compact runner: an orphaned run marker past the pass bound re-arms stow even when its pid was reused"
+}
+
 test_precompact_gate_failed_pass_retries_next_compaction() {
   local root="$TMP_ROOT/gate-failed" status=0
   make_run_primary "$root"
@@ -1267,6 +1294,7 @@ test_precompact_gate_codex_agent_invoked
 test_precompact_gate_cooldown_and_stale_rearm
 test_precompact_gate_auto_also_performs_stow
 test_precompact_gate_live_run_not_stacked
+test_precompact_gate_stale_run_marker_rearms_despite_pid_reuse
 test_precompact_gate_failed_pass_retries_next_compaction
 test_precompact_gate_stands_down_when_ineligible
 test_precompact_gate_unwritable_state_never_wedges
