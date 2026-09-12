@@ -183,6 +183,8 @@ fm_composer_normalize_compare_text() {
   printf '%s' "$text"
 }
 
+FM_COMPOSER_AGY_EMPTY_ROW=$'\001'
+
 # fm_composer_strip_ghost: the ONE fleet-wide ANSI-aware extractor of "real typed
 # content" from a captured, styled composer row. Reads the styled line on stdin
 # (from `tmux capture-pane -e`, `herdr pane read --format ansi`, or
@@ -1449,8 +1451,14 @@ EOF
     # OpenCode's left-bar hint and legacy shell-glyph boxed placeholders have no
     # such styling proof, so their structurally fixed positions remain the two
     # idle-regex exceptions here.
-    if [ -z "$content" ] \
-       || { { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
+    if [ -z "$content" ]; then
+      if [ "$compare" = compare-rows ] && [ "$harness" = agy ]; then
+        printf '%s\n' "$FM_COMPOSER_AGY_EMPTY_ROW"
+      fi
+      row=$((row + 1))
+      continue
+    fi
+    if { { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
               || { [ "$FM_COMPOSER_SELECTED_KIND" = box ] && [ "$prompt_is_shell" = 1 ]; }; } \
             && [ "$placeholder_position" = 1 ] \
             && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; } \
@@ -1471,35 +1479,46 @@ EOF
 }
 
 fm_composer_agy_expected_matches_rows() {  # <expected> <rows>
-  local expected=$1 rows=$2 row pos=0 row_index=0 row_length expected_length candidate separator found
-  expected=$(fm_composer_normalize_compare_text "$expected")
-  expected_length=${#expected}
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    row_length=${#row}
-    if [ "$row_index" -eq 0 ]; then
-      [ "${expected:pos:row_length}" = "$row" ] || return 1
-      pos=$((pos + row_length))
+  local expected=$1 rows=$2 row pos=0 row_length expected_length candidate separator found
+  local expected_flat='' expected_line have_content=0
+  [ -n "$rows" ] || return 1
+  while IFS= read -r expected_line || [ -n "$expected_line" ]; do
+    fm_composer_normalize_trim_var expected_line
+    if [ -z "$expected_line" ]; then
+      expected_flat="${expected_flat}${FM_COMPOSER_AGY_EMPTY_ROW}"
+      have_content=0
     else
-      candidate=$pos
-      found=0
-      while [ "$candidate" -le "$expected_length" ]; do
-        separator=${expected:pos:candidate-pos}
-        case "$separator" in
-          *[![:space:]]*) break ;;
-        esac
-        if [ "${expected:candidate:row_length}" = "$row" ]; then
-          pos=$((candidate + row_length))
-          found=1
-          break
-        fi
-        candidate=$((candidate + 1))
-      done
-      [ "$found" -eq 1 ] || return 1
+      [ "$have_content" -eq 0 ] || expected_flat="${expected_flat} "
+      expected_flat="${expected_flat}${expected_line}"
+      have_content=1
     fi
-    row_index=$((row_index + 1))
+  done <<< "$expected"
+  expected_length=${#expected_flat}
+  while IFS= read -r row || [ -n "$row" ]; do
+    [ "$row" = "$FM_COMPOSER_AGY_EMPTY_ROW" ] && row=''
+    if [ -z "$row" ]; then
+      [ "${expected_flat:pos:1}" = "$FM_COMPOSER_AGY_EMPTY_ROW" ] || return 1
+      pos=$((pos + 1))
+      continue
+    fi
+    row_length=${#row}
+    candidate=$pos
+    found=0
+    while [ "$candidate" -le "$expected_length" ]; do
+      separator=${expected_flat:pos:candidate-pos}
+      case "$separator" in
+        *[![:space:]]*) break ;;
+      esac
+      if [ "${expected_flat:candidate:row_length}" = "$row" ]; then
+        pos=$((candidate + row_length))
+        found=1
+        break
+      fi
+      candidate=$((candidate + 1))
+    done
+    [ "$found" -eq 1 ] || return 1
   done <<< "$rows"
-  [ "$row_index" -gt 0 ] && [ "$pos" -eq "$expected_length" ]
+  [ "$pos" -eq "$expected_length" ]
 }
 
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity] [harness]

@@ -331,6 +331,9 @@ prepare_agy_exit_composer() {
       ;;
     pending)
       draft=$(fm_backend_agy_composer_content "$BACKEND" "$T" "$LABEL" compare-rows) || draft=
+      if [ -n "${FM_COMPOSER_AGY_EMPTY_ROW:-}" ]; then
+        draft=${draft//"$FM_COMPOSER_AGY_EMPTY_ROW"/}
+      fi
       [ -n "$draft" ] || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:pending; the unsent composer text could not be extracted"
       draft_log=${draft//\\/\\\\}
       draft_log=${draft_log//$'\n'/\\n}

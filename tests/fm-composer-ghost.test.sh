@@ -530,6 +530,34 @@ test_agy_expected_guided_rows_match_wrapping_only() {
   pass "fm_composer_agy_expected_matches_rows: wrapping-only boundaries match exactly"
 }
 
+test_agy_expected_guided_rows_preserve_blank_lines() {
+  local expected rows boundary screen extracted
+  expected=$'first\n\nsecond'
+  rows=$'first\n\nsecond'
+  fm_composer_agy_expected_matches_rows "$expected" "$rows" \
+    || fail "AGY expected-guided matching should preserve an interior blank row"
+  rows=$'first\nsecond'
+  fm_composer_agy_expected_matches_rows "$expected" "$rows" \
+    && fail "AGY expected-guided matching should reject a missing interior blank row"
+  expected=$'first\n'
+  rows=$'first\n'
+  fm_composer_agy_expected_matches_rows "$expected" "$rows" \
+    || fail "AGY expected-guided matching should preserve a trailing blank row"
+  rows=first
+  fm_composer_agy_expected_matches_rows "$expected" "$rows" \
+    && fail "AGY expected-guided matching should reject a missing trailing blank row"
+  expected=first
+  rows=$'first\n'
+  fm_composer_agy_expected_matches_rows "$expected" "$rows" \
+    && fail "AGY expected-guided matching should reject an unexpected trailing blank row"
+  boundary=$(printf '─%.0s' {1..16})
+  screen="$boundary"$'\n> first\n\nsecond\n'"$boundary"
+  extracted=$(fm_composer_extract_selected_content 'styled=0' "$screen" '' agy compare-rows)
+  fm_composer_agy_expected_matches_rows $'first\n\nsecond' "$extracted" \
+    || fail "AGY compare-rows extraction should preserve an interior blank row"
+  pass "fm_composer_agy_expected_matches_rows: blank rows remain structural"
+}
+
 test_misaligned_box_is_unknown() {
   local dir fb capture out fixture
   dir="$TMP_ROOT/misaligned-box"; mkdir -p "$dir"
@@ -790,6 +818,7 @@ test_agy_busy_scope_uses_widest_rules
 test_agy_submit_waits_for_stable_render
 test_agy_busy_post_enter_confirms_delivery
 test_agy_expected_guided_rows_match_wrapping_only
+test_agy_expected_guided_rows_preserve_blank_lines
 test_misaligned_box_is_unknown
 test_unproved_empty_geometry_fails_closed
 test_differing_widths_use_asymmetric_verdicts
