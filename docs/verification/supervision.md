@@ -55,6 +55,16 @@ Both tracked `.omp/extensions/*.ts` files loaded by auto-discovery alone (no `-e
 omp's `session_start` payload carries no reason field, so the adapter derives the source: the first start of the process is `startup` (or `resume` from a `--continue`/`--resume` launch line) and a later in-process start is `clear`; `tests/fm-omp-harness.test.sh` pins that mapping over a fake omp API.
 A file named both by `-e` and by auto-discovery loads twice (two factory calls, doubled `session_stop` continuations), which is why the secondmate launch names no `-e` and the per-task worker extension lives in `state/`.
 
+### omp watcher composer preservation, 2026-09-11
+
+The prompt-safe watcher transport was verified on 2026-09-11 against omp 18.1.17 with the portable fake-API guard and the real-provider live guard below.
+The watcher wake is a hidden `firstmate-primary-omp-watcher-wake` custom message with `deliverAs: "followUp"` and `triggerTurn: true`, so operational input remains model-visible without claiming the captain-owned user role that clears the editor on `message_start`.
+`bash tests/fm-omp-harness.test.sh` pins the custom message type, hidden display, follow-up delivery, turn trigger, exact content, and wake consumption over a fake omp API.
+Its relevant output is `ok - .omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one hidden custom follow-up`.
+`FM_OMP_LIVE_E2E=1 bash tests/fm-omp-primary-live-e2e.test.sh` verifies through a real omp provider turn that the actionable watcher close reaches the model exactly once as hidden custom input and never as a user message.
+Its relevant outputs are `ok - omp omp/18.1.17: an actionable close spawned a ledger-linked successor and woke main exactly once through hidden custom input` and `# omp omp/18.1.17 model=openai-codex/gpt-6-astra: every live omp primary assertion passed`.
+The tracked extension remains auto-discovered with no config or installation change, but an omp process that loaded the previous extension must restart normally after the updated file lands.
+
 ### Run-tier source vocabulary and context-reset injection
 
 The run tier depends on three facts only the vendor can supply: the session-open source it reports, whether hook stdout reaches model context on a context-RESET open rather than only a cold one, and whether a worker the hook detaches survives the hook returning.

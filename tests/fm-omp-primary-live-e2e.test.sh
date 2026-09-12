@@ -10,7 +10,7 @@
 #   2. the session-start digest reaches model context before the first turn
 #      and the session lock names the omp process (ancestry detection);
 #   3. fm_watch_arm_omp starts a real watcher, an actionable close spawns a
-#      ledger-linked successor, and the wake arrives as one follow-up turn;
+#      ledger-linked successor, and the wake arrives once as hidden custom input;
 #   4. with the successor watcher frozen until its beacon passes the lab grace,
 #      the next turn end is genuinely unsupervised, so session_stop must compel
 #      the turn-end guard continuation and the model reaches for the tool.
@@ -240,9 +240,13 @@ grep -Eq 'reason=actionable-signal.*successor=started:[0-9]+' "$PROJECT/state/.w
   || fail "omp extension did not start and ledger-link a successor after the actionable close"
 wait_for_log "FIRSTMATE WATCHER WAKE: signal:" 240 || fail "the actionable close was not delivered to main as a watcher follow-up"
 wait_for_agent_ends 3 360 || fail "omp did not finish the wake turn"
+custom_wake_count=$(jq -r 'select(.type == "message_start" and .message.role == "custom" and .message.customType == "firstmate-primary-omp-watcher-wake" and (.message.content | contains("FIRSTMATE WATCHER WAKE: signal:"))) | .type' "$RPC_LOG" 2>/dev/null | grep -c . 2>/dev/null) || true
+user_wake_count=$(jq -r 'select(.type == "message_start" and .message.role == "user" and (([.message.content[]? | select(.type == "text") | .text] | join("\n")) | contains("FIRSTMATE WATCHER WAKE: signal:"))) | .type' "$RPC_LOG" 2>/dev/null | grep -c . 2>/dev/null) || true
+[ "${custom_wake_count:-0}" -eq 1 ] || fail "the watcher wake did not enter the model exactly once as hidden custom input (count ${custom_wake_count:-0})"
+[ "${user_wake_count:-0}" -eq 0 ] || fail "the watcher wake entered through the captain-owned user role (count ${user_wake_count:-0})"
 arm_calls=$(tool_call_count fm_watch_arm_omp)
 [ "$arm_calls" -eq 1 ] || fail "the model re-armed from memory instead of the extension (fm_watch_arm_omp call count $arm_calls)"
-pass "omp $OMP_VERSION: an actionable close spawned a ledger-linked successor and woke main exactly once"
+pass "omp $OMP_VERSION: an actionable close spawned a ledger-linked successor and woke main exactly once through hidden custom input"
 
 # --- 3. the compelled turn-end guard continuation -------------------------------
 # Freeze the successor watcher (SIGSTOP) so its beacon goes stale past the lab
@@ -258,7 +262,7 @@ kill -STOP "$successor_pid" 2>/dev/null || fail "could not freeze the successor 
 thaw() { kill -CONT "$successor_pid" 2>/dev/null || true; }
 i=0
 while [ "$i" -lt 60 ]; do
-  age=$(( $(date +%s) - $(stat -f %m "$PROJECT/state/.last-watcher-beat" 2>/dev/null || stat -c %Y "$PROJECT/state/.last-watcher-beat" 2>/dev/null || date +%s) ))
+  age=$(( $(date +%s) - $(stat -c %Y "$PROJECT/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$PROJECT/state/.last-watcher-beat" 2>/dev/null || date +%s) ))
   [ "$age" -gt "$GUARD_GRACE" ] && break
   sleep 1
   i=$((i + 1))
