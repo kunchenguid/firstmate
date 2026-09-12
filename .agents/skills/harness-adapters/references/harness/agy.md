@@ -16,6 +16,7 @@ Antigravity CLI `agy` is a verified worker adapter for CREWMATE and SCOUT tasks 
 - Non-tmux composer reads use a bounded 200-row tail for agy so both measured boundaries survive long drafts; other harnesses retain the normal 20-row tail.
 - The inbox doorbell defers both pending and unknown agy composer verdicts and rings only after a proven empty result; the watcher records the deferral and retries.
 - Typed AGY steering compares the extracted composer with the literal text before Enter; a mismatch withholds Enter, records the steer in the inbox, and reports that stray text may remain unsent in the pane.
+- AGY exit records a pending composer in the line-oriented status log by doubling literal backslashes and replacing newlines with the two-character sequence `\n`.
 - AGY exit records any pending composer text, clears it with the measured C-u key, requires a proven empty composer, and then submits `/quit`; unknown or uncleared input remains a loud refusal.
 - The remaining sub-second race between preflight and literal typing is shared with every typed harness path; no exclusive input reservation is provided, a human typing in this window can leave firstmate's text unsent alongside their draft, Enter is never pressed on a mismatch, and the durable inbox record is the recovery copy.
 - Assignment forms of `ANTIGRAVITY_AGENT` (`ANTIGRAVITY_AGENT=`, `export`, `declare`, or `typeset`) are refused in raw launch commands, a bare marker name used as an argument value is allowed, and the launch boundary scrubs the variable firstmate provides.

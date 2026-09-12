@@ -858,18 +858,21 @@ test_agent_that_does_not_stop_fails_closed() {
 }
 
 test_agy_exit_clears_pending_composer() {
-  local dir out rc
+  local dir out rc expected_note note_count stray_count
   dir=$(new_case agy-pending-exit)
   add_task "$dir" t1 agy
   alive_as "$dir" agy
-  printf '────────────────\n> draft\n────────────────\n? for shortcuts\n' > "$dir/fake/pane"
+  printf '────────────────\n> first\nsecond\n────────────────\n? for shortcuts\n' > "$dir/fake/pane"
   out=$(FM_FAKE_AGY_LIVE_COMPOSER=1 FM_FAKE_CLEAR_COMPOSER=1 FM_FAKE_CLEAR_DELAY=2 run_control "$dir" t1 exit); rc=$?
   expect_code 0 "$rc" "exit should clear an AGY pending composer"$'\n'"$out"
   [ "$(keys_sent "$dir")" = C-u ] || fail "pending AGY exit should clear with C-u"
   [ "$(literals "$dir")" = /quit ] || fail "pending AGY exit should type /quit after clearing"
-  assert_grep 'note: exit cleared unsent composer text: draft' "$dir/home/state/t1.status" \
-    "pending AGY exit should record the cleared draft"
-  pass "fm-control exit: pending AGY composers are recorded, cleared, and exited"
+  expected_note='note: exit cleared unsent composer text: first\nsecond'
+  note_count=$(grep -Fxc "$expected_note" "$dir/home/state/t1.status" || true)
+  [ "$note_count" = 1 ] || fail "pending AGY exit should record one encoded multiline draft note"
+  stray_count=$(grep -Fxc second "$dir/home/state/t1.status" || true)
+  [ "$stray_count" = 0 ] || fail "pending AGY exit should not append a multiline draft as a stray event"
+  pass "fm-control exit: pending AGY multiline composers are encoded, cleared, and exited"
 }
 
 test_agy_exit_refuses_unknown_composer() {

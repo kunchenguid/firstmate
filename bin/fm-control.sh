@@ -324,15 +324,17 @@ busy_verdict() {
 }
 
 prepare_agy_exit_composer() {
-  local verdict draft elapsed=0
+  local verdict draft draft_log elapsed=0
   verdict=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" agy) || verdict=unknown
   case "$verdict" in
     empty)
       ;;
     pending)
-      draft=$(fm_backend_agy_composer_content "$BACKEND" "$T" "$LABEL") || draft=
+      draft=$(fm_backend_agy_composer_content "$BACKEND" "$T" "$LABEL" compare-rows) || draft=
       [ -n "$draft" ] || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:pending; the unsent composer text could not be extracted"
-      printf 'note: exit cleared unsent composer text: %s\n' "$draft" >> "$STATE/$ID.status" \
+      draft_log=${draft//\\/\\\\}
+      draft_log=${draft_log//$'\n'/\\n}
+      printf 'note: exit cleared unsent composer text: %s\n' "$draft_log" >> "$STATE/$ID.status" \
         || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:pending; the unsent composer note could not be recorded"
       fm_control_backend_supports_key "$BACKEND" C-u \
         || die "exit-command=refused $ID harness=$HARNESS verdict=agy-preflight:pending; backend $BACKEND cannot deliver AGY's measured composer-clear key C-u"

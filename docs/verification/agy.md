@@ -384,6 +384,15 @@ C-u is the measured AGY composer-clear key and the pending-to-empty transition p
 The measured draft was one long line that wrapped across the composer, rather than a literal newline between input lines.
 Escape does not clear the composer, and C-c does not clear it and arms AGY's double-press exit warning.
 
+### Coverage of later commits
+
+The recorded live evidence above was run against gate tip `30f3d426`, so it remains evidence for the shared tmux lifecycle path rather than a fresh proof of the final tip.
+Commit `7e10435` touched `bin/fm-backend.sh`, `bin/fm-composer-lib.sh`, `bin/fm-spawn.sh`, `bin/fm-teardown.sh`, `docs/verification/agy.md`, `docs/verification/runtime-backends.md`, and `tests/fm-send-inbox-doorbell-live-e2e.test.sh`; the cleanup-helper consolidation is covered by the `fm-busy-adapter-wiring`, `fm-control`, and `fm-teardown` portable regressions.
+Commit `26ab875` touched `.agents/skills/harness-adapters/references/harness/agy.md`, `bin/fm-backend.sh`, `bin/fm-tmux-lib.sh`, and `docs/verification/agy.md`; its unused-helper removal leaves the composer and control paths covered by `fm-composer-lib` and `fm-control`, while its code-site race text is documentation-only.
+Commit `d4f081c` touched `bin/backends/zellij.sh` and `tests/fm-backend-zellij.test.sh`; the plain-capture fallback is covered by the `fm-backend-zellij` regression.
+The multiline status-note serialization in this round is covered by the multiline AGY exit case in `tests/fm-control.test.sh`.
+final-tip live re-run: <pending>
+
 ## Repository gates
 
 Command:
