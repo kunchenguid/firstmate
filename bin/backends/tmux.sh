@@ -86,9 +86,9 @@ fm_backend_tmux_container_ensure() {
 #     ("$ses:"), so a non-default base-index (e.g. base-index 1) cannot collide.
 #   - PIN the window name by disabling automatic-rename and allow-rename on the
 #     new window: the captain's tmux may rename the window away from fm-<id> once
-#     treehouse cd's into the worktree, which would break name-based targeting.
+#     the pane cd's into its leased slot, which would break name-based targeting.
 # The returned window id lets callers target the window even if its name is ever
-# lost, so worktree discovery cannot fall back to the active client's window.
+# lost, so pane-arrival detection cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
   local ses=$1 wname=$2 proj_abs=$3 wid
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
