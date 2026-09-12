@@ -2034,12 +2034,17 @@ auto_quota_drain_surface() {
   wake "$reason"
 }
 
-# Read-only registered-home beat scan inside the heartbeat fleet-scan.
-# Recovery is a supervised --recover after this wake, not an in-watcher loop.
+# MAIN scans registered homes read-only, so their recovery stays supervised after
+# a wake. A local secondmate heartbeat instead recovers its stale parent MAIN
+# directly through the same verified liveness wrapper.
 secondmate_home_liveness_tick() {
   local out line reason
   watcher_heartbeat
-  out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-secondmate-liveness.sh" 2>/dev/null) || true
+  if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+    out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-secondmate-liveness.sh" --recover 2>/dev/null) || true
+  else
+    out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-secondmate-liveness.sh" 2>/dev/null) || true
+  fi
   reason=
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue

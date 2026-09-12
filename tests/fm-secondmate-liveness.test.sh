@@ -536,6 +536,40 @@ test_sweep_skipped_under_detect_only() {
   pass "sweep: skipped entirely under FM_BOOTSTRAP_DETECT_ONLY=1, exactly like the other mutating sweeps"
 }
 
+test_network_stage_recovers_stale_main_watcher() {
+  local w fb tmuxfb log out arm_log slack_log
+  w=$(new_world network-main-stale)
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  arm_log="$w/main-arm.log"
+  slack_log="$w/main-slack.log"
+  fm_touch_epoch 999999100 "$w/home/state/.last-watcher-beat"
+  cat > "$fb/fake-arm" <<SH
+#!/usr/bin/env bash
+printf 'home=%s args=%s\n' "\${FM_HOME:-}" "\$*" >> "$arm_log"
+SH
+  cat > "$fb/fake-slack" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$slack_log"
+SH
+  chmod +x "$fb/fake-arm" "$fb/fake-slack"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" \
+    FM_BOOTSTRAP_NETWORK=only FM_GUARD_GRACE=300 \
+    FM_SECONDMATE_LIVENESS_NOW=1000000000 \
+    FM_SECONDMATE_LIVENESS_ARM="$fb/fake-arm" \
+    FM_SECONDMATE_LIVENESS_SLACK="$fb/fake-slack")
+  assert_contains "$out" "MAIN beat=900s grace=300s watcher=unhealthy verdict=stale" \
+    "the deferred network stage did not inspect MAIN's stale beat"
+  [ "$(wc -l < "$arm_log" | tr -d '[:space:]')" = 1 ] \
+    || fail "the deferred network stage should request one MAIN re-arm: $(cat "$arm_log")"
+  assert_contains "$(cat "$arm_log")" "home=$w/home args=" \
+    "the deferred network stage did not arm MAIN without stopping its watcher"
+  assert_contains "$(cat "$slack_log")" "message MAIN watcher beat stale; re-armed" \
+    "the deferred network stage did not post the MAIN recovery line"
+  pass "network-stage liveness scan recovers stale MAIN watcher"
+}
+
 test_sweep_noop_with_no_secondmate_meta() {
   local w fb tmuxfb log out
   w=$(new_world sweep-no-secondmates)
@@ -567,6 +601,7 @@ test_sweep_reports_missing_endpoint_relaunch_failure
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
+test_network_stage_recovers_stale_main_watcher
 test_sweep_noop_with_no_secondmate_meta
 
 echo "# all fm-secondmate-liveness tests passed"

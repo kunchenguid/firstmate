@@ -478,6 +478,60 @@ SH
   pass "supervised bridge keys a reaction answer wake by its event ts"
 }
 
+test_unhandled_auto_reply_once() {
+  local home="$TMP_ROOT/unhandled-auto-reply" fakebin log rearm_log ts i
+  make_home "$home"
+  fakebin=$(make_fake_curl "$home/fake")
+  log="$home/curl.log"; : > "$log"
+  rearm_log="$home/rearm.log"
+  ts="$(date +%s).690829"
+  cat > "$fakebin/node" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '{"envelope_id":"env-auto-reply","event":{"type":"message","channel":"C0BQ9K1TJKG","user":"U0CAPTAIN1","text":"status","ts":"$ts"}}'
+SH
+  cat > "$fakebin/fake-rearm" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$rearm_log"
+SH
+  chmod +x "$fakebin/node" "$fakebin/fake-rearm"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SLACK_API_URL=https://slack.test/api FM_SLACK_CURL_BIN="$fakebin/curl" \
+    FM_SLACK_CURL_LOG="$log" FM_SLACK_UNHANDLED_AFTER=3 \
+    FM_SLACK_UNHANDLED_REARM="$fakebin/fake-rearm" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-slack-socket.sh" || fail "socket bridge failed while scheduling auto-reply"
+  sleep 0.5
+  [ "$(grep -c '^method=chat.postMessage' "$log" || true)" -eq 0 ] \
+    || fail "the auto-reply posted before its timeout: $(cat "$log")"
+  i=0
+  while [ "$(grep -c '^method=chat.postMessage' "$log" || true)" -lt 1 ] && [ "$i" -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(grep -c '^method=chat.postMessage' "$log" || true)" -eq 1 ] \
+    || fail "an unhandled message did not receive one timed auto-reply: $(cat "$log")"
+  grep -F 'MAIN%20has%20not%20picked%20this%20up%20in%205%20min%3B%20watcher%20re-arm%20requested' "$log" >/dev/null \
+    || fail "the timed auto-reply text was wrong: $(cat "$log")"
+  grep -F "thread_ts=$ts" "$log" >/dev/null \
+    || fail "the timed auto-reply was not posted in the message thread: $(cat "$log")"
+  [ "$(wc -l < "$rearm_log" | tr -d '[:space:]')" = 1 ] \
+    || fail "the timed auto-reply did not request exactly one re-arm: $(cat "$rearm_log")"
+  [ "$(cat "$rearm_log")" = --recover ] \
+    || fail "the timed auto-reply did not use the shared recovery path: $(cat "$rearm_log")"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SLACK_API_URL=https://slack.test/api FM_SLACK_CURL_BIN="$fakebin/curl" \
+    FM_SLACK_CURL_LOG="$log" FM_SLACK_UNHANDLED_AFTER=3 \
+    FM_SLACK_UNHANDLED_REARM="$fakebin/fake-rearm" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-slack-socket.sh" || fail "duplicate socket delivery failed"
+  sleep 3.2
+  [ "$(grep -c '^method=chat.postMessage' "$log" || true)" -eq 1 ] \
+    || fail "one unhandled message received more than one auto-reply: $(cat "$log")"
+  [ "$(wc -l < "$rearm_log" | tr -d '[:space:]')" = 1 ] \
+    || fail "one unhandled message requested more than one re-arm: $(cat "$rearm_log")"
+  pass "an unhandled Socket Mode message receives one timed thread reply and re-arm"
+}
+
 test_supervision() {
   local home="$TMP_ROOT/supervision"
   make_home "$home"
@@ -543,6 +597,7 @@ case "${FM_SLACK_SOCKET_TEST_CASE:-all}" in
   reaction-conflict-second-answer) test_reaction_conflict_second_answer ;;
   reaction-duplicate-silent) test_reaction_duplicate_silent ;;
   bridge-reaction) test_bridge_reaction ;;
+  auto-reply) test_unhandled_auto_reply_once ;;
   supervision) test_supervision ;;
   bootstrap) test_bootstrap ;;
   all)
@@ -574,6 +629,7 @@ case "${FM_SLACK_SOCKET_TEST_CASE:-all}" in
     test_reaction_conflict_second_answer
     test_reaction_duplicate_silent
     test_bridge_reaction
+    test_unhandled_auto_reply_once
     test_supervision
     test_bootstrap
     ;;

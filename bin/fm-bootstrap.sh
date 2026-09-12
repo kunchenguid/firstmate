@@ -1697,6 +1697,9 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
       secondmate_liveness_sweep
       fm_timing_record phase secondmate-liveness "$__fm_timing_stamp"
     fi
+    if network_sweep_authorized 'MAIN watcher liveness recovery'; then
+      "$SCRIPT_DIR/fm-secondmate-liveness.sh" --recover
+    fi
     if network_sweep_authorized 'secondmate convergence'; then
       __fm_timing_stamp=$(fm_timing_now_ms)
       secondmate_sync
