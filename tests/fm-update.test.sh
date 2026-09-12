@@ -471,6 +471,32 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+test_pi_extension_scratch_does_not_skip_as_dirty() {
+  local w out
+  w=$(new_world t-pi-scratch)
+  cp "$ROOT/.gitignore" "$w/seed/.gitignore"
+  git -C "$w/seed" add .gitignore
+  git -C "$w/seed" commit -qm gitignore
+  git -C "$w/seed" push -q origin main
+  git -C "$w/main" pull -q origin main
+  add_sm "$w" sm1
+  mkdir -p "$w/sm1/.pi/tasks/run" "$w/sm1/.pi/evidence/run" \
+    "$w/main/.pi/tasks/run" "$w/main/.pi/evidence/run"
+  printf 'scratch\n' > "$w/sm1/.pi/tasks/run/out"
+  printf 'evidence\n' > "$w/sm1/.pi/evidence/run/out"
+  printf 'scratch\n' > "$w/main/.pi/tasks/run/out"
+  printf 'evidence\n' > "$w/main/.pi/evidence/run/out"
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_not_contains "$out" "skipped: dirty working tree" \
+    "Pi extension scratch made a home look dirty"
+  assert_contains "$out" "firstmate: updated " "firstmate should still fast-forward"
+  assert_contains "$out" "secondmate sm1: updated " "secondmate should still fast-forward"
+  pass "gitignored .pi/tasks and .pi/evidence do not skip fm-update as dirty"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_bin_only_advance_restarts
@@ -485,5 +511,6 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_pi_extension_scratch_does_not_skip_as_dirty
 
 echo "# all fm-update tests passed"

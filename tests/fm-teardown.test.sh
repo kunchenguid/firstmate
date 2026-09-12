@@ -1407,6 +1407,39 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
+test_pi_extension_scratch_does_not_refuse_landed_worktree() {
+  local case_dir rc tmp
+  case_dir=$(make_case pi-scratch)
+  write_meta "$case_dir" no-mistakes ship
+
+  tmp="$case_dir/_gi"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  cp "$ROOT/.gitignore" "$tmp/.gitignore"
+  git -C "$tmp" add .gitignore
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m gitignore
+  git -C "$case_dir/origin.git" fetch -q "$tmp" HEAD:refs/heads/main
+  rm -rf "$tmp"
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" reset -q --hard origin/main
+
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  mkdir -p "$case_dir/wt/.pi/tasks/run" "$case_dir/wt/.pi/evidence/run"
+  printf 'scratch\n' > "$case_dir/wt/.pi/tasks/run/out"
+  printf 'evidence\n' > "$case_dir/wt/.pi/evidence/run/out"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "pi-scratch: teardown should not treat gitignored Pi scratch as uncommitted work: $(cat "$case_dir/stderr")"
+  ! grep -q "uncommitted changes" "$case_dir/stderr" \
+    || fail "pi-scratch: teardown cited uncommitted changes for gitignored .pi scratch"
+  pass "gitignored .pi/tasks and .pi/evidence do not refuse teardown of a landed worktree"
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -4021,6 +4054,7 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_pi_extension_scratch_does_not_refuse_landed_worktree
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead

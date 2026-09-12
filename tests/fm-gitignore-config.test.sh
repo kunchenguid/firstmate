@@ -82,8 +82,49 @@ test_scratchpad2_does_not_dirty_porcelain() {
   pass "scratchpad2/ does not make git status --porcelain dirty"
 }
 
+test_pi_scratch_dirs_are_ignored() {
+  local sample
+  for sample in .pi/tasks/run/out .pi/evidence/run/out .pi/tasks/ .pi/evidence/; do
+    git -C "$ROOT" check-ignore -q "$sample" \
+      || fail "git does not ignore $sample (Pi worker scratch must be ignored)"
+  done
+  git -C "$ROOT" check-ignore -q .pi/other \
+    && fail "git unexpectedly ignores .pi/other (only tasks/ and evidence/ are scratch)"
+  pass ".pi/tasks/ and .pi/evidence/ are gitignored"
+}
+
+test_pi_scratch_ignores_no_tracked_path() {
+  local tracked
+  tracked=$(git -C "$ROOT" ls-files | grep -E '(^|/)\.pi/(tasks|evidence)(/|$)' || true)
+  [ -z "$tracked" ] \
+    || fail "a currently tracked path would be newly ignored by .pi scratch rules: $tracked"
+  pass "no currently tracked path lives under .pi/tasks or .pi/evidence"
+}
+
+test_pi_scratch_dirs_do_not_dirty_porcelain() {
+  # Teardown and fm-update both use git status --porcelain. Pi extension scratch
+  # under .pi/tasks and .pi/evidence must not make a home or worktree look dirty.
+  local repo status
+  repo=$(mktemp -d "${TMPDIR:-/tmp}/fm-pi-scratch-ignore.XXXXXX")
+  git init -q "$repo"
+  cp "$ROOT/.gitignore" "$repo/.gitignore"
+  git -C "$repo" add .gitignore
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'seed gitignore'
+  mkdir -p "$repo/.pi/tasks/run" "$repo/.pi/evidence/run"
+  printf 'scratch\n' > "$repo/.pi/tasks/run/out"
+  printf 'evidence\n' > "$repo/.pi/evidence/run/out"
+  status=$(git -C "$repo" status --porcelain)
+  rm -rf "$repo"
+  [ -z "$status" ] || fail ".pi scratch paths still dirty porcelain: $status"
+  pass ".pi/tasks/ and .pi/evidence/ do not make git status --porcelain dirty"
+}
+
 test_config_dir_ignored_as_category
 test_unrelated_path_stays_visible
 test_scratchpad_prefix_is_ignored
 test_scratchpad_prefix_ignores_no_tracked_path
 test_scratchpad2_does_not_dirty_porcelain
+test_pi_scratch_dirs_are_ignored
+test_pi_scratch_ignores_no_tracked_path
+test_pi_scratch_dirs_do_not_dirty_porcelain
