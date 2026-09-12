@@ -231,6 +231,7 @@ The setting is per-home and is not inherited because each secondmate owns a diff
 
 The watcher runs `bin/fm-refill.sh check` locally and wakes the supervisor when terminal work remains to be reconciled, or when the active count is below the target and `tasks-axi ready` reports dispatchable work.
 Working is the only productive state; parked, paused, blocked, unknown, done, and failed records remain visible but cannot hide a clean slot in another project or pool.
+In a secondmate home, an unacknowledged parent instruction suppresses the check without advancing its deduplication record, so the parent inbox is handled first and the deficit surfaces on the first poll after acknowledgement.
 The detector performs no merge, cleanup, backlog transition, or spawn.
 The `refill-continuity` agent skill owns the guarded reconcile-and-refill procedure and requires each candidate to be evaluated independently.
 
