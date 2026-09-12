@@ -521,6 +521,66 @@ done
 [ "$(count_lines "$LEVEL_LOG")" -ge 2 ] || fail "a real edge after the level must still ring the watch again"
 pass "a repeat watch never refires on a level that never went false"
 
+# --- a failed edge-marker write escalates to a captured terminal outcome ----
+# A regression guard for the exact bug the edge marker exists to prevent: if
+# the write that records "the next stable-true is not a new edge" itself
+# fails, the fix must escalate to a captured terminal outcome (status fired,
+# no `repeat: continues`) instead of the old `|| true` swallow - because a
+# swallowed failure left no marker behind, and cmd_terminal classifies any
+# fired result without `repeat: continues` as terminal, so the generic runner
+# retires the source instead of leaving a live registration that a level which
+# never goes false could refire on the very next reconcile. The write is
+# forced to fail deterministically by pre-occupying the marker's path with a
+# directory, which `: > path` can never truncate.
+H="$TMP_ROOT/h-repeat-edgefail"; new_home "$H"
+EDGEFAIL_TRIG="$TMP_ROOT/repeat-edgefail-trigger"
+EDGEFAIL_LOG="$TMP_ROOT/repeat-edgefail-act"
+rm -f -- "$EDGEFAIL_TRIG"
+when "$H" arm edgefail --interval 0.1 --stable 1 --repeat \
+  --condition "$COND" "$EDGEFAIL_TRIG" "$TMP_ROOT/repeat-edgefail-count" \
+  --action "$ACT" "$EDGEFAIL_LOG" >/dev/null
+mkdir -p "$H/state/when/when-edgefail.needs-edge"
+# The obstruction directory also makes the runner start with needs_edge=1 (the
+# marker "exists"), so the runner must observe at least one real false poll
+# before it will count a true poll towards firing at all - drive that with the
+# same reconcile-then-wait-then-trigger idiom the other repeat tests use,
+# otherwise this would only prove the runner never fires, not that it fires
+# once and stops safely.
+pe "$H" reconcile >/dev/null
+wait_for_file "$TMP_ROOT/repeat-edgefail-count" || fail "the edge-marker-write-failure condition was never polled"
+: > "$EDGEFAIL_TRIG"
+wait_for_result "$H" when-edgefail || fail "the edge-marker-write-failure watch captured no first outcome"
+RESULT=$(first_result "$H" when-edgefail)
+assert_grep 'status: fired' "$RESULT" "the fire itself is still recorded as fired"
+assert_not_contains "$(cat "$RESULT")" 'repeat: continues' \
+  "a failed edge-marker write must not declare the watch continues"
+assert_grep 'edge marker could not be written' "$RESULT" \
+  "the captured outcome names the edge-marker write failure"
+[ "$(count_lines "$EDGEFAIL_LOG")" -eq 1 ] || fail "the fire must still run the action exactly once"
+when "$H" terminal "$RESULT" || fail "a failed edge-marker write must be terminal, exactly like a failed journal write"
+if when "$H" silent "$RESULT"; then
+  fail "a failed edge-marker write must never be silenced"
+fi
+# The generic runner retires a terminal source: no restart, no second fire -
+# this is the actual mechanism that stops the level from refiring, not a
+# leftover fired-claim file.
+for _ in $(seq 1 100); do
+  [ ! -e "$H/state/procevent/when-edgefail.source" ] && break
+  sleep 0.1
+done
+assert_absent "$H/state/procevent/when-edgefail.source" "a failed edge-marker write retires the watch"
+assert_contains "$(wake_payloads "$H")" "procevent when when-edgefail" \
+  "a fire whose edge marker could not be written must wake firstmate, not stay silent"
+# The trigger is left in place (still continuously true); since the watch is
+# retired, no further reconcile may run the action again.
+for _ in $(seq 1 15); do
+  pe "$H" reconcile >/dev/null 2>&1
+  sleep 0.1
+done
+[ "$(count_lines "$EDGEFAIL_LOG")" -eq 1 ] || \
+  fail "a retired watch must never refire, even on a level that never went false"
+pass "a failed edge-marker write escalates to a captured terminal outcome and retires the watch"
+
 # --- retire stops a repeat watch ---------------------------------------------
 STOPPED=$(count_lines "$REPEATLOG")
 when "$H" retire repeat >/dev/null
