@@ -24,10 +24,11 @@
 #   2. The cause of the 2026-09-11/12 reassignments: a slot taken by the
 #      interactive pane-driven `treehouse get` reads available the moment its
 #      process is gone, so the next lease is handed that same slot.
-#   3. A real spawn leases its slot under the task id, lands the pane in that
-#      slot and not in the project, and a real teardown returns it with the
-#      holder check; a second spawn while the first task's window is already
-#      gone gets a different slot.
+#   3. A real spawn leases its slot under the task id and lands the pane in
+#      that slot and not in the project; a relaunch reuses that same leased
+#      slot; a second spawn while the first task's window is already gone gets
+#      a different slot; and a real teardown returns the slot with the holder
+#      check.
 #   4. The reassigned record: a task whose recorded slot is now leased to
 #      another task cannot relaunch into it, and its teardown finishes only its
 #      own cleanup, leaving the other task's lease, copy, and worker untouched.
@@ -248,7 +249,7 @@ SH
 
 # --- 3. Real spawn and teardown honour the lease -----------------------------
 test_spawn_leases_and_teardown_returns_with_holder_check() {
-  local lab wt1 wt2 out
+  local lab wt1 wt2 out agent_pid
   lab=$(make_lab spawn-teardown 3)
   brief_for "$lab" t1
   brief_for "$lab" t2
@@ -268,6 +269,23 @@ test_spawn_leases_and_teardown_returns_with_holder_check() {
   [ "$(cd "$(pane_path t1)" && pwd -P)" = "$(cd "$wt1" && pwd -P)" ] \
     || fail "t1's pane sits in '$(pane_path t1)', not its leased slot $wt1"
   wait_for_state "firstmate:fm-t1" alive
+
+  # The agent exits and is relaunched: the relaunch reads the slot's lease,
+  # finds it t1's own, and puts the replacement agent back into that slot.
+  agent_pid=$("$REAL_TMUX" -L "$SOCKET" list-panes -t firstmate:fm-t1 -F '#{pane_pid}')
+  pkill -TERM -P "$agent_pid" 2>/dev/null || true
+  wait_for_state "firstmate:fm-t1" dead
+  : > "$TREEHOUSE_LOG"
+  out=$(run_relaunch "$lab" t1) || fail "relaunch of t1 into its own leased slot failed: $out"
+  wait_for_state "firstmate:fm-t1" alive
+  [ "$(meta_worktree "$lab" t1)" = "$wt1" ] || fail "relaunch moved t1 off its leased slot"
+  [ "$(lease_holder_of "$lab" "$wt1")" = t1 ] || fail "relaunch disturbed t1's lease"
+  [ "$(cd "$(pane_path t1)" && pwd -P)" = "$(cd "$wt1" && pwd -P)" ] \
+    || fail "the relaunched agent is not in t1's leased slot"
+  ! grep -Fq "treehouse get" "$TREEHOUSE_LOG" \
+    || fail "relaunch leased a new slot instead of reusing t1's: $(treehouse_calls)"
+  ! grep -Fq "treehouse return" "$TREEHOUSE_LOG" \
+    || fail "relaunch returned t1's slot: $(treehouse_calls)"
 
   # The worker vanishes without exiting cleanly - the shape of the incident.
   # With a durable lease the slot stays t1's, so the next spawn gets another.
