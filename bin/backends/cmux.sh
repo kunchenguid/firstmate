@@ -478,7 +478,7 @@ fm_backend_cmux_send_literal() {  # <target> <text> [expected-label]
 }
 
 # fm_backend_cmux_normalize_key: map firstmate's key vocabulary (Enter,
-# Escape, C-c) onto cmux's `send-key` names. Verified empirically: enter,
+# Escape, C-c, C-d) onto cmux's `send-key` names. Verified empirically: enter,
 # escape, and ctrl-c all work directly (lowercase, hyphenated). cmux's own
 # key vocabulary is genuinely richer (ctrl-d/ctrl-z/ctrl-\\, semantic aliases
 # sigint/sigtstp/sigquit - `TerminalSurface+Input.swift`), but firstmate's
@@ -488,6 +488,7 @@ fm_backend_cmux_normalize_key() {  # <key>
     Enter|enter) printf 'enter' ;;
     Escape|escape|Esc|esc) printf 'escape' ;;
     C-c|c-c|ctrl+c|Ctrl+c|Ctrl+C|ctrl-c) printf 'ctrl-c' ;;
+    C-d|c-d|ctrl+d|Ctrl+d|Ctrl+D|ctrl-d) printf 'ctrl-d' ;;
     # C-u clears a composer line. fm-send.sh's muse interrupt path needs it to
     # drop the prompt muse restores into the composer after Escape.
     C-u|c-u|ctrl+u|Ctrl+u|Ctrl+U|ctrl-u) printf 'ctrl-u' ;;

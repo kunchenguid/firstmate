@@ -332,6 +332,10 @@ provider_for_harness() {
     kimi)         printf 'kimi\n' ;;
     cursor)       printf 'cursor\n' ;;
     muse)         printf 'meta\n' ;;
+    # agy is an aggregator over several model families; no single provider
+    # quota row can safely stand in for its catalog, so use its own row when a
+    # host supplies one and otherwise fail closed as unknown quota.
+    agy)          printf 'agy\n' ;;
     *)            return 1 ;;
   esac
 }

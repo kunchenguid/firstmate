@@ -483,8 +483,19 @@ do_exit() {
   # authoritative proof is the agent-state wait below. The retried Enter still
   # matters, because a slash command opens a completion popup on some TUIs that
   # swallows the first Enter.
-  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
-    || die "the exit command could not be sent to task $ID on $BACKEND"
+  case "$cmd" in
+    C-*)
+      fm_control_backend_supports_key "$BACKEND" "$cmd" \
+        || die "backend $BACKEND cannot deliver exit key $cmd for task $ID"
+      fm_backend_send_key "$BACKEND" "$T" "$cmd" "$LABEL" \
+        || die "the exit key could not be sent to task $ID on $BACKEND"
+      verdict=sent
+      ;;
+    *)
+      verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
+        || die "the exit command could not be sent to task $ID on $BACKEND"
+      ;;
+  esac
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {

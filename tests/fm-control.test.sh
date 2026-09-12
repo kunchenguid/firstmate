@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse agy omp"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -53,6 +53,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    agy) printf 'C-d\tEscape\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -103,6 +104,9 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      if [ -z "${FM_FAKE_NEVER_DIES:-}" ] && [ "$payload" = C-d ]; then
+        printf 'zsh' > "$D/command"
+      fi
       if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
@@ -230,8 +234,13 @@ test_exit_types_each_harness_verified_command() {
     out=$(run_control "$dir" t1 exit); rc=$?
     expect_code 0 "$rc" "exit on $harness should succeed"$'\n'"$out"
     IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
-    [ "$(literals "$dir")" = "$expected" ] \
-      || fail "exit on $harness should type exactly '$expected', got: $(literals "$dir")"
+    if [ "$harness" = agy ]; then
+      [ "$(keys_sent "$dir")" = "$expected" ] \
+        || fail "exit on $harness should send exactly '$expected', got: $(keys_sent "$dir")"
+    else
+      [ "$(literals "$dir")" = "$expected" ] \
+        || fail "exit on $harness should type exactly '$expected', got: $(literals "$dir")"
+    fi
     assert_contains "$out" "stopped t1 harness=$harness" "exit should report the stop for $harness"
   done
   pass "fm-control exit: every verified harness gets its own verified exit command"
@@ -267,7 +276,7 @@ test_harness_family_resolution() {
   local pair recorded want got
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
-      cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
+      cursor-agent:cursor muse:muse muse-bin-0.1.0:muse agy:agy pi:pi \
       pi-signed:pi-signed omp:omp; do
     recorded=${pair%%:*}
     want=${pair#*:}
@@ -352,7 +361,7 @@ test_backend_key_capability_matrix() {
   for backend in tmux herdr zellij cmux; do
     # C-u is the composer clear muse's interrupt needs; every session provider
     # but Orca normalizes it (bin/backends/*.sh).
-    for key in Escape Enter C-c C-u; do
+    for key in Escape Enter C-c C-d C-u; do
       fm_control_backend_supports_key "$backend" "$key" \
         || fail "$backend should be able to deliver $key"
     done
@@ -381,6 +390,8 @@ test_harness_kind_capability() {
   done
   fm_control_harness_supports_kind muse secondmate \
     && fail "muse has no primary supervision protocol and must not claim a secondmate"
+  fm_control_harness_supports_kind agy secondmate \
+    && fail "agy has no primary supervision protocol and must not claim a secondmate"
   for harness in claude codex opencode pi pi-signed grok kimi omp; do
     fm_control_harness_supports_kind "$harness" secondmate \
       || fail "$harness should be able to run a secondmate"
