@@ -122,6 +122,46 @@ fm_parent_channel_destination() {  # <home> <state>
   esac
 }
 
+# Resolve the steering inbox the parent writes for <home>: a local route's
+# parent home state/<mate-id>.inbox, or a remote route's host-local
+# state/parent-route/<mate-id>.inbox (bin/fm-remote-secondmate-control.sh).
+# Same return codes as fm_parent_channel_destination.
+fm_parent_channel_inbox_dir() {  # <home>
+  local home=$1 id rc=0
+  id=$(fm_parent_channel_home_id "$home") || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  fm_secondmate_parent_record_parse "$home/.fm-secondmate-parent" || return 3
+  case "$FM_SECONDMATE_PARENT_ROUTE" in
+    local)
+      [ -n "$FM_SECONDMATE_PARENT_HOME" ] || return 3
+      printf '%s/state/%s.inbox\n' "$FM_SECONDMATE_PARENT_HOME" "$id"
+      ;;
+    remote) printf '%s/state/parent-route/%s.inbox\n' "$home" "$id" ;;
+    *) return 3 ;;
+  esac
+}
+
+# Print the oldest unacknowledged parent instruction record for <home>, in the
+# inbox's numeric FIFO order, and succeed; fail when none is waiting or <home>
+# is not a secondmate. Read-only: acknowledgement stays the worker's mv.
+fm_parent_channel_pending_instruction() {  # <home>
+  local dir f base n best='' best_n=0
+  dir=$(fm_parent_channel_inbox_dir "$1") || return 1
+  for f in "$dir"/*.msg; do
+    [ -f "$f" ] || continue
+    base=${f##*/}
+    n=${base%.msg}
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    n=$((10#$n))
+    if [ -z "$best" ] || [ "$n" -lt "$best_n" ]; then
+      best=$f
+      best_n=$n
+    fi
+  done
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
+}
+
 # Fold <text> onto one bounded line, so a note copied from a child ledger or a
 # hold reason cannot break the channel's line framing.
 fm_parent_channel_clean_note() {  # <text>

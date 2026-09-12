@@ -182,4 +182,27 @@ refill=$(bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_status "$2" 3
 [ "$refill" = true ] || fail "supervision predicate did not see the overridden refill target"
 pass "an overridden config target is the one supervision checks"
 
+MATE_HOME="$TMP/mate-home"
+PARENT_HOME="$TMP/parent-home"
+mkdir -p "$MATE_HOME/config" "$MATE_HOME/state" "$MATE_HOME/data" "$PARENT_HOME/state/mate-1.inbox/handled"
+printf 'mate-1\n' > "$MATE_HOME/.fm-secondmate-home"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$PARENT_HOME" > "$MATE_HOME/.fm-secondmate-parent"
+printf '3\n' > "$MATE_HOME/config/desired-concurrency"
+printf '1\n' > "$TMP/ready"
+printf 'schema=fm-task-inbox.v1\n--\npersist the update and restart\n' > "$PARENT_HOME/state/mate-1.inbox/001.msg"
+mate_check() {
+  FM_HOME="$MATE_HOME" FM_REFILL_CREW_STATE_BIN="$TMP/crew-state" FM_REFILL_TASKS_AXI="$TMP/tasks-axi" \
+    FM_REFILL_STATE_MAP="$TMP/states" FM_REFILL_READY_FILE="$TMP/ready" FM_REFILL_RESURFACE_SECS=60 \
+    FM_REFILL_CHECK_SECS=1 FM_REFILL_NOW="$1" "$CMD" check
+}
+out=$(mate_check 300) || fail "mate check with a pending parent instruction failed"
+[ -z "$out" ] || fail "refill deficit preempted a pending parent instruction: $out"
+[ ! -e "$MATE_HOME/state/refill-deficit" ] || fail "preempted check advanced the dedup observation"
+[ -f "$PARENT_HOME/state/mate-1.inbox/001.msg" ] || fail "refill check acknowledged the parent instruction"
+mv "$PARENT_HOME/state/mate-1.inbox/001.msg" "$PARENT_HOME/state/mate-1.inbox/handled/"
+out=$(mate_check 301) || fail "mate check after acknowledgement failed"
+[ "$out" = 'refill-deficit: active=0 desired=3 ready=1 terminal=0 other=0' ] \
+  || fail "deficit did not surface once the parent instruction was acknowledged: $out"
+pass "a pending parent instruction preempts refill until acknowledged, then the deficit surfaces"
+
 echo "All desired-concurrency refill tests passed."
