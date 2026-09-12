@@ -260,8 +260,12 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "continue in the same turn with /no-mistakes" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
+  assert_grep 'working: implementation committed; starting validation' "$brief" \
+    "generated delivery contract omitted the nonterminal implementation milestone"
+  assert_grep 'done: PR {url} checks green' "$brief" \
+    "generated delivery contract omitted its CI-ready terminal outcome"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \

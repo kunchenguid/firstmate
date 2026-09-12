@@ -28,6 +28,34 @@ run_verifier() {
     python3 "$VERIFY" 2>&1
 }
 
+test_workflow_forwards_pull_request_facts() {
+  command -v ruby >/dev/null 2>&1 \
+    || fail "ruby is required to parse the no-mistakes workflow contract"
+  # shellcheck disable=SC2016 # Ruby compares literal GitHub expression strings.
+  ruby -ryaml -e '
+workflow = YAML.load_file(ARGV[0])
+steps = workflow.dig("jobs", "check", "steps")
+abort "check job steps are missing" unless steps.is_a?(Array)
+step = steps.find do |candidate|
+  candidate.is_a?(Hash) && candidate["uses"] == ARGV[1]
+end
+abort "pinned require-no-mistakes action step is missing" unless step
+forwarded = step["with"]
+abort "pinned action inputs are missing" unless forwarded.is_a?(Hash)
+expected = {
+  "pr-body" => "${{ github.event.pull_request.body }}",
+  "pr-head-sha" => "${{ github.event.pull_request.head.sha }}",
+  "pr-head-ref" => "${{ github.event.pull_request.head.ref }}",
+  "pr-author" => "${{ github.event.pull_request.user.login }}",
+  "pr-number" => "${{ github.event.pull_request.number }}"
+}
+abort "pinned action input mapping differs" unless forwarded.slice(*expected.keys) == expected
+' "$ROOT/.github/workflows/no-mistakes-required.yml" \
+  "kunchenguid/no-mistakes/.github/actions/require-no-mistakes@${ACTION_REF}" \
+    || fail "workflow must forward the pull request body and identity facts to the pinned verifier"
+  pass "workflow explicitly forwards pull request facts to the pinned verifier"
+}
+
 test_matching_head_and_completed_steps_pass() {
   local body output rc
   body="$SIGNATURE
@@ -67,6 +95,7 @@ test_missing_head_fails() {
 }
 
 fetch_shared_verifier
+test_workflow_forwards_pull_request_facts
 test_matching_head_and_completed_steps_pass
 test_mismatched_head_fails_with_both_shas
 test_missing_head_fails

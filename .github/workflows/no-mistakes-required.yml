@@ -28,3 +28,9 @@ jobs:
     steps:
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
+        with:
+          pr-body: ${{ github.event.pull_request.body }}
+          pr-head-sha: ${{ github.event.pull_request.head.sha }}
+          pr-head-ref: ${{ github.event.pull_request.head.ref }}
+          pr-author: ${{ github.event.pull_request.user.login }}
+          pr-number: ${{ github.event.pull_request.number }}
