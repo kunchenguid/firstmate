@@ -55,6 +55,7 @@ Default it off for every project and every posture, and enable it only on the ca
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
+Confirm true ownership of the source repo explicitly rather than inferring it from a matching org/user namespace or a repo description; the captain may have access to a repo (as a member or contributor) under a familiar namespace without owning it, and recording ownership incorrectly misleads every later delivery-mode and PR-content decision for that project.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
