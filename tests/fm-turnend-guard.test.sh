@@ -166,6 +166,17 @@ test_predicate_relay_shim_is_not_a_custom_check() {
   pass "fm_supervision_status: the relay shim is not counted as a registered custom check"
 }
 
+test_predicate_refill_target_needs_supervision() {
+  local home="$TMP_ROOT/pred-refill" state="$TMP_ROOT/pred-refill/state"
+  mkdir -p "$state" "$home/config"
+  printf '8\n' > "$home/config/desired-concurrency"
+  fm_supervision_needed "$state" 300 || fail "a desired-concurrency target did not register as supervision need"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a refill target must not count as an in-flight task"
+  [ "$FM_SUP_REFILL" = true ] || fail "a refill target must set FM_SUP_REFILL"
+  fm_supervision_unhealthy "$state" 300 || fail "a refill-only home with no beacon must be unhealthy"
+  pass "fm_supervision_needed: desired concurrency stays supervised with no current workers"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -2228,6 +2239,7 @@ test_predicate_registered_check_survives_rebinding_drift
 test_predicate_unregistered_check_needs_nothing
 test_predicate_task_pr_poll_is_not_a_custom_check
 test_predicate_relay_shim_is_not_a_custom_check
+test_predicate_refill_target_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home

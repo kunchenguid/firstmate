@@ -16,9 +16,9 @@
 # state/.afk or the explicit per-home config/continuous-supervision opt-in is
 # present. Invoking /afk owns only the away flag; returning from away mode does
 # not disable an independent continuous-supervision preference.
-# When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
-# Any buffered daemon escalations that remain while afk is off survive in
-# state/.subsuper-escalations and are flushed on the next "while you were out"
+# When neither presence gate is active, normal fm-watch.sh supervision is the
+# active mechanism. Any buffered daemon escalations survive in
+# state/.subsuper-escalations and are flushed on the next supervised window's
 # catch-up or when afk is re-entered.
 #
 # IN-BAND OPERATIONAL INPUT. bin/fm-operational-input.sh constructs every

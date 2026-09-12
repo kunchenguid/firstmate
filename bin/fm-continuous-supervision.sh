@@ -42,7 +42,8 @@ lock_acquire() {
 }
 
 record_read() {
-  REC_SESSION= REC_TARGET=
+  REC_SESSION=''
+  REC_TARGET=''
   [ -f "$RECORD" ] || return 1
   IFS=$(printf '\t') read -r REC_SESSION REC_TARGET < "$RECORD" || return 2
   case "$REC_SESSION:$REC_TARGET" in
@@ -97,6 +98,15 @@ ensure() {
     return 0
   fi
   [ "$rc" -ne 2 ] || { fm_lock_release "$LOCK"; log "malformed terminal record; refusing to replace it"; return 1; }
+  # A live daemon without this lifecycle's matching live terminal is another
+  # owner (normally an away-mode launch or a surviving prior implementation).
+  # Never kill, adopt, or race it. Its own lifecycle must reconcile it first.
+  if fm_afk_daemon_owns_supervision "$STATE" \
+     && { [ "$rc" -ne 0 ] || ! session_alive "$REC_SESSION"; }; then
+    fm_lock_release "$LOCK"
+    log "a live supervisor daemon exists without a matching continuous-supervision terminal; refusing a second owner"
+    return 1
+  fi
   stop_recorded || { fm_lock_release "$LOCK"; return 1; }
   session="fm-continuous-$(printf '%s' "$FM_HOME" | cksum | awk '{print $1}')-$$"
   if ! tmux new-session -d -s "$session" env FM_HOME="$FM_HOME" \
@@ -110,13 +120,13 @@ ensure() {
     fm_lock_release "$LOCK"
     return 1
   }
-  printf '%s\t%s\n' "$session" "$target" > "$pending" && mv "$pending" "$RECORD" || {
+  if ! printf '%s\t%s\n' "$session" "$target" > "$pending" || ! mv "$pending" "$RECORD"; then
     rm -f "$pending"
     tmux kill-session -t "$session" 2>/dev/null || true
     fm_lock_release "$LOCK"
     return 1
-  }
-  if ! wait_ready "$session"; then
+  fi
+  if ! wait_ready "$session" || ! session_alive "$session"; then
     stop_recorded || true
     fm_lock_release "$LOCK"
     log "daemon did not become ready"

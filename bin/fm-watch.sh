@@ -1983,6 +1983,22 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
+  # An explicitly configured productive-worker target is a durable operating
+  # intent, not a reminder the model must keep in context. The detector is
+  # local, cadence-bounded, and silent when satisfied or unchanged. It only
+  # asks the supervisor to reconcile and refill; every merge, teardown, task
+  # choice, and spawn still goes through its existing guarded owner.
+  refill_out=
+  if refill_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    fm_run_timed "$CHECK_TIMEOUT" "$SCRIPT_DIR/fm-refill.sh" check 2>/dev/null); then
+    if [ -n "$refill_out" ]; then
+      fm_wake_append check refill-deficit "check: refill-deficit" || exit 1
+      wake "check: refill-deficit"
+    fi
+  else
+    triage_log "desired-concurrency reconciliation unavailable"
+  fi
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
