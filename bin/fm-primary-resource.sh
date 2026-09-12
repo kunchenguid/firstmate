@@ -707,6 +707,8 @@ pr_find_replacement() {  # <sourceHarness> <sourceProvider> <quota-json> [pid]
         | if ($w | length) == 0 then {ok:false, reason:"no-applicable-windows"}
           elif ($w | map(select((.percentRemaining | type) != "number")) | length) > 0 then
             {ok:false, reason:"malformed-window"}
+          elif ($w | map(select(.percentRemaining < 0 or .percentRemaining > 100)) | length) > 0 then
+            {ok:false, reason:"malformed-window"}
           elif ($w | map(select((100 - .percentRemaining) >= $thr)) | length) > 0 then
             {ok:false, reason:"destination-above-threshold"}
           else {ok:true, reason:""}

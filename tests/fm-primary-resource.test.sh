@@ -178,6 +178,33 @@ test_quota_percent_filter_96_99() {
   pass "check filters 96.99 vs 97 percent used"
 }
 
+test_invalid_destination_quota_is_alert_only() {
+  local value home q out
+  for value in 150 -1; do
+    home=$(make_main_home "invalid-destination-$value")
+    write_claude_transcript "$home/tx.jsonl" 1000
+    bind_home "$home" claude "sess-invalid-destination-$value" "$home/tx.jsonl"
+    q=$(quota_json claude 3 codex "$value")
+    out=$(FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
+      run_pr "$home" check 2>&1 || true)
+    assert_contains "$out" "primary-resource alert" \
+      "destination $value must leave the source session alert-only"
+    case "$out" in
+      *'primary-resource quota '*) fail "destination $value must not propose quota handover" ;;
+    esac
+  done
+
+  home=$(make_main_home valid-destination)
+  write_claude_transcript "$home/tx.jsonl" 1000
+  bind_home "$home" claude sess-valid-destination "$home/tx.jsonl"
+  q=$(quota_json claude 3 codex 50)
+  out=$(FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
+    run_pr "$home" check 2>&1 || true)
+  assert_contains "$out" "primary-resource quota" \
+    "in-range destination must remain eligible"
+  pass "invalid destination quota is alert-only"
+}
+
 test_check_quota_wins_both() {
   local home q out
   home=$(make_main_home quota-wins)
@@ -1028,6 +1055,7 @@ EOF
 
 test_check_context_thresholds
 test_quota_percent_filter_96_99
+test_invalid_destination_quota_is_alert_only
 test_check_quota_wins_both
 test_quota_five_hour_schema_variants
 test_observe_wrong_session_and_non_owner
