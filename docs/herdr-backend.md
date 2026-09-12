@@ -64,11 +64,12 @@ With presentation spaces disabled, a crewmate or scout is created in the exact w
 Duplicate labels elsewhere in the session are irrelevant, and the globally focused workspace is never the target.
 A `--secondmate` launch is the deliberate exception: it stands up that secondmate home's own workspace instead of joining the launcher's.
 
-Every harness Herdr detects through a canonical or raw `fm-spawn.sh` launch receives a stable custom agent name before spawn reports success.
+Every canonical verified worker runtime with supported Herdr registration receives a stable custom agent name before `fm-spawn.sh` reports success.
 Ship workers use a `crew-<task>` identity, scouts use `scout-<task>`, and second mates use `secondmate-<id>`.
 A short identity digest derived from the target home, role, and task keeps the readable task stem unique across homes and stable across relaunches after normalization and truncation to Herdr's 32-byte limit.
 The exact primary agent is outside this worker-launch path and retains its genuine Firstmate name.
 If Herdr does not detect a harness selected for naming or cannot verify the exact pane's assigned name, spawn refuses rather than leave a worker represented by a generic repository or directory fallback.
+Raw launch commands remain the unverified-adapter escape hatch and are not guaranteed task-derived names in Herdr's Agents view.
 
 A claimed parent identity that cannot be resolved exactly stops the spawn before any worker endpoint exists, rather than falling back to a label search.
 That covers a missing or unusable socket identity, a closed or unreadable launcher pane, a pane and tab that disagree about their workspace, a workspace missing from the session, and a pane belonging to another named session or Herdr server.

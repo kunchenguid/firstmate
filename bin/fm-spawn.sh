@@ -79,11 +79,11 @@
 #   session stops the spawn before any worker endpoint exists. A launcher
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
-#   exception: it stands up that secondmate home's own workspace. Every worker
-#   Herdr detects after a canonical or raw launch receives a stable task-derived
-#   crew, scout, or secondmate identity before spawn reports success; the
-#   primary agent is outside this worker path and keeps its genuine Firstmate
-#   name.
+#   exception: it stands up that secondmate home's own workspace. Canonical
+#   verified worker runtimes with supported Herdr registration receive a stable
+#   task-derived crew, scout, or secondmate identity before spawn reports
+#   success; the primary agent is outside this worker path and keeps its genuine
+#   Firstmate name.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -4077,22 +4077,13 @@ fi
 # harness converges here after launch, so one verified rename covers ship,
 # scout, secondmate, and relaunch paths
 # without changing the genuine primary agent outside fm-spawn.
-if [ "$BACKEND" = herdr ]; then
-  HERDR_AGENT_HOME=$FM_HOME
-  [ "$KIND" != secondmate ] || HERDR_AGENT_HOME=$PROJ_ABS
+if [ "$BACKEND" = herdr ] && [ "$RAW_LAUNCH" = 0 ]; then
   case "$HARNESS" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp)
+      HERDR_AGENT_HOME=$FM_HOME
+      [ "$KIND" != secondmate ] || HERDR_AGENT_HOME=$PROJ_ABS
       HERDR_AGENT_NAME=$(fm_backend_herdr_name_task_agent \
         "$T" "$ID" "$KIND" "$HERDR_AGENT_HOME") || exit 1
-      ;;
-    *)
-      if [ "$RAW_LAUNCH" = 1 ]; then
-        HERDR_AGENT_NAME_STATUS=0
-        HERDR_AGENT_NAME=$(fm_backend_herdr_name_task_agent \
-          "$T" "$ID" "$KIND" "$HERDR_AGENT_HOME" optional) \
-          || HERDR_AGENT_NAME_STATUS=$?
-        case "$HERDR_AGENT_NAME_STATUS" in 0|2) ;; *) exit 1 ;; esac
-      fi
       ;;
   esac
 fi

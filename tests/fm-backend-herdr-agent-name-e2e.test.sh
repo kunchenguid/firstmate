@@ -32,7 +32,8 @@ Expose the worker's Herdr identity without performing project work.
 EOF
 
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-agent-name)
-export HERDR_LAB_HELPER HERDR_LAB_SESSION HERDR_ORIGINAL_PATH
+PI_ORIGINAL=$(command -v pi)
+export HERDR_LAB_HELPER HERDR_LAB_SESSION HERDR_ORIGINAL_PATH PI_ORIGINAL
 
 cleanup() {
   local status=$? cleanup_status=0 teardown_out
@@ -75,6 +76,14 @@ done
 exec env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"
 SH
 chmod +x "$FAKEBIN/herdr"
+cat > "$FAKEBIN/pi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  exec "$PI_ORIGINAL" --help
+fi
+exec "$PI_ORIGINAL" --no-context-files --no-session
+SH
+chmod +x "$FAKEBIN/pi"
 
 git -C "$PROJECT" init -q
 git -C "$PROJECT" config user.name 'Firstmate Tests'
@@ -88,9 +97,9 @@ git -C "$PROJECT" remote add origin "file://$TMP_ROOT/firstmate.origin.git"
 SPAWN_OUT=$(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH \
   PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" HERDR_SESSION="$HERDR_LAB_SESSION" \
   FM_SPAWN_NO_GUARD=1 FM_GATE_REFUSE_BYPASS=1 FM_HOME="$HOME_ROOT" FM_ROOT_OVERRIDE="$ROOT" \
-  "$ROOT/bin/fm-spawn.sh" worker-label "$PROJECT" 'env FOO=1 pi --no-context-files --no-session' \
+  "$ROOT/bin/fm-spawn.sh" worker-label "$PROJECT" pi \
   --mode no-mistakes --yolo off --backend herdr 2>&1) || fail "full Herdr worker spawn failed:$NL$SPAWN_OUT"
-assert_contains "$SPAWN_OUT" "spawned worker-label harness=env" "full spawn did not report its prefixed raw worker"
+assert_contains "$SPAWN_OUT" "spawned worker-label harness=pi" "full spawn did not report its canonical Pi worker"
 
 META="$HOME_ROOT/state/worker-label.meta"
 [ -f "$META" ] || fail "full spawn did not publish worker metadata"
@@ -115,5 +124,5 @@ LIST_NAME=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" agent list | jq -r --ar
 [ "$LIST_NAME" = "$NAME" ] \
   || fail "the Agents list did not expose the exact verified task-derived name: '$LIST_NAME'"
 
-pass "full fm-spawn names a Herdr-detected Pi behind a prefixed raw command"
+pass "full fm-spawn names a canonical verified Pi worker"
 pass "Herdr's agent get and Agents list agree on the exact named worker pane"

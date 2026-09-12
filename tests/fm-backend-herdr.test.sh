@@ -377,6 +377,23 @@ test_name_task_agent_waits_for_detection_then_renames_and_verifies() {
   pass "fm_backend_herdr_name_task_agent waits for auto-detection, renames the exact pane, and verifies the visible identity"
 }
 
+test_name_task_agent_rejects_unreadable_agent_response() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/agent-name-unreadable"; mkdir -p "$dir/responses" "$dir/home"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'not-json\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_task_agent fmtest:w1:p9 worker-label ship "$1"' \
+    "$ROOT" "$dir/home" 2>&1)
+  status=$?
+  expect_code 1 "$status" "task-agent naming must reject an unreadable agent response"
+  assert_contains "$out" "unreadable agent response" "task-agent naming did not identify the unreadable response"
+  [ "$(grep -c $'\x1f''agent'$'\x1f''get'$'\x1f''w1:p9' "$log")" = 1 ] \
+    || fail "task-agent naming should reject an unreadable response immediately"
+  pass "fm_backend_herdr_name_task_agent rejects unreadable agent responses"
+}
+
 # --- fm_backend_herdr_cli: session targeting (2026-07-02 incident fix) -------
 
 test_cli_helper_sets_env_and_appends_trailing_session_flag() {
@@ -5234,6 +5251,7 @@ test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_task_agent_names_are_specific_stable_and_session_unique
 test_name_task_agent_waits_for_detection_then_renames_and_verifies
+test_name_task_agent_rejects_unreadable_agent_response
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_recovery_grade_read_widens_only_at_its_own_boundary
