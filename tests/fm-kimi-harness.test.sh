@@ -552,7 +552,7 @@ SH
     -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
-  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+  out=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u PRIME_AGENT_CODING_AGENT_DIR -u PRIME_AGENT_INTERNAL_DAEMON_WORKER -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
     CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
   pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"

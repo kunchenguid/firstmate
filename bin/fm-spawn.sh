@@ -133,7 +133,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|gemini|muse|rovo|omp)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -142,6 +142,9 @@
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
+#   For prime-agent, fm-spawn resolves the `prime-agent` executable from PATH once
+#   and refuses before endpoint or metadata creation when it is absent, then
+#   launches that same concrete path.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -264,11 +267,14 @@
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
+#     __PRIMEBIN__  quoted concrete prime-agent executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __PRIMEEXT__ absolute path to state/<task-id>.prime-ext.ts (prime-agent turn-end
+#                  extension, written by this script; outside the worktree like __PIEXT__)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OMPBIN__   quoted concrete omp executable path resolved from PATH
@@ -1389,7 +1395,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    ''|claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|gemini|muse|rovo|omp)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1519,6 +1525,21 @@ launch_template() {
       else
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
+      ;;
+    # prime-agent (Prime Agent): a Pi fork, so the same single-positional brief
+    # and -e extension shape as pi, and the same one-positional rule - extra
+    # positionals become separate queued messages. It has no permission system
+    # and no project-trust store (verified: no trust file, and its extension API
+    # exposes no project_trust event, unlike pi 0.83.0), so no autonomy flag and
+    # no post-launch dialog keystroke are needed. `env -u CLAUDECODE -u GROK_AGENT`
+    # is the same foreign-marker clear muse needs; FM_PI_HARNESS must survive it,
+    # so the marker is prepended as an assignment outside this env call, and
+    # PI_CODING_AGENT is prime-agent's own export and is not cleared either.
+    # A prime-agent SECONDMATE needs the primary supervision extensions that land
+    # with the rest of secondmate support, so the kind-specific refusal below
+    # rejects it by name rather than letting this template stand one up.
+    prime-agent)
+      printf '%s' 'env -u CLAUDECODE -u GROK_AGENT __PRIMEBIN__ __MODELFLAG____EFFORTFLAG__-e __PRIMEEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       ;;
     # omp (Oh My Pi), a Pi fork. Same one-positional-brief, --model, --thinking,
     # and -e shape as Pi, verified on omp 18.1.11. The differences are all at
@@ -1691,8 +1712,11 @@ case "$ARG3" in
     ;;
 esac
 
-# muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
-# a firstmate instance, so it needs a primary supervision protocol.
+# muse, gemini, and prime-agent are verified as CREWMATE/SCOUT adapters only. A
+# secondmate is a firstmate instance, so it needs a primary supervision protocol.
+# prime-agent has none yet: its crew wiring is a turn-end notification with no
+# agent_settled event, so the primary supervision extensions a secondmate arms
+# have nothing to bind to until that support lands.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
 # exit, so a gemini secondmate is refused rather than stood up on an unverified
@@ -1701,7 +1725,7 @@ esac
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
 # secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = prime-agent ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -1716,6 +1740,13 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
 fi
 
 case "$HARNESS" in
+  prime-agent)
+    PRIME_BIN=$(resolve_pi_executable prime-agent) || {
+      echo "error: prime-agent executable not found on PATH; install Prime Agent or select a different verified harness" >&2
+      exit 1
+    }
+    LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    ;;
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
@@ -1902,7 +1933,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
+    claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|gemini|muse|rovo|omp)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1942,6 +1973,17 @@ effort_flag_for_harness() {
           "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" || return 1
           printf -- '--codex-effort %s ' "$(shell_quote ultra)"
           ;;
+        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    prime-agent)
+      # prime-agent 0.9.1 --thinking accepts off|minimal|low|medium|high|xhigh|max,
+      # so the whole shared vocabulary maps straight across; off and minimal sit
+      # below it and stay unreachable. The flag IS applied, but the EFFECTIVE
+      # level is then clamped to the selected model's supported set by the shared
+      # pi-ai clampThinkingLevel, which walks UP to the next supported level
+      # first - that is model capability, not a dropped flag.
+      case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
@@ -3441,6 +3483,23 @@ export const FmBusyState = async () => {
 EOF
       exclude_path '.opencode/plugins/fm-busy-state.js'
       ;;
+    prime-agent)
+      # prime-agent's crew wake is a turn-end NOTIFICATION only, deliberately
+      # with no busy-state wiring. Nothing is armed for the same reason muse and
+      # standalone Kimi are not: a seeded busy record needs a writer that can
+      # clear it. Written OUTSIDE the worktree like the Pi extension, so the
+      # project stays clean. Cleaned by teardown.
+      cat > "$STATE/$ID.prime-ext.ts" <<EOF
+// Firstmate crew turn-end notification for prime-agent; written by fm-spawn.
+// "turn_end" fires at every completed turn boundary and is a wake NOTIFICATION
+// for the watcher, never current-state truth. prime-agent exposes no
+// agent_settled event at all, so no settle-based state is derived here.
+import { execFile } from "node:child_process";
+export default function (pi: any) {
+  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+}
+EOF
+      ;;
     pi|pi-signed)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
       # loaded from inside the project (verified live), but an explicit -e path
@@ -3860,6 +3919,7 @@ fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_primeext=$(shell_quote "$STATE/$ID.prime-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
@@ -3881,6 +3941,7 @@ fi
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__PRIMEEXT__/$sq_primeext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
@@ -3888,13 +3949,14 @@ LAUNCH=${LAUNCH//__OMPWORKERCFG__/$sq_ompcfg}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
+  prime-agent) LAUNCH=${LAUNCH//__PRIMEBIN__/"$(shell_quote "$PRIME_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
   omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse|rovo)
+  claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|gemini|muse|rovo)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac

@@ -40,7 +40,7 @@ test_gemini_marker_outranks_inherited_claudecode() {
   # each marker alone must still produce its own verdict.
   out=$(env -u CLAUDECODE GEMINI_CLI=1 "$HARNESS")
   [ "$out" = gemini ] || fail "GEMINI_CLI alone must detect gemini, got '$out'"
-  out=$(env -u GEMINI_CLI CLAUDECODE=1 "$HARNESS")
+  out=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u PRIME_AGENT_CODING_AGENT_DIR -u PRIME_AGENT_INTERNAL_DAEMON_WORKER -u GEMINI_CLI CLAUDECODE=1 "$HARNESS")
   [ "$out" = claude ] || fail "CLAUDECODE alone must still detect claude, got '$out'"
   # Cursor's marker still outranks gemini's, preserving the documented order.
   out=$(CURSOR_AGENT=1 GEMINI_CLI=1 "$HARNESS")

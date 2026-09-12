@@ -49,6 +49,7 @@ SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
+  fm_fake_exit0 "$fakebin" prime-agent
   printf '%s\n' "$fakebin"
 }
 
@@ -134,6 +135,77 @@ test_no_profile_keeps_claude_profile_defaults() {
   expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
+}
+
+# A prime-agent crewmate is the launch boundary that establishes the identity
+# marker bin/fm-harness.sh keys on, so the rendered launch must carry it; the
+# worker would otherwise resolve as plain Pi.
+test_prime_agent_launch_establishes_its_harness_marker() {
+  local rec id out status launch
+  id=profile-prime-agent-z1c
+  rec=$(make_spawn_case profile-prime-agent prime-agent "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-luna)
+  status=$?
+  expect_code 0 "$status" "prime-agent spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_PI_HARNESS=prime-agent env -u CLAUDECODE -u GROK_AGENT '$FAKEBIN_DIR/prime-agent'" \
+    "prime-agent launch did not establish FM_PI_HARNESS=prime-agent with its resolved executable path"
+  assert_not_contains "$launch" "GROK_AGENT prime-agent " \
+    "prime-agent launch still asks the worker pane to resolve a bare executable"
+  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI" \
+    "prime-agent launch kept inherited cursor/gemini identity markers"
+  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-luna'" \
+    "prime-agent launch dropped the selected model"
+  assert_contains "$launch" "-e '$HOME_DIR/state/$id.prime-ext.ts'" \
+    "prime-agent launch did not load its turn-end extension"
+  [ -s "$HOME_DIR/state/$id.prime-ext.ts" ] \
+    || fail "prime-agent spawn did not write its turn-end extension"
+  pass "a prime-agent launch establishes the harness marker its own detection needs"
+}
+
+test_prime_agent_missing_binary_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=profile-prime-agent-missing-z1e
+  rec=$(make_spawn_case profile-prime-agent-missing prime-agent "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/prime-agent"
+  : > "$LAUNCH_LOG"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" PATH="$FAKEBIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "a missing prime-agent executable should refuse the spawn"
+  assert_contains "$out" "prime-agent executable not found on PATH" \
+    "missing prime-agent refusal did not name the actionable requirement"
+  assert_absent "$HOME_DIR/state/$id.meta" "missing prime-agent refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing prime-agent refusal typed a launch command"
+  pass "prime-agent refuses safely and actionably when the selected executable is unavailable"
+}
+
+# A prime-agent secondmate has no primary supervision protocol yet, so the spawn
+# must refuse by name rather than fall through to the raw-launch escape hatch.
+test_prime_agent_secondmate_is_refused() {
+  local rec id out status
+  id=profile-prime-agent-sm-z1d
+  rec=$(make_spawn_case profile-prime-agent-sm prime-agent "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" prime-agent --secondmate)
+  status=$?
+  [ "$status" -ne 0 ] || fail "prime-agent was accepted as a secondmate harness"
+  assert_contains "$out" "crewmate/scout adapter only" \
+    "prime-agent secondmate refusal did not explain the boundary"
+  case "$out" in
+    *"unknown harness"*) fail "prime-agent secondmate refusal claimed the harness is unknown: $out" ;;
+  esac
+  pass "a prime-agent secondmate spawn is refused by name, not as an unknown harness"
 }
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
@@ -1298,6 +1370,8 @@ test_non_claude_harness_ignores_claude_permission_mode() {
 
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
+test_prime_agent_launch_establishes_its_harness_marker
+test_prime_agent_secondmate_is_refused
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -1325,6 +1399,7 @@ test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
+test_prime_agent_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set

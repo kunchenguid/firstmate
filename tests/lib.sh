@@ -63,6 +63,14 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Clear the Pi-family launch selector and Prime Agent's own values. Every
+# Pi-family session leaks FM_PI_HARNESS into its children, and bin/fm-harness.sh
+# detect_own tests FM_PI_HARNESS=prime-agent ahead of the CLAUDECODE fast path,
+# so a suite run from inside such a session would resolve prime-agent where a
+# case pins CLAUDECODE=1. Cases that exercise those arms set the values
+# themselves.
+unset FM_PI_HARNESS PRIME_AGENT_CODING_AGENT_DIR PRIME_AGENT_INTERNAL_DAEMON_WORKER
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
