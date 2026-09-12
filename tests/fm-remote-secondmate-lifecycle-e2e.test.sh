@@ -110,7 +110,7 @@ git --git-dir="$REMOTE_ORIGIN" symbolic-ref HEAD refs/heads/main
 
 # One remote-backed direct-PR project. The remote home clones its origin, never
 # the primary working tree.
-git init -q --bare "$TMP_ROOT/alpha.git"
+git init -q --bare -b main "$TMP_ROOT/alpha.git"
 git -C "$PARENT/projects" init -q -b main alpha
 git -C "$PARENT/projects/alpha" config user.email test@example.com
 git -C "$PARENT/projects/alpha" config user.name Test
@@ -656,7 +656,7 @@ out=$(FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
 assert_contains "$out" "home=remote-mac:$REMOTE_HOME" "remote seed did not report the host-qualified home"
 assert_grep 'host: remote-mac; root:' "$PARENT/data/secondmates.md" "registry did not record the remote host dimension"
 assert_present "$REMOTE_HOME/.fm-secondmate-home" "remote provisioning did not publish the identity marker"
-assert_present "$REMOTE_HOME/projects/alpha/.git" "remote provisioning did not clone the project on that host"
+assert_present "$REMOTE_HOME/projects/alpha/README.md" "remote provisioning did not clone the project on that host"
 assert_grep "$REMOTE_HOME/state/parent-replies.status" "$REMOTE_HOME/data/charter.md" "remote charter did not use its append-only reply log"
 assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local status path"
 if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
