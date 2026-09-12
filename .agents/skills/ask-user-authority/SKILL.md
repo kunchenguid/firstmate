@@ -6,6 +6,7 @@ description: >-
   This skill is the single owner of finding-decision policy: firstmate always applies judgment, decides findings that are unambiguous toward accepted intent, and escalates only genuinely ambiguous, expanding, or destructive ones.
   Finding authority is this skill's criteria, not the project's yolo posture.
 user-invocable: false
+disable-model-invocation: true
 metadata:
   internal: true
 ---

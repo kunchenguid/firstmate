@@ -6,6 +6,7 @@ description: >-
   Cloning or registering a project is add intake and uses the same trigger.
   Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, and outward-consent decisions.
 user-invocable: false
+disable-model-invocation: true
 metadata:
   internal: true
 ---
