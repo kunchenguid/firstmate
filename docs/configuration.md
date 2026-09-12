@@ -150,7 +150,6 @@ A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herd
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
-A paseo task will additionally record `paseo_workspace_id=` and `paseo_terminal_id=`, with `window=` carrying the composite `<workspace_id>:<terminal_id>` target.
 `fm_backend_validate_task_endpoint` fails CLOSED by default: a backend name registered before its lifecycle adapter lands - `paseo` today - has EVERY record refused whatever its shape, because `fm_backend_kill` has no arm for it and teardown's close is best-effort, so accepting one would let teardown delete a still-running terminal's only durable identity and report completion.
 That default is the boundary's own contract rather than a per-backend rule, so the next name registered ahead of its adapter inherits it.
 The per-field shape check arrives with the adapter that can act on the record.
