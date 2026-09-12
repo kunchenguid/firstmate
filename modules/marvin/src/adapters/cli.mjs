@@ -6,7 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { loadConfig } from './config.mjs';
 import { quotaSource } from './source.mjs';
 import { telemetry } from './telemetry.mjs';
-import { terminalRenderer, renderHistory } from './terminal.mjs';
+import { terminalRenderer, renderHistory, renderFrame } from './terminal.mjs';
 import { terminal } from '../../../fm-tui-core/src/index.mjs';
 import { observe, watch } from '../index.mjs';
 
@@ -22,7 +22,8 @@ Options (accepted by every verb):
   --config FILE    Pool/window settings. Example: fm-marvin.sh --config marvin.json
   --refresh N      Seconds between completed frames (1..86400; default 60). Example: fm-marvin.sh watch --refresh 30
   --frames N       Stop after N frames (watch only). Example: fm-marvin.sh watch --frames 2
-  --out DIR        Export numbered frames (watch only, requires --frames). Example: fm-marvin.sh watch --frames 2 --out state/marvin/frames
+  --out DIR        Export numbered frames (watch only, requires --frames). Example: fm-marvin.sh watch --frames 3 --out state/marvin/frames
+                   Text --frames 3 writes 80 Unicode, 120 Unicode, and 80 ASCII review frames from one sample.
 NO_COLOR disables color. FM_HOME selects the home (default repository root).
 Config defaults to FM_HOME/config/marvin.json if present, otherwise module config.json.
 Telemetry is written under FM_HOME/state/marvin/telemetry; no daemon or credential scraping.
@@ -57,7 +58,9 @@ async function main() {
   }
   const output = terminal();
   let index = 0;
+  const review = verb === 'watch' && values.out && values.frames === '3' && !values.json;
   const renderer = terminalRenderer(output, { watch: verb === 'watch', clean: values.clean, json: values.json,
+    refreshSeconds: config.refreshSeconds,
     width: () => Math.floor(Math.max(20, Math.min(299, process.stdout.columns || Number(process.env.COLUMNS) || 100))) });
   const ports = { source: quotaSource(), clock, telemetry: journal, renderer: { render(frame) {
     const cpu = process.cpuUsage();
@@ -65,11 +68,19 @@ async function main() {
     const text = renderer.render(frame);
     if (values.out) {
       fs.mkdirSync(values.out, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(path.join(values.out, `${String(++index).padStart(4, '0')}.${values.json ? 'json' : 'txt'}`), text, { mode: 0o600, flag: 'wx' });
+      if (review) {
+        const variants = [[80, false], [120, false], [80, true]];
+        for (const [width, ascii] of variants) {
+          fs.writeFileSync(path.join(values.out, `${String(++index).padStart(4, '0')}.txt`),
+            renderFrame(frame, { width, clean: ascii, refreshSeconds: config.refreshSeconds }), { mode: 0o600, flag: 'wx' });
+        }
+      } else {
+        fs.writeFileSync(path.join(values.out, `${String(++index).padStart(4, '0')}.${values.json ? 'json' : 'txt'}`), text, { mode: 0o600, flag: 'wx' });
+      }
     }
   } } };
   // No raw mode or hidden cursor: default SIGINT terminates both polling and child reads.
-  if (verb === 'watch') await watch(ports, config, values.frames ? Number(values.frames) : Infinity);
+  if (verb === 'watch') await watch(ports, config, review ? 1 : values.frames ? Number(values.frames) : Infinity);
   else await observe(ports, config);
 }
 main().catch(error => { process.stderr.write(`marvin: ${error.message}\n`); process.exitCode = 1; });

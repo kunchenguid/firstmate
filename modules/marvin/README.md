@@ -4,7 +4,7 @@
 
 Glance at subscription quota and spending pace without opening Baby Menu.
 Named after Marvin from The Hitchhiker's Guide to the Galaxy: the depressed robot who always knows exactly how bad the numbers are, and says so.
-One card represents one configured account pool, with independent limit rows.
+One table row represents one configured account pool, sorted by pace urgency.
 The observer only reads quota-axi; it never selects models, changes subscriptions, or reads credential files.
 There is no background server, idle animation, or automatic startup.
 
@@ -18,22 +18,24 @@ bin/fm-marvin.sh
 bin/fm-marvin.sh status --clean
 bin/fm-marvin.sh status --json
 bin/fm-marvin.sh watch --refresh 60
-bin/fm-marvin.sh watch --frames 2 --refresh 1 --out state/marvin/frames
+bin/fm-marvin.sh watch --frames 3 --out state/marvin/frames
 bin/fm-marvin.sh history
 bin/fm-marvin.sh stats
 ```
 
 Every verb accepts `-h` and `--help` without querying quota-axi.
 `watch` runs in the foreground and Ctrl+C exits; refresh is measured after each completed frame, so reads never overlap.
-`NO_COLOR` disables color and `--clean` prints the same aligned grid as static ASCII.
-Pool headers carry pace badges; a 12-cell gauge leads each account, followed by fixed-width limit bars, percentages, signed pace deltas, and the earliest reset badge.
-The footer counts pools, over-pace pools, unavailable pools, identity mismatches, and duplicates beside the observation timestamp.
+`NO_COLOR` disables color and `--clean` prints the same rows from the ASCII glyph set.
+Each live pool is one row: a 10-cell remaining bar, floored percent, `!`/`!!` band, pace word with signed points, and the binding window's reset.
+When a pool's limits differ, each limit gets its own indented line with bar, percent, pace, and reset.
+Unavailable pools are omitted from the table; the footer keeps a dim unavailable count plus the bar legend.
+The header separates data time from sample age and next refresh.
 JSON output includes complete untruncated fields and one object per refresh, plus `resources.rssBytes` and `resources.cpuPercent` for this observer process.
 CPU percent is process CPU time divided by process uptime, not host load or quota-axi child CPU.
 TTY watch writes only changed cells and skips unchanged quota evidence; timestamps alone do not trigger a redraw.
-Cards occupy fixed 32-cell columns with two-cell gutters: three columns at 100 cells and two at 80 cells.
-Reset badges align at the foot of each row of cards; unusually many limits or warnings grow the output rather than hide data.
-Account fields and limit labels end in `~` when shortened; common labels use `7D ALL`, `5H SESSION`, `WEEKLY`, and `API`.
+At 100 cells the ACCOUNT column shows the configured pool id (email only in `--clean` and `--json`); below 100 that column is dropped and the footer splits onto two lines.
+The last column truncates with `~`; rows never wrap.
+`watch --frames 3 --out DIR` writes 80-column Unicode, 120-column Unicode, and 80-column ASCII review frames from one sample.
 Use `--json` for complete identities, credential-source labels, original window names, ideal percentages, and per-window reset times.
 
 ## How to configure
@@ -80,7 +82,8 @@ Quota-axi may omit plans, identities, or limits that Baby Menu has, so this view
 Explicit start/reset timestamps determine duration unless configured otherwise; otherwise the source window duration is used.
 Negative delta is `HOT`, positive is `UNDER`, and equality is `ON PACE`.
 Missing cycle data is `PACE UNKNOWN`; expired limits, stale source data, missing measurements, and failed reads are never presented as fresh quota.
-A pool is `HOT` when any measured limit is over pace; its gauge uses quota-axi's all-model effective availability when present, otherwise its smallest measured remaining percentage.
+A pool is `HOT` when any measured limit is over pace; LEFT uses quota-axi's all-model effective availability when present, otherwise its smallest measured remaining percentage.
+The row shows the binding window's reset and prints `EVEN` for core `ON PACE`.
 `DUPLICATE ACCOUNT` marks both pools sharing a provider and account identity; `IDENTITY MISMATCH` compares a configured expected email with observed evidence.
 Warnings are independent of pace, and the footer counts pools rather than silently deduplicating subscriptions.
 
