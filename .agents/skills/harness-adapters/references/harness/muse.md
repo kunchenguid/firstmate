@@ -1,6 +1,6 @@
 # Muse Code
 
-Verified 2026-08-05 on Muse Code 0.1.0-R708.1, build sha 427a430436.
+Unless noted otherwise, observations below were verified 2026-08-05 on Muse Code 0.1.0-R708.1, build sha 427a430436.
 The router owns Muse's task-kind boundary.
 
 ## Operating facts
@@ -19,13 +19,14 @@ The router owns Muse's task-kind boundary.
 | Trust | Dialog `Do you trust this workspace?`, choice `1 Trust and continue` preselected for Enter; `--yolo` suppresses it, which fresh task paths require. |
 | Marker | None; detect anchored `muse-bin-*` ancestry after clearing foreign primary markers, while `MUSE_CURRENT_SESSION_LOG` is a path rather than identity and its export to tools is unverified. |
 | Composer | Bordered `⟩`, truecolor `38;2;90;160;255`, luminance about 149.9 and narrowly above ghost threshold 128; typed text is `38;2;204;211;219`, about 209.8, with no observed placeholder or ghost. |
-| Effort | `--reasoning-effort`, default `high`, accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra`; shared values expose low through xhigh, explicit captain `max` maps to `ultra`, and `none` or `minimal` remain unreachable. |
+| Effort | Verified 2026-09-12 on Muse Code 1.1.1: `--reasoning-effort`, default `high`, accepts `none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra`; shared `low` through `max` pass straight across, with `max` only ever an explicit captain choice; `ultra` sits behind a closed `ultra_reasoning_effort` gate and silently downgrades to `xhigh`, so it never stands in for `max`; `max` needs an active Muse Code subscription and is otherwise refused with a 400; `none` or `minimal` remain unreachable. |
 
 ## Credential preflight
 
 Muse reads winning `META_API_KEY` or `${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json` written by OIDC device-code `muse login` or `muse auth set --api-key-stdin`.
 The spawn accepts the environment key only if the backend worker already has it: caller-only variables do not cross a long-lived daemon, and secrets never enter argv.
 Stored credentials are the supported fleet path.
+For `max`, use a subscription-backed stored credential; a winning non-subscription `META_API_KEY` overrides it and causes Muse to refuse the requested effort.
 It resolves non-secret `XDG_CONFIG_HOME` and `XDG_DATA_HOME` absolutely before preflight and forwarding, keeping auth and logs aligned.
 
 With neither worker-reachable credential, spawn refuses.
@@ -64,7 +65,7 @@ Inspect, never force past, that refusal.
 
 ## Maturity and primary limit
 
-Muse 0.1.0 is day-zero beta; its hourly channel poll can replace the binary and process name.
+The hourly channel poll observed on Muse 0.1.0 can replace the binary and process name.
 The captain accepted this, so Firstmate does not set `MUSE_NO_AUTO_UPDATE=1`; a fleet may set it without adapter change.
 Plugins report unavailable unless `MUSE_EXPERIMENTAL_PLUGINS=on`, so busy state uses logs.
 The compatibility dialect explicitly lacks `asyncRewake` and model reawakening; the router owns the resulting primary boundary.
