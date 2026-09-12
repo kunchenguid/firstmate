@@ -44,6 +44,9 @@ install_helper_tmux() {
 #!/usr/bin/env bash
 if [ "$1" = new-session ]; then
   command="${!#}"
+  # The real helper deletes launch cmd files after its attempt; snapshot them
+  # at launch time, the deterministic moment commit guarantees they exist.
+  cp -f "$FM_HOME"/state/primary-resource/launch/*.cmd "$FM_HOME/" 2>/dev/null || true
   bash -c "$command" >/dev/null 2>&1 &
   exit 0
 fi
@@ -495,10 +498,10 @@ test_argv_admission_via_commit_rejects_wrappers() {
   expect_code 0 "$rc" "harness argv[0]=claude must commit"
   assert_present "$home/state/primary-resource/receipts/$incident.json"
   assert_grep '--dangerously-skip-permissions' \
-    "$home/state/primary-resource/launch/$incident.cmd" \
-    "commit launch cmd must keep skip-permissions"
-  assert_grep '--verbose' "$home/state/primary-resource/launch/$incident.cmd" \
-    "commit launch cmd must keep --verbose after -c"
+    "$home/$incident.cmd" \
+    "commit launch cmd must keep skip-permissions (launch-time snapshot)"
+  assert_grep '--verbose' "$home/$incident.cmd" \
+    "commit launch cmd must keep --verbose after -c (launch-time snapshot)"
 
   home=$(make_main_home argvadm-codex)
   write_codex_transcript "$home/tx.jsonl" 200000
@@ -516,8 +519,8 @@ test_argv_admission_via_commit_rejects_wrappers() {
     run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 || rc=$?
   expect_code 0 "$rc" "Codex bypass argv must commit"
   assert_grep '--dangerously-bypass-approvals-and-sandbox' \
-    "$home/state/primary-resource/launch/$incident.cmd" \
-    "Codex successor command must keep bypass flag"
+    "$home/$incident.cmd" \
+    "Codex successor command must keep bypass flag (launch-time snapshot)"
   pass "argv admission rejects unknown options and keeps spawned adapter flags"
 }
 
@@ -837,6 +840,41 @@ test_reconcile_stranded_helper_alert() {
     run_pr "$home" check 2>/dev/null || true)
   assert_equals "" "$(printf '%s' "$out" | tr -d '\n')" "stranded alert once"
   pass "stranded helper reconciliation alerts once and keeps receipt"
+}
+
+# A terminal failed helper outcome written after commit already returned 0 is
+# read by nobody else; reconciliation must surface it once, receipt preserved.
+test_reconcile_failed_outcome_alert() {
+  local home out incident
+  home=$(make_main_home failalert)
+  write_claude_transcript "$home/tx.jsonl" 1000
+  bind_home "$home" claude sess-fa "$home/tx.jsonl"
+  incident=fa-1
+  mkdir -p "$home/state/primary-resource/receipts" "$home/state/primary-resource/outcomes" \
+    "$home/state/primary-resource/alerts"
+  jq -nc --arg id "$incident" \
+    '{version:1, incidentId:$id, action:"context", sourceHarness:"claude", sourceProvider:"claude",
+      destinationHarness:"claude", destinationProvider:"claude", generation:"sess-fa",
+      stowReceiptPath:"", reservedAt:1}' \
+    > "$home/state/primary-resource/receipts/$incident.json"
+  jq -nc --arg id "$incident" \
+    '{version:1, incidentId:$id, stage:"failed", reason:"successor-not-alive", updatedAt:1}' \
+    > "$home/state/primary-resource/outcomes/$incident.json"
+  out=$(FM_PRIMARY_RESOURCE_RECONCILE_SECS=1 FM_PRIMARY_RESOURCE_NOW=99999 \
+    FM_PRIMARY_RESOURCE_QUOTA_JSON="$(quota_json claude 50)" FM_SUPERVISOR_BACKEND=tmux \
+    run_pr "$home" check 2>/dev/null || true)
+  assert_contains "$out" "handover failed (successor-not-alive)" \
+    "stale failed outcome must alert with its recorded reason"
+  assert_contains "$out" "no auto-retry" "failed-outcome alert must promise no retry"
+  assert_present "$home/state/primary-resource/receipts/$incident.json" \
+    "failed reconciliation must preserve the receipt"
+  assert_present "$home/state/primary-resource/alerts/sess-fa--failed-$incident" \
+    "failed-outcome alert must be recorded once per incident"
+  out=$(FM_PRIMARY_RESOURCE_RECONCILE_SECS=1 FM_PRIMARY_RESOURCE_NOW=99999 \
+    FM_PRIMARY_RESOURCE_QUOTA_JSON="$(quota_json claude 50)" FM_SUPERVISOR_BACKEND=tmux \
+    run_pr "$home" check 2>/dev/null || true)
+  assert_equals "" "$(printf '%s' "$out" | tr -d '\n')" "failed-outcome alert exactly once"
+  pass "terminal failed helper outcome alerts exactly once, no retry"
 }
 
 test_quota_axi_bounded_and_fresh() {
@@ -1252,6 +1290,7 @@ EOF
     '{version:1, incidentId:$id, stage:"waiting-idle", reason:"helper-launched", helperEndpoint:"herdr:sess:helper:p1:workspace"}' \
     > "$home/state/primary-resource/outcomes/$incident.json"
   printf 'true\n' > "$home/state/primary-resource/launch/$incident.cmd"
+  printf 'codex\0--verbose\0old prompt' > "$home/state/primary-resource/launch/$incident.argv"
   printf 'idle\n' > "$home/busy"
   cat > "$FAKEBIN/herdr" <<EOF
 #!/usr/bin/env bash
@@ -1278,6 +1317,22 @@ elif [[ "\$*" == *"pane send-text"* ]]; then
     touch '$state/launched'
   fi
   printf '%s\n' '{"result":{}}'
+elif [[ "\$*" == *"pane close"* ]]; then
+  # Real Herdr pane close terminates the closed pane's whole process tree,
+  # including the helper running inside it; emulate that so any cleanup the
+  # helper schedules after its own pane close provably never runs.
+  chain=''
+  p=\$PPID
+  depth=0
+  while [ -n "\$p" ] && [ "\$p" -gt 1 ] && [ "\$depth" -lt 32 ]; do
+    if tr '\0' ' ' < "/proc/\$p/cmdline" 2>/dev/null | grep -q 'fm-primary-resource.sh helper'; then
+      chain="\$p \$chain"
+    fi
+    p=\$(awk '/^PPid:/{print \$2; exit}' "/proc/\$p/status" 2>/dev/null)
+    depth=\$((depth + 1))
+  done
+  [ -n "\$chain" ] && kill -TERM \$chain 2>/dev/null
+  printf '%s\n' '{"result":{}}'
 else
   printf '%s\n' '{"result":{}}'
 fi
@@ -1295,7 +1350,11 @@ EOF
   assert_equals "started" "$stage" "Herdr helper must record a live successor"
   assert_equals "successor-alive" "$reason" "Herdr helper must complete its transaction"
   assert_grep 'pane close helper:p1' "$calls" "successful helper must close the recorded helper pane"
-  pass "Herdr occupant proof and helper workspace cleanup"
+  assert_absent "$home/state/primary-resource/launch/$incident.cmd" \
+    "successful Herdr handover must not leak the launch cmd file (pane close kills the helper)"
+  assert_absent "$home/state/primary-resource/launch/$incident.argv" \
+    "successful Herdr handover must not leak the launch argv file (pane close kills the helper)"
+  pass "Herdr occupant proof, helper workspace cleanup, launch file cleanup"
 }
 
 # Finding 10: live tmux with classifier-recognized agent identity.
@@ -1436,6 +1495,7 @@ test_helper_exit_authority_is_receipt_not_binding
 test_outcome_write_failure_still_closes_helper_pane
 test_incident_path_rejected_before_state_write
 test_reconcile_stranded_helper_alert
+test_reconcile_failed_outcome_alert
 test_quota_axi_bounded_and_fresh
 test_reconcile_same_second_successor
 test_commit_endpoint_on_outcome_not_receipt

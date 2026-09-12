@@ -839,7 +839,8 @@ action_arm() {
 # --- check --------------------------------------------------------------------
 
 pr_reconcile_stranded() {
-  # Receipt-preserving: emit one alert for stale nonterminal or stalled started.
+  # Receipt-preserving: one alert for stale nonterminal, stalled started, or
+  # terminal failed outcomes.
   local f stage updated now age incident gen reason
   now=$(pr_now)
   [ -d "$PR_DIR/outcomes" ] || return 0
@@ -856,7 +857,6 @@ pr_reconcile_stranded() {
     gen=$(jq -r '.generation // "unknown"' "$PR_DIR/receipts/$incident.json" 2>/dev/null || printf 'unknown')
     case "$stage" in
       waiting-idle|exiting|launching)
-        reason="handover-stranded-$stage"
         pr_alert_once "$gen" "stranded-$incident" \
           "primary-resource alert: handover stranded ($stage) for $incident; session kept; no auto-retry" || true
         ;;
@@ -869,6 +869,12 @@ pr_reconcile_stranded() {
           pr_alert_once "$gen" "stalled-successor-$incident" \
             "primary-resource alert: successor never became a working session for $incident; session kept; no auto-retry" || true
         fi
+        ;;
+      failed)
+        reason=$(jq -r '.reason // "unknown"' "$f" 2>/dev/null || printf 'unknown')
+        case "$reason" in ''|*[!a-z-]*) reason=unknown ;; esac
+        pr_alert_once "$gen" "failed-$incident" \
+          "primary-resource alert: handover failed ($reason) for $incident; session kept; no auto-retry" || true
         ;;
     esac
   done
@@ -1117,7 +1123,10 @@ pr_outcome_write() {  # <incident> <stage> <reason> [<helper-endpoint>]
        + if $endpoint == "" then {} else {helperEndpoint:$endpoint} end')" || record_rc=1
   fi
   case "$stage" in
-    started|failed) pr_helper_endpoint_close "$endpoint" || true ;;
+    started|failed)
+      rm -f -- "$PR_DIR/launch/$id.argv" "$PR_DIR/launch/$id.cmd" 2>/dev/null || true
+      pr_helper_endpoint_close "$endpoint" || true
+      ;;
   esac
   return "$record_rc"
 }
@@ -1885,7 +1894,6 @@ action_helper() {
     # Pane-scoped agent classifier only — never host-wide pgrep of the harness name.
     if [ "$(fm_backend_agent_alive "$backend" "$state_target")" = alive ]; then
       pr_outcome_write "$incident" "started" "successor-alive" || true
-      rm -f -- "$PR_DIR/launch/$incident.argv" "$PR_DIR/launch/$incident.cmd" 2>/dev/null || true
       return 0
     fi
     sleep 1
