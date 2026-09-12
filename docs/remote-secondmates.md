@@ -104,6 +104,8 @@ Herdr's own SSH remote attach starts such a server when it finds none, and at bo
 `KeepAlive={SuccessfulExit=false}` lets that exit 0 rest instead of respawning against a held socket; the guard's header owns the decision table and [`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) owns the birth markers it reads.
 It starts the same workers directly on Linux, recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent, and creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target, stopping after one harness satisfies the at-least-one requirement.
 It never installs packages or overwrites a non-Firstmate file at a reserved wrapper path.
+Worker startup can recover an interrupted quarantine publication only when the lock contains one exact completed staging marker with account ownership, restrictive modes, unchanged nonsymlink identity, no conflicting entries, and no live worker or recorded job execution under the existing quarantine checks.
+Malformed, ambiguous, foreign, or entry-conflicting staging candidates remain untouched, while an otherwise valid marker that reaches a live-execution refusal remains published as official quarantine for investigation.
 The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server and does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
 It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.
 
