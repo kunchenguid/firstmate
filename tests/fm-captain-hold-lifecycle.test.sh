@@ -510,7 +510,9 @@ test_verify_resolves_a_pre_collapse_key_through_its_derived_marker() {
 # the transition library does: on a beads-configured home its hold/answer/done
 # calls reach tasks-axi with no markdown file override. Fully portable - the
 # stubbed tasks-axi fakes the beads backend, so no bd or beads-capable install
-# is needed.
+# is needed. The stub also shows the body as a quoted JSON scalar carrying
+# escapes and a newline, so the hold pins the shared show-scalar decode owned by
+# bin/fm-backlog-transition-lib.sh against this host's JSON::PP.
 test_captain_hold_mutations_address_the_beads_backend() {
   local home id fb log
   home="$TMP_ROOT/captain-stub-beads/home"
@@ -526,6 +528,10 @@ EOF
   id=fm-stub-held-row
   fb=$(fm_fakebin "$home")
   log="$home/tasks-axi-calls"
+  cat > "$home/initial-body" <<'EOF'
+First line with a quoted "route" and a literal backslash: \ before the end.
+Second line after the encoded newline.
+EOF
   cat > "$fb/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "@LOG@"
@@ -587,13 +593,11 @@ case "${1:-}" in
     printf '  id: %s\n' "@ID@"
     printf '%s\n' '  state: queued' '  held: yes' '  blocked: no' \
       '  hold_kind: captain'
-    if [ -f "@HOME@/last-body" ]; then
-      printf '%s' '  body: '
-      perl -MJSON::PP -e 'local $/; print encode_json(<STDIN>)' < "@HOME@/last-body"
-      printf '\n'
-    else
-      printf '%s\n' '  body: ""'
-    fi
+    stub_body="@HOME@/last-body"
+    [ -f "$stub_body" ] || stub_body="@HOME@/initial-body"
+    printf '%s' '  body: '
+    perl -MJSON::PP -e 'local $/; print JSON::PP->new->utf8->allow_nonref->encode(<STDIN>)' < "$stub_body"
+    printf '\n'
     ;;
   *) exit 1 ;;
 esac
@@ -605,10 +609,15 @@ SH
   PATH="$fb:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CAPTAIN_HOLD_NOW=2026-09-12T00:00:00Z \
     "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason "captain must decide" >/dev/null \
     || fail "holding on a beads-configured home failed without a markdown backlog"
   assert_grep "hold $id" "$log" \
     "the captain-hold mutation never reached the configured backend"
+  assert_equals \
+    "$(printf 'Captain hold set: 2026-09-12T00:00:00Z\n\n%s' "$(cat "$home/initial-body")")" \
+    "$(cat "$home/last-body")" \
+    "the captain hold did not round-trip the escapes and line structure of a quoted tasks-axi scalar"
 
   decision="$home/captain-decision.txt"
   printf 'Ship the gold-only plan.\n' > "$decision"
