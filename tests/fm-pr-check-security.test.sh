@@ -152,6 +152,10 @@ case "${1:-} ${2:-}" in
         ;;
     esac
     ;;
+  "pr merge")
+    [ -z "${FM_TEST_GH_MERGE_HOOK:-}" ] || "$FM_TEST_GH_MERGE_HOOK"
+    exit 0
+    ;;
 esac
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
@@ -2246,6 +2250,111 @@ test_merged_poll_row_names_no_authority_when_no_record_grants_one() {
   pass "poll distinguishes attended authorization from external landing"
 }
 
+test_authority_persistence_refuses_rebound_metadata() {
+  local dir state url_a url_b rc
+  url_a=https://github.com/o/r/pull/1
+  url_b=https://github.com/o/r/pull/2
+  dir=$(make_case merge-authority-rebound-metadata)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url_a" >/dev/null 2> "$dir/seed.err" \
+    || fail "rebind: could not arm the original poll"
+  cat > "$dir/rebind.sh" <<SH
+#!/usr/bin/env bash
+"$PR_CHECK" task-a "$url_b" >/dev/null
+SH
+  chmod +x "$dir/rebind.sh"
+  set +e
+  FM_TEST_GH_MERGE_HOOK="$dir/rebind.sh" \
+    FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \
+    FM_TEST_GH_GRAPHQL_QUEUED=true \
+    run_merge_entry "$dir" task-a "$url_a" > "$dir/merge.out" 2> "$dir/merge.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "rebind: accepted merge persisted against rebound metadata"
+  grep -qxF "pr=$url_b" "$state/task-a.meta" \
+    || fail "rebind: merge hook did not replace the canonical identity"
+  [ ! -e "$state/task-a.merge-authority" ] \
+    || fail "rebind: authority was published for the wrong canonical identity"
+  pass "accepted merge authority refuses rebound task metadata"
+}
+
+test_authority_persists_before_control_unlock() {
+  local dir state url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-authority-control-lock)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+    || fail "control lock: could not arm the merge poll"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *"task-a.merge-authority "*)
+    [ -d "$FM_TEST_CONTROL_LOCK" ] || exit 91
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" FM_TEST_REAL_MV="$REAL_MV" \
+    queue_merge "$dir" "$url"
+  pass "accepted merge authority persists under the lifecycle lock"
+}
+
+test_authority_retirement_preserves_replacement() {
+  local dir state url_a url_b rc
+  url_a=https://github.com/o/r/pull/1
+  url_b=https://github.com/o/r/pull/2
+  dir=$(make_case merge-authority-retirement-replacement)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url_a" >/dev/null 2> "$dir/seed.err" \
+    || fail "replacement: could not arm the original poll"
+  queue_merge "$dir" "$url_a"
+  cat > "$dir/replace-authority.sh" <<SH
+#!/usr/bin/env bash
+"$PR_CHECK" task-a "$url_b" >/dev/null
+FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \\
+FM_TEST_GH_GRAPHQL_QUEUED=true \\
+"$PR_MERGE" task-a "$url_b" >/dev/null
+SH
+  chmod +x "$dir/replace-authority.sh"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+"$FM_TEST_REAL_MV" "$@" || exit $?
+case " $* " in
+  *"task-a.pr-poll-merge-notified "*)
+    if [ ! -e "$FM_TEST_REPLACEMENT_RAN" ]; then
+      : > "$FM_TEST_REPLACEMENT_RAN"
+      "$FM_TEST_REPLACEMENT_SCRIPT"
+    fi
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/mv"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REPLACEMENT_RAN="$dir/replacement-ran" \
+    FM_TEST_REPLACEMENT_SCRIPT="$dir/replace-authority.sh" \
+    FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/watch-a.out" 2> "$dir/watch-a.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "replacement: original poll failed: $(cat "$dir/watch-a.err")"
+  [ -f "$state/task-a.merge-authority" ] \
+    || fail "replacement: original poll retirement deleted the replacement authority"
+  grep -qxF "pr=$url_b" "$state/task-a.meta" \
+    || fail "replacement: replacement poll was not armed"
+  ack_watcher_cycle "$state" || fail "replacement: could not acknowledge the original wake"
+  rm -f "$dir/fakebin/mv" "$state/.last-check"
+  run_merged_poll_cycle "$dir"
+  awk -F'\t' -v expected="check: merge landed: task-a $url_b" \
+    '$5 == expected { found=1 } END { exit !found }' "$state/.wake-queue" \
+    || fail "replacement: replacement merge lost its attended authority"
+  pass "poll retirement preserves a replacement authority record"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -2254,6 +2363,9 @@ test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome
 test_merged_poll_row_carries_the_merge_authority
 test_merged_poll_row_names_no_authority_when_no_record_grants_one
+test_authority_persistence_refuses_rebound_metadata
+test_authority_persists_before_control_unlock
+test_authority_retirement_preserves_replacement
 test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_different_merged_pr_for_same_task_is_not_absorbed
 test_persistent_secondmate_retirement_is_poll_only

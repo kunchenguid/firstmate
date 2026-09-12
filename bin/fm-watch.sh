@@ -2038,6 +2038,7 @@ while :; do
             triage_log "no matching persisted merge authority for $id; recording an external merge outcome"
           fi
           merge_authority=$FM_MERGE_AUTHORITY
+          merge_authority_record_identity=$FM_MERGE_AUTHORITY_RECORD_IDENTITY
           merge_outcome_rc=0
           fm_merge_outcome_report "$FM_HOME" "$STATE" "$id" "$url" poll \
             "$merge_authority" || merge_outcome_rc=$?
@@ -2045,7 +2046,10 @@ while :; do
             triage_log "merge outcome for $id could not be recorded (rc=$merge_outcome_rc)"
             exit 1
           fi
-          if ! fm_merge_authority_remove "$STATE" "$id"; then
+          if [ -n "$merge_authority_record_identity" ] \
+            && ! fm_merge_authority_remove_if_matches "$STATE" "$id" \
+              "$provider" "$host" "$path" "$number" "$merge_authority" \
+              "$merge_authority_record_identity"; then
             triage_log "published merge outcome for $id but could not retire its authority record"
             exit 1
           fi

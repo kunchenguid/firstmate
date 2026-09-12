@@ -35,6 +35,8 @@ _FM_MERGE_AUTHORITY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_MERGE_AUTHORITY=
 # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
 FM_MERGE_AUTHORITY_REASON=
+# shellcheck disable=SC2034 # Public results consumed by sourcing callers.
+FM_MERGE_AUTHORITY_RECORD_IDENTITY=
 
 fm_merge_authority_resolve() {  # <home> <state> <meta> <task-id>
   local home=${1-} state=${2-} meta=${3-} id=${4-}
@@ -103,50 +105,90 @@ fm_merge_authority_record_matches() {  # <record> <device> <provider> <host> <pa
   FM_MERGE_AUTHORITY=$authority
 }
 
-fm_merge_authority_persist() {  # <state> <task-id> <meta> <authority>
-  local state=$1 id=$2 meta=$3 authority=$4 record tmp state_device
+fm_merge_authority_persist() {  # <state> <task-id> <meta> <provider> <host> <path> <number> <authority>
+  local state=$1 id=$2 meta=$3 provider=$4 host=$5 path=$6 number=$7 authority=$8
+  local record tmp='' state_device lock status=0
   fm_pr_task_id_valid "$id" || return 1
   case "$authority" in yolo|away-grant|attended) ;; *) return 1 ;; esac
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   fm_pr_metadata_identity_parse "$meta" || return 1
+  [ "$FM_PR_META_PROVIDER" = "$provider" ] \
+    && [ "$FM_PR_META_HOST" = "$host" ] \
+    && [ "$FM_PR_META_PATH" = "$path" ] \
+    && [ "$FM_PR_META_NUMBER" = "$number" ] || return 1
   record="$state/$id.merge-authority"
-  fm_pr_regular_destination_on_device_or_absent "$record" "$state_device" || return 1
-  umask 077
-  tmp=$(mktemp "$state/.fm-merge-authority.XXXXXX") || return 1
-  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
-      fm-merge-authority-v1 "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" \
-      "$FM_PR_META_PATH" "$FM_PR_META_NUMBER" "$authority" > "$tmp" \
-    || ! chmod 0600 "$tmp" \
-    || ! fm_merge_authority_record_matches "$tmp" "$state_device" \
-      "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER" \
-    || ! fm_pr_regular_destination_on_device_or_absent "$record" "$state_device" \
-    || ! mv -f -- "$tmp" "$record" \
-    || ! fm_merge_authority_record_matches "$record" "$state_device" \
-      "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER"; then
-    rm -f -- "$tmp"
-    return 1
+  lock="$record.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  fm_pr_regular_destination_on_device_or_absent "$record" "$state_device" || status=1
+  if [ "$status" -eq 0 ]; then
+    umask 077
+    tmp=$(mktemp "$state/.fm-merge-authority.XXXXXX") || status=1
   fi
+  if [ "$status" -eq 0 ]; then
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-merge-authority-v1 "$provider" "$host" "$path" "$number" "$authority" > "$tmp" \
+      || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    chmod 0600 "$tmp" \
+      && fm_merge_authority_record_matches "$tmp" "$state_device" \
+        "$provider" "$host" "$path" "$number" \
+      && fm_pr_regular_destination_on_device_or_absent "$record" "$state_device" \
+      && mv -f -- "$tmp" "$record" \
+      && fm_merge_authority_record_matches "$record" "$state_device" \
+        "$provider" "$host" "$path" "$number" \
+      || status=1
+  fi
+  [ "$status" -eq 0 ] || rm -f -- "$tmp"
+  fm_lock_release "$lock" || status=1
+  return "$status"
 }
 
 fm_merge_authority_read() {  # <state> <task-id> <provider> <host> <path> <number>
-  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 record state_device
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6
+  local record state_device lock status=0
   FM_MERGE_AUTHORITY='external'
+  FM_MERGE_AUTHORITY_RECORD_IDENTITY=
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   record="$state/$id.merge-authority"
-  fm_merge_authority_record_matches "$record" "$state_device" \
-    "$provider" "$host" "$path" "$number"
+  lock="$record.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if fm_merge_authority_record_matches "$record" "$state_device" \
+      "$provider" "$host" "$path" "$number"; then
+    FM_MERGE_AUTHORITY_RECORD_IDENTITY=$(fm_pr_file_identity "$record") || status=1
+  else
+    FM_MERGE_AUTHORITY='external'
+    status=1
+  fi
+  fm_lock_release "$lock" || status=1
+  return "$status"
 }
 
-fm_merge_authority_remove() {  # <state> <task-id>
-  local state=$1 id=$2 record state_device
+fm_merge_authority_remove_if_matches() {  # <state> <task-id> <provider> <host> <path> <number> <authority> <file-identity>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6
+  local authority=$7 expected_file_identity=$8 record state_device lock current_file_identity status=0
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   record="$state/$id.merge-authority"
-  [ -e "$record" ] || [ -L "$record" ] || return 0
-  fm_pr_private_file_valid "$record" 600 "$state_device" || return 1
-  rm -f -- "$record"
+  lock="$record.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    if fm_merge_authority_record_matches "$record" "$state_device" \
+        "$provider" "$host" "$path" "$number"; then
+      current_file_identity=$(fm_pr_file_identity "$record") || status=1
+      if [ "$status" -eq 0 ] \
+        && [ "$FM_MERGE_AUTHORITY" = "$authority" ] \
+        && [ "$current_file_identity" = "$expected_file_identity" ]; then
+        rm -f -- "$record" || status=1
+      fi
+    elif ! fm_pr_private_file_valid "$record" 600 "$state_device"; then
+      status=1
+    fi
+  fi
+  fm_lock_release "$lock" || status=1
+  return "$status"
 }
