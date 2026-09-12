@@ -81,6 +81,11 @@ CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
 CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 ARM_PID=${BASHPID:-$$}
+ARM_ORIGIN=${FM_WATCH_ARM_ORIGIN:-started}
+case "$ARM_ORIGIN" in
+  ack-rearm|started) ;;
+  *) ARM_ORIGIN=started ;;
+esac
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
 
@@ -506,7 +511,7 @@ else
   FM_WATCH_HANDLING_SUCCESSOR=0 "$WATCH" >"$child_out" &
 fi
 child=$!
-cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
+cycle_begin "$child" "$ARM_ORIGIN" "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
 
 owned_child_finished() {

@@ -224,6 +224,24 @@ assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
 }
 
+# Acknowledgement closes the handling episode, so MAIN immediately owns the
+# next watcher cycle when no healthy watcher or extension continuity owner does.
+# fm-watch-arm.sh remains the single arm and singleton-lock owner; this call
+# intentionally stays foreground so its tracked watcher child can deliver the
+# next actionable wake through the current handling turn.
+# A detached state override is a test or inspection target, not this home's
+# watcher lifecycle, so it must not spawn a watcher for a different home.
+rearm_watcher_after_acknowledgement() {
+  local grace
+  [ "$STATE" = "$FM_HOME/state" ] || return 0
+  [ "$ACTOR" = main ] || return 0
+  [ ! -e "$STATE/.afk" ] || return 0
+  grace=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
+  fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$grace" "$FM_HOME" && return 0
+  fm_extension_owns_supervision "$STATE" "$FM_ROOT" && return 0
+  FM_WATCH_ARM_ORIGIN=ack-rearm "$SCRIPT_DIR/fm-watch-arm.sh"
+}
+
 # Mark presentation-stage inactive terminal outcomes only after the handling
 # turn has completed and before this acknowledgement consumes its queue rows.
 # The helper ignores non-presentation and legacy keys, so this is a narrow
@@ -824,7 +842,8 @@ if [ -n "$ACK_THROUGH" ]; then
     printf 'wake drain: acknowledged wakes through %s (%s row(s) consumed), but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
       "$ACK_THROUGH" "$ACK_REMOVED" >&2
   fi
-  exit 0
+  rearm_watcher_after_acknowledgement
+  exit $?
 fi
 
 if [ ! -s "$FM_WAKE_QUEUE" ]; then

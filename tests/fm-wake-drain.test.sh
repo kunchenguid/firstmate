@@ -41,5 +41,83 @@ test_empty_drain_is_silent() {
   pass "empty drain succeeds silently"
 }
 
+test_acknowledgement_rearms_an_unheld_watcher_once() {
+  local dir home state fakebin out err ackout ackerr ackpid watcher_pid status rearmed
+  dir=$(make_case ack-rearm-unheld)
+  home="$dir/home"
+  state="$home/state"
+  fakebin="$dir/fakebin"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  ackout="$dir/ack.out"
+  ackerr="$dir/ack.err"
+  mkdir -p "$home/data"
+  append_wake "$state" check fixture "check: fixture wake" || fail "fixture wake append failed"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" \
+    || fail "wake drain failed before acknowledgement"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_POLL=1 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$DRAIN" --ack-through "$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")" \
+    --recovery-generation "$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")" \
+    > "$ackout" 2> "$ackerr" &
+  ackpid=$!
+
+  i=0
+  while [ "$i" -lt 40 ]; do
+    watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    is_live_non_zombie "$watcher_pid" && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$watcher_pid" || {
+    wait "$ackpid" 2>/dev/null || true
+    fail "acknowledgement left no live watcher: $(cat "$ackout") $(cat "$ackerr")"
+  }
+
+  printf 'done: ends the acknowledgement-owned watcher cycle\n' > "$state/after-ack.status"
+  wait_for_exit "$ackpid" 120
+  status=$?
+  expect_code 0 "$status" "acknowledgement-owned watcher cycle must report its actionable wake"
+  rearmed=$(rg -c -F -- 'origin=ack-rearm' "$state/.watch-cycle-exits.log")
+  [ "$rearmed" -eq 1 ] || fail "acknowledgement re-arm ledger count was $rearmed, expected one"
+  pass "wake drain: acknowledgement re-arms one watcher when no watcher is live"
+}
+
+test_acknowledgement_does_not_rearm_a_live_watcher() {
+  local dir home state out err watcher_pid holder identity
+  dir=$(make_case ack-rearm-live)
+  home="$dir/home"
+  state="$home/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  mkdir -p "$home/data" "$state/.watch.lock"
+  sleep 30 &
+  holder=$!
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$holder") \
+    || { kill "$holder" 2>/dev/null || true; fail "could not identify live watcher fixture"; }
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+  : > "$state/.last-watcher-beat"
+  append_wake "$state" check fixture "check: fixture wake" || fail "fixture wake append failed"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" \
+    || fail "wake drain failed before live-watcher acknowledgement"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" \
+    --ack-through "$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")" \
+    --recovery-generation "$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")" \
+    || fail "acknowledgement failed with a live watcher"
+  [ ! -e "$state/.watch-cycle-exits.log" ] \
+    || fail "acknowledgement started a watcher despite the live cycle"
+  is_live_non_zombie "$holder" || fail "live watcher fixture was disturbed by acknowledgement"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "wake drain: acknowledgement does not re-arm while a watcher is live"
+}
+
 test_drain_consumes_and_deduplicates_wakes
 test_empty_drain_is_silent
+test_acknowledgement_rearms_an_unheld_watcher_once
+test_acknowledgement_does_not_rearm_a_live_watcher
