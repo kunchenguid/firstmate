@@ -94,6 +94,10 @@
 #                          external-wait pause rows do not feed this escalation,
 #                          observation is read-only, and one parent notification
 #                          covers each no-progress episode
+#   check: secondmate-liveness: <id> beat=<age>s grace=<n>s agent=... verdict=stale|dead
+#                          MAIN's heartbeat-interval read of registered homes'
+#                          watcher beats (bin/fm-secondmate-liveness.sh); recovery
+#                          is a supervised --recover, never an in-watcher loop
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -2013,6 +2017,33 @@ auto_quota_drain_surface() {
   wake "$reason"
 }
 
+# Read-only registered-home beat scan inside the heartbeat fleet-scan.
+# Recovery is a supervised --recover after this wake, not an in-watcher loop.
+secondmate_home_liveness_tick() {
+  local out line reason
+  watcher_heartbeat
+  out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-secondmate-liveness.sh" 2>/dev/null) || true
+  reason=
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *' verdict=stale'|*' verdict=dead')
+        if [ -n "$reason" ]; then
+          reason="$reason; $line"
+        else
+          reason=$line
+        fi
+        ;;
+    esac
+  done <<EOF
+$out
+EOF
+  [ -n "$reason" ] || return 0
+  reason="check: secondmate-liveness: $reason"
+  fm_wake_append check secondmate-liveness "$reason" || return 1
+  wake "$reason"
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -2856,6 +2887,12 @@ EOF
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
     watcher_heartbeat
+    # ponytail: rides this heartbeat, including idle backoff; a dedicated
+    # 600s marker if idle fleets miss the 10-minute recovery bound.
+    secondmate_home_liveness_tick || {
+      echo "watcher: secondmate home liveness observation failed" >&2
+      exit 1
+    }
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
