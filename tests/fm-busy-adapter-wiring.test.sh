@@ -392,13 +392,18 @@ test_gemini_hooks_stale_incarnation_harmless() {
 }
 
 test_agy_hooks_semantic_lifecycle() {
-  local rec id=busy-agy-1 out state settings
+  local rec id=busy-agy-1 out state settings spawn_gen
   rec=$(make_spawn_case agy-lifecycle agy "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "agy spawn should succeed: $out"
   state="$HOME_DIR/state"
   settings="$state/$id.agy-hooks/.agents/hooks.json"
+  spawn_gen=$(awk -F= '$1 == "spawn_gen" { print substr($0, index($0, "=") + 1); exit }' "$state/$id.meta")
+  grep -qx 'agy_hooks_owned=1' "$state/$id.meta" \
+    || fail "agy task metadata must record hook-root ownership"
+  [ "$(cat "$state/$id.agy-hooks/.firstmate-spawn-gen")" = "$spawn_gen" ] \
+    || fail "agy hook root must carry the recorded spawn ownership marker"
   assert_present "$settings" "agy spawn did not write firstmate-owned hooks"
   jq -e . "$settings" >/dev/null || fail "agy hooks are not valid JSON"
   for ev in PreInvocation PostToolUse Stop; do

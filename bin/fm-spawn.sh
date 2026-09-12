@@ -923,6 +923,7 @@ AGY_HOOK_ROOT=
 AGY_HOOK_ROOT_PATH=
 AGY_HOOK_ROOT_CREATED=0
 AGY_HOOK_SETTINGS=
+SPAWN_GEN=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
@@ -937,17 +938,14 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
 spawn_fresh_wiring_rollback() {
-  local status=0
+  local status=0 meta="$STATE/$ID.meta"
   [ "$SPAWN_FRESH_WIRING_PENDING" = 1 ] || return 0
-  if [ "${AGY_HOOK_ROOT_CREATED:-0}" = 1 ]; then
-    if [ -n "${AGY_HOOK_ROOT:-}" ] && ! rm -rf -- "$AGY_HOOK_ROOT"; then
-      echo "error: failed-dispatch cleanup did not remove agy hook state for $ID" >&2
+  if [ -n "${AGY_HOOK_ROOT_PATH:-}" ] \
+      && { [ -e "$AGY_HOOK_ROOT_PATH" ] || [ -L "$AGY_HOOK_ROOT_PATH" ]; }; then
+    if ! agy_remove_owned_hook_root "$AGY_HOOK_ROOT_PATH" "$STATE_REAL" "$meta" "$ID" \
+        "${AGY_HOOK_ROOT_CREATED:-0}" "$SPAWN_GEN"; then
       status=1
     fi
-  elif [ -n "${AGY_HOOK_ROOT_PATH:-}" ] \
-      && { [ -e "$AGY_HOOK_ROOT_PATH" ] || [ -L "$AGY_HOOK_ROOT_PATH" ]; }; then
-    echo "warning: failed-dispatch cleanup retained pre-existing agy hook path $AGY_HOOK_ROOT_PATH" >&2
-    status=1
   fi
   SPAWN_FRESH_WIRING_PENDING=0
   return "$status"
@@ -955,14 +953,13 @@ spawn_fresh_wiring_rollback() {
 
 spawn_fresh_commit_rollback() {
   local status=0
-  if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
+  if ! spawn_fresh_wiring_rollback; then
+    status=1
+  elif fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
       "$FM_ROOT/bin/fm-busy-event.sh" "$STATE" "$ID" "${BUSY_GEN:-}"; then
     SPAWN_FRESH_COMMIT_PENDING=0
   else
     echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
-    status=1
-  fi
-  if ! spawn_fresh_wiring_rollback; then
     status=1
   fi
   return "$status"
@@ -1146,7 +1143,7 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 agy_root_owned=${5:-1}
+  local harness=$1 wt=$2 state=$3 id=$4 agy_root_owned=${5:-0}
   local token_path token auth_path path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
@@ -1167,21 +1164,18 @@ clear_relaunch_harness_wiring() {
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    if [ "$harness" = agy ] && [ "$path" = "$state/$id.agy-hooks" ]; then
+      if ! agy_remove_owned_hook_root "$path" "$state" "$state/$id.meta" "$id" \
+          "$agy_root_owned" "$SPAWN_GEN"; then
+        return 1
+      fi
+      continue
+    fi
     if [ -d "$path" ] && [ ! -L "$path" ]; then
       if [ "$harness" != agy ] || [ "$path" != "$state/$id.agy-hooks" ]; then
         return 1
       fi
-      if [ "$agy_root_owned" != 1 ]; then
-        echo "warning: retaining pre-existing agy hook root $path after aborted relaunch of $id" >&2
-        return 1
-      fi
-      rm -rf -- "$path" || return 1
     else
-      if [ "$harness" = agy ] && [ "$path" = "$state/$id.agy-hooks" ] \
-          && [ "$agy_root_owned" != 1 ]; then
-        echo "warning: retaining pre-existing agy hook path $path after aborted relaunch of $id" >&2
-        return 1
-      fi
       rm -f -- "$path" || return 1
     fi
   done <<EOF
@@ -1193,6 +1187,69 @@ spawn_herdr_presentation_order_lock_release() {
   [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ] || return 0
   HERDR_PRESENTATION_ORDER_LOCK_HELD=0
   fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+}
+
+agy_hook_root_matches_owner() {
+  local root=$1 state_root=$2 meta=$3 expected_gen=${4:-} prefer_expected=${5:-0}
+  local root_real state_real marker marker_gen owner_gen
+  if [ "$prefer_expected" = 1 ]; then
+    [ -n "$expected_gen" ] || return 1
+    owner_gen=$expected_gen
+  else
+    owner_gen=$(fm_meta_get "$meta" spawn_gen)
+    [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ] || {
+      [ -n "$expected_gen" ] || return 1
+      owner_gen=$expected_gen
+    }
+  fi
+  [ -n "$owner_gen" ] || return 1
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  state_real=$(cd -P -- "$state_root" && pwd -P) || return 1
+  root_real=$(cd -P -- "$root" && pwd -P) || return 1
+  case "$root_real/" in
+    "$state_real/"*) ;;
+    *) return 1 ;;
+  esac
+  marker="$root_real/.firstmate-spawn-gen"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  marker_gen=$(cat "$marker") || return 1
+  [ "$marker_gen" = "$owner_gen" ] || return 1
+}
+
+agy_clear_hook_ownership_meta() {
+  local meta=$1 state_root=$2 id=$3 tmp
+  [ -f "$meta" ] || return 0
+  tmp="$state_root/.$id.meta.agy-unowned.${BASHPID:-$$}"
+  awk -F= '$1 != "agy_hooks_owned"' "$meta" > "$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$state_root"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+agy_remove_owned_hook_root() {
+  local root=$1 state_root=$2 meta=$3 id=$4 current_owned=${5:-0} expected_gen=${6:-}
+  if [ ! -e "$root" ] && [ ! -L "$root" ]; then
+    if [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ]; then
+      agy_clear_hook_ownership_meta "$meta" "$state_root" "$id" || return 1
+    fi
+    return 0
+  fi
+  if ! agy_hook_root_matches_owner "$root" "$state_root" "$meta" \
+      "$([ "$current_owned" = 1 ] && printf '%s' "$expected_gen")" "$current_owned"; then
+    echo "warning: retaining agy hook path $root; ownership could not be proven" >&2
+    return 1
+  fi
+  if ! rm -rf -- "$root" || [ -e "$root" ] || [ -L "$root" ]; then
+    echo "error: agy hook root $root could not be removed; retaining task $id" >&2
+    return 1
+  fi
+  if [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ]; then
+    agy_clear_hook_ownership_meta "$meta" "$state_root" "$id" || return 1
+  fi
 }
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
@@ -2124,7 +2181,7 @@ json_escape() {
 }
 
 agy_prepare_hook_root() {
-  local root=$1 state_root=$2 root_real agents_real
+  local root=$1 state_root=$2 root_real agents_real owner_path
   AGY_HOOK_ROOT_PATH=$root
   if [ -e "$root" ] || [ -L "$root" ]; then
     echo "error: refusing pre-existing agy hook root $root" >&2
@@ -2151,6 +2208,11 @@ agy_prepare_hook_root() {
       return 1
       ;;
   esac
+  owner_path="$root_real/.firstmate-spawn-gen"
+  if ! (set -C; printf '%s\n' "$SPAWN_GEN" > "$owner_path"); then
+    echo "error: could not create agy hook ownership marker $owner_path" >&2
+    return 1
+  fi
   if [ -e "$root_real/.agents" ] || [ -L "$root_real/.agents" ]; then
     echo "error: refusing pre-existing agy hook settings directory $root_real/.agents" >&2
     return 1
@@ -3434,6 +3496,7 @@ mkdir -p "$TASK_TMP/gotmp"
 # check or leak into a commit.
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
@@ -3896,7 +3959,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -3913,7 +3975,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen agy_hooks_owned traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3933,6 +3995,9 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ "$HARNESS" = agy ] && [ "${AGY_HOOK_ROOT_CREATED:-0}" = 1 ]; then
+    echo "agy_hooks_owned=1"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;

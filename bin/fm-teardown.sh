@@ -2938,14 +2938,57 @@ preflight_firstmate_home_herdr_children() {  # <home>
   done
 }
 
-retire_agy_hook_root() {
-  local hook_root=$1 record_label=$2
-  if [ -e "$hook_root" ] || [ -L "$hook_root" ]; then
-    if ! rm -rf -- "$hook_root" || [ -e "$hook_root" ] || [ -L "$hook_root" ]; then
-      echo "error: agy hook root $hook_root could not be removed; retaining $record_label" >&2
-      return 1
-    fi
+agy_hook_root_matches_owner() {
+  local root=$1 meta=$2 state_root=$3
+  local root_real state_real marker marker_gen owner_gen
+  [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ] || return 1
+  owner_gen=$(fm_meta_get "$meta" spawn_gen)
+  [ -n "$owner_gen" ] || return 1
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  state_real=$(cd -P -- "$state_root" && pwd -P) || return 1
+  root_real=$(cd -P -- "$root" && pwd -P) || return 1
+  case "$root_real/" in
+    "$state_real/"*) ;;
+    *) return 1 ;;
+  esac
+  marker="$root_real/.firstmate-spawn-gen"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  marker_gen=$(cat "$marker") || return 1
+  [ "$marker_gen" = "$owner_gen" ] || return 1
+}
+
+agy_clear_hook_ownership_meta() {
+  local meta=$1 state_root=$2 id=$3 tmp
+  [ -f "$meta" ] || return 0
+  tmp="$state_root/.$id.meta.agy-unowned.${BASHPID:-$$}"
+  awk -F= '$1 != "agy_hooks_owned"' "$meta" > "$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$state_root"; then
+    rm -f -- "$tmp"
+    return 1
   fi
+}
+
+retire_agy_hook_root() {
+  local hook_root=$1 meta=$2 record_label=$3 state_root
+  state_root=$(dirname -- "$meta")
+  if [ ! -e "$hook_root" ] && [ ! -L "$hook_root" ]; then
+    if [ "$(fm_meta_get "$meta" agy_hooks_owned)" = 1 ]; then
+      agy_clear_hook_ownership_meta "$meta" "$state_root" "$(basename "$meta" .meta)" || return 1
+    fi
+    return 0
+  fi
+  if ! agy_hook_root_matches_owner "$hook_root" "$meta" "$state_root"; then
+    echo "error: retaining agy hook path $hook_root; ownership could not be proven for $record_label" >&2
+    return 1
+  fi
+  if ! rm -rf -- "$hook_root" || [ -e "$hook_root" ] || [ -L "$hook_root" ]; then
+    echo "error: agy hook root $hook_root could not be removed; retaining $record_label" >&2
+    return 1
+  fi
+  agy_clear_hook_ownership_meta "$meta" "$state_root" "$(basename "$meta" .meta)" || return 1
 }
 
 cleanup_firstmate_home_children() {
@@ -3040,7 +3083,7 @@ cleanup_firstmate_home_children() {
       fi
     fi
     if [ "$child_harness" = agy ]; then
-      retire_agy_hook_root "$sub_state/$child_id.agy-hooks" "child $child_id's durable identity record" || return 1
+      retire_agy_hook_root "$sub_state/$child_id.agy-hooks" "$child_meta" "child $child_id's durable identity record" || return 1
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
@@ -3459,7 +3502,7 @@ if [ "$KIND" = secondmate ]; then
   remove_secondmate_registry_entry "$ID"
 fi
 if [ "$TEARDOWN_META_HARNESS" = agy ]; then
-  retire_agy_hook_root "$STATE/$ID.agy-hooks" "$ID's durable task record" || exit 1
+  retire_agy_hook_root "$STATE/$ID.agy-hooks" "$META" "$ID's durable task record" || exit 1
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1

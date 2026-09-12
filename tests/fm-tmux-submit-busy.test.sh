@@ -342,6 +342,24 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
 }
 
+test_custom_busy_regex_keeps_deep_capture_agy_scoped() {
+  local dir fakebin composer
+  dir="$TMP_ROOT/custom-regex-scope"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  {
+    printf 'STALE\n'
+    for _ in $(seq 1 27); do printf 'idle\n'; done
+  } > "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_BUSY_REGEX=STALE \
+    fm_pane_busy_state "win" pi | grep -qx idle \
+    || fail "non-AGY pane must ignore a custom busy match outside its last 12 rows"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_BUSY_REGEX=STALE \
+    fm_pane_busy_state "win" agy | grep -qx busy \
+    || fail "AGY pane must retain its 40-row custom busy capture"
+  pass "fm_pane_busy_state scopes deep custom busy capture to AGY"
+}
+
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_wrapped_continuation_retries_swallowed_enter
@@ -353,3 +371,4 @@ test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes
+test_custom_busy_regex_keeps_deep_capture_agy_scoped

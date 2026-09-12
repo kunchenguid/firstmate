@@ -575,29 +575,19 @@ test_agy_threads_model_effort_and_private_hooks() {
   pass "agy receives --model, maps xhigh to --effort high, and uses firstmate-owned hooks"
 }
 
-test_agy_omits_unsupported_max_effort() {
-  local effort rec id out status launch
-  for effort in max high; do
-    id="profile-agy-$effort-z1a"
-    rec=$(make_spawn_case "profile-agy-$effort" agy "$id")
-    read_case_record "$rec"
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$PROJ_DIR" --model agy-model --effort "$effort")
-    status=$?
-    expect_code 0 "$status" "agy spawn with $effort effort should succeed"
-    assert_meta_profile "$HOME_DIR/state/$id.meta" agy agy-model "$effort"
-    launch=$(cat "$LAUNCH_LOG")
-    assert_contains "$launch" "'$FAKEBIN_DIR/agy' --dangerously-skip-permissions --model 'agy-model'" \
-      "agy $effort launch did not preserve the model flag"
-    if [ "$effort" = max ]; then
-      assert_not_contains "$launch" "--effort" \
-        "agy max launch must omit the unsupported effort flag"
-    else
-      assert_contains "$launch" "--effort 'high'" \
-        "agy high launch must pass the supported effort flag"
-    fi
-  done
-  pass "agy preserves max in metadata and omits its unsupported launch flag"
+test_agy_passes_supported_effort() {
+  local rec id=profile-agy-high-z1a out status launch
+  rec=$(make_spawn_case profile-agy-high agy "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model agy-model --effort high)
+  status=$?
+  expect_code 0 "$status" "agy spawn with high effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" agy agy-model high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/agy' --dangerously-skip-permissions --model 'agy-model' --effort 'high'" \
+    "agy high launch did not pass the supported effort flag"
+  pass "agy passes its supported high effort flag"
 }
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
@@ -1430,7 +1420,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_agy_threads_model_effort_and_private_hooks
-test_agy_omits_unsupported_max_effort
+test_agy_passes_supported_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn

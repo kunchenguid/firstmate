@@ -2340,9 +2340,12 @@ configure_secondmate_with_agy_child() {  # <case-dir>
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=local-only" \
-    "harness=agy"
+    "harness=agy" \
+    "spawn_gen=child-agy-generation" \
+    "agy_hooks_owned=1"
   : > "$home/state/child-agy.status"
   mkdir -p "$home/state/child-agy.agy-hooks"
+  printf '%s\n' child-agy-generation > "$home/state/child-agy.agy-hooks/.firstmate-spawn-gen"
   printf '%s\n' hook > "$home/state/child-agy.agy-hooks/stop"
 }
 
@@ -2383,8 +2386,9 @@ test_normal_agy_hook_cleanup_retains_record_on_failure() {
   local case_dir hook_root rc
   case_dir=$(make_case agy-normal-hook-cleanup)
   write_meta "$case_dir" local-only ship
-  printf '%s\n' 'harness=agy' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' 'harness=agy' 'agy_hooks_owned=1' >> "$case_dir/state/task-x1.meta"
   mkdir -p "$case_dir/state/task-x1.agy-hooks"
+  printf '%s\n' teardown-test-task-x1 > "$case_dir/state/task-x1.agy-hooks/.firstmate-spawn-gen"
   printf '%s\n' hook > "$case_dir/state/task-x1.agy-hooks/stop"
   wt_commit "$case_dir" "land agy task"
   add_fork_with_pushed_branch "$case_dir"

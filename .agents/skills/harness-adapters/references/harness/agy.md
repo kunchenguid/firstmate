@@ -7,6 +7,7 @@ Antigravity CLI `agy` is a verified worker adapter for CREWMATE and SCOUT tasks 
 
 - `agy` is resolved from `PATH` and refused when absent.
 - The canonical launch, model and effort flags, private hook root, and brief submission are owned by `bin/fm-spawn.sh`.
+- AGY dispatch profiles accept low, medium, high, and xhigh effort; xhigh maps to high and max is rejected by crew-dispatch validation.
 - The adapter clears inherited Antigravity and foreign-harness markers before launching a worker.
 - Child and tool processes export `ANTIGRAVITY_AGENT=1`, while exact `agy` ancestry identifies the launcher process.
 - Firstmate-owned `PreInvocation` and `Stop` hooks provide the semantic busy source, while `PostToolUse` refreshes the shared progress marker; all are retired with the task.
