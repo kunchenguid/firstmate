@@ -451,6 +451,9 @@ fm_backend_zellij_normalize_key() {  # <key>
     Enter|enter) printf 'Enter' ;;
     Escape|escape|Esc|esc) printf 'Esc' ;;
     C-c|c-c|ctrl+c|Ctrl+c|Ctrl+C|'Ctrl c'|'ctrl c') printf 'Ctrl c' ;;
+    # C-d is reachable only through `fm-send.sh --key`: no adapter returns it
+    # for interrupt or exit (agy exits with the /quit composer command), and
+    # fm_control_backend_supports_key omits it. Not empirically verified here.
     C-d|c-d|ctrl+d|Ctrl+d|Ctrl+D|'Ctrl d'|'ctrl d') printf 'Ctrl d' ;;
     # C-u clears a composer line. fm-send.sh's muse interrupt path needs it to
     # drop the prompt muse restores into the composer after Escape.

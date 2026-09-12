@@ -2968,10 +2968,8 @@ fm_backend_herdr_send_literal() {  # <target> <text>
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
-# Escape, C-c, as used by fm-send.sh --key and stuck-crewmate-recovery, plus
-# C-d, which only fm-send.sh --key reaches because no verified adapter exits on
-# it - agy's own exit is the /quit composer command) onto herdr's
-# `pane send-keys` names. Verified empirically: enter, escape/esc, and
+# Escape, C-c, as used by fm-send.sh --key and stuck-crewmate-recovery) onto
+# herdr's `pane send-keys` names. Verified empirically: enter, escape/esc, and
 # both ctrl+c/C-c all work (case-insensitive on herdr's side, but normalize
 # explicitly rather than relying on that).
 fm_backend_herdr_normalize_key() {  # <key>
@@ -2979,6 +2977,9 @@ fm_backend_herdr_normalize_key() {  # <key>
     Enter|enter) printf 'enter' ;;
     Escape|escape|Esc|esc) printf 'escape' ;;
     C-c|c-c|ctrl+c|Ctrl+C) printf 'ctrl+c' ;;
+    # C-d is reachable only through `fm-send.sh --key`: no adapter returns it
+    # for interrupt or exit (agy exits with the /quit composer command), and
+    # fm_control_backend_supports_key omits it. Not empirically verified here.
     C-d|c-d|ctrl+d|Ctrl+D) printf 'ctrl+d' ;;
     # C-u clears a composer line. fm-send.sh's muse interrupt path needs it to
     # drop the prompt muse restores into the composer after Escape.
