@@ -36,6 +36,10 @@ managed_settings_already_ready() {
 
 test_unaccepted_machine_is_refused_with_the_setup_command() {
   local config out status
+  if managed_settings_already_ready; then
+    pass "fm-claude-ready.sh: unaccepted-machine refusal (skipped: this machine records the acceptance machine-wide)"
+    return 0
+  fi
   config="$TMP_ROOT/unaccepted/claude-config"
   mkdir -p "$config"
 
@@ -64,6 +68,10 @@ test_accepted_machine_is_ready() {
 
 test_unparseable_settings_do_not_read_as_accepted() {
   local config out status
+  if managed_settings_already_ready; then
+    pass "fm-claude-ready.sh: unparseable-settings refusal (skipped: this machine records the acceptance machine-wide)"
+    return 0
+  fi
   config="$TMP_ROOT/corrupt/claude-config"
   mkdir -p "$config"
   printf 'skipDangerousModePermissionPrompt: true\n' > "$config/settings.json"

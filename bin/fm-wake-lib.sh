@@ -562,6 +562,37 @@ fm_lock_dir_writable() {
   return 0
 }
 
+# The recursive stale-lock path this file used to take built `<lock>.steal`,
+# then `.steal.steal`, without a depth bound, so the machines an upgrade reaches
+# are exactly the ones with such chains on disk. Nothing else in bin/ removes
+# one, and depth-1 arbitration cannot claim `<lock>.steal` while a leftover
+# `<lock>.steal.steal` blocks it through fm_lock_claim_blocked_by_steal, so a
+# leftover chain would wedge the primary lock forever - trading the old crash
+# for a silent hang. Clear it instead, deepest level first so no orphan is left
+# to block a later claim, and stop at the first level still owned.
+FM_LOCK_STEAL_CHAIN_MAX="${FM_LOCK_STEAL_CHAIN_MAX:-512}"
+
+fm_lock_clear_stale_steal_chain() {
+  local lockdir=$1 next pid i
+  local levels=()
+  next="$lockdir.steal"
+  while [ "${#levels[@]}" -lt "$FM_LOCK_STEAL_CHAIN_MAX" ]; do
+    { [ -e "$next" ] || [ -L "$next" ]; } || break
+    pid=$(cat "$next/pid" 2>/dev/null || true)
+    if fm_pid_alive "$pid" || fm_lock_mid_acquire_is_fresh "$next" "$pid"; then
+      return 1
+    fi
+    levels[${#levels[@]}]=$next
+    next="$next.steal"
+  done
+  i=${#levels[@]}
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    fm_lock_remove_path "${levels[$i]}" || return 1
+  done
+  return 0
+}
+
 fm_lock_mid_acquire_is_fresh() {
   local lockdir=$1 pid=$2 mid_acquire_stale
   case "$pid" in
@@ -935,14 +966,18 @@ _fm_lock_try_acquire() {
     return 0
   fi
 
+  # Classify an uncreatable lock before anything else, and independently of
+  # what is already on disk: a leftover lock or steal chain in an unwritable
+  # directory is still a permission problem, and waiting cannot clear it. A
+  # live holder is reported below only when a lock could in principle be taken.
+  if ! fm_lock_dir_writable "$(dirname "$lockdir")"; then
+    FM_LOCK_FAILURE=unwritable
+    # shellcheck disable=SC2034 # Read by callers after acquisition fails.
+    FM_LOCK_FAILURE_PATH=$(dirname "$lockdir")
+    return 1
+  fi
   if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
     # Creation failed with no lock present, so this was never contention.
-    if ! fm_lock_dir_writable "$(dirname "$lockdir")"; then
-      FM_LOCK_FAILURE=unwritable
-      # shellcheck disable=SC2034 # Read by callers after acquisition fails.
-      FM_LOCK_FAILURE_PATH=$(dirname "$lockdir")
-      return 1
-    fi
     return 1
   fi
 
@@ -982,6 +1017,10 @@ _fm_lock_try_acquire() {
     # atomic arbiter: two reclaimers can both remove the stale link, but only
     # one can recreate it, and the loser's primary claim is then refused by
     # fm_lock_claim_blocked_by_steal.
+    if ! fm_lock_clear_stale_steal_chain "$lockdir"; then
+      FM_LOCK_HELD_PID=$(cat "$lockdir.steal/pid" 2>/dev/null || true)
+      return 1
+    fi
     fm_lock_remove_path "$lockdir" || true
     if fm_lock_try_create "$lockdir"; then
       return 0

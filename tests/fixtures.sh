@@ -292,10 +292,24 @@ fm_test_run_spawn() {
   # stands in for a provisioned machine so every spawn case here exercises what
   # it is actually about; the refusal itself is covered in
   # tests/fm-claude-ready.test.sh.
+  # Provision only inside a fixture tree. fm-spawn-dispatch-profile
+  # deliberately points FM_TEST_CLAUDE_CONFIG_DIR at the bare absolute path
+  # /opt/test/claude-work for a codex spawn the readiness gate never consults,
+  # so creating it would either error or litter outside the test tree; an
+  # in-tree store that does not exist yet still needs provisioning, because the
+  # spawn is what creates it. The test applies fm_test_in_fixture_tree rather
+  # than a TMPDIR prefix, because fm_test_tmproot resolves its root with
+  # `pwd -P` and on macOS that makes the root /private/var/... while TMPDIR
+  # still reads /var/..., so a prefix comparison silently never matches.
   if [ "${FM_TEST_CLAUDE_BYPASS_UNREADY:-0}" != 1 ]; then
-    mkdir -p "${FM_TEST_CLAUDE_CONFIG_DIR:-$spawn_home/.claude}"
-    printf '{"skipDangerousModePermissionPrompt":true}\n' \
-      > "${FM_TEST_CLAUDE_CONFIG_DIR:-$spawn_home/.claude}/settings.json"
+    local ready_dir=$spawn_home/.claude
+    if [ -n "${FM_TEST_CLAUDE_CONFIG_DIR:-}" ]; then
+      ready_dir=$FM_TEST_CLAUDE_CONFIG_DIR
+    fi
+    if fm_test_in_fixture_tree "$ready_dir"; then
+      mkdir -p "$ready_dir"
+      printf '{"skipDangerousModePermissionPrompt":true}\n' > "$ready_dir/settings.json"
+    fi
   fi
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \

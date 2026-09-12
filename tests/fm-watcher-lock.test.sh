@@ -454,6 +454,69 @@ test_queued_keys_reports_an_unreadable_queue_from_a_substitution() {
   pass "an unreadable wake queue reports a failed read rather than an empty one"
 }
 
+# Regression: the recursive stale-lock path this replaced is what created
+# `<lock>.steal.steal` chains, so the machines an upgrade reaches are exactly
+# the ones carrying them, and nothing else in bin/ removes one. Depth-1
+# arbitration cannot claim `<lock>.steal` while a leftover blocks it, so a
+# chain left behind would wedge the primary lock forever - trading the old
+# crash for a silent hang.
+test_lock_clears_a_legacy_nested_steal_chain() {
+  local dir state lockdir out level i
+  dir=$(make_case lock-legacy-chain)
+  state="$dir/state"
+  lockdir="$state/.legacy.lock"
+  level=$lockdir
+  i=0
+  while [ "$i" -lt 3 ]; do
+    mkdir -p "$level"
+    printf '%s\n' 999999 > "$level/pid"
+    level="$level.steal"
+    i=$((i + 1))
+  done
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s class=%s\n" "$rc" "${FM_LOCK_FAILURE:-}"
+  ' _ "$LIB" "$lockdir")
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "a leftover nested steal chain blocked acquisition instead of being cleared: $out" ;;
+  esac
+  [ ! -e "$lockdir.steal" ] && [ ! -L "$lockdir.steal" ] \
+    || fail "the leftover steal chain was not removed"
+  [ ! -e "$lockdir.steal.steal" ] && [ ! -L "$lockdir.steal.steal" ] \
+    || fail "a deeper leftover level survived and would block a later claim"
+  pass "a legacy nested steal chain is cleared rather than wedging the lock"
+}
+
+# Regression: the required unwritable refusal must not depend on what is
+# already on disk. A leftover steal in an unwritable directory used to be
+# classified as ordinary contention, so the named permission refusal - the
+# whole point of classifying at all - was unreachable in the compound case.
+test_lock_unwritable_is_classified_despite_a_leftover_steal() {
+  local dir state locks lockdir out
+  dir=$(make_case lock-unwritable-leftover)
+  state="$dir/state"
+  locks="$dir/unwritable"
+  mkdir -p "$locks"
+  lockdir="$locks/x.lock"
+  mkdir -p "$lockdir" "$lockdir.steal"
+  printf '%s\n' 999999 > "$lockdir/pid"
+  printf '%s\n' 999999 > "$lockdir.steal/pid"
+  chmod 500 "$locks"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s class=%s path=%s\n" "$rc" "${FM_LOCK_FAILURE:-}" "${FM_LOCK_FAILURE_PATH:-}"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  chmod 700 "$locks"
+  case "$out" in
+    *"class=unwritable"*"path=$locks"*) ;;
+    *) fail "an unwritable directory holding a leftover steal was not classified as unwritable: $out" ;;
+  esac
+  pass "an unwritable directory is classified even when a leftover steal is present"
+}
+
 test_lock_empty_pid_uses_minimum_grace() {
   local dir state lockdir out
   dir=$(make_case lock-empty-grace)
@@ -1236,6 +1299,8 @@ test_lock_unwritable_dir_is_classified_not_recursed
 test_lock_acquire_wait_fails_closed_on_unwritable_dir
 test_lock_live_holder_is_reported_without_steal_chain
 test_queued_keys_reports_an_unreadable_queue_from_a_substitution
+test_lock_clears_a_legacy_nested_steal_chain
+test_lock_unwritable_is_classified_despite_a_leftover_steal
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal

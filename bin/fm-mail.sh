@@ -433,7 +433,7 @@ mail_heal() {
   # Both are generation-scoped: only evidence matching the CURRENT mailbox
   # generation is healed, so a legacy key or a stale prior-generation wake can
   # never mark a reused numeric uid as surfaced in the new mailbox.
-  local generation=$1 jgen juid jtag keyrest keygen keyuid heal_ok=0
+  local generation=$1 jgen juid jtag keyrest keygen keyuid heal_ok=0 queued_keys
   if [ -s "$WOKEN" ]; then
     while IFS=$'\t' read -r jgen juid jtag; do
       [ -n "$juid" ] || continue
@@ -461,7 +461,10 @@ mail_heal() {
   # unfinished for the next poll. Treating the second as the first would record
   # nothing and report success, and the uids it failed to heal would surface
   # again as duplicate mail wakes.
-  if queued_keys=$(fm_wake_queued_keys check 2>&1); then
+  # Capture stdout only. Folding stderr in would parse a diagnostic as queue
+  # content; letting it pass through keeps it reaching the operator, and adds
+  # no state file to the inventory docs/configuration.md owns.
+  if queued_keys=$(fm_wake_queued_keys check); then
     while IFS= read -r k; do
       keyrest="${k#mail:}"
       [ "$keyrest" = "$k" ] && continue
@@ -484,7 +487,7 @@ mail_heal() {
 $queued_keys
 EOF
   else
-    echo "fm-mail: could not read the wake queue to finish recovery; retried on next poll: $queued_keys" >&2
+    echo "fm-mail: could not read the wake queue to finish recovery; retried on next poll" >&2
     heal_ok=1
   fi
   return "$heal_ok"
