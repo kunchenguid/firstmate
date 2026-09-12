@@ -483,7 +483,8 @@ test_interrupted_handling_is_redrained_on_rearm() {
   esac
   handling_generation=$(recovery_marker_generation "$state/.watcher-down")
   handling_watcher_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).* recovery-generation=.*$/\1/p' "$dir/handling-successor-arm.out")
-  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$handling_generation" \
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch \
+    "$WATCH_ARM" --handling-delivered "$handling_generation" \
     --watcher-pid "$handling_watcher_pid" \
     || fail "confirmed prompt delivery did not begin handling"
   case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
@@ -841,9 +842,41 @@ test_arm_refuses_an_unusable_launch_confirm_window() {
   pass "watch-arm: an unusable launch confirm window refuses to arm by name"
 }
 
+assert_branch_actor_arm_refused() {
+  local home=$1 state=$2 label=$3 out status
+  shift 3
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch \
+    "$WATCH_ARM" "$@" 2>&1)
+  status=$?
+  expect_code 6 "$status" "branch $label invocation must refuse before arming: $out"
+  case "$out" in
+    *"the supervision branch never performs this action"*) ;;
+    *) fail "branch $label refusal lost the role-partition reason: $out" ;;
+  esac
+  [ ! -e "$state/.watch.lock" ] \
+    || fail "branch $label invocation reached watcher startup"
+}
+
+test_branch_actor_refuses_main_owned_arm_modes() {
+  local dir home state mode
+  dir=$(make_case branch-actor-arm-refusal)
+  home="$dir/home"
+  state="$dir/state"
+  mkdir -p "$home/data"
+
+  assert_branch_actor_arm_refused "$home" "$state" bare
+  assert_branch_actor_arm_refused "$home" "$state" arm arm
+  assert_branch_actor_arm_refused "$home" "$state" dash-arm --arm
+  assert_branch_actor_arm_refused "$home" "$state" restart --restart
+  mode=--restart
+  assert_branch_actor_arm_refused "$home" "$state" expanded-restart "$mode"
+  pass "watch-arm: branch actor cannot arm or restart the main-owned watcher"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
+test_branch_actor_refuses_main_owned_arm_modes
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_marker_publish_failure_retains_recovery_evidence
