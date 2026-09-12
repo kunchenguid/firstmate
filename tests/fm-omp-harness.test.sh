@@ -64,28 +64,46 @@ make_named_shells() {  # <dir> -> echoes <bindir>
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
-  local bin out
+  local bin out omp_ancestor=0 pid
   bin=$(make_named_shells "$TMP_ROOT/named")
+  while IFS= read -r pid; do
+    [ "$(ps -o comm= -p "$pid" 2>/dev/null | tr -d " ")" = omp ] && omp_ancestor=1
+  done <<EOF
+$(fm_harness_ancestry_pids || true)
+EOF
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
+  # A decoy launched under the test's own OMP parent genuinely has an omp
+  # ancestor, so test the anchored-name boundary directly and expect ancestry
+  # detection to preserve the real outer OMP identity.
   for decoy in ompd comp; do
-    # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-    out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-      "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
-    [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
+    ! fm_harness_process_matches "$decoy" '' \
+      || fail "'$decoy' merely contains omp and must not match by name"
+    if [ "$omp_ancestor" -eq 0 ]; then
+      # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+      out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+        "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
+      [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
+    fi
   done
   # The marker beats an inherited CLAUDECODE only under a real omp ancestor.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  # ...and is inert when it leaks into a worker with no omp ancestor.
+  # A worker with no OMP ancestor must not be relabeled by a leaked marker.
+  # When this suite itself runs under OMP, the worker has a genuine ancestor
+  # and omp is the correct result under the ancestry contract.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     bash -c '"$1"; :' _ "$HARNESS")
-  [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
+  if [ "$omp_ancestor" -eq 1 ]; then
+    [ "$out" = omp ] || fail "a worker under an omp ancestor must detect as omp, got '$out'"
+  else
+    [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
+  fi
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
 }
 
@@ -474,7 +492,8 @@ SH
   chmod +x "$repo/bin/"*.sh
   out=$(FM_GUARD_LOG="$TMP_ROOT/guard/guard.log" FM_HOME="$home" EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const handlers = new Map();
 const pi = { on(e, h) { handlers.set(e, h); }, sendMessage() {} };
 const mod = await import(pathToFileURL(process.env.EXT).href);
@@ -574,7 +593,59 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+test_omp_markers_record_outer_omp_ancestor() {
+  local repo home bin driver omp_pid out status mode
+  repo="$TMP_ROOT/nested/repo"; home="$TMP_ROOT/nested/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_TEST_SESSION_PID:?}" > "${FM_HOME:?}/state/.lock"
+printf 'OMP DIGEST source=%s\n' "$2"
+SH
+  chmod +x "$repo/bin/fm-sessionstart-run.sh"
+  driver="$TMP_ROOT/nested/drive.mjs"
+  cat > "$driver" <<'EOF'
+import { pathToFileURL } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+const handlers = new Map();
+const noop = { on() {}, registerCommand() {}, registerTool() {}, sendUserMessage() {} };
+await import(pathToFileURL(process.env.WATCH_EXT).href).then(({ default: load }) => load(noop));
+await import(pathToFileURL(process.env.GUARD_EXT).href).then(({ default: load }) => load({ on(e, h) { handlers.set(e, h); } }));
+if (process.env.MODE === "fresh") {
+  if (existsSync(`${process.env.FM_HOME}/state/.lock`)) throw new Error("fresh startup must begin without a lock");
+  if (existsSync(`${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`)) throw new Error("missing lock must not publish a marker");
+  const ctx = { sessionManager: { getSessionId: () => "fresh" } };
+  handlers.get("session_start")({}, ctx);
+  const result = await handlers.get("before_agent_start")({ prompt: "hi" }, ctx);
+  if (!result?.message?.content?.includes("OMP DIGEST source=startup")) throw new Error("startup did not complete");
+  const marker = readFileSync(`${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`, "utf8").trim().split("\n");
+  if (marker[1] !== process.env.FM_TEST_SESSION_PID || marker[1] === String(process.pid)) throw new Error("startup marker must record the outer session PID");
+  await handlers.get("session_shutdown")({}, {});
+}
+EOF
+  bin=$(make_named_shells "$TMP_ROOT/nested/bin")
+  for mode in owned fresh; do
+    rm -f "$home/state/.lock" "$home/state/.omp-watch-extension-loaded" "$home/state/.omp-turnend-extension-loaded"
+    # shellcheck disable=SC2016 # the quoted body expands inside the named shell
+    out=$(MODE="$mode" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" WATCH_EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" GUARD_EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" \
+      "$bin/omp" -c 'export FM_TEST_SESSION_PID=$$; if [ "$MODE" = owned ]; then printf "%s\n" "$$" > "$1/state/.lock"; fi; node "$2"; result=$?; exit "$result"' _ "$home" "$driver" 2>&1)
+    status=$?
+    expect_code 0 "$status" "nested omp $mode marker writer: $out"
+    [ -z "$out" ] || fail "nested omp marker writer printed output: $out"
+    omp_pid=$(cat "$home/state/.lock")
+    [ -n "$omp_pid" ] || fail "nested omp wrapper did not record its pid"
+    for marker in .omp-watch-extension-loaded .omp-turnend-extension-loaded; do
+      [ "$mode" = fresh ] && [ "$marker" = .omp-watch-extension-loaded ] && continue
+      [ "$(sed -n '2p' "$home/state/$marker")" = "$omp_pid" ] \
+        || fail "$marker must record outer omp pid $omp_pid, got $(sed -n '2p' "$home/state/$marker")"
+    done
+  done
+  pass "omp extension markers record the outer lock-owning omp ancestor from a nested worker"
+}
+
 test_detection_anchored_name_and_marker_precedence
+test_omp_markers_record_outer_omp_ancestor
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
