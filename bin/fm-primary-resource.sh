@@ -955,16 +955,11 @@ action_check() {
     fi
   fi
 
-  local backend be_ok=true argv_ok=true herdr_alert_only=false
+  local backend be_ok=true argv_ok=true
   backend=$(discover_supervisor_backend 2>/dev/null) || backend=
   [ -n "$backend" ] || backend=unknown
   case "$backend" in
-    tmux) be_ok=true ;;
-    herdr)
-      # Decide may still compute thresholds; terminal commit/helper stay disabled.
-      be_ok=true
-      herdr_alert_only=true
-      ;;
+    tmux|herdr) be_ok=true ;;
     *) be_ok=false ;;
   esac
   if printf '%s' "$ctx" | jq -e --argjson threshold "$CONTEXT_THRESHOLD" \
@@ -1064,11 +1059,6 @@ action_check() {
         return 0
       fi
       if [ "$action" = quota ] && [ "$episode_blocks" = true ]; then
-        return 0
-      fi
-      if [ "$herdr_alert_only" = true ]; then
-        pr_alert_once "$generation" "herdr-alert-only" \
-          "primary-resource alert: Herdr terminal handover unverified (live proof missing); session kept" || return 0
         return 0
       fi
       # Persist normalized evidence + generation for commit-time revalidation.
@@ -1240,17 +1230,35 @@ pr_launch_helper() {  # <incident> <primary-target> <primary-backend>
   local incident=$1 target=$2 backend=$3 cmd session hash nonce entry helper_endpoint
   entry="$SCRIPT_DIR/fm-primary-resource.sh"
   case "$backend" in
-    tmux) ;;
-    herdr)
-      # Terminal helper launch disabled until guarded live Herdr proof exists.
-      return 1
-      ;;
+    tmux|herdr) ;;
     *) return 1 ;;
   esac
   cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q helper %q' \
     "$FM_HOME" "$target" "$backend" "$entry" "$incident")
   hash=$(printf '%s' "$FM_HOME" | cksum | cut -d' ' -f1)
   nonce="$$-${RANDOM:-0}-$(pr_now)"
+  if [ "$backend" = herdr ]; then
+    # The helper needs its own terminal that never touches the captain's pane.
+    # Same shape as bin/fm-afk-launch.sh: a dedicated non-focused workspace
+    # holding one tab/pane, so closing that pane disposes of the workspace too.
+    local primary_session out wsid pane label
+    primary_session=${target%%:*}
+    [ -n "$primary_session" ] && [ "$primary_session" != "$target" ] || return 1
+    fm_backend_source herdr 2>/dev/null || return 1
+    label="fm-pr-helper-$hash-$nonce"
+    out=$(fm_backend_herdr_cli "$primary_session" workspace create \
+      --cwd "$FM_HOME" --label "$label" --no-focus 2>/dev/null) || return 1
+    wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
+    pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+    [ -n "$wsid" ] && [ -n "$pane" ] || return 1
+    if ! fm_backend_herdr_cli "$primary_session" pane run "$pane" "$cmd" >/dev/null 2>&1; then
+      # Reclaim the endpoint this attempt created rather than leaking it.
+      fm_backend_herdr_cli "$primary_session" pane close "$pane" >/dev/null 2>&1
+      return 1
+    fi
+    printf 'herdr:%s:%s:%s\n' "$primary_session" "$pane" "$wsid"
+    return 0
+  fi
   session="fm-pr-helper-$hash-$nonce"
   if ! tmux new-session -d -s "$session" "$cmd" 2>/dev/null; then
     return 1
@@ -1263,7 +1271,7 @@ pr_launch_helper() {  # <incident> <primary-target> <primary-backend>
 pr_commit_revalidate() {  # <incident> <expected-action> -> 0 if still warranted
   local incident=$1 expected=$2
   local binding harness pid session transcript ctx qjson provider verdict replacement
-  local generation evidence decision action fresh_id be_ok=true
+  local generation evidence decision action fresh_id be_ok=true argv_ok=true
 
   [ -f "$PR_DIR/binding.json" ] || return 1
   binding=$(cat -- "$PR_DIR/binding.json")
@@ -1297,9 +1305,17 @@ pr_commit_revalidate() {  # <incident> <expected-action> -> 0 if still warranted
   local backend
   backend=$(discover_supervisor_backend 2>/dev/null) || backend=
   case "$backend" in
-    tmux) be_ok=true ;;
+    tmux|herdr) be_ok=true ;;
     *) be_ok=false ;;
   esac
+
+  # Recompute the launch-reconstruction guard here too. The periodic check's
+  # verdict is not carried over: a refusal must also hold at the moment of
+  # acting, which is the whole point of revalidating.
+  if printf '%s' "$ctx" | jq -e --argjson threshold "$CONTEXT_THRESHOLD" \
+    '(.reliability == "reliable") and ((.tokens | tonumber) >= $threshold)' >/dev/null 2>&1; then
+    pr_argv_parseable "$pid" "$harness" || argv_ok=false
+  fi
 
   local id_ctx id_quota
   id_ctx=$(pr_incident_context "$session")
@@ -1316,6 +1332,7 @@ pr_commit_revalidate() {  # <incident> <expected-action> -> 0 if still warranted
     --arg gen "$generation" \
     --arg src "$harness" \
     --argjson be_ok "$be_ok" \
+    --argjson argv_ok "$argv_ok" \
     --arg idc "$id_ctx" \
     --arg idq "$id_quota" \
     '{
@@ -1327,14 +1344,20 @@ pr_commit_revalidate() {  # <incident> <expected-action> -> 0 if still warranted
       generation:$gen,
       sourceHarness:$src,
       backendSupported:$be_ok,
-      argvParseable:true,
+      argvParseable:$argv_ok,
       incidentIdContext:$idc,
       incidentIdQuota:$idq
     }')
   decision=$(printf '%s\n' "$evidence" | pr_decide) || return 1
   action=$(printf '%s' "$decision" | jq -r '.action')
   fresh_id=$(printf '%s' "$decision" | jq -r '.incidentId // empty')
-  [ "$action" = "$expected" ] || return 1
+  if [ "$action" != "$expected" ]; then
+    # Name the concrete cause when it is one an operator can act on, rather
+    # than collapsing every mismatch into "no longer warranted".
+    [ "$argv_ok" = false ] && \
+      PR_REVALIDATE_REASON='unparseable launch argv (wrapper/interpreter refused or unknown options)'
+    return 1
+  fi
   [ "$fresh_id" = "$incident" ] || return 1
   return 0
 }
@@ -1395,10 +1418,12 @@ action_commit() {
 
   # Under the resource lock: binding must still be the lock owner; re-read
   # evidence and refuse unless the same action remains warranted.
+  PR_REVALIDATE_REASON=
   if [ "${FM_PRIMARY_RESOURCE_FORCE_OWNER:-0}" != 1 ]; then
     if ! pr_commit_revalidate "$incident" "$action"; then
       pr_lock_release
-      printf 'fm-primary-resource: commit revalidation refused (action no longer warranted)\n' >&2
+      printf 'fm-primary-resource: commit revalidation refused (%s)\n' \
+        "${PR_REVALIDATE_REASON:-action no longer warranted}" >&2
       return 1
     fi
   else
@@ -1415,7 +1440,8 @@ action_commit() {
     fi
     if ! pr_commit_revalidate "$incident" "$action"; then
       pr_lock_release
-      printf 'fm-primary-resource: commit revalidation refused (action no longer warranted)\n' >&2
+      printf 'fm-primary-resource: commit revalidation refused (%s)\n' \
+        "${PR_REVALIDATE_REASON:-action no longer warranted}" >&2
       return 1
     fi
   fi
@@ -1722,12 +1748,6 @@ action_helper() {
     pr_outcome_write "$incident" "failed" "missing-supervisor-target"
     return 1
   }
-  case "$backend" in
-    herdr)
-      pr_outcome_write "$incident" "failed" "herdr-alert-only"
-      return 1
-      ;;
-  esac
   launch_cmd=$(cat -- "$PR_DIR/launch/$incident.cmd" 2>/dev/null || true)
   [ -n "$launch_cmd" ] || { pr_outcome_write "$incident" "failed" "missing-launch-cmd"; exit 1; }
 
