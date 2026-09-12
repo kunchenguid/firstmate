@@ -2,11 +2,13 @@
 # Ensure a project worktree follows the agent-memory file convention.
 # AGENTS.md is the real project-intrinsic knowledge file; CLAUDE.md is a
 # real regular file whose canonical content is the two-line @AGENTS.md pointer
-# that Claude Code inlines at load time. Creates a minimal AGENTS.md skeleton
+# that Claude Code inlines at load time, unless an existing correct symlink is
+# explicitly retained by the two project-owned marks documented below.
+# Creates a minimal AGENTS.md skeleton
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
 # file present (unless it is already the canonical pointer), converts a correct
-# CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
-# distinct real files or wrong symlinks.
+# CLAUDE.md -> AGENTS.md symlink into the pointer file by default, and refuses
+# to clobber distinct real files or wrong symlinks.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
@@ -15,6 +17,12 @@
 # Projects may place this mark at the start of the file and retain equivalent
 # maintenance guidance under their own heading. It declares guidance is present, not
 # permission to remove governance. No prose equivalence is inferred.
+# A project may retain an existing correct CLAUDE.md -> AGENTS.md symlink by
+# placing this exact second line immediately after that first-line mark (LF or CRLF):
+# <!-- firstmate:keep-claude-symlink -->
+# The helper never creates or retargets a symlink. A missing or misplaced
+# second-line mark keeps the default pointer conversion; a wrong target remains
+# a conflict.
 # Owns the canonical CLAUDE.md pointer content (the exact two-line @AGENTS.md
 # form). A real-file pointer cannot follow a write into AGENTS.md, which is why
 # the installer never creates a CLAUDE.md symlink.
@@ -37,6 +45,13 @@ canonical section, use this exact first line of AGENTS.md (LF or CRLF):
 <!-- firstmate:maintained-by-project -->
 The mark declares retained guidance, not permission to remove governance.
 Without the first-line mark or exact canonical heading, the helper adds the section.
+
+To retain an existing correct CLAUDE.md -> AGENTS.md symlink, place this exact
+second line immediately after the first-line project-owned mark (LF or CRLF):
+<!-- firstmate:keep-claude-symlink -->
+The helper never creates or retargets a symlink. Without both marks in those
+positions, it converts a correct symlink to the canonical @AGENTS.md pointer.
+A CLAUDE.md symlink to any other target remains a conflict.
 EOF
 }
 
@@ -162,6 +177,13 @@ PY
   return 1
 }
 
+keeps_correct_claude_symlink() {
+  sed -n '1p' "$AGENTS" | grep -Fqx -e '<!-- firstmate:maintained-by-project -->' \
+    -e $'<!-- firstmate:maintained-by-project -->\r' &&
+    sed -n '2p' "$AGENTS" | grep -Fqx -e '<!-- firstmate:keep-claude-symlink -->' \
+      -e $'<!-- firstmate:keep-claude-symlink -->\r'
+}
+
 # Refuse a case-variant real memory file (issue #389). On a case-insensitive
 # filesystem an existing lowercase agents.md satisfies every [ -e AGENTS.md ]
 # test below, so the script would emit a CLAUDE.md pointer whose @AGENTS.md
@@ -196,6 +218,10 @@ if [ -e "$AGENTS" ]; then
   if [ -L "$CLAUDE" ]; then
     if is_correct_claude_symlink; then
       ensure_maintenance_section
+      if keeps_correct_claude_symlink; then
+        echo "unchanged: AGENTS.md with project-retained CLAUDE.md -> AGENTS.md symlink in $DIR"
+        exit 0
+      fi
       install_claude_pointer
       if [ "$MAINT_INJECTED" -eq 1 ]; then
         echo "updated: added ## Maintaining this file to AGENTS.md and wrote CLAUDE.md @AGENTS.md pointer in $DIR"
