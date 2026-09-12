@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { measure, thread, answer } from '../src/core/findings.mjs';
-const c = { beaconSeconds: 300, poolRatio: .9, idleSeconds: 900, loopSeconds: 5400, loopAttempts: 2 };
+const c = { beaconSeconds: 300, poolRatio: .9, idleSeconds: 900, busySilentSeconds: 3600, loopSeconds: 5400, loopAttempts: 2 };
 const worker = { id: 'sample', last: 'working: waiting', lines: [], changed: 1000, age: 9000, busy: 'idle', idleAt: 1000 };
 const pr = { url: 'https://github.com/example/repo/pull/1', head: 'fm/sample', state: 'open', proof: true };
 const state = { workers: [], prs: [], beaconAge: 0, beaconAt: 10000, used: 0, capacity: 10, now: 10000 };
@@ -10,6 +10,7 @@ for (const [rule, positive, contrary] of [
   ['stale-beacon', { beaconAge: 301 }, { beaconAge: 300 }],
   ['pool-near-cap', { used: 9 }, { used: 8 }],
   ['silent-idle', { workers: [worker] }, { workers: [{ ...worker, busy: 'unknown' }] }],
+  ['busy-but-silent', { workers: [{ ...worker, busy: 'busy' }] }, { workers: [{ ...worker, busy: 'idle' }] }],
   ['repeat-failure', { workers: [{ ...worker, lines: Array(3).fill('blocked: FAIL alpha') }] }, { workers: [{ ...worker, lines: ['FAIL alpha', 'FAIL beta', 'FAIL alpha'] }] }],
   ['missing-pr-proof', { workers: [{ ...worker, last: `done: PR ${pr.url}`, pr: { ...pr, proof: false } }] }, { workers: [{ ...worker, last: `done: PR ${pr.url}`, pr }] }],
   ['ownerless-pr', { prs: [pr] }, { prs: [pr], workers: [{ ...worker, pr }] }],
@@ -19,6 +20,7 @@ for (const [rule, positive, contrary] of [
 test('unknown, held, truncated or newly idle evidence never becomes an idle cut', () => {
   for (const patch of [{ busy: 'busy' }, { busy: 'unknown' }, { idleAt: null }, { idleAt: state.now }, { truncated: true }, ...['paused [key=x]: wait', 'needs-decision: choice', 'done: ready', 'parked: hold'].map(last => ({ last }))]) assert.ok(!rules({ workers: [{ ...worker, ...patch }] }).includes('silent-idle'));
   assert.ok(!rules({ beaconAge: null, poolComplete: false, used: 10 }).includes('pool-near-cap'));
+  for (const last of ['blocked [key=stalled]: old', 'blocked [key=stalled-after-interrupt]: inspect']) assert.ok(!rules({ workers: [{ ...worker, busy: 'busy', last }] }).includes('busy-but-silent'));
 });
 test('age of the last status is not evidence of a 90-minute loop', () => {
   const w = { ...worker, lines: ['FAIL alpha', 'FAIL alpha'] };

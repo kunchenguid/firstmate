@@ -3035,6 +3035,77 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
 # demand-deep-inspection marker - never an
 # automatic interrupt or restart.
 
+test_busy_silent_stalls_and_recovers_once() {
+  local dir state fakebin out capture window task control slack pid sig key
+  dir=$(make_case busy-silent); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; window="test:fm-busy-silent"; task=busy-silent
+  control="$dir/control"; slack="$dir/slack"
+  printf 'Working...\n' > "$capture"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/$task.meta"
+  record_pi_busy "$state" "$task"
+  printf 'working: old event\n' > "$state/$task.status"
+  set_mtime "$(( $(date +%s) - 10 ))" "$state/$task.status"
+  sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  cat > "$control" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$CONTROL_LOG"
+SH
+  cat > "$slack" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SLACK_LOG"
+SH
+  chmod +x "$control" "$slack"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CONTROL_BIN="$control" FM_SLACK_POST_BIN="$slack" \
+    CONTROL_LOG="$dir/control.log" SLACK_LOG="$dir/slack.log" \
+    FM_BUSY_SILENT_SECS=1 FM_BUSY_SILENT_RECOVERY_SECS=300 FM_BUSY_TURN_MAX_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "unchanged busy pane did not become stalled: $(cat "$out")"; }
+  [ "$(grep -c '^busy-silent interrupt$' "$dir/control.log" 2>/dev/null || true)" -eq 1 ] \
+    || fail "stalled busy pane did not interrupt exactly once"
+  [ "$(grep -c '^message ' "$dir/slack.log" 2>/dev/null || true)" -eq 1 ] \
+    || fail "stalled busy pane did not post one Slack line"
+  grep -F 'blocked [key=stalled]: busy ' "$state/$task.status" >/dev/null \
+    || fail "stalled busy pane did not append the stalled status"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the stalled wake"
+  sleep 1.1
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CONTROL_BIN="$control" FM_SLACK_POST_BIN="$slack" \
+    CONTROL_LOG="$dir/control.log" SLACK_LOG="$dir/slack.log" \
+    FM_BUSY_SILENT_SECS=1 FM_BUSY_SILENT_RECOVERY_SECS=1 FM_BUSY_TURN_MAX_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "silent recovery did not finish: $(cat "$out")"; }
+  [ "$(grep -c '^busy-silent interrupt$' "$dir/control.log" 2>/dev/null || true)" -eq 1 ] \
+    || fail "silent recovery interrupted more than once"
+  grep -F 'blocked [key=stalled-after-interrupt]' "$state/$task.status" >/dev/null \
+    || fail "silent recovery did not append its final status"
+
+  task=busy-silent-changing; window="test:fm-busy-silent-changing"; capture="$dir/changing-pane.txt"
+  printf 'Working... first\n' > "$capture"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/$task.meta"
+  record_pi_busy "$state" "$task"
+  printf 'working: old event\n' > "$state/$task.status"
+  set_mtime "$(( $(date +%s) - 10 ))" "$state/$task.status"
+  sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CONTROL_BIN="$control" FM_SLACK_POST_BIN="$slack" \
+    CONTROL_LOG="$dir/changing-control.log" SLACK_LOG="$dir/changing-slack.log" \
+    FM_BUSY_SILENT_SECS=1 FM_BUSY_SILENT_RECOVERY_SECS=300 FM_BUSY_TURN_MAX_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "changing-hash watcher did not complete its first cycle"; }
+  printf 'Working... second\n' > "$capture"
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "changing-hash watcher did not survive the changed capture"; }
+  [ ! -s "$dir/changing-control.log" ] || fail "a changing capture hash triggered recovery"
+  reap "$pid"
+  pass "busy-silent requires old status plus unchanged pane bytes and interrupts once"
+}
+
 test_busy_pane_below_turn_age_bound_is_absorbed() {
   local dir state fakebin out capture_file window key sig pid
   dir=$(make_case busy-below-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4875,6 +4946,7 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
   exit "$?"
 fi
 
+test_busy_silent_stalls_and_recovers_once
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure

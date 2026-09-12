@@ -205,7 +205,7 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-slack-lib.sh"
   : >"$repo/bin/fm-pending-reply-lib.sh"
   : >"$repo/bin/fm-control-lib.sh"
-  : >"$repo/bin/fm-timeout-lib.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   : >"$repo/bin/fm-procevent-quota.sh"
   : >"$repo/bin/fm-quota-axi-lib.sh"
   : >"$repo/bin/fm-quota-choose.sh"
@@ -258,6 +258,7 @@ init_primary_and_linked_worktree() {
   for tree in "$repo" "$linked"; do
     mkdir -p "$tree/bin" "$tree/tests"
     cp "$RUNNER" "$tree/bin/fm-test-run.sh"
+    cp "$ROOT/bin/fm-timeout-lib.sh" "$tree/bin/fm-timeout-lib.sh"
     chmod +x "$tree/bin/fm-test-run.sh"
     cat >"$tree/tests/probe.test.sh" <<PROBE
 #!/usr/bin/env bash
@@ -921,7 +922,7 @@ test_script_list_uses_bounded_automatic_concurrency() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-script-list.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
-  rm -f "$repo/bin/fm-timeout-lib.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   # fm-cd-pretool-check and fm-pr-merge are individually proven isolated;
   # fm-backend-orca is not, so it must still land in the serial tail.
   for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh fm-backend-orca.test.sh; do
@@ -972,14 +973,17 @@ assert automatic["selection"].split(";")[-1] == f"jobs={expected}"
 assert serial["selection"].split(";")[-1] == "jobs=1"
 PYJSON
 
-  (cd "$repo" && bin/fm-test-run.sh tests/fm-backend-orca.test.sh) \
+  # An explicit zero keeps the historical unbounded mode available even when
+  # the timeout helper is absent.
+  rm -f "$repo/bin/fm-timeout-lib.sh"
+  (cd "$repo" && bin/fm-test-run.sh --per-script-timeout-secs 0 tests/fm-backend-orca.test.sh) \
     >"$tmp/named.out" 2>"$tmp/named.err" \
-    || fail "a named script unexpectedly required a timeout helper: $(cat "$tmp/named.err")"
+    || fail "an explicit unbounded script unexpectedly required a timeout helper: $(cat "$tmp/named.err")"
   grep -Eq '^FM_TEST_END .+ tests/fm-backend-orca\.test\.sh exit=0 ' "$tmp/named.out" \
-    || fail "a named script did not run without an automatic bound: $(cat "$tmp/named.out")"
+    || fail "an explicitly unbounded named script did not run: $(cat "$tmp/named.out")"
 
   rm -rf "$tmp"
-  pass "a plain script list defaults to bounded automatic concurrency without an automatic timeout"
+  pass "a plain script list defaults to bounded automatic concurrency and explicit zero remains unbounded"
 }
 
 test_family_proofs_run_in_separate_concurrent_phases() {
@@ -1190,6 +1194,7 @@ test_lane_selection_grammar_is_the_published_lane_label() {
   runner="$repo/bin/fm-test-run.sh"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   # fm-daemon is neither proven-isolated nor Herdr-gated, so it is the whole
   # portable serial remainder here; the smoke suite is the whole Herdr family.
   printf '#!/usr/bin/env bash\necho "ok - serial fixture"\n' >"$repo/tests/fm-daemon.test.sh"
@@ -1717,6 +1722,7 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   # Two members of the proven residual family, plus a test basename the family
   # map has never seen - the shape of any test added tomorrow.
@@ -1815,6 +1821,8 @@ SH
   [ "$rc" -ne 0 ] || fail "a terminated script must fail the run: $(cat "$tmp/out")"
   [ "$((ended - began))" -lt 120 ] \
     || fail "the per-script bound did not stop a 600s hang (took $((ended - began))s)"
+  grep -Fq "FM_TEST_TIMEOUT script=$hang after=3s" "$tmp/out" \
+    || fail "the timeout diagnostic was not emitted: $(cat "$tmp/out")"
   grep -Fq 'exceeded the per-script bound' "$tmp/out" \
     || fail "the terminated script was not named: $(cat "$tmp/out")"
   grep -Eq 'FM_TEST_END .* exit=124 ' "$tmp/out" \
@@ -1857,6 +1865,7 @@ test_max_wall_ms_is_a_result_not_advice() {
   fast=tests/fm-budget-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   cat >"$repo/$fast" <<'SH'
 #!/usr/bin/env bash
 sleep 1
@@ -1921,6 +1930,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then

@@ -1,10 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object", "additionalProperties": false,
-  "required": ["beaconSeconds", "idleSeconds", "loopSeconds", "loopAttempts", "poolRatio", "quietSeconds", "forgeSeconds", "repositories", "poolFiles", "roles"],
+  "required": ["beaconSeconds", "idleSeconds", "busySilentSeconds", "loopSeconds", "loopAttempts", "poolRatio", "quietSeconds", "forgeSeconds", "repositories", "poolFiles", "roles"],
   "properties": {
     "beaconSeconds": {"type":"number", "minimum":1},
     "idleSeconds": {"type":"number", "minimum":1},
+    "busySilentSeconds": {"type":"number", "minimum":1},
     "loopSeconds": {"type":"number", "minimum":1},
     "loopAttempts": {"type":"integer", "minimum":2, "maximum":3},
     "poolRatio": {"type":"number", "minimum":0.01, "maximum":1},

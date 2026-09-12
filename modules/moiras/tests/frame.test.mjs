@@ -39,6 +39,7 @@ test('reviewed arc stays among the hoods, and a seeded idle beat moves only one 
   assert.match(plain(frame({ findings: [finding] })), /\? 12345678  repeat-failure/);
   assert.ok(!plain(frame({ findings: [finding] })).includes(finding.id));
   assert.ok(plainStatus({ findings: [finding] }).includes(finding.id));
+  assert.match(plain(frame({ workers: [{ id: 'sample', harness: 'pi', model: 'x', effort: 'medium', busy: 'busy', age: 3600, last: 'working: wait' }], findings: [{ ...finding, rule: 'busy-but-silent' }] })), /⚠️/);
 });
 test('CLI reasoning honors the home harness policy before invoking a model', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'moiras-policy-')), sentinel = path.join(home, 'invoked');

@@ -38,7 +38,9 @@ export function frame(data, elapsed = 0, width = 100, height = 30) {
   if (!workers.length) line(start, 'No threads to measure. Even fate gets a quiet afternoon.', 2);
   workers.slice(page * room, (page + 1) * room).forEach((w, i) => {
     const age = Number.isFinite(w.age) ? Math.max(0, Math.floor((w.age + ageOffset) / 60)) : null, bars = age === null ? 0 : Math.min(8, Math.floor(age / 10));
-    line(start + i * 2, `${w.id}  ${w.harness}/${w.model}  ${w.effort}  ${w.busy ?? 'unknown'}`);
+    const warning = findings.some(f => f.rule === 'busy-but-silent' && f.task === w.id);
+    if (warning) { put(2, start + i * 2, '⚠️', 5); put(6, start + i * 2, safe(`${w.id}  ${w.harness}/${w.model}  ${w.effort}  ${w.busy ?? 'unknown'}`)); }
+    else line(start + i * 2, `${w.id}  ${w.harness}/${w.model}  ${w.effort}  ${w.busy ?? 'unknown'}`);
     put(2, start + i * 2 + 1, '━'.repeat(bars) + '┄'.repeat(8 - bars), 4);
     put(12, start + i * 2 + 1, safe(`${age === null ? '?' : age}m since status  ${w.last}`), 2);
   });

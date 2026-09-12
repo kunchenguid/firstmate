@@ -3,6 +3,7 @@ import { safe } from '../../../fm-state-reader/src/index.mjs';
 export const serviceId = 'fm-moiras';
 export const digest = text => createHash('sha256').update(text).digest('hex').slice(0, 24);
 const held = text => /^(done|paused|parked|needs-decision)(?:\s|:)/.test(text);
+const busySilentHeld = text => /^blocked \[key=stalled(?:-after-interrupt)?\]/.test(text);
 const failures = w => w.lines.map(l => l.match(/(?:^|:\s*)(?:FAIL(?:ED)?|failing test|test failed)[: ]+(.+)/i)?.[1]);
 export function episodes(workers, previous, now) {
   return Object.fromEntries(workers.flatMap(w => {
@@ -35,6 +36,7 @@ export function measure(s, c) {
   if (s.poolComplete !== false && s.capacity && s.used / s.capacity >= c.poolRatio) add('pool-near-cap', 'pool', [`${s.used}/${s.capacity} leases; threshold ${c.poolRatio}`]);
   for (const w of s.workers) {
     if (w.truncated) continue;
+    if (w.busy === 'busy' && Number.isFinite(w.age) && w.age >= c.busySilentSeconds && !held(w.last) && !busySilentHeld(w.last)) add('busy-but-silent', w.id, [`status at ${w.changed}; busy marker still active for ${Math.floor(w.age)}s`, w.last]);
     if (w.busy === 'idle' && Number.isFinite(w.idleAt) && w.age > c.idleSeconds && s.now - w.idleAt > c.idleSeconds && !held(w.last)) add('silent-idle', w.id, [`status at ${w.changed}; idle since ${w.idleAt}`, w.last]);
     const failed = failures(w), repeated = failed.length === 3 && failed.every(x => x && x === failed[0]);
     if (repeated) add('repeat-failure', w.id, w.lines);

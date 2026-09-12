@@ -33,6 +33,7 @@ export async function observe({ home, root, configFile, messages, notify = () =>
           onNotice: notify }, c, now);
         clearTimeout(deadline);
         const boundaries = [c.repositories.length ? now + c.forgeSeconds : Infinity, current.beaconAt === null ? Infinity : current.beaconAt + c.beaconSeconds + 1,
+          ...current.workers.filter(w => w.busy === 'busy').map(w => (w.changed ?? now) + c.busySilentSeconds + 1),
           ...current.workers.filter(w => w.busy === 'idle').map(w => Math.max(w.changed ?? now, w.idleAt ?? now) + c.idleSeconds + 1),
           ...current.workers.filter(w => Number.isFinite(w.loopSince)).map(w => w.loopSince + c.loopSeconds + 1)].filter(t => Number.isFinite(t) && t > now);
         if (boundaries.length) deadline = setTimeout(update, Math.min(2147483647, Math.max(1000, (Math.min(...boundaries) - now) * 1000)));

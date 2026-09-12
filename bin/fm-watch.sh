@@ -60,9 +60,9 @@
 #                          every other pane goes through the same wedge timer and
 #                          surfaces with the identical "stale: ..." reason,
 #                          escalation count, and demand-deep-inspection marker,
-#                          for human inspection only - never an automatic
-#                          interrupt, signal, or restart of the worker or its
-#                          tool process.
+#                          for human inspection only. The separate busy-silent
+#                          guard is the sole bounded recovery path: it interrupts
+#                          once, never kills or relaunches the worker.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -257,10 +257,23 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # non-busy stale - so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only, never an
 # automatic interrupt, signal, or restart - unless the crew declared the wait
-# itself, which takes the long pause cadence instead. Set generously above
+# itself, which takes the long pause cadence instead. The separate busy-silent
+# guard below handles the stronger two-record silence proof and its one interrupt.
+# Set generously above
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+# A busy pane is not progress when neither its status log nor its captured bytes
+# have moved for an hour. This guard is separate from BUSY_TURN_MAX_SECS because
+# a completed-turn marker can be stale while a status event and pane capture are
+# still proving the current quiet interval.
+BUSY_SILENT_SECS=${FM_BUSY_SILENT_SECS:-3600}
+case "$BUSY_SILENT_SECS" in ''|*[!0-9]*|0) BUSY_SILENT_SECS=3600 ;; esac
+BUSY_SILENT_RECOVERY_SECS=${FM_BUSY_SILENT_RECOVERY_SECS:-300}
+case "$BUSY_SILENT_RECOVERY_SECS" in ''|*[!0-9]*|0) BUSY_SILENT_RECOVERY_SECS=300 ;; esac
+BUSY_SILENT_CONTROL_BIN=${FM_CONTROL_BIN:-$SCRIPT_DIR/fm-control.sh}
+BUSY_SILENT_SLACK_BIN=${FM_SLACK_POST_BIN:-$SCRIPT_DIR/fm-slack-post.sh}
+BUSY_SILENT_HANDLED=0
 # A local secondmate's foreign queue is checked on every poll, but only after this
 # bounded interval with no drain progress can it produce a parent notification.
 # A healthy mate drains its queue between turns, not inside one, so this default
@@ -1145,6 +1158,192 @@ busy_turn_over_age() {  # <task>
   progress="$STATE/$task.progress"
   if [ -f "$progress" ] && [ "$progress" -nt "$f" ]; then f="$progress"; fi
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+}
+
+busy_silent_marker_value() {  # <file> <key>
+  awk -F= -v wanted="$2" '$1 == wanted { value = substr($0, index($0, "=") + 1) } END { if (value != "") print value }' "$1" 2>/dev/null
+}
+
+busy_silent_write_marker() {  # <file> <key=value>...
+  local file=$1 tmp line
+  shift
+  tmp=$(mktemp "$file.tmp.XXXXXX" 2>/dev/null) || return 1
+  {
+    for line in "$@"; do printf '%s\n' "$line"; done
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
+busy_silent_status_size() {
+  local size
+  size=$(wc -c < "$1" 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$size"
+}
+
+busy_silent_status_event_changed() {  # <status> <mtime> <size>
+  local status=$1 old_mtime=$2 old_size=$3 mtime size
+  mtime=$(stat_mtime "$status") || return 1
+  size=$(busy_silent_status_size "$status") || return 1
+  [ "$mtime" != "$old_mtime" ] || [ "$size" != "$old_size" ]
+}
+
+busy_silent_post_slack() {  # <task> <minutes> <last-event>
+  local task=$1 minutes=$2 last=$3 text
+  text="⚠️ worker $task stalled: busy ${minutes} min, last event $last"
+  [ -x "$BUSY_SILENT_SLACK_BIN" ] || return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$BUSY_SILENT_SLACK_BIN" message "$text" \
+    >/dev/null 2>>"$TRIAGE_LOG" || true
+}
+
+busy_silent_record() {  # <window> <task> <hash> <status> <mtime> <size> <age>
+  local win=$1 task=$2 hash=$3 status=$4 mtime=$5 size=$6 age=$7 marker line minutes after_size after_mtime last
+  marker="$STATE/.busy-silent-$(window_key "$win")"
+  minutes=$((age / 60))
+  last=$(last_status_line "$status")
+  line="blocked [key=stalled]: busy ${minutes} min, last event $last"
+  # Claim the recovery stage before any external call. A watcher restart after
+  # this point can therefore never send a second automatic interrupt.
+  busy_silent_write_marker "$marker" \
+    phase=interrupted task="$task" hash="$hash" started="$(date +%s)" \
+    interrupt_at="$(date +%s)" status_mtime="$mtime" status_size_before="$size" \
+    status_size_after=0 || return 1
+  fm_wake_status_mark_current "$STATE" "$status" || return 1
+  fm_wake_status_append_self_announced "$STATE" "$status" "$line" >/dev/null 2>&1 || return 1
+  after_size=$(busy_silent_status_size "$status" || printf '%s' "$size")
+  after_mtime=$(stat_mtime "$status" || printf '%s' "$mtime")
+  busy_silent_write_marker "$marker" \
+    phase=interrupted task="$task" hash="$hash" started="$(date +%s)" \
+    interrupt_at="$(date +%s)" status_mtime="$after_mtime" status_size_before="$size" \
+    status_size_after="$after_size" || return 1
+  busy_silent_post_slack "$task" "$minutes" "$last"
+  if [ -x "$BUSY_SILENT_CONTROL_BIN" ]; then
+    "$BUSY_SILENT_CONTROL_BIN" "$task" interrupt >/dev/null 2>>"$TRIAGE_LOG" || \
+      triage_log "busy-silent interrupt was not confirmed: $task"
+  else
+    triage_log "busy-silent interrupt helper is unavailable: $BUSY_SILENT_CONTROL_BIN"
+  fi
+  BUSY_SILENT_HANDLED=1
+  return 0
+}
+
+busy_silent_finish() {  # <window> <task> <hash> <status> <mtime> <size> <age> <marker>
+  local win=$1 task=$2 hash=$3 status=$4 mtime=$5 size=$6 age=$7 marker=$8 line after_size after_mtime
+  line="blocked [key=stalled-after-interrupt]: no status event after interrupt; MAIN must inspect"
+  fm_wake_status_mark_current "$STATE" "$status" || return 1
+  fm_wake_status_append_self_announced "$STATE" "$status" "$line" >/dev/null 2>&1 || return 1
+  after_size=$(busy_silent_status_size "$status" || printf '%s' "$size")
+  after_mtime=$(stat_mtime "$status" || printf '%s' "$mtime")
+  busy_silent_write_marker "$marker" phase=final task="$task" hash="$hash" final_at="$(date +%s)" \
+    status_mtime="$after_mtime" status_size_after="$after_size" || return 1
+  BUSY_SILENT_HANDLED=1
+  return 0
+}
+
+# Returns 0 when an active stalled recovery marker owns this pane, otherwise 1.
+# It only mutates private guard markers and emits the two required status events;
+# the existing pane-staleness and pause semantics remain the final fallback.
+busy_silent_check() {  # <window> <task> <hash> <busy-flag>
+  local win=$1 task=$2 hash=$3 busy=$4 status marker candidate
+  local now mtime size status_age candidate_task candidate_hash candidate_since candidate_mtime candidate_size
+  local phase interrupt_at status_after marker_task marker_hash age reason
+  BUSY_SILENT_HANDLED=0
+  [ -n "$task" ] || return 1
+  status="$STATE/$task.status"
+  marker="$STATE/.busy-silent-$(window_key "$win")"
+  candidate="$STATE/.busy-silent-since-$(window_key "$win")"
+  if [ ! -f "$status" ]; then
+    rm -f "$candidate"
+    return 1
+  fi
+  mtime=$(stat_mtime "$status") || { rm -f "$candidate"; return 1; }
+  size=$(busy_silent_status_size "$status") || { rm -f "$candidate"; return 1; }
+  now=$(date +%s)
+  case "$mtime:$size:$now" in *[!0-9:]*|:*|*::*) rm -f "$candidate"; return 1 ;; esac
+  status_age=$((now - mtime))
+  [ "$status_age" -ge 0 ] || status_age=0
+  if [ -L "$marker" ] || { [ -e "$marker" ] && [ ! -f "$marker" ]; }; then
+    triage_log "busy-silent marker is unsafe: $marker"
+    return 1
+  fi
+  if [ -L "$candidate" ] || { [ -e "$candidate" ] && [ ! -f "$candidate" ]; }; then
+    triage_log "busy-silent candidate marker is unsafe: $candidate"
+    return 1
+  fi
+
+  if [ -f "$marker" ]; then
+    phase=$(busy_silent_marker_value "$marker" phase)
+    marker_task=$(busy_silent_marker_value "$marker" task)
+    marker_hash=$(busy_silent_marker_value "$marker" hash)
+    status_after=$(busy_silent_marker_value "$marker" status_size_after)
+    case "$phase:$status_after" in
+      interrupted:[0-9]*)
+        if [ "$marker_task" != "$task" ] || [ "$marker_hash" != "$hash" ]; then
+          rm -f "$marker" "$candidate"
+          return 1
+        fi
+        interrupt_at=$(busy_silent_marker_value "$marker" interrupt_at)
+        case "$interrupt_at" in ''|*[!0-9]*) rm -f "$marker" ;; *)
+          if busy_silent_status_event_changed "$status" \
+              "$(busy_silent_marker_value "$marker" status_mtime)" "$status_after"; then
+            rm -f "$marker" "$candidate"
+            return 1
+          fi
+          age=$((now - interrupt_at)); [ "$age" -ge 0 ] || age=0
+          if [ "$age" -ge "$BUSY_SILENT_RECOVERY_SECS" ]; then
+            busy_silent_finish "$win" "$task" "$hash" "$status" "$mtime" "$size" "$age" "$marker" || return 1
+            reason="check: stalled-after-interrupt: $task remained silent for ${age}s"
+            fm_wake_append check "busy-silent:$task" "$reason" || exit 1
+            wake "$reason"
+          fi
+          BUSY_SILENT_HANDLED=1
+          return 0
+          ;;
+        esac
+        ;;
+      final:[0-9]*)
+        if [ "$marker_task" != "$task" ] || [ "$marker_hash" != "$hash" ]; then
+          rm -f "$marker" "$candidate"
+          return 1
+        fi
+        if busy_silent_status_event_changed "$status" \
+            "$(busy_silent_marker_value "$marker" status_mtime)" "$status_after"; then
+          rm -f "$marker" "$candidate"
+          return 1
+        fi
+        BUSY_SILENT_HANDLED=1
+        return 0
+        ;;
+      *)
+        triage_log "busy-silent marker is malformed: $marker"
+        return 1
+        ;;
+    esac
+  fi
+
+  [ "$busy" -eq 0 ] || { rm -f "$candidate"; return 1; }
+  candidate_task=$(busy_silent_marker_value "$candidate" task)
+  candidate_hash=$(busy_silent_marker_value "$candidate" hash)
+  candidate_since=$(busy_silent_marker_value "$candidate" since)
+  candidate_mtime=$(busy_silent_marker_value "$candidate" status_mtime)
+  candidate_size=$(busy_silent_marker_value "$candidate" status_size)
+  case "$candidate_task:$candidate_hash:$candidate_since:$candidate_mtime:$candidate_size" in
+    "$task":"$hash":[0-9]*:"$mtime":"$size") ;;
+    *)
+      busy_silent_write_marker "$candidate" task="$task" hash="$hash" since="$now" \
+        status_mtime="$mtime" status_size="$size" || return 1
+      return 1
+      ;;
+  esac
+  case "$candidate_since" in ''|*[!0-9]*) rm -f "$candidate"; return 1 ;; esac
+  age=$((now - candidate_since)); [ "$age" -ge 0 ] || { rm -f "$candidate"; return 1; }
+  [ "$age" -ge "$BUSY_SILENT_SECS" ] || return 1
+  [ "$status_age" -ge "$BUSY_SILENT_SECS" ] || return 1
+  busy_silent_record "$win" "$task" "$hash" "$status" "$mtime" "$size" "$age" || return 1
+  reason="check: busy-but-silent: $task busy ${age}s with no status event or pane bytes for ${BUSY_SILENT_SECS}s"
+  fm_wake_append check "busy-silent:$task" "$reason" || exit 1
+  wake "$reason"
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -2733,6 +2932,7 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    busy_silent_check "$w" "$task" "$h" "$busy_now" || true
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -2871,7 +3071,8 @@ EOF
         # then route it through busy_turn_bound_check, which hands the crossed
         # bound to the same wedge timer unless the crew declared the wait itself.
         paused_bound=1
-        if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task" \
+        if [ "$busy_now" -eq 0 ] && [ "$BUSY_SILENT_HANDLED" -eq 0 ] \
+           && busy_turn_over_age "$task" \
            && [ "$WINDOW_BUSY_VERDICT" != 'busy claude-hook' ]; then
           busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
         else
@@ -2890,7 +3091,8 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       paused_bound=1
-      if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task" \
+      if [ "$busy_now" -eq 0 ] && [ "$BUSY_SILENT_HANDLED" -eq 0 ] \
+         && busy_turn_over_age "$task" \
          && [ "$WINDOW_BUSY_VERDICT" != 'busy claude-hook' ]; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
       else

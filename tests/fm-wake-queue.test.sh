@@ -1782,6 +1782,44 @@ SH
   pass "bounded acquire hands ownership to the waiting caller after contention"
 }
 
+# Every ordinary lock wait has a finite default now. The outer timeout keeps
+# this regression bounded against the pre-fix unbounded implementation, while
+# the inner result must identify the live holder rather than silently acquiring.
+test_default_lock_wait_deadline_reports_holder() {
+  local dir state lock holder_pid out rc
+  dir=$(make_case default-lock-deadline)
+  state="$dir/state"
+  lock="$state/.fixture.lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    printf "ready\n" > "$3"
+    sleep 30
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/holder.ready" &
+  holder_pid=$!
+  local i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/holder.ready" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "default-deadline holder never acquired its lock"; }
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  set +e
+  # shellcheck disable=SC2016 # Arguments are intentionally expanded by the child shell.
+  out=$(FM_LOCK_WAIT_SECS=1 FM_STATE_OVERRIDE="$state" \
+    fm_run_timed 3 bash -c '. "$1"; fm_lock_acquire_wait "$2"' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$lock" 2>&1)
+  rc=$?
+  set -e
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  [ "$rc" -eq 124 ] || fail "default lock deadline returned $rc: $out"
+  printf '%s\n' "$out" | grep -F "lock wait timed out after 1s: $lock (holder pid $holder_pid)" >/dev/null \
+    || fail "default lock deadline omitted its holder pid: $out"
+  pass "default lock waits fail at their deadline and name the live holder"
+}
+
 # A live-but-stuck presentation lock must not strand the executable drain. The
 # presentation remains retriable on the next pass, while the separate queue
 # mutation lock keeps its blocking all-or-nothing acknowledgement contract.
@@ -2005,6 +2043,7 @@ test_historical_annotation_skips_announced_status() {
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
+test_default_lock_wait_deadline_reports_holder
 test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure
 test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once

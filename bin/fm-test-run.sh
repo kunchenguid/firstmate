@@ -64,10 +64,9 @@
 #                   script paths, which use the bounded automatic scheduler.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
-#                   record it as exit 124 (0 disables, the default). The
-#                   --changed applies 900s automatically: no real script
-#                   approaches it, so it only converts a HUNG
-#                   script into a bounded failure. --max-wall-ms is checked
+#                   record it as exit 124. Every nonempty selection defaults to
+#                   900s; pass 0 explicitly to preserve an unbounded run.
+#                   --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
 #                   External interruption cleanup is outside this runner's
 #                   guarantee; configured per-script bounds remain authoritative.
@@ -190,16 +189,16 @@ JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
-# Bound applied automatically on the automatic --changed path, derived from
-# measured healthy runtimes with margin rather than picked: the slowest measured
-# behavior test is the 341s Herdr presentation E2E, and the slowest script in a
-# runner-file changed selection is tests/fm-calm-pi-extension.test.sh at 77s
-# once its Chrome reap terminates. 900s leaves roughly 2.6x headroom over the
-# slowest real script, so this can only ever fire on a script that is genuinely
-# stuck. It is a guard, not a speed control: a HUNG script becomes a bounded
-# failure instead of an unbounded suite, which is the shape that silently
-# outruns a caller's invocation budget.
-CHANGED_DEFAULT_TIMEOUT_SECS=900
+PER_SCRIPT_TIMEOUT_EXPLICIT=0
+# Bound applied automatically to every nonempty selection, derived from measured
+# healthy runtimes with margin rather than picked: the slowest measured behavior
+# test is the 341s Herdr presentation E2E, and the slowest script in a runner-file
+# changed selection is tests/fm-calm-pi-extension.test.sh at 77s once its Chrome
+# reap terminates. 900s leaves roughly 2.6x headroom over the slowest real script,
+# so this can only ever fire on a script that is genuinely stuck. It is a guard,
+# not a speed control: a HUNG script becomes a bounded failure instead of an
+# unbounded suite, which is the shape that silently outruns a caller's budget.
+DEFAULT_PER_SCRIPT_TIMEOUT_SECS=900
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -2269,10 +2268,12 @@ while [ "$#" -gt 0 ]; do
     --per-script-timeout-secs)
       [ "$#" -gt 1 ] || die "--per-script-timeout-secs requires a whole number of seconds"
       PER_SCRIPT_TIMEOUT_SECS=$2
+      PER_SCRIPT_TIMEOUT_EXPLICIT=1
       shift 2
       ;;
     --per-script-timeout-secs=*)
       PER_SCRIPT_TIMEOUT_SECS=${1#--per-script-timeout-secs=}
+      PER_SCRIPT_TIMEOUT_EXPLICIT=1
       shift
       ;;
     --list)
@@ -2539,10 +2540,11 @@ done
 # lane must stay strictly serial, --family is what the required Herdr lane runs,
 # and --all is a deliberate complete regression.
 AUTO_CONCURRENCY=0
+if [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ] \
+  && [ "$PER_SCRIPT_TIMEOUT_EXPLICIT" -eq 0 ]; then
+  PER_SCRIPT_TIMEOUT_SECS=$DEFAULT_PER_SCRIPT_TIMEOUT_SECS
+fi
 if { [ "$MODE" = changed ] || [ "$MODE" = scripts ]; } && [ "$JOBS_EXPLICIT" -eq 0 ]; then
-  if [ "$MODE" = changed ] && [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
-    PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
-  fi
   auto_admissible=0
   for s in "${SCRIPTS[@]}"; do
     script_allows_concurrency "$s" && auto_admissible=$((auto_admissible + 1))
@@ -2714,7 +2716,7 @@ record_script_result() {
   TOTAL=$((TOTAL + 1))
 }
 
-# Run <script>, capturing output to <out>. <stream> 1 also echoes it live.
+# Run <script>, capturing output to <out>. <stream> 1 replays it after completion.
 # <id> only has to be unique within this run. When PER_SCRIPT_TIMEOUT_SECS is
 # positive, a script that outruns it is terminated and reported as exit 124: a
 # hung script must become a bounded failure rather than an unbounded suite,
@@ -2724,28 +2726,23 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   local rc
   : "$id"
   set +e
-  if [ "$stream" -eq 1 ]; then
-    if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-      # Expansion is intentionally deferred to the child bash passed to -c.
-      # shellcheck disable=SC2016
-      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
-        'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
-      rc=$?
-    else
-      bash "$script" 2>&1 | tee "$out"
-      rc=${PIPESTATUS[0]}
-    fi
-  elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+  # Never put the bounded command on a pipeline. A timed-out script can leave
+  # a descendant holding the pipeline's input open after the direct child exits,
+  # which strands tee and prevents the suite trailer from being emitted. Capture
+  # to the regular output file, then replay it for serial callers.
+  if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
     fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
     rc=$?
   else
     bash "$script" >"$out" 2>&1
     rc=$?
   fi
+  [ "$stream" -eq 1 ] && cat "$out"
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
+    printf 'FM_TEST_TIMEOUT script=%s after=%ss\n' "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
     printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
       "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
-    [ "$stream" -eq 1 ] && tail -1 "$out"
+    [ "$stream" -eq 1 ] && tail -2 "$out"
   fi
   return "$rc"
 }
@@ -2764,7 +2761,7 @@ run_one_serial() {
     "$begin_iso" "$script" "$family" "$expected"
 
   set +e
-  # Stream live output while retaining a copy for gate-skip detection.
+  # Replay captured output while retaining a copy for gate-skip detection.
   # Preserve the fork's clean-home contract around the upstream bounded runner.
   (
     unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \

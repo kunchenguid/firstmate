@@ -1,6 +1,7 @@
 {
   "beaconSeconds": 300,
   "idleSeconds": 900,
+  "busySilentSeconds": 3600,
   "loopSeconds": 5400,
   "loopAttempts": 2,
   "poolRatio": 0.9,

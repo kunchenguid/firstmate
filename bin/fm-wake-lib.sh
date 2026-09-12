@@ -9,6 +9,7 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+FM_LOCK_WAIT_SECS="${FM_LOCK_WAIT_SECS:-600}"
 
 fm_wake_queue_sequences_unique() {
   local queue=${1:-}
@@ -933,6 +934,14 @@ fm_lock_try_acquire() {
   fi
 
   fm_current_pid current || return 1
+  case "$lockdir" in
+    *.steal)
+      if [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+        FM_LOCK_FAILURE=malformed-lock
+        return 1
+      fi
+      ;;
+  esac
 
   # A creation failure with NO lock present has nothing to steal: recursing
   # into "$lockdir.steal" would hit the same failure and recurse again
@@ -1053,14 +1062,45 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
-fm_lock_acquire_wait() {
-  local lockdir=$1
+_fm_lock_acquire_wait_unbounded() {
+  local lockdir=$1 owner_create_retries=0
   while ! fm_lock_try_acquire "$lockdir"; do
     case "${FM_LOCK_FAILURE:-}" in
-      owner-create|stale-remove) return 1 ;;
+      stale-remove|malformed-lock) return 1 ;;
+      owner-create)
+        # A holder can release between fm_lock_try_create's failed link and
+        # its absence check. Give that contention window one retry, but keep a
+        # genuine owner-directory failure bounded instead of spinning forever.
+        if [ "$owner_create_retries" -eq 0 ]; then
+          owner_create_retries=1
+          sleep 0.1
+          continue
+        fi
+        return 1
+        ;;
     esac
     sleep 0.1
   done
+}
+
+fm_lock_acquire_wait() {  # <lockdir> [positive-seconds]
+  local lockdir=$1 seconds=${2:-$FM_LOCK_WAIT_SECS} rc
+  case "$seconds" in
+    ''|*[!0-9]*|0)
+      printf 'lock wait refused: deadline must be a positive whole number of seconds (got %s)\n' "$seconds" >&2
+      return 2
+      ;;
+  esac
+  if fm_lock_acquire_wait_bounded "$lockdir" "$seconds"; then
+    return 0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 124 ]; then
+    printf 'lock wait timed out after %ss: %s (holder pid %s)\n' \
+      "$seconds" "$lockdir" "${FM_LOCK_HELD_PID:-unknown}" >&2
+  fi
+  return "$rc"
 }
 
 # Acquire in the timed helper process, then transfer the lock record to the
@@ -1072,7 +1112,7 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
   case "$caller_pid" in ''|*[!0-9]*) return 1 ;; esac
   fm_pid_alive "$caller_pid" || return 1
   trap 'fm_lock_release "$lockdir"; exit 143' TERM INT
-  fm_lock_acquire_wait "$lockdir" || return 1
+  _fm_lock_acquire_wait_unbounded "$lockdir" || return 1
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || {
       fm_lock_release "$lockdir"
@@ -1099,8 +1139,8 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
 # owns the lock, and leaves FM_LOCK_HELD_PID naming that holder.
 # Use it where a caller must refuse rather than block: wake presentation, and
 # the guarded remote link clear, whose whole contract is to return a
-# reconciliation refusal instead of wedging an unattended close.
-# Mutation-critical callers that can safely block keep fm_lock_acquire_wait.
+# reconciliation refusal instead of wedging an unattended close. The ordinary
+# wait wrapper also uses this path with its finite default deadline.
 fm_lock_acquire_wait_bounded() {
   local lockdir=$1 seconds=$2 caller_pid rc owner_pid
   case "$seconds" in ''|*[!0-9]*|0) return 2 ;; esac
@@ -1109,7 +1149,8 @@ fm_lock_acquire_wait_bounded() {
     return 0
   fi
   case "${FM_LOCK_FAILURE:-}" in
-    owner-create|stale-remove) return 1 ;;
+    stale-remove|malformed-lock) return 1 ;;
+    owner-create) : ;; # Let the handoff perform its one transient-window retry.
   esac
 
   fm_current_pid caller_pid || return 1

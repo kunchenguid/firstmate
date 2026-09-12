@@ -69,6 +69,7 @@ The observer reloads edited configuration and rebuilds state/pool subscriptions;
 | --- | --- | --- |
 | `beaconSeconds` | `300` | Watcher silence threshold in seconds. |
 | `idleSeconds` | `900` | Both status age and generation-matched idle age must exceed this. |
+| `busySilentSeconds` | `3600` | Busy status age before Moiras proposes the busy-but-silent advisory. |
 | `loopSeconds` | `5400` | Duration of an observed repeated-failure episode, never inferred from old status alone. |
 | `loopAttempts` | `2` | Matching failure-status threshold, integer 2-3; evidence is not proof of distinct command executions. |
 | `poolRatio` | `0.9` | Lease fraction threshold, 0.01-1; incomplete pools stay unknown. |
