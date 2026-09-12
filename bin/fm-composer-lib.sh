@@ -689,7 +689,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local agy_opening_row=-1 agy_closing_row=-1 agy_boundary_count=0 boundary_width agy_pair_width_valid=1
+  local agy_opening_row=-1 agy_closing_row=-1 agy_boundary_count=0 boundary_width
   local unsafe_rows='' unsafe_row
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
@@ -743,13 +743,14 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
       *) leftbar_start=-1 ;;
     esac
     if [ "$harness" = agy ] && boundary_width=$(_fm_composer_agy_boundary_width "$trimmed"); then
-      agy_boundary_count=$((agy_boundary_count + 1))
-      if [ "$agy_boundary_count" -eq 1 ]; then
+      if [ "$agy_boundary_count" -eq 0 ] || [ "$boundary_width" -gt "$FM_COMPOSER_SCAN_AGY_WIDTH" ]; then
+        agy_boundary_count=1
         agy_opening_row=$row
         FM_COMPOSER_SCAN_AGY_WIDTH=$boundary_width
-      elif [ "$agy_boundary_count" -eq 2 ]; then
+        agy_closing_row=-1
+      elif [ "$boundary_width" -eq "$FM_COMPOSER_SCAN_AGY_WIDTH" ]; then
+        agy_boundary_count=$((agy_boundary_count + 1))
         agy_closing_row=$row
-        [ "$boundary_width" = "$FM_COMPOSER_SCAN_AGY_WIDTH" ] || agy_pair_width_valid=0
       fi
     fi
     # Bare agent-glyph rows: the glyph itself is the container proof. Bare
@@ -890,8 +891,7 @@ EOF
     fm_composer_normalize_trim_var agy_first_trimmed
     agy_end_row=$((agy_closing_row - 1))
   fi
-  if [ "$agy_pair_width_valid" = 1 ] \
-     && [ "$agy_first_row" -ge 0 ] && [ "$agy_end_row" -ge "$agy_first_row" ] \
+  if [ "$agy_first_row" -ge 0 ] && [ "$agy_end_row" -ge "$agy_first_row" ] \
      && [[ "$agy_first_trimmed" == '>'* ]] \
      && { [ -z "$cy" ] || { [ "$cy" -ge "$agy_first_row" ] && [ "$cy" -le "$agy_end_row" ]; }; }; then
     FM_COMPOSER_SCAN_AGY_ROW=$agy_first_row
@@ -1108,23 +1108,24 @@ _fm_composer_agy_boundary_row() {  # <trimmed-row>
 }
 
 _fm_composer_agy_busy_scope() {  # <plain-screen>
-  local screen=$1 line trimmed row=0 opening=-1 closing=-1 boundary_count=0 first first_trimmed opening_width boundary_width pair_width_valid=1
+  local screen=$1 line trimmed row=0 opening=-1 closing=-1 boundary_count=0 first first_trimmed opening_width boundary_width
   while IFS= read -r line; do
     trimmed=$line
     fm_composer_normalize_trim_var trimmed
     if boundary_width=$(_fm_composer_agy_boundary_width "$trimmed"); then
-      boundary_count=$((boundary_count + 1))
-      if [ "$boundary_count" -eq 1 ]; then
+      if [ "$boundary_count" -eq 0 ] || [ "$boundary_width" -gt "$opening_width" ]; then
+        boundary_count=1
         opening=$row
         opening_width=$boundary_width
-      elif [ "$boundary_count" -eq 2 ]; then
+        closing=-1
+      elif [ "$boundary_width" -eq "$opening_width" ]; then
+        boundary_count=$((boundary_count + 1))
         closing=$row
-        [ "$boundary_width" = "$opening_width" ] || pair_width_valid=0
       fi
     fi
     row=$((row + 1))
   done <<< "$screen"
-  if [ "$boundary_count" -ne 2 ] || [ "$opening" -lt 0 ] || [ "$closing" -le "$opening" ] || [ "$pair_width_valid" -ne 1 ]; then
+  if [ "$boundary_count" -ne 2 ] || [ "$opening" -lt 0 ] || [ "$closing" -le "$opening" ]; then
     return 0
   fi
   first=$((opening + 1))
@@ -1357,7 +1358,8 @@ _fm_composer_select_cursorless() {
 }
 
 _fm_composer_select_agy_cursorless() {
-  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$FM_COMPOSER_SCAN_AGY_BOUNDARY" ] \
+  if [ "$FM_COMPOSER_SCAN_AGY_AMBIGUOUS" = 1 ] \
+     || [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$FM_COMPOSER_SCAN_AGY_BOUNDARY" ] \
      || [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$FM_COMPOSER_SCAN_AGY_BOUNDARY" ]; then
     return 1
   fi

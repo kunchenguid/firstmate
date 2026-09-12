@@ -447,32 +447,39 @@ test_mismatched_box_families_are_unknown() {
   pass "fm_tmux_composer_state: inconsistent box geometry fails closed"
 }
 
-test_agy_boundary_pair_widths_must_match() {
+test_agy_boundary_pair_uses_widest_rules() {
   local out boundary72 boundary16 capture
   boundary72=$(printf '─%.0s' {1..72})
   boundary16=$(printf '─%.0s' {1..16})
   capture="$boundary72"$'\n>\n'"$boundary16"
   out=$(fm_composer_classify_screen 'styled=0' "$capture" 1 1 agy)
   [ "$out" = unknown ] \
-    || fail "an AGY pair with mismatched boundary widths should be unknown, got '$out'"
-  capture="$boundary72"$'\n>\n'"$boundary72"
+    || fail "a single widest AGY boundary should be unknown, got '$out'"
+  capture="$boundary72"$'\n>\n'"$boundary72"$'\n'"$boundary16"
   out=$(fm_composer_classify_screen 'styled=0' "$capture" 1 1 agy)
   [ "$out" = empty ] \
-    || fail "an AGY pair with equal boundary widths should remain empty, got '$out'"
-  pass "fm_composer_classify_screen: AGY boundary pairs require equal widths"
+    || fail "a lower-width transcript rule should not invalidate the widest pair, got '$out'"
+  capture="$boundary72"$'\n> x\n'"$boundary72"$'\n'"$boundary16"
+  out=$(fm_composer_classify_screen 'styled=0' "$capture" '' '' agy)
+  [ "$out" = pending ] \
+    || fail "a draft in the widest pair should remain pending, got '$out'"
+  pass "fm_composer_classify_screen: AGY pairs use the widest boundary rules"
 }
 
-test_agy_busy_scope_requires_matching_boundaries() {
+test_agy_busy_scope_uses_widest_rules() {
   local boundary72 boundary16 screen
   boundary72=$(printf '─%.0s' {1..72})
   boundary16=$(printf '─%.0s' {1..16})
+  screen="$boundary72"$'\n>\n'"$boundary72"$'\n'"$boundary16"$'\nesc to cancel  model · low'
+  printf '%s' "$screen" | fm_busy_lines_match agy \
+    || fail "a narrower transcript rule should not invalidate the widest busy pair"
   screen="$boundary72"$'\n>\n'"$boundary16"$'\nesc to cancel  model · low'
   printf '%s' "$screen" | fm_busy_lines_match agy \
-    && fail "an AGY busy scope with mismatched boundaries must fail closed"
+    && fail "a single widest AGY boundary must fail closed"
   screen="$boundary72"$'\n>\n'"$boundary72"$'\nesc to cancel  model · low'
   printf '%s' "$screen" | fm_busy_lines_match agy \
     || fail "an AGY busy scope with equal boundaries should detect busy"
-  pass "fm_busy_lines_match: AGY busy scopes require matching boundaries"
+  pass "fm_busy_lines_match: AGY busy scopes use the widest rules"
 }
 
 test_agy_submit_waits_for_stable_render() {
@@ -778,8 +785,8 @@ test_non_bordered_busy_footer_is_unknown_strict
 test_clipped_bordered_box_is_unknown
 test_asymmetric_composer_edges_are_unknown
 test_mismatched_box_families_are_unknown
-test_agy_boundary_pair_widths_must_match
-test_agy_busy_scope_requires_matching_boundaries
+test_agy_boundary_pair_uses_widest_rules
+test_agy_busy_scope_uses_widest_rules
 test_agy_submit_waits_for_stable_render
 test_agy_busy_post_enter_confirms_delivery
 test_agy_expected_guided_rows_match_wrapping_only

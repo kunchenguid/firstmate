@@ -287,18 +287,25 @@ Narrow-pane lifecycle command:
 env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 FM_AGY_LIFECYCLE_TMUX_WIDTH=80 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
 
+Width-120 lifecycle command:
+
+```text
+env -u ANTIGRAVITY_AGENT FM_AGY_LIFECYCLE_LIVE_E2E=1 FM_AGY_LIFECYCLE_TMUX_WIDTH=120 bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
 The no-mistakes pipeline sandbox cannot execute these credentialed post-fix lifecycle runs because it has no worktree pool or signed-in AGY session; the doorbell assertions remain in the executable guard for firstmate to run at both widths.
 
 No post-fix live output is recorded here; the placeholder below remains intentionally unfilled until firstmate runs the real-binary guard at both widths.
 
-Firstmate's 2026-09-12 AGY 1.2.2 run against gate tip 7b25b46 passed the lifecycle guard at tmux width 80 with spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown.
-The same run at the default width (120) reached the doorbell step but reported `doorbell instruction was not acted on`.
+Firstmate's 2026-09-12 AGY 1.2.2 run against gate tip 930d28d passed the lifecycle guard at width 120 with spawn, hooks, doorbell, control/data interrupts, Stop, exit, and teardown.
+The same run at widths 220 and 80 reached the pre-exit settle with an idle screen classified as `unknown`.
+That evidence predates the widest-boundary filtering correction below.
 The submit comparison now uses the typed text as its guide: each extracted row must match in order, with zero or more ASCII spaces permitted only between rows, while interior row spaces remain exact.
 
 Post-fix output placeholder for firstmate's credentialed runs:
 
 ```text
-<replace with the exact default-width and FM_AGY_LIFECYCLE_TMUX_WIDTH=80 outputs>
+<replace with the exact FM_AGY_LIFECYCLE_TMUX_WIDTH=220, 120, and 80 outputs>
 ```
 
 Output from firstmate's 2026-09-12 pre-doorbell-assertion lifecycle run:

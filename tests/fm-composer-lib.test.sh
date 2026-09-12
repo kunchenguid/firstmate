@@ -909,6 +909,17 @@ test_agy_boundary_ambiguity_fails_closed() {
   out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 2 probe-absent agy)
   [ "$out" = unknown ] \
     || fail "a cursor outside the current AGY pair must defer, got '$out'"
+  local narrow boundary80
+  narrow=$(printf '─%.0s' {1..60})
+  boundary80=$(printf '─%.0s' {1..80})
+  screen="$narrow"$'\ntranscript divider\n'"$boundary80"$'\n>\n'"$boundary80"
+  out=$(fm_composer_classify_screen "$CAPS_TMUX" "$screen" 3 probe-absent agy)
+  [ "$out" = empty ] \
+    || fail "a narrower transcript divider above a full-width pair should remain empty, got '$out'"
+  screen="$narrow"$'\ntranscript divider\n'"$boundary80"$'\n> x\n'"$boundary80"
+  out=$(fm_composer_classify_screen 'styled=0' "$screen" '' '' agy)
+  [ "$out" = pending ] \
+    || fail "a draft below a narrower transcript divider should remain pending, got '$out'"
   base_screen=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
   rules_screen="$boundary"$'\nscrollback\n'"$boundary"$'\nmore output\n'"$boundary"$'\n'"$base_screen"
   base_out=$(fm_composer_classify_screen 'styled=1' "$base_screen")
