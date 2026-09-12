@@ -201,12 +201,23 @@
 #   not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
-#   resolves the current remote default branch, and resets to its tip. When none
-#   is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   resolves the current remote default branch, and then picks the base between
+#   `origin/<default>` and the SPAWNING PROJECT's own local `<default>` ref (the
+#   primary checkout's tip, resolved exactly as a secondmate sync resolves it):
+#   origin ahead of or equal to the local tip resets to origin, a local tip ahead
+#   of origin resets to the local tip and says so on stderr, and a genuine
+#   divergence refuses naming both commits rather than silently choosing the older
+#   one. That is what keeps a `local-only` project, whose landed work never leaves
+#   the primary checkout, from launching every task on origin's stale history.
+#   When no origin configuration is detected, spawn skips that freshness check and
+#   launches from the clean worktree's current HEAD. Relaunch reuses the recorded
+#   worktree without fetching or resetting its base. An unreachable detected
+#   origin, unresolved default branch, or non-clean worktree refuses a fresh spawn
+#   rather than risking a PR based on stale history or discarding local work; the
+#   single exception is an unreachable origin whose recorded remote-tracking ref
+#   the local tip strictly descends from, which launches from that local tip with
+#   a one-line notice instead. It is deliberately that narrow: with no tracking
+#   ref, an unpushed local-only project and a misconfigured origin look identical.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -2497,8 +2508,63 @@ spawn_worktree_has_origin_config() {  # <worktree>
   return 1
 }
 
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+# Resolve the commit a fresh pooled slot must start from, given the project's own
+# local default-branch tip and origin's. `origin/<default>` alone is wrong for any
+# project whose local default branch is the authoritative one - a `local-only`
+# project never pushes, so every unlanded slice lives only in the primary
+# checkout's `main` and a slot reset to `origin/<default>` silently starts on
+# history the captain already moved past. Reading the primary's default-branch
+# *ref* (bin/fm-ff-lib.sh's primary_head_commit, the same resolution every
+# secondmate sync follows) rather than its HEAD keeps a primary stranded on a
+# feature branch from propagating that branch into the pool.
+#
+# Echoes the chosen commit, or returns 1 after naming the refusal. The primary tip
+# has to be readable from the pool's own object store to be usable at all; when it
+# is not - a slot that is not a worktree of this project's repository - the origin
+# tip stays the only candidate, exactly as before.
+spawn_base_commit() {  # <worktree> <project> <default> <origin-tip>
+  local worktree=$1 project=$2 default=$3 origin_tip=$4 primary
+  primary=$(primary_head_commit "$project" 2>/dev/null) || primary=""
+  if [ -n "$primary" ]; then
+    git -C "$worktree" rev-parse --verify --quiet "$primary^{commit}" >/dev/null 2>&1 || primary=""
+  fi
+  if [ -z "$primary" ] || [ "$primary" = "$origin_tip" ]; then
+    printf '%s\n' "$origin_tip"
+    return 0
+  fi
+  if git -C "$worktree" merge-base --is-ancestor "$primary" "$origin_tip" 2>/dev/null; then
+    printf '%s\n' "$origin_tip"
+    return 0
+  fi
+  if git -C "$worktree" merge-base --is-ancestor "$origin_tip" "$primary" 2>/dev/null; then
+    echo "notice: the project's local '$default' ($primary) is ahead of 'origin/$default' ($origin_tip); launching pooled worktree '$worktree' from the local tip" >&2
+    printf '%s\n' "$primary"
+    return 0
+  fi
+  echo "error: the project's local '$default' ($primary) and 'origin/$default' ($origin_tip) have diverged for pooled worktree '$worktree'; refusing to launch rather than picking one of them" >&2
+  return 1
+}
+
+# The primary's local default-branch tip when it is provably newer than every
+# origin state this machine has ever seen, so an unreachable origin does not have
+# to refuse. It is deliberately narrow: a local remote-tracking ref must exist AND
+# the primary must be a strict descendant of it. With no tracking ref at all,
+# nothing here can tell an unpushed local-only project apart from a slot whose
+# origin is simply misconfigured, and the existing refusal stands. The tracking ref
+# is also only as current as the last successful fetch, so this proves the primary
+# is ahead of what was last seen, never that origin has not moved since.
+spawn_offline_primary_base() {  # <worktree> <project> <default>
+  local worktree=$1 project=$2 default=$3 primary seen
+  primary=$(primary_head_commit "$project" 2>/dev/null) || return 1
+  git -C "$worktree" rev-parse --verify --quiet "$primary^{commit}" >/dev/null 2>&1 || return 1
+  seen=$(git -C "$worktree" rev-parse --verify --quiet "refs/remotes/origin/$default^{commit}" 2>/dev/null) || return 1
+  [ "$seen" != "$primary" ] || return 1
+  git -C "$worktree" merge-base --is-ancestor "$seen" "$primary" 2>/dev/null || return 1
+  printf '%s\n' "$primary"
+}
+
+freshen_spawn_worktree_base() {  # <worktree> <project>
+  local worktree=$1 project=$2 default target expected actual status offline
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2515,33 +2581,41 @@ freshen_spawn_worktree_base() {  # <worktree>
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+    default=$(default_branch "$worktree" 2>/dev/null || true)
+    if [ -n "$default" ] && offline=$(spawn_offline_primary_base "$worktree" "$project" "$default"); then
+      echo "notice: could not fetch origin for pooled worktree '$worktree'; launching from the project's local '$default' ($offline), which is ahead of the last origin state this checkout saw" >&2
+      expected=$offline
+    else
+      echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+  else
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+      echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    expected=$(spawn_base_commit "$worktree" "$project" "$default" "$expected") || return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
-    echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
-    echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
+  if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
+    echo "error: could not reset pooled worktree '$worktree' to '$expected'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
-    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not the resolved base '$expected' for '$default'; refusing to launch" >&2
     return 1
   fi
 }
@@ -3214,7 +3288,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "$PROJ_ABS" || exit 1
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,

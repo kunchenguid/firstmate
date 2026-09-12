@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Regression tests for fm-spawn's pooled-worktree base refresh.
 #
-# A treehouse pool can return a clean detached worktree whose origin/main was
-# advanced after the worktree was allocated.
-# These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin tip, launches a clean origin-less
-# pool as-is, or stops when a configured origin is unusable.
+# A treehouse pool can return a clean detached worktree whose default branch moved
+# after the worktree was allocated - on origin, in the primary checkout, or both.
+# These tests drive the real spawn path with a fake terminal, then prove it starts
+# the worker from whichever of origin's tip and the project's own local
+# default-branch tip is the newer, refuses when the two have diverged, launches a
+# clean origin-less pool as-is, or stops when a configured origin is unusable.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -213,6 +214,169 @@ test_non_main_default_branch_refreshes_before_branching() {
   [ "$branch_head" = "$current" ] || fail "spawn did not refresh to current origin/$DEFAULT_BRANCH"
   [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove origin/$DEFAULT_BRANCH advanced past the pool base"
   pass "a stale pooled worktree resolves and refreshes a non-main default branch"
+}
+
+# The base a fresh slot starts from is a choice between two commits, not one: the
+# project's own local default-branch tip and origin's. A `local-only` project never
+# pushes, so its landed work exists only in the primary checkout and `origin/main`
+# is the older of the two. These cases drive all three relations through the real
+# spawn path.
+make_local_base_case() {  # <name> <id> <shape: origin-ahead|local-ahead|diverged>
+  local name=$1 id=$2 shape=$3 case_dir home project origin pool publisher fakebin initial local_tip origin_tip
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool"
+  publisher="$case_dir/publisher"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  case "$shape" in
+    origin-ahead|diverged)
+      git clone --quiet "file://$origin" "$publisher"
+      printf 'pushed to origin\n' > "$publisher/origin-side.txt"
+      git -C "$publisher" add origin-side.txt
+      git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-origin
+      git -C "$publisher" push --quiet origin main
+      ;;
+  esac
+  case "$shape" in
+    local-ahead|diverged)
+      # Landed in the primary checkout and never pushed: exactly the state a
+      # local-only project is in for every task after the first.
+      printf 'landed locally, never pushed\n' > "$project/local-landed.txt"
+      git -C "$project" add local-landed.txt
+      git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local
+      ;;
+  esac
+
+  local_tip=$(git -C "$project" rev-parse refs/heads/main)
+  origin_tip=$(git --git-dir="$origin" rev-parse refs/heads/main)
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$local_tip|$origin_tip"
+}
+
+read_local_base_case() {
+  IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR INITIAL_SHA LOCAL_TIP ORIGIN_TIP <<EOF
+$1
+EOF
+}
+
+test_origin_ahead_of_local_default_uses_origin_tip() {
+  local rec id out status head
+  id='pool-origin-ahead-r14'
+  rec=$(make_local_base_case origin-ahead "$id" origin-ahead)
+  read_local_base_case "$rec"
+  [ "$LOCAL_TIP" = "$INITIAL_SHA" ] || fail "fixture moved the local default branch in the origin-ahead shape"
+  [ "$ORIGIN_TIP" != "$LOCAL_TIP" ] || fail "fixture did not advance origin past the local default branch"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch when origin is ahead of the local default branch"$'\n'"$out"
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$head" = "$ORIGIN_TIP" ] || fail "spawn did not start from origin's tip when origin was ahead"
+  assert_not_contains "$out" "is ahead of 'origin/main'" \
+    "spawn claimed the local default branch was ahead when origin was ahead"
+  assert_not_contains "$out" "have diverged" \
+    "spawn reported a divergence between an ancestor and its descendant"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# origin-ahead: HEAD=%s origin=%s local=%s\n' "$head" "$ORIGIN_TIP" "$LOCAL_TIP"
+  fi
+  pass "an origin ahead of the project's local default branch still wins the base"
+}
+
+test_local_default_ahead_of_origin_launches_from_local_tip() {
+  local rec id out status head project_head
+  id='pool-local-ahead-r14'
+  rec=$(make_local_base_case local-ahead "$id" local-ahead)
+  read_local_base_case "$rec"
+  [ "$ORIGIN_TIP" = "$INITIAL_SHA" ] || fail "fixture advanced origin in the local-ahead shape"
+  [ "$LOCAL_TIP" != "$ORIGIN_TIP" ] || fail "fixture did not advance the local default branch past origin"
+  project_head=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch a project whose local default branch is ahead of origin"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success from the local tip"
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$head" = "$LOCAL_TIP" ] || fail "spawn did not start from the project's local default-branch tip"
+  [ "$head" != "$ORIGIN_TIP" ] || fail "spawn started from origin's older tip"
+  assert_grep 'landed locally, never pushed' "$POOL_DIR/local-landed.txt" \
+    "the launched worktree is missing work that only exists in the primary checkout"
+  assert_contains "$out" "is ahead of 'origin/main'" \
+    "spawn did not say it launched from the local tip instead of origin"
+  [ "$(git -C "$PROJECT_DIR" rev-parse HEAD)" = "$project_head" ] \
+    || fail "spawn moved the spawning project's own checkout"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# local-ahead: HEAD=%s local=%s origin=%s\n' "$head" "$LOCAL_TIP" "$ORIGIN_TIP"
+    printf '# notice: %s\n' "$(printf '%s\n' "$out" | grep 'is ahead of' | head -n 1)"
+  fi
+  pass "a local default branch ahead of origin becomes the pooled worktree's base"
+}
+
+test_diverged_local_and_origin_refuse_pool() {
+  local rec id out status before
+  id='pool-diverged-r14'
+  rec=$(make_local_base_case diverged "$id" diverged)
+  read_local_base_case "$rec"
+  [ "$LOCAL_TIP" != "$ORIGIN_TIP" ] || fail "fixture did not produce two different tips"
+  git -C "$PROJECT_DIR" merge-base --is-ancestor "$LOCAL_TIP" "$ORIGIN_TIP" 2>/dev/null \
+    && fail "fixture left the local tip an ancestor of origin instead of diverged"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from one side of a diverged default branch"
+  assert_contains "$out" "have diverged" "spawn did not name the divergence as the cause"
+  assert_contains "$out" "$LOCAL_TIP" "the refusal did not name the local default-branch commit"
+  assert_contains "$out" "$ORIGIN_TIP" "the refusal did not name origin's commit"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the pooled worktree while refusing a diverged base"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# diverged refusal: %s\n' "$(printf '%s\n' "$out" | grep 'have diverged' | head -n 1)"
+  fi
+  pass "a diverged local default branch and origin refuse the pooled worktree naming both commits"
+}
+
+test_unreachable_origin_launches_from_a_provably_newer_local_tip() {
+  local rec id out status head
+  id='pool-offline-local-ahead-r14'
+  rec=$(make_local_base_case offline-local-ahead "$id" local-ahead)
+  read_local_base_case "$rec"
+  # One successful fetch is what records origin/main; only against that recorded
+  # state can the local tip be proven strictly newer while origin is unreachable.
+  git -C "$POOL_DIR" fetch --quiet origin
+  [ "$(git -C "$POOL_DIR" rev-parse refs/remotes/origin/main)" = "$ORIGIN_TIP" ] \
+    || fail "fixture did not record origin's state before origin became unreachable"
+  git -C "$POOL_DIR" remote set-url origin "file://$CASE_DIR/missing-origin.git"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "an unreachable origin should not block a provably newer local tip"$'\n'"$out"
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$head" = "$LOCAL_TIP" ] || fail "spawn did not launch from the project's local default-branch tip"
+  assert_contains "$out" "which is ahead of the last origin state this checkout saw" \
+    "spawn did not report why it launched without reaching origin"
+  assert_not_contains "$out" "refusing to launch from a potentially stale base" \
+    "spawn refused despite holding a provably newer local tip"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# offline notice: %s\n' "$(printf '%s\n' "$out" | grep 'could not fetch origin' | head -n 1)"
+  fi
+  pass "an unreachable origin launches from a local tip that provably descends the last origin state seen"
 }
 
 make_originless_case() {  # <name> <id>
@@ -748,6 +912,10 @@ test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
+test_origin_ahead_of_local_default_uses_origin_tip
+test_local_default_ahead_of_origin_launches_from_local_tip
+test_diverged_local_and_origin_refuse_pool
+test_unreachable_origin_launches_from_a_provably_newer_local_tip
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
