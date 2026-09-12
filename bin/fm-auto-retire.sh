@@ -111,7 +111,6 @@ classify() {  # <id> <meta> -> merged|scout|skip|unclassified
 
 retire_one() {  # <id> <reason>
   local id=$1 reason=$2 out rc
-  append_status "$id" "done: auto-retired ($reason)"
   if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_TEARDOWN_GUARD_DONE=1 "$TEARDOWN_BIN" "$id" 2>&1); then
     "$SLACK_BIN" message "retired $id ($reason)" >/dev/null 2>&1 || true
@@ -120,7 +119,7 @@ retire_one() {  # <id> <reason>
   fi
   rc=$?
   out=$(printf '%s\n' "$out" | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g;s/^ //;s/ $//' | cut -c1-240)
-  append_status "$id" "blocked: automatic retirement refused: $out"
+  append_status "$id" "note: automatic retirement refused: $out"
   mark_once "$id" refused "$out"
   printf 'refused: %s\n' "$id"
   return 0

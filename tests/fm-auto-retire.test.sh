@@ -6,6 +6,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
 
 RETIRE="$ROOT/bin/fm-auto-retire.sh"
 TMP_ROOT=$(fm_test_tmproot fm-auto-retire)
@@ -131,8 +133,8 @@ test_gh_fail_is_unclassified_and_untouched() {
   pass "a forge lookup failure is reported once and left untouched"
 }
 
-test_teardown_refusal_is_reported_once() {
-  local dir out
+test_teardown_refusal_never_claims_retirement_or_a_decision() {
+  local dir out open
   dir="$TMP_ROOT/refuse"
   seed_home "$dir"
   install_fakes "$dir"
@@ -143,13 +145,17 @@ test_teardown_refusal_is_reported_once() {
   out=$(run_retire "$dir") || fail "refusal pass failed: $out"
   assert_contains "$out" "refused: dirty-ship" "refusal was not reported"
   [ -f "$dir/home/state/dirty-ship.meta" ] || fail "refused record was removed"
-  grep -q 'blocked: automatic retirement refused:' "$dir/home/state/dirty-ship.status" \
-    || fail "refusal was not written to status"
+  grep -q 'done: auto-retired' "$dir/home/state/dirty-ship.status" \
+    && fail "refusal claimed retirement before teardown succeeded"
+  grep -q 'note: automatic retirement refused:' "$dir/home/state/dirty-ship.status" \
+    || fail "refusal was not written as an operational note"
+  open=$(status_open_decisions "$dir/home/state/dirty-ship.status")
+  [ -z "$open" ] || fail "refusal opened a decision: $open"
   : > "$dir/teardown.log"
   out=$(run_retire "$dir") || fail "second refusal pass failed: $out"
   [ -z "$out" ] || fail "refused retirement was retried: $out"
   [ ! -s "$dir/teardown.log" ] || fail "teardown was retried after a refusal"
-  pass "a teardown refusal is reported once and never retried"
+  pass "a teardown refusal is noted once without claiming retirement or opening a decision"
 }
 
 test_secondmate_and_reportless_scout_are_left_alone() {
@@ -191,6 +197,6 @@ test_merged_done_ship_is_retired
 test_done_scout_with_report_is_retired
 test_open_pr_and_working_ship_are_left_alone
 test_gh_fail_is_unclassified_and_untouched
-test_teardown_refusal_is_reported_once
+test_teardown_refusal_never_claims_retirement_or_a_decision
 test_secondmate_and_reportless_scout_are_left_alone
 test_watcher_surfaces_one_retirement
