@@ -246,6 +246,14 @@ fi
 # bin/fm-bootstrap.sh lists node in COMMON_TOOLS and reports it at setup, which is
 # where a missing tool belongs rather than as a stalled pane later.
 command -v node >/dev/null 2>&1 || refuse "node is required to record workspace trust and was not found on PATH"
+# Presence is not health: a node that resolves on PATH and aborts on every
+# invocation passes the check above and then fails real_file()'s node -e, so the
+# spawn dies at bin/fm-spawn.sh's trust-registration step with no mention of node.
+# Setup-time reporting does not cover this either, because bin/fm-bootstrap.sh
+# tests COMMON_TOOLS with command -v as well. Executing the interpreter is the
+# only check that distinguishes a broken one from a working one, and it is named
+# separately from the missing case because the two have different remedies.
+node -e '' >/dev/null 2>&1 || refuse "node is on PATH but failed to execute, so workspace trust cannot be recorded; check the interpreter itself with: node --version"
 
 STORE="$CONFIG_DIR_REAL/.claude.json"
 # A dotfile manager or a synced folder legitimately symlinks this store, so the
