@@ -34,6 +34,7 @@ run_pr() {
     FM_PRIMARY_RESOURCE_FORCE_OWNER=1 \
     FM_SUPERVISOR_TARGET="${FM_SUPERVISOR_TARGET:-fixture:agent}" \
     FM_SUPERVISOR_BACKEND="${FM_SUPERVISOR_BACKEND:-tmux}" \
+    FM_PRIMARY_RESOURCE_ARGV_FILE="${FM_PRIMARY_RESOURCE_ARGV_FILE:-$home/argv}" \
     PATH="$FAKEBIN:$PATH" \
     "$PR" "$@"
 }
@@ -141,6 +142,7 @@ bind_home() {
   jq -nc --arg h "$harness" --argjson p "$$" --arg s "$session" --arg t "$transcript" \
     '{version:1, harness:$h, pid:$p, sessionId:$s, transcriptPath:$t, boundAt:1}' \
     > "$home/state/primary-resource/binding.json"
+  printf '%s\0' "$harness" > "$home/argv"
 }
 
 test_check_context_thresholds() {
@@ -176,6 +178,26 @@ test_quota_percent_filter_96_99() {
     run_pr "$home" check 2>&1 || true)
   assert_contains "$out" "primary-resource quota" "97% used must wake a quota handover"
   pass "check filters 96.99 vs 97 percent used"
+}
+
+test_unparseable_context_is_alert_only() {
+  local home q out
+  home=$(make_main_home unparseable-context)
+  write_codex_transcript "$home/tx.jsonl" 200000
+  bind_home "$home" codex sess-unparseable-context "$home/tx.jsonl"
+  printf 'codex\0--unknown-option\0old prompt' > "$home/argv"
+  q=$(quota_json codex 50)
+  out=$(FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
+    run_pr "$home" check 2>&1 || true)
+  assert_contains "$out" "unparseable-launch-argv" \
+    "unparseable context argv must alert before stow"
+  case "$out" in
+    *'primary-resource context '*) fail "unparseable context argv must not propose handover" ;;
+  esac
+  if find "$home/state/primary-resource/proposals" -type f -print -quit | grep -q .; then
+    fail "unparseable context argv must not create a commit proposal"
+  fi
+  pass "unparseable context argv is alert-only"
 }
 
 test_invalid_destination_quota_is_alert_only() {
@@ -349,6 +371,36 @@ test_commit_revalidates_and_refuses_stale() {
   assert_absent "$home/state/primary-resource/receipts/$incident.json" \
     "refused commit must not create a receipt"
   pass "commit revalidates and refuses stale proposal"
+}
+
+test_commit_revalidation_rejects_invalid_quota_json() {
+  local home q invalid out incident rc=0
+  home=$(make_main_home invalid-revalidation-quota)
+  write_claude_transcript "$home/tx.jsonl" 1000
+  bind_home "$home" claude sess-invalid-revalidation-quota "$home/tx.jsonl"
+  q=$(quota_json claude 3 codex 50)
+  out=$(FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
+    run_pr "$home" check 2>/dev/null || true)
+  assert_contains "$out" "primary-resource quota" "setup: quota proposal"
+  incident=${out##* }; incident=${incident%%$'\n'*}
+  write_stow_ok "$home/stow.md" "$incident" sess-invalid-revalidation-quota
+  invalid=$(printf '%s' "$q" | jq '.schemaVersion = 4')
+  rc=0
+  FM_PRIMARY_RESOURCE_QUOTA_JSON="$invalid" FM_SUPERVISOR_BACKEND=tmux \
+    run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 || rc=$?
+  expect_code 1 "$rc" "invalid quota schema must refuse revalidation"
+  assert_absent "$home/state/primary-resource/receipts/$incident.json" \
+    "invalid quota schema must not create a receipt"
+
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/codex"
+  chmod +x "$FAKEBIN/codex"
+  install_helper_tmux
+  FM_PRIMARY_RESOURCE_QUOTA_JSON="$q" FM_SUPERVISOR_BACKEND=tmux \
+    run_pr "$home" commit "$incident" --stow-receipt "$home/stow.md" >/dev/null 2>&1 \
+    || fail "valid quota schema must still commit"
+  assert_present "$home/state/primary-resource/receipts/$incident.json" \
+    "valid quota schema must create a receipt"
+  pass "commit revalidation rejects invalid quota json"
 }
 
 # Finding 2: structured attestation; negative prose rejected.
@@ -1055,6 +1107,7 @@ EOF
 
 test_check_context_thresholds
 test_quota_percent_filter_96_99
+test_unparseable_context_is_alert_only
 test_invalid_destination_quota_is_alert_only
 test_check_quota_wins_both
 test_quota_five_hour_schema_variants
@@ -1063,6 +1116,7 @@ test_observe_stdin_no_args_writes_binding
 test_unsupported_adapter_stays_alert_only
 test_check_lock_pid_mismatch_alert
 test_commit_revalidates_and_refuses_stale
+test_commit_revalidation_rejects_invalid_quota_json
 test_stow_attestation_rejects_negative_prose
 test_argv_admission_via_commit_rejects_wrappers
 test_arm_requires_python3

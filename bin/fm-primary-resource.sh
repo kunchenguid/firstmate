@@ -476,7 +476,7 @@ pr_decide_jq() {
 | if ($be_ok == false) then
     {action:"alert", incidentId:("alert-backend-" + $gen), reason:"unsupported-backend",
      replacement:null, alertKey:($gen + "--unsupported-backend")}
-  elif ($argv_ok == false) and ($quota_hit or $ctx_hit) then
+  elif ($argv_ok == false) and $ctx_hit then
     {action:"alert", incidentId:("alert-argv-" + $gen), reason:"unparseable-launch-argv",
      replacement:null, alertKey:($gen + "--unparseable-launch-argv")}
   elif $quota_hit then
@@ -967,6 +967,10 @@ action_check() {
       ;;
     *) be_ok=false ;;
   esac
+  if printf '%s' "$ctx" | jq -e --argjson threshold "$CONTEXT_THRESHOLD" \
+    '(.reliability == "reliable") and ((.tokens | tonumber) >= $threshold)' >/dev/null 2>&1; then
+    pr_argv_parseable "$pid" "$harness" || argv_ok=false
+  fi
 
   local id_ctx id_quota receipts_json alerts_json episode_blocks=false
   id_ctx=$(pr_incident_context "$session")
@@ -1221,6 +1225,17 @@ print(" ".join(shlex.quote(x) for x in out))
 PY
 }
 
+pr_argv_parseable() {  # <pid> <harness>
+  local pid=$1 harness=$2 argv_file
+  argv_file=$(mktemp "$PR_DIR/launch/.argv-check.XXXXXX") || return 1
+  if pr_capture_argv "$pid" "$argv_file" && pr_strip_resume_argv "$argv_file" "$harness" >/dev/null; then
+    rm -f -- "$argv_file"
+    return 0
+  fi
+  rm -f -- "$argv_file"
+  return 1
+}
+
 pr_launch_helper() {  # <incident> <primary-target> <primary-backend>
   local incident=$1 target=$2 backend=$3 cmd session hash nonce entry helper_endpoint
   entry="$SCRIPT_DIR/fm-primary-resource.sh"
@@ -1269,7 +1284,8 @@ pr_commit_revalidate() {  # <incident> <expected-action> -> 0 if still warranted
 
   ctx=$(pr_read_context "$harness" "$transcript")
   provider=$(pr_provider_for_harness "$harness" 2>/dev/null || printf '')
-  qjson=$(pr_load_quota_json 2>/dev/null || printf '{"schemaVersion":5,"providers":[]}')
+  qjson=$(pr_load_quota_json 2>/dev/null) || return 1
+  printf '%s\n' "$qjson" | fm_quota_json_valid 2>/dev/null || return 1
   if [ -n "$provider" ]; then
     verdict=$(pr_quota_verdict "$provider" "$qjson")
     replacement=$(pr_find_replacement "$harness" "$provider" "$qjson" "$pid")
