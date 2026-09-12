@@ -799,6 +799,15 @@ require_current_away_authority() {
   fi
 }
 
+persist_accepted_merge_authority() {
+  if fm_merge_authority_persist "$STATE" "$ID" "$META" "$FM_PR_MERGE_AUTHORITY"; then
+    return 0
+  fi
+  printf 'actionable: the forge accepted the merge request for %s but its merge authority could not be persisted; the merge poll remains armed\n' \
+    "$URL" >&2
+  return 1
+}
+
 require_recorded_pr_identity() {
   local existing
   existing=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -964,6 +973,7 @@ case "$PROVIDER" in
     MERGE_CONTROL_LOCK=
     if [ "$merge_status" -eq 0 ]; then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
+      persist_accepted_merge_authority || exit 1
     else
       [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
       if github_read_outcome; then
@@ -1010,6 +1020,7 @@ case "$PROVIDER" in
     fm_lock_release "$MERGE_CONTROL_LOCK" || true
     MERGE_CONTROL_LOCK=
     [ "$merge_status" -eq 0 ] || exit "$merge_status"
+    persist_accepted_merge_authority || exit 1
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0

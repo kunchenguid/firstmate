@@ -147,11 +147,8 @@ mkdir -p "$STATE"
 # worker while adding no uncovered file.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
-# The one owner of what permitted a task's merge, shared with
-# bin/fm-pr-merge.sh so the row this poll publishes names the same authority
-# the attended merge gate read. It reaches the away-posture record owner, which
-# is already a source of this runtime below; keep it an analysis boundary for
-# the same bounded-lint-worker reason as the owners around it.
+# The durable merge-authority owner is shared with bin/fm-pr-merge.sh. The
+# watcher consumes only its identity-bound record after a poll observes landing.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
@@ -2036,14 +2033,9 @@ while :; do
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
-          # The ledger row names the authority that permitted this task to
-          # merge, exactly as the attended path records it, so a merge the
-          # forge queued or landed out of band is as auditable as one this
-          # home merged directly. Reading it authorizes nothing: the merge has
-          # already landed, and an unresolved answer records an untagged row
-          # rather than inventing an authority or dropping the outcome.
-          if ! fm_merge_authority_resolve "$FM_HOME" "$STATE" "$STATE/$id.meta" "$id"; then
-            triage_log "merge authority for $id unresolved (${FM_MERGE_AUTHORITY_REASON:-unknown}); recording an untagged merge outcome"
+          if ! fm_merge_authority_read "$STATE" "$id" \
+              "$provider" "$host" "$path" "$number"; then
+            triage_log "no matching persisted merge authority for $id; recording an external merge outcome"
           fi
           merge_authority=$FM_MERGE_AUTHORITY
           merge_outcome_rc=0
@@ -2051,6 +2043,10 @@ while :; do
             "$merge_authority" || merge_outcome_rc=$?
           if [ "$merge_outcome_rc" -ne 0 ]; then
             triage_log "merge outcome for $id could not be recorded (rc=$merge_outcome_rc)"
+            exit 1
+          fi
+          if ! fm_merge_authority_remove "$STATE" "$id"; then
+            triage_log "published merge outcome for $id but could not retire its authority record"
             exit 1
           fi
           retire_merged_pr_poll "$id"

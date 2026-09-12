@@ -42,11 +42,11 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 #   self - this home performed the merge.
 #   poll - this home's merge poll detected the merge, so the canonical outcome
 #          also wakes this home after any upward hop needed by a secondmate.
-# Optional <authority> is yolo or away-grant when the merge ran while the
-# away-posture record existed; it is appended to the ledger line. Both origins
-# supply it, so a queued merge and a poll that wins direct-merge deduplication
-# carry the same tag as a direct attended merge; bin/fm-merge-authority-lib.sh
-# is the one owner of what that value may be and of where it is read from.
+# Optional <authority> is yolo, away-grant, attended, or external. Yolo,
+# away-grant, and external are appended to the ledger line; attended remains
+# untagged. The merge entrypoint supplies its authority after forge acceptance,
+# while the poll supplies the persisted identity-bound value or external when
+# no matching record proves that this home authorized the merge.
 #
 # Returns 0 when the outcome is recorded (or already was), 2 on an invalid
 # request, 3 when this home's own role or parent binding cannot be read well
@@ -63,8 +63,8 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
   case "$origin" in self|poll) ;; *) return 2 ;; esac
   case "$authority" in
-    yolo|away-grant) suffix=" $authority" ;;
-    '') ;;
+    yolo|away-grant|external) suffix=" $authority" ;;
+    attended|'') ;;
     *) return 2 ;;
   esac
   fm_pr_task_id_valid "$id" || return 2

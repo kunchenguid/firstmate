@@ -2140,11 +2140,6 @@ test_gitlab_merged_poll_retires() {
 }
 
 # --- poll-path merge authority ----------------------------------------------
-# The merge ledger names the authority that permitted a merge while the
-# away-posture record existed. bin/fm-pr-merge.sh records it on the attended
-# path; these cases pin the same tag on the row the merge poll publishes,
-# including for a merge the forge queued and landed after the merge call
-# returned. bin/fm-merge-authority-lib.sh is the one source both read.
 
 write_away_record() {  # <dir> [<fm-afk-contract.sh propose args>...]
   local dir=$1
@@ -2157,8 +2152,13 @@ write_away_record() {  # <dir> [<fm-afk-contract.sh propose args>...]
     || fail "could not confirm an away-posture record"
 }
 
-# The durable queue is TSV (epoch, sequence, kind, key, payload); read the
-# task's merge row as that model rather than matching raw file bytes.
+archive_away_record() {  # <dir>
+  FM_HOME="$1/home" FM_STATE_OVERRIDE="$1/home/state" \
+    "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null \
+    || fail "could not archive the away-posture record"
+}
+
+# The durable queue is TSV (epoch, sequence, kind, key, payload).
 merged_ledger_row() {  # <state> <task-id>
   awk -F'\t' -v prefix="check: merge landed: $2 " \
     'index($5, prefix) == 1 { print $5 }' "$1/.wake-queue"
@@ -2175,89 +2175,75 @@ run_merged_poll_cycle() {  # <dir>
   [ "$rc" -eq 0 ] || fail "merged poll watcher failed: $(cat "$dir/watch.err")"
 }
 
-test_merged_poll_row_carries_the_merge_authority() {
-  local dir state url
-
-  url=https://github.com/o/r/pull/1
-  dir=$(make_case merged-poll-authority-yolo)
-  state="$dir/home/state"
-  write_poll_meta "$state" task-a "$url" yolo=on
-  write_away_record "$dir"
-  seed_canonical_poll "$dir" task-a "$url"
-  run_merged_poll_cycle "$dir"
-  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url yolo" ] \
-    || fail "merged-poll-authority-yolo: the poll's ledger row did not name yolo: $(merged_ledger_row "$state" task-a)"
-
-  dir=$(make_case merged-poll-authority-grant)
-  state="$dir/home/state"
-  write_poll_meta "$state" task-a "$url"
-  write_away_record "$dir" --grant task-a
-  seed_canonical_poll "$dir" task-a "$url"
-  run_merged_poll_cycle "$dir"
-  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url away-grant" ] \
-    || fail "merged-poll-authority-grant: the poll's ledger row did not name away-grant: $(merged_ledger_row "$state" task-a)"
-
-  pass "a merge the poll detects records the authority that permitted it"
-}
-
-test_merged_poll_row_names_no_authority_when_no_record_grants_one() {
-  local dir state url
-
-  url=https://github.com/o/r/pull/1
-  dir=$(make_case merged-poll-authority-attended)
-  state="$dir/home/state"
-  write_poll_meta "$state" task-a "$url" yolo=on
-  seed_canonical_poll "$dir" task-a "$url"
-  run_merged_poll_cycle "$dir"
-  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url" ] \
-    || fail "merged-poll-authority-attended: an attended merge was tagged with a standing authority: $(merged_ledger_row "$state" task-a)"
-
-  # The away record exists and admits nothing for this task, so the merge
-  # landed outside this home's authority. The outcome is still published -
-  # reading the authority must never gate the row - but it names none.
-  dir=$(make_case merged-poll-authority-ungranted)
-  state="$dir/home/state"
-  write_poll_meta "$state" task-a "$url"
-  write_away_record "$dir" --grant task-other
-  seed_canonical_poll "$dir" task-a "$url"
-  run_merged_poll_cycle "$dir"
-  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url" ] \
-    || fail "merged-poll-authority-ungranted: an ungranted merge was tagged or dropped: $(merged_ledger_row "$state" task-a)"
-  assert_poll_absent "$state" task-a
-
-  pass "a merge no record admits is still reported, with no authority claimed"
-}
-
-test_queued_merge_row_carries_the_authority_the_merge_ran_under() {
-  local dir state url rc
-  url=https://github.com/o/r/pull/1
-  dir=$(make_case queued-merge-authority)
-  state="$dir/home/state"
-  write_task_meta "$dir" task-a
-  printf 'yolo=on\n' >> "$state/task-a.meta"
-  write_away_record "$dir"
-  run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
-    || fail "queued-merge-authority: could not arm the merge poll"
-
+queue_merge() {  # <dir> <url>
+  local dir=$1 url=$2 rc=0
   set +e
   FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \
     FM_TEST_GH_GRAPHQL_QUEUED=true \
     run_merge_entry "$dir" task-a "$url" > "$dir/merge.out" 2> "$dir/merge.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] \
-    || fail "queued-merge-authority: an accepted queued merge failed: $(cat "$dir/merge.err")"
-  assert_grep "is queued" "$dir/merge.out" \
-    "queued-merge-authority: the merge was not left queued"
-  [ ! -e "$state/.wake-queue" ] \
-    || fail "queued-merge-authority: a queued merge published a landed row"
-  [ -f "$state/task-a.check.sh" ] \
-    || fail "queued-merge-authority: the queued merge retired its own poll"
+  [ "$rc" -eq 0 ] || fail "queued merge failed: $(cat "$dir/merge.err")"
+  assert_grep "is queued" "$dir/merge.out" "the forge did not queue the merge"
+  [ -f "$dir/home/state/task-a.merge-authority" ] \
+    || fail "the accepted queued merge did not persist its authority"
+}
 
+test_merged_poll_row_carries_the_merge_authority() {
+  local dir state url expected posture
+  url=https://github.com/o/r/pull/1
+
+  for posture in yolo grant; do
+    dir=$(make_case "queued-merge-authority-$posture")
+    state="$dir/home/state"
+    write_task_meta "$dir" task-a
+    if [ "$posture" = yolo ]; then
+      printf 'yolo=on\n' >> "$state/task-a.meta"
+      write_away_record "$dir"
+      expected=yolo
+    else
+      write_away_record "$dir" --grant task-a
+      expected=away-grant
+    fi
+    run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+      || fail "$posture: could not arm the merge poll"
+    queue_merge "$dir" "$url"
+    archive_away_record "$dir"
+    run_merged_poll_cycle "$dir"
+    [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url $expected" ] \
+      || fail "$posture: archived posture lost persisted authority: $(merged_ledger_row "$state" task-a)"
+    [ ! -e "$state/task-a.merge-authority" ] \
+      || fail "$posture: published merge left its authority record behind"
+  done
+
+  pass "queued merges retain yolo and away-grant after captain return"
+}
+
+test_merged_poll_row_names_no_authority_when_no_record_grants_one() {
+  local dir state url
+  url=https://github.com/o/r/pull/1
+
+  dir=$(make_case queued-merge-authority-attended)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+    || fail "attended: could not arm the merge poll"
+  queue_merge "$dir" "$url"
   run_merged_poll_cycle "$dir"
-  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url yolo" ] \
-    || fail "queued-merge-authority: the queued merge's ledger row did not name yolo: $(merged_ledger_row "$state" task-a)"
-  pass "a merge the forge queued and later landed records the authority it ran under"
+  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url" ] \
+    || fail "attended queued merge was tagged: $(merged_ledger_row "$state" task-a)"
+
+  dir=$(make_case merged-poll-authority-external)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  write_away_record "$dir"
+  seed_canonical_poll "$dir" task-a "$url"
+  run_merged_poll_cycle "$dir"
+  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url external" ] \
+    || fail "external merge was attributed from live away posture: $(merged_ledger_row "$state" task-a)"
+  assert_poll_absent "$state" task-a
+
+  pass "poll distinguishes attended authorization from external landing"
 }
 
 test_parser_matrix
@@ -2268,7 +2254,6 @@ test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome
 test_merged_poll_row_carries_the_merge_authority
 test_merged_poll_row_names_no_authority_when_no_record_grants_one
-test_queued_merge_row_carries_the_authority_the_merge_ran_under
 test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_different_merged_pr_for_same_task_is_not_absorbed
 test_persistent_secondmate_retirement_is_poll_only
