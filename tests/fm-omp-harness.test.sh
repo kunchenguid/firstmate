@@ -474,7 +474,8 @@ SH
   chmod +x "$repo/bin/"*.sh
   out=$(FM_GUARD_LOG="$TMP_ROOT/guard/guard.log" FM_HOME="$home" EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const handlers = new Map();
 const pi = { on(e, h) { handlers.set(e, h); }, sendMessage() {} };
 const mod = await import(pathToFileURL(process.env.EXT).href);
@@ -574,7 +575,35 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+test_omp_markers_record_outer_omp_ancestor() {
+  local repo home bin driver omp_pid out status
+  repo="$TMP_ROOT/nested/repo"; home="$TMP_ROOT/nested/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  driver="$TMP_ROOT/nested/drive.mjs"
+  cat > "$driver" <<'EOF'
+import { pathToFileURL } from "node:url";
+const noop = { on() {}, registerCommand() {}, registerTool() {}, sendUserMessage() {} };
+await import(pathToFileURL(process.env.WATCH_EXT).href).then(({ default: load }) => load(noop));
+await import(pathToFileURL(process.env.GUARD_EXT).href).then(({ default: load }) => load(noop));
+EOF
+  bin=$(make_named_shells "$TMP_ROOT/nested/bin")
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" WATCH_EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" GUARD_EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" \
+    "$bin/omp" -c 'printf "%s\n" "$$" > "$1/state/.lock"; node "$2"' _ "$home" "$driver" 2>&1)
+  status=$?
+  expect_code 0 "$status" "nested omp marker writer: $out"
+  [ -z "$out" ] || fail "nested omp marker writer printed output: $out"
+  omp_pid=$(cat "$home/state/.lock")
+  [ -n "$omp_pid" ] || fail "nested omp wrapper did not record its pid"
+  for marker in .omp-watch-extension-loaded .omp-turnend-extension-loaded; do
+    [ "$(sed -n '2p' "$home/state/$marker")" = "$omp_pid" ] \
+      || fail "$marker must record outer omp pid $omp_pid, got $(sed -n '2p' "$home/state/$marker")"
+  done
+  pass "omp extension markers record the outer lock-owning omp ancestor from a nested worker"
+}
+
 test_detection_anchored_name_and_marker_precedence
+test_omp_markers_record_outer_omp_ancestor
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
