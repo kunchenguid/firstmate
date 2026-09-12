@@ -164,6 +164,9 @@ Its header is the single owner of composed commands, ordering, and digest conten
 Do not reimplement it by separately running its lock, bootstrap, initial wake-drain, or deferred-network components.
 Run-tier harness surfaces run this command for you at session open while the rest only nudge it, so confirm the digest is present in this session and run it yourself when it is not; `docs/sessionstart-nudge.md` owns adapter tiers, source routing, and compatibility.
 
+When manual Codex startup needs process ancestry access, use normal approval to run it outside the sandbox; keep sandboxing enabled for ordinary work.
+If startup already ran, diagnose rather than repeat it.
+
 Read the complete digest once and trust it as this turn's startup and recovery input.
 If the harness shows only a preview and persists the full output to a file, read that file before acting.
 Do not separately re-read the context, backlog, metadata, or bulk status inputs it just printed unless a source was reported absent or corrupt, older history is specifically needed, or a targeted workflow must inspect before writing.
