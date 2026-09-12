@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # fm-primary-resource.sh - automatic resource protection for the MAIN Firstmate
-# session only. Owns observe/arm/disarm/check/decide/commit/helper and the
+# session only. Owns observe/arm/check/commit/helper and the
 # private state schema under state/primary-resource/.
 #
 # Usage:
 #   fm-primary-resource.sh observe [--payload-file <path> | --payload <json>]
 #   fm-primary-resource.sh arm
-#   fm-primary-resource.sh disarm
 #   fm-primary-resource.sh check
-#   fm-primary-resource.sh decide <evidence.json|->
 #   fm-primary-resource.sh commit <incident-id> --stow-receipt <path>
 #   fm-primary-resource.sh helper <incident-id>
 #   fm-primary-resource.sh --help
@@ -51,9 +49,6 @@
 #                   replacement}
 #   receipt        fields above; outcome stage is a separate file
 #
-# `decide` is one pure jq program over an evidence JSON document (stdin or
-# path); no I/O. Thresholds and precedence are fixture-testable.
-#
 # Main home only: observe/arm/check are no-ops in a secondmate home and in task
 # worktrees. Terminal handover is tmux-only. Herdr is alert-only until a guarded
 # live lab proves the full exit->shell->successor transaction. Other backends
@@ -90,9 +85,6 @@
 #   FM_PRIMARY_RESOURCE_SKIP_HELPER=1      commit reserves but does not launch
 #   FM_PRIMARY_RESOURCE_BUSY_STATE_FILE    override busy|idle|unknown for helper
 #   FM_PRIMARY_RESOURCE_QUOTA_INTERVAL     gate live quota-axi re-reads (default 60)
-#   FM_PRIMARY_RESOURCE_TEST_SIGNAL_EXIT=1 negative-path force-kill (not the happy path)
-#   FM_PRIMARY_RESOURCE_ROUTE_ENV_FILE     inject NUL-delimited environ for route checks
-#   FM_PRIMARY_RESOURCE_TEST_SIGNAL_EXIT=1 negative-path force-kill (not the happy path)
 #   FM_PRIMARY_RESOURCE_ROUTE_ENV_FILE     inject NUL-delimited environ for route checks
 #   FM_PRIMARY_RESOURCE_ARGV_FILE         inject NUL-delimited argv for commit capture (tests)
 
@@ -152,9 +144,7 @@ usage() {
 Usage:
   fm-primary-resource.sh observe [--payload-file PATH | --payload JSON]
   fm-primary-resource.sh arm
-  fm-primary-resource.sh disarm
   fm-primary-resource.sh check
-  fm-primary-resource.sh decide [evidence.json|-]
   fm-primary-resource.sh commit INCIDENT --stow-receipt PATH
   fm-primary-resource.sh helper INCIDENT
   fm-primary-resource.sh --help
@@ -467,7 +457,7 @@ pr_alert_once() {  # <generation> <condition> <line>
   return 0
 }
 
-# --- decide (pure jq; no I/O) -------------------------------------------------
+# --- decision -----------------------------------------------------------------
 
 pr_decide_jq() {
   # Thresholds come from shell CONTEXT_THRESHOLD / QUOTA_THRESHOLD via --argjson.
@@ -534,16 +524,9 @@ pr_decide_jq() {
 JQ
 }
 
-action_decide() {
-  local input=${1:--} json
-  if [ "$input" = "-" ] || [ -z "$input" ]; then
-    json=$(cat)
-  else
-    [ -f "$input" ] || die_usage "decide: evidence file not found: $input"
-    json=$(cat -- "$input")
-  fi
+pr_decide() {
   command -v jq >/dev/null 2>&1 || { printf 'fm-primary-resource: jq required\n' >&2; exit 1; }
-  printf '%s\n' "$json" | jq -c \
+  jq -c \
     --argjson threshold_ctx "$CONTEXT_THRESHOLD" \
     "$(pr_decide_jq)"
 }
@@ -635,7 +618,7 @@ pr_quota_budget_secs() {
   case "$check_timeout" in
     ''|*[!0-9]*) check_timeout=30 ;;
   esac
-  # Leave headroom for decide/jq and watcher kill grace (fm-tool-update-check pattern).
+  # Leave headroom for jq and watcher kill grace (fm-tool-update-check pattern).
   max=$((check_timeout - 5))
   [ "$max" -ge 1 ] || max=1
   if [ "$QUOTA_BUDGET_SECS" -gt "$max" ]; then
@@ -715,7 +698,8 @@ pr_quota_verdict() {  # <provider> <quota-json>
         {provider:$provider, exhausted:[], reliability:"unknown", ambiguousReset:false}
       else
         ($p.windows // [])
-        | map(select((.kind == "session" or .kind == "weekly")
+        | map(select((.kind == "session" or .kind == "five_hour" or .id == "five_hour"
+                      or .kind == "weekly" or .id == "seven_day")
               and ((.percentRemaining | type) == "number")
               and (.percentRemaining >= 0) and (.percentRemaining <= 100)))
         | map(. + {percentUsed: (100 - .percentRemaining)})
@@ -762,7 +746,8 @@ pr_find_replacement() {  # <sourceHarness> <sourceProvider> <quota-json> [pid]
       elif (($p.quotaSemantics.status // "unknown") == "unknown") then {ok:false, reason:"unknown-row"}
       else
         ($p.windows // [])
-        | map(select(.kind == "session" or .kind == "weekly")) as $w
+        | map(select(.kind == "session" or .kind == "five_hour" or .id == "five_hour"
+                     or .kind == "weekly" or .id == "seven_day")) as $w
         | if ($w | length) == 0 then {ok:false, reason:"no-applicable-windows"}
           elif ($w | map(select((.percentRemaining | type) != "number")) | length) > 0 then
             {ok:false, reason:"malformed-window"}
@@ -864,7 +849,7 @@ action_observe() {
   return 0
 }
 
-# --- arm / disarm -------------------------------------------------------------
+# --- arm ---------------------------------------------------------------------
 
 shim_write() {
   local tmp
@@ -890,11 +875,6 @@ action_arm() {
     rm -f -- "$CHECK_SHIM" "$CHECK_TRUST"
     return 1
   fi
-  return 0
-}
-
-action_disarm() {
-  rm -f -- "$CHECK_SHIM" "$CHECK_TRUST"
   return 0
 }
 
@@ -1047,7 +1027,7 @@ action_check() {
   if [ -d "$PR_DIR/receipts" ] && [ -n "$(ls -A "$PR_DIR/receipts" 2>/dev/null || true)" ]; then
     receipts_json=$(jq -nc '[inputs.incidentId] | unique' "$PR_DIR"/receipts/*.json 2>/dev/null || printf '[]')
   fi
-  # Treat per-window claims and active episodes as receipt coverage for decide.
+  # Treat per-window claims and active episodes as receipt coverage.
   if [ "$episode_blocks" = true ] && [ -n "$id_quota" ] && [ "$id_quota" != "quota-none" ]; then
     receipts_json=$(printf '%s' "$receipts_json" | jq -c --arg id "$id_quota" '. + [$id] | unique')
   fi
@@ -1093,7 +1073,7 @@ action_check() {
       sourceBinding:{pid:$pid, sessionId:$sess, harness:$src}
     }')
 
-  decision=$(printf '%s\n' "$evidence" | action_decide -) || return 0
+  decision=$(printf '%s\n' "$evidence" | pr_decide) || return 0
   action=$(printf '%s' "$decision" | jq -r '.action')
   incident=$(printf '%s' "$decision" | jq -r '.incidentId // empty')
   alert_key=$(printf '%s' "$decision" | jq -r '.alertKey // empty')
@@ -1375,7 +1355,7 @@ pr_commit_revalidate() {  # <incident> <expected-action> -> 0 if still warranted
       incidentIdContext:$idc,
       incidentIdQuota:$idq
     }')
-  decision=$(printf '%s\n' "$evidence" | action_decide -) || return 1
+  decision=$(printf '%s\n' "$evidence" | pr_decide) || return 1
   action=$(printf '%s' "$decision" | jq -r '.action')
   fresh_id=$(printf '%s' "$decision" | jq -r '.incidentId // empty')
   [ "$action" = "$expected" ] || return 1
@@ -1818,30 +1798,15 @@ action_helper() {
 
   # Immediately before exit: occupant must still be the recorded source pid/harness.
   if ! pr_pane_occupant_matches "$backend" "$target" "$pid" "$harness"; then
-    if [ "${FM_PRIMARY_RESOURCE_FORCE_EXIT:-0}" = 1 ] \
-      && [ "${FM_PRIMARY_RESOURCE_TEST_SIGNAL_EXIT:-0}" = 1 ]; then
-      : # negative-path signal kill allowed below without sending exit text
-    else
-      pr_outcome_write "$incident" "failed" "occupant-changed"
-      return 1
-    fi
+    pr_outcome_write "$incident" "failed" "occupant-changed"
+    return 1
   fi
 
   pr_outcome_write "$incident" "exiting" "sending-exit" || true
-  # Send exit once only when occupant still matches (or force-exit test seam).
-  if pr_pane_occupant_matches "$backend" "$target" "$pid" "$harness" \
-    || [ "${FM_PRIMARY_RESOURCE_FORCE_EXIT:-0}" = 1 ]; then
-    if pr_pane_occupant_matches "$backend" "$target" "$pid" "$harness"; then
-      if ! fm_backend_send_text_submit "$backend" "$target" "$exit_cmd" 1 0.2 0.5 >/dev/null 2>&1; then
-        case "$backend" in
-          tmux) tmux send-keys -t "$target" -l "$exit_cmd" \; send-keys -t "$target" Enter 2>/dev/null || true ;;
-        esac
-      fi
-    fi
-  fi
-  # Test-only negative path: force-kill without proving the exit-command path.
-  if [ "${FM_PRIMARY_RESOURCE_TEST_SIGNAL_EXIT:-0}" = 1 ]; then
-    kill -TERM "$pid" 2>/dev/null || true
+  if ! fm_backend_send_text_submit "$backend" "$target" "$exit_cmd" 1 0.2 0.5 >/dev/null 2>&1; then
+    case "$backend" in
+      tmux) tmux send-keys -t "$target" -l "$exit_cmd" \; send-keys -t "$target" Enter 2>/dev/null || true ;;
+    esac
   fi
 
   i=0
@@ -1906,9 +1871,7 @@ case "$cmd" in
   --help|-h) usage; exit 0 ;;
   observe) action_observe "$@"; exit $? ;;
   arm) action_arm "$@"; exit $? ;;
-  disarm) action_disarm "$@"; exit $? ;;
   check) action_check "$@"; exit $? ;;
-  decide) action_decide "$@"; exit $? ;;
   commit) action_commit "$@"; exit $? ;;
   helper) action_helper "$@"; exit $? ;;
   *) die_usage "unknown command: $cmd" ;;
