@@ -3122,7 +3122,7 @@ spawn_worktree_wait_refuse() {  # <kind> <elapsed> <report> <treehouse-seen> <tr
       ;;
     unknown)
       if [ "$entered" = 1 ]; then
-        echo "error: treehouse get printed its 'Entered worktree' line, but no isolated worktree appeared within 60s after it; this backend could not read the pane's foreground process, and the pane's path reader never showed the worktree; $observed (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+        echo "error: treehouse get printed its 'Entered worktree' line, but no two consecutive path reads agreed on an isolated worktree within 60s after it; this backend could not read the pane's foreground process; $observed (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
       else
         echo "error: no isolated worktree appeared within 60s; this backend could not read the pane's foreground process, no 'Entered worktree' line was seen in the pane, and no refusal was confirmed on two consecutive reads, so treehouse get may still be running (a slow fetch, say), may never have started, or may have printed a refusal that the next read no longer showed; read the pane's last lines below; $observed (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
       fi

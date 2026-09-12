@@ -544,7 +544,7 @@ test_error_line_after_entry_is_not_read_as_a_refusal() {
   out=$(run_settle_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a pane whose path never settled"$'\n'"$out"
-  assert_contains "$out" "printed its 'Entered worktree' line, but no isolated worktree appeared within 60s after it" \
+  assert_contains "$out" "printed its 'Entered worktree' line, but no two consecutive path reads agreed on an isolated worktree within 60s after it" \
     "spawn did not name the entry it saw and the settle bound it reached"
   assert_contains "$out" "$STALE_DIR" \
     "the refusal did not name the path the pane kept reporting"
