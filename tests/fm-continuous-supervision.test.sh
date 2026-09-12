@@ -79,6 +79,26 @@ second=$(cat "$HOME_DIR/state/.continuous-supervision-terminal")
 [ "${second#*$'\t'}" = cap2:0 ] || fail "service retained the pre-relaunch target: $second"
 pass "service continuity retargets after a Firstmate relaunch"
 
+# A daemon launched by another lifecycle is authoritative evidence that this
+# helper must stand down. A missing local record cannot authorize adopting or
+# killing that process, and starting a duplicate would race one home lock.
+FM_HOME=$HOME_DIR "$CMD" disable >/dev/null || fail "pre-foreign disable failed"
+: > "$HOME_DIR/config/continuous-supervision"
+tmux new-session -d -s foreign-supervisor env FM_HOME="$HOME_DIR" "$TMP/fake-daemon.sh"
+sleep 1
+rm -f "$HOME_DIR/state/.continuous-supervision-terminal"
+if FM_HOME=$HOME_DIR FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=cap2:0 \
+  FM_CONTINUOUS_DAEMON=$TMP/fake-daemon.sh "$CMD" ensure > "$TMP/foreign.out" 2> "$TMP/foreign.err"; then
+  fail "ensure adopted a live unrecorded daemon"
+fi
+tmux has-session -t foreign-supervisor 2>/dev/null || fail "ensure killed the foreign daemon terminal"
+[ ! -e "$HOME_DIR/state/.continuous-supervision-terminal" ] || fail "ensure recorded a second owner"
+grep -F 'refusing a second owner' "$TMP/foreign.err" >/dev/null \
+  || fail "foreign-owner refusal was not explained"
+tmux kill-session -t foreign-supervisor
+sleep 1
+pass "a live unrecorded daemon prevents duplicate successor ownership"
+
 mkdir -p "$HOME_DIR/state/task.inbox"
 printf 'preserve me\n' > "$HOME_DIR/state/task.inbox/0001"
 FM_HOME=$HOME_DIR "$CMD" disable >/dev/null || fail "disable failed"

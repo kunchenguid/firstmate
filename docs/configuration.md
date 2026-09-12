@@ -222,6 +222,22 @@ The opt-in is per-home and is not inherited; enable it explicitly in each remote
 Run `bin/fm-continuous-supervision.sh enable` from the home session to opt in, `status` to inspect it, and `disable` to remove the flag and stop only its exact recorded service session.
 Disabling continuous supervision does not alter tasks, worktrees, queued wakes, or away-mode state.
 
+## Desired concurrency (config/desired-concurrency)
+
+The optional local, gitignored `config/desired-concurrency` file contains one positive integer from 1 through 64.
+It records how many ordinary direct workers this home should keep productively working while dispatchable backlog exists.
+Set it with `bin/fm-refill.sh set <count>`, inspect it with `bin/fm-refill.sh status`, and remove it with `bin/fm-refill.sh disable`.
+The setting is per-home and is not inherited because each secondmate owns a different backlog and resource envelope.
+
+The watcher runs `bin/fm-refill.sh check` locally and wakes the supervisor when terminal work remains to be reconciled, or when the active count is below the target and `tasks-axi ready` reports dispatchable work.
+Working is the only productive state; parked, paused, blocked, unknown, done, and failed records remain visible but cannot hide a clean slot in another project or pool.
+The detector performs no merge, cleanup, backlog transition, or spawn.
+The `refill-continuity` agent skill owns the guarded reconcile-and-refill procedure and requires each candidate to be evaluated independently.
+
+An identical deficit is suppressed until `FM_REFILL_RESURFACE_SECS` (default 900 seconds), while a changed task-state or ready-work fingerprint wakes immediately.
+Each current observation is stored atomically in `state/refill-deficit`; `FM_REFILL_STATE_TIMEOUT` (default 10 seconds per worker) bounds current-state reads.
+An absent setting preserves existing behavior exactly.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
