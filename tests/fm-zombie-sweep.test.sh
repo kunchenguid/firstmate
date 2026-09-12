@@ -106,6 +106,34 @@ test_gone_nonterminal_herdr_pane_closes() {
   pass "a nonterminal Herdr record with a gone endpoint closes its own pane"
 }
 
+test_busy_spawn_lock_skips_cleanup() {
+  local dir out owner holder
+  dir="$TMP_ROOT/busy-spawn"
+  seed "$dir"
+  install_pane_close "$dir"
+  mkdir -p "$dir/project"
+  printf 'kind=ship\nbackend=herdr\nwindow=gone:pane\nendpoint_task_id=busy-spawn\nherdr_session=gone\nherdr_workspace_id=w1\nherdr_tab_id=t1\nherdr_pane_id=pane\nworktree=%s/gone\nproject=%s/project\n' "$dir" "$dir" \
+    > "$dir/home/state/busy-spawn.meta"
+  sleep 30 &
+  holder=$!
+  owner="$dir/home/state/.spawn-busy-spawn.lock.owner.busy"
+  mkdir "$owner"
+  printf '%s\n' "$holder" > "$owner/pid"
+  ln -s "$owner" "$dir/home/state/.spawn-busy-spawn.lock"
+  out=$(FM_ZOMBIE_LIVE_IDS=other FM_ZOMBIE_KILL_BIN="$dir/fake-pane-close.sh" run_sweep "$dir" --apply) \
+    || fail "busy-spawn sweep failed: $out"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "in-flight: busy-spawn (spawn running)" "busy spawn was not reported"
+  assert_not_contains "$out" "paused-repair: busy-spawn" "busy spawn repaired a missing status"
+  assert_not_contains "$out" "pane-close: busy-spawn" "busy spawn closed its pane"
+  assert_not_contains "$out" "retire-candidate: busy-spawn" "busy spawn was classified for retirement"
+  [ ! -e "$dir/pane-close.log" ] || fail "busy spawn invoked pane close"
+  [ ! -e "$dir/home/state/busy-spawn.status" ] || fail "busy spawn repaired status"
+  [ -f "$dir/home/state/busy-spawn.meta" ] || fail "busy spawn retired metadata"
+  pass "a busy spawn lock suppresses all zombie cleanup for its task"
+}
+
 test_classes_and_summary_count() {
   local dir out
   dir="$TMP_ROOT/classes"
@@ -146,4 +174,5 @@ test_lock_gc_removes_dead_owner_only_on_apply
 test_lock_gc_keeps_live_owner_and_pidless
 test_missing_status_gets_paused_line
 test_gone_nonterminal_herdr_pane_closes
+test_busy_spawn_lock_skips_cleanup
 test_classes_and_summary_count

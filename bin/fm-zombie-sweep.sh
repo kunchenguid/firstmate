@@ -60,6 +60,24 @@ meta_field() {
 
 report() { printf '%s\n' "$1"; }
 
+IN_FLIGHT_IDS=' '
+spawn_in_flight() {  # <id>
+  local id=$1 lock
+  lock="$STATE/.spawn-$id.lock"
+  if fm_lock_try_acquire "$lock"; then
+    fm_lock_release "$lock" || return 1
+    return 1
+  fi
+  case "$IN_FLIGHT_IDS" in
+    *" $id "*) ;;
+    *)
+      IN_FLIGHT_IDS="${IN_FLIGHT_IDS}${id} "
+      report "in-flight: $id (spawn running)"
+      ;;
+  esac
+  return 0
+}
+
 # --- (a) lock garbage collection -------------------------------------------
 
 gc_locks() {
@@ -108,6 +126,7 @@ repair_missing_status() {
     id=${meta##*/}
     id=${id%.meta}
     fm_task_id_path_safe "$id" || continue
+    spawn_in_flight "$id" && continue
     status="$STATE/$id.status"
     if [ -e "$status" ]; then
       continue
@@ -198,6 +217,7 @@ sweep_records() {
       report "unclassified: $id (unsafe id)"
       continue
     }
+    spawn_in_flight "$id" && continue
     agent_gone "$meta" "$id" || continue
     NO_LIVE=$((NO_LIVE + 1))
     close_herdr_if_needed "$id" "$meta"
