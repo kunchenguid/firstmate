@@ -85,6 +85,19 @@
 #      re-block (budget_account_current_epoch owns that rule), so an inert
 #      hook that leaves the ledger frozen cannot hold the guard in an
 #      unbounded re-block loop below that override.
+#   4. one case cannot be repaired from inside the session at all: state/.lock
+#      names a LIVE harness process outside this session's ancestry
+#      (bin/fm-session-lock-lib.sh), so the session is read-only by the
+#      session-start contract, may not arm or repair supervision, and its own
+#      auto-arm exits without claiming. Re-blocking it past the budget only
+#      wedges a session that cannot act (2026-09-12: ~30 blocked turns). Once
+#      the budget above is spent and no verified failure episode exists, the
+#      guard therefore releases the turn with an OWNERSHIP-UNRESOLVED
+#      escalation: a systemMessage naming the live owner, the supervision need,
+#      and that this is not a completion attestation. Every re-block on that
+#      path already told the model it is read-only and must report to the
+#      captain. A dead owner, a missing lock, or a malformed lock is not this
+#      case and keeps blocking, because the session can still take the lock.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -240,6 +253,9 @@ block_stop() {
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
     fi
+    if [ -n "${LOCK_REFUSED_PID:-}" ]; then
+      printf '●  Another live session (harness pid %s) holds this home'"'"'s session lock, so this session is read-only: do not arm, steer, or repair supervision from here - report this to the captain now (bin/fm-lock.sh status names the owner).\n' "$LOCK_REFUSED_PID"
+    fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
   } >&2
@@ -254,6 +270,10 @@ fi
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
+# Session-lock identity is needed only on this path, so the other harness
+# adapters' fixtures need not carry it.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 #
 # Budget accounting, under the budget lock. Sets COUNT (the session's
 # consumed continuations, including this one) and BUDGET_INITIALIZED_FAILURE.
@@ -466,6 +486,32 @@ failure_episode_verified() {
   esac
 }
 
+need_desc() {
+  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
+    printf '%s task(s) in flight' "$FM_SUP_IN_FLIGHT"
+  elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
+    printf '%s process-event source(s) registered' "$FM_SUP_SOURCES"
+  elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
+    printf '%s registered custom check(s)' "$FM_SUP_CHECKS"
+  else
+    printf 'X-mode relay polling active'
+  fi
+}
+
+# Sets LOCK_REFUSED_PID when state/.lock names a live harness process outside
+# this session's ancestry: the one condition the session cannot repair. A dead
+# owner, a missing lock, or a malformed lock leaves it empty.
+LOCK_REFUSED_PID=
+lock_refused_owner() {
+  local lock_pid
+  LOCK_REFUSED_PID=
+  fm_session_lock_owned_by_self "$STATE" && return 1
+  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$lock_pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_harness_pid_alive "$lock_pid" || return 1
+  LOCK_REFUSED_PID=$lock_pid
+}
+
 i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
@@ -486,21 +532,29 @@ fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.
+lock_refused_owner || true
 budget_account_current_epoch block || block_stop
 terminal_fail_open
 terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then
-  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
-    NEED_DESC="$FM_SUP_IN_FLIGHT task(s) in flight"
-  elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
-    NEED_DESC="$FM_SUP_SOURCES process-event source(s) registered"
-  elif [ "$FM_SUP_CHECKS" -gt 0 ]; then
-    NEED_DESC="$FM_SUP_CHECKS registered custom check(s)"
-  else
-    NEED_DESC="X-mode relay polling active"
-  fi
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$(need_desc)"
   exit 0
 fi
 [ "$terminal_status" -eq 2 ] && exit 0
+
+# --- ownership-unresolved escalation --------------------------------------------
+# The budget is spent, no verified failure episode exists, and the lock is
+# held by another live session: this session cannot own supervision by
+# contract, so re-blocking cannot lead anywhere. Release the turn to the
+# operator with the evidence, explicitly not as a completion attestation. The
+# owning session's own guard, the attended alarm, and every marker stay
+# untouched; a healthy watcher, a dead owner, or away mode never reaches here,
+# and a verified failure episode keeps its own attended shape above (one
+# alarm, then attended re-blocks) even under a foreign owner.
+if [ -n "$LOCK_REFUSED_PID" ] && [ "$COUNT" -gt "$BLOCK_BUDGET" ] && [ ! -e "$STATE/.afk" ] \
+  && ! failure_episode_verified; then
+  printf '{"systemMessage":"FIRSTMATE CANNOT ESTABLISH SUPERVISION OWNERSHIP: %s and no watcher beacon is fresh (last beat: %s), but another live session (harness pid %s) holds this home'"'"'s session lock, so this session is read-only by contract and has already been blocked %s times. The turn is released to the operator; this is NOT a completion attestation, and supervision of that work is unverified from this session. The lock-holding session'"'"'s own turn-end guard is responsible - run bin/fm-lock.sh status to see the owner."}\n' \
+    "$(need_desc)" "$FM_SUP_BEACON_DESC" "$LOCK_REFUSED_PID" "$BLOCK_BUDGET"
+  exit 0
+fi
 block_stop
