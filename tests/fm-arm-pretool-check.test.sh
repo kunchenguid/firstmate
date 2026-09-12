@@ -14,6 +14,21 @@ set -u
 CHECK="$ROOT/bin/fm-arm-pretool-check.sh"
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
+MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
+FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
+trap fm_test_cleanup EXIT
+
+# The checker reads the active firstmate home from FM_HOME and falls back to its
+# own code root (docs/arm-pretool-check.md). Home is a real classification input:
+# an absolute x-mode setup path is approved only when it normalizes to the ACTIVE
+# HOME's config/x-mode.env. Pin that input to a home DISTINCT from the code root,
+# so the verdicts below are the policy's and never the ambient FM_HOME of
+# whatever fleet home happens to be running this suite, and so the two sides of
+# the home boundary can be asserted apart from each other.
+ACTIVE_HOME="$MATRIX_TMP/active-home"
+mkdir -p "$ACTIVE_HOME/config"
+export FM_HOME="$ACTIVE_HOME"
+
 # --- full cross-harness acceptance matrix ----------------------------------
 
 MATRIX_IDS=()
@@ -38,7 +53,7 @@ matrix_case A09 allow "export FM_HOME='$ROOT'; bin/fm-watch-checkpoint.sh --seco
 matrix_case A10 allow 'source config/x-mode.env; bin/fm-watch-checkpoint.sh --seconds 180'
 matrix_case A11 allow "source 'config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
 matrix_case A12 allow "source './config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
-matrix_case A13 allow "source '$ROOT/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case A13 allow "source '$ACTIVE_HOME/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
 matrix_case A14 allow "[ -f 'config/x-mode.env' ] && source 'config/x-mode.env'; exec bin/fm-watch-arm.sh"
 matrix_case A15 allow "cd $ROOT && exec bin/fm-watch-arm.sh"
 matrix_case A16 allow "export FM_HOME=$ROOT && bin/fm-watch-checkpoint.sh --seconds 180"
@@ -140,10 +155,7 @@ matrix_case E14 allow '$FM_HOME/bin/fm-teardown.sh &'
 matrix_case E15 allow '$FM_HOME/bin/fm-watch-arm.sh'
 matrix_case E16 allow '~/firstmate/bin/fm-watch-checkpoint.sh --seconds 180'
 matrix_case E17 allow 'for f in 1; do echo fm-watch; done'
-
-MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
-FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
-trap fm_test_cleanup EXIT
+matrix_case E18 deny "source '$ROOT/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
 
 run_matrix_entry() {
   local id=$1 expected=$2 entry=$3 cmd=$4 payload out_file err_file rc
